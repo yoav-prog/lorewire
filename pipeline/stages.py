@@ -1,10 +1,9 @@
 """Pipeline stages.
 
 Dry-run (no keys) uses bundled fixtures and stub transforms. With an LLM key
-set, the research and article stages make real calls (the anti-fabrication
-rule is the load-bearing instruction, condensed from from-amir). The real
-scrape, image, voice, and video stages remain env-gated seams to port from
-/from-amir once their keys are in place.
+set, the research and article stages make real calls; the model is whatever the
+admin selected (see pipeline.models), not an env var. The real scrape, image,
+voice, and video stages remain env-gated seams to port from /from-amir.
 """
 from __future__ import annotations
 
@@ -46,7 +45,6 @@ def make_idea(post: dict, dry_run: bool) -> dict:
 def research(idea: dict, post: dict, dry_run: bool) -> dict:
     if dry_run:
         return {"rules": RESEARCH_RULES, "brief": post.get("selftext", "")[:400], "source": post.get("url", "")}
-    _require_llm()
     from pipeline import llm
 
     prompt = (
@@ -68,7 +66,6 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
             f"{research['brief']}\n\n"
             "(In a real run the LLM rewrites this into an original article.)"
         )
-    _require_llm()
     from pipeline import llm
 
     prompt = (
@@ -80,9 +77,3 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
         f"Research:\n{research['brief']}"
     )
     return llm.chat(prompt, 1200)
-
-
-def _require_llm() -> None:
-    miss = config.missing("llm")
-    if miss:
-        raise RuntimeError(f"LLM stage requires {miss}; set it in pipeline/.env")

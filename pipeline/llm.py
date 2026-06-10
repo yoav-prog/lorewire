@@ -1,8 +1,8 @@
-"""Minimal LLM client, standard library only (no extra dependency).
+"""Minimal LLM client, standard library only.
 
-OpenAI by default (OPENAI_API_KEY); or any OpenAI-compatible endpoint via
-LLM_API_KEY + LLM_BASE_URL + LLM_MODEL. The request shape mirrors the working
-calls in the reference scripts under /from-amir.
+The model is chosen from the registry/DB selection (admin-managed), NOT from an
+env var. Only the API key comes from the environment. Request shape mirrors the
+working calls in /from-amir.
 """
 from __future__ import annotations
 
@@ -10,25 +10,26 @@ import json
 import urllib.error
 import urllib.request
 
-from pipeline import config
+from pipeline import config, models
 
 
-def _settings() -> tuple[str, str, str]:
-    if config.env("OPENAI_API_KEY"):
-        key = config.env("OPENAI_API_KEY") or ""
-        base = config.env("LLM_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1"
-        model = config.env("OPENAI_MODEL") or config.env("LLM_MODEL") or "gpt-5.4-mini"
+def _resolve() -> tuple[str, str, str]:
+    selected = models.get_selected("llm")  # e.g. "openai/gpt-5.4-mini"
+    provider, _, model = selected.partition("/")
+    if provider == "openai":
+        key = config.env("OPENAI_API_KEY")
+        if not key:
+            raise RuntimeError("OPENAI_API_KEY is not set. Add it to pipeline/.env to run the LLM stages.")
+        base = config.env("OPENAI_BASE_URL", "https://api.openai.com/v1")
         return key, base, model
-    if config.env("LLM_API_KEY"):
-        key = config.env("LLM_API_KEY") or ""
-        base = config.env("LLM_BASE_URL", "https://api.openai.com/v1") or "https://api.openai.com/v1"
-        model = config.env("LLM_MODEL", "gpt-5.4-mini") or "gpt-5.4-mini"
-        return key, base, model
-    raise RuntimeError("No LLM key set (OPENAI_API_KEY or LLM_API_KEY).")
+    raise NotImplementedError(
+        f"LLM provider {provider!r} (model {selected!r}) is in the registry but not wired yet. "
+        "Switch with `python -m pipeline.models set llm openai/gpt-5.4-mini`, or wire the adapter."
+    )
 
 
 def chat(prompt: str, max_tokens: int = 2000) -> str:
-    key, base, model = _settings()
+    key, base, model = _resolve()
     body = json.dumps(
         {
             "model": model,

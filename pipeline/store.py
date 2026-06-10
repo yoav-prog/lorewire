@@ -1,8 +1,9 @@
 """Storage layer.
 
 SQLite for local dev/validation (zero setup, stdlib only). The schema mirrors
-the production Postgres table, so moving to Cloud SQL is a connection change,
-not a rewrite.
+the production Postgres tables, so moving to Cloud SQL is a connection change,
+not a rewrite. `settings` holds admin-managed config like the active model per
+stage (never secrets).
 """
 from __future__ import annotations
 
@@ -24,6 +25,10 @@ CREATE TABLE IF NOT EXISTS stories (
     source_url   TEXT,
     created_at   REAL,
     payload      TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
 );
 """
 
@@ -60,3 +65,21 @@ def all_stories() -> list[dict]:
     with _conn() as c:
         cur = c.execute("SELECT id, category, title, status FROM stories ORDER BY created_at DESC")
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_setting(key: str) -> str | None:
+    try:
+        with _conn() as c:
+            row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+    except sqlite3.OperationalError:
+        return None  # settings table not created yet
+
+
+def set_setting(key: str, value: str) -> None:
+    with _conn() as c:
+        c.executescript(SCHEMA)
+        c.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )

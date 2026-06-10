@@ -91,6 +91,7 @@ A single role-gated internal admin built into the Next.js app — this **is** th
 
 **C. Model defaults & routing (per stage)**
 - Editable **default + fallback chain per stage:** images (gpt-image-2 → nano-banana-2), LLM for ideas/research/script, TTS voice/lane, alignment.
+- **Models are config, not env.** Model choices live in a registry (`config/models.json`) plus a DB selection, edited via the admin picker (no model env vars). API keys/credentials stay in the environment/secret manager and are never editable in the UI.
 - **Voiceover:** ElevenLabs + Google Cloud TTS (reused from youtubestudio). Pick a voice **per video**, or set a **default for all** and **per-category** defaults; premium voices are cost-gated.
 - **Cost band shown per model** (like youtubestudio's picker) with a **cost-gate** that asks for confirmation above a threshold.
 - **Per-category overrides** (cheaper models for low-priority categories).
