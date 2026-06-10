@@ -1,10 +1,10 @@
 """Pipeline stages.
 
-Each stage runs offline in dry-run mode (deterministic transforms on bundled
-fixtures). The real implementations call external services and are gated on
-env keys; they are intentionally left as clearly-marked NotImplementedError
-seams to be ported from the reference scripts in /from-amir once keys are
-rotated and set.
+Dry-run (no keys) uses bundled fixtures and stub transforms. With an LLM key
+set, the research and article stages make real calls (the anti-fabrication
+rule is the load-bearing instruction, condensed from from-amir). The real
+scrape, image, voice, and video stages remain env-gated seams to port from
+/from-amir once their keys are in place.
 """
 from __future__ import annotations
 
@@ -15,8 +15,6 @@ from pipeline import config
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-# Anti-fabrication rule, condensed from from-amir/reaearchreddit.txt. This is
-# the load-bearing instruction that keeps stories grounded in the real post.
 RESEARCH_RULES = (
     "Use ONLY the provided post. Invent nothing: no facts, names, numbers, or "
     "outcomes that are not in the source. Keep quotes exact. If a detail is "
@@ -24,20 +22,19 @@ RESEARCH_RULES = (
 )
 
 
-def scrape(subreddit: str, limit: int, dry_run: bool) -> list[dict]:
-    if dry_run:
+def scrape(subreddit: str, limit: int, use_fixture: bool) -> list[dict]:
+    if use_fixture:
         posts = json.loads((FIXTURES / "sample_post.json").read_text(encoding="utf-8"))
         return posts[:limit]
     miss = config.missing("scrape")
     if miss:
-        raise RuntimeError(f"scrape requires env {miss}; rotate and set them in .env")
+        raise RuntimeError(f"scrape requires env {miss}; set them in pipeline/.env")
     raise NotImplementedError(
         "Real scrape: port from from-amir/redditscraperformsn.py (Decodo proxy) using DECODO_TOKEN."
     )
 
 
 def make_idea(post: dict, dry_run: bool) -> dict:
-    # Deterministic in dry-run; an LLM proposes the headline/angle in a real run.
     return {
         "reddit_id": post["id"],
         "category": post.get("category", "Entitled"),
@@ -48,16 +45,19 @@ def make_idea(post: dict, dry_run: bool) -> dict:
 
 def research(idea: dict, post: dict, dry_run: bool) -> dict:
     if dry_run:
-        return {
-            "rules": RESEARCH_RULES,
-            "beats": [post.get("selftext", "")[:400]],
-            "quotes": [],
-            "source": post.get("url", ""),
-        }
+        return {"rules": RESEARCH_RULES, "brief": post.get("selftext", "")[:400], "source": post.get("url", "")}
     _require_llm()
-    raise NotImplementedError(
-        "Real research: port from from-amir/reaearchreddit.txt — LLM call with RESEARCH_RULES over the post."
+    from pipeline import llm
+
+    prompt = (
+        f"{RESEARCH_RULES}\n\n"
+        "SOURCE POST\n"
+        f"Title: {post['title']}\n"
+        f"Body: {post.get('selftext', '')}\n\n"
+        "Write a tight research brief for a writer: retell the story in order, "
+        "list 3 to 6 key beats, and pull any exact quotes. Plain text."
     )
+    return {"rules": RESEARCH_RULES, "brief": llm.chat(prompt, 1500), "source": post.get("url", "")}
 
 
 def write_article(idea: dict, research: dict, dry_run: bool) -> str:
@@ -65,17 +65,24 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
         return (
             "[DRY RUN ARTICLE]\n\n"
             f"{idea['headline']}\n\n"
-            f"{research['beats'][0]}\n\n"
-            "(In a real run the LLM rewrites this into an original article, "
-            "and later stages generate the doodle video and narration.)"
+            f"{research['brief']}\n\n"
+            "(In a real run the LLM rewrites this into an original article.)"
         )
     _require_llm()
-    raise NotImplementedError(
-        "Real article writer: port from from-amir/listscreator.txt and storycreator.txt."
+    from pipeline import llm
+
+    prompt = (
+        "You are a LoreWire writer. Rewrite the research below into an original, "
+        "engaging article of about 400 words in a punchy editorial voice. Do not "
+        "fabricate anything beyond the research, and avoid clickbait. Return only "
+        "the article text.\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Research:\n{research['brief']}"
     )
+    return llm.chat(prompt, 1200)
 
 
 def _require_llm() -> None:
     miss = config.missing("llm")
     if miss:
-        raise RuntimeError(f"LLM stage requires env {miss}; rotate and set them in .env")
+        raise RuntimeError(f"LLM stage requires {miss}; set it in pipeline/.env")
