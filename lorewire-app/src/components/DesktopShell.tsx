@@ -219,7 +219,28 @@ const GALLERY = [
   { n: "3", t: "Somewhere safe turned out to be a weekend trip and a very new handbag." },
   { n: "4", t: "HR found the group chat. The receipts, as they say, were already screenshotted." },
 ];
-function Read() {
+function GenArticle({ story }: { story: Story }) {
+  const paras = (story.body || "").split(/\n{2,}/);
+  return (
+    <article className="fade-in max-w-[660px]">
+      <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
+      <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>{story.title}</h1>
+      {paras.map((para, i) =>
+        i === 0 ? (
+          <p key={i} className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5"><span className="float-left font-display font-black text-accent mr-2.5 leading-[.78]" style={{ fontSize: 72 }}>{para.charAt(0)}</span>{para.slice(1)}</p>
+        ) : (
+          <p key={i} className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">{para}</p>
+        )
+      )}
+      <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
+        <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap"><span className="text-ink/80">r/AmItheAsshole</span><span>&middot;</span><span>retold by LoreWire</span><span className="ml-auto text-accent font-medium">View source &rarr;</span></div>
+      </div>
+    </article>
+  );
+}
+
+function Read({ story }: { story: Story }) {
   const [mode, setMode] = useState("Article");
   return (
     <div>
@@ -229,6 +250,7 @@ function Read() {
         ))}
       </div>
       {mode === "Article" ? (
+        story.body ? <GenArticle story={story} /> : (
         <article className="fade-in max-w-[660px]">
           <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
           <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>The $800 Envelope</h1>
@@ -257,6 +279,7 @@ function Read() {
             </div>
           </div>
         </article>
+        )
       ) : (
         <div className="fade-in grid grid-cols-2 gap-5">
           {GALLERY.map((g, i) => (
@@ -372,7 +395,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
             </div>
             <div className="pt-7">
               {tab === "Watch" && <WatchDoodle />}
-              {tab === "Read" && <Read />}
+              {tab === "Read" && <Read story={story} />}
               {tab === "Read-along" && <ReadAlong />}
             </div>
             <section className="mt-12">

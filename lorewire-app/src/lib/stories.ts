@@ -1,6 +1,8 @@
 // Sample story data for the validation build. Replaces the in-browser design
 // data. Later this comes from Postgres via the pipeline; the shape stays stable.
 
+import { BODIES } from "@/data/bodies";
+
 export type Cat = "Drama" | "Entitled" | "Humor" | "Wholesome" | "Dating" | "Roommate";
 
 export interface Story {
@@ -13,6 +15,7 @@ export interface Story {
   glyph: string;
   tags: string[];
   syn: string;
+  body?: string;
 }
 
 export const CAT: Record<Cat, string> = {
@@ -42,6 +45,12 @@ export const STORIES: Story[] = [
   { id: "rules", title: "MY ROOMMATE'S 3AM RULES", cat: "Roommate", dur: "2:09", match: 85, year: 2025, glyph: "3", tags: ["True Story", "Roommates", "Quiet"], syn: "A laminated quiet-hours schedule, a contraband kettle, and the night the rules finally broke." },
   { id: "bill", title: "HE SPLIT THE BILL BY ITEMS", cat: "Dating", dur: "1:58", match: 79, year: 2024, glyph: "=", tags: ["True Story", "Dating", "Cringe"], syn: "A calculator at the table, a charge for 'half the appetizer she touched,' and a second date that never came." },
 ];
+
+// Attach generated article bodies (from the content pipeline) where available.
+for (const s of STORIES) {
+  const b = (BODIES as Record<string, string>)[s.id];
+  if (b) s.body = b;
+}
 
 export const byId = (id: string): Story => {
   const s = STORIES.find((x) => x.id === id);
