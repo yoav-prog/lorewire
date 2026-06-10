@@ -69,10 +69,12 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
     from pipeline import llm
 
     prompt = (
-        "You are a LoreWire writer. Rewrite the research below into an original, "
-        "engaging article of about 400 words in a punchy editorial voice. Do not "
-        "fabricate anything beyond the research, and avoid clickbait. Return only "
-        "the article text.\n\n"
+        "You write for LoreWire, where true internet stories are retold as short, "
+        "vivid narratives. Retell the story below in about 350 to 450 words: open "
+        "with a hook, move scene by scene, keep it punchy and entertaining, and let "
+        "the facts carry it. Do NOT analyze, moralize, or render a verdict ('it's "
+        "not hard to see why...', 'the lesson here'), and do not invent anything "
+        "beyond the research. Return only the article text.\n\n"
         f"Headline: {idea['headline']}\n\n"
         f"Research:\n{research['brief']}"
     )
