@@ -1,7 +1,7 @@
 # Media orchestration in pipeline/run.py
 
-Date: 2026-06-10
-Status: in progress
+Date: 2026-06-10 (updated 2026-06-11 to add Gemini-TTS)
+Status: shipped
 Section in handoff: 3.1 (orchestrate the media stages into one pipeline run)
 
 ## Goal
@@ -167,6 +167,31 @@ After implementation:
      in the DB row.
    - `[media id=...]` log lines printed at every step.
 4. Sanity: open one of the images, scrub the mp3, check the alignment JSON.
+
+## 2026-06-11 addendum: Gemini-TTS as a third Google tier
+
+After 3.2 shipped we wired Vertex AI Gemini-TTS as additional `voice` registry
+entries: `google/gemini-25-flash-tts` and `google/gemini-31-flash-tts`. Same
+service account, same `texttospeech.googleapis.com/v1/text:synthesize` endpoint,
+same STT alignment path as the existing Google tiers — three small differences
+in the synth request body:
+
+- `voice.modelName` is set to `gemini-2.5-flash-tts` (stable) or
+  `gemini-3.1-flash-tts-preview` (preview, more expressive but ~2x cost).
+- `voice.name` is the BARE form ("Aoede", "Charon", ...), not the
+  locale-prefixed Chirp 3 HD form. `_gemini_voice_name` strips the prefix so
+  the same `voice.google_voice_name` setting works across tiers — the lazy
+  user picks a voice once.
+- `input.prompt` carries an optional style instruction sourced from the new
+  `voice.google_style_prompt` admin setting. Both fields count toward billing
+  and toward Google's caps (4 KB each, 8 KB combined). Oversized inputs fail
+  loud before the HTTP call.
+
+Pricing estimates in `pipeline/media.py`: Gemini 2.5 Flash TTS ~$16/1M chars
+(input + prompt), Gemini 3.1 Flash TTS Preview ~$33/1M chars. Numbers translated
+from Google's token-based billing per yt-studio's calibration; flagged as
+estimates until a real GCP invoice reconciles. ElevenLabs (~$300/1M chars on
+Starter) remains in the picker as the premium English-only option.
 
 ## Rejected alternatives
 

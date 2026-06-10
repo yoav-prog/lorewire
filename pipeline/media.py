@@ -49,12 +49,18 @@ IMAGE_COST_USD = {
 
 # USD per character. Sized from each provider's public pricing as of 2026-06.
 # ElevenLabs Starter ~$0.30/1k, Google HD tier published as a chars/min rate;
-# values below are conservative single-number stand-ins.
+# values below are conservative single-number stand-ins. Gemini-TTS pricing is
+# token-based on the invoice and translates roughly to the per-char rates below
+# (sourced from yt-studio's cost.ts, verified against Google's own pricing page
+# kept timing out 2026-05-26). Treat Gemini rows as estimates until a real GCP
+# invoice reconciles.
 TTS_COST_PER_CHAR = {
-    "google/chirp3-hd": 30e-6,   # ~$30 / 1M chars (HD)
-    "google/neural2":   16e-6,   # ~$16 / 1M chars
-    "google/standard":   4e-6,   # ~$4  / 1M chars
-    "elevenlabs/default": 300e-6,  # ~$0.30 / 1k chars
+    "google/chirp3-hd":           30e-6,   # ~$30 / 1M chars (HD)
+    "google/gemini-25-flash-tts": 16e-6,   # ~$16 / 1M chars (input + style prompt)
+    "google/gemini-31-flash-tts": 33e-6,   # ~$33 / 1M chars (preview, input + style prompt)
+    "google/neural2":             16e-6,   # ~$16 / 1M chars
+    "google/standard":             4e-6,   # ~$4  / 1M chars
+    "elevenlabs/default":        300e-6,   # ~$0.30 / 1k chars
 }
 
 # Google STT (alignment) per second of audio. Used only on Google voices.

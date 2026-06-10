@@ -23,6 +23,8 @@
     "default": "google/chirp3-hd",
     "options": [
       { "id": "google/chirp3-hd", "label": "Google Chirp 3 HD", "provider": "google", "cost": "~$0.054 / 1800 chars (HD tier)", "wired": true },
+      { "id": "google/gemini-25-flash-tts", "label": "Google Gemini 2.5 Flash TTS (style prompt)", "provider": "google", "cost": "~$0.029 / 1800 chars + style prompt chars", "wired": true },
+      { "id": "google/gemini-31-flash-tts", "label": "Google Gemini 3.1 Flash TTS (preview, style prompt)", "provider": "google", "cost": "~$0.059 / 1800 chars + style prompt chars", "wired": true },
       { "id": "google/neural2", "label": "Google Neural2", "provider": "google", "cost": "~$0.029 / 1800 chars", "wired": true },
       { "id": "google/standard", "label": "Google Standard", "provider": "google", "cost": "~$0.007 / 1800 chars", "wired": true },
       { "id": "elevenlabs/default", "label": "ElevenLabs", "provider": "elevenlabs", "cost": "~$0.54 / 1800 chars (Starter)", "wired": true }

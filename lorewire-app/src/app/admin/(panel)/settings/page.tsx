@@ -26,7 +26,13 @@ const FIELDS: { key: string; label: string; placeholder: string; hint?: string }
       key: "voice.google_voice_name",
       label: "Google voice name",
       placeholder: "en-US-Chirp3-HD-Aoede",
-      hint: "Full Google voice id (e.g. en-US-Chirp3-HD-Charon). Used when the active model is Google.",
+      hint: "Full Google voice id (e.g. en-US-Chirp3-HD-Charon). Used by every Google tier; the pipeline strips the locale prefix automatically when Gemini-TTS is active so the same setting works across tiers.",
+    },
+    {
+      key: "voice.google_style_prompt",
+      label: "Gemini-TTS style prompt",
+      placeholder: "Read this in a calm, conversational tone, like a podcaster telling a story",
+      hint: "Only used when a Google Gemini-TTS model is active. Steers delivery (pace, tone, emotion). Counts toward Google's combined 8000-byte cap with the narration text and shows up on the bill.",
     },
     {
       key: "voice.elevenlabs_voice_id",

@@ -30,6 +30,20 @@ GOOGLE_STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
 GOOGLE_DEFAULT_VOICE = "en-US-Chirp3-HD-Aoede"
 GOOGLE_DEFAULT_LANGUAGE = "en-US"
 
+# Gemini-TTS goes through the SAME text:synthesize endpoint with voice.model_name set
+# to one of these values. Voices are the same 28 prebuilt names as Chirp 3 HD (Aoede,
+# Charon, Kore, ...) but Gemini expects the BARE name, not the locale-prefixed form.
+# Limits per Google's gemini-tts docs: text field <= 4000 bytes, prompt field <= 4000
+# bytes, combined <= 8000 bytes. Our articles top out around 2500 chars so a single
+# sync request handles the whole narration without chunking.
+GEMINI_TIER_TO_MODEL_NAME = {
+    "gemini-25-flash-tts": "gemini-2.5-flash-tts",
+    "gemini-31-flash-tts": "gemini-3.1-flash-tts-preview",
+}
+GEMINI_TEXT_BYTE_LIMIT = 4000
+GEMINI_PROMPT_BYTE_LIMIT = 4000
+GEMINI_COMBINED_BYTE_LIMIT = 8000
+
 # Process-level totals for cost metering. Per-provider so the run-end summary
 # can attribute spend without ambiguity.
 totals = {
@@ -139,6 +153,9 @@ _GOOGLE_TIER_FALLBACK_VOICE = {
     "chirp3-hd": "en-US-Chirp3-HD-Aoede",
     "neural2": "en-US-Neural2-F",
     "standard": "en-US-Standard-F",
+    # Gemini-TTS expects bare voice names (see _gemini_voice_name).
+    "gemini-25-flash-tts": "en-US-Chirp3-HD-Aoede",
+    "gemini-31-flash-tts": "en-US-Chirp3-HD-Aoede",
 }
 
 
@@ -148,6 +165,10 @@ def _google_tier(selected: str) -> str:
     if not tier:
         raise RuntimeError(f"Google voice selection {selected!r} is missing a tier suffix.")
     return tier
+
+
+def _is_gemini_tier(tier: str) -> bool:
+    return tier in GEMINI_TIER_TO_MODEL_NAME
 
 
 def _google_voice_name(selected: str) -> str:
@@ -161,6 +182,21 @@ def _google_voice_name(selected: str) -> str:
         return setting
     tier = _google_tier(selected)
     return _GOOGLE_TIER_FALLBACK_VOICE.get(tier, GOOGLE_DEFAULT_VOICE)
+
+
+def _gemini_voice_name(voice_name: str) -> str:
+    """Strip the locale + Chirp3-HD prefix so a setting like
+    'en-US-Chirp3-HD-Aoede' becomes 'Aoede' — the bare form Gemini-TTS expects.
+
+    Passing the full Chirp name to Gemini returns
+    'Gemini models cannot be used with non-Gemini voices.' (yt-studio note,
+    see _reference/youtubestudio/src/lib/tts/providers/google.ts). Falls
+    through to the raw value when the pattern doesn't match so an admin who
+    sets a bare name directly still works.
+    """
+    import re
+    match = re.search(r"Chirp3-HD-(.+)$", voice_name, re.IGNORECASE)
+    return match.group(1) if match else voice_name
 
 
 def _google_language_code(voice_name: str) -> str:
@@ -189,17 +225,25 @@ def _google_post(url: str, body: dict, timeout: int = 180) -> dict:
 
 
 def _google_synthesize(text: str, dest_audio: Path, selected: str) -> dict:
-    voice_name = _google_voice_name(selected)
-    language_code = _google_language_code(voice_name)
+    voice_name_setting = _google_voice_name(selected)
+    language_code = _google_language_code(voice_name_setting)
+    tier = _google_tier(selected)
 
-    # Google's synchronous text:synthesize endpoint accepts up to 5000 bytes.
-    # Our articles top out around 2500 chars (~2.5 KB ASCII), so we render in
-    # one call and let the LLM rewrite keep us under the ceiling.
-    payload = {
-        "input": {"text": text},
-        "voice": {"languageCode": language_code, "name": voice_name},
-        "audioConfig": {"audioEncoding": "MP3"},
-    }
+    if _is_gemini_tier(tier):
+        payload = _build_gemini_payload(text, voice_name_setting, language_code, tier)
+        billed_chars = payload["_billed_chars"]
+        payload.pop("_billed_chars")
+    else:
+        # Google's synchronous text:synthesize endpoint accepts up to 5000 bytes for
+        # non-Gemini voices. Our articles top out around 2500 chars (~2.5 KB ASCII),
+        # so we render in one call and let the LLM rewrite keep us under the ceiling.
+        payload = {
+            "input": {"text": text},
+            "voice": {"languageCode": language_code, "name": voice_name_setting},
+            "audioConfig": {"audioEncoding": "MP3"},
+        }
+        billed_chars = len(text)
+
     data = _google_post(GOOGLE_TTS_URL, payload)
     audio_b64 = data.get("audioContent")
     if not audio_b64:
@@ -207,7 +251,7 @@ def _google_synthesize(text: str, dest_audio: Path, selected: str) -> dict:
     dest_audio.parent.mkdir(parents=True, exist_ok=True)
     audio_bytes = base64.b64decode(audio_b64)
     dest_audio.write_bytes(audio_bytes)
-    totals["google_tts_characters"] += len(text)
+    totals["google_tts_characters"] += billed_chars
 
     # Google does not return word timings with synthesis. Run STT on the
     # generated audio with enableWordTimeOffsets to recover them.
@@ -216,11 +260,80 @@ def _google_synthesize(text: str, dest_audio: Path, selected: str) -> dict:
     return {"audio": str(dest_audio), "words": words, "provider": "google"}
 
 
+def _build_gemini_payload(
+    text: str, voice_name_setting: str, language_code: str, tier: str
+) -> dict:
+    """Construct the synth payload for a Gemini-TTS request.
+
+    Three Gemini quirks the regular path doesn't have:
+      1. The voice.name field must be the BARE form ("Aoede"), not the
+         locale-prefixed Chirp 3 HD form ("en-US-Chirp3-HD-Aoede"). Google
+         rejects the prefixed form with "Gemini models cannot be used with
+         non-Gemini voices."
+      2. voice.modelName carries the specific Gemini variant
+         (gemini-2.5-flash-tts or gemini-3.1-flash-tts-preview).
+      3. An optional style instruction lives at `input.prompt`. Total
+         (text + prompt) cannot exceed 8000 bytes and each field is capped
+         at 4000 bytes. Both fields count toward billing.
+
+    The function attaches a `_billed_chars` key the caller pops before
+    POSTing — it's the combined char count that drives cost tracking.
+    """
+    style_prompt = (store.get_setting("voice.google_style_prompt") or "").strip()
+    text_bytes = len(text.encode("utf-8"))
+    prompt_bytes = len(style_prompt.encode("utf-8")) if style_prompt else 0
+    if text_bytes > GEMINI_TEXT_BYTE_LIMIT:
+        raise RuntimeError(
+            f"Gemini-TTS text exceeds {GEMINI_TEXT_BYTE_LIMIT}-byte cap "
+            f"({text_bytes} bytes). Shorten the narration or chunk client-side."
+        )
+    if prompt_bytes > GEMINI_PROMPT_BYTE_LIMIT:
+        raise RuntimeError(
+            f"voice.google_style_prompt exceeds {GEMINI_PROMPT_BYTE_LIMIT}-byte cap "
+            f"({prompt_bytes} bytes). Tighten the style instruction."
+        )
+    if text_bytes + prompt_bytes > GEMINI_COMBINED_BYTE_LIMIT:
+        raise RuntimeError(
+            f"Gemini-TTS combined text + prompt exceeds {GEMINI_COMBINED_BYTE_LIMIT}-byte cap "
+            f"(text={text_bytes}, prompt={prompt_bytes})."
+        )
+
+    voice_input = {"text": text}
+    if style_prompt:
+        voice_input["prompt"] = style_prompt
+
+    voice_obj = {
+        "languageCode": language_code,
+        "name": _gemini_voice_name(voice_name_setting),
+        "modelName": GEMINI_TIER_TO_MODEL_NAME[tier],
+    }
+    return {
+        "input": voice_input,
+        "voice": voice_obj,
+        "audioConfig": {"audioEncoding": "MP3"},
+        "_billed_chars": len(text) + len(style_prompt),
+    }
+
+
 def _google_align(audio_bytes: bytes, language_code: str) -> list[dict]:
-    """Recognize the TTS audio with word-level offsets and return word timings."""
+    """Recognize the TTS audio with word-level offsets and return word timings.
+
+    Two hardening tricks on this path:
+      1. Pin `sampleRateHertz: 24000`. Google TTS outputs at 24 kHz for every
+         tier we expose (Chirp HD, Gemini, Neural2, Standard). Without the pin,
+         STT mis-detected the rate on Gemini-TTS MP3 (verified 2026-06-11) and
+         returned timings stretched ~1.5x past the real audio duration —
+         which then drove the video composition to play 60 s past the end of
+         the narration.
+      2. After collecting word offsets, scale them to the audio file's real
+         duration when STT's last-word-end disagrees by >5%. Defense against
+         any future format quirk (or a tier we add later) producing the same
+         off-by-N issue without us noticing until a video looks wrong.
+    """
     payload = {
         "config": {
             "encoding": "MP3",
+            "sampleRateHertz": 24000,
             "languageCode": language_code,
             "enableWordTimeOffsets": True,
             # latest_long is tuned for narration-length audio; better word-time
@@ -243,9 +356,77 @@ def _google_align(audio_bytes: bytes, language_code: str) -> list[dict]:
                     "end": _parse_google_duration(w.get("endTime")),
                 }
             )
+
+    words = _calibrate_to_audio_duration(words, audio_bytes)
     if words:
         totals["google_stt_seconds"] += words[-1]["end"]
     return words
+
+
+def _calibrate_to_audio_duration(words: list[dict], audio_bytes: bytes) -> list[dict]:
+    """Scale every word timing to the real MP3 duration when STT drifts >5%.
+
+    Returns the original list unchanged when the durations agree or when the
+    audio can't be probed (we'd rather ship slightly off timings than block).
+    """
+    if not words:
+        return words
+    true_seconds = _probe_mp3_duration(audio_bytes)
+    if true_seconds <= 0:
+        return words
+    stt_seconds = words[-1]["end"]
+    if stt_seconds <= 0:
+        return words
+    ratio = true_seconds / stt_seconds
+    if abs(1.0 - ratio) <= 0.05:
+        return words
+    print(
+        f"[voice align] STT drift detected: true audio={true_seconds:.2f}s, "
+        f"STT last word end={stt_seconds:.2f}s; scaling timings by {ratio:.3f}"
+    )
+    return [
+        {"word": w["word"], "start": w["start"] * ratio, "end": w["end"] * ratio}
+        for w in words
+    ]
+
+
+def _probe_mp3_duration(mp3_bytes: bytes) -> float:
+    """Compute the duration of a Google-TTS MP3 (MPEG-2 Layer III, 24 kHz mono)
+    by counting frames in the byte stream. Pure stdlib, no ffmpeg/ffprobe.
+
+    MPEG audio frames start with the 11-bit sync word `0xFFE`. For MPEG-2 Layer
+    III each frame is exactly 576 samples; at 24 kHz mono that's 24 ms per
+    frame. We scan once, count frames, and return seconds. Returns 0.0 on any
+    failure so the caller can fall back to STT's reported duration cleanly.
+    """
+    SAMPLES_PER_FRAME = 576
+    SAMPLE_RATE = 24000
+    # MPEG-2 Layer III bitrate table (kbps) indexed by the 4-bit bitrate field.
+    BITRATE_TABLE = [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None]
+    try:
+        frames = 0
+        i = 0
+        n = len(mp3_bytes)
+        while i < n - 4:
+            if mp3_bytes[i] != 0xFF or (mp3_bytes[i + 1] & 0xE0) != 0xE0:
+                i += 1
+                continue
+            bitrate_idx = (mp3_bytes[i + 2] >> 4) & 0x0F
+            bitrate_kbps = BITRATE_TABLE[bitrate_idx]
+            if bitrate_kbps is None:
+                i += 1
+                continue
+            padding = (mp3_bytes[i + 2] >> 1) & 0x01
+            # Frame size formula for MPEG-2 Layer III, single channel.
+            frame_size = (72 * bitrate_kbps * 1000) // SAMPLE_RATE + padding
+            if frame_size <= 0:
+                i += 1
+                continue
+            frames += 1
+            i += frame_size
+        return frames * SAMPLES_PER_FRAME / SAMPLE_RATE if frames > 0 else 0.0
+    except Exception:
+        return 0.0
 
 
 def _parse_google_duration(value) -> float:
