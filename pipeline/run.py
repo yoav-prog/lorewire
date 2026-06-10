@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from pipeline import stages, store
+from pipeline import llm, stages, store
 
 
 def main() -> None:
@@ -54,12 +54,15 @@ def main() -> None:
         )
         processed += 1
         if not dry:
-            print(f"\n--- {idea['headline']} ---\n{body[:600]}\n")
+            print(f"\n--- {idea['headline']} ---\n{body}\n")
 
     rows = store.all_stories()
     print(f"Processed {processed} post(s). Stories in DB: {len(rows)}")
     for r in rows[:10]:
         print(f"  [{r['status']}] {r['category']}: {r['title']}")
+    if not dry and llm.totals["calls"]:
+        t = llm.totals
+        print(f"\nLLM usage: {t['calls']} calls, {t['prompt_tokens']} in + {t['completion_tokens']} out = {t['total_tokens']} tokens")
 
 
 if __name__ == "__main__":

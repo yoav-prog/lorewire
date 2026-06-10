@@ -12,6 +12,9 @@ import urllib.request
 
 from pipeline import config, models
 
+# Running token totals for this process, for cost metering.
+totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
 
 def _resolve() -> tuple[str, str, str]:
     selected = models.get_selected("llm")  # e.g. "openai/gpt-5.4-mini"
@@ -49,4 +52,9 @@ def chat(prompt: str, max_tokens: int = 2000) -> str:
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "ignore")[:300]
         raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
+    usage = data.get("usage", {}) or {}
+    totals["calls"] += 1
+    totals["prompt_tokens"] += usage.get("prompt_tokens", 0)
+    totals["completion_tokens"] += usage.get("completion_tokens", 0)
+    totals["total_tokens"] += usage.get("total_tokens", 0)
     return data["choices"][0]["message"]["content"].strip()
