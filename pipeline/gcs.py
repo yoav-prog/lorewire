@@ -150,9 +150,15 @@ def upload(local_path: Path, key: str) -> str:
     payload = local_path.read_bytes()
     mime = _mime_for(local_path.name)
     encoded_key = urllib.parse.quote(key, safe="")
+    # predefinedAcl=publicRead grants allUsers:READER on the object so it
+    # serves through https://storage.googleapis.com/<bucket>/<key> without
+    # signing. Required on buckets using legacy per-object ACLs (the
+    # default for buckets created before uniform bucket-level access was
+    # standard). Buckets with uniform bucket-level access reject this
+    # flag — we handle that in publish() with a retry.
     url = (
         f"{UPLOAD_BASE}/b/{urllib.parse.quote(bucket, safe='')}/o"
-        f"?uploadType=media&name={encoded_key}"
+        f"?uploadType=media&name={encoded_key}&predefinedAcl=publicRead"
     )
     req = urllib.request.Request(
         url,
