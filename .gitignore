@@ -26,6 +26,11 @@ out/
 dist/
 build/
 
+# Remotion staging + props (per-story media gets copied here for staticFile())
+/video/public/
+/video/.props/
+/video/out/
+
 # Misc
 .DS_Store
 *.log

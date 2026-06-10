@@ -7,18 +7,20 @@ Dry run (no keys, offline, stub transforms on a fixture):
 Real rewrite of the fixture post (needs an LLM key in .env, no scrape):
     python -m pipeline.run --fixture
     python -m pipeline.run --fixture --media         # + real images + voice
+    python -m pipeline.run --fixture --media --video # + render the doodle MP4
 
 Full real run (needs scrape + LLM keys):
     python -m pipeline.run --subreddit AmItheAsshole --limit 5
-    python -m pipeline.run --subreddit AmItheAsshole --limit 1 --media
+    python -m pipeline.run --subreddit AmItheAsshole --limit 1 --media --video
 """
 from __future__ import annotations
 
 import argparse
 import datetime
+import json
 from pathlib import Path
 
-from pipeline import llm, media, stages, store
+from pipeline import llm, media, stages, store, video
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -34,7 +36,14 @@ def main() -> None:
         action="store_true",
         help="also generate images + narration (kie.ai + voice provider). Costs real money.",
     )
+    ap.add_argument(
+        "--video",
+        action="store_true",
+        help="render the doodle short MP4 via Remotion. Requires --media in the same run.",
+    )
     args = ap.parse_args()
+    if args.video and not args.media:
+        ap.error("--video requires --media in the same run (no rerender flag yet)")
 
     dry = args.dry_run
     use_fixture = args.dry_run or args.fixture
@@ -75,6 +84,31 @@ def main() -> None:
             row.update(media_cols)
             # Token spend from this story includes the image-prompt LLM call.
             row["tokens"] = llm.totals["total_tokens"] - before
+            if args.video and not dry:
+                # Pull the just-written image URLs + alignment back out of the
+                # row, in the same shape the video stage expects (the columns
+                # were serialized to JSON for storage; deserialize here).
+                hero = row.get("hero_image")
+                scenes_raw = row.get("images") or "[]"
+                try:
+                    scenes = json.loads(scenes_raw) if isinstance(scenes_raw, str) else scenes_raw
+                except json.JSONDecodeError:
+                    scenes = []
+                image_urls = ([hero] if hero else []) + list(scenes)
+                alignment_raw = row.get("alignment") or "[]"
+                try:
+                    alignment = json.loads(alignment_raw) if isinstance(alignment_raw, str) else alignment_raw
+                except json.JSONDecodeError:
+                    alignment = []
+                video_cols = video.generate_video(
+                    idea["reddit_id"],
+                    idea["headline"],
+                    image_urls,
+                    row.get("audio_url") or "",
+                    alignment,
+                    repo_root=REPO_ROOT,
+                )
+                row.update(video_cols)
         store.upsert_story(row)
         processed += 1
         if not dry:
