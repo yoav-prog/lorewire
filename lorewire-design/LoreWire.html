@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoreWire</title>
+<link rel="icon" type="image/svg+xml" href="lorewire-monogram.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Caveat:wght@600;700&family=Hanken+Grotesk:wght@400;500;600;700;800&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      colors: {
+        bg:'#0A0A0C', surface:'#15141A', surface2:'#211F29',
+        line:'rgba(255,255,255,0.085)', ink:'#F5F3EF', muted:'#8E8A97', accent:'#E8462B',
+        canvas:'#FBFAF4', doodle:'#1A1714', high:'#FFD84D',
+        cat: { drama:'#9B3A30', entitled:'#C06234', humor:'#C9A227', wholesome:'#2C7E78', dating:'#A8466A', roommate:'#5B3B8A' }
+      },
+      fontFamily: {
+        display:['Archivo','sans-serif'], body:['Hanken Grotesk','sans-serif'],
+        mono:['Spline Sans Mono','monospace'], hand:['Caveat','cursive']
+      }
+    }}
+  };
+</script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  :root{ --accent:#E8462B; }
+  html,body{ margin:0; height:100%; background:#000; }
+  body{ font-family:'Hanken Grotesk',sans-serif; -webkit-font-smoothing:antialiased; }
+  *{ box-sizing:border-box; }
+  button{ -webkit-appearance:none; appearance:none; }
+  ::-webkit-scrollbar{ display:none; }
+  .noscroll{ -ms-overflow-style:none; scrollbar-width:none; }
+  .stage{ min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; background:
+      radial-gradient(120% 90% at 50% -10%, #161318 0%, #050506 60%); }
+  .phone{ width:390px; height:844px; max-height:calc(100vh - 32px); border-radius:46px; position:relative;
+      background:#0A0A0C; overflow:hidden; box-shadow:0 40px 120px rgba(0,0,0,.7), 0 0 0 11px #121116, 0 0 0 12px #2a2830; }
+  .screen{ position:absolute; inset:0; overflow-y:auto; overflow-x:hidden; }
+  .notch{ position:absolute; top:9px; left:50%; transform:translateX(-50%); width:118px; height:30px; background:#000; border-radius:18px; z-index:60; }
+  @keyframes drift{ 0%{ transform:scale(1.08) translate(0,0);} 100%{ transform:scale(1.16) translate(-14px,-10px);} }
+  .drift{ animation:drift 18s ease-in-out infinite alternate; }
+  @keyframes slideUp{ from{ transform:translateY(100%);} to{ transform:translateY(0);} }
+  .sheet-in{ animation:slideUp .42s cubic-bezier(.16,1,.3,1); }
+  @keyframes fadeIn{ from{opacity:0} to{opacity:1} }
+  .fade-in{ animation:fadeIn .5s ease both; }
+  .poster-vig{ background:linear-gradient(0deg, rgba(0,0,0,.82) 0%, rgba(0,0,0,.28) 38%, rgba(0,0,0,0) 62%); }
+  .grain{ background-image:repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 2px, transparent 2px 7px); }
+  .tracking-tightest{ letter-spacing:-0.03em; }
+  .ink-shadow{ text-shadow:0 2px 14px rgba(0,0,0,.6); }
+  @keyframes floaty{ 0%{transform:translateY(0) rotate(-1deg)} 100%{transform:translateY(-6px) rotate(-1deg)} }
+  .floaty{ animation:floaty 4.5s ease-in-out infinite alternate; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+/* ----------------------------- DATA ----------------------------- */
+const CAT = {
+  Drama:'#9B3A30', Entitled:'#C06234', Humor:'#C9A227',
+  Wholesome:'#2C7E78', Dating:'#A8466A', Roommate:'#5B3B8A'
+};
+
+const STORIES = [
+  { id:'envelope', title:'THE $800 ENVELOPE', cat:'Entitled', dur:'2:14', match:97, year:2024,
+    glyph:'$', tags:['True Story','Workplace','Karma'],
+    syn:'A coworker collects cash for the boss\u2019s retirement gift, then the envelope quietly disappears \u2014 and so does her story.' },
+  { id:'replyall', title:'SHE REPLIED ALL', cat:'Humor', dur:'1:48', match:94, year:2025,
+    glyph:'!', tags:['True Story','Office','Cringe'],
+    syn:'One typo, four thousand recipients, and a thread that refused to die before lunch.' },
+  { id:'fence', title:'THE NEIGHBOR\u2019S FENCE', cat:'Drama', dur:'2:51', match:91, year:2024,
+    glyph:'/', tags:['True Story','Neighbors','Property'],
+    syn:'He built it eight inches over the line. She had the survey. Then the lawn furniture started moving.' },
+  { id:'wrongnumber', title:'WRONG NUMBER, RIGHT GUY', cat:'Dating', dur:'2:30', match:96, year:2025,
+    glyph:'?', tags:['True Story','Heartwarming','Texting'],
+    syn:'A misdialed \u201cyou up?\u201d turns into eleven months of the best conversations of her life.' },
+  { id:'groupghost', title:'THE GROUP PROJECT GHOST', cat:'Humor', dur:'1:39', match:89, year:2024,
+    glyph:'0', tags:['True Story','College','Petty'],
+    syn:'Five names on the slide deck. One person who actually opened it. Finals week receipts inside.' },
+  { id:'fridge', title:'DECONSTRUCTING THE FRIDGE', cat:'Roommate', dur:'2:05', match:88, year:2025,
+    glyph:'#', tags:['True Story','Roommates','Notes'],
+    syn:'A war fought entirely in sticky notes, escalating from \u201cwhose milk?\u201d to a 14-point house manifesto.' },
+  { id:'seat', title:'GIVE ME YOUR SEAT', cat:'Entitled', dur:'1:55', match:90, year:2024,
+    glyph:'\u2191', tags:['True Story','Travel','Entitled'],
+    syn:'\u201cMy kids need to sit together.\u201d The window seat she paid extra for had other plans.' },
+  { id:'parking', title:'THE PARKING SPOT WAR', cat:'Entitled', dur:'2:22', match:86, year:2024,
+    glyph:'P', tags:['True Story','Neighbors','Cones'],
+    syn:'He saved a public spot with a lawn chair for nine years. The new tenant had a tow truck on speed dial.' },
+  { id:'birthday', title:'IT\u2019S MY BIRTHDAY MONTH', cat:'Entitled', dur:'1:44', match:84, year:2025,
+    glyph:'*', tags:['True Story','Friends','Audacity'],
+    syn:'Thirty-one days of mandatory celebration, one shared bill, and a friend group quietly doing math.' },
+  { id:'landlord', title:'THE LANDLORD\u2019S NEW RULE', cat:'Entitled', dur:'2:38', match:82, year:2024,
+    glyph:'L', tags:['True Story','Tenants','Receipts'],
+    syn:'A surprise clause about \u201cguest air\u201d appears in the lease. The tenants brought a lawyer and a printer.' },
+  { id:'stranger', title:'THE STRANGER WHO PAID', cat:'Wholesome', dur:'1:52', match:95, year:2025,
+    glyph:'+', tags:['True Story','Kindness','Anonymous'],
+    syn:'A declined card at the register, a tap on the shoulder, and a note she still keeps in her wallet.' },
+  { id:'wifi', title:'I NAMED MY WIFI', cat:'Humor', dur:'1:30', match:88, year:2025,
+    glyph:'~', tags:['True Story','Petty','Neighbors'],
+    syn:'A passive-aggressive network name starts a slow-burn rivalry visible to the entire apartment block.' },
+  { id:'wrongmom', title:'THE TEXT SENT TO THE WRONG MOM', cat:'Drama', dur:'2:47', match:93, year:2025,
+    glyph:'@', tags:['True Story','Family','Mixup'],
+    syn:'One contact saved wrong, a secret out early, and a Sunday dinner nobody will ever forget.' },
+  { id:'wedding', title:'THE WEDDING CRASHER', cat:'Drama', dur:'3:01', match:92, year:2024,
+    glyph:'\u25C6', tags:['True Story','Family','Wedding'],
+    syn:'An uninvited aunt, a seating chart with no mercy, and a toast that went badly off-script.' },
+  { id:'rules', title:'MY ROOMMATE\u2019S 3AM RULES', cat:'Roommate', dur:'2:09', match:85, year:2025,
+    glyph:'3', tags:['True Story','Roommates','Quiet'],
+    syn:'A laminated quiet-hours schedule, a contraband kettle, and the night the rules finally broke.' },
+  { id:'bill', title:'HE SPLIT THE BILL BY ITEMS', cat:'Dating', dur:'1:58', match:79, year:2024,
+    glyph:'=', tags:['True Story','Dating','Cringe'],
+    syn:'A calculator at the table, a charge for \u201chalf the appetizer she touched,\u201d and a second date that never came.' },
+];
+
+const byId = id => STORIES.find(s => s.id === id);
+const CONTINUE = [ {id:'wedding',p:67},{id:'rules',p:30},{id:'bill',p:88} ];
+const TOP10 = ['envelope','replyall','fence','wrongnumber','groupghost','fridge'];
+const ENTITLED_ROW = ['seat','parking','birthday','landlord','envelope'];
+const NEW_ROW = ['stranger','wifi','wrongmom','wrongnumber'];
+const PILLS = ['All','Drama','Entitled','Humor','Wholesome','Dating','Roommate'];
+
+/* ----------------------------- ICONS ----------------------------- */
+const Ico = ({d, fill, size=24, stroke=1.7}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill||'none'} stroke="currentColor"
+    strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">{d}</svg>
+);
+const HomeI = (p)=><Ico {...p} d={<><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v9.5h14V10"/></>}/>;
+const SearchI = (p)=><Ico {...p} d={<><circle cx="11" cy="11" r="6.2"/><path d="m20 20-3.6-3.6"/></>}/>;
+const NewI = (p)=><Ico {...p} d={<><circle cx="12" cy="12" r="8.4"/><path d="M12 8v8M8 12h8"/></>}/>;
+const ListI = (p)=><Ico {...p} d={<path d="M6 4h12v16l-6-4-6 4Z"/>}/>;
+const PlayI = ({size=22})=><svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>;
+const PlusI = (p)=><Ico {...p} d={<path d="M12 5v14M5 12h14"/>}/>;
+const StarI = (p)=><Ico {...p} d={<path d="M12 4.5l2.2 4.6 5 .6-3.7 3.4 1 4.9L12 16.1 7.5 18.5l1-4.9L4.8 10.2l5-.6z"/>}/>;
+const ShareI = (p)=><Ico {...p} d={<><circle cx="6" cy="12" r="2.3"/><circle cx="17" cy="6" r="2.3"/><circle cx="17" cy="18" r="2.3"/><path d="M8 11l7-4M8 13l7 4"/></>}/>;
+const ChevDown = (p)=><Ico {...p} d={<path d="m6 9 6 6 6-6"/>}/>;
+const ShuffleI = (p)=><Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5"/><path d="m18 5 2 2-2 2M18 15l2 2-2 2"/></>}/>;
+const InfoI = (p)=><Ico {...p} d={<><circle cx="12" cy="12" r="8.4"/><path d="M12 11v5M12 8h.01"/></>}/>;
+
+/* ----------------------------- POSTER ART ----------------------------- */
+function PosterArt({ story, rounded=true, showTitle=true }){
+  const c = CAT[story.cat];
+  return (
+    <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded?12:0, background:c }}>
+      {/* tonal art field */}
+      <div className="absolute inset-0" style={{ background:`radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)` }}></div>
+      <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
+      {/* oversized faint glyph as box-art motif */}
+      <div className="absolute -right-3 -top-4 font-display font-black leading-none select-none"
+        style={{ fontSize:172, color:'rgba(255,255,255,.10)' }}>{story.glyph}</div>
+      <div className="absolute inset-0 poster-vig"></div>
+      {/* category kicker */}
+      <div className="absolute left-2.5 top-2.5">
+        <span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded"
+          style={{ color:'#fff', background:'rgba(0,0,0,.32)' }}>{story.cat}</span>
+      </div>
+      {/* duration badge */}
+      <div className="absolute right-2 top-2 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded"
+        style={{ background:'rgba(0,0,0,.5)', color:'#F5F3EF' }}>{story.dur}</div>
+      {showTitle && (
+        <div className="absolute left-3 right-3 bottom-3">
+          <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow"
+            style={{ fontSize: story.title.length>16?19:22, color:'#F5F3EF' }}>{story.title}</h3>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------- RAIL HEADER ----------------------------- */
+const RailHead = ({children}) => (
+  <h2 className="font-display font-bold uppercase tracking-tightest text-[15px] text-ink px-4 mb-2.5">{children}</h2>
+);
+
+/* ----------------------------- BILLBOARD ----------------------------- */
+function Billboard({ story, onOpen, onShuffle }){
+  const c = CAT[story.cat];
+  return (
+    <div className="relative h-[500px] w-full overflow-hidden">
+      {/* LoreWire masthead */}
+      <div className="absolute left-5 z-30 flex items-center gap-2" style={{ top:52 }}>
+        <span className="relative grid place-items-center bg-ink text-bg font-display font-black rounded-[7px]" style={{ width:26, height:26, fontSize:11, letterSpacing:'-.04em' }}>
+          LW
+          <span className="absolute rounded-full bg-accent" style={{ top:3, right:4, width:4, height:4 }}></span>
+        </span>
+        <span className="font-display font-black tracking-tight text-ink ink-shadow" style={{ fontSize:18 }}>LoreWire</span>
+      </div>
+      <div className="absolute inset-0 drift" style={{ background:c }}>
+        <div className="absolute inset-0" style={{ background:`radial-gradient(120% 90% at 70% 20%, rgba(255,255,255,.18), rgba(0,0,0,.45) 72%)` }}></div>
+        <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
+        <div className="absolute -right-6 top-6 font-display font-black leading-none select-none"
+          style={{ fontSize:320, color:'rgba(255,255,255,.09)' }}>{story.glyph}</div>
+      </div>
+      <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background:'linear-gradient(0deg,#0A0A0C 6%, rgba(10,10,12,.55) 45%, rgba(10,10,12,0) 100%)' }}></div>
+
+      <div className="absolute left-0 right-0 bottom-5 px-5">
+        <div className="flex items-center gap-2 mb-2.5">
+          <span className="w-[3px] h-3.5 bg-accent rounded-full"></span>
+          <span className="font-mono text-[10px] uppercase tracking-[.34em] text-ink/90">LW Original</span>
+        </div>
+        <h1 className="font-display font-black uppercase tracking-tightest leading-[.9] text-ink ink-shadow" style={{ fontSize:46 }}>{story.title}</h1>
+        <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+          {story.tags.map((t,i)=>(
+            <React.Fragment key={t}>
+              {i>0 && <span className="w-1 h-1 rounded-full bg-muted/70"></span>}
+              <span className="font-body text-[12.5px] text-ink/85">{t}</span>
+            </React.Fragment>
+          ))}
+        </div>
+        <div className="flex items-center gap-2.5 mt-4">
+          <button onClick={()=>onOpen(story.id,'Watch')}
+            className="flex-1 flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition">
+            <PlayI/> Play
+          </button>
+          <button onClick={()=>onOpen(story.id)}
+            className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink"
+            style={{ background:'rgba(255,255,255,.13)' }}>
+            <InfoI size={18}/> More Info
+          </button>
+        </div>
+        <button onClick={onShuffle}
+          className="mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-[10px] border border-line font-mono text-[11px] uppercase tracking-[.2em] text-ink/80 active:scale-[.98] transition">
+          <ShuffleI size={15}/> Play Something
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- POSTER CARD (rail) ----------------------------- */
+function PosterCard({ story, onOpen, w=132, h=192, progress }){
+  return (
+    <button onClick={()=>onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width:w }}>
+      <div style={{ height:h }}><PosterArt story={story}/></div>
+      {progress!=null && (
+        <div className="absolute left-1.5 right-1.5 bottom-1.5 h-[3px] rounded-full" style={{ background:'rgba(255,255,255,.25)' }}>
+          <div className="h-full rounded-full bg-accent" style={{ width:`${progress}%` }}></div>
+        </div>
+      )}
+    </button>
+  );
+}
+
+/* ----------------------------- HOME ----------------------------- */
+function Home({ onOpen, onShuffle, pill, setPill }){
+  const featured = byId('envelope');
+  const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
+  return (
+    <div className="pb-28">
+      <Billboard story={featured} onOpen={onOpen} onShuffle={onShuffle}/>
+
+      {/* category pills */}
+      <div className="flex gap-2 px-4 py-4 overflow-x-auto noscroll">
+        {PILLS.map(p=>(
+          <button key={p} onClick={()=>setPill(p)}
+            className="shrink-0 px-3.5 py-1.5 rounded-full font-body font-semibold text-[13px] transition"
+            style={ pill===p
+              ? { background:'#F5F3EF', color:'#0A0A0C' }
+              : { background:'rgba(255,255,255,.07)', color:'#C9C6CE', border:'1px solid rgba(255,255,255,.085)' } }>
+            {p}
+          </button>
+        ))}
+      </div>
+
+      {/* Continue Watching */}
+      <section className="mt-1">
+        <RailHead>Continue Watching</RailHead>
+        <div className={railClass}>
+          {CONTINUE.map(({id,p})=> <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={150} h={96} progress={p}/> )}
+        </div>
+      </section>
+
+      {/* Top 10 */}
+      <section className="mt-7">
+        <RailHead>Top 10 Today</RailHead>
+        <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
+          {TOP10.map((id,i)=>(
+            <button key={id} onClick={()=>onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ width:170 }}>
+              <span className="font-display font-black leading-[.7] select-none -mr-1"
+                style={{ fontSize:120, color:'transparent', WebkitTextStroke:'2px rgba(255,255,255,.32)' }}>{i+1}</span>
+              <div className="w-[112px] h-[166px] -ml-2"><PosterArt story={byId(id)}/></div>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {/* Entitled genre row */}
+      <section className="mt-7">
+        <RailHead>Audacity: Entitled People</RailHead>
+        <div className={railClass}>
+          {ENTITLED_ROW.map(id=> <PosterCard key={id} story={byId(id)} onOpen={onOpen}/> )}
+        </div>
+      </section>
+
+      {/* New */}
+      <section className="mt-7">
+        <RailHead>New on LoreWire</RailHead>
+        <div className={railClass}>
+          {NEW_ROW.map(id=> <PosterCard key={id} story={byId(id)} onOpen={onOpen}/> )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/* ----------------------------- WATCH (doodle frame) ----------------------------- */
+function WatchDoodle(){
+  return (
+    <div className="px-4 pt-4 pb-2">
+      <div className="relative rounded-[14px] overflow-hidden mx-auto" style={{ background:'#FBFAF4', height:430, width:'100%' }}>
+        <div className="absolute inset-0" style={{ background:'repeating-linear-gradient(0deg, rgba(26,23,20,.035) 0 1px, transparent 1px 26px)' }}></div>
+
+        {/* hand caption top */}
+        <div className="absolute top-3 left-0 right-0 text-center font-hand font-bold text-doodle" style={{ fontSize:26 }}>
+          so about that office gift fund&hellip;
+        </div>
+
+        {/* envelope with $800 */}
+        <div className="absolute left-1/2 top-[120px] -translate-x-1/2 floaty">
+          <svg width="190" height="128" viewBox="0 0 190 128">
+            <rect x="4" y="4" width="182" height="120" rx="6" fill="#fff" stroke="#1A1714" strokeWidth="4"/>
+            <polyline points="6,8 95,64 184,8" fill="none" stroke="#1A1714" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <div className="absolute inset-0 flex items-center justify-center pt-5">
+            <span className="font-hand font-bold" style={{ fontSize:54, color:'#E8462B', transform:'rotate(-4deg)' }}>$800</span>
+          </div>
+        </div>
+
+        {/* tilted polaroid */}
+        <div className="absolute right-5 bottom-7" style={{ transform:'rotate(7deg)' }}>
+          <div className="bg-white p-2 pb-6 shadow-[0_8px_22px_rgba(26,23,20,.25)]" style={{ width:118 }}>
+            <div className="w-full h-[78px] grain" style={{ background:'#E6E2D6', backgroundColor:'#d9d4c6' }}></div>
+            <div className="absolute left-0 right-0 bottom-1 text-center font-hand font-bold text-doodle" style={{ fontSize:18 }}>the breakroom</div>
+          </div>
+        </div>
+
+        {/* highlighter label */}
+        <div className="absolute left-5 bottom-10" style={{ transform:'rotate(-3deg)' }}>
+          <span className="font-hand font-bold px-1.5" style={{ fontSize:24, color:'#1A1714', background:'#FFD84D', boxDecorationBreak:'clone', WebkitBoxDecorationBreak:'clone' }}>
+            she never paid it back
+          </span>
+        </div>
+
+        {/* arrow doodle */}
+        <svg className="absolute left-[60px] bottom-[150px]" width="60" height="46" viewBox="0 0 60 46">
+          <path d="M4 6 C 24 2, 40 14, 48 36" fill="none" stroke="#1A1714" strokeWidth="3" strokeLinecap="round"/>
+          <path d="M40 32 l9 6 l-2 -11" fill="none" stroke="#1A1714" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </div>
+
+      {/* scrubber */}
+      <div className="flex items-center gap-3 mt-4 px-1">
+        <button className="w-11 h-11 rounded-full bg-accent text-bg flex items-center justify-center shrink-0"><PlayI size={20}/></button>
+        <span className="font-mono text-[11px] text-muted">0:42</span>
+        <div className="flex-1 h-[3px] rounded-full bg-surface2">
+          <div className="h-full w-[31%] rounded-full bg-accent"></div>
+        </div>
+        <span className="font-mono text-[11px] text-muted">2:14</span>
+      </div>
+      <p className="font-hand text-muted text-center mt-3" style={{ fontSize:19 }}>hand-drawn explainer &middot; low-motion</p>
+    </div>
+  );
+}
+
+/* ----------------------------- READ ----------------------------- */
+const GALLERY = [
+  { n:'1', t:'The envelope went around the whole floor. Twenties, a few fifties, one optimistic hundred.' },
+  { n:'2', t:'By Friday it was gone from the drawer. Dana said she\u201dd \u201cmoved it somewhere safe.\u201d' },
+  { n:'3', t:'Somewhere safe turned out to be a weekend trip and a very new handbag.' },
+  { n:'4', t:'HR found the group chat. The receipts, as they say, were already screenshotted.' },
+];
+function Read(){
+  const [mode,setMode] = useState('Article');
+  return (
+    <div className="px-4 pt-3 pb-2">
+      <div className="flex gap-2 mb-4">
+        {['Article','Gallery'].map(m=>(
+          <button key={m} onClick={()=>setMode(m)}
+            className="px-3.5 py-1.5 rounded-full font-body font-semibold text-[13px] transition"
+            style={ mode===m ? {background:'#F5F3EF',color:'#0A0A0C'} : {background:'rgba(255,255,255,.07)',color:'#C9C6CE',border:'1px solid rgba(255,255,255,.085)'} }>
+            {m}
+          </button>
+        ))}
+      </div>
+
+      {mode==='Article' ? (
+        <article className="fade-in">
+          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
+          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize:30 }}>The $800 Envelope</h1>
+          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">
+            <span className="float-left font-display font-black text-accent mr-2 leading-[.8]" style={{ fontSize:58 }}>I</span>
+            t started, as these things do, with the most enthusiastic person in the office. Dana volunteered to collect for the retirement gift before anyone else could even reach for their wallet, and within a day the cash was rolling in from every desk on the floor.
+          </p>
+          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">
+            The envelope was, by all accounts, fat. People remembered handing over twenties. One person swears they put in a hundred. And then, sometime over a long weekend, the envelope simply&hellip; relocated.
+          </p>
+
+          {/* inline illustration */}
+          <figure className="my-5">
+            <div className="rounded-[12px] overflow-hidden" style={{ background:'#FBFAF4', height:150 }}>
+              <div className="w-full h-full relative grain">
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="font-hand font-bold" style={{ fontSize:40, color:'#E8462B', transform:'rotate(-3deg)' }}>poof.</span>
+                </div>
+              </div>
+            </div>
+            <figcaption className="font-mono text-[10px] text-muted mt-1.5">Illustration &middot; LoreWire Studio</figcaption>
+          </figure>
+
+          <p className="font-body text-[15px] leading-relaxed text-ink/90">
+            What follows is a slow-motion unraveling: a vague excuse, a suspiciously new handbag, and a group chat that had quietly been keeping receipts the entire time.
+          </p>
+
+          {/* pull quote */}
+          <blockquote className="my-6 text-center">
+            <p className="font-display font-bold uppercase tracking-tightest leading-[1.02] text-ink" style={{ fontSize:24 }}>
+              &ldquo;I moved it somewhere safe,&rdquo; she said. <span className="text-accent">It was not somewhere safe.</span>
+            </p>
+          </blockquote>
+
+          <p className="font-body text-[15px] leading-relaxed text-ink/90">
+            By Monday, forty-one people wanted answers and exactly one of them worked in HR. The math, helpfully, did itself.
+          </p>
+
+          {/* source card */}
+          <div className="mt-6 rounded-[10px] p-4" style={{ background:'#15141A', borderLeft:'3px solid #E8462B' }}>
+            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2">From the original thread</p>
+            <p className="font-body italic text-[14.5px] text-ink/90 leading-relaxed">
+              &ldquo;She told us it was &lsquo;handled.&rsquo; It was handled the way a magician handles a coin.&rdquo;
+            </p>
+            <div className="flex items-center gap-2 mt-3 font-mono text-[11px] text-muted flex-wrap">
+              <span className="text-ink/80">u/throwaway_desk42</span><span>&middot;</span>
+              <span>r/AmItheAsshole</span><span>&middot;</span><span>Mar 2024</span>
+              <span className="ml-auto text-accent font-medium">View source &rarr;</span>
+            </div>
+          </div>
+        </article>
+      ) : (
+        <div className="fade-in">
+          <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
+            {GALLERY.map((g,i)=>(
+              <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width:300, background:'#FBFAF4' }}>
+                <div className="h-[230px] relative grain flex items-center justify-center">
+                  <span className="font-display font-black leading-none" style={{ fontSize:150, color:'rgba(26,23,20,.13)' }}>{g.n}</span>
+                  <span className="absolute top-3 left-4 font-hand font-bold text-accent" style={{ fontSize:30 }}>{g.n}.</span>
+                </div>
+                <p className="font-body text-[14.5px] leading-snug text-doodle p-4">{g.t}</p>
+              </div>
+            ))}
+          </div>
+          <Dots count={GALLERY.length}/>
+        </div>
+      )}
+    </div>
+  );
+}
+function Dots({count}){
+  const [active,setActive] = useState(0);
+  useEffect(()=>{
+    const el = document.getElementById('gallery-scroll');
+    if(!el) return;
+    const onS = ()=> setActive(Math.round(el.scrollLeft/(312)));
+    el.addEventListener('scroll',onS,{passive:true});
+    return ()=> el.removeEventListener('scroll',onS);
+  },[]);
+  return (
+    <div className="flex justify-center gap-1.5 mt-4">
+      {Array.from({length:count}).map((_,i)=>(
+        <span key={i} className="h-1.5 rounded-full transition-all" style={{ width:i===active?18:6, background:i===active?'#E8462B':'rgba(255,255,255,.22)' }}></span>
+      ))}
+    </div>
+  );
+}
+
+/* ----------------------------- READ-ALONG ----------------------------- */
+const SCRIPT = ("Dana volunteered to collect the money before anyone else could blink. " +
+  "The envelope filled up fast, fat with twenties and one brave hundred. " +
+  "Then, over a single long weekend, it simply vanished from the drawer. " +
+  "She said she moved it somewhere safe. It was not, in any sense, safe.").split(' ');
+
+function ReadAlong(){
+  const [playing,setPlaying] = useState(false);
+  const [idx,setIdx] = useState(-1);
+  const tRef = useRef(null);
+  useEffect(()=>{
+    if(playing){
+      tRef.current = setInterval(()=>{
+        setIdx(i=>{
+          if(i>=SCRIPT.length-1){ clearInterval(tRef.current); setPlaying(false); return i; }
+          return i+1;
+        });
+      },300);
+    }
+    return ()=> clearInterval(tRef.current);
+  },[playing]);
+  const toggle = ()=>{
+    if(idx>=SCRIPT.length-1) setIdx(-1);
+    setPlaying(p=>!p);
+  };
+  const cur = Math.max(idx,0);
+  const total = SCRIPT.length;
+  const secsTotal = Math.round(total*0.3);
+  const secsNow = Math.round((cur+1)*0.3);
+  const fmt = s => `0:${String(Math.min(s,secsTotal)).padStart(2,'0')}`;
+  const progress = ((idx+1)/total)*100;
+
+  return (
+    <div className="px-4 pt-4 pb-2">
+      {/* player */}
+      <div className="flex items-center gap-3.5">
+        <button onClick={toggle} className="w-14 h-14 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 active:scale-95 transition">
+          {playing
+            ? <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+            : <PlayI size={24}/>}
+        </button>
+        {/* waveform */}
+        <div className="flex-1 flex items-center gap-[2px] h-12">
+          {Array.from({length:46}).map((_,i)=>{
+            const seed = (Math.sin(i*1.7)*0.5+0.5);
+            const hgt = 16 + seed*30 + (i%3)*6;
+            const played = (i/46)*100 <= progress;
+            return <span key={i} className="flex-1 rounded-full transition-colors" style={{ height:hgt, background: played?'#E8462B':'rgba(255,255,255,.14)' }}></span>;
+          })}
+        </div>
+      </div>
+      <div className="flex justify-between font-mono text-[11px] text-muted mt-2">
+        <span>{fmt(idx<0?0:secsNow)}</span><span>{fmt(secsTotal)}</span>
+      </div>
+
+      {/* script */}
+      <div className="mt-6 leading-[1.7]" style={{ fontFamily:"'Hanken Grotesk',sans-serif", fontSize:21 }}>
+        {SCRIPT.map((w,i)=>{
+          const spoken = i < idx;
+          const current = i === idx;
+          return (
+            <span key={i}
+              style={{
+                color: current ? '#fff' : spoken ? 'rgba(245,243,239,.95)' : 'rgba(142,138,151,.55)',
+                background: current ? '#E8462B' : 'transparent',
+                padding: current ? '1px 5px' : '1px 0',
+                borderRadius: 5,
+                fontWeight: current?700:500,
+                transition:'color .12s, background .12s'
+              }}>{w}{' '}</span>
+          );
+        })}
+      </div>
+      <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-6">Word-by-word &middot; tap play to follow along</p>
+    </div>
+  );
+}
+
+/* ----------------------------- TITLE SHEET ----------------------------- */
+function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }){
+  const [tab,setTab] = useState(initialTab || 'Watch');
+  useEffect(()=>{ setTab(initialTab||'Watch'); },[story.id, initialTab]);
+  const c = CAT[story.cat];
+  const more = STORIES.filter(s=> s.cat===story.cat && s.id!==story.id).slice(0,6);
+  if(more.length<3) more.push(...STORIES.filter(s=>s.id!==story.id && !more.includes(s)).slice(0,3));
+
+  return (
+    <div className="screen sheet-in z-40 noscroll" style={{ background:'#0A0A0C' }}>
+      {/* hero */}
+      <div className="relative h-[300px]">
+        <div className="absolute inset-0" style={{ background:c }}>
+          <div className="absolute inset-0" style={{ background:'radial-gradient(120% 95% at 72% 18%, rgba(255,255,255,.18), rgba(0,0,0,.5) 74%)' }}></div>
+          <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
+          <div className="absolute -right-4 top-0 font-display font-black leading-none select-none" style={{ fontSize:240, color:'rgba(255,255,255,.10)' }}>{story.glyph}</div>
+        </div>
+        <div className="absolute inset-x-0 bottom-0 h-1/2" style={{ background:'linear-gradient(0deg,#0A0A0C 5%, rgba(10,10,12,0) 100%)' }}></div>
+        <button onClick={onClose} className="absolute top-4 left-4 w-9 h-9 rounded-full flex items-center justify-center text-ink z-10" style={{ background:'rgba(0,0,0,.4)' }}>
+          <ChevDown size={22}/>
+        </button>
+        {/* circular play on hero */}
+        <button onClick={()=>setTab('Watch')} className="absolute left-1/2 top-[120px] -translate-x-1/2 w-16 h-16 rounded-full flex items-center justify-center text-bg active:scale-95 transition"
+          style={{ background:'#F5F3EF', boxShadow:'0 10px 30px rgba(0,0,0,.4)' }}>
+          <PlayI size={28}/>
+        </button>
+      </div>
+
+      <div className="px-4 -mt-6 relative pb-28">
+        <h1 className="font-display font-black uppercase tracking-tightest leading-[.92] text-ink ink-shadow" style={{ fontSize:34 }}>{story.title}</h1>
+
+        {/* meta row */}
+        <div className="flex items-center gap-2 mt-3 flex-wrap font-body text-[12.5px]">
+          <span className="font-semibold" style={{ color:'#5fcf86' }}>{story.match}% Match</span>
+          <span className="text-muted">{story.year}</span>
+          <span className="px-1.5 py-0.5 rounded border border-line text-ink/80 font-mono text-[10px]">{story.dur}</span>
+          <span className="px-1.5 py-0.5 rounded font-mono text-[10px] uppercase tracking-wider" style={{ background:'rgba(232,70,43,.16)', color:'#E8462B' }}>True</span>
+          <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ background:c, color:'#fff' }}>{story.cat}</span>
+        </div>
+
+        {/* big play */}
+        <button onClick={()=>setTab('Watch')} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition">
+          <PlayI/> Play
+        </button>
+
+        {/* actions */}
+        <div className="grid grid-cols-3 gap-2 mt-3 text-center">
+          <button onClick={()=>toggleList(story.id)} className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
+            {inList ? <span className="text-accent"><Ico d={<path d="m5 12 5 5L20 7"/>} size={22}/></span> : <PlusI size={22}/>}
+            <span className="font-body text-[11px]" style={{ color:inList?'#E8462B':undefined }}>{inList?'My List':'My List'}</span>
+          </button>
+          <button className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
+            <StarI size={22}/><span className="font-body text-[11px]">Rate</span>
+          </button>
+          <button className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
+            <ShareI size={22}/><span className="font-body text-[11px]">Share</span>
+          </button>
+        </div>
+
+        {/* synopsis */}
+        <p className="font-body text-[14.5px] leading-relaxed text-ink/85 mt-4">{story.syn}</p>
+
+        {/* tabs */}
+        <div className="flex gap-6 mt-6 border-b border-line">
+          {['Watch','Read','Read-along'].map(t=>(
+            <button key={t} onClick={()=>setTab(t)} className="relative pb-2.5 font-display font-bold uppercase tracking-tight text-[14px] transition"
+              style={{ color: tab===t ? '#F5F3EF' : '#8E8A97' }}>
+              {t}
+              {tab===t && <span className="absolute left-0 right-0 -bottom-px h-[2.5px] bg-accent rounded-full"></span>}
+            </button>
+          ))}
+        </div>
+
+        {/* tab content */}
+        <div className="-mx-4 mt-2">
+          {tab==='Watch' && <WatchDoodle/>}
+          {tab==='Read' && <Read/>}
+          {tab==='Read-along' && <ReadAlong/>}
+        </div>
+
+        {/* more like this */}
+        <section className="mt-8 -mx-4">
+          <RailHead>More Like This</RailHead>
+          <div className="flex gap-3 px-4 overflow-x-auto noscroll pb-1">
+            {more.map(s=> <PosterCard key={s.id} story={s} onOpen={onOpen} w={120} h={174}/> )}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- SEARCH ----------------------------- */
+function Search({ onOpen }){
+  const [q,setQ] = useState('');
+  const res = STORIES.filter(s=> (s.title+s.cat).toLowerCase().includes(q.toLowerCase()));
+  return (
+    <div className="pt-14 px-4 pb-28">
+      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-3">Search</h1>
+      <div className="flex items-center gap-2 rounded-[10px] px-3 py-2.5 mb-5" style={{ background:'#15141A', border:'1px solid rgba(255,255,255,.085)' }}>
+        <span className="text-muted"><SearchI size={18}/></span>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Stories, categories, vibes\u2026"
+          className="bg-transparent outline-none flex-1 font-body text-[14px] text-ink placeholder:text-muted"/>
+      </div>
+      {q==='' && (
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">Browse all &middot; {STORIES.length} stories</p>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        {res.map(s=>(
+          <div key={s.id} style={{ height:160 }}><PosterCard story={s} onOpen={onOpen} w={'100%'} h={160}/></div>
+        ))}
+      </div>
+      {res.length===0 && <p className="font-body text-muted text-center mt-10">No stories match &ldquo;{q}&rdquo;.</p>}
+    </div>
+  );
+}
+
+/* ----------------------------- NEW ----------------------------- */
+function NewScreen({ onOpen }){
+  const list = ['stranger','wifi','wrongmom','wrongnumber','rules','birthday'];
+  return (
+    <div className="pt-14 px-4 pb-28">
+      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-1">New &amp; Hot</h1>
+      <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-5">Fresh threads this week</p>
+      <div className="flex flex-col gap-3">
+        {list.map((id,i)=>{
+          const s = byId(id);
+          return (
+            <button key={id} onClick={()=>onOpen(id)} className="flex gap-3 items-stretch text-left active:scale-[.99] transition">
+              <div className="w-[110px] h-[68px] shrink-0"><PosterArt story={s} showTitle={false}/></div>
+              <div className="flex-1 min-w-0 py-0.5">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="font-mono text-[9px] uppercase tracking-[.16em] px-1.5 py-0.5 rounded" style={{ background:CAT[s.cat], color:'#fff' }}>{s.cat}</span>
+                  <span className="font-mono text-[10px] text-muted">{s.dur}</span>
+                </div>
+                <h3 className="font-display font-bold uppercase tracking-tightest text-ink text-[15px] leading-[.98] truncate">{s.title}</h3>
+                <p className="font-body text-[12.5px] text-muted leading-snug mt-1 line-clamp-2">{s.syn}</p>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- MY LIST ----------------------------- */
+function MyList({ onOpen, list }){
+  const items = list.map(byId);
+  return (
+    <div className="pt-14 px-4 pb-28">
+      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-5">My List</h1>
+      {items.length===0 ? (
+        <p className="font-body text-muted mt-10 text-center">Nothing saved yet. Tap <span className="text-ink">+ My List</span> on any story.</p>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          {items.map(s=> <div key={s.id} style={{height:180}}><PosterCard story={s} onOpen={onOpen} w={'100%'} h={180}/></div> )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------- TAB BAR ----------------------------- */
+function TabBar({ tab, setTab }){
+  const items = [ ['Home',HomeI],['Search',SearchI],['New',NewI],['My List',ListI] ];
+  return (
+    <div className="absolute bottom-0 left-0 right-0 z-50" style={{ background:'linear-gradient(0deg,#0A0A0C 70%, rgba(10,10,12,0))' }}>
+      <div className="flex justify-around items-center pt-2.5 pb-7 px-2">
+        {items.map(([label,Icon])=>{
+          const active = tab===label;
+          return (
+            <button key={label} onClick={()=>setTab(label)} className="flex flex-col items-center gap-1 flex-1 transition"
+              style={{ color: active?'#E8462B':'#8E8A97' }}>
+              <Icon size={23} fill={active && label==='My List' ? '#E8462B' : 'none'}/>
+              <span className="font-body text-[10px] font-semibold tracking-tight">{label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- APP ----------------------------- */
+function App(){
+  const [tab,setTab] = useState('Home');
+  const [pill,setPill] = useState('All');
+  const [active,setActive] = useState(null); // {id, tab}
+  const [list,setList] = useState(['stranger','wrongnumber']);
+  const screenRef = useRef(null);
+
+  const open = (id, t) => { setActive({ id, tab:t }); };
+  const close = () => setActive(null);
+  const shuffle = () => { const r = STORIES[Math.floor(Math.random()*STORIES.length)]; open(r.id,'Watch'); };
+  const toggleList = (id) => setList(l=> l.includes(id)? l.filter(x=>x!==id) : [...l,id]);
+
+  useEffect(()=>{ if(screenRef.current) screenRef.current.scrollTop=0; },[tab]);
+
+  return (
+    <div className="stage">
+      <div className="phone font-body">
+        <div className="notch"></div>
+        {/* status bar */}
+        <div className="absolute top-0 left-0 right-0 h-11 flex items-center justify-between px-7 z-50 pointer-events-none">
+          <span className="font-mono text-[12px] text-ink mt-1">9:41</span>
+          <span className="font-display font-black text-[13px] text-accent tracking-tight mt-1">LW</span>
+        </div>
+
+        <div ref={screenRef} className="screen noscroll">
+          {tab==='Home' && <Home onOpen={open} onShuffle={shuffle} pill={pill} setPill={setPill}/>}
+          {tab==='Search' && <Search onOpen={open}/>}
+          {tab==='New' && <NewScreen onOpen={open}/>}
+          {tab==='My List' && <MyList onOpen={open} list={list}/>}
+        </div>
+
+        {active && (
+          <TitleSheet story={byId(active.id)} initialTab={active.tab} onClose={close} onOpen={open}
+            inList={list.includes(active.id)} toggleList={toggleList}/>
+        )}
+
+        <TabBar tab={tab} setTab={(t)=>{ close(); setTab(t); }}/>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

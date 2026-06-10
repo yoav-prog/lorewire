@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0a0c;
+  --color-surface: #15141a;
+  --color-surface2: #211f29;
+  --color-line: rgba(255, 255, 255, 0.085);
+  --color-ink: #f5f3ef;
+  --color-muted: #8e8a97;
+  --color-accent: #e8462b;
+  --color-canvas: #fbfaf4;
+  --color-doodle: #1a1714;
+  --color-high: #ffd84d;
+  --color-cat-drama: #9b3a30;
+  --color-cat-entitled: #c06234;
+  --color-cat-humor: #c9a227;
+  --color-cat-wholesome: #2c7e78;
+  --color-cat-dating: #a8466a;
+  --color-cat-roommate: #5b3b8a;
+
+  --font-display: var(--font-archivo), "Arial Black", Arial, sans-serif;
+  --font-body: var(--font-hanken), system-ui, sans-serif;
+  --font-mono: var(--font-spline), ui-monospace, monospace;
+  --font-hand: var(--font-caveat), cursive;
+}
+
+html,
+body {
+  height: 100%;
+}
+body {
+  margin: 0;
+  /* page letterbox behind the mobile column */
+  background: radial-gradient(120% 90% at 50% -10%, #161318 0%, #050506 60%);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+* {
+  box-sizing: border-box;
+}
+button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+/* hide scrollbars */
+.noscroll {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.noscroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* the scrollable app surface inside the shell */
+.screen {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* effects ported from the design */
+@keyframes drift {
+  0% {
+    transform: scale(1.08) translate(0, 0);
+  }
+  100% {
+    transform: scale(1.16) translate(-14px, -10px);
+  }
+}
+.drift {
+  animation: drift 18s ease-in-out infinite alternate;
+}
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+.sheet-in {
+  animation: slideUp 0.42s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.fade-in {
+  animation: fadeIn 0.5s ease both;
+}
+@keyframes floaty {
+  0% {
+    transform: translateY(0) rotate(-1deg);
+  }
+  100% {
+    transform: translateY(-6px) rotate(-1deg);
+  }
+}
+.floaty {
+  animation: floaty 4.5s ease-in-out infinite alternate;
+}
+.poster-vig {
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.28) 38%, rgba(0, 0, 0, 0) 62%);
+}
+.grain {
+  background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0 2px, transparent 2px 7px);
+}
+.tracking-tightest {
+  letter-spacing: -0.03em;
+}
+.ink-shadow {
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6);
+}

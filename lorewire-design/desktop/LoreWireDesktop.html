@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LoreWire — Desktop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Caveat:wght@600;700&family=Hanken+Grotesk:wght@400;500;600;700;800&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: {
+      colors: {
+        bg:'#0A0A0C', surface:'#15141A', surface2:'#211F29',
+        line:'rgba(255,255,255,0.085)', ink:'#F5F3EF', muted:'#8E8A97', accent:'#E8462B',
+        canvas:'#FBFAF4', doodle:'#1A1714', high:'#FFD84D',
+        cat: { drama:'#9B3A30', entitled:'#C06234', humor:'#C9A227', wholesome:'#2C7E78', dating:'#A8466A', roommate:'#5B3B8A' }
+      },
+      fontFamily: {
+        display:['Archivo','sans-serif'], body:['Hanken Grotesk','sans-serif'],
+        mono:['Spline Sans Mono','monospace'], hand:['Caveat','cursive']
+      }
+    }}
+  };
+</script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  :root{ --accent:#E8462B; }
+  html,body{ margin:0; background:#0A0A0C; }
+  body{ font-family:'Hanken Grotesk',sans-serif; -webkit-font-smoothing:antialiased; color:#F5F3EF; }
+  *{ box-sizing:border-box; }
+  button{ -webkit-appearance:none; appearance:none; cursor:pointer; }
+  ::-webkit-scrollbar{ width:10px; height:0; }
+  ::-webkit-scrollbar-thumb{ background:#2a2830; border-radius:8px; }
+  ::-webkit-scrollbar-track{ background:transparent; }
+  .noscroll{ -ms-overflow-style:none; scrollbar-width:none; }
+  .noscroll::-webkit-scrollbar{ display:none; }
+  @keyframes drift{ 0%{ transform:scale(1.06) translate(0,0);} 100%{ transform:scale(1.13) translate(-22px,-12px);} }
+  .drift{ animation:drift 22s ease-in-out infinite alternate; }
+  @keyframes fadeIn{ from{opacity:0} to{opacity:1} }
+  .fade-in{ animation:fadeIn .45s ease both; }
+  @keyframes modalIn{ from{ opacity:0; transform:translateY(26px) scale(.985);} to{ opacity:1; transform:translateY(0) scale(1);} }
+  .modal-in{ animation:modalIn .4s cubic-bezier(.16,1,.3,1) both; }
+  @keyframes scrimIn{ from{opacity:0} to{opacity:1} }
+  .scrim-in{ animation:scrimIn .3s ease both; }
+  .grain{ background-image:repeating-linear-gradient(135deg, rgba(255,255,255,.05) 0 2px, transparent 2px 7px); }
+  .tracking-tightest{ letter-spacing:-0.03em; }
+  .ink-shadow{ text-shadow:0 2px 22px rgba(0,0,0,.6); }
+  .poster-vig{ background:linear-gradient(0deg, rgba(0,0,0,.84) 0%, rgba(0,0,0,.25) 40%, rgba(0,0,0,0) 64%); }
+  @keyframes floaty{ 0%{transform:translateY(0) rotate(-1deg)} 100%{transform:translateY(-7px) rotate(-1deg)} }
+  .floaty{ animation:floaty 4.5s ease-in-out infinite alternate; }
+  .rail-fade-l{ background:linear-gradient(90deg,#0A0A0C, rgba(10,10,12,0)); }
+  .rail-fade-r{ background:linear-gradient(270deg,#0A0A0C, rgba(10,10,12,0)); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+/* ----------------------------- DATA ----------------------------- */
+const CAT = {
+  Drama:'#9B3A30', Entitled:'#C06234', Humor:'#C9A227',
+  Wholesome:'#2C7E78', Dating:'#A8466A', Roommate:'#5B3B8A'
+};
+const STORIES = [
+  { id:'envelope', title:'THE $800 ENVELOPE', cat:'Entitled', dur:'2:14', match:97, year:2024, glyph:'$', tags:['True Story','Workplace','Karma'],
+    syn:'A coworker collects cash for the boss\u2019s retirement gift, then the envelope quietly disappears \u2014 and so does her story.' },
+  { id:'replyall', title:'SHE REPLIED ALL', cat:'Humor', dur:'1:48', match:94, year:2025, glyph:'!', tags:['True Story','Office','Cringe'],
+    syn:'One typo, four thousand recipients, and a thread that refused to die before lunch.' },
+  { id:'fence', title:'THE NEIGHBOR\u2019S FENCE', cat:'Drama', dur:'2:51', match:91, year:2024, glyph:'/', tags:['True Story','Neighbors','Property'],
+    syn:'He built it eight inches over the line. She had the survey. Then the lawn furniture started moving.' },
+  { id:'wrongnumber', title:'WRONG NUMBER, RIGHT GUY', cat:'Dating', dur:'2:30', match:96, year:2025, glyph:'?', tags:['True Story','Heartwarming','Texting'],
+    syn:'A misdialed \u201cyou up?\u201d turns into eleven months of the best conversations of her life.' },
+  { id:'groupghost', title:'THE GROUP PROJECT GHOST', cat:'Humor', dur:'1:39', match:89, year:2024, glyph:'0', tags:['True Story','College','Petty'],
+    syn:'Five names on the slide deck. One person who actually opened it. Finals week receipts inside.' },
+  { id:'fridge', title:'DECONSTRUCTING THE FRIDGE', cat:'Roommate', dur:'2:05', match:88, year:2025, glyph:'#', tags:['True Story','Roommates','Notes'],
+    syn:'A war fought entirely in sticky notes, escalating from \u201cwhose milk?\u201d to a 14-point house manifesto.' },
+  { id:'seat', title:'GIVE ME YOUR SEAT', cat:'Entitled', dur:'1:55', match:90, year:2024, glyph:'\u2191', tags:['True Story','Travel','Entitled'],
+    syn:'\u201cMy kids need to sit together.\u201d The window seat she paid extra for had other plans.' },
+  { id:'parking', title:'THE PARKING SPOT WAR', cat:'Entitled', dur:'2:22', match:86, year:2024, glyph:'P', tags:['True Story','Neighbors','Cones'],
+    syn:'He saved a public spot with a lawn chair for nine years. The new tenant had a tow truck on speed dial.' },
+  { id:'birthday', title:'IT\u2019S MY BIRTHDAY MONTH', cat:'Entitled', dur:'1:44', match:84, year:2025, glyph:'*', tags:['True Story','Friends','Audacity'],
+    syn:'Thirty-one days of mandatory celebration, one shared bill, and a friend group quietly doing math.' },
+  { id:'landlord', title:'THE LANDLORD\u2019S NEW RULE', cat:'Entitled', dur:'2:38', match:82, year:2024, glyph:'L', tags:['True Story','Tenants','Receipts'],
+    syn:'A surprise clause about \u201cguest air\u201d appears in the lease. The tenants brought a lawyer and a printer.' },
+  { id:'stranger', title:'THE STRANGER WHO PAID', cat:'Wholesome', dur:'1:52', match:95, year:2025, glyph:'+', tags:['True Story','Kindness','Anonymous'],
+    syn:'A declined card at the register, a tap on the shoulder, and a note she still keeps in her wallet.' },
+  { id:'wifi', title:'I NAMED MY WIFI', cat:'Humor', dur:'1:30', match:88, year:2025, glyph:'~', tags:['True Story','Petty','Neighbors'],
+    syn:'A passive-aggressive network name starts a slow-burn rivalry visible to the entire apartment block.' },
+  { id:'wrongmom', title:'THE TEXT SENT TO THE WRONG MOM', cat:'Drama', dur:'2:47', match:93, year:2025, glyph:'@', tags:['True Story','Family','Mixup'],
+    syn:'One contact saved wrong, a secret out early, and a Sunday dinner nobody will ever forget.' },
+  { id:'wedding', title:'THE WEDDING CRASHER', cat:'Drama', dur:'3:01', match:92, year:2024, glyph:'\u25C6', tags:['True Story','Family','Wedding'],
+    syn:'An uninvited aunt, a seating chart with no mercy, and a toast that went badly off-script.' },
+  { id:'rules', title:'MY ROOMMATE\u2019S 3AM RULES', cat:'Roommate', dur:'2:09', match:85, year:2025, glyph:'3', tags:['True Story','Roommates','Quiet'],
+    syn:'A laminated quiet-hours schedule, a contraband kettle, and the night the rules finally broke.' },
+  { id:'bill', title:'HE SPLIT THE BILL BY ITEMS', cat:'Dating', dur:'1:58', match:79, year:2024, glyph:'=', tags:['True Story','Dating','Cringe'],
+    syn:'A calculator at the table, a charge for \u201chalf the appetizer she touched,\u201d and a second date that never came.' },
+];
+const byId = id => STORIES.find(s => s.id === id);
+const CONTINUE = [ {id:'wedding',p:67},{id:'rules',p:30},{id:'bill',p:88},{id:'fence',p:52} ];
+const TOP10 = ['envelope','replyall','fence','wrongnumber','groupghost','fridge','wifi','seat','wrongmom','stranger'];
+const ENTITLED_ROW = ['seat','parking','birthday','landlord','envelope','bill'];
+const NEW_ROW = ['stranger','wifi','wrongmom','wrongnumber','replyall','groupghost'];
+const NAV = ['Home','Browse','New & Hot','My List'];
+
+/* ----------------------------- ICONS ----------------------------- */
+const Ico = ({d, fill, size=24, stroke=1.7}) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill||'none'} stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">{d}</svg>
+);
+const SearchI = (p)=><Ico {...p} d={<><circle cx="11" cy="11" r="6.2"/><path d="m20 20-3.6-3.6"/></>}/>;
+const PlayI = ({size=22})=><svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>;
+const PlusI = (p)=><Ico {...p} d={<path d="M12 5v14M5 12h14"/>}/>;
+const CheckI = (p)=><Ico {...p} d={<path d="m5 12 5 5L20 7"/>}/>;
+const StarI = (p)=><Ico {...p} d={<path d="M12 4.5l2.2 4.6 5 .6-3.7 3.4 1 4.9L12 16.1 7.5 18.5l1-4.9L4.8 10.2l5-.6z"/>}/>;
+const ShareI = (p)=><Ico {...p} d={<><circle cx="6" cy="12" r="2.3"/><circle cx="17" cy="6" r="2.3"/><circle cx="17" cy="18" r="2.3"/><path d="M8 11l7-4M8 13l7 4"/></>}/>;
+const ChevR = (p)=><Ico {...p} d={<path d="m9 6 6 6-6 6"/>}/>;
+const ChevL = (p)=><Ico {...p} d={<path d="m15 6-6 6 6 6"/>}/>;
+const XI = (p)=><Ico {...p} d={<path d="M6 6l12 12M18 6 6 18"/>}/>;
+const ShuffleI = (p)=><Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5"/><path d="m18 5 2 2-2 2M18 15l2 2-2 2"/></>}/>;
+const InfoI = (p)=><Ico {...p} d={<><circle cx="12" cy="12" r="8.4"/><path d="M12 11v5M12 8h.01"/></>}/>;
+
+/* ----------------------------- POSTER ART ----------------------------- */
+function PosterArt({ story, rounded=8, showTitle=true, kicker=true }){
+  const c = CAT[story.cat];
+  return (
+    <div className="relative w-full h-full overflow-hidden" style={{ borderRadius:rounded, background:c }}>
+      <div className="absolute inset-0" style={{ background:`radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)` }}></div>
+      <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
+      <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize:200, color:'rgba(255,255,255,.10)' }}>{story.glyph}</div>
+      <div className="absolute inset-0 poster-vig"></div>
+      {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color:'#fff', background:'rgba(0,0,0,.34)' }}>{story.cat}</span></div>}
+      <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background:'rgba(0,0,0,.5)', color:'#F5F3EF' }}>{story.dur}</div>
+      {showTitle && (
+        <div className="absolute left-3.5 right-3.5 bottom-5">
+          <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length>16?19:23, color:'#F5F3EF' }}>{story.title}</h3>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------- TOP NAV ----------------------------- */
+function TopNav({ view, setView, solid, onSearch, query, setQuery }){
+  const [searchOpen,setSearchOpen] = useState(false);
+  return (
+    <header className="fixed top-0 left-0 right-0 z-50 transition-colors duration-300"
+      style={{ background: solid ? '#0A0A0C' : 'linear-gradient(180deg, rgba(10,10,12,.92), rgba(10,10,12,0))',
+               borderBottom: solid ? '1px solid rgba(255,255,255,.07)' : '1px solid transparent' }}>
+      <div className="mx-auto max-w-[1600px] flex items-center gap-9 px-10 h-[68px]">
+        <button onClick={()=>setView('Home')} className="flex items-center gap-1.5 shrink-0">
+          <span className="font-display font-black text-[26px] tracking-tightest text-ink">LORE</span>
+          <span className="font-display font-black text-[26px] tracking-tightest text-accent">WIRE</span>
+        </button>
+        <nav className="flex items-center gap-7">
+          {NAV.map(n=>(
+            <button key={n} onClick={()=>setView(n)} className="font-body text-[14px] transition-colors"
+              style={{ color: view===n ? '#F5F3EF' : '#8E8A97', fontWeight: view===n?700:500 }}>{n}</button>
+          ))}
+        </nav>
+        <div className="ml-auto flex items-center gap-5">
+          <div className="flex items-center rounded-full transition-all overflow-hidden"
+            style={{ background: searchOpen||query ? '#15141A':'transparent', border: searchOpen||query?'1px solid rgba(255,255,255,.12)':'1px solid transparent', width: searchOpen||query?248:38 }}>
+            <button onClick={()=>{ setSearchOpen(o=>!o); setView('Search'); }} className="w-[38px] h-[38px] flex items-center justify-center text-ink shrink-0"><SearchI size={19}/></button>
+            <input value={query} onChange={e=>{ setQuery(e.target.value); setView('Search'); }} placeholder="Stories, categories\u2026"
+              className="bg-transparent outline-none font-body text-[13.5px] text-ink placeholder:text-muted pr-3 w-full"
+              style={{ display: searchOpen||query?'block':'none' }}/>
+          </div>
+          <div className="w-9 h-9 rounded-md flex items-center justify-center font-display font-bold text-[14px] text-bg" style={{ background:'#E8462B' }}>L</div>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+/* ----------------------------- HERO ----------------------------- */
+function Hero({ story, onOpen, onShuffle }){
+  const c = CAT[story.cat];
+  return (
+    <section className="relative h-[82vh] min-h-[620px] w-full overflow-hidden">
+      <div className="absolute inset-0 drift" style={{ background:c }}>
+        <div className="absolute inset-0" style={{ background:'radial-gradient(90% 110% at 78% 26%, rgba(255,255,255,.20), rgba(0,0,0,.42) 72%)' }}></div>
+        <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>
+        <div className="absolute right-[2%] top-[2%] font-display font-black leading-none select-none" style={{ fontSize:560, color:'rgba(255,255,255,.085)' }}>{story.glyph}</div>
+      </div>
+      <div className="absolute inset-0" style={{ background:'linear-gradient(90deg,#0A0A0C 8%, rgba(10,10,12,.45) 42%, rgba(10,10,12,0) 72%)' }}></div>
+      <div className="absolute inset-x-0 bottom-0 h-44" style={{ background:'linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)' }}></div>
+
+      <div className="relative h-full max-w-[1600px] mx-auto px-10 flex items-end pb-24">
+        <div className="max-w-[620px]">
+          <div className="flex items-center gap-2.5 mb-4">
+            <span className="w-[3px] h-4 bg-accent rounded-full"></span>
+            <span className="font-mono text-[11px] uppercase tracking-[.36em] text-ink/90">LoreWire Original</span>
+          </div>
+          <h1 className="font-display font-black uppercase tracking-tightest leading-[.88] text-ink ink-shadow" style={{ fontSize:84 }}>{story.title}</h1>
+          <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
+            <span className="font-semibold text-[15px]" style={{ color:'#5fcf86' }}>{story.match}% Match</span>
+            <span className="text-muted">·</span><span className="text-ink/80 text-[15px]">{story.year}</span>
+            <span className="text-muted">·</span>
+            <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
+            {story.tags.slice(0,2).map(t=> <span key={t} className="font-body text-[14px] text-ink/80">· {t}</span>)}
+          </div>
+          <p className="font-body text-[17px] leading-relaxed text-ink/85 mt-5 max-w-[540px]">{story.syn}</p>
+          <div className="flex items-center gap-3 mt-7">
+            <button onClick={()=>onOpen(story.id,'Watch')} className="flex items-center gap-2.5 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]">
+              <PlayI size={24}/> Play
+            </button>
+            <button onClick={()=>onOpen(story.id)} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background:'rgba(255,255,255,.14)' }}>
+              <InfoI size={20}/> More Info
+            </button>
+            <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]">
+              <ShuffleI size={17}/> Play Something
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ----------------------------- RAIL ----------------------------- */
+function Rail({ title, children, height }){
+  const ref = useRef(null);
+  const [hover,setHover] = useState(false);
+  const scroll = dir => ref.current && ref.current.scrollBy({ left: dir*720, behavior:'smooth' });
+  return (
+    <section className="mt-11 group" onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}>
+      <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 max-w-[1600px] mx-auto mb-3.5">{title}</h2>
+      <div className="relative">
+        <button onClick={()=>scroll(-1)} className="absolute left-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity"
+          style={{ opacity:hover?1:0 }}><span className="rail-fade-l absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevL size={22}/></span></button>
+        <div ref={ref} className="flex gap-3.5 overflow-x-auto noscroll px-10 max-w-[1600px] mx-auto scroll-px-10" style={{ scrollPaddingLeft:40 }}>
+          {children}
+        </div>
+        <button onClick={()=>scroll(1)} className="absolute right-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity"
+          style={{ opacity:hover?1:0 }}><span className="rail-fade-r absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevR size={22}/></span></button>
+      </div>
+    </section>
+  );
+}
+
+function PosterCard({ story, onOpen, w=196, h=284, progress, landscape }){
+  return (
+    <button onClick={()=>onOpen(story.id)} className="relative shrink-0 transition-transform duration-200 hover:scale-[1.05] hover:z-10" style={{ width:w }}>
+      <div style={{ height:h, boxShadow:'0 8px 26px rgba(0,0,0,.4)', borderRadius:8 }}>
+        <PosterArt story={story} showTitle={!landscape}/>
+        {landscape && (
+          <div className="absolute left-3.5 right-3.5 bottom-5">
+            <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow text-ink" style={{ fontSize:18 }}>{story.title}</h3>
+          </div>
+        )}
+      </div>
+      {progress!=null && (
+        <div className="absolute left-2 right-2 bottom-2 h-[3px] rounded-full" style={{ background:'rgba(255,255,255,.26)' }}>
+          <div className="h-full rounded-full bg-accent" style={{ width:`${progress}%` }}></div>
+        </div>
+      )}
+    </button>
+  );
+}
+
+function Top10Row({ onOpen }){
+  return TOP10.slice(0,10).map((id,i)=>(
+    <button key={id} onClick={()=>onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ width:264 }}>
+      <span className="font-display font-black leading-[.7] select-none -mr-2" style={{ fontSize:200, color:'transparent', WebkitTextStroke:'2.5px rgba(255,255,255,.34)' }}>{i+1}</span>
+      <div className="-ml-3" style={{ width:164, height:236, boxShadow:'0 8px 26px rgba(0,0,0,.4)', borderRadius:8 }}><PosterArt story={byId(id)}/></div>
+    </button>
+  ));
+}
+
+/* ----------------------------- WATCH (doodle) ----------------------------- */
+function WatchDoodle(){
+  return (
+    <div>
+      <div className="relative rounded-[14px] overflow-hidden w-full" style={{ background:'#FBFAF4', height:440 }}>
+        <div className="absolute inset-0" style={{ background:'repeating-linear-gradient(0deg, rgba(26,23,20,.035) 0 1px, transparent 1px 28px)' }}></div>
+        <div className="absolute top-5 left-0 right-0 text-center font-hand font-bold text-doodle" style={{ fontSize:32 }}>so about that office gift fund&hellip;</div>
+
+        <div className="absolute left-1/2 top-[130px] -translate-x-1/2 floaty">
+          <svg width="230" height="154" viewBox="0 0 230 154">
+            <rect x="5" y="5" width="220" height="144" rx="7" fill="#fff" stroke="#1A1714" strokeWidth="5"/>
+            <polyline points="8,10 115,78 222,10" fill="none" stroke="#1A1714" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <div className="absolute inset-0 flex items-center justify-center pt-6"><span className="font-hand font-bold" style={{ fontSize:66, color:'#E8462B', transform:'rotate(-4deg)' }}>$800</span></div>
+        </div>
+
+        <div className="absolute right-10 bottom-10" style={{ transform:'rotate(7deg)' }}>
+          <div className="bg-white p-2.5 pb-7 shadow-[0_10px_26px_rgba(26,23,20,.25)]" style={{ width:148 }}>
+            <div className="w-full grain" style={{ height:100, background:'#d9d4c6' }}></div>
+            <div className="absolute left-0 right-0 bottom-1.5 text-center font-hand font-bold text-doodle" style={{ fontSize:22 }}>the breakroom</div>
+          </div>
+        </div>
+
+        <div className="absolute left-12 bottom-14" style={{ transform:'rotate(-3deg)' }}>
+          <span className="font-hand font-bold px-1.5" style={{ fontSize:30, color:'#1A1714', background:'#FFD84D', WebkitBoxDecorationBreak:'clone', boxDecorationBreak:'clone' }}>she never paid it back</span>
+        </div>
+        <svg className="absolute left-[120px] bottom-[185px]" width="72" height="56" viewBox="0 0 72 56">
+          <path d="M5 8 C 30 3, 50 18, 58 44" fill="none" stroke="#1A1714" strokeWidth="3.5" strokeLinecap="round"/>
+          <path d="M48 40 l11 7 l-3 -13" fill="none" stroke="#1A1714" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </div>
+
+      <div className="flex items-center gap-4 mt-5">
+        <button className="w-12 h-12 rounded-full bg-accent text-bg flex items-center justify-center shrink-0"><PlayI size={22}/></button>
+        <span className="font-mono text-[12px] text-muted">0:42</span>
+        <div className="flex-1 h-[4px] rounded-full bg-surface2"><div className="h-full w-[31%] rounded-full bg-accent"></div></div>
+        <span className="font-mono text-[12px] text-muted">2:14</span>
+      </div>
+      <p className="font-hand text-muted mt-3" style={{ fontSize:22 }}>hand-drawn explainer &middot; low-motion</p>
+    </div>
+  );
+}
+
+/* ----------------------------- READ ----------------------------- */
+const GALLERY = [
+  { n:'1', t:'The envelope went around the whole floor. Twenties, a few fifties, one optimistic hundred.' },
+  { n:'2', t:'By Friday it was gone from the drawer. Dana said she\u2019d \u201cmoved it somewhere safe.\u201d' },
+  { n:'3', t:'Somewhere safe turned out to be a weekend trip and a very new handbag.' },
+  { n:'4', t:'HR found the group chat. The receipts, as they say, were already screenshotted.' },
+];
+function Read(){
+  const [mode,setMode] = useState('Article');
+  return (
+    <div>
+      <div className="flex gap-2 mb-6">
+        {['Article','Gallery'].map(m=>(
+          <button key={m} onClick={()=>setMode(m)} className="px-4 py-1.5 rounded-full font-body font-semibold text-[13.5px] transition"
+            style={ mode===m ? {background:'#F5F3EF',color:'#0A0A0C'} : {background:'rgba(255,255,255,.07)',color:'#C9C6CE',border:'1px solid rgba(255,255,255,.085)'} }>{m}</button>
+        ))}
+      </div>
+      {mode==='Article' ? (
+        <article className="fade-in max-w-[660px]">
+          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
+          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize:40 }}>The $800 Envelope</h1>
+          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">
+            <span className="float-left font-display font-black text-accent mr-2.5 leading-[.78]" style={{ fontSize:72 }}>I</span>
+            t started, as these things do, with the most enthusiastic person in the office. Dana volunteered to collect for the retirement gift before anyone else could even reach for their wallet, and within a day the cash was rolling in from every desk on the floor.
+          </p>
+          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">The envelope was, by all accounts, fat. People remembered handing over twenties. One person swears they put in a hundred. And then, sometime over a long weekend, the envelope simply&hellip; relocated.</p>
+          <figure className="my-7">
+            <div className="rounded-[12px] overflow-hidden grain relative" style={{ background:'#FBFAF4', height:200 }}>
+              <div className="absolute inset-0 flex items-center justify-center"><span className="font-hand font-bold" style={{ fontSize:54, color:'#E8462B', transform:'rotate(-3deg)' }}>poof.</span></div>
+            </div>
+            <figcaption className="font-mono text-[10px] text-muted mt-2">Illustration &middot; LoreWire Studio</figcaption>
+          </figure>
+          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90">What follows is a slow-motion unraveling: a vague excuse, a suspiciously new handbag, and a group chat that had quietly been keeping receipts the entire time.</p>
+          <blockquote className="my-8 border-l-[3px] border-accent pl-5">
+            <p className="font-display font-bold uppercase tracking-tightest leading-[1.04] text-ink" style={{ fontSize:28 }}>&ldquo;I moved it somewhere safe,&rdquo; she said. <span className="text-accent">It was not somewhere safe.</span></p>
+          </blockquote>
+          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90">By Monday, forty-one people wanted answers and exactly one of them worked in HR. The math, helpfully, did itself.</p>
+          <div className="mt-8 rounded-[10px] p-5" style={{ background:'#211F29', borderLeft:'3px solid #E8462B' }}>
+            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
+            <p className="font-body italic text-[15.5px] text-ink/90 leading-relaxed">&ldquo;She told us it was &lsquo;handled.&rsquo; It was handled the way a magician handles a coin.&rdquo;</p>
+            <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
+              <span className="text-ink/80">u/throwaway_desk42</span><span>&middot;</span><span>r/AmItheAsshole</span><span>&middot;</span><span>Mar 2024</span>
+              <span className="ml-auto text-accent font-medium">View source &rarr;</span>
+            </div>
+          </div>
+        </article>
+      ) : (
+        <div className="fade-in grid grid-cols-2 gap-5">
+          {GALLERY.map((g,i)=>(
+            <div key={i} className="rounded-[14px] overflow-hidden flex" style={{ background:'#FBFAF4' }}>
+              <div className="w-[140px] shrink-0 relative grain flex items-center justify-center" style={{ background:'#FBFAF4' }}>
+                <span className="font-display font-black leading-none" style={{ fontSize:120, color:'rgba(26,23,20,.13)' }}>{g.n}</span>
+                <span className="absolute top-3 left-4 font-hand font-bold text-accent" style={{ fontSize:30 }}>{g.n}.</span>
+              </div>
+              <p className="font-body text-[15px] leading-snug text-doodle p-5 self-center">{g.t}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------- READ-ALONG ----------------------------- */
+const SCRIPT = ("Dana volunteered to collect the money before anyone else could blink. The envelope filled up fast, fat with twenties and one brave hundred. Then, over a single long weekend, it simply vanished from the drawer. She said she moved it somewhere safe. It was not, in any sense, safe.").split(' ');
+function ReadAlong(){
+  const [playing,setPlaying] = useState(false);
+  const [idx,setIdx] = useState(-1);
+  const tRef = useRef(null);
+  useEffect(()=>{
+    if(playing){ tRef.current = setInterval(()=> setIdx(i=>{ if(i>=SCRIPT.length-1){ clearInterval(tRef.current); setPlaying(false); return i; } return i+1; }), 300); }
+    return ()=> clearInterval(tRef.current);
+  },[playing]);
+  const toggle = ()=>{ if(idx>=SCRIPT.length-1) setIdx(-1); setPlaying(p=>!p); };
+  const cur = Math.max(idx,0), total=SCRIPT.length, secsTotal=Math.round(total*0.3), secsNow=Math.round((cur+1)*0.3);
+  const fmt = s=> `0:${String(Math.min(s,secsTotal)).padStart(2,'0')}`;
+  const progress = ((idx+1)/total)*100;
+  return (
+    <div className="max-w-[760px]">
+      <div className="flex items-center gap-4">
+        <button onClick={toggle} className="w-16 h-16 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition">
+          {playing ? <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg> : <PlayI size={26}/>}
+        </button>
+        <div className="flex-1 flex items-center gap-[3px] h-14">
+          {Array.from({length:64}).map((_,i)=>{ const seed=(Math.sin(i*1.7)*0.5+0.5); const hgt=18+seed*34+(i%3)*7; const played=(i/64)*100<=progress;
+            return <span key={i} className="flex-1 rounded-full transition-colors" style={{ height:hgt, background: played?'#E8462B':'rgba(255,255,255,.14)' }}></span>; })}
+        </div>
+        <div className="flex flex-col items-end font-mono text-[12px] text-muted shrink-0 w-14">
+          <span className="text-ink">{fmt(idx<0?0:secsNow)}</span><span>{fmt(secsTotal)}</span>
+        </div>
+      </div>
+      <div className="mt-8 leading-[1.75]" style={{ fontFamily:"'Hanken Grotesk',sans-serif", fontSize:27 }}>
+        {SCRIPT.map((w,i)=>{ const spoken=i<idx, current=i===idx;
+          return <span key={i} style={{ color: current?'#fff':spoken?'rgba(245,243,239,.95)':'rgba(142,138,151,.5)', background: current?'#E8462B':'transparent', padding: current?'2px 7px':'2px 0', borderRadius:6, fontWeight: current?700:500, transition:'color .12s, background .12s' }}>{w}{' '}</span>; })}
+      </div>
+      <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-8">Word-by-word &middot; press play to follow along</p>
+    </div>
+  );
+}
+
+/* ----------------------------- DETAIL MODAL ----------------------------- */
+function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }){
+  const [tab,setTab] = useState(initialTab||'Watch');
+  useEffect(()=>{ setTab(initialTab||'Watch'); },[story.id, initialTab]);
+  useEffect(()=>{ const onKey=e=>{ if(e.key==='Escape') onClose(); }; window.addEventListener('keydown',onKey); return ()=>window.removeEventListener('keydown',onKey); },[onClose]);
+  const c = CAT[story.cat];
+  let more = STORIES.filter(s=> s.cat===story.cat && s.id!==story.id);
+  if(more.length<6) more = more.concat(STORIES.filter(s=>s.id!==story.id && !more.includes(s)));
+  more = more.slice(0,6);
+  return (
+    <div className="fixed inset-0 z-[60] overflow-y-auto scrim-in" style={{ background:'rgba(0,0,0,.82)' }} onClick={onClose}>
+      <div className="min-h-full flex items-start justify-center py-10 px-4">
+        <div className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden" style={{ background:'#15141A', boxShadow:'0 40px 120px rgba(0,0,0,.7)' }} onClick={e=>e.stopPropagation()}>
+          {/* hero banner */}
+          <div className="relative h-[400px]">
+            <div className="absolute inset-0" style={{ background:c }}>
+              <div className="absolute inset-0" style={{ background:'radial-gradient(90% 120% at 72% 22%, rgba(255,255,255,.20), rgba(0,0,0,.5) 74%)' }}></div>
+              <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>
+              <div className="absolute -right-6 top-0 font-display font-black leading-none select-none" style={{ fontSize:380, color:'rgba(255,255,255,.10)' }}>{story.glyph}</div>
+            </div>
+            <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background:'linear-gradient(0deg,#15141A 4%, rgba(21,20,26,0) 100%)' }}></div>
+            <button onClick={onClose} className="absolute top-5 right-5 w-10 h-10 rounded-full flex items-center justify-center text-ink z-10" style={{ background:'rgba(0,0,0,.5)' }}><XI size={22}/></button>
+            <button onClick={()=>setTab('Watch')} className="absolute left-10 top-[150px] w-[72px] h-[72px] rounded-full flex items-center justify-center text-bg hover:scale-105 transition" style={{ background:'#F5F3EF', boxShadow:'0 12px 32px rgba(0,0,0,.45)' }}><PlayI size={32}/></button>
+            <div className="absolute left-10 right-10 bottom-7">
+              <h1 className="font-display font-black uppercase tracking-tightest leading-[.9] text-ink ink-shadow" style={{ fontSize:54 }}>{story.title}</h1>
+            </div>
+          </div>
+
+          <div className="px-10 pb-12">
+            {/* meta + actions */}
+            <div className="flex items-start gap-8 pt-6">
+              <div className="flex-1">
+                <div className="flex items-center gap-2.5 flex-wrap font-body text-[14px] mb-4">
+                  <span className="font-semibold" style={{ color:'#5fcf86' }}>{story.match}% Match</span>
+                  <span className="text-muted">{story.year}</span>
+                  <span className="px-2 py-0.5 rounded border border-line text-ink/80 font-mono text-[11px]">{story.dur}</span>
+                  <span className="px-2 py-0.5 rounded font-mono text-[10px] uppercase tracking-wider" style={{ background:'rgba(232,70,43,.16)', color:'#E8462B' }}>True</span>
+                  <span className="px-2.5 py-0.5 rounded-full text-[12px] font-semibold" style={{ background:c, color:'#fff' }}>{story.cat}</span>
+                </div>
+                <p className="font-body text-[15.5px] leading-relaxed text-ink/85 max-w-[520px]">{story.syn}</p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0 pt-1">
+                <button onClick={()=>setTab('Watch')} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20}/> Play</button>
+                <button onClick={()=>toggleList(story.id)} title="My List" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color:inList?'#E8462B':'#F5F3EF' }}>{inList?<CheckI size={20}/>:<PlusI size={20}/>}</button>
+                <button title="Rate" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><StarI size={19}/></button>
+                <button title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19}/></button>
+              </div>
+            </div>
+
+            {/* tabs */}
+            <div className="flex gap-8 mt-8 border-b border-line">
+              {['Watch','Read','Read-along'].map(t=>(
+                <button key={t} onClick={()=>setTab(t)} className="relative pb-3 font-display font-bold uppercase tracking-tight text-[15px] transition" style={{ color: tab===t?'#F5F3EF':'#8E8A97' }}>
+                  {t}{tab===t && <span className="absolute left-0 right-0 -bottom-px h-[3px] bg-accent rounded-full"></span>}
+                </button>
+              ))}
+            </div>
+
+            <div className="pt-7">
+              {tab==='Watch' && <WatchDoodle/>}
+              {tab==='Read' && <Read/>}
+              {tab==='Read-along' && <ReadAlong/>}
+            </div>
+
+            {/* more like this */}
+            <section className="mt-12">
+              <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>
+              <div className="grid grid-cols-3 gap-4">
+                {more.map(s=>(
+                  <button key={s.id} onClick={()=>onOpen(s.id)} className="rounded-[10px] overflow-hidden text-left hover:scale-[1.03] transition" style={{ background:'#211F29' }}>
+                    <div style={{ height:150 }}><PosterArt story={s} showTitle={false} rounded={0}/></div>
+                    <div className="p-3.5">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="font-mono text-[10px] text-muted">{s.dur}</span>
+                        <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ background:CAT[s.cat], color:'#fff' }}>{s.cat}</span>
+                      </div>
+                      <h3 className="font-display font-bold uppercase tracking-tightest text-ink text-[15px] leading-[.98]">{s.title}</h3>
+                      <p className="font-body text-[12.5px] text-muted leading-snug mt-1.5 line-clamp-2">{s.syn}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------- PAGES ----------------------------- */
+function HomePage({ onOpen, onShuffle }){
+  return (
+    <div className="pb-20">
+      <Hero story={byId('envelope')} onOpen={onOpen} onShuffle={onShuffle}/>
+      <div className="relative -mt-20 z-10">
+        <Rail title="Continue Watching">{CONTINUE.map(({id,p})=> <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={300} h={170} progress={p} landscape/> )}</Rail>
+        <Rail title="Top 10 Today"><Top10Row onOpen={onOpen}/></Rail>
+        <Rail title="Audacity: Entitled People">{ENTITLED_ROW.map(id=> <PosterCard key={id} story={byId(id)} onOpen={onOpen}/> )}</Rail>
+        <Rail title="New on LoreWire">{NEW_ROW.map(id=> <PosterCard key={id} story={byId(id)} onOpen={onOpen}/> )}</Rail>
+      </div>
+    </div>
+  );
+}
+
+function GridPage({ title, sub, ids, onOpen }){
+  return (
+    <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
+      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">{title}</h1>
+      {sub && <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">{sub}</p>}
+      <div className="grid grid-cols-5 gap-5 mt-9">
+        {ids.map(id=> <div key={id} style={{height:296}}><PosterCard story={byId(id)} onOpen={onOpen} w={'100%'} h={296}/></div> )}
+      </div>
+      {ids.length===0 && <p className="font-body text-muted mt-12">Nothing here yet.</p>}
+    </div>
+  );
+}
+
+function SearchPage({ onOpen, query }){
+  const res = STORIES.filter(s=> (s.title+s.cat).toLowerCase().includes(query.toLowerCase()));
+  return (
+    <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
+      <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query? `Results for \u201c${query}\u201d` : `Browse all \u00b7 ${STORIES.length} stories`}</p>
+      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none mb-9">{query||'Search'}</h1>
+      <div className="grid grid-cols-5 gap-5">
+        {res.map(s=> <div key={s.id} style={{height:296}}><PosterCard story={s} onOpen={onOpen} w={'100%'} h={296}/></div> )}
+      </div>
+      {res.length===0 && <p className="font-body text-muted mt-12">No stories match &ldquo;{query}&rdquo;.</p>}
+    </div>
+  );
+}
+
+/* ----------------------------- APP ----------------------------- */
+function App(){
+  const [view,setView] = useState('Home');
+  const [active,setActive] = useState(null);
+  const [list,setList] = useState(['stranger','wrongnumber']);
+  const [solid,setSolid] = useState(false);
+  const [query,setQuery] = useState('');
+
+  useEffect(()=>{ const onS=()=> setSolid(window.scrollY>120); window.addEventListener('scroll',onS,{passive:true}); return ()=>window.removeEventListener('scroll',onS); },[]);
+  useEffect(()=>{ window.scrollTo(0,0); },[view]);
+  useEffect(()=>{ document.body.style.overflow = active? 'hidden':''; },[active]);
+
+  const open = (id,t)=> setActive({ id, tab:t });
+  const close = ()=> setActive(null);
+  const shuffle = ()=>{ const r=STORIES[Math.floor(Math.random()*STORIES.length)]; open(r.id,'Watch'); };
+  const toggleList = id=> setList(l=> l.includes(id)? l.filter(x=>x!==id):[...l,id]);
+
+  return (
+    <div className="min-h-screen bg-bg">
+      <TopNav view={view} setView={(v)=>{ if(v!=='Search') setQuery(''); setView(v); }} solid={solid||view!=='Home'} query={query} setQuery={setQuery}/>
+
+      {view==='Home' && <HomePage onOpen={open} onShuffle={shuffle}/>}
+      {view==='Browse' && <GridPage title="Browse" sub={`All true stories \u00b7 ${STORIES.length} titles`} ids={STORIES.map(s=>s.id)} onOpen={open}/>}
+      {view==='New & Hot' && <GridPage title="New & Hot" sub="Fresh threads this week" ids={['stranger','wifi','wrongmom','wrongnumber','replyall','groupghost','rules','birthday','seat','parking']} onOpen={open}/>}
+      {view==='My List' && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open}/>}
+      {view==='Search' && <SearchPage onOpen={open} query={query}/>}
+
+      <footer className="border-t border-line mt-10">
+        <div className="max-w-[1600px] mx-auto px-10 py-9 flex items-center gap-3">
+          <span className="font-display font-black text-[20px] tracking-tightest text-ink">LORE<span className="text-accent">WIRE</span></span>
+          <span className="font-mono text-[11px] uppercase tracking-[.2em] text-muted">True internet stories, hand-drawn.</span>
+        </div>
+      </footer>
+
+      {active && <DetailModal story={byId(active.id)} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList}/>}
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

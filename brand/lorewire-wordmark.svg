@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300" role="img" aria-label="LoreWire">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@800;900&amp;display=swap');
+    .wm{font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;letter-spacing:0;}
+  </style>
+
+  <!-- Near-black background. DELETE this rect for a transparent logo. -->
+  <rect x="0" y="0" width="900" height="300" fill="#0A0A0C"/>
+
+  <!-- The word is split at the W|i seam so the "i" starts at a KNOWN x (560).
+       The second half uses a DOTLESS i (&#305;) so the font draws no tittle;
+       the vermilion circle below is the only dot. letter-spacing:0 makes the
+       split seamless (identical to one continuous "LoreWire"). -->
+  <text text-anchor="end"   x="560" y="205" class="wm" font-size="152" fill="#F5F3EF">LoreW</text>
+  <text text-anchor="start" x="560" y="205" class="wm" font-size="152" fill="#F5F3EF">&#305;re</text>
+
+  <!-- Vermilion tittle on the i. If it sits slightly off, nudge cx/cy a few units. -->
+  <circle cx="584" cy="110" r="10" fill="#E8462B"/>
+</svg>

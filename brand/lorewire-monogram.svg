@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="LoreWire avatar">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Archivo:wght@800;900&amp;display=swap');
+    .wm{font-family:'Archivo','Arial Black',Arial,sans-serif;font-weight:900;}
+  </style>
+
+  <!-- FULL-BLEED near-black. Fills the square so it survives circular AND
+       square crops with no white corners. -->
+  <rect x="0" y="0" width="512" height="512" fill="#0A0A0C"/>
+
+  <defs>
+    <text id="lw" x="256" y="338" text-anchor="middle" class="wm" font-size="250">LW</text>
+  </defs>
+
+  <g fill="#F5F3EF"><use href="#lw"/></g>
+
+  <!-- Vermilion accent node, compact and clear of the letters -->
+  <circle cx="256" cy="150" r="22" fill="#E8462B"/>
+</svg>

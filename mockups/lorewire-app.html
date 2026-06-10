@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LoreWire — Netflix-style mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Caveat:wght@600;700&family=Hanken+Grotesk:wght@400;500;600;700;800&family=Spline+Sans+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0A0A0C; --surface:#15141A; --surface2:#211F29; --line:rgba(255,255,255,.085);
+    --paper:#F5F3EF; --muted:#8E8A97; --spot:#E8462B; --spot-soft:rgba(232,70,43,.16);
+    --drama:#9B3A30; --entitled:#C06234; --humor:#C9A227; --whole:#2C7E78; --dating:#A8466A; --room:#5B3B8A; --lists:#4C7A53;
+    --fdisp:'Archivo',system-ui,sans-serif; --fbody:'Hanken Grotesk',system-ui,sans-serif; --fmono:'Spline Sans Mono',monospace;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{background:#000;color:var(--paper);font-family:var(--fbody);display:flex;justify-content:center;align-items:center;min-height:100dvh}
+  .device{position:relative;width:100%;max-width:412px;height:100dvh;max-height:880px;background:var(--bg);overflow:hidden;border-radius:38px;box-shadow:0 40px 120px rgba(0,0,0,.7),0 0 0 10px #000,0 0 0 11px #26242c}
+  @media (max-width:460px){.device{max-height:none;border-radius:0;box-shadow:none}}
+  .screen{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:88px;scrollbar-width:none}
+  .screen::-webkit-scrollbar{display:none}
+  .view{display:none} .view.active{display:block;animation:fade .35s ease both}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+
+  /* header */
+  .top{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,rgba(10,10,12,.95),rgba(10,10,12,0));padding:12px 16px 6px}
+  .toprow{display:flex;align-items:center;gap:9px}
+  .lw{width:30px;height:30px;border-radius:8px;background:var(--paper);color:#15131B;font-family:var(--fdisp);font-weight:900;display:grid;place-items:center;font-size:13px;letter-spacing:-.04em;position:relative}
+  .lw i{position:absolute;top:3px;right:4px;width:5px;height:5px;border-radius:50%;background:var(--spot)}
+  .wordmark{font-family:var(--fdisp);font-weight:900;font-size:20px;letter-spacing:-.03em}
+  .top .sp{flex:1}
+  .ic{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;color:var(--paper);background:rgba(255,255,255,.08)}
+  .ic svg{width:18px;height:18px}
+  .avatar{background:linear-gradient(135deg,var(--dating),var(--spot));font-weight:800;font-size:12px;color:#fff;font-family:var(--fbody)}
+  .pills{display:flex;gap:8px;overflow-x:auto;padding:10px 0 2px;scrollbar-width:none}
+  .pills::-webkit-scrollbar{display:none}
+  .pill{flex:0 0 auto;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--paper);font-family:var(--fbody);font-weight:600;font-size:12.5px;padding:7px 14px;border-radius:30px;cursor:pointer;transition:.15s}
+  .pill.on{background:var(--paper);color:#111;border-color:var(--paper)}
+
+  /* billboard */
+  .bb{position:relative;height:478px;display:flex;flex-direction:column;justify-content:flex-end;text-align:center;margin-top:-58px}
+  .bb .art{position:absolute;inset:0;background:radial-gradient(120% 80% at 70% 22%,rgba(232,70,43,.5),transparent 58%),radial-gradient(95% 80% at 22% 30%,rgba(168,70,106,.5),transparent 55%),linear-gradient(180deg,#2a1418,#0A0A0C 94%);animation:ken 16s ease-in-out infinite alternate}
+  @keyframes ken{from{transform:scale(1.07)}to{transform:scale(1.17)}}
+  .bb .sc{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,12,.45) 0,transparent 28%,rgba(10,10,12,.55) 72%,var(--bg))}
+  .bb .in{position:relative;z-index:2;padding:0 22px 14px}
+  .orig{font-family:var(--fmono);font-size:10px;letter-spacing:.42em;color:var(--muted);margin-bottom:8px}
+  .orig b{color:var(--spot);letter-spacing:.04em;font-weight:600}
+  .bb h1{font-family:var(--fdisp);font-weight:900;font-size:32px;line-height:.98;letter-spacing:-.025em;margin:0 0 10px;text-transform:uppercase}
+  .tags{font-family:var(--fbody);font-size:12.5px;color:#cfc9d2;display:flex;gap:7px;justify-content:center;margin-bottom:16px}
+  .tags span{opacity:.55}
+  .cta{display:flex;gap:9px;justify-content:center}
+  .btn{border:0;font-family:var(--fbody);font-weight:700;font-size:14px;padding:12px 20px;border-radius:8px;display:flex;align-items:center;gap:8px;cursor:pointer;transition:transform .12s}
+  .btn:active{transform:scale(.95)} .btn svg{width:17px;height:17px}
+  .btn.play{background:var(--paper);color:#111} .btn.info{background:rgba(120,118,128,.5);color:#fff;backdrop-filter:blur(4px)}
+
+  .shufrow{display:flex;justify-content:center;margin:14px 0 2px}
+  .shuf{border:1px solid var(--line);background:rgba(255,255,255,.05);color:var(--paper);font-family:var(--fbody);font-weight:700;font-size:13px;padding:9px 16px;border-radius:8px;display:flex;gap:8px;align-items:center;cursor:pointer}
+  .shuf svg{width:16px;height:16px;color:var(--spot)}
+
+  /* rails */
+  .rail{margin:18px 0 2px}
+  .rail h2{font-family:var(--fdisp);font-weight:800;font-size:16px;letter-spacing:-.01em;margin:0 0 11px;padding:0 16px}
+  .track{display:flex;gap:10px;overflow-x:auto;padding:0 16px 6px;scroll-snap-type:x mandatory;scrollbar-width:none}
+  .track::-webkit-scrollbar{display:none}
+  .card{flex:0 0 128px;scroll-snap-align:start;cursor:pointer;transition:transform .18s}
+  .card:active{transform:scale(.95)}
+  .poster{position:relative;height:182px;border-radius:8px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;box-shadow:0 8px 20px rgba(0,0,0,.4)}
+  .poster .pa{position:absolute;inset:0;transition:transform .4s} .card:hover .poster .pa{transform:scale(1.08)}
+  .poster .ps{position:absolute;inset:0;background:linear-gradient(180deg,transparent 42%,rgba(0,0,0,.8))}
+  .dur{position:absolute;top:7px;right:7px;font-family:var(--fmono);font-size:9px;color:#fff;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);padding:3px 6px;border-radius:5px;z-index:2}
+  .poster .pt{position:relative;font-family:var(--fdisp);font-weight:800;font-size:13px;line-height:1.05;letter-spacing:-.01em;padding:6px 9px 9px;text-transform:uppercase}
+  .prog{position:relative;height:3px;background:rgba(255,255,255,.25);margin:0 9px 9px;border-radius:3px}
+  .prog i{display:block;height:100%;background:var(--spot);border-radius:3px}
+
+  /* top 10 numerals */
+  .t10 .card{flex:0 0 196px;display:flex;align-items:flex-end}
+  .t10 .num{font-family:var(--fdisp);font-weight:900;font-size:128px;line-height:.7;color:transparent;-webkit-text-stroke:2px rgba(245,243,239,.32);margin-right:-6px;letter-spacing:-.06em;flex:0 0 auto}
+  .t10 .poster{flex:1;height:172px}
+
+  /* detail */
+  #detail{position:absolute;inset:0;z-index:50;background:var(--bg);transform:translateY(100%);transition:transform .42s cubic-bezier(.2,.8,.2,1);overflow-y:auto;padding-bottom:40px;scrollbar-width:none}
+  #detail.open{transform:none} #detail::-webkit-scrollbar{display:none}
+  .player{position:relative;height:288px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .player .pa{position:absolute;inset:0;animation:ken 18s ease-in-out infinite alternate}
+  .player .psc{position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.3),transparent 45%,var(--bg))}
+  .back{position:absolute;top:13px;left:13px;z-index:5}
+  .playbtn{position:relative;z-index:3;width:70px;height:70px;border-radius:50%;border:0;background:rgba(255,255,255,.95);color:#111;display:grid;place-items:center;cursor:pointer;box-shadow:0 8px 30px rgba(0,0,0,.5);transition:transform .15s}
+  .playbtn:active{transform:scale(.92)} .playbtn svg{width:28px;height:28px;margin-left:3px}
+  .playing .playbtn{opacity:0;pointer-events:none}
+  .vprogbar{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.18);z-index:4} .vprogbar i{display:block;height:100%;width:0;background:var(--spot)}
+
+  .db{padding:2px 18px 0}
+  .db h1{font-family:var(--fdisp);font-weight:900;font-size:25px;line-height:1;letter-spacing:-.02em;text-transform:uppercase;margin:12px 0 9px}
+  .mrow{display:flex;align-items:center;gap:9px;font-family:var(--fbody);font-size:12.5px;color:var(--muted);margin-bottom:14px;flex-wrap:wrap}
+  .mrow .match{color:#54b758;font-weight:700} .mrow b{color:var(--paper);font-weight:600}
+  .mrow .chip{font-family:var(--fmono);font-size:10px;border:1px solid var(--line);padding:2px 6px;border-radius:4px;color:#cfc9d2}
+  .bigplay{width:100%;background:var(--paper);color:#111;border:0;font-family:var(--fbody);font-weight:700;font-size:15px;padding:13px;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:9px;cursor:pointer;margin-bottom:10px}
+  .bigplay svg{width:19px;height:19px}
+  .acts{display:flex;justify-content:space-around;margin:6px 0 18px;color:var(--muted)}
+  .act{background:0;border:0;color:var(--muted);font-family:var(--fbody);font-size:11px;font-weight:600;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer}
+  .act svg{width:22px;height:22px}
+  .synopsis{font-size:14px;line-height:1.55;color:#d8d4dd;margin-bottom:16px}
+
+  .tabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin-bottom:4px}
+  .tab{border:0;background:0;color:var(--muted);font-family:var(--fbody);font-weight:700;font-size:13.5px;padding:10px 0;cursor:pointer;position:relative;display:flex;align-items:center;gap:7px}
+  .tab svg{width:15px;height:15px}
+  .tab.on{color:var(--paper)} .tab.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:3px;background:var(--spot);border-radius:3px}
+  .panel{display:none;animation:fade .3s both;padding-top:16px} .panel.on{display:block}
+
+  .article{font-size:15px;line-height:1.62;color:#ddd9e1} .article p{margin:0 0 15px}
+  .article p.lead::first-letter{font-family:var(--fdisp);font-weight:900;font-size:46px;float:left;line-height:.8;padding:4px 9px 0 0;color:var(--paper)}
+  .pull{font-family:var(--fdisp);font-weight:700;font-size:18px;line-height:1.25;letter-spacing:-.01em;color:var(--paper);border-left:3px solid var(--spot);padding:2px 0 2px 15px;margin:20px 0;text-transform:none}
+
+  /* read sub-modes: Article vs Gallery */
+  .subtoggle{display:inline-flex;gap:4px;background:var(--surface);border-radius:10px;padding:4px;margin-bottom:16px}
+  .st{border:0;background:0;color:var(--muted);font-family:var(--fbody);font-weight:700;font-size:12.5px;padding:7px 16px;border-radius:7px;cursor:pointer;transition:.18s}
+  .st.on{background:var(--spot);color:#fff}
+  .readmode{display:none} .readmode.on{display:block;animation:fade .3s both}
+  .fig{margin:18px -2px}
+  .fig-img{height:200px;border-radius:10px}
+  .fig figcaption{font-family:var(--fmono);font-size:10px;letter-spacing:.04em;color:var(--muted);margin-top:7px;text-align:right}
+  .source{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--spot);border-radius:10px;padding:14px 16px;margin:18px 0}
+  .src-head{font-family:var(--fmono);font-size:9.5px;letter-spacing:.2em;color:var(--spot);font-weight:600;margin-bottom:9px}
+  .src-quote{font-size:14.5px;line-height:1.5;color:#e3dfe7;margin:0 0 10px;font-style:italic}
+  .src-meta{font-family:var(--fmono);font-size:10.5px;color:var(--muted);display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+  .src-meta a{color:var(--paper);text-decoration:none;border-bottom:1px solid var(--spot)}
+  /* gallery swipe */
+  .gal{margin:2px -18px 0}
+  .gal-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none} .gal-track::-webkit-scrollbar{display:none}
+  .gal-slide{flex:0 0 100%;scroll-snap-align:center;padding:0 18px}
+  .gal-img{height:230px;border-radius:12px;display:flex;align-items:flex-end}
+  .gal-num{font-family:var(--fdisp);font-weight:900;font-size:52px;line-height:.8;color:rgba(255,255,255,.9);padding:14px;text-shadow:0 4px 20px rgba(0,0,0,.5)}
+  .gal-txt{font-size:14.5px;line-height:1.55;color:#ddd9e1;padding:14px 2px 6px} .gal-txt b{color:var(--paper);font-family:var(--fdisp);font-weight:800}
+  .gal-dots{display:flex;gap:6px;justify-content:center;padding:6px 0 2px}
+  .gal-dots i{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.2);transition:.2s} .gal-dots i.on{background:var(--spot);width:18px;border-radius:4px}
+  .gal-hint{text-align:center;font-family:var(--fmono);font-size:10px;letter-spacing:.16em;color:var(--muted);padding:4px 0 0}
+
+  /* doodle-explainer video style preview (vertical, hand-drawn on white) */
+  .doodle-wrap{display:flex;flex-direction:column;align-items:center;gap:11px;padding-top:2px}
+  .doodle{position:relative;width:206px;height:300px;background:#FBFAF4;border-radius:14px;overflow:hidden;box-shadow:0 14px 34px rgba(0,0,0,.4);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px}
+  .dl-polaroid{position:absolute;top:15px;right:15px;width:60px;height:70px;background:#fff;border:1px solid #e3ddd0;box-shadow:0 4px 10px rgba(0,0,0,.18);transform:rotate(5deg);padding:5px}
+  .dl-polaroid::before{content:"";display:block;width:100%;height:50px;background:linear-gradient(135deg,#cdbfae,#9a8f86)}
+  .dl-env{width:124px;height:80px;margin-top:10px}
+  .dl-hand{font-family:'Caveat',cursive}
+  .dl-label{font-family:'Caveat',cursive;font-weight:700;font-size:30px;color:#1a1714;background:linear-gradient(180deg,transparent 56%,#FFD84D 56%);padding:0 10px;transform:rotate(-2.5deg)}
+  .doodle-meta{font-family:var(--fmono);font-size:10px;letter-spacing:.05em;color:var(--muted);text-align:center}
+  .doodle-meta b{color:#86efac}
+
+  /* teleprompter */
+  .tpc{display:flex;align-items:center;gap:12px;background:var(--surface);border-radius:12px;padding:11px 13px;margin-bottom:15px}
+  .tpb{width:44px;height:44px;border-radius:50%;border:0;background:var(--spot);color:#fff;display:grid;place-items:center;cursor:pointer;flex:0 0 auto;transition:transform .15s} .tpb:active{transform:scale(.9)} .tpb svg{width:19px;height:19px}
+  .wave{flex:1;display:flex;align-items:center;gap:2px;height:32px}
+  .wave i{flex:1;background:rgba(245,243,239,.16);border-radius:2px;transition:background .2s} .wave i.on{background:var(--spot)}
+  .tptime{font-family:var(--fmono);font-size:11px;color:var(--muted);flex:0 0 auto}
+  .script{font-family:var(--fbody);font-weight:600;font-size:21px;line-height:1.5;letter-spacing:-.01em;color:#4d4a55;max-height:300px;overflow-y:auto;scrollbar-width:none;padding:2px 2px 56px} .script::-webkit-scrollbar{display:none}
+  .script .w{transition:color .18s} .script .w.read{color:#c9c4d1} .script .w.now{color:var(--paper)}
+  .script .w.now b{background:var(--spot);color:#fff;border-radius:5px;padding:1px 5px;box-shadow:0 6px 16px rgba(232,70,43,.5)} .script .w b{font-weight:600}
+  .more{margin-top:24px}
+
+  .empty{padding:90px 30px;text-align:center;color:var(--muted)}
+  .empty .lwbig{width:62px;height:62px;border-radius:14px;margin:0 auto 18px;background:var(--surface);display:grid;place-items:center;font-family:var(--fdisp);font-weight:900;font-size:26px;letter-spacing:-.04em;position:relative}
+  .empty .lwbig i{position:absolute;top:9px;right:11px;width:7px;height:7px;border-radius:50%;background:var(--spot)}
+  .empty h3{font-family:var(--fdisp);font-weight:800;font-size:21px;color:var(--paper);text-transform:uppercase;letter-spacing:-.01em;margin:0 0 6px}
+
+  .nav{position:absolute;left:0;right:0;bottom:0;z-index:60;display:flex;justify-content:space-around;padding:9px 6px calc(9px + env(safe-area-inset-bottom));background:linear-gradient(0deg,var(--bg) 72%,rgba(10,10,12,0));border-top:1px solid var(--line)}
+  .nav button{border:0;background:0;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:4px;font-family:var(--fbody);font-size:10px;font-weight:600;cursor:pointer;padding:4px 12px;transition:color .2s}
+  .nav button svg{width:22px;height:22px} .nav button.on{color:var(--paper)} .nav button.on svg{color:var(--spot)}
+</style>
+</head>
+<body>
+<div class="device">
+  <div class="screen">
+
+    <!-- HOME -->
+    <section id="home" class="view active">
+      <div class="top">
+        <div class="toprow">
+          <span class="lw">LW<i></i></span><span class="wordmark">LoreWire</span>
+          <span class="sp"></span>
+          <button class="ic" onclick="go('search')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4"/></svg></button>
+          <button class="ic avatar">Y</button>
+        </div>
+        <div class="pills" id="pills"></div>
+      </div>
+
+      <div class="bb" onclick="openDetail(this)" data-kick="Wedding Disasters" data-title="The $800 Maid of Honor" data-c1="#9B3A30" data-c2="#A8466A">
+        <div class="art"></div><div class="sc"></div>
+        <div class="in">
+          <div class="orig"><b>LW</b> &nbsp;ORIGINAL</div>
+          <h1>The $800 Maid<br>of Honor</h1>
+          <div class="tags">Drama <span>·</span> Betrayal <span>·</span> True Story</div>
+          <div class="cta">
+            <button class="btn play" onclick="event.stopPropagation();openDetail(document.querySelector('.bb'),'watch')"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Play</button>
+            <button class="btn info" onclick="event.stopPropagation();openDetail(document.querySelector('.bb'),'read')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M11 12h1v4h1"/></svg>More Info</button>
+          </div>
+          <div class="shufrow"><button class="shuf" onclick="event.stopPropagation();shuffle()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 3h5v5M4 20 21 3M4 4l5 5M21 16v5h-5M15 15l6 6"/></svg>Play Something</button></div>
+        </div>
+      </div>
+
+      <div id="rails"></div>
+    </section>
+
+    <!-- NEW & HOT -->
+    <section id="new" class="view">
+      <div class="top"><div class="toprow"><span class="wordmark">New &amp; Hot</span></div></div>
+      <div id="newlist" style="padding-top:8px"></div>
+    </section>
+
+    <section id="search" class="view"><div class="empty"><div class="lwbig">LW<i></i></div><h3>Search</h3><p>Find any story by topic, mood, or chaos level.</p></div></section>
+    <section id="mylist" class="view"><div class="empty"><div class="lwbig">LW<i></i></div><h3>My List</h3><p>Tap + on any story to save it for the in-between moments.</p></div></section>
+  </div>
+
+  <!-- DETAIL -->
+  <div id="detail">
+    <div class="player" id="player">
+      <div class="pa"></div><div class="psc"></div>
+      <button class="ic back" onclick="closeDetail()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <button class="playbtn" onclick="togglePlay()"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
+      <div class="vprogbar"><i id="vprog"></i></div>
+    </div>
+    <div class="db">
+      <h1 id="d-title">The $800 Maid of Honor</h1>
+      <div class="mrow"><span class="match">97% Match</span><b>2026</b><span class="chip">1:42</span><span class="chip">TRUE</span><span id="d-kick">Wedding Disasters</span></div>
+      <button class="bigplay" onclick="tab('watch');togglePlay()"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Play</button>
+      <div class="acts">
+        <button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>My List</button>
+        <button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 11v8H4v-8zM7 11l4-7a2 2 0 0 1 3 2l-1 5h5a2 2 0 0 1 2 2l-1 6a2 2 0 0 1-2 2H7"/></svg>Rate</button>
+        <button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8h16v-8M16 6l-4-4-4 4M12 2v14"/></svg>Share</button>
+      </div>
+      <p class="synopsis">She flew across the country, paid for her own dress, and gave a toast that made the groom's mother cry. A week later, the invoice arrived. Itemized. With a late fee.</p>
+
+      <div class="tabs">
+        <button class="tab on" data-p="watch" onclick="tab('watch')"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>Watch</button>
+        <button class="tab" data-p="read" onclick="tab('read')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16M4 12h16M4 19h10"/></svg>Read</button>
+        <button class="tab" data-p="along" onclick="tab('along')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>Read-along</button>
+      </div>
+
+      <div class="panel on" id="p-watch">
+        <div class="doodle-wrap">
+          <div class="doodle">
+            <div class="dl-polaroid"></div>
+            <svg class="dl-env" viewBox="0 0 124 80"><rect x="4" y="6" width="116" height="70" rx="3" fill="#fff" stroke="#1a1714" stroke-width="3"/><path d="M5 9 L62 48 L119 9" fill="none" stroke="#1a1714" stroke-width="3" stroke-linejoin="round"/><text x="62" y="64" text-anchor="middle" class="dl-hand" font-size="26" fill="#E8462B">$800</text></svg>
+            <div class="dl-label">WAIT… $800?!</div>
+          </div>
+          <div class="doodle-meta">DOODLE EXPLAINER · VERTICAL · LOW MOTION · <b>KIE GPT-IMAGE-2 → NANO-BANANA-2</b></div>
+        </div>
+        <p style="color:var(--muted);font-size:13px;line-height:1.5;text-align:center;margin-top:14px">Hand-drawn doodle on white, calm tempo, 1 to 3 minutes. Cheap because the youtubestudio engine edits sibling frames instead of generating dozens of separate images.</p>
+        <div class="more rail"><h2>More Like This</h2><div class="track" id="more1"></div></div>
+      </div>
+      <div class="panel" id="p-read">
+        <div class="subtoggle">
+          <button class="st on" data-r="article" onclick="readMode('article')">Article</button>
+          <button class="st" data-r="gallery" onclick="readMode('gallery')">Gallery</button>
+        </div>
+
+        <div class="readmode on" id="read-article">
+          <div class="article">
+            <p class="lead">When the first invoice arrived, Dana assumed it was a mistake. Heavy cardstock, itemized, addressed to her by full name. Line one: bridesmaid participation fee, eight hundred dollars.</p>
+            <figure class="fig"><div class="fig-img" style="background:radial-gradient(120% 90% at 70% 25%,#9B3A30cc,transparent 60%),linear-gradient(180deg,#2a1418,#15141A)"></div><figcaption>Illustration · LoreWire</figcaption></figure>
+            <p>She had flown across the country, paid for her own dress, and given a toast that made the groom's mother cry. None of that, apparently, was included.</p>
+            <div class="pull">"I thought the friendship was the gift. Turns out it had a payment plan."</div>
+            <p>Two other bridesmaids got the same envelope the same week. By midnight they were comparing notes in a group chat.</p>
+            <div class="source">
+              <div class="src-head">● FROM THE ORIGINAL THREAD</div>
+              <p class="src-quote">"AITA for invoicing my bridesmaids after the wedding? They agreed to be in it, so I assumed that meant splitting the costs."</p>
+              <div class="src-meta">u/throwaway_bride8821 · r/AmItheAsshole · Jun 2026 · <a href="#" onclick="return false">View source ↗</a></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="readmode" id="read-gallery">
+          <div class="gal">
+            <div class="gal-track" id="galTrack">
+              <div class="gal-slide"><div class="gal-img" style="background:radial-gradient(120% 90% at 70% 25%,#9B3A30dd,transparent 60%),linear-gradient(180deg,#2a1418,#15141A)"><span class="gal-num">1</span></div><div class="gal-txt"><b>The envelope.</b> A week after the reception, a manila envelope arrived on heavy cardstock, addressed to Dana by her full legal name.</div></div>
+              <div class="gal-slide"><div class="gal-img" style="background:radial-gradient(120% 90% at 70% 25%,#A8466Add,transparent 60%),linear-gradient(180deg,#241019,#15141A)"><span class="gal-num">2</span></div><div class="gal-txt"><b>The line items.</b> Bridesmaid participation fee, eight hundred dollars. Below it, in smaller type, a late penalty accruing at five percent a week.</div></div>
+              <div class="gal-slide"><div class="gal-img" style="background:radial-gradient(120% 90% at 70% 25%,#C06234dd,transparent 60%),linear-gradient(180deg,#22150f,#15141A)"><span class="gal-num">3</span></div><div class="gal-txt"><b>The group chat.</b> Two other bridesmaids got the same envelope. By midnight they were comparing scans line by line.</div></div>
+              <div class="gal-slide"><div class="gal-img" style="background:radial-gradient(120% 90% at 70% 25%,#5B3B8Add,transparent 60%),linear-gradient(180deg,#191229,#15141A)"><span class="gal-num">4</span></div><div class="gal-txt"><b>The reminder.</b> Before anyone could reply, the bride sent a calendar invite. The subject line read: payment due.</div></div>
+            </div>
+            <div class="gal-dots" id="galDots"></div>
+            <div class="gal-hint">← SWIPE THROUGH THE STORY →</div>
+          </div>
+        </div>
+
+        <div class="more rail"><h2>More Like This</h2><div class="track" id="more2"></div></div>
+      </div>
+      <div class="panel" id="p-along">
+        <div class="tpc">
+          <button class="tpb" id="tpBtn" onclick="tpToggle()"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
+          <div class="wave" id="wave"></div><div class="tptime" id="tpTime">0:00</div>
+        </div>
+        <div class="script" id="script"></div>
+      </div>
+    </div>
+  </div>
+
+  <nav class="nav">
+    <button class="on" data-v="home" onclick="go('home')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>Home</button>
+    <button data-v="search" onclick="go('search')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4"/></svg>Search</button>
+    <button data-v="new" onclick="go('new')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z"/></svg>New</button>
+    <button data-v="mylist" onclick="go('mylist')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h12v18l-6-4-6 4z"/></svg>My List</button>
+  </nav>
+</div>
+
+<script>
+const C={drama:'#9B3A30',entitled:'#C06234',humor:'#C9A227',whole:'#2C7E78',dating:'#A8466A',room:'#5B3B8A',lists:'#4C7A53'};
+const grad=(a,b)=>`radial-gradient(120% 90% at 72% 20%,${a}dd,transparent 60%),radial-gradient(90% 80% at 22% 35%,${b}bb,transparent 55%),linear-gradient(180deg,#181016,#0A0A0C 92%)`;
+const S=[
+ {k:'Entitled People',t:"Billed for My Own Street",c:[C.entitled,C.drama],w:'1:18'},
+ {k:'Roommate Horror',t:"He Labeled Every Egg",c:[C.room,C.dating],w:'2:04'},
+ {k:'Wedding Disasters',t:"Audition Your Outfit",c:[C.drama,C.dating],w:'1:36'},
+ {k:'Entitled People',t:"Returned a Couch, Used",c:[C.entitled,C.humor],w:'1:09'},
+ {k:'Dating Nightmares',t:"He Brought a Spreadsheet",c:[C.dating,C.room],w:'1:51'},
+ {k:'Humor',t:"Toddler Lawyer at Bedtime",c:[C.humor,C.whole],w:'0:58'},
+ {k:'Wholesome',t:"The Wallet Came Back",c:[C.whole,C.lists],w:'1:24'},
+ {k:'Roommate Horror',t:"Rent for the Couch I Bought",c:[C.room,C.drama],w:'1:47'},
+];
+const pills=['All','Drama','Entitled','Wedding','Roommate','Dating','Humor','Wholesome'];
+document.getElementById('pills').innerHTML=pills.map((p,i)=>`<button class="pill${i===0?' on':''}" onclick="document.querySelectorAll('.pill').forEach(x=>x.classList.remove('on'));this.classList.add('on')">${p}</button>`).join('');
+
+const poster=(i,prog)=>{const s=S[i];return `<div class="card" onclick="openCard(${i})"><div class="poster"><div class="pa" style="background:${grad(s.c[0],s.c[1])}"></div><div class="ps"></div><div class="dur">${s.w}</div><div class="pt">${s.t}</div>${prog!=null?`<div class="prog"><i style="width:${prog}%"></i></div>`:''}</div></div>`;};
+const railHTML=(h,items,opt={})=>`<div class="rail ${opt.t10?'t10':''}"><h2>${h}</h2><div class="track">${items.map((i,n)=>opt.t10?`<div class="card" onclick="openCard(${i})"><div class="num">${n+1}</div><div class="poster"><div class="pa" style="background:${grad(S[i].c[0],S[i].c[1])}"></div><div class="ps"></div><div class="dur">${S[i].w}</div></div></div>`:poster(i,opt.prog?[68,33,12][n]??null:null)).join('')}</div></div>`;
+
+document.getElementById('rails').innerHTML=[
+ railHTML('Continue Watching for Yoav',[2,4,7],{prog:true}),
+ railHTML('Top 10 in Your Spare Minute Today',[0,2,5,7,4,1,6,3],{t10:true}),
+ railHTML('Wedding Disasters',[2,0,3,5]),
+ railHTML('Certified Chaos',[1,7,4,0,6]),
+ railHTML('New on LoreWire',[5,6,3,1,2]),
+].join('');
+document.getElementById('newlist').innerHTML=[railHTML('Just Dropped',[5,6,3]),railHTML('Coming This Week',[1,4,7,0])].join('');
+document.getElementById('more1').innerHTML=[1,4,6,2].map(i=>poster(i)).join('');
+document.getElementById('more2').innerHTML=[3,7,5,0].map(i=>poster(i)).join('');
+
+function go(v){document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id===v));document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));document.querySelector('.screen').scrollTo({top:0});}
+const D=document.getElementById('detail');
+function fill(s){document.getElementById('d-title').textContent=s.t;document.getElementById('d-kick').textContent=s.k;document.querySelector('#player .pa').style.background=grad(s.c[0],s.c[1]);}
+function openCard(i){fill(S[i]);openSheet('watch');}
+function openDetail(el,t){fill({k:el.dataset.kick,t:el.dataset.title,c:[el.dataset.c1,el.dataset.c2]});openSheet(t||'watch');}
+function openSheet(t){tab(t);stopPlay();D.scrollTo({top:0});requestAnimationFrame(()=>D.classList.add('open'));}
+function closeDetail(){D.classList.remove('open');stopPlay();tpStop();}
+function shuffle(){openCard(Math.floor(Math.random()*S.length));}
+function tab(p){document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.p===p));document.querySelectorAll('.panel').forEach(pn=>pn.classList.toggle('on',pn.id==='p-'+p));if(p!=='along')tpStop();}
+function readMode(m){document.querySelectorAll('.st').forEach(b=>b.classList.toggle('on',b.dataset.r===m));document.querySelectorAll('.readmode').forEach(p=>p.classList.toggle('on',p.id==='read-'+m));}
+(function(){const tr=document.getElementById('galTrack'),dots=document.getElementById('galDots');if(!tr||!dots)return;const n=tr.children.length;dots.innerHTML=Array.from({length:n},(_,i)=>`<i class="${i===0?'on':''}"></i>`).join('');tr.addEventListener('scroll',()=>{const i=Math.round(tr.scrollLeft/tr.clientWidth);[...dots.children].forEach((d,j)=>d.classList.toggle('on',j===i));});})();
+
+let vAnim,vT=0;
+function togglePlay(){document.getElementById('player').classList.add('playing');vT=0;cancelAnimationFrame(vAnim);const step=()=>{vT+=.4;document.getElementById('vprog').style.width=Math.min(vT,100)+'%';if(vT<100)vAnim=requestAnimationFrame(step);};step();}
+function stopPlay(){cancelAnimationFrame(vAnim);document.getElementById('player').classList.remove('playing');document.getElementById('vprog').style.width='0';}
+
+const TEXT="When the first invoice arrived, Dana assumed it was a mistake. It was printed on heavy cardstock, itemized, and addressed to her by her full name. Bridesmaid participation fee: eight hundred dollars. Late payment penalty accrues at five percent weekly. She had flown across the country and paid for her own dress. None of that, apparently, was included.";
+const words=TEXT.split(/\s+/);
+document.getElementById('script').innerHTML=words.map((w,i)=>`<span class="w" data-i="${i}"><b>${w}</b></span> `).join('');
+const WAVE=40;document.getElementById('wave').innerHTML=Array.from({length:WAVE},(_,i)=>`<i style="height:${30+50*Math.abs(Math.sin(i*1.7))}%"></i>`).join('');
+let tpI=-1,tpTimer=null,tpOn=false;const bars=()=>document.querySelectorAll('#wave i');
+function tpToggle(){tpOn?tpPause():tpPlay();}
+function tpPlay(){tpOn=true;icon(true);tpTimer=setInterval(()=>{tpI++;if(tpI>=words.length){tpStop();return;}const sp=document.querySelectorAll('#script .w');sp.forEach((s,j)=>{s.classList.toggle('read',j<tpI);s.classList.toggle('now',j===tpI);});sp[tpI].scrollIntoView({behavior:'smooth',block:'center'});bars().forEach((b,j)=>b.classList.toggle('on',j<=Math.floor(tpI/words.length*WAVE)));document.getElementById('tpTime').textContent=fmt(tpI/words.length*102);},230);}
+function tpPause(){tpOn=false;icon(false);clearInterval(tpTimer);}
+function tpStop(){tpPause();tpI=-1;document.querySelectorAll('#script .w').forEach(s=>s.classList.remove('read','now'));bars().forEach(b=>b.classList.remove('on'));document.getElementById('tpTime').textContent='0:00';}
+function icon(p){document.getElementById('tpBtn').innerHTML=p?'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>':'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';}
+const fmt=s=>Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0');
+</script>
+</body>
+</html>

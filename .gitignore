@@ -1,0 +1,28 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Reference clones of other projects (not part of this repo)
+_reference/
+
+# Amir's source scripts — contain hardcoded secrets; kept local only
+from-amir/
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+.next/
+out/
+dist/
+build/
+
+# Misc
+.DS_Store
+*.log
+npm-debug.log*
+.vscode/
+.idea/
