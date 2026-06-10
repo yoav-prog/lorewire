@@ -39,11 +39,24 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = 8, showTitle = true, kicker = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean }) {
   const c = CAT[story.cat];
+  const [imageOk, setImageOk] = useState(true);
+  const showImage = !!story.heroImage && imageOk;
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded, background: c }}>
-      <div className="absolute inset-0" style={{ background: "radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)" }}></div>
-      <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
-      <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize: 200, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>
+      {showImage && (
+        <img
+          src={story.heroImage}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+          onError={() => {
+            setImageOk(false);
+            console.warn("[lorewire poster err]", { storyId: story.id, src: story.heroImage });
+          }}
+        />
+      )}
+      <div className="absolute inset-0" style={{ background: showImage ? "linear-gradient(180deg, rgba(0,0,0,0) 35%, rgba(0,0,0,.55) 100%)" : "radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)" }}></div>
+      {!showImage && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
+      {!showImage && <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize: 200, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
       <div className="absolute inset-0 poster-vig"></div>
       {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
       <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
@@ -88,12 +101,25 @@ function TopNav({ view, setView, solid, query, setQuery }: { view: string; setVi
 /* ----------------------------- HERO ----------------------------- */
 function Hero({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn; onShuffle: () => void }) {
   const c = CAT[story.cat];
+  const [heroOk, setHeroOk] = useState(true);
+  const showHero = !!story.heroImage && heroOk;
   return (
     <section className="relative h-[82vh] min-h-[620px] w-full overflow-hidden">
       <div className="absolute inset-0 drift" style={{ background: c }}>
-        <div className="absolute inset-0" style={{ background: "radial-gradient(90% 110% at 78% 26%, rgba(255,255,255,.20), rgba(0,0,0,.42) 72%)" }}></div>
-        <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>
-        <div className="absolute right-[2%] top-[2%] font-display font-black leading-none select-none" style={{ fontSize: 560, color: "rgba(255,255,255,.085)" }}>{story.glyph}</div>
+        {showHero && (
+          <img
+            src={story.heroImage}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover"
+            onError={() => {
+              setHeroOk(false);
+              console.warn("[lorewire hero err]", { storyId: story.id, src: story.heroImage });
+            }}
+          />
+        )}
+        <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(180deg, rgba(0,0,0,.15) 0%, rgba(0,0,0,.45) 70%, rgba(10,10,12,.9) 100%)" : "radial-gradient(90% 110% at 78% 26%, rgba(255,255,255,.20), rgba(0,0,0,.42) 72%)" }}></div>
+        {!showHero && <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>}
+        {!showHero && <div className="absolute right-[2%] top-[2%] font-display font-black leading-none select-none" style={{ fontSize: 560, color: "rgba(255,255,255,.085)" }}>{story.glyph}</div>}
       </div>
       <div className="absolute inset-0" style={{ background: "linear-gradient(90deg,#0A0A0C 8%, rgba(10,10,12,.45) 42%, rgba(10,10,12,0) 72%)" }}></div>
       <div className="absolute inset-x-0 bottom-0 h-44" style={{ background: "linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)" }}></div>
@@ -173,8 +199,26 @@ function Top10Row({ onOpen }: { onOpen: OpenFn }) {
   );
 }
 
-/* ----------------------------- WATCH (doodle) ----------------------------- */
-function WatchDoodle() {
+/* ----------------------------- WATCH (real video or doodle) ----------------------------- */
+function WatchDoodle({ story }: { story: Story }) {
+  if (story.videoUrl) {
+    return (
+      <div>
+        <div className="relative rounded-[14px] overflow-hidden w-full bg-black" style={{ height: 540 }}>
+          <video
+            src={story.videoUrl}
+            poster={story.heroImage}
+            controls
+            preload="metadata"
+            playsInline
+            className="absolute inset-0 w-full h-full object-contain"
+            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: story.videoUrl })}
+          />
+        </div>
+        <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-4">LoreWire Original &middot; doodle short</p>
+      </div>
+    );
+  }
   return (
     <div>
       <div className="relative rounded-[14px] overflow-hidden w-full" style={{ background: "#FBFAF4", height: 440 }}>
@@ -299,7 +343,77 @@ function Read({ story }: { story: Story }) {
 
 /* ----------------------------- READ-ALONG ----------------------------- */
 const SCRIPT = ("Dana volunteered to collect the money before anyone else could blink. The envelope filled up fast, fat with twenties and one brave hundred. Then, over a single long weekend, it simply vanished from the drawer. She said she moved it somewhere safe. It was not, in any sense, safe.").split(" ");
-function ReadAlong() {
+
+function ReadAlong({ story }: { story: Story }) {
+  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
+  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+}
+
+function RealReadAlong({ story }: { story: Story }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const words = story.alignment || [];
+
+  const activeIdx = (() => {
+    for (let i = 0; i < words.length; i++) {
+      if (elapsed >= words[i].start && elapsed < words[i].end) return i;
+    }
+    return elapsed >= (words[words.length - 1]?.end ?? 0) ? words.length - 1 : -1;
+  })();
+
+  const toggle = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) {
+      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId: story.id, e }));
+    } else {
+      a.pause();
+    }
+  };
+
+  const totalSecs = duration || words[words.length - 1]?.end || 0;
+  const progress = totalSecs > 0 ? (elapsed / totalSecs) * 100 : 0;
+  const fmt = (s: number) => {
+    const m = Math.floor(s / 60);
+    const ss = String(Math.floor(s % 60)).padStart(2, "0");
+    return `${m}:${ss}`;
+  };
+
+  return (
+    <div className="max-w-[760px]">
+      <audio
+        ref={audioRef}
+        src={story.audioUrl}
+        preload="metadata"
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+        onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
+        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+      />
+      <div className="flex items-center gap-4">
+        <button onClick={toggle} className="w-16 h-16 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition">
+          {playing ? <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg> : <PlayI size={26} />}
+        </button>
+        <div className="flex-1 flex items-center gap-[3px] h-14">
+          {Array.from({ length: 64 }).map((_, i) => { const seed = Math.sin(i * 1.7) * 0.5 + 0.5; const hgt = 18 + seed * 34 + (i % 3) * 7; const played = (i / 64) * 100 <= progress; return <span key={i} className="flex-1 rounded-full transition-colors" style={{ height: hgt, background: played ? "#E8462B" : "rgba(255,255,255,.14)" }}></span>; })}
+        </div>
+        <div className="flex flex-col items-end font-mono text-[12px] text-muted shrink-0 w-14">
+          <span className="text-ink">{fmt(elapsed)}</span><span>{fmt(totalSecs)}</span>
+        </div>
+      </div>
+      <div className="mt-8 leading-[1.75] font-body" style={{ fontSize: 27 }}>
+        {words.map((w, i) => { const spoken = i < activeIdx, current = i === activeIdx; return <span key={i} style={{ color: current ? "#fff" : spoken ? "rgba(245,243,239,.95)" : "rgba(142,138,151,.5)", background: current ? "#E8462B" : "transparent", padding: current ? "2px 7px" : "2px 0", borderRadius: 6, fontWeight: current ? 700 : 500, transition: "color .12s, background .12s" }}>{w.word}{" "}</span>; })}
+      </div>
+      <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-8">Word-by-word &middot; press play to follow along</p>
+    </div>
+  );
+}
+
+function FakeReadAlong() {
   const [playing, setPlaying] = useState(false);
   const [idx, setIdx] = useState(-1);
   const tRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -338,6 +452,32 @@ function ReadAlong() {
 }
 
 /* ----------------------------- DETAIL MODAL ----------------------------- */
+// Header block for the detail modal. Renders the hero image when the story has
+// one, falling back to the gradient + glyph the design ships with otherwise.
+function DetailModalHero({ story }: { story: Story }) {
+  const c = CAT[story.cat];
+  const [heroOk, setHeroOk] = useState(true);
+  const showHero = !!story.heroImage && heroOk;
+  return (
+    <div className="absolute inset-0" style={{ background: c }}>
+      {showHero && (
+        <img
+          src={story.heroImage}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+          onError={() => {
+            setHeroOk(false);
+            console.warn("[lorewire modal hero err]", { storyId: story.id, src: story.heroImage });
+          }}
+        />
+      )}
+      <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(180deg, rgba(0,0,0,.05) 0%, rgba(0,0,0,.45) 65%, rgba(21,20,26,.9) 100%)" : "radial-gradient(90% 120% at 72% 22%, rgba(255,255,255,.20), rgba(0,0,0,.5) 74%)" }}></div>
+      {!showHero && <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>}
+      {!showHero && <div className="absolute -right-6 top-0 font-display font-black leading-none select-none" style={{ fontSize: 380, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
+    </div>
+  );
+}
+
 function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   useEffect(() => { setTab(initialTab || "Watch"); }, [story.id, initialTab]);
@@ -355,11 +495,8 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
       <div className="min-h-full flex items-start justify-center py-10 px-4">
         <div className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()}>
           <div className="relative h-[400px]">
-            <div className="absolute inset-0" style={{ background: c }}>
-              <div className="absolute inset-0" style={{ background: "radial-gradient(90% 120% at 72% 22%, rgba(255,255,255,.20), rgba(0,0,0,.5) 74%)" }}></div>
-              <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>
-              <div className="absolute -right-6 top-0 font-display font-black leading-none select-none" style={{ fontSize: 380, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>
-            </div>
+            <DetailModalHero story={story} />
+
             <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background: "linear-gradient(0deg,#15141A 4%, rgba(21,20,26,0) 100%)" }}></div>
             <button onClick={onClose} className="absolute top-5 right-5 w-10 h-10 rounded-full flex items-center justify-center text-ink z-10" style={{ background: "rgba(0,0,0,.5)" }}><XI size={22} /></button>
             <button onClick={() => setTab("Watch")} className="absolute left-10 top-[150px] w-[72px] h-[72px] rounded-full flex items-center justify-center text-bg hover:scale-105 transition" style={{ background: "#F5F3EF", boxShadow: "0 12px 32px rgba(0,0,0,.45)" }}><PlayI size={32} /></button>
@@ -394,9 +531,9 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               ))}
             </div>
             <div className="pt-7">
-              {tab === "Watch" && <WatchDoodle />}
+              {tab === "Watch" && <WatchDoodle story={story} />}
               {tab === "Read" && <Read story={story} />}
-              {tab === "Read-along" && <ReadAlong />}
+              {tab === "Read-along" && <ReadAlong story={story} />}
             </div>
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>

@@ -55,11 +55,27 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; rounded?: boolean; showTitle?: boolean }) {
   const c = CAT[story.cat];
+  // Heroes that 404 fall back to the gradient automatically.
+  const [imageOk, setImageOk] = useState(true);
+  const showImage = !!story.heroImage && imageOk;
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded ? 12 : 0, background: c }}>
-      <div className="absolute inset-0" style={{ background: "radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)" }}></div>
-      <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
-      <div className="absolute -right-3 -top-4 font-display font-black leading-none select-none" style={{ fontSize: 172, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>
+      {showImage && (
+        <img
+          src={story.heroImage}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+          onError={() => {
+            setImageOk(false);
+            console.warn("[lorewire poster err]", { storyId: story.id, src: story.heroImage });
+          }}
+        />
+      )}
+      <div className="absolute inset-0" style={{ background: showImage ? "linear-gradient(180deg, rgba(0,0,0,0) 35%, rgba(0,0,0,.55) 100%)" : "radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)" }}></div>
+      {!showImage && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
+      {!showImage && (
+        <div className="absolute -right-3 -top-4 font-display font-black leading-none select-none" style={{ fontSize: 172, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>
+      )}
       <div className="absolute inset-0 poster-vig"></div>
       <div className="absolute left-2.5 top-2.5">
         <span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.32)" }}>{story.cat}</span>
@@ -81,6 +97,8 @@ const RailHead = ({ children }: { children: React.ReactNode }) => (
 /* ----------------------------- BILLBOARD ----------------------------- */
 function Billboard({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn; onShuffle: () => void }) {
   const c = CAT[story.cat];
+  const [heroOk, setHeroOk] = useState(true);
+  const showHero = !!story.heroImage && heroOk;
   return (
     <div className="relative h-[500px] w-full overflow-hidden">
       <div className="absolute left-5 z-30 flex items-center gap-2" style={{ top: "calc(env(safe-area-inset-top, 0px) + 14px)" }}>
@@ -91,9 +109,20 @@ function Billboard({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn;
         <span className="font-display font-black tracking-tight text-ink ink-shadow" style={{ fontSize: 18 }}>LoreWire</span>
       </div>
       <div className="absolute inset-0 drift" style={{ background: c }}>
-        <div className="absolute inset-0" style={{ background: "radial-gradient(120% 90% at 70% 20%, rgba(255,255,255,.18), rgba(0,0,0,.45) 72%)" }}></div>
-        <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
-        <div className="absolute -right-6 top-6 font-display font-black leading-none select-none" style={{ fontSize: 320, color: "rgba(255,255,255,.09)" }}>{story.glyph}</div>
+        {showHero && (
+          <img
+            src={story.heroImage}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover"
+            onError={() => {
+              setHeroOk(false);
+              console.warn("[lorewire billboard err]", { storyId: story.id, src: story.heroImage });
+            }}
+          />
+        )}
+        <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(180deg, rgba(0,0,0,.15) 0%, rgba(0,0,0,.45) 70%, rgba(10,10,12,.85) 100%)" : "radial-gradient(120% 90% at 70% 20%, rgba(255,255,255,.18), rgba(0,0,0,.45) 72%)" }}></div>
+        {!showHero && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
+        {!showHero && <div className="absolute -right-6 top-6 font-display font-black leading-none select-none" style={{ fontSize: 320, color: "rgba(255,255,255,.09)" }}>{story.glyph}</div>}
       </div>
       <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background: "linear-gradient(0deg,#0A0A0C 6%, rgba(10,10,12,.55) 45%, rgba(10,10,12,0) 100%)" }}></div>
 
@@ -194,8 +223,29 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
   );
 }
 
-/* ----------------------------- WATCH (doodle frame) ----------------------------- */
-function WatchDoodle() {
+/* ----------------------------- WATCH (real video or doodle frame) ----------------------------- */
+function WatchDoodle({ story }: { story: Story }) {
+  // Real generated video gets a native player with the hero as poster; the
+  // hand-drawn doodle stays as the fallback so older stories without media
+  // keep their illustrated look.
+  if (story.videoUrl) {
+    return (
+      <div className="px-4 pt-4 pb-2">
+        <div className="relative rounded-[14px] overflow-hidden mx-auto bg-black" style={{ height: 430, width: "100%" }}>
+          <video
+            src={story.videoUrl}
+            poster={story.heroImage}
+            controls
+            preload="metadata"
+            playsInline
+            className="absolute inset-0 w-full h-full object-contain"
+            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: story.videoUrl })}
+          />
+        </div>
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted text-center mt-3">LoreWire Original &middot; doodle short</p>
+      </div>
+    );
+  }
   return (
     <div className="px-4 pt-4 pb-2">
       <div className="relative rounded-[14px] overflow-hidden mx-auto" style={{ background: "#FBFAF4", height: 430, width: "100%" }}>
@@ -384,7 +434,104 @@ const SCRIPT = (
   "She said she moved it somewhere safe. It was not, in any sense, safe."
 ).split(" ");
 
-function ReadAlong() {
+function ReadAlong({ story }: { story: Story }) {
+  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
+  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+}
+
+// Real read-along: drives the karaoke from an <audio> element's timeupdate,
+// using the alignment word timings the pipeline writes (3.1 STT step).
+function RealReadAlong({ story }: { story: Story }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const words = story.alignment || [];
+
+  // Find the active word index by linear scan — same rule the Remotion
+  // composition uses (the chunk has at most ~4 words; binary search would
+  // be more code for no win).
+  const activeIdx = (() => {
+    for (let i = 0; i < words.length; i++) {
+      if (elapsed >= words[i].start && elapsed < words[i].end) return i;
+    }
+    return elapsed >= (words[words.length - 1]?.end ?? 0) ? words.length - 1 : -1;
+  })();
+
+  const toggle = () => {
+    const a = audioRef.current;
+    if (!a) return;
+    if (a.paused) {
+      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId: story.id, e }));
+    } else {
+      a.pause();
+    }
+  };
+
+  const totalSecs = duration || words[words.length - 1]?.end || 0;
+  const progress = totalSecs > 0 ? (elapsed / totalSecs) * 100 : 0;
+  const fmt = (s: number) => {
+    const m = Math.floor(s / 60);
+    const ss = String(Math.floor(s % 60)).padStart(2, "0");
+    return `${m}:${ss}`;
+  };
+
+  return (
+    <div className="px-4 pt-4 pb-2">
+      <audio
+        ref={audioRef}
+        src={story.audioUrl}
+        preload="metadata"
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+        onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
+        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+      />
+      <div className="flex items-center gap-3.5">
+        <button onClick={toggle} className="w-14 h-14 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 active:scale-95 transition">
+          {playing
+            ? <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+            : <PlayI size={24} />}
+        </button>
+        <div className="flex-1 flex items-center gap-[2px] h-12">
+          {Array.from({ length: 46 }).map((_, i) => {
+            const seed = Math.sin(i * 1.7) * 0.5 + 0.5;
+            const hgt = 16 + seed * 30 + (i % 3) * 6;
+            const played = (i / 46) * 100 <= progress;
+            return <span key={i} className="flex-1 rounded-full transition-colors" style={{ height: hgt, background: played ? "#E8462B" : "rgba(255,255,255,.14)" }}></span>;
+          })}
+        </div>
+      </div>
+      <div className="flex justify-between font-mono text-[11px] text-muted mt-2">
+        <span>{fmt(elapsed)}</span><span>{fmt(totalSecs)}</span>
+      </div>
+
+      <div className="mt-6 leading-[1.7] font-body" style={{ fontSize: 21 }}>
+        {words.map((w, i) => {
+          const spoken = i < activeIdx;
+          const current = i === activeIdx;
+          return (
+            <span key={i} style={{
+              color: current ? "#fff" : spoken ? "rgba(245,243,239,.95)" : "rgba(142,138,151,.55)",
+              background: current ? "#E8462B" : "transparent",
+              padding: current ? "1px 5px" : "1px 0",
+              borderRadius: 5,
+              fontWeight: current ? 700 : 500,
+              transition: "color .12s, background .12s",
+            }}>{w.word}{" "}</span>
+          );
+        })}
+      </div>
+      <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-6">Word-by-word &middot; tap play to follow along</p>
+    </div>
+  );
+}
+
+// Fallback read-along for stories without alignment/audio. Drives a fake
+// 300ms-per-word ticker so the design stays alive in the validation catalog.
+function FakeReadAlong() {
   const [playing, setPlaying] = useState(false);
   const [idx, setIdx] = useState(-1);
   const tRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -466,13 +613,26 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
   const more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
   if (more.length < 3) more.push(...STORIES.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
 
+  const [headerHeroOk, setHeaderHeroOk] = useState(true);
+  const showHeaderHero = !!story.heroImage && headerHeroOk;
   return (
     <div className="screen sheet-in z-40 noscroll" style={{ background: "#0A0A0C" }}>
       <div className="relative h-[300px]">
         <div className="absolute inset-0" style={{ background: c }}>
-          <div className="absolute inset-0" style={{ background: "radial-gradient(120% 95% at 72% 18%, rgba(255,255,255,.18), rgba(0,0,0,.5) 74%)" }}></div>
-          <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>
-          <div className="absolute -right-4 top-0 font-display font-black leading-none select-none" style={{ fontSize: 240, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>
+          {showHeaderHero && (
+            <img
+              src={story.heroImage}
+              alt=""
+              className="absolute inset-0 w-full h-full object-cover"
+              onError={() => {
+                setHeaderHeroOk(false);
+                console.warn("[lorewire sheet hero err]", { storyId: story.id, src: story.heroImage });
+              }}
+            />
+          )}
+          <div className="absolute inset-0" style={{ background: showHeaderHero ? "linear-gradient(180deg, rgba(0,0,0,.05) 0%, rgba(0,0,0,.4) 70%, rgba(10,10,12,.85) 100%)" : "radial-gradient(120% 95% at 72% 18%, rgba(255,255,255,.18), rgba(0,0,0,.5) 74%)" }}></div>
+          {!showHeaderHero && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
+          {!showHeaderHero && <div className="absolute -right-4 top-0 font-display font-black leading-none select-none" style={{ fontSize: 240, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
         </div>
         <div className="absolute inset-x-0 bottom-0 h-1/2" style={{ background: "linear-gradient(0deg,#0A0A0C 5%, rgba(10,10,12,0) 100%)" }}></div>
         <button onClick={onClose} className="absolute top-4 left-4 w-9 h-9 rounded-full flex items-center justify-center text-ink z-10" style={{ background: "rgba(0,0,0,.4)" }}>
@@ -523,9 +683,9 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         </div>
 
         <div className="-mx-4 mt-2">
-          {tab === "Watch" && <WatchDoodle />}
+          {tab === "Watch" && <WatchDoodle story={story} />}
           {tab === "Read" && <Read story={story} />}
-          {tab === "Read-along" && <ReadAlong />}
+          {tab === "Read-along" && <ReadAlong story={story} />}
         </div>
 
         <section className="mt-8 -mx-4">

@@ -5,6 +5,12 @@ import { PUBLISHED } from "@/data/published";
 
 export type Cat = "Drama" | "Entitled" | "Humor" | "Wholesome" | "Dating" | "Roommate";
 
+export interface AlignedWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
 export interface Story {
   id: string;
   title: string;
@@ -16,6 +22,13 @@ export interface Story {
   tags: string[];
   syn: string;
   body?: string;
+  // Pipeline-generated media (3.1 + 3.2). All optional — UI components fall
+  // back to their CSS treatments when these are unset.
+  heroImage?: string;
+  images?: string[];
+  audioUrl?: string;
+  videoUrl?: string;
+  alignment?: AlignedWord[];
 }
 
 export const CAT: Record<Cat, string> = {
@@ -87,6 +100,11 @@ for (const p of PUBLISHED) {
   const existing = STORIES.find((s) => s.id === p.id);
   if (existing) {
     existing.body = p.body;
+    if (p.heroImage) existing.heroImage = p.heroImage;
+    if (p.images) existing.images = p.images;
+    if (p.audioUrl) existing.audioUrl = p.audioUrl;
+    if (p.videoUrl) existing.videoUrl = p.videoUrl;
+    if (p.alignment) existing.alignment = p.alignment;
   } else {
     STORIES.push({
       id: p.id,
@@ -99,6 +117,11 @@ for (const p of PUBLISHED) {
       tags: ["True Story", cat],
       syn: p.syn || "",
       body: p.body,
+      heroImage: p.heroImage,
+      images: p.images,
+      audioUrl: p.audioUrl,
+      videoUrl: p.videoUrl,
+      alignment: p.alignment,
     });
     if (!NEW_ROW.includes(p.id)) NEW_ROW.unshift(p.id);
   }
