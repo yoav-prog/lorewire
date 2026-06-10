@@ -6,10 +6,10 @@ in the DB. When unset, callers keep the local-file behavior (write to
 `lorewire-app/public/generated/<id>/`, store the `/generated/<id>/<file>` URL)
 so dev runs work offline.
 
-Auth uses a separate service account (`GOOGLE_GCS_*`) from the TTS/STT one —
-clean separation of duties per the security plan. The OAuth2 token flow is
-the same JWT bearer dance `pipeline/google_auth.py` uses; we sign with
-google-auth's signer and exchange via stdlib urllib.
+Auth uses a separate service account (`GCS_CLIENT_EMAIL` / `GCS_PRIVATE_KEY`)
+from the TTS/STT one — clean separation of duties per the security plan. The
+OAuth2 token flow is the same JWT bearer dance `pipeline/google_auth.py` uses;
+we sign with google-auth's signer and exchange via stdlib urllib.
 
 The bucket itself must already grant `roles/storage.objectViewer` to
 `allUsers` (uniform bucket-level access). That makes every uploaded object
@@ -53,12 +53,15 @@ _MIME = {
 
 
 def is_configured() -> bool:
-    """True when GCS_BUCKET + all three GOOGLE_GCS_* env vars are set."""
+    """True when GCS_BUCKET + the two required GCS_* credential vars are set."""
     return bool(config.env("GCS_BUCKET")) and not _missing_credentials()
 
 
 def _missing_credentials() -> list[str]:
-    needed = ("GOOGLE_GCS_PROJECT_ID", "GOOGLE_GCS_CLIENT_EMAIL", "GOOGLE_GCS_PRIVATE_KEY")
+    # client_id is the service account's numeric id, useful for telemetry but
+    # not required by google-auth's JWT bearer flow — client_email + private_key
+    # are the two that actually sign the token.
+    needed = ("GCS_CLIENT_EMAIL", "GCS_PRIVATE_KEY")
     return [k for k in needed if not config.env(k)]
 
 
@@ -68,17 +71,16 @@ def _service_account_info() -> dict:
         raise RuntimeError(
             "GCS upload is not configured. Set " + ", ".join(miss) + " in .env.local."
         )
-    private_key = (config.env("GOOGLE_GCS_PRIVATE_KEY") or "").replace("\\n", "\n")
+    private_key = (config.env("GCS_PRIVATE_KEY") or "").replace("\\n", "\n")
     if "BEGIN PRIVATE KEY" not in private_key:
         raise RuntimeError(
-            "GOOGLE_GCS_PRIVATE_KEY is set but does not look like a PEM key. Verify the "
+            "GCS_PRIVATE_KEY is set but does not look like a PEM key. Verify the "
             "'-----BEGIN PRIVATE KEY-----' line is intact and newlines are preserved."
         )
     return {
         "type": "service_account",
-        "project_id": config.env("GOOGLE_GCS_PROJECT_ID"),
         "private_key": private_key,
-        "client_email": config.env("GOOGLE_GCS_CLIENT_EMAIL"),
+        "client_email": config.env("GCS_CLIENT_EMAIL"),
         "token_uri": TOKEN_URI,
     }
 

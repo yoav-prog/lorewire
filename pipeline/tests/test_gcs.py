@@ -15,22 +15,21 @@ from pipeline import gcs
 class ConfigurationTests(unittest.TestCase):
     def test_missing_bucket_means_not_configured(self):
         with mock.patch.dict(os.environ, {}, clear=False):
-            for k in ("GCS_BUCKET", "GOOGLE_GCS_PROJECT_ID", "GOOGLE_GCS_CLIENT_EMAIL", "GOOGLE_GCS_PRIVATE_KEY"):
+            for k in ("GCS_BUCKET", "GCS_CLIENT_EMAIL", "GCS_PRIVATE_KEY"):
                 os.environ.pop(k, None)
             self.assertFalse(gcs.is_configured())
 
     def test_bucket_alone_is_not_enough(self):
         with mock.patch.dict(os.environ, {"GCS_BUCKET": "b"}, clear=False):
-            for k in ("GOOGLE_GCS_PROJECT_ID", "GOOGLE_GCS_CLIENT_EMAIL", "GOOGLE_GCS_PRIVATE_KEY"):
+            for k in ("GCS_CLIENT_EMAIL", "GCS_PRIVATE_KEY"):
                 os.environ.pop(k, None)
             self.assertFalse(gcs.is_configured())
 
-    def test_all_four_present_is_configured(self):
+    def test_all_three_present_is_configured(self):
         env = {
             "GCS_BUCKET": "b",
-            "GOOGLE_GCS_PROJECT_ID": "p",
-            "GOOGLE_GCS_CLIENT_EMAIL": "e",
-            "GOOGLE_GCS_PRIVATE_KEY": "k",
+            "GCS_CLIENT_EMAIL": "e",
+            "GCS_PRIVATE_KEY": "k",
         }
         with mock.patch.dict(os.environ, env, clear=False):
             self.assertTrue(gcs.is_configured())
