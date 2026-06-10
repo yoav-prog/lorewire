@@ -22,6 +22,7 @@ import {
   TITLE_FADE_MS,
 } from "./caption-style";
 import { findActiveWordIndex } from "./caption-words";
+import { FONT_FAMILY } from "./fonts";
 import type {
   ShortCaptionChunk,
   ShortCaptionWord,
@@ -70,7 +71,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
 
   return (
     <AbsoluteFill
-      style={{ background: "#ffffff", fontFamily: "Inter, system-ui, sans-serif" }}
+      style={{ background: "#ffffff", fontFamily: FONT_FAMILY }}
     >
       {config.voiceover_url && <Audio src={staticFile(config.voiceover_url)} />}
 
@@ -203,7 +204,7 @@ const DoodleCaption: React.FC<{
         style={{
           fontSize,
           fontWeight: style.fontWeight,
-          fontFamily: "Inter, system-ui, sans-serif",
+          fontFamily: FONT_FAMILY,
           textTransform: style.textTransform,
           letterSpacing: style.letterSpacing,
           lineHeight: style.lineHeight,

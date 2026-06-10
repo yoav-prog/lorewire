@@ -98,16 +98,22 @@ def _image_filename(index: int) -> str:
     return "hero.png" if index == 0 else f"scene-{index}.png"
 
 
+# Soft default used when the admin hasn't set `budget.daily_usd` yet. Matches
+# the placeholder shown on the admin settings page and gives the running cost
+# log a real number to compare against on first runs.
+DEFAULT_BUDGET_DAILY_USD = 5.0
+
+
 def _budget_log() -> None:
     """Print the daily spend cap and a running estimate. Never blocks."""
     cap_raw = store.get_setting("budget.daily_usd")
     try:
-        cap = float(cap_raw) if cap_raw is not None else 0.0
+        cap = float(cap_raw) if cap_raw is not None else DEFAULT_BUDGET_DAILY_USD
     except ValueError:
-        cap = 0.0
+        cap = DEFAULT_BUDGET_DAILY_USD
     spent = _running_cost_usd()
-    cap_str = f"${cap:.2f}" if cap > 0 else "(unset)"
-    print(f"[media budget] cap = {cap_str} / day, est spend this process = ${spent:.2f}")
+    note = "" if cap_raw is not None else " (default; set budget.daily_usd in /admin/settings to override)"
+    print(f"[media budget] cap = ${cap:.2f} / day{note}, est spend this process = ${spent:.2f}")
 
 
 def _running_cost_usd() -> float:

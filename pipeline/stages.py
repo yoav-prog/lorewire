@@ -216,7 +216,11 @@ def make_image_prompts(idea: dict, body: str, dry_run: bool, n: int = 4) -> list
         f"Headline: {idea['headline']}\n\n"
         f"Article:\n{body}"
     )
-    raw = llm.chat(instruction, 800).strip()
+    # gpt-5-nano is plenty for a structured JSON list this small and
+    # ~10x cheaper than gpt-5.4-mini (the default for the article rewrite).
+    # Override locally instead of switching the admin's stage selection so the
+    # article-rewrite stage keeps its higher-quality model.
+    raw = llm.chat(instruction, 800, model="openai/gpt-5-nano").strip()
     prompts = _parse_prompt_list(raw, n, idea["headline"], style)
     return prompts
 

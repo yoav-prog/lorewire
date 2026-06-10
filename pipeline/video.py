@@ -308,3 +308,76 @@ def _stage_assets(
         shutil.copy2(src, static_dir / src.name)
         static_images.append(f"{safe_id}/{src.name}")
     return {"audio": static_audio, "images": static_images}
+
+
+# --- re-render CLI ------------------------------------------------------------
+
+def rerender_from_db(story_id: str, repo_root: Path) -> dict:
+    """Re-render an existing story's video from its persisted media columns.
+
+    Reads `hero_image`, `images`, `audio_url`, and `alignment` from the
+    `stories` row, calls `generate_video`, and writes `video_url` + a new
+    `updated_at` back to the same row. Spends no API money — only CPU and
+    disk. Returns the new column dict (`{}` on a clean failure).
+    """
+    import datetime
+    import sqlite3
+    from pipeline import config
+
+    safe_id = media._sanitize_id(story_id)
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    raw = conn.execute(
+        "SELECT title, hero_image, images, audio_url, alignment "
+        "FROM stories WHERE id = ?",
+        (safe_id,),
+    ).fetchone()
+    if not raw:
+        print(f"[video id={safe_id}] no story with that id in {config.DB_PATH}")
+        return {}
+    row = dict(raw)
+
+    hero = row.get("hero_image")
+    try:
+        scenes = json.loads(row.get("images") or "[]")
+    except json.JSONDecodeError:
+        scenes = []
+    image_urls = ([hero] if hero else []) + list(scenes)
+    try:
+        alignment = json.loads(row.get("alignment") or "[]")
+    except json.JSONDecodeError:
+        alignment = []
+
+    cols = generate_video(
+        safe_id,
+        row.get("title") or "",
+        image_urls,
+        row.get("audio_url") or "",
+        alignment,
+        repo_root=repo_root,
+    )
+    if "video_url" in cols:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "UPDATE stories SET video_url = ?, updated_at = ? WHERE id = ?",
+            (cols["video_url"], now, safe_id),
+        )
+        conn.commit()
+    conn.close()
+    return cols
+
+
+def _cli() -> None:
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Re-render the doodle short for an existing story.",
+    )
+    ap.add_argument("story_id", help="The stories.id to re-render (e.g. 'envelope').")
+    args = ap.parse_args()
+    cols = rerender_from_db(args.story_id, Path(__file__).resolve().parent.parent)
+    if not cols:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    _cli()

@@ -16,8 +16,8 @@ from pipeline import config, models
 totals = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
-def _resolve() -> tuple[str, str, str]:
-    selected = models.get_selected("llm")  # e.g. "openai/gpt-5.4-mini"
+def _resolve(model_id: str | None = None) -> tuple[str, str, str]:
+    selected = model_id or models.get_selected("llm")  # e.g. "openai/gpt-5.4-mini"
     provider, _, model = selected.partition("/")
     if provider == "openai":
         key = config.env("OPENAI_API_KEY")
@@ -31,8 +31,14 @@ def _resolve() -> tuple[str, str, str]:
     )
 
 
-def chat(prompt: str, max_tokens: int = 2000) -> str:
-    key, base, model = _resolve()
+def chat(prompt: str, max_tokens: int = 2000, model: str | None = None) -> str:
+    """Call the active LLM (or `model` when set, e.g. 'openai/gpt-5-nano').
+
+    `model` is a registry id and falls back to the admin's stage selection when
+    omitted. Used by smaller sub-stages (image-prompt builder, future title
+    generator) that don't need the full article-rewrite model's budget.
+    """
+    key, base, model = _resolve(model)
     body = json.dumps(
         {
             "model": model,
