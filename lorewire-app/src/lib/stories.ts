@@ -53,8 +53,9 @@ export const CONTINUE: { id: string; p: number }[] = [
   { id: "wedding", p: 67 },
   { id: "rules", p: 30 },
   { id: "bill", p: 88 },
+  { id: "fence", p: 52 },
 ];
-export const TOP10 = ["envelope", "replyall", "fence", "wrongnumber", "groupghost", "fridge"];
-export const ENTITLED_ROW = ["seat", "parking", "birthday", "landlord", "envelope"];
-export const NEW_ROW = ["stranger", "wifi", "wrongmom", "wrongnumber"];
+export const TOP10 = ["envelope", "replyall", "fence", "wrongnumber", "groupghost", "fridge", "wifi", "seat", "wrongmom", "stranger"];
+export const ENTITLED_ROW = ["seat", "parking", "birthday", "landlord", "envelope", "bill"];
+export const NEW_ROW = ["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost"];
 export const PILLS = ["All", "Drama", "Entitled", "Humor", "Wholesome", "Dating", "Roommate"];

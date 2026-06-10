@@ -12,6 +12,7 @@ import {
   PILLS,
   type Story,
 } from "@/lib/stories";
+import DesktopShell from "@/components/DesktopShell";
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -605,8 +606,8 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
   );
 }
 
-/* ----------------------------- APP SHELL ----------------------------- */
-export default function AppShell() {
+/* ----------------------------- MOBILE SHELL ----------------------------- */
+function MobileShell() {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
@@ -647,5 +648,21 @@ export default function AppShell() {
 
       <TabBar tab={tab} setTab={(t) => { close(); setTab(t); }} />
     </div>
+  );
+}
+
+/* ----------------------------- RESPONSIVE APP ----------------------------- */
+// Mobile layout below the lg breakpoint, the desktop layout at lg and up.
+// Both mount; CSS shows exactly one, so neither layout regresses the other.
+export default function AppShell() {
+  return (
+    <>
+      <div className="lg:hidden">
+        <MobileShell />
+      </div>
+      <div className="hidden lg:block">
+        <DesktopShell />
+      </div>
+    </>
   );
 }
