@@ -1,0 +1,10 @@
+# LoreWire pipeline.
+#
+# The pipeline was originally stdlib-only, but the Google Cloud REST APIs
+# require a service-account JWT signed with RSA-SHA256 — Python stdlib has
+# no RSA primitives. google-auth gives us a signer + JWT encoder; HTTP is
+# still done with stdlib urllib.
+#
+# Install:  python -m pip install -r pipeline/requirements.txt
+
+google-auth>=2.50,<3

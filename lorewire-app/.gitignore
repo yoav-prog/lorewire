@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# pipeline-generated media (served as /generated/*; uploaded to GCS in prod)
+/public/generated/

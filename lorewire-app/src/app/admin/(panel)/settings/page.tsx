@@ -23,6 +23,12 @@ const FIELDS: { key: string; label: string; placeholder: string; hint?: string }
       hint: "Soft cap the pipeline checks before spending on media.",
     },
     {
+      key: "voice.google_voice_name",
+      label: "Google voice name",
+      placeholder: "en-US-Chirp3-HD-Aoede",
+      hint: "Full Google voice id (e.g. en-US-Chirp3-HD-Charon). Used when the active model is Google.",
+    },
+    {
       key: "voice.elevenlabs_voice_id",
       label: "ElevenLabs voice id",
       placeholder: "21m00Tcm4TlvDq8ikWAM",

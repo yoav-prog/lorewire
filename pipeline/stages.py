@@ -176,3 +176,80 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
         f"Research:\n{research['brief']}"
     )
     return _clean_typography(llm.chat(prompt, 1200))
+
+
+# --- image prompts ------------------------------------------------------------
+
+# Default style note appended to every image prompt. Overridden by the admin
+# `video.style` setting when present.
+DEFAULT_IMAGE_STYLE = (
+    "hand-drawn doodle illustration on off-white paper, single black marker, "
+    "loose linework, minimal palette, no text, no captions, no logos"
+)
+
+
+def make_image_prompts(idea: dict, body: str, dry_run: bool, n: int = 4) -> list[str]:
+    """Build N image prompts grounded in the article (1 hero + n-1 scene shots).
+
+    Each prompt names the subject and a concrete visual moment from the body,
+    then appends the configured style note. Dry-run returns deterministic stub
+    prompts so the rest of the pipeline can run end to end without an LLM key.
+    """
+    from pipeline import llm, store
+
+    style = (store.get_setting("video.style") or DEFAULT_IMAGE_STYLE).strip()
+
+    if dry_run:
+        prompts = [f"[DRY RUN] hero illustration of {idea['headline'][:80]}. Style: {style}"]
+        for i in range(1, n):
+            prompts.append(f"[DRY RUN] scene {i}: a moment from the story. Style: {style}")
+        return prompts
+
+    instruction = (
+        f"You design illustrations for LoreWire shorts. Read the article and return "
+        f"exactly {n} image prompts as a JSON array of strings: prompt 0 is the HERO "
+        f"shot (the single most striking visual that represents the story); prompts "
+        f"1..{n - 1} are scene shots taken in story order. Each prompt: one sentence, "
+        f"concrete subject and action, NO text/captions/logos, NO faces of "
+        f"identifiable real people. Append this style note to every prompt verbatim "
+        f"at the end: \"{style}\". Return ONLY the JSON array.\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Article:\n{body}"
+    )
+    raw = llm.chat(instruction, 800).strip()
+    prompts = _parse_prompt_list(raw, n, idea["headline"], style)
+    return prompts
+
+
+def _parse_prompt_list(raw: str, n: int, headline: str, style: str) -> list[str]:
+    """Best-effort JSON parse of the LLM's prompt list, with a safe fallback.
+
+    Handles the common LLM cases: pure JSON array, fenced code block, or a
+    leading paragraph followed by the array. Falls back to a single-hero list
+    padded with generic scene prompts if nothing parses.
+    """
+    snippet = raw
+    if "```" in snippet:
+        parts = snippet.split("```")
+        for part in parts:
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("["):
+                snippet = stripped
+                break
+    start, end = snippet.find("["), snippet.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(snippet[start : end + 1])
+            if isinstance(parsed, list):
+                prompts = [str(p).strip() for p in parsed if str(p).strip()]
+                if prompts:
+                    return prompts[:n] if len(prompts) >= n else prompts
+        except json.JSONDecodeError:
+            pass
+
+    fallback = [f"Hero illustration capturing the moment of: {headline}. {style}"]
+    for i in range(1, n):
+        fallback.append(f"Scene {i} from the story above. {style}")
+    return fallback
