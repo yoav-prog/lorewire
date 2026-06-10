@@ -12,7 +12,7 @@ Full real run (needs scrape + LLM keys):
 from __future__ import annotations
 
 import argparse
-import time
+import datetime
 
 from pipeline import llm, stages, store
 
@@ -35,20 +35,26 @@ def main() -> None:
 
     processed = 0
     for post in posts:
+        before = llm.totals["total_tokens"]
         idea = stages.make_idea(post, dry)
         research = stages.research(idea, post, dry)
         body = stages.write_article(idea, research, dry)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         store.upsert_story(
             {
                 "id": idea["reddit_id"],
                 "reddit_id": idea["reddit_id"],
+                "slug": idea["reddit_id"],
                 "category": idea["category"],
                 "title": idea["headline"],
                 "summary": post.get("selftext", "")[:160],
                 "body": body,
-                "status": "dry-run" if dry else "scripted",
+                # Fresh articles land in the review queue, not live.
+                "status": "draft" if dry else "review",
                 "source_url": post.get("url", ""),
-                "created_at": time.time(),
+                "tokens": llm.totals["total_tokens"] - before,
+                "created_at": now,
+                "updated_at": now,
                 "payload": {"idea": idea, "research": research},
             }
         )

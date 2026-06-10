@@ -1,5 +1,5 @@
 {
-  "_comment": "Model registry — the single source of truth the admin picker renders and the pipeline resolves against. Selection (which model is active) lives in the DB settings, not here. API keys are NEVER stored here; they stay in the environment. 'wired' marks which adapters are implemented today.",
+  "_comment": "Model registry mirrored from /config/models.json (the pipeline's copy). The admin picker renders these; the active selection per stage lives in the settings table, not here. API keys are NEVER stored here. 'wired' marks which adapters are implemented today.",
   "llm": {
     "default": "openai/gpt-5.4-mini",
     "options": [

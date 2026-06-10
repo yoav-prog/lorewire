@@ -1,9 +1,9 @@
 """Pipeline configuration.
 
-Real runs read keys from the environment. The pipeline auto-loads
-`pipeline/.env` if present (no external dependency), so you create that file
-locally with rotated keys and the values never pass through chat or git.
-Shell/exported variables always win over the file.
+Real runs read keys from the environment. The pipeline auto-loads the repo-root
+`.env` and `.env.local`, then `pipeline/.env` if present (no external
+dependency), so keys live in a gitignored file and never pass through chat or
+git. Shell/exported variables always win over the files.
 """
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ ROOT = Path(__file__).resolve().parent
 
 
 def _load_dotenv() -> None:
-    # Load the repo-root .env then pipeline/.env (both gitignored). Exported
-    # shell vars win; among files, the first to set a key wins.
-    for env_file in (ROOT.parent / ".env", ROOT / ".env"):
+    # Load repo-root .env, repo-root .env.local, then pipeline/.env (all
+    # gitignored). Exported shell vars win; among files, the first to set a key
+    # wins. Secret keys live in .env.local beside the GitHub/Vercel tokens.
+    for env_file in (ROOT.parent / ".env", ROOT.parent / ".env.local", ROOT / ".env"):
         if not env_file.exists():
             continue
         for raw in env_file.read_text(encoding="utf-8").splitlines():

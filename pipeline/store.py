@@ -1,9 +1,10 @@
 """Storage layer.
 
 SQLite for local dev/validation (zero setup, stdlib only). The schema mirrors
-the production Postgres tables, so moving to Cloud SQL is a connection change,
-not a rewrite. `settings` holds admin-managed config like the active model per
-stage (never secrets).
+lorewire-app/src/lib/schema.ts so the Next admin and the pipeline share one
+store; moving to Postgres is a connection change, not a rewrite. Timestamps are
+ISO-8601 text and JSON blobs are text, for cross-engine portability. `settings`
+holds admin-managed config like the active model per stage (never secrets).
 """
 from __future__ import annotations
 
@@ -17,13 +18,25 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS stories (
     id           TEXT PRIMARY KEY,
     reddit_id    TEXT,
+    slug         TEXT,
     category     TEXT,
     title        TEXT,
     summary      TEXT,
     body         TEXT,
+    teleprompter TEXT,
     status       TEXT,
     source_url   TEXT,
-    created_at   REAL,
+    hero_image   TEXT,
+    images       TEXT,
+    audio_url    TEXT,
+    video_url    TEXT,
+    duration     TEXT,
+    alignment    TEXT,
+    tokens       INTEGER,
+    cost_cents   INTEGER,
+    created_at   TEXT,
+    updated_at   TEXT,
+    published_at TEXT,
     payload      TEXT
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -31,6 +44,15 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 """
+
+_COLUMNS = [
+    "id", "reddit_id", "slug", "category", "title", "summary", "body",
+    "teleprompter", "status", "source_url", "hero_image", "images", "audio_url",
+    "video_url", "duration", "alignment", "tokens", "cost_cents", "created_at",
+    "updated_at", "published_at", "payload",
+]
+# Refreshed on conflict: everything except the identity and creation time.
+_UPDATE = [c for c in _COLUMNS if c not in ("id", "created_at")]
 
 
 def _conn() -> sqlite3.Connection:
@@ -45,25 +67,32 @@ def init() -> None:
         c.executescript(SCHEMA)
 
 
+def _serialize(s: dict) -> dict:
+    row = {k: s.get(k) for k in _COLUMNS}
+    for jcol in ("images", "alignment", "payload"):
+        if isinstance(row.get(jcol), (dict, list)):
+            row[jcol] = json.dumps(row[jcol])
+    return row
+
+
 def upsert_story(s: dict) -> None:
-    row = {**s, "payload": json.dumps(s.get("payload", {}))}
+    row = _serialize(s)
+    cols = ", ".join(_COLUMNS)
+    placeholders = ", ".join(f":{c}" for c in _COLUMNS)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in _UPDATE)
     with _conn() as c:
         c.execute(
-            """
-            INSERT INTO stories (id, reddit_id, category, title, summary, body, status, source_url, created_at, payload)
-            VALUES (:id, :reddit_id, :category, :title, :summary, :body, :status, :source_url, :created_at, :payload)
-            ON CONFLICT(id) DO UPDATE SET
-                category=excluded.category, title=excluded.title, summary=excluded.summary,
-                body=excluded.body, status=excluded.status, source_url=excluded.source_url,
-                payload=excluded.payload
-            """,
+            f"INSERT INTO stories ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}",
             row,
         )
 
 
 def all_stories() -> list[dict]:
     with _conn() as c:
-        cur = c.execute("SELECT id, category, title, status FROM stories ORDER BY created_at DESC")
+        cur = c.execute(
+            "SELECT id, category, title, status FROM stories ORDER BY created_at DESC"
+        )
         return [dict(r) for r in cur.fetchall()]
 
 
