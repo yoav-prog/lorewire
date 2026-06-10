@@ -18,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from pipeline import media
+from pipeline import gcs, media
 
 VIDEO_PROJECT_RELATIVE = Path("video")
 ENTRY_POINT = "src/Root.tsx"
@@ -140,11 +140,13 @@ def generate_video(
         return {}
 
     size_mb = out_mp4.stat().st_size / (1024 * 1024) if out_mp4.exists() else 0.0
+    local_url = f"{media.PUBLIC_URL_PREFIX}/{safe_id}/video.mp4"
+    stored_url = gcs.publish(out_mp4, f"{safe_id}/video.mp4", local_url)
     print(
         f"[video id={safe_id} render] done in {elapsed:.1f}s "
-        f"({size_mb:.1f} MB at {out_mp4})"
+        f"({size_mb:.1f} MB at {stored_url})"
     )
-    return {"video_url": f"{media.PUBLIC_URL_PREFIX}/{safe_id}/video.mp4"}
+    return {"video_url": stored_url}
 
 
 # --- pure helpers (covered by pipeline/tests/test_video.py) -------------------

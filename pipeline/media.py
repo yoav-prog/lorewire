@@ -22,7 +22,7 @@ import re
 import time
 from pathlib import Path
 
-from pipeline import config, images, models, stages, store, voice
+from pipeline import config, gcs, images, models, stages, store, voice
 
 # Output goes under the Next app's public/ so it serves as /generated/<id>/...
 # The pipeline runs from the repo root; this is the relative path it writes to.
@@ -198,17 +198,19 @@ def generate_media(
         kie_url = _generate_with_retry(prompt, f"id={safe_id} {label}")
         if kie_url is None:
             continue
+        local_path = out_dir / filename
         try:
-            images.download(kie_url, out_dir / filename)
+            images.download(kie_url, local_path)
         except Exception as e:
             print(f"[media id={safe_id} image {i + 1}/{len(prompts)}] {label} download FAILED: {e}")
             continue
+        stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
         elapsed = time.time() - started
         print(
             f"[media id={safe_id} image {i + 1}/{len(prompts)}] {label} "
-            f"({models.get_selected('images')}) -> {public_url} ({elapsed:.1f}s)"
+            f"({models.get_selected('images')}) -> {stored_url} ({elapsed:.1f}s)"
         )
-        image_urls.append(public_url)
+        image_urls.append(stored_url)
         if i == 0:
             hero_succeeded = True
 
@@ -236,12 +238,15 @@ def generate_media(
             elapsed = time.time() - started
             words = result.get("words", [])
             duration = words[-1]["end"] if words else 0.0
+            stored_audio_url = gcs.publish(
+                narration_path, f"{safe_id}/narration.mp3", f"{url_prefix}/narration.mp3"
+            )
             print(
                 f"[media id={safe_id} voice] {len(body)} chars "
                 f"({models.get_selected('voice')}, provider={result['provider']}) "
-                f"-> {url_prefix}/narration.mp3 ({elapsed:.1f}s, {len(words)} words, ~{duration:.1f}s audio)"
+                f"-> {stored_audio_url} ({elapsed:.1f}s, {len(words)} words, ~{duration:.1f}s audio)"
             )
-            out["audio_url"] = f"{url_prefix}/narration.mp3"
+            out["audio_url"] = stored_audio_url
             out["alignment"] = json.dumps(words)
         except Exception as e:
             print(f"[media id={safe_id} voice] FAILED: {e}")

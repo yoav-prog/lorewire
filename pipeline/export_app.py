@@ -1,8 +1,9 @@
 """Export PUBLISHED stories from the store into the Next app as a typed module.
 
-The live site reads a static catalog, so publishing in the admin is a two-step
-bridge until a production Postgres is connected: set a story to "published",
-then run this to push it into the app and redeploy.
+The public site reads a static catalog, so publishing in the admin is a two-step
+bridge: set a story to "published", then run this to push it into the app and
+redeploy. Works against both backends — SQLite locally, Postgres in production
+when `DATABASE_URL` is set.
 
     python -m pipeline.export_app
 
@@ -12,16 +13,15 @@ the next build.
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
-from pipeline.config import DB_PATH
+from pipeline import store
 
 OUT = Path(__file__).resolve().parent.parent / "lorewire-app" / "src" / "data" / "published.ts"
 
 
-def _year(row: sqlite3.Row) -> int:
-    ts = row["published_at"] or row["created_at"] or ""
+def _year(row: dict) -> int:
+    ts = row.get("published_at") or row.get("created_at") or ""
     try:
         return int(str(ts)[:4])
     except (ValueError, TypeError):
@@ -40,14 +40,7 @@ def _parse_json_col(raw, default):
 
 
 def main() -> None:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, title, category, summary, body, duration, published_at, created_at, "
-        "hero_image, images, audio_url, video_url, alignment "
-        "FROM stories WHERE status='published' AND body IS NOT NULL AND body != '' "
-        "ORDER BY published_at DESC"
-    ).fetchall()
+    rows = store.published_stories()
     data = [
         {
             "id": r["id"],
