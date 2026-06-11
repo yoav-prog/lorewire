@@ -44,10 +44,13 @@ export interface StoryRow {
   updated_at: string | null;
   published_at: string | null;
   payload: string | null;
+  // 0 or NULL = indexable; 1 = the public story page (when it exists)
+  // should emit noindex,nofollow. Mirrors articles.noindex.
+  noindex: number | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
@@ -247,6 +250,18 @@ export async function setStatus(id: string, status: StoryStatus): Promise<void> 
       id,
     ]);
   }
+}
+
+export async function setStoryNoindex(
+  id: string,
+  noindex: boolean,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE stories SET noindex = ?, updated_at = ? WHERE id = ?",
+    [noindex ? 1 : 0, now, id],
+  );
+  console.info("[stories repo] noindex", { id, noindex });
 }
 
 export async function getSetting(key: string): Promise<string | null> {

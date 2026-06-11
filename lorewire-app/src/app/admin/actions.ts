@@ -25,6 +25,7 @@ import {
   updateArticle,
   setArticleStatus,
   setArticleNoindex,
+  setStoryNoindex,
   deleteArticle,
   appendRevision,
   checkSlugAvailable,
@@ -118,6 +119,19 @@ export async function changeStatus(formData: FormData): Promise<void> {
   revalidatePath(`/admin/stories/${id}`);
   revalidatePath("/admin/stories");
   revalidatePath("/admin");
+}
+
+export async function setStoryNoindexAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const noindex = String(formData.get("noindex") ?? "") === "1";
+  if (!id) return;
+  await setStoryNoindex(id, noindex);
+  console.info("[stories action] noindex", { id, noindex });
+  revalidatePath(`/admin/stories/${id}`);
+  revalidatePath(`/admin/videos/${id}`);
 }
 
 export async function setModelAction(formData: FormData): Promise<void> {

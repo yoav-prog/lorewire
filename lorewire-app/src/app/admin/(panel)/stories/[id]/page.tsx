@@ -12,6 +12,7 @@ import {
   saveStory,
   changeStatus,
   setStoryOverrideAction,
+  setStoryNoindexAction,
 } from "@/app/admin/actions";
 import { CATEGORIES, statusClass } from "@/app/admin/ui";
 import Breadcrumb from "@/app/admin/Breadcrumb";
@@ -168,6 +169,26 @@ export default async function EditStory({
                 </form>
               ))}
             </div>
+          </div>
+
+          <div className="rounded-xl border border-line bg-surface p-4">
+            <div className={LABEL}>Search visibility</div>
+            <p className="mb-2 text-[12px] text-muted">
+              {s.noindex
+                ? "Hidden from search engines."
+                : "Indexable. Search engines can crawl this story's public page when it exists."}
+            </p>
+            <form action={setStoryNoindexAction}>
+              <input type="hidden" name="id" value={s.id} />
+              <input
+                type="hidden"
+                name="noindex"
+                value={s.noindex ? "0" : "1"}
+              />
+              <button className="rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
+                {s.noindex ? "Show in search engines" : "Hide from search engines"}
+              </button>
+            </form>
           </div>
 
           <div className="rounded-xl border border-line bg-surface p-4">
