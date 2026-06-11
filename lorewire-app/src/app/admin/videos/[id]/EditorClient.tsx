@@ -158,9 +158,17 @@ export default function EditorClient({
   // Draft config: overlays user edits on top of the persisted config so the
   // Player previews unsaved changes. Reset on persist (server revalidates →
   // new `config` prop comes in → draft regenerates).
+  //
+  // NaN guards: `??` doesn't catch NaN (NaN != null/undefined), so a
+  // malformed persisted config could otherwise carry a NaN into
+  // `durationInFrames` below and the Player would throw a hard TypeError.
+  // safePositiveInt clamps to a sane default in one place.
   const [draft, setDraft] = useState<DraftEdits>({
-    clip_start_ms: config.clip_start_ms ?? 0,
-    clip_end_ms: config.clip_end_ms ?? config.duration_ms,
+    clip_start_ms: safePositiveInt(config.clip_start_ms ?? 0, 0),
+    clip_end_ms: safePositiveInt(
+      config.clip_end_ms ?? config.duration_ms,
+      Math.max(1, safePositiveInt(config.duration_ms, 1)),
+    ),
   });
 
   // Caption draft is held separately from `draft` because it's an array
@@ -194,14 +202,17 @@ export default function EditorClient({
   );
 
   // Derived Player props — duration shrinks to the trimmed window so the
-  // scrub bar matches what the rendered MP4 will be.
-  const trimmedDurationMs = Math.max(
-    1,
+  // scrub bar matches what the rendered MP4 will be. Each step is NaN-
+  // clamped because Math.max(1, NaN) returns NaN (Math.max doesn't treat
+  // NaN as "lose to anything else"), so a single bad input would otherwise
+  // propagate all the way to the Player and throw.
+  const trimmedDurationMs = safePositiveInt(
     draft.clip_end_ms - draft.clip_start_ms,
-  );
-  const durationInFrames = Math.max(
     1,
+  );
+  const durationInFrames = safePositiveInt(
     Math.ceil((trimmedDurationMs / 1000) * FPS),
+    1,
   );
 
   // eslint-disable-next-line no-console -- rule 14
@@ -980,6 +991,16 @@ function TrimRow({
 function clamp(n: number, lo: number, hi: number): number {
   if (!Number.isFinite(n)) return lo;
   return Math.max(lo, Math.min(hi, Math.round(n)));
+}
+
+// `Math.max(1, NaN)` returns NaN — Math.max doesn't take NaN as "lose to
+// anything else", it propagates. So `Math.max(1, ...)` is NOT enough to
+// guard against NaN inputs. This helper does the explicit finite-check
+// before clamping, and rounds down so the result is always a positive
+// integer.
+function safePositiveInt(n: number, fallback: number): number {
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
 }
 
 // ─── Captions panel ──────────────────────────────────────────────────────────

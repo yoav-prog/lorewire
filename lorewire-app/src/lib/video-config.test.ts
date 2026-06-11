@@ -369,6 +369,45 @@ describe("defaultVideoConfig", () => {
     expect(cfg.duration_ms).toBe(6000);
   });
 
+  it("handles word-level alignment shape (start/end in seconds)", () => {
+    // Pre-video-editor pipeline writes alignment as word-level STT output:
+    // `[{word, start, end}]` with start/end in *seconds*. defaultVideoConfig
+    // must detect this shape and chunk it the way pipeline/video.py does —
+    // otherwise duration_ms ends up NaN and the Player throws hard.
+    const cfg = defaultVideoConfig(
+      emptyStoryRow({
+        audio_url: "/v.mp3",
+        alignment: JSON.stringify([
+          { word: "Hi",    start: 0.0, end: 0.2 },
+          { word: "there", start: 0.2, end: 0.4 },
+          { word: "world", start: 0.5, end: 0.7 },
+        ]),
+      }),
+    );
+    expect(cfg.captions.length).toBeGreaterThan(0);
+    expect(cfg.duration_ms).toBe(700);
+    expect(Number.isFinite(cfg.duration_ms)).toBe(true);
+    // Every chunk has finite ms-scale timings.
+    for (const c of cfg.captions) {
+      expect(Number.isFinite(c.start_ms)).toBe(true);
+      expect(Number.isFinite(c.end_ms)).toBe(true);
+    }
+  });
+
+  it("never produces NaN duration_ms regardless of input", () => {
+    // The Player throws `TypeError: durationInFrames must be an integer,
+    // but got NaN` if even one upstream value is NaN. Lock the boundary
+    // at the validator: result must be finite. (0 is allowed and treated
+    // as "unknown" by the editor's downstream guards.)
+    for (const alignment of [null, "", "[]", "garbage", "[{\"weird\": 1}]"]) {
+      const cfg = defaultVideoConfig(
+        emptyStoryRow({ audio_url: "/v.mp3", alignment }),
+      );
+      expect(Number.isFinite(cfg.duration_ms)).toBe(true);
+      expect(cfg.duration_ms).toBeGreaterThanOrEqual(0);
+    }
+  });
+
   it("tolerates malformed JSON in images / alignment", () => {
     // Corrupted columns shouldn't crash the editor on first open.
     const cfg = defaultVideoConfig(

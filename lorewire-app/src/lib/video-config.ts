@@ -285,9 +285,19 @@ export function applyConfigPatch(
 // video_config yet, build one from the story's raw pipeline outputs. The
 // pipeline will write a fuller version on its next run, but the editor can
 // already show the player and accept edits.
+//
+// The alignment column lives in two historical shapes:
+//   1. word-level: [{ word, start, end }] with start/end in *seconds*
+//      (what STT writes and what the pipeline's _chunk_alignment consumes)
+//   2. chunk-level: [{ start_ms, end_ms, text, words? }] with values in ms
+//      (matches ShortCaptionChunk directly)
+// We detect the shape and convert both into ShortCaptionChunk[]. If neither
+// matches OR the column is empty, captions come back empty and duration_ms
+// defaults to 1 ms so the Player still gets a finite, integer
+// durationInFrames (it rejects NaN with a hard TypeError).
 export function defaultVideoConfig(story: StoryRow): ShortVideoConfig {
   const images = safeJsonArray<string>(story.images);
-  const captions = safeJsonArray<ShortCaptionChunk>(story.alignment);
+  const captions = parseAlignmentFlexibly(story.alignment);
   const totalMs = lastCaptionEnd(captions);
 
   const doodle_frames: DoodleFrame[] = images.map((url, i) => ({
@@ -302,11 +312,130 @@ export function defaultVideoConfig(story: StoryRow): ShortVideoConfig {
     voiceover_url: story.audio_url ?? "",
     title: story.title ?? undefined,
     channel_name: "lorewire",
-    duration_ms: totalMs,
+    // Guarantee a finite non-negative integer. 0 is a valid "unknown" —
+    // the editor's `safePositiveInt` guard clamps it up to a 1-frame
+    // placeholder when handing it to @remotion/player. The Player
+    // hard-rejects NaN/Infinity though, which is what we're really
+    // defending against here.
+    duration_ms: Number.isFinite(totalMs) && totalMs > 0 ? totalMs : 0,
     doodle_frames,
     captions,
-    character_image_mouth_removed:
-      story.audio_url ? undefined : undefined, // populated by pipeline later
+  };
+}
+
+// ─── Alignment parsing (used by defaultVideoConfig) ──────────────────────────
+
+// Detect the alignment shape and convert to ShortCaptionChunk[]. Returns
+// [] for anything we can't interpret — including non-array JSON, objects
+// with unexpected keys, or values that fail the NaN/finite checks. The
+// editor tolerates an empty captions array gracefully; what it can't
+// tolerate is a single bad number infecting duration_ms.
+function parseAlignmentFlexibly(
+  raw: string | null | undefined,
+): ShortCaptionChunk[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return [];
+
+  const first = parsed[0];
+  if (typeof first !== "object" || first === null) return [];
+  const sample = first as Record<string, unknown>;
+
+  // Shape 1: chunk-level. Already what we want — just defensively validate.
+  if (
+    typeof sample.start_ms === "number" &&
+    typeof sample.end_ms === "number"
+  ) {
+    return (parsed as unknown[])
+      .map((c) => {
+        if (!c || typeof c !== "object") return null;
+        const o = c as Record<string, unknown>;
+        if (
+          !Number.isFinite(o.start_ms as number) ||
+          !Number.isFinite(o.end_ms as number) ||
+          typeof o.text !== "string"
+        ) {
+          return null;
+        }
+        return {
+          start_ms: o.start_ms as number,
+          end_ms: o.end_ms as number,
+          text: o.text,
+        } satisfies ShortCaptionChunk;
+      })
+      .filter((c): c is ShortCaptionChunk => c !== null);
+  }
+
+  // Shape 2: word-level (start/end in seconds). Chunk per the same rules
+  // pipeline/video.py uses so the editor-derived captions match the
+  // eventual render byte-for-byte.
+  if (
+    "word" in sample &&
+    typeof sample.start === "number" &&
+    typeof sample.end === "number"
+  ) {
+    return chunkAlignmentWords(
+      parsed.filter(
+        (w): w is { word: string; start: number; end: number } =>
+          !!w &&
+          typeof w === "object" &&
+          typeof (w as Record<string, unknown>).word === "string" &&
+          Number.isFinite((w as Record<string, unknown>).start as number) &&
+          Number.isFinite((w as Record<string, unknown>).end as number),
+      ),
+    );
+  }
+
+  return [];
+}
+
+// Mirrors pipeline/video.py:_chunk_alignment so the editor's first-open
+// derivation lines up with what the pipeline would write on its next run.
+const MAX_WORDS_PER_CHUNK = 4;
+const PAUSE_BREAK_S = 0.4;
+const PUNCT_BREAK_RE = /[.!?,;:]$/;
+
+function chunkAlignmentWords(
+  words: Array<{ word: string; start: number; end: number }>,
+): ShortCaptionChunk[] {
+  const chunks: ShortCaptionChunk[] = [];
+  let current: typeof words = [];
+
+  for (const w of words) {
+    if (current.length > 0) {
+      const last = current[current.length - 1];
+      const breakHere =
+        current.length >= MAX_WORDS_PER_CHUNK ||
+        w.start - last.end >= PAUSE_BREAK_S ||
+        PUNCT_BREAK_RE.test(last.word);
+      if (breakHere) {
+        chunks.push(materializeChunk(current));
+        current = [];
+      }
+    }
+    current.push(w);
+  }
+  if (current.length > 0) chunks.push(materializeChunk(current));
+  return chunks;
+}
+
+function materializeChunk(
+  words: Array<{ word: string; start: number; end: number }>,
+): ShortCaptionChunk {
+  return {
+    start_ms: Math.round(words[0].start * 1000),
+    end_ms: Math.round(words[words.length - 1].end * 1000),
+    text: words.map((w) => w.word).join(" "),
+    words: words.map((w) => ({
+      word: w.word,
+      start_ms: Math.round(w.start * 1000),
+      end_ms: Math.round(w.end * 1000),
+    })),
   };
 }
 
