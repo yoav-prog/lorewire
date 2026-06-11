@@ -133,7 +133,11 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
   const key = String(formData.get("key") ?? "");
   if (!key) return;
   await setSetting(key, String(formData.get("value") ?? ""));
-  revalidatePath("/admin/settings");
+  // Settings show up in multiple admin pages (the master switch lives on
+  // both /admin/settings and /admin/segments; the daily render cap setting
+  // is read from /admin/videos/[id]). Revalidate the whole admin layout so
+  // the next render anywhere under /admin reflects the new value.
+  revalidatePath("/admin", "layout");
 }
 
 // Wave 3 Phase 1 + 2: save all 14 caption template fields for whatever scope
