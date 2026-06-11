@@ -41,6 +41,9 @@ function PosterArt({ story, rounded = 8, showTitle = true, kicker = true }: { st
   const c = CAT[story.cat];
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
+  // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
+  // thumbnails) so the same words don't stack on top of themselves.
+  const renderCssTitle = showTitle && !story.heroHasBakedTitle;
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded, background: c }}>
       {showImage && (
@@ -60,7 +63,7 @@ function PosterArt({ story, rounded = 8, showTitle = true, kicker = true }: { st
       <div className="absolute inset-0 poster-vig"></div>
       {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
       <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
-      {showTitle && (
+      {renderCssTitle && (
         <div className="absolute left-3.5 right-3.5 bottom-5">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 23, color: "#F5F3EF" }}>{story.title}</h3>
         </div>

@@ -34,9 +34,29 @@ PUBLIC_URL_PREFIX = "/generated"
 # bug or a hostile input.
 SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
-# Default scene count. Hero is one of these (index 0), so 4 means 1 hero + 3
-# scene shots. Tunable later via an admin setting if needed.
+# Scene count target. Wave 2 raised this from 3 to 30 so the video doesn't
+# hold each frame for 30+ seconds. Admin can override via `media.scene_count`
+# in /admin/settings. Clamped to [6, 60] to keep runaway costs bounded:
+# 60 scenes at ~$0.05/image = $3.00 per story before voice + video.
+DEFAULT_SCENE_COUNT = 30
+SCENE_COUNT_MIN = 6
+SCENE_COUNT_MAX = 60
+# Legacy alias for old call sites that haven't been updated yet. Removed in a
+# follow-up once nothing imports it.
 DEFAULT_IMAGE_COUNT = 4
+
+
+def _resolve_scene_count(override: int | None) -> int:
+    """Order of precedence: explicit override > admin setting > default."""
+    if override is not None:
+        return max(SCENE_COUNT_MIN, min(SCENE_COUNT_MAX, int(override)))
+    raw = store.get_setting("media.scene_count")
+    if raw is not None:
+        try:
+            return max(SCENE_COUNT_MIN, min(SCENE_COUNT_MAX, int(raw)))
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_SCENE_COUNT
 
 # Rough USD cost bands per image (model -> avg). These are sized for budget
 # math, not invoiced totals. Refined when kie publishes a stable per-credit
@@ -158,17 +178,23 @@ def generate_media(
     story_id: str,
     idea: dict,
     body: str,
+    title: str,
     dry_run: bool,
     repo_root: Path,
-    image_count: int = DEFAULT_IMAGE_COUNT,
+    image_count: int | None = None,
 ) -> dict:
     """Generate images + narration for one story and return DB columns.
 
     Returns the subset of story columns this stage owns:
-    `hero_image`, `images`, `audio_url`, `alignment`, `cost_cents`. Caller
-    merges them into `store.upsert_story`. Any failure inside this function is
-    logged and partial output is returned (e.g. a story can still ship with
-    fewer than `image_count` images if some calls fail).
+    `hero_image`, `hero_image_landscape`, `hero_has_baked_title`, `images`,
+    `audio_url`, `alignment`, `cost_cents`. Caller merges them into
+    `store.upsert_story`. Any failure inside this function is logged and
+    partial output is returned (e.g. a story can still ship with fewer
+    images than requested if some calls fail).
+
+    `title` is the branded LoreWire title — it goes into the cinematic
+    thumbnail prompt so the image model bakes the title typography directly
+    into the hero compositions.
     """
     safe_id = _sanitize_id(story_id)
     out: dict = {}
@@ -181,21 +207,76 @@ def generate_media(
         out_dir.mkdir(parents=True, exist_ok=True)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
-    # --- images
-    prompts = stages.make_image_prompts(idea, body, dry_run, n=image_count)
-    print(f"[media id={safe_id} prompts] {len(prompts)} prompts (1 hero + {len(prompts) - 1} scenes)")
+    # --- scene image prompts: still doodle, used for Article + Gallery + the
+    # Remotion composition's per-shot illustrations. Scene count is now driven
+    # from the admin's media.scene_count setting so a single story can host
+    # 30-60 shots without a code change.
+    scene_count = _resolve_scene_count(image_count)
+    # `make_image_prompts` still yields hero + scenes, but the hero slot is
+    # overwritten downstream by the cinematic title-baked thumbnail. We keep
+    # using slot 0 from make_image_prompts only as a doodle scene-style
+    # fallback when the cinematic call fails.
+    prompts = stages.make_image_prompts(idea, body, dry_run, n=scene_count + 1)
+    print(f"[media id={safe_id} prompts] {len(prompts)} doodle scene prompts + 1 cinematic hero")
 
-    image_urls: list[str] = []
-    hero_succeeded = False
-    for i, prompt in enumerate(prompts):
-        filename = _image_filename(i)
+    # Cinematic title-baked hero: portrait (3:4) for mobile billboard + posters,
+    # landscape (16:9) for desktop hero strips. Same title typography baked into
+    # both so the CSS title overlay is suppressed in the UI.
+    portrait_hero_url: str | None = None
+    landscape_hero_url: str | None = None
+    category = idea.get("category", "Drama")
+    for aspect_ratio, filename, label in (
+        ("3:4", "hero.png", "hero portrait"),
+        ("16:9", "hero-landscape.png", "hero landscape"),
+    ):
         public_url = f"{url_prefix}/{filename}"
-        label = "hero" if i == 0 else f"scene-{i}"
         if dry_run:
-            print(f"[media id={safe_id} image {i + 1}/{len(prompts)}] {label} (DRY RUN) -> {public_url}")
-            image_urls.append(public_url)
-            if i == 0:
-                hero_succeeded = True
+            print(f"[media id={safe_id} {label}] (DRY RUN cinematic) -> {public_url}")
+            if aspect_ratio == "3:4":
+                portrait_hero_url = public_url
+            else:
+                landscape_hero_url = public_url
+            continue
+        cinematic_prompt = stages.make_thumbnail_prompt(
+            title, category, body, aspect_ratio, dry_run=False
+        )
+        started = time.time()
+        kie_url = _generate_with_retry(
+            cinematic_prompt, f"id={safe_id} {label}", aspect_ratio=aspect_ratio
+        )
+        if kie_url is None:
+            print(f"[media id={safe_id} {label}] FAILED, no image stored")
+            continue
+        local_path = out_dir / filename
+        try:
+            images.download(kie_url, local_path)
+        except Exception as e:
+            print(f"[media id={safe_id} {label}] download FAILED: {e}")
+            continue
+        stored = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+        elapsed = time.time() - started
+        print(
+            f"[media id={safe_id} {label}] cinematic title-baked "
+            f"({models.get_selected('images')}, {aspect_ratio}) -> {stored} ({elapsed:.1f}s)"
+        )
+        if aspect_ratio == "3:4":
+            portrait_hero_url = stored
+        else:
+            landscape_hero_url = stored
+
+    # Scene images (doodle aesthetic, used in Article + Gallery + Remotion).
+    # prompts[0] from make_image_prompts is the doodle hero fallback we don't
+    # need any more; the cinematic thumbnails own the hero slot now. Slice
+    # everything after for the scene set.
+    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+    scene_urls: list[str] = []
+    for i, prompt in enumerate(scene_prompts):
+        filename = f"scene-{i + 1}.png"
+        public_url = f"{url_prefix}/{filename}"
+        label = f"scene-{i + 1}"
+        if dry_run:
+            print(f"[media id={safe_id} {label}] (DRY RUN doodle) -> {public_url}")
+            scene_urls.append(public_url)
             continue
         started = time.time()
         kie_url = _generate_with_retry(prompt, f"id={safe_id} {label}")
@@ -205,51 +286,26 @@ def generate_media(
         try:
             images.download(kie_url, local_path)
         except Exception as e:
-            print(f"[media id={safe_id} image {i + 1}/{len(prompts)}] {label} download FAILED: {e}")
+            print(f"[media id={safe_id} {label}] download FAILED: {e}")
             continue
         stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
         elapsed = time.time() - started
         print(
-            f"[media id={safe_id} image {i + 1}/{len(prompts)}] {label} "
+            f"[media id={safe_id} {label}] doodle "
             f"({models.get_selected('images')}) -> {stored_url} ({elapsed:.1f}s)"
         )
-        image_urls.append(stored_url)
-        if i == 0:
-            hero_succeeded = True
+        scene_urls.append(stored_url)
 
-    if image_urls:
-        out["hero_image"] = image_urls[0]
-        out["images"] = json.dumps(image_urls[1:])
-        if not hero_succeeded:
-            # Hero slot failed (even after retry); the CMS renders hero_image as
-            # the primary visual, so we promote the first surviving scene to it
-            # rather than ship a story with no hero. Logged so a human can
-            # decide whether to regenerate.
-            print(f"[media id={safe_id} hero promoted] scene-1 used as hero (original hero failed)")
-
-    # Landscape hero: a second render of the hero prompt at 16:9 so desktop
-    # Billboard / Hero strips have a wide composition instead of cropping the
-    # 3:4 portrait. Same content brief, different framing. Cost: one extra
-    # kie call (~$0.05). The UI falls back to the portrait hero when this is
-    # absent, so a failure here never breaks the page.
-    if hero_succeeded and not dry_run and prompts:
-        landscape_filename = "hero-landscape.png"
-        landscape_local_url = f"{url_prefix}/{landscape_filename}"
-        local_path = out_dir / landscape_filename
-        started = time.time()
-        kie_url = _generate_with_retry(prompts[0], f"id={safe_id} hero-landscape", aspect_ratio="16:9")
-        if kie_url is not None:
-            try:
-                images.download(kie_url, local_path)
-                stored_url = gcs.publish(local_path, f"{safe_id}/{landscape_filename}", landscape_local_url)
-                out["hero_image_landscape"] = stored_url
-                elapsed = time.time() - started
-                print(
-                    f"[media id={safe_id} hero-landscape] 16:9 "
-                    f"({models.get_selected('images')}) -> {stored_url} ({elapsed:.1f}s)"
-                )
-            except Exception as e:
-                print(f"[media id={safe_id} hero-landscape] download/upload FAILED: {e}")
+    if portrait_hero_url:
+        out["hero_image"] = portrait_hero_url
+    if landscape_hero_url:
+        out["hero_image_landscape"] = landscape_hero_url
+    # hero_has_baked_title only true when the cinematic call landed at least
+    # one orientation; otherwise the UI falls back to the CSS overlay.
+    if portrait_hero_url or landscape_hero_url:
+        out["hero_has_baked_title"] = 1
+    if scene_urls:
+        out["images"] = json.dumps(scene_urls)
 
     # --- voice
     if dry_run:

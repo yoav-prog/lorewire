@@ -77,6 +77,13 @@ def generate_video(
     static_images = static_paths["images"]
     doodle_frames = _distribute_frames(static_images, captions, duration_ms)
 
+    # Read the Ken-Burns toggle from settings (Wave 2). Default off so the
+    # existing doodle look doesn't change without an admin explicitly turning
+    # it on. Accepts '1', 'true', 'on', 'yes' (case-insensitive) as truthy.
+    from pipeline import store as _store
+    ken_burns_raw = (_store.get_setting("video.ken_burns") or "").strip().lower()
+    ken_burns = ken_burns_raw in {"1", "true", "on", "yes"}
+
     config = {
         "voiceover_url": static_audio,
         "title": _truncate_title(title),
@@ -84,6 +91,7 @@ def generate_video(
         "duration_ms": duration_ms,
         "doodle_frames": doodle_frames,
         "captions": captions,
+        "ken_burns": ken_burns,
     }
 
     props_dir = video_project / ".props"

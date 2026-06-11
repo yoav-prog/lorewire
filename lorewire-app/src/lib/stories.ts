@@ -30,6 +30,10 @@ export interface Story {
   // modal headers so the 3:4 portrait composition doesn't get center-cropped
   // into character bodies. Same content brief, different framing.
   heroImageLandscape?: string;
+  // Wave 2 cinematic thumbnails bake the title into the image itself. When
+  // true, the UI suppresses its CSS title overlay so it doesn't double up
+  // with the title typography already in the artwork.
+  heroHasBakedTitle?: boolean;
   images?: string[];
   audioUrl?: string;
   videoUrl?: string;
@@ -108,6 +112,7 @@ for (const p of PUBLISHED) {
     if (p.source_url) existing.source_url = p.source_url;
     if (p.heroImage) existing.heroImage = p.heroImage;
     if (p.heroImageLandscape) existing.heroImageLandscape = p.heroImageLandscape;
+    if (p.heroHasBakedTitle !== undefined) existing.heroHasBakedTitle = p.heroHasBakedTitle;
     if (p.images) existing.images = p.images;
     if (p.audioUrl) existing.audioUrl = p.audioUrl;
     if (p.videoUrl) existing.videoUrl = p.videoUrl;
@@ -127,6 +132,7 @@ for (const p of PUBLISHED) {
       source_url: p.source_url,
       heroImage: p.heroImage,
       heroImageLandscape: p.heroImageLandscape,
+      heroHasBakedTitle: p.heroHasBakedTitle,
       images: p.images,
       audioUrl: p.audioUrl,
       videoUrl: p.videoUrl,

@@ -29,4 +29,8 @@ export interface ShortVideoConfig {
   duration_ms: number;
   doodle_frames: DoodleFrame[];
   captions: ShortCaptionChunk[];
+  // Wave 2 admin toggle: when true, each held image gets a slow Ken-Burns
+  // pan/zoom so 30-60 scenes don't feel static between cuts. Off by default
+  // to preserve the doodle look.
+  ken_burns?: boolean;
 }

@@ -54,6 +54,9 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; rounded?: boolean; showTitle?: boolean }) {
+  // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
+  // thumbnails) — otherwise the typography stacks on top of itself.
+  const renderCssTitle = showTitle && !story.heroHasBakedTitle;
   const c = CAT[story.cat];
   // Heroes that 404 fall back to the gradient automatically.
   const [imageOk, setImageOk] = useState(true);
@@ -81,7 +84,7 @@ function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; 
         <span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.32)" }}>{story.cat}</span>
       </div>
       <div className="absolute right-2 top-2 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
-      {showTitle && (
+      {renderCssTitle && (
         <div className="absolute left-3 right-3 bottom-3">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 22, color: "#F5F3EF" }}>{story.title}</h3>
         </div>

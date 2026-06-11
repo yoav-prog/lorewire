@@ -53,6 +53,10 @@ SCHEMA_STATEMENTS = [
     # Additive migration for DBs that pre-date the landscape hero column.
     # IF NOT EXISTS works on both SQLite (>= 3.35) and Postgres (>= 9.6).
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_image_landscape TEXT",
+    # Wave 2 cinematic thumbnails bake the title into the image, so the UI
+    # suppresses its CSS title overlay when this flag is 1. Stored as INTEGER
+    # for portability across SQLite (no native BOOLEAN) and Postgres.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_has_baked_title INTEGER DEFAULT 0",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -62,8 +66,9 @@ SCHEMA_STATEMENTS = [
 _COLUMNS = [
     "id", "reddit_id", "slug", "category", "title", "summary", "body",
     "teleprompter", "status", "source_url", "hero_image", "hero_image_landscape",
-    "images", "audio_url", "video_url", "duration", "alignment", "tokens",
-    "cost_cents", "created_at", "updated_at", "published_at", "payload",
+    "hero_has_baked_title", "images", "audio_url", "video_url", "duration",
+    "alignment", "tokens", "cost_cents", "created_at", "updated_at",
+    "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
 _UPDATE = [c for c in _COLUMNS if c not in ("id", "created_at")]
@@ -220,7 +225,8 @@ def published_stories() -> list[dict]:
     web side keeps the static-overlay pattern so the public site stays fast."""
     sql = (
         "SELECT id, title, category, summary, body, duration, published_at, "
-        "created_at, hero_image, hero_image_landscape, images, audio_url, video_url, alignment "
+        "created_at, hero_image, hero_image_landscape, hero_has_baked_title, "
+        "images, audio_url, video_url, alignment "
         "FROM stories WHERE status = "
         + ("%s" if _is_postgres() else "?")
         + " AND body IS NOT NULL AND body != "

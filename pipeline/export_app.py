@@ -63,6 +63,7 @@ def main() -> None:
             **({"source_url": r["source_url"]} if r.get("source_url") else {}),
             **({"heroImage": r["hero_image"]} if r["hero_image"] else {}),
             **({"heroImageLandscape": r["hero_image_landscape"]} if r.get("hero_image_landscape") else {}),
+            **({"heroHasBakedTitle": bool(r["hero_has_baked_title"])} if r.get("hero_has_baked_title") else {}),
             **({"images": _parse_json_col(r["images"], [])} if r["images"] else {}),
             **({"audioUrl": r["audio_url"]} if r["audio_url"] else {}),
             **({"videoUrl": r["video_url"]} if r["video_url"] else {}),
@@ -90,6 +91,7 @@ def main() -> None:
         "  source_url?: string;\n"
         "  heroImage?: string;\n"
         "  heroImageLandscape?: string;\n"
+        "  heroHasBakedTitle?: boolean;\n"
         "  images?: string[];\n"
         "  audioUrl?: string;\n"
         "  videoUrl?: string;\n"

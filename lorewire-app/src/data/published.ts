@@ -17,6 +17,7 @@ export interface PublishedStory {
   source_url?: string;
   heroImage?: string;
   heroImageLandscape?: string;
+  heroHasBakedTitle?: boolean;
   images?: string[];
   audioUrl?: string;
   videoUrl?: string;
@@ -35,6 +36,7 @@ export const PUBLISHED: PublishedStory[] = [
     "source_url": "https://www.reddit.com/r/AmItheAsshole/comments/example/",
     "heroImage": "https://storage.googleapis.com/aporia-unleash/envelope/hero.png",
     "heroImageLandscape": "https://storage.googleapis.com/aporia-unleash/envelope/hero-landscape.png",
+    "heroHasBakedTitle": true,
     "images": [
       "https://storage.googleapis.com/aporia-unleash/envelope/scene-1.png",
       "https://storage.googleapis.com/aporia-unleash/envelope/scene-2.png",

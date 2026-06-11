@@ -81,15 +81,11 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
           from={f.fromFrames}
           durationInFrames={f.lengthFrames}
         >
-          <Img
+          <DoodleFrameImg
             src={staticFile(f.url)}
-            style={{
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
-              objectFit: "cover",
-            }}
+            kenBurns={!!config.ken_burns}
+            seed={i}
+            lengthFrames={f.lengthFrames}
           />
         </Sequence>
       ))}
@@ -158,6 +154,46 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         </div>
       )}
     </AbsoluteFill>
+  );
+};
+
+// Ken-Burns variant: slow scale + pan during each frame's window so 30+ scene
+// shorts don't feel static between cuts. Direction varies by frame index for
+// visual variety. seed % 4 picks one of (zoom-in, zoom-in + pan-left,
+// zoom-in + pan-right, zoom-in + pan-up). All motions are subtle — between
+// 6% scale and 4% translate — so the brand still reads as illustration, not
+// camera movement.
+const DoodleFrameImg: React.FC<{
+  src: string;
+  kenBurns: boolean;
+  seed: number;
+  lengthFrames: number;
+}> = ({ src, kenBurns, seed, lengthFrames }) => {
+  const frame = useCurrentFrame();
+  const baseStyle: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+  };
+  if (!kenBurns) {
+    return <Img src={src} style={baseStyle} />;
+  }
+  const progress = Math.min(1, Math.max(0, frame / Math.max(1, lengthFrames)));
+  const scale = 1 + 0.06 * progress;
+  const direction = seed % 4;
+  const translateX = direction === 1 ? -4 * progress : direction === 2 ? 4 * progress : 0;
+  const translateY = direction === 3 ? -3 * progress : 0;
+  return (
+    <Img
+      src={src}
+      style={{
+        ...baseStyle,
+        transform: `scale(${scale}) translate(${translateX}%, ${translateY}%)`,
+        transformOrigin: "center center",
+      }}
+    />
   );
 };
 

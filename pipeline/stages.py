@@ -188,6 +188,85 @@ DEFAULT_IMAGE_STYLE = (
 )
 
 
+# --- cinematic thumbnail prompts ----------------------------------------------
+
+# Per-category visual identity for hero / thumbnail art. Each entry is a
+# style cue that gets appended to the thumbnail prompt so a Drama story
+# looks different from a Wholesome story without needing per-story art
+# direction. Wave 2 of the visual system.
+CATEGORY_THUMBNAIL_STYLES = {
+    "Entitled": (
+        "Bold satirical editorial poster, dramatic theatrical lighting, "
+        "expressive characters caught mid-confrontation, mid-century magazine "
+        "illustration palette with saturated red and burnt-orange accents on "
+        "deep neutrals, mild caricature without grotesque distortion."
+    ),
+    "Drama": (
+        "Cinematic neo-noir poster, moody atmospheric lighting with one strong "
+        "warm light source, hyperdetailed realistic illustration, deep blacks "
+        "and selective color, character silhouettes integrated into the "
+        "composition."
+    ),
+    "Humor": (
+        "Punchy animated poster art, vibrant pop palette, comic-book flat "
+        "illustration with confident ink outlines and halftone shading, "
+        "exaggerated comedic body language."
+    ),
+    "Wholesome": (
+        "Soft warm pastel poster, golden-hour lighting, gentle storybook "
+        "illustration, hand-painted feel with cream paper texture, character "
+        "moment that radiates kindness."
+    ),
+    "Dating": (
+        "Modern romantic-comedy poster, warm cinematic tones, character-focused "
+        "editorial illustration, fashion magazine aesthetic, soft rim light, "
+        "intimate framing."
+    ),
+    "Roommate": (
+        "Slice-of-life indie illustration, lived-in interior, cozy 3/4 view, "
+        "muted earthy palette, hand-drawn character with quiet exasperated "
+        "expression."
+    ),
+}
+
+
+def make_thumbnail_prompt(
+    title: str, category: str, body: str, aspect_ratio: str, dry_run: bool
+) -> str:
+    """Build a cinematic title-baked thumbnail prompt for hero / poster art.
+
+    Each prompt names the scene briefly (from the article's opening lines),
+    appends the category's visual identity, and instructs the image model to
+    render the title prominently inside the composition (gpt-image-2 handles
+    short bold text well; longer titles wrap or get abbreviated). Two aspect
+    ratios are supported: '3:4' for portrait posters / mobile billboards, and
+    '16:9' for desktop hero strips.
+    """
+    style = CATEGORY_THUMBNAIL_STYLES.get(category, CATEGORY_THUMBNAIL_STYLES["Drama"])
+    orientation = (
+        "Vertical streaming-thumbnail composition, character focal point "
+        "centered, title baked into the upper or lower band"
+        if aspect_ratio == "3:4"
+        else "Wide cinematic banner composition, character focal point off-center "
+        "to leave room for the title, title baked into the lower-third band"
+    )
+    if dry_run:
+        return f"[DRY] {title} cinematic {category} thumbnail at {aspect_ratio}"
+
+    # Take just the first couple of sentences of the article as the scene cue
+    # so the model gets context without re-rendering the whole body each call.
+    opening = " ".join(body.split()[:60])
+    return (
+        f"Cinematic editorial poster for a short documentary titled \"{title}\". "
+        f"{style} "
+        f"Composition focused on this scene from the story: {opening} "
+        f"Render the title \"{title}\" prominently in bold confident "
+        f"typography, integrated into the composition (not floating on a "
+        f"separate layer). {orientation}. High-resolution magazine-cover "
+        f"finish. No watermarks, no signatures, no extra text beyond the title."
+    )
+
+
 # --- branded title + synopsis -------------------------------------------------
 
 # Style anchors derived from the sample catalog. Future LLM calls follow this

@@ -83,7 +83,8 @@ def main() -> None:
         }
         if args.media:
             media_cols = media.generate_media(
-                idea["reddit_id"], idea, body, dry, repo_root=REPO_ROOT
+                idea["reddit_id"], idea, body, branded_title or idea["headline"],
+                dry, repo_root=REPO_ROOT,
             )
             row.update(media_cols)
             # Token spend from this story includes the image-prompt LLM call.

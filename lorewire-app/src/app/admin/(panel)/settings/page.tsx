@@ -46,6 +46,18 @@ const FIELDS: { key: string; label: string; placeholder: string; hint?: string }
       placeholder: "doodle explainer, off-white paper, single marker",
       hint: "Steers the look of the generated short.",
     },
+    {
+      key: "media.scene_count",
+      label: "Scenes per story",
+      placeholder: "30",
+      hint: "Number of doodle scene images the pipeline generates per story. 30 gives ~4 s shots on a 2 min video; 60 gives ~2 s shots. Clamped to 6-60; default 30.",
+    },
+    {
+      key: "video.ken_burns",
+      label: "Ken-Burns motion on scenes",
+      placeholder: "0",
+      hint: "Set to 1 to slowly pan/zoom each scene image during its shot. Off by default. Adds subtle motion when shots hold for 3+ seconds.",
+    },
   ];
 
 export default async function SettingsPage() {
