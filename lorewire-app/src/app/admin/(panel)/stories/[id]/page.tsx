@@ -14,6 +14,7 @@ import {
   setStoryOverrideAction,
 } from "@/app/admin/actions";
 import { CATEGORIES, statusClass } from "@/app/admin/ui";
+import Breadcrumb from "@/app/admin/Breadcrumb";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -56,13 +57,8 @@ export default async function EditStory({
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between gap-3">
-        <Link
-          href="/admin/stories"
-          className="font-mono text-[12px] text-muted hover:text-ink"
-        >
-          &larr; Stories
-        </Link>
+      <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
+      <div className="flex items-center justify-end gap-3">
         <span
           className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
             s.status,

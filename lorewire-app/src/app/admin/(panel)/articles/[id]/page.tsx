@@ -21,6 +21,7 @@ import {
 import { parseArticlePayload } from "@/lib/article-payload";
 import { buildArticleJsonLd } from "@/lib/article-seo";
 import { statusClass } from "@/app/admin/ui";
+import Breadcrumb from "@/app/admin/Breadcrumb";
 import { ArticleEditor } from "./ArticleEditor";
 import { ArticlePayloadSidebar } from "./ArticlePayloadSidebar";
 import { ArticleSeoPanel } from "./ArticleSeoPanel";
@@ -85,13 +86,8 @@ export default async function EditArticlePage({
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between gap-3">
-        <Link
-          href="/admin/articles"
-          className="font-mono text-[12px] text-muted hover:text-ink"
-        >
-          &larr; Articles
-        </Link>
+      <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
+      <div className="flex items-center justify-end gap-3">
         <div className="flex items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
             {ARTICLE_TYPE_LABELS[type] ?? type}

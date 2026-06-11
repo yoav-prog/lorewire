@@ -62,8 +62,8 @@ export default async function Dashboard() {
           <h2 className="font-mono text-[12px] uppercase tracking-wider text-muted">
             Recent
           </h2>
-          <Link href="/admin/stories" className="text-[13px] text-accent hover:underline">
-            All stories
+          <Link href="/admin/content" className="text-[13px] text-accent hover:underline">
+            Open Inbox
           </Link>
         </div>
         <div className="overflow-hidden rounded-xl border border-line">
