@@ -7,12 +7,15 @@ import { isItemActive, buildGroups, type SidebarItem } from "./AdminSidebar";
 
 const items = {
   overview: { href: "/admin", label: "Overview", exact: true } satisfies SidebarItem,
-  content: { href: "/admin/content", label: "Content", exact: true } satisfies SidebarItem,
-  articles: { href: "/admin/articles", label: "Articles" } satisfies SidebarItem,
-  videos: {
-    href: "/admin/videos",
-    label: "Videos",
-    activePrefixes: ["/admin/videos", "/admin/stories"],
+  content: {
+    href: "/admin/content",
+    label: "Content",
+    activePrefixes: [
+      "/admin/content",
+      "/admin/articles",
+      "/admin/videos",
+      "/admin/stories",
+    ],
   } satisfies SidebarItem,
   settings: {
     href: "/admin/settings",
@@ -36,43 +39,34 @@ describe("isItemActive", () => {
     expect(isItemActive("/admin", items.overview)).toBe(true);
     expect(isItemActive("/admin/articles", items.overview)).toBe(false);
     expect(isItemActive("/admin/videos", items.overview)).toBe(false);
+    expect(isItemActive("/admin/content", items.overview)).toBe(false);
     expect(isItemActive("/admin/settings", items.overview)).toBe(false);
   });
 
-  it("Content only fires on /admin/content (exact)", () => {
+  it("Content lights up for the unified URL and the legacy per-kind URLs", () => {
     expect(isItemActive("/admin/content", items.content)).toBe(true);
-    // Search params aren't in the pathname, so filtered-Inbox URLs still
-    // pass exact-match.
-    expect(isItemActive("/admin/content", items.content)).toBe(true);
-    expect(isItemActive("/admin/articles", items.content)).toBe(false);
-    expect(isItemActive("/admin/videos", items.content)).toBe(false);
-    expect(isItemActive("/admin/content/anything", items.content)).toBe(false);
+    expect(isItemActive("/admin/articles", items.content)).toBe(true);
+    expect(isItemActive("/admin/articles/abc", items.content)).toBe(true);
+    expect(isItemActive("/admin/articles/new", items.content)).toBe(true);
+    expect(isItemActive("/admin/articles/import", items.content)).toBe(true);
+    expect(isItemActive("/admin/videos", items.content)).toBe(true);
+    expect(isItemActive("/admin/videos/abc", items.content)).toBe(true);
+    expect(isItemActive("/admin/stories", items.content)).toBe(true);
+    expect(isItemActive("/admin/stories/abc", items.content)).toBe(true);
   });
 
-  it("Articles lights up for the list and any inner editor page", () => {
-    expect(isItemActive("/admin/articles", items.articles)).toBe(true);
-    expect(isItemActive("/admin/articles/abc123", items.articles)).toBe(true);
-    expect(isItemActive("/admin/articles/new", items.articles)).toBe(true);
-    expect(isItemActive("/admin/articles/import", items.articles)).toBe(true);
-    expect(isItemActive("/admin/videos", items.articles)).toBe(false);
-    expect(isItemActive("/admin/settings", items.articles)).toBe(false);
+  it("Content does NOT light up for Settings or unrelated routes", () => {
+    expect(isItemActive("/admin", items.content)).toBe(false);
+    expect(isItemActive("/admin/settings", items.content)).toBe(false);
+    expect(isItemActive("/admin/models", items.content)).toBe(false);
   });
 
-  it("Videos lights up for /admin/videos*, /admin/videos/[id], and /admin/stories*", () => {
-    expect(isItemActive("/admin/videos", items.videos)).toBe(true);
-    expect(isItemActive("/admin/videos/abc123", items.videos)).toBe(true);
-    expect(isItemActive("/admin/stories", items.videos)).toBe(true);
-    expect(isItemActive("/admin/stories/abc123", items.videos)).toBe(true);
-    expect(isItemActive("/admin/articles", items.videos)).toBe(false);
-    expect(isItemActive("/admin/settings", items.videos)).toBe(false);
-  });
-
-  it("Videos does NOT light up for /admin/videos-spike (Dev group route)", () => {
-    // Prefix "/admin/videos" matches "/admin/videos-spike" naively, so we
-    // assert the Dev route still resolves to Videos under our current
-    // implementation. If we later disambiguate (require trailing /), this
-    // test becomes the regression guard.
-    expect(isItemActive("/admin/videos-spike/abc", items.videos)).toBe(true);
+  it("Content lights up for /admin/videos-spike (prefix collision)", () => {
+    // `"/admin/videos"` prefix-matches `"/admin/videos-spike/abc"`. We accept
+    // this — the Dev group's Player spike still lights up its own entry
+    // when active. If the lit Content entry becomes a problem we can move
+    // to a stricter prefix check, but this asserts current behavior.
+    expect(isItemActive("/admin/videos-spike/abc", items.content)).toBe(true);
   });
 
   it("Settings lights up for all four config URLs", () => {
@@ -84,9 +78,9 @@ describe("isItemActive", () => {
 
   it("Settings does NOT light up for unrelated routes", () => {
     expect(isItemActive("/admin", items.settings)).toBe(false);
+    expect(isItemActive("/admin/content", items.settings)).toBe(false);
     expect(isItemActive("/admin/articles", items.settings)).toBe(false);
     expect(isItemActive("/admin/videos", items.settings)).toBe(false);
-    expect(isItemActive("/admin/content", items.settings)).toBe(false);
   });
 
   it("Player spike matches only its dev route", () => {
@@ -110,16 +104,13 @@ describe("buildGroups", () => {
     );
   });
 
-  it("produces the five top-level entries in stable order", () => {
+  it("produces the three top-level entries in stable order", () => {
     for (const dev of [false, true]) {
       const groups = buildGroups(dev);
-      // The first (and only static) group holds the five primary destinations.
       expect(groups[0].label).toBeNull();
       expect(groups[0].items.map((i) => i.label)).toEqual([
         "Overview",
         "Content",
-        "Articles",
-        "Videos",
         "Settings",
       ]);
     }
