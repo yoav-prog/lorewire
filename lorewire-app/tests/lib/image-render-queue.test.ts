@@ -25,7 +25,10 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await run("DELETE FROM image_renders", []);
-  await run("DELETE FROM settings WHERE key = 'budget.daily_usd'", []);
+  await run(
+    "DELETE FROM settings WHERE key IN ('budget.daily_usd', 'media.scene_count', 'media.prop_count')",
+    [],
+  );
 });
 
 describe("estimateImageRegenCostCents", () => {
@@ -46,6 +49,31 @@ describe("estimateImageRegenCostCents", () => {
     const hero = await estimateImageRegenCostCents("hero");
     expect(scene).toBe(hero);
     expect(prop).toBe(hero);
+  });
+
+  it("scales 'scenes' by media.scene_count setting (clamped)", async () => {
+    await setSetting("media.scene_count", "20");
+    const hero = await estimateImageRegenCostCents("hero");
+    const scenes = await estimateImageRegenCostCents("scenes");
+    expect(scenes).toBe(hero * 20);
+  });
+
+  it("'scenes' clamps a wildly large media.scene_count down to 60", async () => {
+    await setSetting("media.scene_count", "9999");
+    const hero = await estimateImageRegenCostCents("hero");
+    const scenes = await estimateImageRegenCostCents("scenes");
+    expect(scenes).toBe(hero * 60);
+  });
+
+  it("'props' uses media.prop_count when set, defaults to 5", async () => {
+    const hero = await estimateImageRegenCostCents("hero");
+    // Default (setting cleared in beforeEach).
+    const propsDefault = await estimateImageRegenCostCents("props");
+    expect(propsDefault).toBe(hero * 5);
+
+    await setSetting("media.prop_count", "7");
+    const propsSet = await estimateImageRegenCostCents("props");
+    expect(propsSet).toBe(hero * 7);
   });
 });
 

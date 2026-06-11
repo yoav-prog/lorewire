@@ -16,6 +16,10 @@ import {
 } from "@/app/admin/actions";
 import { CATEGORIES, statusClass } from "@/app/admin/ui";
 import Breadcrumb from "@/app/admin/Breadcrumb";
+import {
+  MediaRegenPanel,
+  type MediaAssetSpec,
+} from "@/app/admin/(panel)/_components/MediaRegenPanel";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -55,6 +59,39 @@ export default async function EditStory({
     { status: "published", label: "Publish" },
     { status: "archived", label: "Archive" },
   ];
+
+  // What this story owns that can be regenerated. Order is the order the
+  // panel lists them in — hero first (most impactful), then bulk-asset
+  // groups (scenes, props), then mouth-swap (specialty).
+  const storyAssets: MediaAssetSpec[] = [
+    {
+      asset: "hero",
+      label: "Hero image",
+      hint: "The poster frame on the public reader and the OG card.",
+    },
+    {
+      asset: "scenes",
+      label: "All scene images",
+      hint: "Every scene image the doodle composition cycles through. Count comes from Settings → General → Scenes per story.",
+    },
+  ];
+  // Optional bulk regens that only appear when the relevant feature is on.
+  const propSlideOn = String((await getSetting("video.prop_slide")) ?? "0") !== "0";
+  if (propSlideOn) {
+    storyAssets.push({
+      asset: "props",
+      label: "All prop cutouts",
+      hint: "Object cutouts that slide in across the video. Count comes from Settings → General → Props per story.",
+    });
+  }
+  const mouthSwapOn = String((await getSetting("video.mouth_swap")) ?? "0") !== "0";
+  if (mouthSwapOn) {
+    storyAssets.push({
+      asset: "mouth_swap",
+      label: "Talking head bust",
+      hint: "Protagonist portrait + mouth-removed pair for the lip-flap overlay. Two images per regen.",
+    });
+  }
 
   return (
     <div className="space-y-5">
@@ -190,6 +227,12 @@ export default async function EditStory({
               </button>
             </form>
           </div>
+
+          <MediaRegenPanel
+            ownerKind="story"
+            ownerId={s.id}
+            assets={storyAssets}
+          />
 
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Media</div>

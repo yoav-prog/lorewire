@@ -62,24 +62,52 @@ const IMAGE_COST_USD: Record<string, number> = {
 };
 
 // Mouth-swap generates two images (portrait + mouth-removed); cost it
-// accordingly. Props are single images each — the prop_count setting
-// drives N regen calls if the admin asks to redo all props.
-const ASSET_IMAGE_COUNT: Record<string, number> = {
+// accordingly. The bulk slugs "scenes" / "props" read their image count
+// from the same admin settings the pipeline uses, so the estimate stays
+// accurate as the admin tunes those numbers.
+const ASSET_FIXED_COUNT: Record<string, number> = {
   hero: 1,
   og: 1,
   mouth_swap: 2,
 };
 
-function assetImageCount(asset: string): number {
-  if (asset in ASSET_IMAGE_COUNT) return ASSET_IMAGE_COUNT[asset];
+const SCENE_DEFAULT = 30;
+const SCENE_MIN = 6;
+const SCENE_MAX = 60;
+const PROP_DEFAULT = 5;
+const PROP_MIN = 3;
+const PROP_MAX = 10;
+
+async function assetImageCount(asset: string): Promise<number> {
+  if (asset in ASSET_FIXED_COUNT) return ASSET_FIXED_COUNT[asset];
+  if (asset === "scenes") {
+    const raw = await getSetting("media.scene_count");
+    return clampInt(raw, SCENE_DEFAULT, SCENE_MIN, SCENE_MAX);
+  }
+  if (asset === "props") {
+    const raw = await getSetting("media.prop_count");
+    return clampInt(raw, PROP_DEFAULT, PROP_MIN, PROP_MAX);
+  }
   // scene:N, prop:N, gallery:N, body:<id> — all single-image regens.
   return 1;
+}
+
+function clampInt(
+  raw: string | null,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
 }
 
 export async function estimateImageRegenCostCents(asset: string): Promise<number> {
   const activeModel = await selected("images"); // e.g. "kie/gpt-image-2"
   const perImage = IMAGE_COST_USD[activeModel] ?? 0.05;
-  const count = assetImageCount(asset);
+  const count = await assetImageCount(asset);
   return Math.round(perImage * 100 * count);
 }
 
