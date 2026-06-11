@@ -57,6 +57,13 @@ SCHEMA_STATEMENTS = [
     # suppresses its CSS title overlay when this flag is 1. Stored as INTEGER
     # for portability across SQLite (no native BOOLEAN) and Postgres.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_has_baked_title INTEGER DEFAULT 0",
+    # Wave 3 Phase 3 PropSlideIn: per-story prop list as JSON, written by the
+    # pipeline when the prop_slide motion beat is enabled. Shape:
+    #   [{"url": "https://.../prop-N.png", "label": "envelope", "side": "left"}, ...]
+    # Composition reads it through config.props_list and slides each in at a
+    # spaced interval. Null/empty = no props rendered (which is the default
+    # because the beat ships off).
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS props TEXT",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -67,7 +74,7 @@ _COLUMNS = [
     "id", "reddit_id", "slug", "category", "title", "summary", "body",
     "teleprompter", "status", "source_url", "hero_image", "hero_image_landscape",
     "hero_has_baked_title", "images", "audio_url", "video_url", "duration",
-    "alignment", "tokens", "cost_cents", "created_at", "updated_at",
+    "alignment", "props", "tokens", "cost_cents", "created_at", "updated_at",
     "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
@@ -99,7 +106,7 @@ def _pg_conn():
 
 def _serialize(s: dict) -> dict:
     row = {k: s.get(k) for k in _COLUMNS}
-    for jcol in ("images", "alignment", "payload"):
+    for jcol in ("images", "alignment", "props", "payload"):
         if isinstance(row.get(jcol), (dict, list)):
             row[jcol] = json.dumps(row[jcol])
     return row

@@ -76,6 +76,18 @@ const FIELDS: { key: string; label: string; placeholder: string; hint?: string }
       placeholder: "0",
       hint: "Animated hand-doodled SVG stroke that draws on in a corner at each scene cut. 800 ms reveal. Off by default.",
     },
+    {
+      key: "video.prop_slide",
+      label: "Prop slide-ins",
+      placeholder: "0",
+      hint: "Set to 1 to enable. Small object cutouts slide in from rotating edges every ~20 s. The next --media pipeline run generates the cutouts via kie (~$0.05 each).",
+    },
+    {
+      key: "media.prop_count",
+      label: "Props per story",
+      placeholder: "5",
+      hint: "How many prop cutouts to generate when video.prop_slide is enabled. Clamped 3-10; default 5.",
+    },
   ];
 
 export default async function SettingsPage() {

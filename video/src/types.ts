@@ -28,14 +28,23 @@ export interface ShortCaptionChunk {
 import type { CaptionTemplateInput } from "./caption-style";
 export type { CaptionTemplateInput };
 
-// Wave 3 Phase 3: three composition-only motion beats, each independently
-// togglable from /admin/settings. All three off = byte-identical to today's
+// Wave 3 Phase 3: composition-only motion beats, each independently
+// togglable from /admin/settings. All off = byte-identical to today's
 // render. The composition reads each flag and skips the layer when off so
-// no work is done.
+// no work is done. prop_slide also needs a non-empty props_list to do
+// anything; the pipeline writes that list to the story row when the
+// prop-slide beat is enabled.
 export interface MotionConfig {
   micro_wiggle?: boolean;
   label_pop?: boolean;
   scribble_draw?: boolean;
+  prop_slide?: boolean;
+}
+
+export interface PropListItem {
+  url: string;
+  label?: string;
+  side?: "left" | "right" | "top" | "bottom";
 }
 
 export interface ShortVideoConfig {
@@ -55,4 +64,7 @@ export interface ShortVideoConfig {
   caption_template?: CaptionTemplateInput;
   // Wave 3 Phase 3 motion beats. Missing = all off.
   motion?: MotionConfig;
+  // Prop list for the prop_slide beat. Pipeline writes it when the beat is
+  // enabled; composition slides each prop in at evenly spaced intervals.
+  props_list?: PropListItem[];
 }

@@ -117,6 +117,29 @@ def _generate_with_retry(
     return None
 
 
+# Wave 3 Phase 3 PropSlideIn budgets. Default 5 props per story; admin can
+# tune via media.prop_count between 3 and 10. Costs ~$0.05/prop on the
+# default kie/gpt-image-2 model.
+DEFAULT_PROP_COUNT = 5
+PROP_COUNT_MIN = 3
+PROP_COUNT_MAX = 10
+
+
+def _prop_slide_enabled() -> bool:
+    raw = (store.get_setting("video.prop_slide") or "").strip().lower()
+    return raw in {"1", "true", "on", "yes"}
+
+
+def _prop_count() -> int:
+    raw = store.get_setting("media.prop_count")
+    if raw is None:
+        return DEFAULT_PROP_COUNT
+    try:
+        return max(PROP_COUNT_MIN, min(PROP_COUNT_MAX, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_PROP_COUNT
+
+
 def _sanitize_id(story_id: str) -> str:
     if not SAFE_ID_RE.match(story_id or ""):
         raise ValueError(f"unsafe story id for filesystem use: {story_id!r}")
@@ -306,6 +329,43 @@ def generate_media(
         out["hero_has_baked_title"] = 1
     if scene_urls:
         out["images"] = json.dumps(scene_urls)
+
+    # Wave 3 Phase 3 PropSlideIn: generate a small library of prop cutouts when
+    # the admin has the prop_slide motion beat enabled. Off by default so this
+    # step (and its kie cost) is opt-in. Per-prop cost: ~$0.05 at gpt-image-2.
+    if not dry_run and _prop_slide_enabled():
+        prop_count = _prop_count()
+        plan = stages.make_prop_plan(idea, body, prop_count, dry_run=False)
+        print(f"[media id={safe_id} props] planning {len(plan)} prop(s)")
+        prop_list: list[dict] = []
+        for i, item in enumerate(plan):
+            filename = f"prop-{i + 1}.png"
+            public_url = f"{url_prefix}/{filename}"
+            label = f"prop-{i + 1} ({item['keyword']})"
+            prompt = stages.make_prop_image_prompt(item["keyword"])
+            started = time.time()
+            kie_url = _generate_with_retry(prompt, f"id={safe_id} {label}", aspect_ratio="1:1")
+            if kie_url is None:
+                continue
+            local_path = out_dir / filename
+            try:
+                images.download(kie_url, local_path)
+            except Exception as e:
+                print(f"[media id={safe_id} {label}] download FAILED: {e}")
+                continue
+            stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+            elapsed = time.time() - started
+            print(
+                f"[media id={safe_id} {label}] cutout "
+                f"({models.get_selected('images')}, 1:1) -> {stored_url} ({elapsed:.1f}s)"
+            )
+            prop_list.append({
+                "url": stored_url,
+                "label": item.get("label") or item["keyword"],
+                "side": item.get("side"),
+            })
+        if prop_list:
+            out["props"] = json.dumps(prop_list)
 
     # --- voice
     if dry_run:

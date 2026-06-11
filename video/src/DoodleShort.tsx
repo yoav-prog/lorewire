@@ -28,6 +28,7 @@ import { FONT_FAMILY } from "./fonts";
 import { MicroWiggle } from "./motion/MicroWiggle";
 import { LabelPopOn } from "./motion/LabelPopOn";
 import { ScribbleDraw } from "./motion/ScribbleDraw";
+import { PropSlideIn } from "./motion/PropSlideIn";
 import type {
   ShortCaptionChunk,
   ShortCaptionWord,
@@ -146,6 +147,13 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
           index={activeIndex}
         />
       )}
+
+      <PropSlideIn
+        enabled={!!config.motion?.prop_slide}
+        items={config.props_list ?? []}
+        durationMs={config.duration_ms}
+      />
+
 
       {config.channel_name && (
         <div

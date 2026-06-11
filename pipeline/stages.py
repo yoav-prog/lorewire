@@ -278,6 +278,101 @@ def make_thumbnail_prompt(
     )
 
 
+# --- prop plan (Wave 3 Phase 3 PropSlideIn) ----------------------------------
+
+# Visual style for prop cutouts. Keeps them legible against the cinematic
+# stick-figure scenes — same loose ink line, sparse accent color, transparent
+# or near-white background so the slide-in feels like a sticker, not a photo.
+PROP_IMAGE_STYLE = (
+    "Single object cutout illustration, doodle-marker ink line aesthetic, "
+    "minimal accent color (warm red or ochre), white or transparent "
+    "background, centered, no people, no text, no logos. The object fills "
+    "the frame so a slide-in animation feels punchy."
+)
+
+
+def make_prop_plan(idea: dict, body: str, n: int, dry_run: bool) -> list[dict]:
+    """LLM picks N concrete objects from the article to slide in as props.
+
+    Returns a list of `{keyword, label, side}` items. `keyword` drives the
+    kie generation prompt, `label` is a short caption (for accessibility +
+    future UI), `side` rotates through left/right/top/bottom by index when
+    the LLM doesn't specify one. Dry-run returns deterministic stub items so
+    the rest of the pipeline can run end to end without an LLM key.
+    """
+    from pipeline import llm
+
+    if dry_run:
+        sides = ["right", "left", "bottom", "top"]
+        return [
+            {"keyword": f"prop-{i + 1}", "label": f"DRY {i + 1}", "side": sides[i % len(sides)]}
+            for i in range(n)
+        ]
+
+    instruction = (
+        f"You design illustrated shorts for LoreWire. Read the article and "
+        f"return exactly {n} prop ideas as a JSON array of objects: each "
+        f"object has \"keyword\" (a concrete noun for the prop, 1-3 words, "
+        f"object only — never a person, place, or action), \"label\" (a 1-2 "
+        f"word display caption for accessibility), and \"side\" (one of "
+        f"left, right, top, bottom — the edge the prop slides in from). "
+        f"Pick objects that are mentioned in the article and feel cinematic "
+        f"as a slide-in (e.g. \"envelope\", \"phone\", \"calendar\", "
+        f"\"coffee cup\", \"clipboard\"). Distribute the four sides across "
+        f"your picks so consecutive slide-ins don't come from the same edge. "
+        f"Return ONLY the JSON array.\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Article:\n{body}"
+    )
+    raw = llm.chat(instruction, 2000, model="openai/gpt-5.4-mini").strip()
+    return _parse_prop_plan(raw, n)
+
+
+def _parse_prop_plan(raw: str, n: int) -> list[dict]:
+    """Best-effort JSON parse with a safe fallback. Handles fenced code blocks
+    and leading prose the LLM sometimes prepends."""
+    snippet = raw
+    if "```" in snippet:
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("["):
+                snippet = stripped
+                break
+    start, end = snippet.find("["), snippet.rfind("]")
+    sides = ["right", "left", "bottom", "top"]
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(snippet[start : end + 1])
+            if isinstance(parsed, list):
+                out: list[dict] = []
+                for i, item in enumerate(parsed):
+                    if not isinstance(item, dict):
+                        continue
+                    keyword = str(item.get("keyword", "")).strip()
+                    if not keyword:
+                        continue
+                    label = str(item.get("label", "")).strip() or keyword
+                    side = str(item.get("side", "")).strip().lower()
+                    if side not in {"left", "right", "top", "bottom"}:
+                        side = sides[i % len(sides)]
+                    out.append({"keyword": keyword, "label": label, "side": side})
+                if out:
+                    return out[:n]
+        except json.JSONDecodeError:
+            pass
+    return [
+        {"keyword": "envelope", "label": "envelope", "side": sides[i % len(sides)]}
+        for i in range(n)
+    ]
+
+
+def make_prop_image_prompt(keyword: str) -> str:
+    """Wraps a keyword into a kie-ready prompt with the cutout style suffix."""
+    return f"An illustration of a {keyword}. {PROP_IMAGE_STYLE}"
+
+
 # --- branded title + synopsis -------------------------------------------------
 
 # Style anchors derived from the sample catalog. Future LLM calls follow this
