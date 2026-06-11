@@ -74,20 +74,49 @@ function PosterArt({ story, rounded = 8, showTitle = true, kicker = true }: { st
 }
 
 /* ----------------------------- TOP NAV ----------------------------- */
+// Single nav link with an animated underline. Underline grows from center on
+// hover and stays planted at the active width — gives the bar a clear "you are
+// here" anchor without an extra background pill that would clutter the layout.
+function NavLink({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`group relative font-body text-[14px] py-1.5 transition-colors duration-200 ${active ? "text-ink font-bold" : "text-muted font-medium hover:text-ink"}`}
+    >
+      {label}
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-0 h-[2px] rounded-full transition-all duration-300 ease-out ${active ? "w-[70%] opacity-100" : "w-0 opacity-0 group-hover:w-[58%] group-hover:opacity-90"}`}
+        style={{ background: active ? "#E8462B" : "#F5F3EF" }}
+      />
+    </button>
+  );
+}
+
 function TopNav({ view, setView, solid, query, setQuery }: { view: string; setView: (v: string) => void; solid: boolean; query: string; setQuery: (q: string) => void }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const open = searchOpen || query !== "";
   return (
     <header className="fixed top-0 left-0 right-0 z-50 transition-colors duration-300"
-      style={{ background: solid ? "#0A0A0C" : "linear-gradient(180deg, rgba(10,10,12,.92), rgba(10,10,12,0))", borderBottom: solid ? "1px solid rgba(255,255,255,.07)" : "1px solid transparent" }}>
-      <div className="mx-auto max-w-[1600px] flex items-center gap-9 px-10 h-[68px]">
+      style={{ background: solid ? "#0A0A0C" : "transparent", borderBottom: solid ? "1px solid rgba(255,255,255,.07)" : "1px solid transparent" }}>
+      {/* Soft top-of-page scrim. Extends below the 68px header so the dark fade
+          terminates inside the hero rather than at the header's bottom edge —
+          that hard cut-off was reading as a thin horizontal line. */}
+      {!solid && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0"
+          style={{ height: 150, background: "linear-gradient(180deg, rgba(10,10,12,.82) 0%, rgba(10,10,12,.5) 35%, rgba(10,10,12,.18) 70%, rgba(10,10,12,0) 100%)" }}
+        />
+      )}
+      <div className="relative mx-auto max-w-[1600px] flex items-center gap-9 px-10 h-[68px]">
         <button onClick={() => setView("Home")} className="flex items-center gap-1.5 shrink-0">
           <span className="font-display font-black text-[26px] tracking-tightest text-ink">LORE</span>
           <span className="font-display font-black text-[26px] tracking-tightest text-accent">WIRE</span>
         </button>
         <nav className="flex items-center gap-7">
           {NAV.map((n) => (
-            <button key={n} onClick={() => setView(n)} className="font-body text-[14px] transition-colors" style={{ color: view === n ? "#F5F3EF" : "#8E8A97", fontWeight: view === n ? 700 : 500 }}>{n}</button>
+            <NavLink key={n} label={n} active={view === n} onClick={() => setView(n)} />
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-5">
