@@ -546,31 +546,33 @@ def regen_one(
         return _regen_hero(story, out_dir, safe_id)
 
     if asset == "scenes":
-        # TODO: lift the scene-prompt + per-scene image loop out of
-        # generate_media so it can be called with just (story, scene_count)
-        # and rewrite stories.images with the new GCS-hosted URLs.
-        raise NotImplementedError(
-            "scenes regen is not yet wired. The pipeline currently regenerates "
-            "all scenes only via `python -m pipeline.run --media` for a fresh "
-            "story; per-asset scene regen needs the inner loop extracted."
-        )
+        return _regen_scenes(story, out_dir, safe_id)
 
     if asset == "props":
-        raise NotImplementedError(
-            "props regen is not yet wired. Today the props are generated as "
-            "part of generate_media() when video.prop_slide is on; the inner "
-            "generator needs extracting before per-asset regen is callable."
-        )
+        return _regen_props(story, out_dir, safe_id)
 
     if asset == "mouth_swap":
-        raise NotImplementedError(
-            "mouth_swap regen is not yet wired. Today the portrait + "
-            "mouth-removed pair are generated inside generate_media(); the "
-            "inner _mouth_swap_block call needs surfacing so it can be invoked "
-            "standalone."
-        )
+        return _regen_mouth_swap(story, out_dir, safe_id)
 
     raise NotImplementedError(f"unknown asset slug {asset!r}")
+
+
+def _idea_from_story(story: dict) -> dict:
+    """Reconstruct the `idea` dict the prompt builders expect, using the
+    persisted story row instead of the fresh-run pipeline's working memory.
+    Everything we need (title -> headline, category, id -> reddit_id) is
+    already on the row."""
+    return {
+        "reddit_id": story.get("id"),
+        "category": (story.get("category") or "Drama").strip(),
+        "headline": (story.get("title") or "").strip(),
+        "angle": "Retell as an original article in LoreWire's voice.",
+    }
+
+
+def _per_image_cost_cents() -> int:
+    active_model = models.get_selected("images")
+    return round(IMAGE_COST_USD.get(active_model, 0.05) * 100)
 
 
 def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
@@ -602,8 +604,165 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     store.update_story_hero(story["id"], public_url)
 
     # Cost: one image at the active model's per-image rate.
-    active_model = models.get_selected("images")
-    per_image_usd = IMAGE_COST_USD.get(active_model, 0.05)
-    cost_cents = round(per_image_usd * 100)
+    return public_url, _per_image_cost_cents()
 
-    return public_url, cost_cents
+
+def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
+    """Regenerate every scene image for a story. Builds fresh LLM prompts
+    against the persisted body, generates one image per prompt, replaces
+    stories.images wholesale with the new GCS-hosted URLs.
+
+    Returns (first_url, total_cost_cents). The queue's output_url shows the
+    first scene as a sample — the full list is visible on the row's images
+    column, which the editor reads.
+    """
+    body = (story.get("body") or "").strip()
+    if not body:
+        raise ValueError(
+            f"story {safe_id} has no body — scene prompts need it for context"
+        )
+    idea = _idea_from_story(story)
+    url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
+
+    # n=scene_count+1 because make_image_prompts returns hero at index 0
+    # followed by scene prompts. We discard index 0 — hero owns its own
+    # cinematic prompt via _regen_hero.
+    scene_count = _resolve_scene_count(None)
+    prompts = stages.make_image_prompts(
+        idea, body, dry_run=False, n=scene_count + 1,
+    )
+    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+    print(
+        f"[image regen scenes] id={safe_id} count={len(scene_prompts)} "
+        f"target={scene_count}"
+    )
+
+    scene_urls: list[str] = []
+    per_image_cents = _per_image_cost_cents()
+    total_cents = 0
+    for i, prompt in enumerate(scene_prompts):
+        filename = f"scene-{i + 1}.png"
+        public_url = f"{url_prefix}/{filename}"
+        label = f"scene-{i + 1}"
+        kie_url = _generate_with_retry(prompt, f"id={safe_id} {label} regen")
+        if kie_url is None:
+            print(f"[image regen scenes] id={safe_id} {label} FAILED, skipping")
+            continue
+        local_path = out_dir / filename
+        try:
+            images.download(kie_url, local_path)
+        except Exception as e:
+            print(f"[image regen scenes] id={safe_id} {label} download FAILED: {e}")
+            continue
+        stored_url = gcs.publish(
+            local_path, f"{safe_id}/{filename}", public_url,
+        )
+        scene_urls.append(stored_url)
+        total_cents += per_image_cents
+
+    if not scene_urls:
+        raise RuntimeError("scenes regen produced 0 images — all kie calls failed")
+
+    store.update_story_scenes(story["id"], scene_urls)
+    return scene_urls[0], total_cents
+
+
+def _regen_props(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
+    """Regenerate every prop cutout for a story. The admin only sees this
+    affordance when video.prop_slide is on (see stories/[id]/page.tsx); we
+    still defensively re-check the setting here so a stale UI can't enqueue
+    work for a story whose owner has since disabled props."""
+    if not _prop_slide_enabled():
+        raise RuntimeError(
+            "props regen blocked: video.prop_slide is off in Settings. "
+            "Turn it on, then try again."
+        )
+    body = (story.get("body") or "").strip()
+    if not body:
+        raise ValueError(
+            f"story {safe_id} has no body — prop prompts need it for context"
+        )
+    idea = _idea_from_story(story)
+    url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
+
+    prop_count = _prop_count()
+    plan = stages.make_prop_plan(idea, body, prop_count, dry_run=False)
+    print(f"[image regen props] id={safe_id} count={len(plan)} target={prop_count}")
+
+    prop_list: list[dict] = []
+    per_image_cents = _per_image_cost_cents()
+    total_cents = 0
+    for i, item in enumerate(plan):
+        filename = f"prop-{i + 1}.png"
+        public_url = f"{url_prefix}/{filename}"
+        label = f"prop-{i + 1} ({item['keyword']})"
+        prompt = stages.make_prop_image_prompt(item["keyword"])
+        kie_url = _generate_with_retry(
+            prompt, f"id={safe_id} {label} regen", aspect_ratio="1:1",
+        )
+        if kie_url is None:
+            print(f"[image regen props] id={safe_id} {label} FAILED, skipping")
+            continue
+        local_path = out_dir / filename
+        try:
+            images.download(kie_url, local_path)
+        except Exception as e:
+            print(f"[image regen props] id={safe_id} {label} download FAILED: {e}")
+            continue
+        stored_url = gcs.publish(
+            local_path, f"{safe_id}/{filename}", public_url,
+        )
+        prop_list.append({
+            "url": stored_url,
+            "label": item.get("label") or item["keyword"],
+            "side": item.get("side"),
+        })
+        total_cents += per_image_cents
+
+    if not prop_list:
+        raise RuntimeError("props regen produced 0 cutouts — all kie calls failed")
+
+    store.update_story_props(story["id"], prop_list)
+    return prop_list[0]["url"], total_cents
+
+
+def _regen_mouth_swap(
+    story: dict, out_dir: Path, safe_id: str,
+) -> tuple[str, int]:
+    """Regenerate the talking-head bust + its mouth-removed copy. Two kie
+    calls (~2× per-image cost). The bust is the OG bust prompt; the
+    mouth-removed copy goes through kie's edit endpoint and inherits the
+    same character cues so the lip-flap overlay registers correctly."""
+    if not _mouth_swap_enabled():
+        raise RuntimeError(
+            "mouth_swap regen blocked: video.mouth_swap is off in Settings. "
+            "Turn it on, then try again."
+        )
+    body = (story.get("body") or "").strip()
+    if not body:
+        raise ValueError(
+            f"story {safe_id} has no body — character prompt needs it for context"
+        )
+    idea = _idea_from_story(story)
+    url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
+    char_prompt = stages.make_character_prompt(idea, body, dry_run=False)
+
+    char_url, char_removed_url = _mouth_swap_block(
+        char_prompt, safe_id, out_dir, url_prefix,
+    )
+    if not char_url and not char_removed_url:
+        raise RuntimeError("mouth_swap regen produced 0 images — kie calls failed")
+
+    store.update_story_character(story["id"], char_url, char_removed_url)
+    # Cost: 2 images at the active rate when both came back. When only one
+    # made it, the row still records what we spent so the daily cap stays
+    # honest.
+    per_image_cents = _per_image_cost_cents()
+    total_cents = (1 if char_url else 0) * per_image_cents + (
+        1 if char_removed_url else 0
+    ) * per_image_cents
+
+    # Output URL: the bust is what the composition shows on-screen, so it's
+    # the natural sample to surface in the queue row.
+    sample = char_url or char_removed_url or ""
+    return sample, total_cents

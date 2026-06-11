@@ -986,3 +986,73 @@ def update_story_hero(story_id: str, hero_url: str) -> None:
             "UPDATE stories SET hero_image = ?, updated_at = ? WHERE id = ?",
             (hero_url, now, story_id),
         )
+
+
+def update_story_scenes(story_id: str, scene_urls: list[str]) -> None:
+    """Replace stories.images with a fresh JSON array of scene URLs."""
+    now = _now_iso()
+    payload = json.dumps(scene_urls)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET images = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (payload, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET images = ?, updated_at = ? WHERE id = ?",
+            (payload, now, story_id),
+        )
+
+
+def update_story_props(story_id: str, prop_list: list[dict]) -> None:
+    """Replace stories.props with a fresh JSON list of {url,label,side} dicts."""
+    now = _now_iso()
+    payload = json.dumps(prop_list)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET props = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (payload, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET props = ?, updated_at = ? WHERE id = ?",
+            (payload, now, story_id),
+        )
+
+
+def update_story_character(
+    story_id: str,
+    character_url: str | None,
+    character_mouth_removed_url: str | None,
+) -> None:
+    """Patch both mouth-swap columns at once. Either side can be None when
+    a partial regen succeeds only halfway — the worker passes both back so
+    the row is fully consistent after each tick."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET character_image = %s, "
+                    "character_image_mouth_removed = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (character_url, character_mouth_removed_url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET character_image = ?, "
+            "character_image_mouth_removed = ?, updated_at = ? WHERE id = ?",
+            (character_url, character_mouth_removed_url, now, story_id),
+        )
