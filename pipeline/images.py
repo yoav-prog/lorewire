@@ -105,6 +105,49 @@ def generate(
     raise RuntimeError(f"kie task {task_id} timed out after {poll_timeout}s")
 
 
+def edit_image(image_url: str, prompt: str, aspect_ratio: str = "3:4", poll_timeout: int = 180) -> str:
+    """Edit an existing image via kie's qwen2/image-edit endpoint.
+
+    Same createTask / recordInfo flow as generate(), different model + input
+    shape. Used by the MouthSwap pipeline step to remove a character's mouth
+    so SVG mouth shapes can be overlaid at render time. Verified live against
+    the envelope hero on 2026-06-11; the model preserved the surrounding
+    composition and replaced the mouth with neutral skin in the same style.
+    Cost: ~5-6 kie credits per edit (~$0.03).
+    """
+    created = _post(
+        "createTask",
+        {
+            "model": "qwen2/image-edit",
+            "input": {
+                "prompt": prompt,
+                "image_url": image_url,
+                "image_size": aspect_ratio,
+                "output_format": "png",
+            },
+        },
+    )
+    if created.get("code") != 200:
+        raise RuntimeError(f"kie edit createTask failed: {created}")
+    task_id = created["data"]["taskId"]
+
+    deadline = time.time() + poll_timeout
+    while time.time() < deadline:
+        data = _get(f"recordInfo?taskId={task_id}").get("data", {})
+        state = data.get("state")
+        if state == "success":
+            urls = json.loads(data.get("resultJson") or "{}").get("resultUrls", [])
+            if not urls:
+                raise RuntimeError(f"kie edit task {task_id} succeeded but returned no resultUrls")
+            totals["images"] += 1
+            totals["credits"] += data.get("creditsConsumed", 0) or 0
+            return urls[0]
+        if state == "fail":
+            raise RuntimeError(f"kie edit task {task_id} failed: {data.get('failMsg')}")
+        time.sleep(3)
+    raise RuntimeError(f"kie edit task {task_id} timed out after {poll_timeout}s")
+
+
 def download(url: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     # The kie tempfile host rejects the default urllib user-agent (403).

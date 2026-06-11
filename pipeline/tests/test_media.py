@@ -70,5 +70,31 @@ class StoryCostCentsTests(unittest.TestCase):
             self.assertEqual(media._story_cost_cents(4, 1800, 0.0), 20)
 
 
+class MouthSwapEnabledTests(unittest.TestCase):
+    """Wave 3 Phase 3 (slice 3): the MouthSwap beat reads `video.mouth_swap`
+    through the same truthy parser the other motion flags use. The test
+    locks the key + parser parity so a typo in /admin/settings never
+    accidentally turns the (paid) character generation on."""
+
+    def _with_setting(self, value):
+        return mock.patch("pipeline.media.store.get_setting", return_value=value)
+
+    def test_truthy_values_enable(self):
+        for v in ("1", "true", "TRUE", "  on ", "yes"):
+            with self._with_setting(v):
+                self.assertTrue(media._mouth_swap_enabled(), f"expected enabled: {v!r}")
+
+    def test_falsy_values_disable(self):
+        for v in (None, "", "0", "false", "off", "no", "maybe"):
+            with self._with_setting(v):
+                self.assertFalse(media._mouth_swap_enabled(), f"expected disabled: {v!r}")
+
+    def test_reads_the_mouth_swap_key(self):
+        with mock.patch("pipeline.media.store.get_setting") as get:
+            get.return_value = "1"
+            media._mouth_swap_enabled()
+            get.assert_called_with("video.mouth_swap")
+
+
 if __name__ == "__main__":
     unittest.main()

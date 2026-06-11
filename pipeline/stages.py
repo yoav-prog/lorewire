@@ -373,6 +373,87 @@ def make_prop_image_prompt(keyword: str) -> str:
     return f"An illustration of a {keyword}. {PROP_IMAGE_STYLE}"
 
 
+# --- character bust (Wave 3 Phase 3 MouthSwap) -------------------------------
+
+# Composition rules for the talking-head bust. The MouthSwap composition
+# component overlays SVG mouth shapes at a fixed anchor of (cx=0.50, cy=0.62)
+# — the prompt has to land the mouth at that position or the overlay will
+# float. "tight head-and-shoulders" + "mouth at approximately the lower middle
+# of the frame" gets gpt-image-2 to compose to the anchor in tests; per-image
+# vision detection is a follow-up (see plan's Risks).
+CHARACTER_BUST_STYLE = (
+    "Tight head-and-shoulders portrait of one character, doodle-marker ink "
+    "aesthetic matching the article's other illustrations, neutral off-white "
+    "background, single subject centered, head slightly larger than the "
+    "shoulders, mouth positioned at approximately the lower-middle of the "
+    "frame (around 60-65% down from the top), eyes looking forward, neutral "
+    "expression with the mouth slightly open as if mid-word. No text, no "
+    "captions, no logos, no second character, no hands in frame."
+)
+
+
+def make_character_prompt(idea: dict, body: str, dry_run: bool) -> str:
+    """Build a single image prompt for the protagonist's talking-head bust.
+
+    Used by the mouth_swap beat. The kie generation produces the original
+    bust; a second kie call (images.edit_image) removes the mouth so the
+    composition can overlay SVG mouth shapes. Dry-run returns a deterministic
+    stub so the rest of the pipeline can run without an LLM key.
+
+    The protagonist is identified from the article body — we ask the LLM to
+    pick the single most central recurring character and give a short visual
+    cue (hair, build, clothing) so the bust matches the same character that
+    shows up in the scene prompts.
+    """
+    from pipeline import llm
+
+    if dry_run:
+        return (
+            f"[DRY] tight bust shot of the protagonist of \"{idea['headline'][:80]}\". "
+            f"{CHARACTER_BUST_STYLE}"
+        )
+
+    instruction = (
+        "You design illustrations for LoreWire shorts. Read the article and "
+        "return ONE image prompt (plain text, no JSON, no fences) for a "
+        "tight head-and-shoulders portrait of the single most central "
+        "recurring character in the story.\n\n"
+        "Pick the character whose perspective drives the narrative (often "
+        "the narrator). Give a short distinctive visual cue (hair, build, "
+        "clothing) in the prompt so the bust matches the same character that "
+        "appears in the other scene illustrations.\n\n"
+        f"Append this composition note verbatim to the end of your prompt: "
+        f"\"{CHARACTER_BUST_STYLE}\".\n\n"
+        "Return ONLY the image prompt, one to three sentences, no surrounding "
+        "prose.\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Article:\n{body}"
+    )
+    raw = llm.chat(instruction, 1200, model="openai/gpt-5.4-mini").strip()
+    # The model occasionally wraps in quotes or fences; strip those.
+    if raw.startswith("```"):
+        raw = raw.strip("`").strip()
+        if raw.lower().startswith(("json", "text")):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
+    return raw.strip().strip('"').strip("'") or (
+        f"Tight bust shot of the protagonist of \"{idea['headline']}\". "
+        f"{CHARACTER_BUST_STYLE}"
+    )
+
+
+# Prompt for the kie edit pass that removes the mouth from the bust. Kept
+# small and deterministic — the same string for every story — because the
+# variation lives in the bust, not the edit. Verified live against the
+# envelope hero on 2026-06-11; qwen2/image-edit preserved the surrounding
+# composition and replaced the mouth with neutral skin in the same style.
+MOUTH_REMOVAL_PROMPT = (
+    "Remove the mouth from the character's face. Replace it with neutral "
+    "skin in the same illustration style as the rest of the image. Do not "
+    "change the eyes, hair, clothing, background, or composition — only the "
+    "mouth area is edited."
+)
+
+
 # --- branded title + synopsis -------------------------------------------------
 
 # Style anchors derived from the sample catalog. Future LLM calls follow this

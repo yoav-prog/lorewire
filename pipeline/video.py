@@ -166,6 +166,7 @@ def generate_video(
     repo_root: Path,
     category: str | None = None,
     props_list: list[dict] | None = None,
+    character_image_mouth_removed: str | None = None,
 ) -> dict:
     """Render the doodle short and return DB columns for the story row.
 
@@ -244,12 +245,32 @@ def generate_video(
         "label_pop": _truthy(_store.get_setting("video.label_pop")),
         "scribble_draw": _truthy(_store.get_setting("video.scribble_draw")),
         "prop_slide": _truthy(_store.get_setting("video.prop_slide")),
+        "mouth_swap": _truthy(_store.get_setting("video.mouth_swap")),
     }
     print(
         f"[video id={safe_id} motion] micro_wiggle={motion['micro_wiggle']} "
         f"label_pop={motion['label_pop']} scribble_draw={motion['scribble_draw']} "
-        f"prop_slide={motion['prop_slide']}"
+        f"prop_slide={motion['prop_slide']} mouth_swap={motion['mouth_swap']}"
     )
+
+    # Wave 3 Phase 3 MouthSwap: stage the mouth-removed character bust as a
+    # static asset so the composition can resolve it via staticFile(). We only
+    # stage when the beat is enabled AND the row has a URL — keeps the file
+    # work proportional to the actual render.
+    static_character: str | None = None
+    if motion["mouth_swap"] and character_image_mouth_removed:
+        try:
+            src = _public_url_to_filesystem_path(repo_root, character_image_mouth_removed, safe_id)
+            if not src.exists():
+                print(f"[video id={safe_id} mouth_swap] missing on disk: {src}")
+            else:
+                dst_dir = video_project / STATIC_DIR_RELATIVE / safe_id
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst_dir / src.name)
+                static_character = f"{safe_id}/{src.name}"
+                print(f"[video id={safe_id} mouth_swap] staged {src.name}")
+        except Exception as e:
+            print(f"[video id={safe_id} mouth_swap] stage FAILED: {e}")
 
     # Wave 3 Phase 2: walk the per-story -> per-category -> global scope chain
     # so a story override beats a category override beats the global default.
@@ -271,6 +292,7 @@ def generate_video(
         "caption_template": caption_template,
         "motion": motion,
         "props_list": static_props,
+        "character_image_mouth_removed": static_character,
     }
 
     props_dir = video_project / ".props"
@@ -569,6 +591,7 @@ def rerender_from_db(story_id: str, repo_root: Path) -> dict:
         repo_root=repo_root,
         category=row.get("category"),
         props_list=props_list,
+        character_image_mouth_removed=row.get("character_image_mouth_removed"),
     )
     if "video_url" in cols:
         # Merge the new video_url back through the same store the row came

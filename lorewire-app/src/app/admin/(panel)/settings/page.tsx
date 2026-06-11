@@ -88,6 +88,12 @@ const FIELDS: { key: string; label: string; placeholder: string; hint?: string }
       placeholder: "5",
       hint: "How many prop cutouts to generate when video.prop_slide is enabled. Clamped 3-10; default 5.",
     },
+    {
+      key: "video.mouth_swap",
+      label: "MouthSwap talking head",
+      placeholder: "0",
+      hint: "Set to 1 to enable. A small bottom-left bust of the protagonist with lip-flap mouth shapes timed to the narration. The next --media run generates a character portrait + a mouth-removed copy via kie (~$0.10 / story).",
+    },
   ];
 
 export default async function SettingsPage() {

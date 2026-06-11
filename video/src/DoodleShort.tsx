@@ -29,6 +29,7 @@ import { MicroWiggle } from "./motion/MicroWiggle";
 import { LabelPopOn } from "./motion/LabelPopOn";
 import { ScribbleDraw } from "./motion/ScribbleDraw";
 import { PropSlideIn } from "./motion/PropSlideIn";
+import { MouthSwap } from "./motion/MouthSwap";
 import type {
   ShortCaptionChunk,
   ShortCaptionWord,
@@ -154,6 +155,11 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         durationMs={config.duration_ms}
       />
 
+      <MouthSwap
+        enabled={!!config.motion?.mouth_swap}
+        characterUrl={config.character_image_mouth_removed}
+        words={config.captions.flatMap((c) => c.words ?? [])}
+      />
 
       {config.channel_name && (
         <div

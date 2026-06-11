@@ -39,6 +39,7 @@ export interface MotionConfig {
   label_pop?: boolean;
   scribble_draw?: boolean;
   prop_slide?: boolean;
+  mouth_swap?: boolean;
 }
 
 export interface PropListItem {
@@ -67,4 +68,8 @@ export interface ShortVideoConfig {
   // Prop list for the prop_slide beat. Pipeline writes it when the beat is
   // enabled; composition slides each prop in at evenly spaced intervals.
   props_list?: PropListItem[];
+  // Mouth-removed character bust for the mouth_swap beat. Pipeline writes
+  // it when the beat is enabled; composition overlays SVG mouth shapes at
+  // a fixed anchor while playing. Missing = no talking head rendered.
+  character_image_mouth_removed?: string;
 }

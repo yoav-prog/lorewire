@@ -105,6 +105,11 @@ def main() -> None:
                     alignment = json.loads(alignment_raw) if isinstance(alignment_raw, str) else alignment_raw
                 except json.JSONDecodeError:
                     alignment = []
+                props_raw = row.get("props") or "[]"
+                try:
+                    props_list = json.loads(props_raw) if isinstance(props_raw, str) else props_raw
+                except json.JSONDecodeError:
+                    props_list = []
                 video_cols = video.generate_video(
                     idea["reddit_id"],
                     idea["headline"],
@@ -113,6 +118,8 @@ def main() -> None:
                     alignment,
                     repo_root=REPO_ROOT,
                     category=idea.get("category"),
+                    props_list=props_list,
+                    character_image_mouth_removed=row.get("character_image_mouth_removed"),
                 )
                 row.update(video_cols)
         store.upsert_story(row)

@@ -130,6 +130,14 @@ def _prop_slide_enabled() -> bool:
     return raw in {"1", "true", "on", "yes"}
 
 
+def _mouth_swap_enabled() -> bool:
+    """Mirror of `_prop_slide_enabled` for the MouthSwap motion beat. Off by
+    default so the character + mouth-removed kie calls (~$0.10/story) are
+    opt-in. Truthy parity with the other motion flags: 1/true/on/yes."""
+    raw = (store.get_setting("video.mouth_swap") or "").strip().lower()
+    return raw in {"1", "true", "on", "yes"}
+
+
 def _prop_count() -> int:
     raw = store.get_setting("media.prop_count")
     if raw is None:
@@ -138,6 +146,70 @@ def _prop_count() -> int:
         return max(PROP_COUNT_MIN, min(PROP_COUNT_MAX, int(raw)))
     except (TypeError, ValueError):
         return DEFAULT_PROP_COUNT
+
+
+def _mouth_swap_block(
+    char_prompt: str, safe_id: str, out_dir: Path, url_prefix: str
+) -> tuple[str | None, str | None]:
+    """Generate the character bust + the mouth-removed edited copy.
+
+    Returns `(character_url, character_mouth_removed_url)`. Either or both
+    may be None when the underlying kie calls fail; the caller persists
+    only what came back. Lives outside generate_media() so the two-step
+    sequence is testable in isolation.
+    """
+    # Step 1: generate the bust at 3:4 portrait (same aspect as the cinematic
+    # hero so the kie credits map predictably).
+    started = time.time()
+    bust_url = _generate_with_retry(
+        char_prompt, f"id={safe_id} character bust", aspect_ratio="3:4"
+    )
+    if bust_url is None:
+        print(f"[media id={safe_id} mouth_swap] bust generation FAILED, skipping")
+        return None, None
+    local_bust = out_dir / "character.png"
+    try:
+        images.download(bust_url, local_bust)
+    except Exception as e:
+        print(f"[media id={safe_id} mouth_swap] bust download FAILED: {e}")
+        return None, None
+    public_bust = f"{url_prefix}/character.png"
+    stored_bust = gcs.publish(local_bust, f"{safe_id}/character.png", public_bust)
+    elapsed = time.time() - started
+    print(
+        f"[media id={safe_id} mouth_swap] bust "
+        f"({models.get_selected('images')}, 3:4) -> {stored_bust} ({elapsed:.1f}s)"
+    )
+
+    # Step 2: kie edit pass that removes the mouth. We pass the kie-hosted URL
+    # (bust_url, not stored_bust) — kie's edit endpoint downloads the source
+    # over the public internet and our GCS bucket might require auth on the
+    # public URL. Re-fetching from kie's CDN sidesteps that entirely.
+    started = time.time()
+    try:
+        edit_url = images.edit_image(
+            bust_url, stages.MOUTH_REMOVAL_PROMPT, aspect_ratio="3:4",
+            poll_timeout=IMAGE_POLL_TIMEOUT,
+        )
+    except Exception as e:
+        print(f"[media id={safe_id} mouth_swap] edit FAILED: {e}")
+        return stored_bust, None
+    local_edit = out_dir / "character-mouth-removed.png"
+    try:
+        images.download(edit_url, local_edit)
+    except Exception as e:
+        print(f"[media id={safe_id} mouth_swap] edit download FAILED: {e}")
+        return stored_bust, None
+    public_edit = f"{url_prefix}/character-mouth-removed.png"
+    stored_edit = gcs.publish(
+        local_edit, f"{safe_id}/character-mouth-removed.png", public_edit
+    )
+    elapsed = time.time() - started
+    print(
+        f"[media id={safe_id} mouth_swap] mouth-removed "
+        f"(qwen2/image-edit, 3:4) -> {stored_edit} ({elapsed:.1f}s)"
+    )
+    return stored_bust, stored_edit
 
 
 def _sanitize_id(story_id: str) -> str:
@@ -366,6 +438,20 @@ def generate_media(
             })
         if prop_list:
             out["props"] = json.dumps(prop_list)
+
+    # Wave 3 Phase 3 MouthSwap: generate the protagonist's talking-head bust
+    # and a mouth-removed copy. The composition overlays SVG mouth shapes on
+    # the mouth-removed version at a fixed anchor (cx=0.50, cy=0.62). Two
+    # kie calls per story (~$0.10) so this is opt-in via video.mouth_swap.
+    if not dry_run and _mouth_swap_enabled():
+        char_prompt = stages.make_character_prompt(idea, body, dry_run=False)
+        char_url, char_removed_url = _mouth_swap_block(
+            char_prompt, safe_id, out_dir, url_prefix
+        )
+        if char_url:
+            out["character_image"] = char_url
+        if char_removed_url:
+            out["character_image_mouth_removed"] = char_removed_url
 
     # --- voice
     if dry_run:

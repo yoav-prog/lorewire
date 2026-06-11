@@ -64,9 +64,41 @@ SCHEMA_STATEMENTS = [
     # spaced interval. Null/empty = no props rendered (which is the default
     # because the beat ships off).
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS props TEXT",
+    # Wave 3 Phase 3 MouthSwap: a tight talking-head portrait of the story's
+    # protagonist and a kie-edited copy with the mouth removed. Composition
+    # overlays SVG mouth shapes on the mouth-removed image during narration
+    # so the corner avatar lip-flaps in sync with words. Both null when the
+    # mouth_swap beat is off (the default).
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS character_image TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS character_image_mouth_removed TEXT",
+    # Wave 3 Phase 4 intro/outro override layer: each story can pin a specific
+    # intro/outro from the library, or opt out entirely. NULL/0 = inherit the
+    # global active pick (see settings keys `video.active_intro_id` /
+    # `video.active_outro_id` and the master switch `video.intro_outro_enabled`).
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS intro_segment_id TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS outro_segment_id TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS skip_intro INTEGER DEFAULT 0",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS skip_outro INTEGER DEFAULT 0",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
+    )""",
+    # Wave 3 Phase 4 video segment library: intros and outros are uploaded
+    # through the admin, normalized once to 1080x1920 @ 30fps H.264+AAC, then
+    # cached in GCS. Renders splice the active intro before and the active
+    # outro after the body video. `kind` is 'intro' or 'outro'; soft-disabled
+    # rows stay around (so a per-story override can still resolve) but are
+    # skipped by the global-active picker.
+    """CREATE TABLE IF NOT EXISTS video_segments (
+        id              TEXT PRIMARY KEY,
+        kind            TEXT NOT NULL,
+        label           TEXT,
+        source_url      TEXT,
+        normalized_url  TEXT,
+        duration_ms     INTEGER,
+        enabled         INTEGER DEFAULT 1,
+        created_at      TEXT,
+        updated_at      TEXT
     )""",
 ]
 
@@ -74,8 +106,9 @@ _COLUMNS = [
     "id", "reddit_id", "slug", "category", "title", "summary", "body",
     "teleprompter", "status", "source_url", "hero_image", "hero_image_landscape",
     "hero_has_baked_title", "images", "audio_url", "video_url", "duration",
-    "alignment", "props", "tokens", "cost_cents", "created_at", "updated_at",
-    "published_at", "payload",
+    "alignment", "props", "character_image", "character_image_mouth_removed",
+    "intro_segment_id", "outro_segment_id", "skip_intro", "skip_outro",
+    "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
 _UPDATE = [c for c in _COLUMNS if c not in ("id", "created_at")]
@@ -224,6 +257,115 @@ def fetch_story(story_id: str) -> dict | None:
     with _sqlite_conn() as c:
         row = c.execute(f"SELECT {cols} FROM stories WHERE id=?", (story_id,)).fetchone()
         return dict(row) if row else None
+
+
+# --- video_segments helpers ---------------------------------------------------
+# A small relational library of intro/outro clips. The pipeline reads through
+# `fetch_segment` (single-row) and `list_segments` (admin list page); the admin
+# writes via `upsert_segment` (insert or full overwrite) and `delete_segment`.
+# Kept in this module so both the pipeline and the admin (via the SQLite file)
+# share a single source of truth on the shape.
+
+_SEGMENT_COLUMNS = [
+    "id", "kind", "label", "source_url", "normalized_url", "duration_ms",
+    "enabled", "created_at", "updated_at",
+]
+_SEGMENT_UPDATE = [c for c in _SEGMENT_COLUMNS if c not in ("id", "created_at")]
+
+
+def fetch_segment(segment_id: str) -> dict | None:
+    """Read one segment by id. Returns None when no row matches."""
+    if not segment_id:
+        return None
+    cols = ", ".join(_SEGMENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM video_segments WHERE id = %s",
+                    (segment_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM video_segments WHERE id=?", (segment_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_segments(kind: str | None = None) -> list[dict]:
+    """Read every segment row. Optionally filter by kind ('intro' or 'outro').
+    Newest first so the admin list shows recent uploads at the top."""
+    cols = ", ".join(_SEGMENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                if kind:
+                    cur.execute(
+                        f"SELECT {cols} FROM video_segments WHERE kind = %s "
+                        "ORDER BY created_at DESC",
+                        (kind,),
+                    )
+                else:
+                    cur.execute(
+                        f"SELECT {cols} FROM video_segments ORDER BY created_at DESC"
+                    )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        if kind:
+            cur = c.execute(
+                f"SELECT {cols} FROM video_segments WHERE kind=? "
+                "ORDER BY created_at DESC",
+                (kind,),
+            )
+        else:
+            cur = c.execute(
+                f"SELECT {cols} FROM video_segments ORDER BY created_at DESC"
+            )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def upsert_segment(s: dict) -> None:
+    """Insert or refresh a segment row. `id` and `kind` are required."""
+    row = {k: s.get(k) for k in _SEGMENT_COLUMNS}
+    cols = ", ".join(_SEGMENT_COLUMNS)
+    updates = ", ".join(f"{c}=excluded.{c}" for c in _SEGMENT_UPDATE)
+    if _is_postgres():
+        placeholders = ", ".join(f"%({c})s" for c in _SEGMENT_COLUMNS)
+        sql = (
+            f"INSERT INTO video_segments ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT(id) DO UPDATE SET {updates}"
+        )
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, row)
+            conn.commit()
+        return
+    placeholders = ", ".join(f":{c}" for c in _SEGMENT_COLUMNS)
+    sql = (
+        f"INSERT INTO video_segments ({cols}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+    )
+    with _sqlite_conn() as c:
+        c.execute(sql, row)
+
+
+def delete_segment(segment_id: str) -> None:
+    """Hard-delete a segment row. Callers are responsible for clearing any
+    `video.active_*_id` setting or per-story override that points at it."""
+    if not segment_id:
+        return
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM video_segments WHERE id = %s", (segment_id,)
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute("DELETE FROM video_segments WHERE id=?", (segment_id,))
 
 
 def published_stories() -> list[dict]:
