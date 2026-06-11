@@ -25,6 +25,7 @@ import {
   articleDirection,
 } from "@/lib/articles";
 import type { ArticleLanguage, ArticleRow, ArticleType } from "@/lib/repo";
+import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
 
 function isLanguage(v: string): v is ArticleLanguage {
   return v === "he" || v === "en";
@@ -40,11 +41,13 @@ async function loadArticle(params: Params): Promise<ArticleRow | null> {
   return getPublishedArticleBySlug(params.locale, params.slug);
 }
 
-// Origin used to absolutize OG/canonical URLs. Falls back to "" so local
-// dev still renders sensible relative URLs. The deployer sets
-// NEXT_PUBLIC_SITE_ORIGIN in prod (e.g. https://lorewire.example).
-function siteOrigin(): string {
-  return process.env.NEXT_PUBLIC_SITE_ORIGIN ?? "";
+// Origin used to absolutize OG/canonical URLs. Prefer the admin-configured
+// seo.site_url; fall back to the NEXT_PUBLIC_SITE_ORIGIN env var; empty
+// string for local dev produces sensible relative URLs.
+function resolveOrigin(siteUrlSetting: string): string {
+  return (
+    siteUrlSetting || process.env.NEXT_PUBLIC_SITE_ORIGIN || ""
+  ).replace(/\/$/, "");
 }
 
 export async function generateMetadata({
@@ -53,33 +56,56 @@ export async function generateMetadata({
   params: Promise<Params>;
 }): Promise<Metadata> {
   const article = await loadArticle(await params);
-  if (!article) return { title: "Not found — LoreWire" };
-  const origin = siteOrigin();
+  const seo = await getSiteSeo();
+  if (!article) {
+    return {
+      title: buildPageTitle("Not found", seo.titleTemplate, seo.siteName),
+    };
+  }
+  const origin = resolveOrigin(seo.siteUrl);
   const canonical = `${origin}/articles/${article.language}/${article.slug}`;
-  const title = article.meta_title ?? article.title ?? "Article — LoreWire";
+  const pageTitle =
+    article.meta_title ?? article.title ?? "Article";
+  const title = buildPageTitle(pageTitle, seo.titleTemplate, seo.siteName);
   const description =
-    article.meta_description ?? article.summary ?? undefined;
+    article.meta_description ?? article.summary ?? seo.defaultMetaDescription;
   const ogImage =
     article.og_image ??
     article.hero_image ??
-    `${origin}/articles/og/${article.id}`;
+    (seo.defaultOgImage || `${origin}/articles/og/${article.id}`);
+
+  const noindex = article.noindex === 1;
+
   return {
     title,
     description,
     alternates: { canonical },
+    robots: noindex
+      ? { index: false, follow: false }
+      : { index: true, follow: true },
     openGraph: {
       title,
       description,
       type: "article",
       url: canonical,
+      siteName: seo.siteName,
       images: ogImage ? [{ url: ogImage }] : undefined,
       locale: article.language ?? "en",
     },
     twitter: {
-      card: "summary_large_image",
+      card: seo.twitterCardType,
       title,
       description,
       images: ogImage ? [ogImage] : undefined,
+      site: seo.twitterHandle || undefined,
+    },
+    // Verification metas (Google Search Console, Bing Webmaster) attach
+    // to every public page via the metadata tree.
+    verification: {
+      google: seo.googleVerification || undefined,
+      other: seo.bingVerification
+        ? { "msvalidate.01": seo.bingVerification }
+        : undefined,
     },
   };
 }
@@ -99,10 +125,11 @@ export default async function ArticleReader({
   const payload = parseArticlePayload(type, article.payload);
 
   const bodyHtml = renderArticleHtml(article.document);
+  const seo = await getSiteSeo();
   const jsonLd = buildArticleJsonLd({
     article,
-    siteOrigin: siteOrigin(),
-    siteName: "LoreWire",
+    siteOrigin: resolveOrigin(seo.siteUrl),
+    siteName: seo.siteName,
   });
 
   console.info("[articles reader] render", {

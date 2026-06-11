@@ -503,10 +503,12 @@ export interface ArticleRow {
   created_at: string | null;
   updated_at: string | null;
   published_at: string | null;
+  // 0 or NULL = indexable; 1 = the public reader emits noindex,nofollow.
+  noindex: number | null;
 }
 
 const ARTICLE_COLS =
-  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, payload, source_sheet_row_id, created_at, updated_at, published_at";
+  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, payload, source_sheet_row_id, created_at, updated_at, published_at, noindex";
 
 // Slim projection for /admin/articles list. Drops the heavy text fields
 // (document, payload, summary, meta_*, og_image) the list does not render.
@@ -731,6 +733,18 @@ export async function setArticleStatus(
     );
   }
   console.info("[articles repo] status", { id, status });
+}
+
+export async function setArticleNoindex(
+  id: string,
+  noindex: boolean,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE articles SET noindex = ?, updated_at = ? WHERE id = ?",
+    [noindex ? 1 : 0, now, id],
+  );
+  console.info("[articles repo] noindex", { id, noindex });
 }
 
 export async function deleteArticle(id: string): Promise<void> {

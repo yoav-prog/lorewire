@@ -24,6 +24,7 @@ import {
   getArticleBySourceSheetRowId,
   updateArticle,
   setArticleStatus,
+  setArticleNoindex,
   deleteArticle,
   appendRevision,
   checkSlugAvailable,
@@ -477,6 +478,20 @@ export async function setArticleStatusAction(
   revalidatePath("/admin/articles");
   revalidatePath("/admin/content");
   redirectToArticle(id, { status: "saved" });
+}
+
+export async function setArticleNoindexAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const noindex = String(formData.get("noindex") ?? "") === "1";
+  if (!id) redirectToArticles({ error: "missing-id" });
+  await setArticleNoindex(id, noindex);
+  console.info("[articles action] noindex", { id, noindex });
+  revalidatePath(`/admin/articles/${id}`);
+  revalidatePath(`/articles`, "layout");
+  redirectToArticle(id, { noindex: noindex ? "on" : "off" });
 }
 
 // Slug change runs the per-language uniqueness check before writing. The

@@ -56,6 +56,11 @@ export const STORIES: Table = {
     { name: "updated_at", type: "TEXT" },
     { name: "published_at", type: "TEXT" },
     { name: "payload", type: "TEXT" },
+    // Per-row "hide from search engines" flag. Mirrors the noindex column
+    // on articles. Stories don't have a public permalink yet so this is
+    // data-only today; the per-story public reader, when it lands, must
+    // honor it the same way the article reader does.
+    { name: "noindex", type: "INTEGER" },
   ],
 };
 
@@ -134,6 +139,10 @@ export const ARTICLES: Table = {
     { name: "created_at", type: "TEXT" },
     { name: "updated_at", type: "TEXT" },
     { name: "published_at", type: "TEXT" },
+    // Per-row "hide from search engines" flag (2026-06-12 SEO work). 0 or
+    // NULL = indexable; 1 = the public reader emits noindex,nofollow on the
+    // page and a Disallow could be added to robots.txt in a follow-up.
+    { name: "noindex", type: "INTEGER" },
   ],
 };
 

@@ -25,9 +25,9 @@ import type {
 // next to the function that uses them — a future extraction of this module
 // into its own package shouldn't have to reach back across the seam.
 const PUBLIC_LIST_COLS =
-  "id, type, language, slug, title, summary, hero_image, og_image, meta_description, created_at, updated_at, published_at";
+  "id, type, language, slug, title, summary, hero_image, og_image, meta_description, created_at, updated_at, published_at, noindex";
 const PUBLIC_FULL_COLS =
-  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, payload, source_sheet_row_id, created_at, updated_at, published_at";
+  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, payload, source_sheet_row_id, created_at, updated_at, published_at, noindex";
 
 export interface PublicArticleListRow extends ArticleListRow {
   summary: string | null;

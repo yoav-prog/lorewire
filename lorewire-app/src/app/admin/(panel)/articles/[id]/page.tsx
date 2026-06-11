@@ -11,6 +11,7 @@ import { getArticle } from "@/lib/repo";
 import type { ArticleType } from "@/lib/repo";
 import {
   setArticleStatusAction,
+  setArticleNoindexAction,
   deleteArticleAction,
 } from "@/app/admin/actions";
 import {
@@ -181,6 +182,28 @@ export default async function EditArticlePage({
                 </form>
               ))}
             </div>
+          </div>
+
+          <div className="rounded-xl border border-line bg-surface p-4">
+            <div className={LABEL}>Search visibility</div>
+            <p className="mb-2 text-[12px] text-muted">
+              {article.noindex
+                ? "Hidden from search engines. The public page emits noindex,nofollow."
+                : "Indexable. Search engines can crawl and rank this page."}
+            </p>
+            <form action={setArticleNoindexAction}>
+              <input type="hidden" name="id" value={article.id} />
+              <input
+                type="hidden"
+                name="noindex"
+                value={article.noindex ? "0" : "1"}
+              />
+              <button className="rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
+                {article.noindex
+                  ? "Show in search engines"
+                  : "Hide from search engines"}
+              </button>
+            </form>
           </div>
 
           <Link

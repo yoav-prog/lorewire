@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Archivo, Hanken_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
 import RegisterSW from "@/components/RegisterSW";
+import { getSiteSeo } from "@/lib/site-seo";
 import "./globals.css";
 
 const archivo = Archivo({ subsets: ["latin"], variable: "--font-archivo" });
@@ -8,19 +9,45 @@ const hanken = Hanken_Grotesk({ subsets: ["latin"], variable: "--font-hanken" })
 const spline = Spline_Sans_Mono({ subsets: ["latin"], variable: "--font-spline" });
 const caveat = Caveat({ subsets: ["latin"], variable: "--font-caveat" });
 
-export const metadata: Metadata = {
-  applicationName: "LoreWire",
-  title: "LoreWire — The internet's stories, retold",
-  description: "Netflix for true internet stories. Watch the short, read the article, or read along.",
-  appleWebApp: { capable: true, title: "LoreWire", statusBarStyle: "black-translucent" },
-};
+// Site-wide metadata + viewport. Both functions read the admin-configured
+// seo.* settings from settings_kv, with safe defaults baked into
+// lib/site-seo.ts so a brand-new install still ships with a sensible title
+// and theme color before anyone visits Settings → SEO.
 
-export const viewport: Viewport = {
-  themeColor: "#0A0A0C",
-  width: "device-width",
-  initialScale: 1,
-  viewportFit: "cover",
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const seo = await getSiteSeo();
+  return {
+    applicationName: seo.siteName,
+    title: {
+      default: seo.siteName,
+      // Per-page generateMetadata calls handle their own templates; this
+      // is the fallback title for any page that doesn't set its own.
+      template: seo.titleTemplate,
+    },
+    description: seo.defaultMetaDescription,
+    appleWebApp: {
+      capable: true,
+      title: seo.siteName,
+      statusBarStyle: "black-translucent",
+    },
+    verification: {
+      google: seo.googleVerification || undefined,
+      other: seo.bingVerification
+        ? { "msvalidate.01": seo.bingVerification }
+        : undefined,
+    },
+  };
+}
+
+export async function generateViewport(): Promise<Viewport> {
+  const seo = await getSiteSeo();
+  return {
+    themeColor: seo.themeColor,
+    width: "device-width",
+    initialScale: 1,
+    viewportFit: "cover",
+  };
+}
 
 export default function RootLayout({
   children,
