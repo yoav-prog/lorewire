@@ -17,11 +17,18 @@
 
 import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { saveArticleAction } from "@/app/admin/actions";
 import { Callout, type CalloutTone } from "@/lib/tiptap-callout";
 import { ArticleImage } from "@/lib/tiptap-article-image";
 import { ArticleImageView } from "./ArticleImageView";
+
+// Debounce window for autosave. Matches the default the plan calls out;
+// settings.articles.autosave_debounce_ms can override (Phase 3 wires it).
+// Plenty of time to finish a sentence without trickling DB writes every
+// keystroke, short enough that a 5-minute editing burst leaves at most one
+// uncoalesced revision in flight if the tab closes.
+const AUTOSAVE_DEBOUNCE_MS = 1500;
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -64,8 +71,33 @@ interface UploadResponse {
   height: number | null;
 }
 
+interface AutosaveResponse {
+  ok: true;
+  revisionId: string;
+  coalesced: boolean;
+  savedAt: string;
+}
+
 interface ErrorResponse {
   error?: string;
+}
+
+type AutosaveStatus = "idle" | "saving" | "saved" | "error";
+
+// Format a saved-at ISO string for the tiny indicator next to the toolbar.
+// We show HH:MM:SS so the writer can tell autosave is actually firing even
+// when the document body hasn't visibly changed — a quiet reassurance.
+function fmtClock(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return "";
+  }
 }
 
 export function ArticleEditor({
@@ -82,7 +114,62 @@ export function ArticleEditor({
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [autosaveStatus, setAutosaveStatus] = useState<AutosaveStatus>("idle");
+  const [autosaveSavedAt, setAutosaveSavedAt] = useState<string | null>(null);
+  const [autosaveError, setAutosaveError] = useState("");
   const initialDoc = parseDocument(document);
+
+  // Refs around the autosave timer + the last serialized body so we don't
+  // refire when nothing actually changed (Tiptap fires onUpdate on every
+  // selection move under some conditions). useRef avoids re-creating the
+  // closure inside useEditor when these change.
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSerializedRef = useRef<string>("");
+
+  // The autosave function itself. Stable identity via useMemo so the
+  // useEditor closure doesn't change with state — we read state via the
+  // refs and setters.
+  const autosave = useMemo(
+    () => async (serialized: string) => {
+      if (!serialized || serialized === lastSerializedRef.current) return;
+      setAutosaveStatus("saving");
+      setAutosaveError("");
+      try {
+        const resp = await fetch(`/api/admin/articles/${id}/autosave`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ document: serialized }),
+        });
+        if (!resp.ok) {
+          const data = (await resp.json().catch(() => ({}))) as ErrorResponse;
+          throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        const data = (await resp.json()) as AutosaveResponse;
+        lastSerializedRef.current = serialized;
+        setAutosaveSavedAt(data.savedAt);
+        setAutosaveStatus("saved");
+        console.info("[articles editor] autosave-ok", {
+          revisionId: data.revisionId,
+          coalesced: data.coalesced,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("[articles editor] autosave FAILED:", msg);
+        setAutosaveError(msg);
+        setAutosaveStatus("error");
+      }
+    },
+    [id],
+  );
+
+  // Clear the pending timer on unmount so a stale autosave doesn't fire
+  // after the user has navigated away (avoids "saving" landing on a stale
+  // article via React 18 strict-mode-style remounts).
+  useEffect(() => {
+    return () => {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    };
+  }, []);
 
   // ArticleImage carries a React NodeView. We attach it on-the-fly here so
   // the node spec in lib/ stays importable from server-side rendering code
@@ -104,6 +191,17 @@ export function ArticleEditor({
           "min-h-[420px] rounded-lg border border-line bg-bg px-4 py-3 text-[15px] text-ink leading-relaxed outline-none focus-within:border-accent",
         dir: direction,
       },
+    },
+    // Debounced autosave on every change. The timer resets on the next
+    // edit, so a continuous typing burst fires exactly one save after the
+    // writer pauses for AUTOSAVE_DEBOUNCE_MS. The server's coalescing window
+    // catches anything tighter.
+    onUpdate({ editor: ed }) {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+      autosaveTimerRef.current = setTimeout(() => {
+        const serialized = JSON.stringify(ed.getJSON());
+        autosave(serialized);
+      }, AUTOSAVE_DEBOUNCE_MS);
     },
   });
 
@@ -339,7 +437,26 @@ export function ArticleEditor({
             }}
           />
 
-          <span className="ml-auto flex gap-1">
+          <span
+            className={`ml-auto flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider ${
+              autosaveStatus === "error" ? "text-danger" : "text-muted"
+            }`}
+            title={
+              autosaveStatus === "error" && autosaveError
+                ? autosaveError
+                : undefined
+            }
+          >
+            {autosaveStatus === "saving" && (
+              <span className="text-muted">Saving…</span>
+            )}
+            {autosaveStatus === "saved" && autosaveSavedAt && (
+              <span className="text-muted">
+                Saved {fmtClock(autosaveSavedAt)}
+              </span>
+            )}
+            {autosaveStatus === "error" && <span>Autosave failed</span>}
+            {autosaveStatus === "idle" && <span className="opacity-50">Autosave on</span>}
             <button
               type="button"
               onClick={() => editor.chain().focus().undo().run()}

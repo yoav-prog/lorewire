@@ -8,6 +8,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/dal";
 import { getArticle } from "@/lib/repo";
+import type { ArticleType } from "@/lib/repo";
 import {
   setArticleStatusAction,
   deleteArticleAction,
@@ -17,8 +18,10 @@ import {
   ARTICLE_LANGUAGE_LABELS,
   articleDirection,
 } from "@/lib/articles";
+import { parseArticlePayload } from "@/lib/article-payload";
 import { statusClass } from "@/app/admin/ui";
 import { ArticleEditor } from "./ArticleEditor";
+import { ArticlePayloadSidebar } from "./ArticlePayloadSidebar";
 
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
@@ -28,13 +31,25 @@ export default async function EditArticlePage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ saved?: string; error?: string }>;
+  searchParams: Promise<{
+    saved?: string;
+    error?: string;
+    payload?: string;
+  }>;
 }) {
   await requireAdmin();
   const { id } = await params;
-  const { saved, error } = await searchParams;
+  const { saved, error, payload: payloadSaved } = await searchParams;
   const article = await getArticle(id);
   if (!article) notFound();
+
+  // Parse the type-specific payload once; if the row's type is missing or
+  // unknown we skip the sidebar entirely rather than render a broken form.
+  const articleType = (article.type ?? null) as ArticleType | null;
+  const parsedPayload =
+    articleType && ["news", "feature", "listicle", "review"].includes(articleType)
+      ? parseArticlePayload(articleType, article.payload)
+      : null;
 
   // Status transitions exposed in the sidebar. Order is the workflow direction:
   // forward toward published, with archive as the exit. "draft" is always the
@@ -81,6 +96,11 @@ export default async function EditArticlePage({
           Saved.
         </p>
       )}
+      {payloadSaved === "saved" && (
+        <p className="rounded-lg border border-cat-wholesome/40 bg-cat-wholesome/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-wholesome">
+          Details saved.
+        </p>
+      )}
       {error && (
         <p className="rounded-lg border border-cat-entitled/40 bg-cat-entitled/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-entitled">
           {(() => {
@@ -108,6 +128,13 @@ export default async function EditArticlePage({
         />
 
         <aside className="space-y-4">
+          {parsedPayload && (
+            <ArticlePayloadSidebar
+              articleId={article.id}
+              direction={dir}
+              {...parsedPayload}
+            />
+          )}
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Status</div>
             <div className="flex flex-wrap gap-2">

@@ -42,6 +42,13 @@ import {
   slugifyTitle,
 } from "@/lib/articles";
 import { countImagesMissingAlt } from "@/lib/tiptap-article-image";
+import {
+  NewsPayloadSchema,
+  FeaturePayloadSchema,
+  ListiclePayloadSchema,
+  ReviewPayloadSchema,
+} from "@/lib/article-payload";
+import type { ArticleType } from "@/lib/repo";
 
 export interface LoginState {
   error?: string;
@@ -477,6 +484,110 @@ export async function updateArticleSlugAction(
   revalidatePath(`/admin/articles/${id}`);
   revalidatePath("/admin/articles");
   redirectToArticle(id, { slug: "saved" });
+}
+
+// Save the type-specific payload. The form serializes a flat shape; we
+// reassemble + validate per type before writing. The sidebar carries a
+// hidden `__type` so the action picks the right schema without re-reading
+// the article — we still cross-check it against the stored type and refuse
+// a mismatch, which would otherwise let a swapped form post a payload that
+// the reader can't interpret.
+export async function updateArticlePayloadAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  if (!id) redirectToArticles({ error: "missing-id" });
+  const article = await getArticle(id);
+  if (!article) redirectToArticles({ error: "not-found" });
+  const claimedType = String(formData.get("__type") ?? "");
+  if (!isArticleType(claimedType)) {
+    redirectToArticle(id, { error: "bad-type" });
+  }
+  if (article!.type !== claimedType) {
+    // Hard reject: the form was generated for a different type than the row
+    // currently is. Either a stale tab or a tampered form; either way we
+    // refuse the write and tell the editor to reload.
+    redirectToArticle(id, { error: "type-mismatch" });
+  }
+  const type = claimedType as ArticleType;
+
+  // Per-type parse. We build a plain object from the FormData keys the
+  // sidebar emits — keys are namespaced under "payload." so a future SEO
+  // tab can share the form without collision.
+  function field(name: string): string {
+    return String(formData.get(`payload.${name}`) ?? "");
+  }
+  function fieldList(name: string): string[] {
+    // The sidebar emits repeated fields for arrays (pros / cons / item.*).
+    // FormData.getAll preserves order, which the schemas care about.
+    return formData.getAll(`payload.${name}`).map((v) => String(v ?? ""));
+  }
+
+  let parsed: unknown;
+  try {
+    switch (type) {
+      case "news":
+        parsed = NewsPayloadSchema.parse({
+          datelineLocation: field("datelineLocation"),
+          datelineDate: field("datelineDate"),
+          sourceUrl: field("sourceUrl"),
+          sourceLabel: field("sourceLabel"),
+        });
+        break;
+      case "feature":
+        parsed = FeaturePayloadSchema.parse({
+          authorByline: field("authorByline"),
+          readingTimeMinutes: field("readingTimeMinutes") || 0,
+        });
+        break;
+      case "listicle": {
+        // Items arrive as parallel arrays — title[i], body[i], imageUrl[i],
+        // imageAlt[i], rank[i]. Reassemble row-by-row so the schema can
+        // validate each item's caps independently.
+        const titles = fieldList("item.title");
+        const bodies = fieldList("item.body");
+        const urls = fieldList("item.imageUrl");
+        const alts = fieldList("item.imageAlt");
+        const ranks = fieldList("item.rank");
+        const items = titles.map((title, i) => ({
+          rank: Number(ranks[i] ?? i + 1) || i + 1,
+          title,
+          body: bodies[i] ?? "",
+          imageUrl: urls[i] ?? "",
+          imageAlt: alts[i] ?? "",
+        }));
+        parsed = ListiclePayloadSchema.parse({
+          items,
+          countdownOrder: field("countdownOrder") === "on",
+        });
+        break;
+      }
+      case "review":
+        parsed = ReviewPayloadSchema.parse({
+          rating: field("rating") || 0,
+          verdict: field("verdict"),
+          // Filter blank-after-trim entries so an empty extra row doesn't
+          // pollute the bullets list.
+          pros: fieldList("pros").filter((s) => s.trim()),
+          cons: fieldList("cons").filter((s) => s.trim()),
+        });
+        break;
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[articles action] payload-validation FAILED", {
+      id,
+      type,
+      msg: msg.slice(0, 200),
+    });
+    redirectToArticle(id, { error: "bad-payload" });
+  }
+
+  await updateArticle(id, { payload: JSON.stringify(parsed) });
+  console.info("[articles action] payload-save", { id, type });
+  revalidatePath(`/admin/articles/${id}`);
+  redirectToArticle(id, { payload: "saved" });
 }
 
 export async function deleteArticleAction(formData: FormData): Promise<void> {
