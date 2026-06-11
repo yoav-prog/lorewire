@@ -384,7 +384,39 @@ def generate_video(
         f"[video id={safe_id} render] done in {elapsed:.1f}s "
         f"({size_mb:.1f} MB at {stored_url})"
     )
-    return {"video_url": stored_url}
+    # 2026-06-11 video editor: lock-aware merge over any existing config so
+    # this re-run doesn't clobber human edits. `current` is the parsed JSON
+    # from the row (if any); merge_with_locks preserves every path the editor
+    # stamped into `_locks` and carries `_edit_session` forward verbatim. A
+    # brand-new row falls through to a straight write of the new config.
+    from pipeline.video_config import merge_with_locks
+
+    fresh_config = {**config, "config_version": 2}
+    current_config: dict | None = None
+    if story_row is not None:
+        raw = story_row.get("video_config")
+        if isinstance(raw, str) and raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                print(
+                    f"[video id={safe_id} config persist] existing video_config "
+                    f"is not valid JSON; clobbering (likely first run after migration)"
+                )
+                parsed = None
+            if isinstance(parsed, dict):
+                current_config = parsed
+        elif isinstance(raw, dict):
+            current_config = raw
+
+    persisted_config = merge_with_locks(current_config, fresh_config)
+    lock_count = len((current_config or {}).get("_locks") or {})
+    print(
+        f"[video id={safe_id} config persist] writing video_config "
+        f"(version=2, locked_fields={lock_count}, "
+        f"{len(json.dumps(persisted_config))} bytes)"
+    )
+    return {"video_url": stored_url, "video_config": persisted_config}
 
 
 # --- pure helpers (covered by pipeline/tests/test_video.py) -------------------
@@ -628,8 +660,12 @@ def rerender_from_db(story_id: str, repo_root: Path) -> dict:
         # from so the write lands in whichever driver is active. We re-upsert
         # only the columns the video stage owns; everything else is preserved
         # by the upsert's ON CONFLICT clause writing only the named columns.
+        # 2026-06-11: also persist video_config so the editor and renderer
+        # share one source of truth (see _plans/2026-06-11-video-editor.md).
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         merged = {**row, "video_url": cols["video_url"], "updated_at": now}
+        if "video_config" in cols:
+            merged["video_config"] = cols["video_config"]
         store.upsert_story(merged)
     return cols
 

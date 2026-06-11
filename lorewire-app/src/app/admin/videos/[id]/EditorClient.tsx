@@ -1,0 +1,965 @@
+"use client";
+
+// /admin/videos/[id] editor client. 3-col layout:
+//   left   = frame timeline (read-only)
+//   center = @remotion/player driving PreviewComposition (live preview)
+//   right  = tabs (Trim live; rest stubbed and shipping per the plan)
+//
+// Trim is now a controlled component: EditorClient owns `draftConfig` and
+// passes the live values down to both the Player (so the preview reflects
+// edits before save) AND the TrimPanel (so the sliders show what the
+// Player is rendering). Save writes the draft to the persisted config via
+// saveVideoConfigPatch.
+//
+// Match the lorewire admin design language (rule 5 + rule 16): dark surface
+// tokens (bg-bg / bg-surface / bg-surface2), mono uppercase labels with
+// tracking-wider, accent-orange for the one primary CTA. NO purple
+// gradients, NO glassmorphism — those are the AI-generated tells the rule
+// calls out.
+
+import Link from "next/link";
+import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { statusClass } from "@/app/admin/ui";
+import type { ShortVideoConfig } from "@/lib/video-config";
+import type { RenderRow, RenderStatus } from "@/lib/video-render-queue";
+import {
+  PreviewComposition,
+  type PreviewProps,
+} from "@/components/video-preview/PreviewComposition";
+import { queueRender, saveVideoConfigPatch } from "./actions";
+
+// Player is client-only (Remotion's runtime is not SSR-safe). next/dynamic
+// with ssr:false gives us code-splitting + no hydration mismatch.
+const PlayerNoSSR = dynamic(
+  () => import("@remotion/player").then((m) => m.Player),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        className="flex items-center justify-center rounded-lg border border-line bg-surface font-mono text-[11px] uppercase tracking-wider text-muted"
+        style={{ aspectRatio: "9 / 16", maxHeight: "70vh" }}
+      >
+        Loading Player runtime…
+      </div>
+    ),
+  },
+);
+
+const FPS = 30;
+const WIDTH = 1080;
+const HEIGHT = 1920;
+
+type TabKey = "trim" | "captions" | "audio" | "overlays" | "metadata";
+
+const TABS: { key: TabKey; label: string }[] = [
+  { key: "trim", label: "Trim" },
+  { key: "captions", label: "Captions" },
+  { key: "audio", label: "Audio" },
+  { key: "overlays", label: "Overlays" },
+  { key: "metadata", label: "Metadata" },
+];
+
+export default function EditorClient({
+  storyId,
+  storyTitle,
+  storyStatus,
+  config,
+  previewFrameUrls,
+  audioUrl,
+  derivedDefault,
+  latestRender,
+}: {
+  storyId: string;
+  storyTitle: string;
+  storyStatus: string;
+  config: ShortVideoConfig;
+  previewFrameUrls: string[];
+  audioUrl: string | null;
+  derivedDefault: boolean;
+  latestRender: RenderRow | null;
+}) {
+  const [tab, setTab] = useState<TabKey>("trim");
+  const [selectedFrameIdx, setSelectedFrameIdx] = useState<number | null>(
+    config.doodle_frames.length > 0 ? 0 : null,
+  );
+
+  // Draft config: overlays user edits on top of the persisted config so the
+  // Player previews unsaved changes. Reset on persist (server revalidates →
+  // new `config` prop comes in → draft regenerates).
+  const [draft, setDraft] = useState<DraftEdits>({
+    clip_start_ms: config.clip_start_ms ?? 0,
+    clip_end_ms: config.clip_end_ms ?? config.duration_ms,
+  });
+
+  // The config the Player actually renders — persisted base with the
+  // current draft fields merged in. Memoised so the Player doesn't see a
+  // new object reference on every render.
+  const livePreviewConfig = useMemo<ShortVideoConfig>(
+    () => ({
+      ...config,
+      clip_start_ms: draft.clip_start_ms,
+      clip_end_ms: draft.clip_end_ms,
+    }),
+    [config, draft.clip_start_ms, draft.clip_end_ms],
+  );
+
+  // Derived Player props — duration shrinks to the trimmed window so the
+  // scrub bar matches what the rendered MP4 will be.
+  const trimmedDurationMs = Math.max(
+    1,
+    draft.clip_end_ms - draft.clip_start_ms,
+  );
+  const durationInFrames = Math.max(
+    1,
+    Math.ceil((trimmedDurationMs / 1000) * FPS),
+  );
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[video editor] client mounted", {
+    story_id: storyId,
+    tab,
+    frames: config.doodle_frames.length,
+    preview_urls: previewFrameUrls.length,
+    derived_default: derivedDefault,
+    has_audio: Boolean(audioUrl),
+  });
+
+  return (
+    <div
+      className="flex flex-col"
+      style={{ height: "100svh", overflow: "hidden" }}
+    >
+      <Header
+        storyId={storyId}
+        storyTitle={storyTitle}
+        storyStatus={storyStatus}
+        frameCount={config.doodle_frames.length}
+        durationMs={config.duration_ms}
+        trimmedDurationMs={trimmedDurationMs}
+        derivedDefault={derivedDefault}
+        latestRender={latestRender}
+      />
+
+      <div className="flex min-h-0 flex-1">
+        {/* Left: frame timeline */}
+        <aside
+          className="flex shrink-0 flex-col overflow-hidden border-r border-line bg-surface"
+          style={{ width: 300 }}
+        >
+          <div className="shrink-0 border-b border-line px-4 py-3">
+            <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+              Storyboard · {config.doodle_frames.length} frames
+            </p>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {config.doodle_frames.length === 0 ? (
+              <EmptyHint
+                label="No frames yet"
+                hint="Run the media + video pipeline to populate frames."
+              />
+            ) : (
+              config.doodle_frames.map((frame, idx) => {
+                const captionIdx = frame.caption_chunk_start_index;
+                const captionText =
+                  config.captions[captionIdx]?.text ?? "(no caption)";
+                const isSelected = selectedFrameIdx === idx;
+                return (
+                  <button
+                    key={`${frame.url}-${idx}`}
+                    type="button"
+                    onClick={() => setSelectedFrameIdx(idx)}
+                    className={`flex w-full items-start gap-3 border-b border-line px-3 py-3 text-left transition-colors ${
+                      isSelected ? "bg-surface2" : "hover:bg-surface2/60"
+                    }`}
+                    style={{
+                      borderLeft: isSelected
+                        ? "2px solid var(--color-accent)"
+                        : "2px solid transparent",
+                    }}
+                  >
+                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted">
+                      {String(idx + 1).padStart(2, "0")}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[12px] text-ink">
+                        {captionText}
+                      </span>
+                      <span className="mt-0.5 block truncate font-mono text-[10px] text-muted">
+                        {frameFilename(frame.url)}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        {/* Center: live Player */}
+        <main className="flex min-w-0 flex-1 flex-col">
+          <div className="flex flex-1 items-center justify-center overflow-hidden p-6">
+            {config.doodle_frames.length > 0 ? (
+              <PreviewHost
+                config={livePreviewConfig}
+                frameUrls={previewFrameUrls}
+                audioUrl={audioUrl}
+                durationInFrames={durationInFrames}
+              />
+            ) : (
+              <EmptyPreview />
+            )}
+          </div>
+          <div className="shrink-0 border-t border-line bg-surface px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-muted">
+            {selectedFrameIdx !== null && config.doodle_frames[selectedFrameIdx]
+              ? `frame ${selectedFrameIdx + 1} of ${config.doodle_frames.length} · ${frameFilename(config.doodle_frames[selectedFrameIdx].url)}`
+              : `${config.captions.length} caption chunks · ${(config.duration_ms / 1000).toFixed(1)}s source`}
+          </div>
+        </main>
+
+        {/* Right: tabs */}
+        <aside
+          className="flex shrink-0 flex-col overflow-hidden border-l border-line bg-surface"
+          style={{ width: 340 }}
+        >
+          <div className="flex shrink-0 border-b border-line">
+            {TABS.map((t) => {
+              const isActive = tab === t.key;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => setTab(t.key)}
+                  className={`flex-1 px-2 py-3 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                    isActive ? "text-ink" : "text-muted hover:text-ink"
+                  }`}
+                  style={{
+                    borderBottom: isActive
+                      ? "2px solid var(--color-accent)"
+                      : "2px solid transparent",
+                  }}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex-1 overflow-y-auto p-4">
+            {tab === "trim" ? (
+              <TrimPanel
+                storyId={storyId}
+                config={config}
+                draft={draft}
+                onDraftChange={setDraft}
+              />
+            ) : (
+              <TabStub tab={tab} config={config} />
+            )}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+// ─── Header ──────────────────────────────────────────────────────────────────
+
+function Header({
+  storyId,
+  storyTitle,
+  storyStatus,
+  frameCount,
+  durationMs,
+  trimmedDurationMs,
+  derivedDefault,
+  latestRender,
+}: {
+  storyId: string;
+  storyTitle: string;
+  storyStatus: string;
+  frameCount: number;
+  durationMs: number;
+  trimmedDurationMs: number;
+  derivedDefault: boolean;
+  latestRender: RenderRow | null;
+}) {
+  const trimmed = trimmedDurationMs !== durationMs;
+  return (
+    <header className="flex shrink-0 items-center justify-between gap-4 border-b border-line bg-bg/85 px-5 py-3 backdrop-blur">
+      <div className="flex min-w-0 items-center gap-4">
+        <Link
+          href={`/admin/stories/${storyId}`}
+          className="font-mono text-[12px] uppercase tracking-wider text-muted transition-colors hover:text-ink"
+        >
+          &larr; Story
+        </Link>
+        <div className="min-w-0">
+          <p className="truncate font-display text-[15px] font-bold tracking-tightest">
+            {storyTitle}
+          </p>
+          <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            video editor · {frameCount} frames ·{" "}
+            {trimmed ? (
+              <>
+                {(trimmedDurationMs / 1000).toFixed(1)}s
+                <span className="text-muted/70">
+                  {" / "}
+                  {(durationMs / 1000).toFixed(1)}s source
+                </span>
+              </>
+            ) : (
+              <>{(durationMs / 1000).toFixed(1)}s</>
+            )}
+            {derivedDefault && (
+              <>
+                {" · "}
+                <span className="text-cat-entitled">
+                  derived default — pipeline hasn’t written yet
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        <span
+          className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
+            storyStatus,
+          )}`}
+        >
+          {storyStatus}
+        </span>
+        <RenderControl storyId={storyId} latestRender={latestRender} />
+      </div>
+    </header>
+  );
+}
+
+// ─── RenderControl ──────────────────────────────────────────────────────────
+// Header-mounted Render button + status badge + polling.
+//
+// Flow:
+//   1. Admin clicks → `queueRender` action inserts a video_renders row
+//      (idempotent on the current persisted-config hash).
+//   2. We start polling /api/renders/[id] every 2s while the row is
+//      queued/rendering.
+//   3. On done, router.refresh() so the page re-fetches the new video_url
+//      and the latest-render header reflects it.
+//   4. On error, show the error message under the button.
+//
+// The polling interval is intentionally constant (no exponential backoff)
+// — renders take ~real-time on a laptop, so 2s is the right granularity.
+// Server returns the row as-is; polling is read-only.
+
+const POLL_INTERVAL_MS = 2000;
+
+function RenderControl({
+  storyId,
+  latestRender,
+}: {
+  storyId: string;
+  latestRender: RenderRow | null;
+}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  // We track the row we're watching separately from the server-supplied
+  // `latestRender`. On click we hot-swap with the response from queueRender;
+  // polling updates this state in place.
+  const [active, setActive] = useState<RenderRow | null>(latestRender);
+
+  // Re-sync when the server passes in a fresh latestRender (page revalidated
+  // after queueRender's revalidatePath). Compare by id to avoid clobbering
+  // mid-flight poll updates.
+  useEffect(() => {
+    if (!active || (latestRender && latestRender.id !== active.id)) {
+      setActive(latestRender);
+    }
+  }, [latestRender, active]);
+
+  // Poll while the active row is in flight. Stops cleanly on status
+  // transition or unmount; never starts when nothing's in flight.
+  const isInFlight =
+    active !== null && (active.status === "queued" || active.status === "rendering");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!isInFlight || !active) {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      return;
+    }
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/renders/${active.id}`, {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const next = (await res.json()) as RenderRow;
+        setActive(next);
+        if (next.status === "done") {
+          // Pull the new video_url into the server-rendered page state so
+          // the preview composition mounts against the fresh config too.
+          router.refresh();
+        }
+      } catch {
+        /* transient poll error — try again next tick */
+      }
+    }, POLL_INTERVAL_MS);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = null;
+    };
+  }, [isInFlight, active, router]);
+
+  const handleClick = () => {
+    setError(null);
+    startTransition(async () => {
+      const result = await queueRender(storyId);
+      if (!result.ok) {
+        setError(result.error ?? "Enqueue failed");
+        return;
+      }
+      if (result.render) setActive(result.render);
+    });
+  };
+
+  const statusLabel = renderStatusLabel(active?.status, active?.progress);
+  const buttonLabel = isInFlight
+    ? statusLabel
+    : pending
+      ? "Queueing…"
+      : "Render";
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-2">
+        {active && !isInFlight && (
+          <RenderStatusBadge
+            status={active.status}
+            error={active.error}
+          />
+        )}
+        <button
+          type="button"
+          onClick={handleClick}
+          disabled={pending || isInFlight}
+          className="rounded-md bg-accent px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+        >
+          {buttonLabel}
+        </button>
+      </div>
+      {error && (
+        <p className="font-mono text-[10px] text-danger">{error}</p>
+      )}
+    </div>
+  );
+}
+
+function RenderStatusBadge({
+  status,
+  error,
+}: {
+  status: RenderStatus;
+  error: string | null;
+}) {
+  if (status === "done") {
+    return (
+      <span className="rounded-full border border-cat-wholesome/40 bg-cat-wholesome/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-cat-wholesome">
+        last render: done
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span
+        title={error ?? undefined}
+        className="rounded-full border border-danger/40 bg-danger/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-danger"
+      >
+        last render: error
+      </span>
+    );
+  }
+  return null;
+}
+
+function renderStatusLabel(
+  status: RenderStatus | undefined,
+  progress: number | undefined,
+): string {
+  if (status === "queued") return "Queued…";
+  if (status === "rendering") {
+    const pct = Math.max(0, Math.min(100, Math.round((progress ?? 0) * 100)));
+    return `Rendering ${pct}%`;
+  }
+  return "Render";
+}
+
+// ─── PreviewHost ──────────────────────────────────────────────────────────────
+
+function PreviewHost({
+  config,
+  frameUrls,
+  audioUrl,
+  durationInFrames,
+}: {
+  config: ShortVideoConfig;
+  frameUrls: string[];
+  audioUrl: string | null;
+  durationInFrames: number;
+}) {
+  // Player wants `Record<string, unknown>` for inputProps + a similarly-
+  // loose component type. We keep the strong PreviewProps type internally
+  // and cast at the boundary — matches the SpikeClient pattern.
+  const inputProps = useMemo<PreviewProps>(
+    () => ({ config, frameUrls, audioUrl }),
+    [config, frameUrls, audioUrl],
+  );
+
+  const Component = PreviewComposition as unknown as React.ComponentType<
+    Record<string, unknown>
+  >;
+  const playerInputProps = inputProps as unknown as Record<string, unknown>;
+
+  return (
+    <PlayerNoSSR
+      component={Component}
+      inputProps={playerInputProps}
+      durationInFrames={durationInFrames}
+      compositionWidth={WIDTH}
+      compositionHeight={HEIGHT}
+      fps={FPS}
+      controls
+      style={{
+        aspectRatio: `${WIDTH} / ${HEIGHT}`,
+        maxHeight: "70vh",
+        width: "auto",
+        borderRadius: 12,
+        overflow: "hidden",
+        background: "#000",
+      }}
+    />
+  );
+}
+
+// ─── Trim panel (live) ────────────────────────────────────────────────────────
+// Controlled component: receives `draft` + `onDraftChange` from EditorClient
+// so the slider, the Player preview, and the saved config all read the same
+// values. Lock indicators ride on the persisted config (not the draft) so a
+// user dragging the slider doesn't visually unlock the field until they save.
+
+interface DraftEdits {
+  clip_start_ms: number;
+  clip_end_ms: number;
+}
+
+function TrimPanel({
+  storyId,
+  config,
+  draft,
+  onDraftChange,
+}: {
+  storyId: string;
+  config: ShortVideoConfig;
+  draft: DraftEdits;
+  onDraftChange: (next: DraftEdits) => void;
+}) {
+  const total = config.duration_ms;
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [okFlash, setOkFlash] = useState(false);
+
+  const startLocked = Boolean(config._locks?.clip_start_ms);
+  const endLocked = Boolean(config._locks?.clip_end_ms);
+  const dirty =
+    draft.clip_start_ms !== (config.clip_start_ms ?? 0) ||
+    draft.clip_end_ms !== (config.clip_end_ms ?? total);
+  const valid =
+    draft.clip_start_ms >= 0 &&
+    draft.clip_end_ms > draft.clip_start_ms &&
+    draft.clip_end_ms <= total;
+
+  const handleSave = () => {
+    setError(null);
+    setOkFlash(false);
+    startTransition(async () => {
+      const result = await saveVideoConfigPatch(
+        storyId,
+        {
+          clip_start_ms: draft.clip_start_ms,
+          clip_end_ms: draft.clip_end_ms,
+        },
+        ["clip_start_ms", "clip_end_ms"],
+      );
+      if (result.ok) {
+        setOkFlash(true);
+        setTimeout(() => setOkFlash(false), 1500);
+      } else {
+        setError(result.error ?? "Save failed");
+      }
+    });
+  };
+
+  const handleReset = () => {
+    onDraftChange({
+      clip_start_ms: config.clip_start_ms ?? 0,
+      clip_end_ms: config.clip_end_ms ?? total,
+    });
+    setError(null);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="space-y-1">
+        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          Trim window
+        </p>
+        <p className="text-[12px] leading-relaxed text-muted">
+          The MP4 will render only between these two timestamps. Source audio
+          and images are never modified — undo by clearing the values or
+          unlocking the field.
+        </p>
+      </div>
+
+      <TrimRow
+        label="clip_start_ms"
+        value={draft.clip_start_ms}
+        max={total}
+        locked={startLocked}
+        onChange={(v) =>
+          onDraftChange({ ...draft, clip_start_ms: clamp(v, 0, total) })
+        }
+        onUnlock={
+          startLocked
+            ? () => {
+                startTransition(async () => {
+                  await saveVideoConfigPatch(
+                    storyId,
+                    {},
+                    [],
+                    ["clip_start_ms"],
+                  );
+                });
+              }
+            : undefined
+        }
+      />
+
+      <TrimRow
+        label="clip_end_ms"
+        value={draft.clip_end_ms}
+        max={total}
+        locked={endLocked}
+        onChange={(v) =>
+          onDraftChange({ ...draft, clip_end_ms: clamp(v, 0, total) })
+        }
+        onUnlock={
+          endLocked
+            ? () => {
+                startTransition(async () => {
+                  await saveVideoConfigPatch(
+                    storyId,
+                    {},
+                    [],
+                    ["clip_end_ms"],
+                  );
+                });
+              }
+            : undefined
+        }
+      />
+
+      <div className="space-y-2 rounded-md border border-line bg-bg p-3">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="font-mono uppercase tracking-wider text-muted">
+            Clip length
+          </span>
+          <span
+            className={`font-mono tabular-nums ${
+              valid ? "text-ink" : "text-danger"
+            }`}
+          >
+            {((draft.clip_end_ms - draft.clip_start_ms) / 1000).toFixed(2)}s
+            {" / "}
+            {(total / 1000).toFixed(2)}s
+          </span>
+        </div>
+        <div
+          className="relative h-2 overflow-hidden rounded bg-surface2"
+          aria-hidden
+        >
+          <div
+            className="absolute h-full bg-accent/60"
+            style={{
+              left: `${(draft.clip_start_ms / total) * 100}%`,
+              width: `${
+                Math.max(
+                  0,
+                  ((draft.clip_end_ms - draft.clip_start_ms) / total) * 100,
+                )
+              }%`,
+            }}
+          />
+        </div>
+      </div>
+
+      {error && (
+        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
+          {error}
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!dirty || !valid || pending}
+          className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending ? "Saving…" : okFlash ? "Saved ✓" : "Save trim"}
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          disabled={!dirty || pending}
+          className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Reset
+        </button>
+      </div>
+
+      <p className="font-mono text-[10px] leading-relaxed text-muted">
+        Preview reflects unsaved edits live. Save + render to produce the
+        trimmed MP4.
+      </p>
+    </div>
+  );
+}
+
+function TrimRow({
+  label,
+  value,
+  max,
+  locked,
+  onChange,
+  onUnlock,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  locked: boolean;
+  onChange: (v: number) => void;
+  onUnlock?: () => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          {label}
+          {locked && <span className="ml-1.5 text-accent">🔒</span>}
+        </span>
+        <input
+          type="number"
+          min={0}
+          max={max}
+          step={50}
+          value={value}
+          onChange={(e) => onChange(clamp(Number(e.target.value), 0, max))}
+          className="w-24 rounded border border-line bg-bg px-2 py-1 text-right font-mono text-[11px] tabular-nums text-ink outline-none focus:border-accent"
+        />
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={max}
+        step={50}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full accent-accent"
+        aria-label={label}
+      />
+      {locked && onUnlock && (
+        <button
+          type="button"
+          onClick={onUnlock}
+          className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+        >
+          Unlock — let the pipeline rewrite this
+        </button>
+      )}
+    </div>
+  );
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, Math.round(n)));
+}
+
+// ─── Tab stubs ────────────────────────────────────────────────────────────────
+// Each tab gets a tiny "what's coming" panel so the skeleton communicates
+// the plan to whichever admin opens it before the editing surfaces ship.
+// The plan reference is intentional — rule 7 says plans live in _plans/ and
+// the UI should point at them rather than re-explain the roadmap.
+
+function TabStub({
+  tab,
+  config,
+}: {
+  tab: TabKey;
+  config: ShortVideoConfig;
+}) {
+  switch (tab) {
+    case "trim":
+      return null;
+    case "captions":
+      return (
+        <ComingSoon
+          when="Day 8"
+          summary="Edit caption text · timings frozen"
+          detail="Edit text per chunk. Word-level timings stay locked to forced alignment so karaoke highlight never drifts."
+        >
+          <FieldRow
+            label="chunks"
+            value={String(config.captions.length)}
+          />
+        </ComingSoon>
+      );
+    case "audio":
+      return (
+        <ComingSoon
+          when="Day 9"
+          summary="Voiceover + single bg music track at fixed gain"
+          detail="No sidechain ducking — a single music URL with -12dB default. The single-track decision is in the plan."
+        >
+          <FieldRow
+            label="voiceover_url"
+            value={config.voiceover_url || "(unset)"}
+            mono
+          />
+          <FieldRow
+            label="music"
+            value={config.music?.url ?? "(no track)"}
+            mono
+          />
+        </ComingSoon>
+      );
+    case "overlays":
+      return (
+        <ComingSoon
+          when="Day 10 · maybe v1.5"
+          summary="Timed text overlays"
+          detail="One overlay type. Filters/effects are explicitly out of scope."
+        >
+          <FieldRow
+            label="overlays"
+            value={String(config.overlays?.length ?? 0)}
+          />
+        </ComingSoon>
+      );
+    case "metadata":
+      return (
+        <ComingSoon
+          when="Day 10"
+          summary="Title · description · tags · intro/outro override"
+          detail="Consolidates the metadata fields currently spread across the story edit page."
+        >
+          <FieldRow label="title" value={config.title ?? "(unset)"} />
+          <FieldRow
+            label="channel_name"
+            value={config.channel_name ?? "(unset)"}
+          />
+        </ComingSoon>
+      );
+  }
+}
+
+function ComingSoon({
+  when,
+  summary,
+  detail,
+  children,
+}: {
+  when: string;
+  summary: string;
+  detail: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <p className="font-mono text-[10px] uppercase tracking-wider text-accent">
+          {when}
+        </p>
+        <p className="text-[13px] font-semibold text-ink">{summary}</p>
+        <p className="text-[12px] leading-relaxed text-muted">{detail}</p>
+      </div>
+      {children && (
+        <div className="space-y-1 rounded-md border border-line bg-bg p-3">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FieldRow({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+        {label}
+      </span>
+      <span
+        className={`min-w-0 truncate text-right text-[12px] text-ink ${
+          mono ? "font-mono" : ""
+        }`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function EmptyHint({ label, hint }: { label: string; hint: string }) {
+  return (
+    <div className="px-4 py-8 text-center">
+      <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+        {label}
+      </p>
+      <p className="mt-2 text-[12px] leading-relaxed text-muted">{hint}</p>
+    </div>
+  );
+}
+
+function EmptyPreview() {
+  return (
+    <div
+      className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-line bg-surface px-8 text-center"
+      style={{ aspectRatio: "9 / 16", maxHeight: "70vh" }}
+    >
+      <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+        No frames yet
+      </p>
+      <p className="max-w-[26ch] text-[12px] leading-relaxed text-muted">
+        Run the media + video pipeline so the preview has something to show.
+      </p>
+    </div>
+  );
+}
+
+function frameFilename(url: string): string {
+  const slash = url.lastIndexOf("/");
+  return slash >= 0 ? url.slice(slash + 1) : url;
+}

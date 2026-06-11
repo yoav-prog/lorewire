@@ -45,6 +45,11 @@ export const STORIES: Table = {
     { name: "outro_segment_id", type: "TEXT" },
     { name: "skip_intro", type: "INTEGER" },
     { name: "skip_outro", type: "INTEGER" },
+    // 2026-06-11 video editor: serialised ShortVideoConfig v2 (see
+    // lib/video-config.ts). The pipeline writes it on every render; the
+    // /admin/videos/[id] editor patches it. Mirrors stories.video_config
+    // in pipeline/store.py.
+    { name: "video_config", type: "TEXT" },
     { name: "tokens", type: "INTEGER" },
     { name: "cost_cents", type: "INTEGER" },
     { name: "created_at", type: "TEXT" },
@@ -153,11 +158,34 @@ export const ARTICLE_REVISIONS: Table = {
   ],
 };
 
+// 2026-06-11 video editor render queue. The admin Render button inserts a
+// row here; pipeline/render_worker.py polls for status='queued' and runs
+// generate_video. Idempotency on (story_id, config_hash) so N clicks at
+// the same edit state coalesce. Mirrors `video_renders` in
+// pipeline/store.py.
+export const VIDEO_RENDERS: Table = {
+  name: "video_renders",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "config_hash", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "progress", type: "INTEGER" },
+    { name: "error", type: "TEXT" },
+    { name: "output_url", type: "TEXT" },
+    { name: "requested_by", type: "TEXT" },
+    { name: "requested_at", type: "TEXT" },
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
   USERS,
   VIDEO_SEGMENTS,
+  VIDEO_RENDERS,
   ARTICLES,
   ARTICLE_REVISIONS,
 ];

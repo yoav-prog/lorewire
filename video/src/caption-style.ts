@@ -9,7 +9,10 @@ export interface ResolvedDoodleCaptionStyle {
   color: string;
   outlineColor: string;
   outlineWidth: number;
-  textTransform: "uppercase";
+  // Widened to match CaptionTemplateInput.text_transform so the resolver
+  // doesn't have to narrow on assignment. Composition handles all three
+  // values; "uppercase" is still the visual default the doodle look ships.
+  textTransform: "uppercase" | "none" | "lowercase";
   letterSpacing: number;
   lineHeight: number;
   positionY: number;

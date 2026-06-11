@@ -12,6 +12,7 @@ voice prefs) — never secrets.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import sqlite3
 from pathlib import Path
@@ -79,10 +80,41 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS outro_segment_id TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS skip_intro INTEGER DEFAULT 0",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS skip_outro INTEGER DEFAULT 0",
+    # 2026-06-11 video editor: stories.video_config holds the full
+    # ShortVideoConfig v2 JSON object (see lorewire-app/src/lib/video-config.ts
+    # and video/src/types.ts). The pipeline writes it on every render so the
+    # /admin/videos/[id] editor has the same source of truth the renderer
+    # reads; editor patches mark fields in `_locks` so subsequent pipeline
+    # runs leave human-edited fields alone (see merge_with_locks in
+    # pipeline/video_config.py — added alongside this column).
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS video_config TEXT",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
     )""",
+    # 2026-06-11 video editor: render queue. The admin clicks Render on
+    # /admin/videos/[id]; the Next server action inserts a row here and
+    # the local pipeline worker (pipeline/render_worker.py) polls for
+    # status='queued' rows, claims one, runs generate_video, writes the
+    # result back. Idempotency: `(story_id, config_hash)` unique so ten
+    # clicks on Render at the same config-state coalesce into one render.
+    """CREATE TABLE IF NOT EXISTS video_renders (
+        id              TEXT PRIMARY KEY,
+        story_id        TEXT NOT NULL,
+        config_hash     TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        progress        REAL DEFAULT 0,
+        error           TEXT,
+        output_url      TEXT,
+        requested_by    TEXT,
+        requested_at    TEXT NOT NULL,
+        started_at      TEXT,
+        finished_at     TEXT,
+        UNIQUE (story_id, config_hash)
+    )""",
+    # Speeds up the worker's "claim oldest queued render" query — the
+    # natural index on (story_id, config_hash) doesn't help that scan.
+    "CREATE INDEX IF NOT EXISTS idx_video_renders_status_requested ON video_renders(status, requested_at)",
     # Wave 3 Phase 4 video segment library: intros and outros are uploaded
     # through the admin, normalized once to 1080x1920 @ 30fps H.264+AAC, then
     # cached in GCS. Renders splice the active intro before and the active
@@ -100,6 +132,18 @@ SCHEMA_STATEMENTS = [
         created_at      TEXT,
         updated_at      TEXT
     )""",
+    # 2026-06-11 segments upload fix: browser uploads now go straight to GCS
+    # (bypassing Vercel's 4.5 MB body cap) and pipeline/segments_worker.py
+    # picks `status='pending'` rows up and runs ffmpeg normalize off-Vercel.
+    # `status` lifecycle: pending -> uploading -> normalizing -> ready, with
+    # `error` set on any failure. Default 'ready' for parity with legacy rows
+    # that pre-date the column (the worker only ever picks up pending/uploading
+    # rows, so a backfilled-ready row is never re-normalized by accident).
+    "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ready'",
+    "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS error TEXT",
+    "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS uploaded_at TEXT",
+    # The worker's hot path is "newest pending row first" — index it.
+    "CREATE INDEX IF NOT EXISTS idx_video_segments_status_created ON video_segments(status, created_at)",
 ]
 
 _COLUMNS = [
@@ -108,6 +152,7 @@ _COLUMNS = [
     "hero_has_baked_title", "images", "audio_url", "video_url", "duration",
     "alignment", "props", "character_image", "character_image_mouth_removed",
     "intro_segment_id", "outro_segment_id", "skip_intro", "skip_outro",
+    "video_config",
     "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
@@ -139,24 +184,53 @@ def _pg_conn():
 
 def _serialize(s: dict) -> dict:
     row = {k: s.get(k) for k in _COLUMNS}
-    for jcol in ("images", "alignment", "props", "payload"):
+    for jcol in ("images", "alignment", "props", "payload", "video_config"):
         if isinstance(row.get(jcol), (dict, list)):
             row[jcol] = json.dumps(row[jcol])
     return row
 
 
 def init() -> None:
-    """Create tables if they don't exist on whichever driver is active."""
+    """Create tables if they don't exist on whichever driver is active.
+
+    SQLite quirk worth knowing: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` is
+    a Postgres-only syntax — SQLite errors out with `near "EXISTS"`. The
+    schema list uses the Postgres form for parity; for SQLite we strip the
+    `IF NOT EXISTS` from ADD COLUMN statements and catch the
+    duplicate-column error that fires when the migration was already applied
+    on an older DB. Net behavior is "idempotent on both engines", which is
+    what the additive migration pattern needs.
+    """
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 for stmt in SCHEMA_STATEMENTS:
                     cur.execute(stmt)
             conn.commit()
-    else:
-        with _sqlite_conn() as c:
-            for stmt in SCHEMA_STATEMENTS:
-                c.execute(stmt)
+        return
+    with _sqlite_conn() as c:
+        for stmt in SCHEMA_STATEMENTS:
+            sqlite_stmt = _sqlite_rewrite(stmt)
+            try:
+                c.execute(sqlite_stmt)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e).lower():
+                    # Column already present from a prior init() — fine.
+                    continue
+                raise
+
+
+# Pulls `IF NOT EXISTS` out of ADD COLUMN clauses because SQLite doesn't
+# support it. CREATE TABLE/INDEX IF NOT EXISTS is untouched (SQLite supports
+# those just fine). Case-insensitive match handles the lowercase/uppercase
+# variants in the schema list.
+_ALTER_ADD_IFNE_RE = __import__("re").compile(
+    r"\bADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\b", __import__("re").IGNORECASE,
+)
+
+
+def _sqlite_rewrite(stmt: str) -> str:
+    return _ALTER_ADD_IFNE_RE.sub("ADD COLUMN", stmt)
 
 
 def upsert_story(s: dict) -> None:
@@ -268,7 +342,7 @@ def fetch_story(story_id: str) -> dict | None:
 
 _SEGMENT_COLUMNS = [
     "id", "kind", "label", "source_url", "normalized_url", "duration_ms",
-    "enabled", "created_at", "updated_at",
+    "enabled", "status", "error", "uploaded_at", "created_at", "updated_at",
 ]
 _SEGMENT_UPDATE = [c for c in _SEGMENT_COLUMNS if c not in ("id", "created_at")]
 
@@ -368,6 +442,116 @@ def delete_segment(segment_id: str) -> None:
         c.execute("DELETE FROM video_segments WHERE id=?", (segment_id,))
 
 
+# Worker hot path: only `uploading` rows are normalize-ready — `pending` means
+# the browser is still PUT-ing bytes to GCS (or abandoned the upload); the web
+# tier's finalize action flips pending -> uploading once the browser confirms
+# the PUT finished. Sweeping pending rows is a separate concern (see
+# `list_abandoned_pending_segments`).
+_WORKER_PICKUP_STATUS = "uploading"
+
+
+def list_pending_segments(limit: int = 1) -> list[dict]:
+    """Return up to `limit` `uploading` segments, oldest first.
+
+    Used by pipeline/segments_worker.py — the only caller. Keeps the SELECT
+    on the indexed `(status, created_at)` so the query stays O(log n) as the
+    table grows.
+    """
+    cols = ", ".join(_SEGMENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM video_segments "
+                    "WHERE status = %s "
+                    "ORDER BY created_at ASC LIMIT %s",
+                    (_WORKER_PICKUP_STATUS, limit),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            f"SELECT {cols} FROM video_segments "
+            "WHERE status = ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (_WORKER_PICKUP_STATUS, limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def list_abandoned_pending_segments(older_than_iso: str) -> list[dict]:
+    """Return `pending` rows whose `created_at` is older than `older_than_iso`.
+
+    These are uploads the browser never finalized — either the tab closed
+    mid-PUT or the network failed. The worker's sweeper flips them to `error`
+    so the admin sees the failure rather than a row that spins forever.
+    """
+    cols = ", ".join(_SEGMENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM video_segments "
+                    "WHERE status = %s AND created_at < %s "
+                    "ORDER BY created_at ASC",
+                    ("pending", older_than_iso),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            f"SELECT {cols} FROM video_segments "
+            "WHERE status = ? AND created_at < ? "
+            "ORDER BY created_at ASC",
+            ("pending", older_than_iso),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+# Allowed columns the worker may patch alongside a status flip. Kept as an
+# allow-list so a typo in **fields can't smuggle a write into an unrelated
+# column (the worker's only privileged write surface).
+_SEGMENT_PATCH_COLUMNS = frozenset(
+    {"normalized_url", "duration_ms", "enabled", "error", "uploaded_at"}
+)
+
+
+def set_segment_status(
+    segment_id: str,
+    status: str,
+    **fields: Any,
+) -> None:
+    """Flip a segment's status and optionally patch any of the columns in
+    `_SEGMENT_PATCH_COLUMNS`. `updated_at` is always set to now.
+
+    Unknown column names in `fields` are rejected loudly — this is the worker's
+    only write seam and a silent ignore would mask a real bug.
+    """
+    if not segment_id:
+        raise ValueError("set_segment_status requires segment_id")
+    extra = {k: v for k, v in fields.items() if v is not None or k == "error"}
+    bad = set(extra) - _SEGMENT_PATCH_COLUMNS
+    if bad:
+        raise ValueError(f"set_segment_status: unknown columns: {sorted(bad)}")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    extra["status"] = status
+    extra["updated_at"] = now
+    if _is_postgres():
+        assigns = ", ".join(f"{c} = %({c})s" for c in extra)
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE video_segments SET {assigns} WHERE id = %(id)s",
+                    {**extra, "id": segment_id},
+                )
+            conn.commit()
+        return
+    assigns = ", ".join(f"{c} = :{c}" for c in extra)
+    with _sqlite_conn() as c:
+        c.execute(
+            f"UPDATE video_segments SET {assigns} WHERE id = :id",
+            {**extra, "id": segment_id},
+        )
+
+
 def published_stories() -> list[dict]:
     """Read every published story (media columns included) on whichever driver
     is active. The export bridge uses this to regenerate published.ts; the
@@ -391,3 +575,242 @@ def published_stories() -> list[dict]:
     with _sqlite_conn() as c:
         cur = c.execute(sql, args)
         return [dict(r) for r in cur.fetchall()]
+
+
+# --- video_renders helpers (2026-06-11 video editor render queue) -------------
+# The Next admin enqueues a render via the queueRender server action; this
+# module's `claim_next_render` is what pipeline/render_worker.py polls. Status
+# transitions are queued → rendering → done | error. Idempotency is enforced
+# by the UNIQUE (story_id, config_hash) constraint — INSERT OR IGNORE returns
+# the existing row when the editor re-clicks Render at the same config-state.
+
+_RENDER_COLUMNS = [
+    "id", "story_id", "config_hash", "status", "progress", "error",
+    "output_url", "requested_by", "requested_at", "started_at", "finished_at",
+]
+
+
+def enqueue_render(
+    render_id: str,
+    story_id: str,
+    config_hash: str,
+    requested_by: str | None = None,
+) -> dict:
+    """Insert a queued render row OR return the existing one for the same
+    (story_id, config_hash). The Next action calls this; idempotency on the
+    pair means N concurrent clicks coalesce into a single render."""
+    now = _now_iso()
+    cols = ", ".join(_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                placeholders = ", ".join(f"%({c})s" for c in _RENDER_COLUMNS)
+                cur.execute(
+                    f"INSERT INTO video_renders ({cols}) VALUES ({placeholders}) "
+                    "ON CONFLICT (story_id, config_hash) DO NOTHING",
+                    {
+                        "id": render_id,
+                        "story_id": story_id,
+                        "config_hash": config_hash,
+                        "status": "queued",
+                        "progress": 0,
+                        "error": None,
+                        "output_url": None,
+                        "requested_by": requested_by,
+                        "requested_at": now,
+                        "started_at": None,
+                        "finished_at": None,
+                    },
+                )
+                cur.execute(
+                    f"SELECT {cols} FROM video_renders "
+                    "WHERE story_id = %s AND config_hash = %s",
+                    (story_id, config_hash),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else {}
+    with _sqlite_conn() as c:
+        placeholders = ", ".join(f":{col}" for col in _RENDER_COLUMNS)
+        c.execute(
+            f"INSERT OR IGNORE INTO video_renders ({cols}) VALUES ({placeholders})",
+            {
+                "id": render_id,
+                "story_id": story_id,
+                "config_hash": config_hash,
+                "status": "queued",
+                "progress": 0,
+                "error": None,
+                "output_url": None,
+                "requested_by": requested_by,
+                "requested_at": now,
+                "started_at": None,
+                "finished_at": None,
+            },
+        )
+        row = c.execute(
+            f"SELECT {cols} FROM video_renders "
+            "WHERE story_id=? AND config_hash=?",
+            (story_id, config_hash),
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+def get_render(render_id: str) -> dict | None:
+    """Read one render row by id. The Next status endpoint polls this."""
+    cols = ", ".join(_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM video_renders WHERE id = %s",
+                    (render_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM video_renders WHERE id=?", (render_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def latest_render_for_story(story_id: str) -> dict | None:
+    """Read the most recently requested render for a story. The editor header
+    uses this on page render so the admin sees the last queued/finished
+    render's state without having to remember a render id across reloads."""
+    cols = ", ".join(_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM video_renders WHERE story_id = %s "
+                    "ORDER BY requested_at DESC LIMIT 1",
+                    (story_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM video_renders WHERE story_id=? "
+            "ORDER BY requested_at DESC LIMIT 1",
+            (story_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def claim_next_render() -> dict | None:
+    """Atomically claim the oldest queued render and flip it to 'rendering'.
+
+    Returns the claimed row, or None when the queue is empty. The worker
+    calls this once per polling tick. The atomic update prevents two workers
+    from racing on the same row even though we only run one locally today.
+    """
+    cols = ", ".join(_RENDER_COLUMNS)
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                # FOR UPDATE SKIP LOCKED gives us a clean race-free claim on
+                # Postgres. RETURNING gets the row back in one round trip.
+                cur.execute(
+                    f"UPDATE video_renders SET status = 'rendering', "
+                    "started_at = %s WHERE id = ("
+                    "SELECT id FROM video_renders WHERE status = 'queued' "
+                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    f") RETURNING {cols}",
+                    (now,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    # SQLite has no SKIP LOCKED, but the single-fork local worker pattern
+    # doesn't need it. The conditional UPDATE (status='queued') means a
+    # losing racer simply gets total_changes==0 and tries again next tick.
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT id FROM video_renders WHERE status='queued' "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        c.execute(
+            "UPDATE video_renders SET status='rendering', started_at=? "
+            "WHERE id=? AND status='queued'",
+            (now, row["id"]),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {cols} FROM video_renders WHERE id=?", (row["id"],)
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def update_render_progress(render_id: str, progress: float) -> None:
+    """Update only the progress field. Worker calls this when generate_video
+    surfaces a percentage."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE video_renders SET progress = %s WHERE id = %s",
+                    (progress, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE video_renders SET progress=? WHERE id=?",
+            (progress, render_id),
+        )
+
+
+def finish_render(render_id: str, output_url: str) -> None:
+    """Mark a render done. Worker calls this after generate_video returns a
+    successful video_url."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE video_renders SET status='done', progress=1.0, "
+                    "output_url=%s, finished_at=%s WHERE id=%s",
+                    (output_url, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE video_renders SET status='done', progress=1.0, "
+            "output_url=?, finished_at=? WHERE id=?",
+            (output_url, now, render_id),
+        )
+
+
+def fail_render(render_id: str, error_message: str) -> None:
+    """Mark a render failed. Worker calls this on any exception path."""
+    now = _now_iso()
+    # Cap the message so a 10MB Python traceback doesn't bloat the row.
+    capped = (error_message or "unknown error")[:2000]
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE video_renders SET status='error', error=%s, "
+                    "finished_at=%s WHERE id=%s",
+                    (capped, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE video_renders SET status='error', error=?, "
+            "finished_at=? WHERE id=?",
+            (capped, now, render_id),
+        )
+
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()

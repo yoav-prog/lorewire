@@ -199,6 +199,12 @@ export default async function EditStory({
             ) : (
               <p className="text-[13px] text-muted">No video rendered yet.</p>
             )}
+            <Link
+              href={`/admin/videos/${s.id}`}
+              className="mt-3 inline-flex w-full items-center justify-center rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
+            >
+              Open video editor →
+            </Link>
           </div>
 
           <SegmentOverrideCard

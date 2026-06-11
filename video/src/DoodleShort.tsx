@@ -39,7 +39,16 @@ import type {
 export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
-  const elapsedMs = (frame / fps) * 1000;
+
+  // Trim window. Both bounds are absolute against the unclipped audio /
+  // caption timeline; missing means "no trim, render the full thing". The
+  // composition's durationInFrames already reflects (clip_end - clip_start)
+  // courtesy of calculateMetadata in Root.tsx, so internally we shift every
+  // timestamp from absolute → trimmed-relative.
+  const clipStartMs = config.clip_start_ms ?? 0;
+  const clipEndMs = config.clip_end_ms ?? config.duration_ms;
+  const clipStartFrames = Math.round((clipStartMs / 1000) * fps);
+  const elapsedMs = (frame / fps) * 1000 + clipStartMs;
 
   // Wave 3 Phase 1: resolve the caption template once so every chunk render
   // shares the same style object. Missing fields fall back to the original
@@ -48,28 +57,40 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
 
   // Map each doodle frame to a Sequence window. Frame i runs from its caption
   // chunk's start_ms until frame (i+1)'s caption.start_ms (or the end of the
-  // composition for the last frame). Clamp the tail so the final frame doesn't
-  // overrun durationInFrames.
+  // composition for the last frame). After deriving the absolute window we
+  // subtract clipStartFrames so the Sequence lands at the right spot in the
+  // trimmed timeline, and we drop any window that ends before the clip or
+  // starts after it.
   const rawFrames = config.doodle_frames;
-  const frameWindows = rawFrames.map((f, i) => {
-    const captionForFrame = config.captions[f.caption_chunk_start_index];
-    const startMs = captionForFrame?.start_ms ?? 0;
-    const nextFrame = rawFrames[i + 1];
-    const nextStartMs = nextFrame
-      ? config.captions[nextFrame.caption_chunk_start_index]?.start_ms ??
-        config.duration_ms
-      : config.duration_ms;
-    const fromFrames = Math.max(0, Math.round((startMs / 1000) * fps));
-    const lengthFrames = Math.max(
-      1,
-      Math.round(((nextStartMs - startMs) / 1000) * fps),
-    );
-    const cappedLength = Math.max(
-      1,
-      Math.min(lengthFrames, durationInFrames - fromFrames),
-    );
-    return { ...f, fromFrames, lengthFrames: cappedLength };
-  });
+  const frameWindows = rawFrames
+    .map((f, i) => {
+      const captionForFrame = config.captions[f.caption_chunk_start_index];
+      const startMs = captionForFrame?.start_ms ?? 0;
+      const nextFrame = rawFrames[i + 1];
+      const nextStartMs = nextFrame
+        ? config.captions[nextFrame.caption_chunk_start_index]?.start_ms ??
+          clipEndMs
+        : clipEndMs;
+      const absoluteFromFrames = Math.max(0, Math.round((startMs / 1000) * fps));
+      const lengthFrames = Math.max(
+        1,
+        Math.round(((nextStartMs - startMs) / 1000) * fps),
+      );
+      return { f, absoluteFromFrames, lengthFrames, startMs, nextStartMs };
+    })
+    .filter(({ startMs, nextStartMs }) =>
+      // Drop windows entirely outside the trim. Boundary windows that
+      // straddle the edge survive and get clamped below.
+      nextStartMs > clipStartMs && startMs < clipEndMs
+    )
+    .map(({ f, absoluteFromFrames, lengthFrames }, i) => {
+      const fromFrames = Math.max(0, absoluteFromFrames - clipStartFrames);
+      const cappedLength = Math.max(
+        1,
+        Math.min(lengthFrames, durationInFrames - fromFrames),
+      );
+      return { ...f, fromFrames, lengthFrames: cappedLength };
+    });
 
   const activeIndex = config.captions.findIndex(
     (c) => elapsedMs >= c.start_ms && elapsedMs < c.end_ms,
@@ -85,7 +106,15 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
     <AbsoluteFill
       style={{ background: "#ffffff", fontFamily: FONT_FAMILY }}
     >
-      {config.voiceover_url && <Audio src={staticFile(config.voiceover_url)} />}
+      {config.voiceover_url && (
+        // Skip past the trimmed-out head so audio plays from the clip start.
+        // When clip_start_ms is 0 (the default), startFrom=0 is a no-op and
+        // the render is byte-identical to the pre-trim composition.
+        <Audio
+          src={staticFile(config.voiceover_url)}
+          startFrom={clipStartFrames}
+        />
+      )}
 
       {frameWindows.map((f, i) => (
         <Sequence
