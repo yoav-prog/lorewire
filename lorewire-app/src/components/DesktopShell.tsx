@@ -635,7 +635,17 @@ function DetailModalHero({ story }: { story: Story }) {
 
 function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
-  useEffect(() => { setTab(initialTab || "Watch"); }, [story.id, initialTab]);
+  // Reset the tab whenever the parent swaps in a different story or initialTab
+  // — React 19's set-state-in-effect rule rejects the old useEffect pattern.
+  // The sanctioned alternative is to track the previous prop values during
+  // render and update state inline.
+  const [prevStoryId, setPrevStoryId] = useState(story.id);
+  const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
+  if (prevStoryId !== story.id || prevInitialTab !== initialTab) {
+    setPrevStoryId(story.id);
+    setPrevInitialTab(initialTab);
+    setTab(initialTab || "Watch");
+  }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);

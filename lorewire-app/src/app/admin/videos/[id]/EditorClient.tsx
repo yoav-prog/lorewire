@@ -558,13 +558,18 @@ function RenderControl({
   const [active, setActive] = useState<RenderRow | null>(latestRender);
 
   // Re-sync when the server passes in a fresh latestRender (page revalidated
-  // after queueRender's revalidatePath). Compare by id to avoid clobbering
-  // mid-flight poll updates.
-  useEffect(() => {
+  // after queueRender's revalidatePath). React 19 forbids setState inside an
+  // effect for this kind of prop-driven state sync; the sanctioned pattern is
+  // to track the previous prop value during render and update state inline.
+  // Compare by id to avoid clobbering mid-flight poll updates.
+  const [prevServerRender, setPrevServerRender] =
+    useState<RenderRow | null>(latestRender);
+  if (latestRender !== prevServerRender) {
+    setPrevServerRender(latestRender);
     if (!active || (latestRender && latestRender.id !== active.id)) {
       setActive(latestRender);
     }
-  }, [latestRender, active]);
+  }
 
   // Poll while the active row is in flight. Stops cleanly on status
   // transition or unmount; never starts when nothing's in flight.

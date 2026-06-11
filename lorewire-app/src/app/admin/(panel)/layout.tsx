@@ -2,6 +2,7 @@ import { requireAdmin } from "@/lib/dal";
 import { logout } from "@/app/admin/actions";
 import AdminSidebar from "@/app/admin/AdminSidebar";
 import UserMenu from "@/app/admin/UserMenu";
+import CommandPalette from "@/app/admin/CommandPalette";
 
 // Studio shell. Sidebar + content column. The sidebar holds the brand and all
 // navigation; the header is now a thin chrome line carrying just the user
@@ -46,6 +47,7 @@ export default async function PanelLayout({
           {children}
         </main>
       </div>
+      <CommandPalette />
     </div>
   );
 }
