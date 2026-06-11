@@ -304,22 +304,80 @@ const GALLERY = [
   { n: "3", t: "Somewhere safe turned out to be a weekend trip and a very new handbag." },
   { n: "4", t: "HR found the group chat. The receipts, as they say, were already screenshotted." },
 ];
+
+// Build gallery items from real pipeline assets. Each scene gets a short
+// caption pulled from the alignment words at that scene's slot — proportional
+// slicing keeps the prose moving in sync with the visual.
+function _galleryFromStory(story: Story): { src: string; caption: string }[] | null {
+  const imgs = story.images || [];
+  if (imgs.length === 0) return null;
+  const words = story.alignment || [];
+  if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
+  const perScene = Math.max(1, Math.floor(words.length / imgs.length));
+  return imgs.map((src, i) => {
+    const start = i * perScene;
+    const slice = words.slice(start, start + Math.min(10, perScene));
+    return { src, caption: slice.map((w) => w.word).join(" ") };
+  });
+}
+// Spread scene images evenly between paragraphs so the Article reads like a
+// magazine piece. With N paragraphs and M images, image i goes after paragraph
+// floor((i+1) * N / (M+1)) — the +1 keeps the first image off the top and the
+// last image off the footer.
+function _articleImagePositions(paraCount: number, imageCount: number): Set<number> {
+  if (imageCount === 0 || paraCount < 3) return new Set();
+  const positions = new Set<number>();
+  for (let i = 0; i < imageCount; i++) {
+    const idx = Math.floor(((i + 1) * paraCount) / (imageCount + 1));
+    positions.add(Math.max(1, Math.min(paraCount - 1, idx)));
+  }
+  return positions;
+}
+
 function GenArticle({ story }: { story: Story }) {
   const paras = (story.body || "").split(/\n{2,}/);
+  const scenes = story.images || [];
+  const positions = _articleImagePositions(paras.length, scenes.length);
+  // Map paragraph index -> which scene to render after it (left-to-right order).
+  const posList = Array.from(positions).sort((a, b) => a - b);
+  const imgAt = new Map<number, string>();
+  posList.forEach((p, i) => {
+    if (scenes[i]) imgAt.set(p, scenes[i]);
+  });
+
   return (
     <article className="fade-in">
       <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
       <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>{story.title}</h1>
-      {paras.map((para, i) =>
-        i === 0 ? (
-          <p key={i} className="font-body text-[15px] leading-relaxed text-ink/90 mt-4"><span className="float-left font-display font-black text-accent mr-2 leading-[.8]" style={{ fontSize: 58 }}>{para.charAt(0)}</span>{para.slice(1)}</p>
-        ) : (
-          <p key={i} className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">{para}</p>
-        )
-      )}
+      {paras.map((para, i) => (
+        <React.Fragment key={i}>
+          {i === 0 ? (
+            <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4"><span className="float-left font-display font-black text-accent mr-2 leading-[.8]" style={{ fontSize: 58 }}>{para.charAt(0)}</span>{para.slice(1)}</p>
+          ) : (
+            <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">{para}</p>
+          )}
+          {imgAt.has(i) && (
+            <figure className="my-5">
+              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "3/4" }}>
+                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" />
+              </div>
+              <figcaption className="font-mono text-[10px] text-muted mt-1.5">Illustration &middot; LoreWire Studio</figcaption>
+            </figure>
+          )}
+        </React.Fragment>
+      ))}
       <div className="mt-6 rounded-[10px] p-4" style={{ background: "#15141A", borderLeft: "3px solid #E8462B" }}>
         <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2">From the original thread</p>
-        <div className="flex items-center gap-2 font-mono text-[11px] text-muted flex-wrap"><span className="text-ink/80">r/AmItheAsshole</span><span>&middot;</span><span>retold by LoreWire</span><span className="ml-auto text-accent font-medium">View source &rarr;</span></div>
+        <div className="flex items-center gap-2 font-mono text-[11px] text-muted flex-wrap">
+          <span className="text-ink/80">r/AmItheAsshole</span>
+          <span>&middot;</span>
+          <span>retold by LoreWire</span>
+          {story.source_url ? (
+            <a href={story.source_url} target="_blank" rel="noopener noreferrer" className="ml-auto text-accent font-medium hover:underline">View source &rarr;</a>
+          ) : (
+            <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
+          )}
+        </div>
       </div>
     </article>
   );
@@ -390,20 +448,44 @@ function Read({ story }: { story: Story }) {
         </article>
         )
       ) : (
-        <div className="fade-in">
-          <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
-            {GALLERY.map((g, i) => (
-              <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 300, background: "#FBFAF4" }}>
-                <div className="h-[230px] relative grain flex items-center justify-center">
-                  <span className="font-display font-black leading-none" style={{ fontSize: 150, color: "rgba(26,23,20,.13)" }}>{g.n}</span>
-                  <span className="absolute top-3 left-4 font-hand font-bold text-accent" style={{ fontSize: 30 }}>{g.n}.</span>
+        (() => {
+          const items = _galleryFromStory(story);
+          if (items && items.length > 0) {
+            return (
+              <div className="fade-in">
+                <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
+                  {items.map((g, i) => (
+                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 300, background: "#15141A" }}>
+                      <div className="relative" style={{ aspectRatio: "3/4" }}>
+                        <img src={g.src} alt="" className="absolute inset-0 w-full h-full object-cover" />
+                        <span className="absolute top-3 left-4 font-mono text-[10px] uppercase tracking-[.2em] px-1.5 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${i + 1}`}</span>
+                      </div>
+                      {g.caption && <p className="font-body text-[14px] leading-snug text-ink/85 p-4">{g.caption}</p>}
+                    </div>
+                  ))}
                 </div>
-                <p className="font-body text-[14.5px] leading-snug text-doodle p-4">{g.t}</p>
+                <Dots count={items.length} />
               </div>
-            ))}
-          </div>
-          <Dots count={GALLERY.length} />
-        </div>
+            );
+          }
+          // Fallback to the hardcoded sample gallery for stories without pipeline assets.
+          return (
+            <div className="fade-in">
+              <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
+                {GALLERY.map((g, i) => (
+                  <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 300, background: "#FBFAF4" }}>
+                    <div className="h-[230px] relative grain flex items-center justify-center">
+                      <span className="font-display font-black leading-none" style={{ fontSize: 150, color: "rgba(26,23,20,.13)" }}>{g.n}</span>
+                      <span className="absolute top-3 left-4 font-hand font-bold text-accent" style={{ fontSize: 30 }}>{g.n}.</span>
+                    </div>
+                    <p className="font-body text-[14.5px] leading-snug text-doodle p-4">{g.t}</p>
+                  </div>
+                ))}
+              </div>
+              <Dots count={GALLERY.length} />
+            </div>
+          );
+        })()
       )}
     </div>
   );

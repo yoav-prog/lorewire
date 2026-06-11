@@ -41,6 +41,13 @@ def _parse_json_col(raw, default):
 
 def main() -> None:
     rows = store.published_stories()
+    # source_url isn't in published_stories' SELECT yet — pull it per row via
+    # fetch_story(). Tiny cost: one extra query per published row, and there
+    # are rarely more than a few dozen at a time.
+    for r in rows:
+        full = store.fetch_story(r["id"])
+        if full and full.get("source_url"):
+            r["source_url"] = full["source_url"]
     data = [
         {
             "id": r["id"],
@@ -53,6 +60,7 @@ def main() -> None:
             # Media columns are emitted only when set so the JS-side check
             # `if (story.heroImage)` is honest about availability instead of
             # always-truthy with empty strings.
+            **({"source_url": r["source_url"]} if r.get("source_url") else {}),
             **({"heroImage": r["hero_image"]} if r["hero_image"] else {}),
             **({"images": _parse_json_col(r["images"], [])} if r["images"] else {}),
             **({"audioUrl": r["audio_url"]} if r["audio_url"] else {}),
@@ -78,6 +86,7 @@ def main() -> None:
         "  year: number;\n"
         "  syn: string;\n"
         "  body: string;\n"
+        "  source_url?: string;\n"
         "  heroImage?: string;\n"
         "  images?: string[];\n"
         "  audioUrl?: string;\n"

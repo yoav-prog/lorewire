@@ -22,6 +22,7 @@ export interface Story {
   tags: string[];
   syn: string;
   body?: string;
+  source_url?: string;
   // Pipeline-generated media (3.1 + 3.2). All optional — UI components fall
   // back to their CSS treatments when these are unset.
   heroImage?: string;
@@ -100,6 +101,7 @@ for (const p of PUBLISHED) {
   const existing = STORIES.find((s) => s.id === p.id);
   if (existing) {
     existing.body = p.body;
+    if (p.source_url) existing.source_url = p.source_url;
     if (p.heroImage) existing.heroImage = p.heroImage;
     if (p.images) existing.images = p.images;
     if (p.audioUrl) existing.audioUrl = p.audioUrl;
@@ -117,6 +119,7 @@ for (const p of PUBLISHED) {
       tags: ["True Story", cat],
       syn: p.syn || "",
       body: p.body,
+      source_url: p.source_url,
       heroImage: p.heroImage,
       images: p.images,
       audioUrl: p.audioUrl,
