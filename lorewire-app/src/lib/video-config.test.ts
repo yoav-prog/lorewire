@@ -506,6 +506,25 @@ describe("applyConfigPatch", () => {
     expect(out._locks).toBeUndefined();
   });
 
+  it("audio edit pattern: patches music object + locks music.url + music.gain_db", () => {
+    // AudioPanel sends the full music object on save so partial edits
+    // (gain only / URL only) don't lose the other field. Lock paths are
+    // per-field so the user can independently unlock either.
+    const out = applyConfigPatch(
+      base,
+      { music: { url: "https://example.com/bg.mp3", gain_db: -8 } },
+      ["music.url", "music.gain_db"],
+    );
+    expect(out.music?.url).toBe("https://example.com/bg.mp3");
+    expect(out.music?.gain_db).toBe(-8);
+    expect(out._locks).toEqual({
+      "music.url": true,
+      "music.gain_db": true,
+    });
+    const r = parseVideoConfig(out);
+    expect(r.ok).toBe(true);
+  });
+
   it("captions edit pattern: patches whole array + locks per-chunk text", () => {
     // The CaptionsPanel in EditorClient sends the whole captions array
     // (because the editor only sees them all together) plus per-chunk lock

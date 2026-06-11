@@ -271,6 +271,10 @@ export default function EditorClient({
                 draft={draftCaptions}
                 onDraftChange={setDraftCaptions}
               />
+            ) : tab === "audio" ? (
+              <AudioPanel storyId={storyId} config={config} />
+            ) : tab === "metadata" ? (
+              <MetadataPanel storyId={storyId} config={config} />
             ) : (
               <TabStub tab={tab} config={config} />
             )}
@@ -993,6 +997,437 @@ function CaptionsPanel({
   );
 }
 
+// ─── Audio panel ─────────────────────────────────────────────────────────────
+// Voiceover is read-only — it's derived from the pipeline's TTS step and
+// the caption alignment is anchored to its waveform; swapping the URL would
+// desync the karaoke. Music is editable: a single background track URL +
+// fixed gain (no sidechain ducking, per the plan's "cut multi-track audio"
+// decision). gain_db is clamped to [-24, 0] in the UI so the post-merge
+// parseVideoConfig (which clamps to [-60, 12]) can never reject the save.
+
+const MUSIC_GAIN_MIN = -24;
+const MUSIC_GAIN_MAX = 0;
+const MUSIC_GAIN_DEFAULT = -12;
+
+function AudioPanel({
+  storyId,
+  config,
+}: {
+  storyId: string;
+  config: ShortVideoConfig;
+}) {
+  const persistedUrl = config.music?.url ?? "";
+  const persistedGain = config.music?.gain_db ?? MUSIC_GAIN_DEFAULT;
+  const [musicUrl, setMusicUrl] = useState(persistedUrl);
+  const [musicGain, setMusicGain] = useState(persistedGain);
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [okFlash, setOkFlash] = useState(false);
+
+  const dirty =
+    musicUrl.trim() !== persistedUrl ||
+    Math.round(musicGain) !== Math.round(persistedGain);
+  const urlLocked = Boolean(config._locks?.["music.url"]);
+  const gainLocked = Boolean(config._locks?.["music.gain_db"]);
+
+  const handleSave = () => {
+    setError(null);
+    setOkFlash(false);
+    const trimmedUrl = musicUrl.trim();
+    // Empty URL clears the track; otherwise patch full music object so a
+    // partial save (gain-only) still keeps the URL.
+    const patch = trimmedUrl
+      ? { music: { url: trimmedUrl, gain_db: musicGain } }
+      : { music: undefined };
+    const lockPaths: string[] = [];
+    if (trimmedUrl !== persistedUrl) lockPaths.push("music.url");
+    if (Math.round(musicGain) !== Math.round(persistedGain)) {
+      lockPaths.push("music.gain_db");
+    }
+    startTransition(async () => {
+      const result = await saveVideoConfigPatch(storyId, patch, lockPaths);
+      if (result.ok) {
+        setOkFlash(true);
+        setTimeout(() => setOkFlash(false), 1500);
+      } else {
+        setError(result.error ?? "Save failed");
+      }
+    });
+  };
+
+  const handleReset = () => {
+    setMusicUrl(persistedUrl);
+    setMusicGain(persistedGain);
+    setError(null);
+  };
+
+  const handleUnlock = (path: "music.url" | "music.gain_db") => {
+    startTransition(async () => {
+      await saveVideoConfigPatch(storyId, {}, [], [path]);
+    });
+  };
+
+  return (
+    <div className="space-y-5">
+      <Section
+        title="Voiceover"
+        hint="Derived from the pipeline's TTS step. Editable URL would desync the caption alignment, so the editor leaves this read-only — re-render the story if the voiceover regenerates."
+      >
+        <FieldRow
+          label="voiceover_url"
+          value={config.voiceover_url || "(unset)"}
+          mono
+        />
+        {config.voiceover_url && (
+          <audio
+            controls
+            src={config.voiceover_url}
+            className="mt-2 w-full"
+            style={{ height: 28 }}
+          />
+        )}
+      </Section>
+
+      <Section
+        title="Background music"
+        hint={`Single track mixed at ${MUSIC_GAIN_DEFAULT} dB by default. No sidechain ducking — paste a public URL or leave blank for no music.`}
+      >
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+              music.url
+              {urlLocked && <span className="ml-1.5 text-accent">🔒</span>}
+            </span>
+          </div>
+          <input
+            type="url"
+            value={musicUrl}
+            onChange={(e) => setMusicUrl(e.target.value)}
+            placeholder="https://… (mp3 / m4a)"
+            className="w-full rounded border border-line bg-bg px-2 py-1 font-mono text-[11px] text-ink outline-none focus:border-accent"
+          />
+          {urlLocked && (
+            <button
+              type="button"
+              onClick={() => handleUnlock("music.url")}
+              className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+            >
+              Unlock — let the pipeline rewrite this
+            </button>
+          )}
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+              music.gain_db
+              {gainLocked && <span className="ml-1.5 text-accent">🔒</span>}
+            </span>
+            <span className="font-mono text-[11px] tabular-nums text-ink">
+              {musicGain} dB
+            </span>
+          </div>
+          <input
+            type="range"
+            min={MUSIC_GAIN_MIN}
+            max={MUSIC_GAIN_MAX}
+            step={1}
+            value={musicGain}
+            onChange={(e) => setMusicGain(Number(e.target.value))}
+            className="w-full accent-accent"
+            aria-label="music.gain_db"
+            disabled={!musicUrl.trim()}
+          />
+          {gainLocked && (
+            <button
+              type="button"
+              onClick={() => handleUnlock("music.gain_db")}
+              className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+            >
+              Unlock — let the pipeline rewrite this
+            </button>
+          )}
+        </div>
+
+        {musicUrl.trim() && (
+          <audio
+            controls
+            src={musicUrl}
+            className="mt-2 w-full"
+            style={{ height: 28 }}
+          />
+        )}
+      </Section>
+
+      {error && (
+        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
+          {error}
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!dirty || pending}
+          className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending ? "Saving…" : okFlash ? "Saved ✓" : "Save audio"}
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          disabled={!dirty || pending}
+          className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Metadata panel ──────────────────────────────────────────────────────────
+// Title + channel_name + ken_burns. Intro/outro overrides live on the story
+// row (intro_segment_id / outro_segment_id / skip_intro / skip_outro), not
+// in video_config — those are managed from the story edit page. We link
+// there so admins don't end up wondering where the override lives.
+
+function MetadataPanel({
+  storyId,
+  config,
+}: {
+  storyId: string;
+  config: ShortVideoConfig;
+}) {
+  const persistedTitle = config.title ?? "";
+  const persistedChannel = config.channel_name ?? "";
+  const persistedKenBurns = config.ken_burns ?? false;
+  const [title, setTitle] = useState(persistedTitle);
+  const [channel, setChannel] = useState(persistedChannel);
+  const [kenBurns, setKenBurns] = useState(persistedKenBurns);
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [okFlash, setOkFlash] = useState(false);
+
+  const dirty =
+    title !== persistedTitle ||
+    channel !== persistedChannel ||
+    kenBurns !== persistedKenBurns;
+
+  const titleLocked = Boolean(config._locks?.title);
+  const channelLocked = Boolean(config._locks?.channel_name);
+  const kenBurnsLocked = Boolean(config._locks?.ken_burns);
+
+  const handleSave = () => {
+    setError(null);
+    setOkFlash(false);
+    const patch: Record<string, unknown> = {};
+    const lockPaths: string[] = [];
+    if (title !== persistedTitle) {
+      patch.title = title;
+      lockPaths.push("title");
+    }
+    if (channel !== persistedChannel) {
+      patch.channel_name = channel;
+      lockPaths.push("channel_name");
+    }
+    if (kenBurns !== persistedKenBurns) {
+      patch.ken_burns = kenBurns;
+      lockPaths.push("ken_burns");
+    }
+    startTransition(async () => {
+      const result = await saveVideoConfigPatch(storyId, patch, lockPaths);
+      if (result.ok) {
+        setOkFlash(true);
+        setTimeout(() => setOkFlash(false), 1500);
+      } else {
+        setError(result.error ?? "Save failed");
+      }
+    });
+  };
+
+  const handleReset = () => {
+    setTitle(persistedTitle);
+    setChannel(persistedChannel);
+    setKenBurns(persistedKenBurns);
+    setError(null);
+  };
+
+  const handleUnlock = (path: "title" | "channel_name" | "ken_burns") => {
+    startTransition(async () => {
+      await saveVideoConfigPatch(storyId, {}, [], [path]);
+    });
+  };
+
+  return (
+    <div className="space-y-5">
+      <Section
+        title="Title"
+        hint="The big chip that fades in for ~1.2 s at the start of the short. Truncated by the pipeline if too long."
+      >
+        <LabeledTextInput
+          label="title"
+          value={title}
+          locked={titleLocked}
+          onChange={setTitle}
+          onUnlock={titleLocked ? () => handleUnlock("title") : undefined}
+        />
+      </Section>
+
+      <Section
+        title="Channel branding"
+        hint="The bottom @-pill. Keep it short — long names wrap and look weird at 1080×1920."
+      >
+        <LabeledTextInput
+          label="channel_name"
+          value={channel}
+          locked={channelLocked}
+          onChange={setChannel}
+          onUnlock={
+            channelLocked ? () => handleUnlock("channel_name") : undefined
+          }
+        />
+      </Section>
+
+      <Section
+        title="Visual options"
+        hint="Ken-Burns adds a slow zoom/pan to each frame so 30+ scene shorts don't feel static between cuts."
+      >
+        <label className="flex cursor-pointer items-center justify-between gap-3 rounded border border-line bg-surface px-3 py-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            ken_burns
+            {kenBurnsLocked && <span className="ml-1.5 text-accent">🔒</span>}
+          </span>
+          <span className="flex items-center gap-2">
+            <span className="font-mono text-[11px] text-ink">
+              {kenBurns ? "on" : "off"}
+            </span>
+            <input
+              type="checkbox"
+              checked={kenBurns}
+              onChange={(e) => setKenBurns(e.target.checked)}
+              className="accent-accent"
+            />
+          </span>
+        </label>
+        {kenBurnsLocked && (
+          <button
+            type="button"
+            onClick={() => handleUnlock("ken_burns")}
+            className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+          >
+            Unlock — let the pipeline rewrite this
+          </button>
+        )}
+      </Section>
+
+      <Section
+        title="Intro / outro"
+        hint="Per-story override lives on the story row (intro_segment_id / outro_segment_id), not in video_config. Manage from the story edit page."
+      >
+        <Link
+          href={`/admin/stories/${storyId}`}
+          className="inline-flex w-full items-center justify-center rounded-md border border-line bg-surface px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
+        >
+          Open story page →
+        </Link>
+      </Section>
+
+      {error && (
+        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
+          {error}
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!dirty || pending}
+          className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending ? "Saving…" : okFlash ? "Saved ✓" : "Save metadata"}
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          disabled={!dirty || pending}
+          className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Reset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LabeledTextInput({
+  label,
+  value,
+  locked,
+  onChange,
+  onUnlock,
+}: {
+  label: string;
+  value: string;
+  locked: boolean;
+  onChange: (v: string) => void;
+  onUnlock?: () => void;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          {label}
+          {locked && <span className="ml-1.5 text-accent">🔒</span>}
+        </span>
+      </div>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded border border-line bg-surface px-2 py-1 text-[12px] text-ink outline-none focus:border-accent"
+      />
+      {locked && onUnlock && (
+        <button
+          type="button"
+          onClick={onUnlock}
+          className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+        >
+          Unlock — let the pipeline rewrite this
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Section({
+  title,
+  hint,
+  children,
+}: {
+  title: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="space-y-1">
+        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          {title}
+        </p>
+        {hint && (
+          <p className="text-[12px] leading-relaxed text-muted">{hint}</p>
+        )}
+      </div>
+      <div className="space-y-3 rounded-md border border-line bg-bg p-3">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function CaptionRow({
   index,
   chunk,
@@ -1066,24 +1501,8 @@ function TabStub({
       // Captions is now live (rendered by CaptionsPanel above the switch).
       return null;
     case "audio":
-      return (
-        <ComingSoon
-          when="Day 9"
-          summary="Voiceover + single bg music track at fixed gain"
-          detail="No sidechain ducking — a single music URL with -12dB default. The single-track decision is in the plan."
-        >
-          <FieldRow
-            label="voiceover_url"
-            value={config.voiceover_url || "(unset)"}
-            mono
-          />
-          <FieldRow
-            label="music"
-            value={config.music?.url ?? "(no track)"}
-            mono
-          />
-        </ComingSoon>
-      );
+      // Audio is now live (rendered by AudioPanel above the switch).
+      return null;
     case "overlays":
       return (
         <ComingSoon
@@ -1098,19 +1517,8 @@ function TabStub({
         </ComingSoon>
       );
     case "metadata":
-      return (
-        <ComingSoon
-          when="Day 10"
-          summary="Title · description · tags · intro/outro override"
-          detail="Consolidates the metadata fields currently spread across the story edit page."
-        >
-          <FieldRow label="title" value={config.title ?? "(unset)"} />
-          <FieldRow
-            label="channel_name"
-            value={config.channel_name ?? "(unset)"}
-          />
-        </ComingSoon>
-      );
+      // Metadata is now live (rendered by MetadataPanel above the switch).
+      return null;
   }
 }
 
