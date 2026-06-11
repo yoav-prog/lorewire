@@ -1,6 +1,6 @@
 "use client";
 
-import { useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { saveSettingAction } from "@/app/admin/actions";
 
 // Setting input primitives for the Settings/General page. Five flavors:
@@ -264,5 +264,266 @@ function PresetChip({
     >
       {label}
     </button>
+  );
+}
+
+// ─── SettingSelect ───────────────────────────────────────────────────────────
+// Dropdown for an enumerated set of options sourced from an API. Used for the
+// voice fields (Google + ElevenLabs). When `options` is empty (API
+// unreachable or credentials missing), falls back to a plain text input so
+// the admin can still configure things by typing the id directly.
+//
+// Options are grouped by `group` (typically locale or accent) so a long list
+// stays scannable. The current value is preserved even if it isn't in the
+// options list (e.g. a custom voice the user pasted in before the API came
+// online).
+
+export interface SelectOption {
+  id: string;
+  label: string;
+  group?: string;
+}
+
+export function SettingSelect({
+  settingKey,
+  label,
+  hint,
+  initial,
+  options,
+  placeholder,
+  emptyHint,
+}: {
+  settingKey: string;
+  label: string;
+  hint?: string;
+  initial: string;
+  options: SelectOption[];
+  placeholder?: string;
+  emptyHint?: string;
+}) {
+  // Empty option list -> fall back to free text input.
+  if (options.length === 0) {
+    return (
+      <FieldShell
+        label={label}
+        hint={
+          emptyHint
+            ? `${hint ? `${hint} ` : ""}${emptyHint}`
+            : hint
+        }
+      >
+        <form
+          action={saveSettingAction}
+          className="flex flex-wrap items-center gap-2"
+        >
+          <input type="hidden" name="key" value={settingKey} />
+          <input
+            name="value"
+            defaultValue={initial}
+            placeholder={placeholder}
+            className="min-w-[220px] flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
+          />
+          <button className="rounded-lg border border-line px-4 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:text-accent">
+            Save
+          </button>
+        </form>
+      </FieldShell>
+    );
+  }
+
+  // Group options for readability. `Map` insertion order matters — options
+  // arrive pre-sorted from the provider helper so a stable map iteration
+  // produces stable group order.
+  const groups = new Map<string, SelectOption[]>();
+  for (const o of options) {
+    const g = o.group ?? "";
+    const arr = groups.get(g) ?? [];
+    arr.push(o);
+    groups.set(g, arr);
+  }
+
+  const currentIsKnown = options.some((o) => o.id === initial);
+
+  return (
+    <FieldShell label={label} hint={hint}>
+      <form action={saveSettingAction} className="flex flex-wrap items-center gap-2">
+        <input type="hidden" name="key" value={settingKey} />
+        <select
+          name="value"
+          defaultValue={initial}
+          className="min-w-[260px] flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
+        >
+          {!currentIsKnown && initial !== "" && (
+            <option value={initial}>{initial} (custom)</option>
+          )}
+          {placeholder && <option value="">— pick one —</option>}
+          {Array.from(groups.entries()).map(([groupLabel, opts]) =>
+            groupLabel ? (
+              <optgroup key={groupLabel} label={groupLabel}>
+                {opts.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </optgroup>
+            ) : (
+              opts.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.label}
+                </option>
+              ))
+            ),
+          )}
+        </select>
+        <button className="rounded-lg border border-line px-4 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:text-accent">
+          Save
+        </button>
+      </form>
+    </FieldShell>
+  );
+}
+
+// ─── SettingAutocomplete ─────────────────────────────────────────────────────
+// Text input that shows suggestions as the admin types. Used for the
+// default subreddit field. Hits `/api/admin/subreddit-suggest?q=...` with
+// a 250ms debounce so we don't hammer the upstream Reddit endpoint on every
+// keystroke. Suggestions are clickable and fill the input; the input still
+// accepts any free-text value so an obscure or new subreddit not in the
+// autocomplete index can still be saved.
+
+export interface AutocompleteSuggestion {
+  /** Value to fill the input with. */
+  value: string;
+  /** Display label (defaults to value). */
+  label?: string;
+  /** Optional secondary line (e.g. subscriber count). */
+  meta?: string;
+}
+
+export function SettingAutocomplete({
+  settingKey,
+  label,
+  hint,
+  initial,
+  placeholder,
+  endpoint,
+  mapResponse,
+  minQueryLength = 2,
+}: {
+  settingKey: string;
+  label: string;
+  hint?: string;
+  initial: string;
+  placeholder?: string;
+  endpoint: string;
+  /** Map the JSON response shape to a slim suggestion list. */
+  mapResponse: (json: unknown) => AutocompleteSuggestion[];
+  minQueryLength?: number;
+}) {
+  const [value, setValue] = useState(initial);
+  const [suggestions, setSuggestions] = useState<AutocompleteSuggestion[]>([]);
+  const [open, setOpen] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    // Skip fetching when there's nothing to fetch. Clearing of suggestions
+    // for short values happens in the change handler (rule: don't setState
+    // synchronously inside an effect).
+    if (!open || value.length < minQueryLength) return;
+    let cancelled = false;
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const url = new URL(endpoint, window.location.origin);
+        url.searchParams.set("q", value);
+        const r = await fetch(url.toString(), { credentials: "same-origin" });
+        if (cancelled) return;
+        if (!r.ok) {
+          setSuggestions([]);
+          return;
+        }
+        const json = await r.json();
+        if (cancelled) return;
+        setSuggestions(mapResponse(json));
+      } catch {
+        if (!cancelled) setSuggestions([]);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [value, open, endpoint, minQueryLength, mapResponse]);
+
+  // Click outside closes the dropdown.
+  useEffect(() => {
+    function onDocClick(e: MouseEvent) {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    if (open) document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+
+  function pick(s: AutocompleteSuggestion) {
+    setValue(s.value);
+    setOpen(false);
+  }
+
+  return (
+    <FieldShell label={label} hint={hint}>
+      <form
+        action={saveSettingAction}
+        className="flex flex-wrap items-center gap-2"
+      >
+        <input type="hidden" name="key" value={settingKey} />
+        <div ref={containerRef} className="relative min-w-[220px] flex-1">
+          <input
+            name="value"
+            value={value}
+            onChange={(e) => {
+              const next = e.target.value;
+              setValue(next);
+              setOpen(true);
+              // Clear stale suggestions immediately when the query becomes
+              // too short — the effect won't refetch, so we'd otherwise
+              // show old results against a new prefix.
+              if (next.length < minQueryLength) setSuggestions([]);
+            }}
+            onFocus={() => setOpen(true)}
+            placeholder={placeholder}
+            autoComplete="off"
+            className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
+          />
+          {open && suggestions.length > 0 && (
+            <ul
+              role="listbox"
+              className="absolute left-0 right-0 top-[calc(100%+4px)] z-30 max-h-60 overflow-auto rounded-lg border border-line bg-surface p-1 shadow-lg"
+            >
+              {suggestions.map((s) => (
+                <li key={s.value}>
+                  <button
+                    type="button"
+                    onClick={() => pick(s)}
+                    className="block w-full rounded-md px-3 py-1.5 text-left transition-colors hover:bg-surface2"
+                  >
+                    <div className="text-[13px] text-ink">{s.label ?? s.value}</div>
+                    {s.meta && (
+                      <div className="font-mono text-[10px] text-muted">
+                        {s.meta}
+                      </div>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <button className="rounded-lg border border-line px-4 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:text-accent">
+          Save
+        </button>
+      </form>
+    </FieldShell>
   );
 }

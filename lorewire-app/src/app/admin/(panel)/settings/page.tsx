@@ -1,13 +1,16 @@
 import Link from "next/link";
 import { requireAdmin } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
+import { listGoogleVoices, listElevenLabsVoices } from "@/lib/voice-providers";
 import SettingsShell from "@/app/admin/SettingsShell";
 import {
   SettingToggle,
   SettingNumber,
-  SettingText,
   SettingPresetText,
+  SettingSelect,
+  type SelectOption,
 } from "./_components/SettingControls";
+import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
 
 // Settings / General. Every field now uses the right control: toggles for
 // the booleans (previously stringy "0"/"1"), number inputs with min/max for
@@ -60,7 +63,9 @@ function readToggle(raw: string | null, defaultOn = false): boolean {
 export default async function SettingsPage() {
   await requireAdmin();
 
-  // Pull every setting in parallel so the page paints in one round-trip.
+  // Pull every setting + voice catalog in parallel. The voice catalog fetchers
+  // are cached server-side (1h TTL) so this isn't a fresh upstream call on
+  // every render — the awaits resolve in microseconds after the first warm.
   const [
     subreddit,
     postsPerRun,
@@ -78,6 +83,8 @@ export default async function SettingsPage() {
     propCount,
     mouthSwap,
     introOutroEnabled,
+    googleVoices,
+    elevenLabsVoices,
   ] = await Promise.all([
     getSetting("pipeline.subreddit"),
     getSetting("pipeline.limit"),
@@ -95,7 +102,24 @@ export default async function SettingsPage() {
     getSetting("media.prop_count"),
     getSetting("video.mouth_swap"),
     getSetting("video.intro_outro_enabled"),
+    listGoogleVoices(),
+    listElevenLabsVoices(),
   ]);
+
+  // Map voice catalogs to the SettingSelect option shape. Group Google by
+  // locale (the API returns the locale on each voice); group ElevenLabs by
+  // accent label. When the catalog is empty (creds missing or API down) the
+  // SettingSelect falls back to a plain text input automatically.
+  const googleOptions: SelectOption[] = googleVoices.map((v) => ({
+    id: v.id,
+    label: v.label,
+    group: v.locale,
+  }));
+  const elevenLabsOptions: SelectOption[] = elevenLabsVoices.map((v) => ({
+    id: v.id,
+    label: v.label,
+    group: v.locale || "Other",
+  }));
 
   return (
     <SettingsShell
@@ -108,10 +132,10 @@ export default async function SettingsPage() {
           title="Pipeline"
           description="What the Python pipeline pulls and how much it spends."
         >
-          <SettingText
+          <SubredditAutocomplete
             settingKey="pipeline.subreddit"
             label="Default subreddit"
-            hint="Where the scraper pulls candidate posts from. Just the name — no r/ prefix."
+            hint="Where the scraper pulls candidate posts from. Type to search Reddit — just the name, no r/ prefix."
             initial={subreddit ?? ""}
             placeholder="AmItheAsshole"
           />
@@ -138,12 +162,14 @@ export default async function SettingsPage() {
           title="Voice"
           description="Narrator voice settings used by the active TTS model."
         >
-          <SettingText
+          <SettingSelect
             settingKey="voice.google_voice_name"
-            label="Google voice id"
-            hint="Full Google voice id (e.g. en-US-Chirp3-HD-Charon). The pipeline strips the locale prefix automatically when Gemini-TTS is active. Browse Google's voice catalog at cloud.google.com/text-to-speech/docs/voices."
+            label="Google voice"
+            hint={`Voice used by every Google tier; the pipeline strips the locale prefix automatically when Gemini-TTS is active. ${googleOptions.length} voices in the catalog.`}
             initial={googleVoice ?? ""}
+            options={googleOptions}
             placeholder="en-US-Chirp3-HD-Aoede"
+            emptyHint="Google credentials not configured — paste a voice id manually for now."
           />
           <SettingPresetText
             settingKey="voice.google_style_prompt"
@@ -153,12 +179,14 @@ export default async function SettingsPage() {
             presets={GEMINI_PROMPT_PRESETS}
             placeholder="Read this in a calm, conversational tone, like a podcaster telling a story"
           />
-          <SettingText
+          <SettingSelect
             settingKey="voice.elevenlabs_voice_id"
-            label="ElevenLabs voice id"
-            hint="The narrator voice used when ElevenLabs is the active model. Find ids in your ElevenLabs library."
+            label="ElevenLabs voice"
+            hint={`Used when ElevenLabs is the active model. ${elevenLabsOptions.length} voices from your library.`}
             initial={elevenLabsVoice ?? ""}
+            options={elevenLabsOptions}
             placeholder="21m00Tcm4TlvDq8ikWAM"
+            emptyHint="ElevenLabs API key not configured — paste a voice id manually for now."
           />
         </Section>
 
