@@ -205,9 +205,9 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
         <RailHead>Top 10 Today</RailHead>
         <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
           {TOP10.map((id, i) => (
-            <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ width: 170 }}>
-              <span className="font-display font-black leading-[.7] select-none -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "2px rgba(255,255,255,.32)" }}>{i + 1}</span>
-              <div className="w-[112px] h-[166px] -ml-2"><PosterArt story={byId(id)} /></div>
+            <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
+              <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "2px rgba(255,255,255,.32)" }}>{i + 1}</span>
+              <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={byId(id)} /></div>
             </button>
           ))}
         </div>
