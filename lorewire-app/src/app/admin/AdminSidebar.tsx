@@ -4,20 +4,21 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
-// Studio sidebar. Replaces the previous top-tab AdminNav. Three zones:
-//   - Overview (single entry)
-//   - Content (Inbox / Articles / Stories / Videos)
-//   - Configuration (Models / Captions / Intros & outros / Pipeline)
-// Plus an optional Dev zone surfaced only when NODE_ENV !== 'production' so
-// the throwaway player spike stays reachable locally without leaking into prod.
+// Studio sidebar. Four primary destinations: Overview, Articles, Videos,
+// Settings. Plus an optional Dev zone surfaced only when NODE_ENV !==
+// 'production' so the throwaway player spike stays reachable locally without
+// leaking into prod.
 //
-// Active-state matching mirrors the old AdminNav (exact for Overview, prefix
-// match elsewhere) so deep links into editor pages keep lighting up the
-// correct sidebar entry. The Videos entry links to the filtered Inbox URL
-// (/admin/content?kind=video) because there is no dedicated /admin/videos
-// list page; its active state therefore fires on the /admin/videos/[id]
-// editor routes, not on the filtered Inbox view (where the Inbox entry is
-// active and the kind chip in the page chrome carries the filter).
+// Stories renames to Videos in the label — in this app every story IS a
+// video; "Videos" is what the lazy user reads it as. The sidebar item links
+// to the new dedicated /admin/videos list page; deep links into the visual
+// editor at /admin/videos/[id] keep the Videos item active. /admin/stories
+// (the metadata editor list) still responds; it's reachable from inside the
+// per-video editor's "Edit metadata" affordance.
+//
+// Models, Captions, Intros & outros all collapse into Settings — the page at
+// /admin/settings is a hub with internal category sub-nav. The old standalone
+// /admin/models, /admin/templates, /admin/segments URLs keep responding.
 
 export type SidebarItem = {
   href: string;
@@ -37,28 +38,36 @@ export type SidebarGroup = {
 const STATIC_GROUPS: SidebarGroup[] = [
   {
     label: null,
-    items: [{ href: "/admin", label: "Overview", exact: true }],
-  },
-  {
-    label: "Content",
     items: [
-      { href: "/admin/content", label: "Inbox", exact: true },
-      { href: "/admin/articles", label: "Articles" },
-      { href: "/admin/stories", label: "Stories" },
+      { href: "/admin", label: "Overview", exact: true },
       {
-        href: "/admin/content?kind=video",
-        label: "Videos",
-        activePrefixes: ["/admin/videos/"],
+        href: "/admin/articles",
+        label: "Articles",
+        // /admin/articles, /admin/articles/[id], /admin/articles/new,
+        // /admin/articles/import all light up Articles.
       },
-    ],
-  },
-  {
-    label: "Configuration",
-    items: [
-      { href: "/admin/models", label: "Models" },
-      { href: "/admin/templates", label: "Captions" },
-      { href: "/admin/segments", label: "Intros & outros" },
-      { href: "/admin/settings", label: "Pipeline" },
+      {
+        href: "/admin/videos",
+        label: "Videos",
+        // /admin/videos (list, panel layout), /admin/videos/[id] (visual
+        // editor, full-bleed), and /admin/stories (metadata list) all light
+        // up Videos — stories ARE videos in this app.
+        activePrefixes: ["/admin/videos", "/admin/stories"],
+      },
+      {
+        href: "/admin/settings",
+        label: "Settings",
+        // All four config URLs land on the Settings hub with the right
+        // sub-nav category active. /admin/templates renders standalone
+        // (per Phase 3 plan) but the sidebar still highlights Settings
+        // when we land there from a deep link.
+        activePrefixes: [
+          "/admin/settings",
+          "/admin/models",
+          "/admin/templates",
+          "/admin/segments",
+        ],
+      },
     ],
   },
 ];

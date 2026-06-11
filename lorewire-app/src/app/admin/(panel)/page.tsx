@@ -62,8 +62,8 @@ export default async function Dashboard() {
           <h2 className="font-mono text-[12px] uppercase tracking-wider text-muted">
             Recent
           </h2>
-          <Link href="/admin/content" className="text-[13px] text-accent hover:underline">
-            Open Inbox
+          <Link href="/admin/videos" className="text-[13px] text-accent hover:underline">
+            All videos
           </Link>
         </div>
         <div className="overflow-hidden rounded-xl border border-line">
@@ -75,7 +75,7 @@ export default async function Dashboard() {
             recent.map((s) => (
               <Link
                 key={s.id}
-                href={`/admin/stories/${s.id}`}
+                href={`/admin/videos/${s.id}`}
                 className="flex items-center justify-between gap-3 border-b border-line bg-surface px-4 py-3 last:border-0 hover:bg-surface2"
               >
                 <span className="truncate text-[14px] text-ink">

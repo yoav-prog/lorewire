@@ -11,7 +11,6 @@
 // in a transitional state, <SegmentsAutoRefresh> polls every 5s so the chip
 // transitions live in front of the admin.
 
-import Link from "next/link";
 import { requireAdmin } from "@/lib/dal";
 import {
   getSetting,
@@ -24,7 +23,9 @@ import {
   setSegmentEnabledAction,
   renameSegmentAction,
   deleteSegmentAction,
+  saveSettingAction,
 } from "@/app/admin/actions";
+import SettingsShell from "@/app/admin/SettingsShell";
 import { SegmentUploadForm } from "./SegmentUploadForm";
 import { SegmentsAutoRefresh } from "./SegmentsAutoRefresh";
 
@@ -75,61 +76,69 @@ export default async function SegmentsPage({
     intros.filter(isTransitional).length + outros.filter(isTransitional).length;
 
   return (
-    <div className="space-y-6">
-      <SegmentsAutoRefresh activeRows={transitionalCount} />
-      <div>
-        <h1 className="font-display text-[22px] font-extrabold tracking-tightest">
-          Intros &amp; outros
-        </h1>
-        <p className="mt-1 text-[14px] text-muted">
-          Upload short branded clips that the pipeline splices onto every
-          rendered video. Exactly one intro and one outro is active globally;
-          a story can override the pick or skip the segment entirely from its
-          edit page.
-        </p>
-      </div>
+    <SettingsShell
+      active="intros"
+      title="Intros & outros"
+      description="Upload short branded clips that the pipeline splices onto every rendered video. Exactly one intro and one outro is active globally; a story can override the pick or skip the segment entirely from its edit page."
+    >
+      <div className="space-y-6">
+        <SegmentsAutoRefresh activeRows={transitionalCount} />
 
-      {errorKey && (
-        <div className="rounded-xl border border-danger/40 bg-danger/10 p-3 text-[13px] text-danger">
-          {errorKey}
-        </div>
-      )}
-
-      <div className="rounded-xl border border-line bg-surface p-4 text-[13px]">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="font-medium text-ink">Master switch</div>
-            <p className="mt-1 text-muted">
-              {masterExplicitlyOff
-                ? "Currently off. No intro or outro is spliced onto any render."
-                : "Currently on. Active intro and outro are spliced onto every render. Per-story overrides still apply."}
-            </p>
+        {errorKey && (
+          <div className="rounded-xl border border-danger/40 bg-danger/10 p-3 text-[13px] text-danger">
+            {errorKey}
           </div>
-          <Link
-            href="/admin/settings#video.intro_outro_enabled"
-            className="rounded-md border border-line px-3 py-1.5 font-mono text-[12px] text-ink transition-colors hover:border-accent hover:text-accent"
-          >
-            Edit in Settings
-          </Link>
-        </div>
+        )}
+
+        <form
+          action={saveSettingAction}
+          className="rounded-xl border border-line bg-surface p-4"
+        >
+          <input type="hidden" name="key" value="video.intro_outro_enabled" />
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[13px] font-semibold text-ink">
+                Master switch
+              </div>
+              <p className="mt-0.5 text-[12px] text-muted">
+                {masterExplicitlyOff
+                  ? "Currently off. No intro or outro is spliced onto any render."
+                  : "Currently on. Active intro and outro are spliced onto every render. Per-story overrides still apply."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <select
+                name="value"
+                defaultValue={masterExplicitlyOff ? "0" : "1"}
+                className="rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
+              >
+                <option value="1">On</option>
+                <option value="0">Off</option>
+              </select>
+              <button className="rounded-md border border-line px-3 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
+                Save
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <SegmentSection
+          kind="intro"
+          title="Intros"
+          rows={intros}
+          activeId={activeIntroId}
+          uploadMode={uploadMode}
+        />
+
+        <SegmentSection
+          kind="outro"
+          title="Outros"
+          rows={outros}
+          activeId={activeOutroId}
+          uploadMode={uploadMode}
+        />
       </div>
-
-      <SegmentSection
-        kind="intro"
-        title="Intros"
-        rows={intros}
-        activeId={activeIntroId}
-        uploadMode={uploadMode}
-      />
-
-      <SegmentSection
-        kind="outro"
-        title="Outros"
-        rows={outros}
-        activeId={activeOutroId}
-        uploadMode={uploadMode}
-      />
-    </div>
+    </SettingsShell>
   );
 }
 
