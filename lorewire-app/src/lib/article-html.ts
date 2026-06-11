@@ -13,11 +13,27 @@ import { generateHTML } from "@tiptap/html";
 import StarterKit from "@tiptap/starter-kit";
 import { Callout } from "@/lib/tiptap-callout";
 import { ArticleImage } from "@/lib/tiptap-article-image";
+import { ArticleGallery } from "@/lib/tiptap-gallery";
+import { ArticleEmbed } from "@/lib/tiptap-embed";
+import { PullQuote } from "@/lib/tiptap-pullquote";
+import { ArticleComparison } from "@/lib/tiptap-comparison";
+import { SheetsRef, stripSheetsRefs } from "@/lib/tiptap-sheets-ref";
 
 // Extensions array. Pin the same set the editor registers so the renderer
 // understands every block the writer can author. Adding a new editor block
-// means appending it here too — same node spec, both surfaces.
-const EXTENSIONS = [StarterKit, Callout, ArticleImage];
+// means appending it here too — same node spec, both surfaces. SheetsRef
+// is here so a stored research block round-trips through autosave; the
+// public render path strips those nodes before serialization (see below).
+const EXTENSIONS = [
+  StarterKit,
+  Callout,
+  ArticleImage,
+  ArticleGallery,
+  ArticleEmbed,
+  PullQuote,
+  ArticleComparison,
+  SheetsRef,
+];
 
 // Empty doc shape used when the stored document is missing or unparseable.
 // Returning empty HTML in that case beats throwing — a corrupt revision
@@ -40,14 +56,18 @@ export function renderArticleHtml(raw: string | null | undefined): string {
     return generateHTML(emptyDoc(), EXTENSIONS);
   }
   try {
+    // Strip research-only blocks before serializing — the editor's
+    // SheetsRef node is for the writer, not the reader. Done here so the
+    // public renderer's contract is "in: stored document, out: reader
+    // HTML" without callers needing to remember a filter step.
+    const cleaned = stripSheetsRefs(
+      json as Parameters<typeof generateHTML>[0],
+    );
     // generateHTML's signature is permissive on the JSON shape; if a stored
     // document carries an unknown node type the renderer either drops it or
     // throws, depending on the extension. Catch ensures the public page
     // never 500s on a corrupt body — we surface an empty body instead.
-    return generateHTML(
-      json as Parameters<typeof generateHTML>[0],
-      EXTENSIONS,
-    );
+    return generateHTML(cleaned, EXTENSIONS);
   } catch (e) {
     console.error("[articles reader] render FAILED:", e);
     return generateHTML(emptyDoc(), EXTENSIONS);

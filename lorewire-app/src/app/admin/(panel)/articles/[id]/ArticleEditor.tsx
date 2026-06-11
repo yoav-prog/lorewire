@@ -16,12 +16,22 @@
 // `.extend({ addNodeView })` so the schema in lib/ is pure JSON-side.
 
 import { useEditor, EditorContent, ReactNodeViewRenderer } from "@tiptap/react";
+import { Extension } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { saveArticleAction } from "@/app/admin/actions";
 import { Callout, type CalloutTone } from "@/lib/tiptap-callout";
 import { ArticleImage } from "@/lib/tiptap-article-image";
+import { ArticleGallery } from "@/lib/tiptap-gallery";
+import { ArticleEmbed } from "@/lib/tiptap-embed";
+import { PullQuote } from "@/lib/tiptap-pullquote";
+import { ArticleComparison } from "@/lib/tiptap-comparison";
+import { SheetsRef } from "@/lib/tiptap-sheets-ref";
 import { ArticleImageView } from "./ArticleImageView";
+import { GalleryView } from "./GalleryView";
+import { EmbedView } from "./EmbedView";
+import { ComparisonView } from "./ComparisonView";
+import { SheetsRefView } from "./SheetsRefView";
 
 // Debounce window for autosave. Matches the default the plan calls out;
 // settings.articles.autosave_debounce_ms can override (Phase 3 wires it).
@@ -171,17 +181,58 @@ export function ArticleEditor({
     };
   }, []);
 
-  // ArticleImage carries a React NodeView. We attach it on-the-fly here so
-  // the node spec in lib/ stays importable from server-side rendering code
-  // that has no React available.
+  // The Tiptap node specs in lib/ stay React-free so the public reader can
+  // import them under Node. The editor attaches each spec's React NodeView
+  // here via `.extend({ addNodeView })`. PullQuote is fully editable inline
+  // (content="inline+") so it needs no NodeView — Tiptap handles its
+  // editing through the default mark / selection paths.
   const ArticleImageWithView = ArticleImage.extend({
     addNodeView() {
       return ReactNodeViewRenderer(ArticleImageView);
     },
   });
+  const ArticleGalleryWithView = ArticleGallery.extend({
+    addNodeView() {
+      return ReactNodeViewRenderer(GalleryView);
+    },
+  });
+  const ArticleEmbedWithView = ArticleEmbed.extend({
+    addNodeView() {
+      return ReactNodeViewRenderer(EmbedView);
+    },
+  });
+  const ArticleComparisonWithView = ArticleComparison.extend({
+    addNodeView() {
+      return ReactNodeViewRenderer(ComparisonView);
+    },
+  });
+  const SheetsRefWithView = SheetsRef.extend({
+    addNodeView() {
+      return ReactNodeViewRenderer(SheetsRefView);
+    },
+  });
+
+  // Tiptap "storage" lets the NodeViews read the article id without prop
+  // drilling. We stamp it in a no-op Extension that owns its own bucket.
+  const LorewireStorage = Extension.create({
+    name: "lorewire",
+    addStorage() {
+      return { articleId: id };
+    },
+  });
 
   const editor = useEditor({
-    extensions: [StarterKit, Callout, ArticleImageWithView],
+    extensions: [
+      StarterKit,
+      Callout,
+      ArticleImageWithView,
+      ArticleGalleryWithView,
+      ArticleEmbedWithView,
+      PullQuote,
+      ArticleComparisonWithView,
+      SheetsRefWithView,
+      LorewireStorage,
+    ],
     content: initialDoc,
     textDirection: direction,
     immediatelyRender: false,
@@ -436,6 +487,80 @@ export function ArticleEditor({
               if (file) onUploadFile(file);
             }}
           />
+
+          <button
+            type="button"
+            onClick={() =>
+              editor
+                ?.chain()
+                .focus()
+                .insertArticleGallery({ items: [] })
+                .run()
+            }
+            className={TOOLBAR_BTN}
+            title="Insert image gallery"
+          >
+            Gallery
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              editor
+                ?.chain()
+                .focus()
+                .insertContent({
+                  type: "articleEmbed",
+                  attrs: { provider: "", url: "", originalUrl: "" },
+                })
+                .run()
+            }
+            className={TOOLBAR_BTN}
+            title="Insert embed (YouTube / X / TikTok)"
+          >
+            Embed
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              editor?.isActive("pullQuote")
+                ? editor.chain().focus().unsetPullQuote().run()
+                : editor?.chain().focus().setPullQuote().run()
+            }
+            className={
+              editor.isActive("pullQuote") ? TOOLBAR_BTN_ACTIVE : TOOLBAR_BTN
+            }
+            title="Pull-quote"
+          >
+            ❝ Pull
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              editor
+                ?.chain()
+                .focus()
+                .insertArticleComparison()
+                .run()
+            }
+            className={TOOLBAR_BTN}
+            title="Insert comparison"
+          >
+            ⇄ Compare
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              editor
+                ?.chain()
+                .focus()
+                .insertSheetsRef({ spreadsheetId: "", tab: "" })
+                .run()
+            }
+            className={TOOLBAR_BTN}
+            title="Insert Sheets research (editor only, not in published article)"
+          >
+            ⌗ Sheets
+          </button>
 
           <span
             className={`ml-auto flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider ${

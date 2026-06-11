@@ -47,6 +47,7 @@ import {
   slugifyTitle,
 } from "@/lib/articles";
 import { countImagesMissingAlt } from "@/lib/tiptap-article-image";
+import { countGalleryImagesMissingAlt } from "@/lib/tiptap-gallery";
 import {
   NewsPayloadSchema,
   FeaturePayloadSchema,
@@ -454,7 +455,8 @@ export async function setArticleStatusAction(
     } catch {
       doc = null;
     }
-    const missing = countImagesMissingAlt(doc);
+    const missing =
+      countImagesMissingAlt(doc) + countGalleryImagesMissingAlt(doc);
     if (missing > 0) {
       console.info("[articles action] publish-blocked alt-missing", {
         id,
