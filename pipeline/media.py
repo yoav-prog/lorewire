@@ -73,18 +73,21 @@ STT_COST_PER_SECOND = 0.024 / 60.0
 IMAGE_POLL_TIMEOUT = 240
 
 
-def _generate_with_retry(prompt: str, label: str, attempts: int = 2) -> str | None:
+def _generate_with_retry(
+    prompt: str, label: str, attempts: int = 2, aspect_ratio: str = "3:4"
+) -> str | None:
     """Call `images.generate` with one retry on transient failure.
 
     Returns the kie-hosted URL or None when both attempts fail. Logging is
     routed through the same namespace as the caller so a human reading the
-    log sees the retry + outcome inline.
+    log sees the retry + outcome inline. `aspect_ratio` is passed through so
+    callers can render a landscape variant of the same prompt.
     """
     last: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
             return images.generate(
-                prompt, aspect_ratio="3:4", resolution="1K", poll_timeout=IMAGE_POLL_TIMEOUT
+                prompt, aspect_ratio=aspect_ratio, resolution="1K", poll_timeout=IMAGE_POLL_TIMEOUT
             )
         except Exception as e:
             last = e
@@ -223,6 +226,30 @@ def generate_media(
             # rather than ship a story with no hero. Logged so a human can
             # decide whether to regenerate.
             print(f"[media id={safe_id} hero promoted] scene-1 used as hero (original hero failed)")
+
+    # Landscape hero: a second render of the hero prompt at 16:9 so desktop
+    # Billboard / Hero strips have a wide composition instead of cropping the
+    # 3:4 portrait. Same content brief, different framing. Cost: one extra
+    # kie call (~$0.05). The UI falls back to the portrait hero when this is
+    # absent, so a failure here never breaks the page.
+    if hero_succeeded and not dry_run and prompts:
+        landscape_filename = "hero-landscape.png"
+        landscape_local_url = f"{url_prefix}/{landscape_filename}"
+        local_path = out_dir / landscape_filename
+        started = time.time()
+        kie_url = _generate_with_retry(prompts[0], f"id={safe_id} hero-landscape", aspect_ratio="16:9")
+        if kie_url is not None:
+            try:
+                images.download(kie_url, local_path)
+                stored_url = gcs.publish(local_path, f"{safe_id}/{landscape_filename}", landscape_local_url)
+                out["hero_image_landscape"] = stored_url
+                elapsed = time.time() - started
+                print(
+                    f"[media id={safe_id} hero-landscape] 16:9 "
+                    f"({models.get_selected('images')}) -> {stored_url} ({elapsed:.1f}s)"
+                )
+            except Exception as e:
+                print(f"[media id={safe_id} hero-landscape] download/upload FAILED: {e}")
 
     # --- voice
     if dry_run:

@@ -98,7 +98,10 @@ const RailHead = ({ children }: { children: React.ReactNode }) => (
 function Billboard({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn; onShuffle: () => void }) {
   const c = CAT[story.cat];
   const [heroOk, setHeroOk] = useState(true);
-  const showHero = !!story.heroImage && heroOk;
+  // Mobile Billboard is taller than it is wide (500h x ~390-480w), so the
+  // portrait hero composes better here than the landscape variant.
+  const heroSrc = story.heroImage;
+  const showHero = !!heroSrc && heroOk;
   return (
     <div className="relative h-[500px] w-full overflow-hidden">
       <div className="absolute left-5 z-30 flex items-center gap-2" style={{ top: "calc(env(safe-area-inset-top, 0px) + 14px)" }}>
@@ -111,12 +114,12 @@ function Billboard({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn;
       <div className="absolute inset-0 drift" style={{ background: c }}>
         {showHero && (
           <img
-            src={story.heroImage}
+            src={heroSrc}
             alt=""
             className="absolute inset-0 w-full h-full object-cover"
             onError={() => {
               setHeroOk(false);
-              console.warn("[lorewire billboard err]", { storyId: story.id, src: story.heroImage });
+              console.warn("[lorewire billboard err]", { storyId: story.id, src: heroSrc });
             }}
           />
         )}
@@ -358,8 +361,8 @@ function GenArticle({ story }: { story: Story }) {
           )}
           {imgAt.has(i) && (
             <figure className="my-5">
-              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "3/4" }}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" />
+              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "16/9" }}>
+                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: "50% 30%" }} />
               </div>
               <figcaption className="font-mono text-[10px] text-muted mt-1.5">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
@@ -696,19 +699,25 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
   if (more.length < 3) more.push(...STORIES.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
 
   const [headerHeroOk, setHeaderHeroOk] = useState(true);
-  const showHeaderHero = !!story.heroImage && headerHeroOk;
+  // TitleSheet header is wider than it is tall (300h vs full-screen width on
+  // a 480px-max-width mobile shell) so the landscape variant composes cleaner;
+  // portrait is the fallback with the same upper-focus tweak.
+  const headerHeroSrc = story.heroImageLandscape || story.heroImage;
+  const isHeaderLandscape = !!story.heroImageLandscape;
+  const showHeaderHero = !!headerHeroSrc && headerHeroOk;
   return (
     <div className="screen sheet-in z-40 noscroll" style={{ background: "#0A0A0C" }}>
       <div className="relative h-[300px]">
         <div className="absolute inset-0" style={{ background: c }}>
           {showHeaderHero && (
             <img
-              src={story.heroImage}
+              src={headerHeroSrc}
               alt=""
               className="absolute inset-0 w-full h-full object-cover"
+              style={isHeaderLandscape ? undefined : { objectPosition: "50% 25%" }}
               onError={() => {
                 setHeaderHeroOk(false);
-                console.warn("[lorewire sheet hero err]", { storyId: story.id, src: story.heroImage });
+                console.warn("[lorewire sheet hero err]", { storyId: story.id, src: headerHeroSrc });
               }}
             />
           )}

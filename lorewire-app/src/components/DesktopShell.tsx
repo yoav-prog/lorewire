@@ -102,24 +102,27 @@ function TopNav({ view, setView, solid, query, setQuery }: { view: string; setVi
 function Hero({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn; onShuffle: () => void }) {
   const c = CAT[story.cat];
   const [heroOk, setHeroOk] = useState(true);
-  const showHero = !!story.heroImage && heroOk;
+  // Desktop Hero is widescreen — prefer the 16:9 landscape variant when it
+  // exists, fall back to the 3:4 portrait with object-position adjustment
+  // otherwise.
+  const heroSrc = story.heroImageLandscape || story.heroImage;
+  const isLandscape = !!story.heroImageLandscape;
+  const showHero = !!heroSrc && heroOk;
   return (
     <section className="relative h-[82vh] min-h-[620px] w-full overflow-hidden">
       <div className="absolute inset-0 drift" style={{ background: c }}>
         {showHero && (
           <img
-            src={story.heroImage}
+            src={heroSrc}
             alt=""
             className="absolute inset-0 w-full h-full object-cover"
-            // Hero images are generated at 3:4 portrait for the Shorts pipeline;
-            // a 16:9 Hero crops the sides and shows the middle vertical strip.
-            // Pushing the focal point up (25%) keeps characters' faces /
-            // top-of-frame action visible instead of cropping into bodies.
-            // Wave 2 generates a proper landscape hero per story and removes this.
-            style={{ objectPosition: "50% 25%" }}
+            // Landscape variant fits naturally; portrait fallback needs
+            // object-position to keep characters' faces visible instead of
+            // cropping into bodies.
+            style={isLandscape ? undefined : { objectPosition: "50% 25%" }}
             onError={() => {
               setHeroOk(false);
-              console.warn("[lorewire hero err]", { storyId: story.id, src: story.heroImage });
+              console.warn("[lorewire hero err]", { storyId: story.id, src: heroSrc });
             }}
           />
         )}
@@ -270,6 +273,37 @@ const GALLERY = [
   { n: "4", t: "HR found the group chat. The receipts, as they say, were already screenshotted." },
 ];
 
+// Horizontal scroller with left/right arrow buttons that appear on hover.
+// Same idiom Rail uses on the home rails, scoped here so the gallery doesn't
+// need its own rail-fade gradients (the modal background already provides
+// contrast).
+function GalleryScroller({ children, count }: { children: React.ReactNode; count: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [hover, setHover] = useState(false);
+  const scroll = (dir: number) => ref.current && ref.current.scrollBy({ left: dir * 480, behavior: "smooth" });
+  return (
+    <div className="relative" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      <button
+        onClick={() => scroll(-1)}
+        className="absolute left-0 top-0 bottom-0 z-20 w-14 flex items-center justify-center transition-opacity"
+        style={{ opacity: hover && count > 2 ? 1 : 0 }}
+        aria-label="Previous scene"
+      >
+        <span className="w-10 h-10 rounded-full bg-bg/85 border border-line flex items-center justify-center text-ink"><ChevL size={22} /></span>
+      </button>
+      <div ref={ref} className="flex gap-5 overflow-x-auto noscroll snap-x snap-mandatory pb-2 -mx-1 px-1">{children}</div>
+      <button
+        onClick={() => scroll(1)}
+        className="absolute right-0 top-0 bottom-0 z-20 w-14 flex items-center justify-center transition-opacity"
+        style={{ opacity: hover && count > 2 ? 1 : 0 }}
+        aria-label="Next scene"
+      >
+        <span className="w-10 h-10 rounded-full bg-bg/85 border border-line flex items-center justify-center text-ink"><ChevR size={22} /></span>
+      </button>
+    </div>
+  );
+}
+
 function _galleryFromStory(story: Story): { src: string; caption: string }[] | null {
   const imgs = story.images || [];
   if (imgs.length === 0) return null;
@@ -317,8 +351,8 @@ function GenArticle({ story }: { story: Story }) {
           )}
           {imgAt.has(i) && (
             <figure className="my-7">
-              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "3/4", maxWidth: 480 }}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" />
+              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "16/9" }}>
+                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: "50% 30%" }} />
               </div>
               <figcaption className="font-mono text-[11px] text-muted mt-2">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
@@ -388,7 +422,7 @@ function Read({ story }: { story: Story }) {
           if (items && items.length > 0) {
             return (
               <div className="fade-in">
-                <div className="flex gap-5 overflow-x-auto noscroll snap-x snap-mandatory pb-2 -mx-1 px-1">
+                <GalleryScroller count={items.length}>
                   {items.map((g, i) => (
                     <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 380, background: "#15141A" }}>
                       <div className="relative" style={{ aspectRatio: "3/4" }}>
@@ -398,7 +432,7 @@ function Read({ story }: { story: Story }) {
                       {g.caption && <p className="font-body text-[15px] leading-snug text-ink/85 p-5">{g.caption}</p>}
                     </div>
                   ))}
-                </div>
+                </GalleryScroller>
               </div>
             );
           }
@@ -538,17 +572,21 @@ function FakeReadAlong() {
 function DetailModalHero({ story }: { story: Story }) {
   const c = CAT[story.cat];
   const [heroOk, setHeroOk] = useState(true);
-  const showHero = !!story.heroImage && heroOk;
+  // Modal header is widescreen too; use landscape when available.
+  const heroSrc = story.heroImageLandscape || story.heroImage;
+  const isLandscape = !!story.heroImageLandscape;
+  const showHero = !!heroSrc && heroOk;
   return (
     <div className="absolute inset-0" style={{ background: c }}>
       {showHero && (
         <img
-          src={story.heroImage}
+          src={heroSrc}
           alt=""
           className="absolute inset-0 w-full h-full object-cover"
+          style={isLandscape ? undefined : { objectPosition: "50% 25%" }}
           onError={() => {
             setHeroOk(false);
-            console.warn("[lorewire modal hero err]", { storyId: story.id, src: story.heroImage });
+            console.warn("[lorewire modal hero err]", { storyId: story.id, src: heroSrc });
           }}
         />
       )}

@@ -26,6 +26,10 @@ export interface Story {
   // Pipeline-generated media (3.1 + 3.2). All optional — UI components fall
   // back to their CSS treatments when these are unset.
   heroImage?: string;
+  // Landscape-cropped variant of the hero used on desktop Hero / Billboard /
+  // modal headers so the 3:4 portrait composition doesn't get center-cropped
+  // into character bodies. Same content brief, different framing.
+  heroImageLandscape?: string;
   images?: string[];
   audioUrl?: string;
   videoUrl?: string;
@@ -103,6 +107,7 @@ for (const p of PUBLISHED) {
     existing.body = p.body;
     if (p.source_url) existing.source_url = p.source_url;
     if (p.heroImage) existing.heroImage = p.heroImage;
+    if (p.heroImageLandscape) existing.heroImageLandscape = p.heroImageLandscape;
     if (p.images) existing.images = p.images;
     if (p.audioUrl) existing.audioUrl = p.audioUrl;
     if (p.videoUrl) existing.videoUrl = p.videoUrl;
@@ -121,6 +126,7 @@ for (const p of PUBLISHED) {
       body: p.body,
       source_url: p.source_url,
       heroImage: p.heroImage,
+      heroImageLandscape: p.heroImageLandscape,
       images: p.images,
       audioUrl: p.audioUrl,
       videoUrl: p.videoUrl,
