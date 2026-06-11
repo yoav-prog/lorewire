@@ -4,13 +4,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
-// Studio sidebar. Four primary destinations: Overview, Articles, Videos,
-// Settings. Plus an optional Dev zone surfaced only when NODE_ENV !==
+// Studio sidebar. Five primary destinations: Overview, Content, Articles,
+// Videos, Settings. Plus an optional Dev zone surfaced only when NODE_ENV !==
 // 'production' so the throwaway player spike stays reachable locally without
 // leaking into prod.
 //
-// Stories renames to Videos in the label — in this app every story IS a
-// video; "Videos" is what the lazy user reads it as. The sidebar item links
+// Content is the unified mixed feed (articles + stories in one list with
+// kind chips). Articles and Videos are scoped to their tables. Stories
+// renames to Videos in the label — in this app every story IS a video;
+// "Videos" is what the lazy user reads it as. The Videos sidebar item links
 // to the new dedicated /admin/videos list page; deep links into the visual
 // editor at /admin/videos/[id] keep the Videos item active. /admin/stories
 // (the metadata editor list) still responds; it's reachable from inside the
@@ -40,6 +42,14 @@ const STATIC_GROUPS: SidebarGroup[] = [
     label: null,
     items: [
       { href: "/admin", label: "Overview", exact: true },
+      {
+        href: "/admin/content",
+        label: "Content",
+        // Unified mixed feed (articles + stories). Exact match so a deeper
+        // route doesn't accidentally light Content up — Articles and Videos
+        // take precedence on their own URLs.
+        exact: true,
+      },
       {
         href: "/admin/articles",
         label: "Articles",

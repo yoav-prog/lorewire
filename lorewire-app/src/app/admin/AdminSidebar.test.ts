@@ -7,6 +7,7 @@ import { isItemActive, buildGroups, type SidebarItem } from "./AdminSidebar";
 
 const items = {
   overview: { href: "/admin", label: "Overview", exact: true } satisfies SidebarItem,
+  content: { href: "/admin/content", label: "Content", exact: true } satisfies SidebarItem,
   articles: { href: "/admin/articles", label: "Articles" } satisfies SidebarItem,
   videos: {
     href: "/admin/videos",
@@ -36,6 +37,16 @@ describe("isItemActive", () => {
     expect(isItemActive("/admin/articles", items.overview)).toBe(false);
     expect(isItemActive("/admin/videos", items.overview)).toBe(false);
     expect(isItemActive("/admin/settings", items.overview)).toBe(false);
+  });
+
+  it("Content only fires on /admin/content (exact)", () => {
+    expect(isItemActive("/admin/content", items.content)).toBe(true);
+    // Search params aren't in the pathname, so filtered-Inbox URLs still
+    // pass exact-match.
+    expect(isItemActive("/admin/content", items.content)).toBe(true);
+    expect(isItemActive("/admin/articles", items.content)).toBe(false);
+    expect(isItemActive("/admin/videos", items.content)).toBe(false);
+    expect(isItemActive("/admin/content/anything", items.content)).toBe(false);
   });
 
   it("Articles lights up for the list and any inner editor page", () => {
@@ -99,13 +110,14 @@ describe("buildGroups", () => {
     );
   });
 
-  it("produces the four top-level entries in stable order", () => {
+  it("produces the five top-level entries in stable order", () => {
     for (const dev of [false, true]) {
       const groups = buildGroups(dev);
-      // The first (and only static) group holds Overview/Articles/Videos/Settings.
+      // The first (and only static) group holds the five primary destinations.
       expect(groups[0].label).toBeNull();
       expect(groups[0].items.map((i) => i.label)).toEqual([
         "Overview",
+        "Content",
         "Articles",
         "Videos",
         "Settings",
