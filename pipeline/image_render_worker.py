@@ -44,21 +44,19 @@ RegenFn = Callable[[dict], tuple[str, int]]
 
 
 def _default_regen(claimed: dict) -> tuple[str, int]:
-    """Dispatch on (owner_kind, asset). Keeps this module thin — the actual
-    generators live in pipeline.media (story side) and a future
-    article_media module (article side, not yet built).
+    """Dispatch on (owner_kind, asset). Story assets route to
+    pipeline.media.regen_one; article assets route to
+    pipeline.article_media.regen_article_one. Both share the same return
+    shape: (output_url, cost_cents) on success, raise on any failure.
     """
-    from pipeline import media
+    from pipeline import article_media, media
     owner_kind = claimed["owner_kind"]
     asset = claimed["asset"]
     if owner_kind == "story":
         return media.regen_one(claimed["owner_id"], asset, REPO_ROOT)
     if owner_kind == "article":
-        raise NotImplementedError(
-            f"article asset regen for {asset!r} is not yet wired on the "
-            "Python side. Story assets are the v1 scope; article image "
-            "gen is a follow-up workstream (pipeline currently has no "
-            "article media pipeline)."
+        return article_media.regen_article_one(
+            claimed["owner_id"], asset, REPO_ROOT,
         )
     raise NotImplementedError(f"unknown owner_kind {owner_kind!r}")
 

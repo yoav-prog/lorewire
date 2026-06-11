@@ -1030,6 +1030,101 @@ def update_story_props(story_id: str, prop_list: list[dict]) -> None:
         )
 
 
+# --- articles helpers (2026-06-12) -------------------------------------------
+# Articles are TS-owned (the schema lives in lorewire-app/src/lib/schema.ts,
+# rows are created via the admin editor at /admin/articles/new). The Python
+# pipeline historically had no reason to touch them, but the asset re-render
+# worker now needs to: hero + og are top-level columns; body + gallery
+# images live inside articles.document (Tiptap JSON), so the worker walks
+# the doc, replaces image src attributes, and writes the modified doc back.
+
+_ARTICLE_COLUMNS = [
+    "id", "type", "language", "slug", "title", "subtitle", "summary",
+    "document", "hero_image", "status", "author_id", "meta_title",
+    "meta_description", "og_image", "payload", "source_sheet_row_id",
+    "created_at", "updated_at", "published_at", "noindex",
+]
+
+
+def fetch_article(article_id: str) -> dict | None:
+    """Read a single article row by id, dialect-agnostic."""
+    cols = ", ".join(_ARTICLE_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM articles WHERE id = %s", (article_id,)
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM articles WHERE id=?", (article_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_article_hero(article_id: str, hero_url: str) -> None:
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE articles SET hero_image = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (hero_url, now, article_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE articles SET hero_image = ?, updated_at = ? WHERE id = ?",
+            (hero_url, now, article_id),
+        )
+
+
+def update_article_og(article_id: str, og_url: str) -> None:
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE articles SET og_image = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (og_url, now, article_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE articles SET og_image = ?, updated_at = ? WHERE id = ?",
+            (og_url, now, article_id),
+        )
+
+
+def update_article_document(article_id: str, document_json: str) -> None:
+    """Replace articles.document wholesale. Worker calls this after walking
+    the Tiptap doc, swapping image src attributes for fresh kie URLs, and
+    re-serializing. The string IS the document; we don't re-parse on the
+    DB side."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE articles SET document = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (document_json, now, article_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE articles SET document = ?, updated_at = ? WHERE id = ?",
+            (document_json, now, article_id),
+        )
+
+
 def update_story_character(
     story_id: str,
     character_url: str | None,
