@@ -11,6 +11,7 @@ import {
   NEW_ROW,
   type Story,
 } from "@/lib/stories";
+import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -362,19 +363,22 @@ function GenArticle({ story }: { story: Story }) {
           )}
         </React.Fragment>
       ))}
-      <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
-        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
-        <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
-          <span className="text-ink/80">r/AmItheAsshole</span>
-          <span>&middot;</span>
-          <span>retold by LoreWire</span>
-          {story.source_url ? (
-            <a href={story.source_url} target="_blank" rel="noopener noreferrer" className="ml-auto text-accent font-medium hover:underline">View source &rarr;</a>
-          ) : (
-            <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
-          )}
+      {isRealRedditUrl(story.source_url) ? (
+        <div className="mt-8 max-w-[660px]">
+          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
+          <RedditEmbed url={story.source_url!} title={story.title} />
         </div>
-      </div>
+      ) : (
+        <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
+          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
+          <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
+            <span className="text-ink/80">r/AmItheAsshole</span>
+            <span>&middot;</span>
+            <span>retold by LoreWire</span>
+            <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
+          </div>
+        </div>
+      )}
     </article>
   );
 }
