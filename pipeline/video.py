@@ -427,9 +427,32 @@ def _truncate_title(title: str, max_chars: int = 70) -> str:
     return title[: max_chars - 1].rstrip() + "..."
 
 
-def _public_url_to_filesystem_path(repo_root: Path, public_url: str) -> Path:
-    """Resolve the on-disk path that backs a /generated/... public URL."""
-    relative = public_url.lstrip("/")
+def _public_url_to_filesystem_path(repo_root: Path, public_url: str, safe_id: str | None = None) -> Path:
+    """Resolve the on-disk path that backs a story media URL.
+
+    Three URL shapes are handled:
+      - `/generated/<id>/<file>` — legacy local-only path, just join to public/.
+      - `https://storage.googleapis.com/.../<id>/<file>?v=...` — GCS-hosted
+        URL with a possible cache-bust query string. Strip query, take the
+        basename, look in `lorewire-app/public/generated/<safe_id>/<basename>`
+        since pipeline always writes the local copy first.
+      - file:// or any other scheme — fall through to the legacy join, may
+        produce a bogus path; caller logs and continues.
+    """
+    import urllib.parse
+    parsed = urllib.parse.urlparse(public_url)
+    if parsed.scheme in {"http", "https"}:
+        # Remote URL: take the path basename and place under the story dir.
+        basename = Path(parsed.path).name
+        if safe_id:
+            return (repo_root / media.PUBLIC_DIR_RELATIVE / safe_id / basename).resolve()
+        # Without an id, try to derive it from the second-to-last path segment.
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2:
+            return (repo_root / media.PUBLIC_DIR_RELATIVE / parts[-2] / basename).resolve()
+        return (repo_root / media.PUBLIC_DIR_RELATIVE / basename).resolve()
+    # Legacy local-only path. lstrip leading slashes so the join works.
+    relative = parsed.path.lstrip("/")
     return (repo_root / media.PUBLIC_DIR_RELATIVE.parent / relative).resolve()
 
 
@@ -451,14 +474,14 @@ def _stage_assets(
         shutil.rmtree(static_dir)
     static_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_src = _public_url_to_filesystem_path(repo_root, audio_url)
+    audio_src = _public_url_to_filesystem_path(repo_root, audio_url, safe_id)
     audio_filename = audio_src.name
     shutil.copy2(audio_src, static_dir / audio_filename)
     static_audio = f"{safe_id}/{audio_filename}"
 
     static_images: list[str] = []
     for url in image_urls:
-        src = _public_url_to_filesystem_path(repo_root, url)
+        src = _public_url_to_filesystem_path(repo_root, url, safe_id)
         if not src.exists():
             print(f"[video stage] skipping missing image {src}")
             continue
@@ -476,23 +499,19 @@ def rerender_from_db(story_id: str, repo_root: Path) -> dict:
     `stories` row, calls `generate_video`, and writes `video_url` + a new
     `updated_at` back to the same row. Spends no API money — only CPU and
     disk. Returns the new column dict (`{}` on a clean failure).
+
+    Reads through the store abstraction so it works against whichever driver
+    the env points at (SQLite locally, Postgres when DATABASE_URL is set).
     """
     import datetime
-    import sqlite3
-    from pipeline import config
+    from pipeline import config, store
 
     safe_id = media._sanitize_id(story_id)
-    conn = sqlite3.connect(config.DB_PATH)
-    conn.row_factory = sqlite3.Row
-    raw = conn.execute(
-        "SELECT title, hero_image, images, audio_url, alignment, category "
-        "FROM stories WHERE id = ?",
-        (safe_id,),
-    ).fetchone()
-    if not raw:
-        print(f"[video id={safe_id}] no story with that id in {config.DB_PATH}")
+    row = store.fetch_story(safe_id)
+    if not row:
+        driver = "Postgres" if config.env("DATABASE_URL") else f"SQLite ({config.DB_PATH})"
+        print(f"[video id={safe_id}] no story with that id in {driver}")
         return {}
-    row = dict(raw)
 
     hero = row.get("hero_image")
     try:
@@ -515,13 +534,13 @@ def rerender_from_db(story_id: str, repo_root: Path) -> dict:
         category=row.get("category"),
     )
     if "video_url" in cols:
+        # Merge the new video_url back through the same store the row came
+        # from so the write lands in whichever driver is active. We re-upsert
+        # only the columns the video stage owns; everything else is preserved
+        # by the upsert's ON CONFLICT clause writing only the named columns.
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        conn.execute(
-            "UPDATE stories SET video_url = ?, updated_at = ? WHERE id = ?",
-            (cols["video_url"], now, safe_id),
-        )
-        conn.commit()
-    conn.close()
+        merged = {**row, "video_url": cols["video_url"], "updated_at": now}
+        store.upsert_story(merged)
     return cols
 
 

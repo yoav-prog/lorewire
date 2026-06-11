@@ -58,6 +58,24 @@ const FIELDS: { key: string; label: string; placeholder: string; hint?: string }
       placeholder: "0",
       hint: "Set to 1 to slowly pan/zoom each scene image during its shot. Off by default. Adds subtle motion when shots hold for 3+ seconds.",
     },
+    {
+      key: "video.micro_wiggle",
+      label: "Micro-wiggle on scenes",
+      placeholder: "0",
+      hint: "Tiny sinusoidal rotation + translate on each held image. Subtle (max 0.6 deg / 2 px). Set to 1 to enable. Composes with Ken-Burns.",
+    },
+    {
+      key: "video.label_pop",
+      label: "Label pop on captions",
+      placeholder: "0",
+      hint: "Each caption chunk pops a small bold label with the first word in a corner. Yellow box, dark outline, scale-from-0.5 entry. Off by default.",
+    },
+    {
+      key: "video.scribble_draw",
+      label: "Scribble-draw on scene start",
+      placeholder: "0",
+      hint: "Animated hand-doodled SVG stroke that draws on in a corner at each scene cut. 800 ms reveal. Off by default.",
+    },
   ];
 
 export default async function SettingsPage() {

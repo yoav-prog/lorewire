@@ -28,6 +28,16 @@ export interface ShortCaptionChunk {
 import type { CaptionTemplateInput } from "./caption-style";
 export type { CaptionTemplateInput };
 
+// Wave 3 Phase 3: three composition-only motion beats, each independently
+// togglable from /admin/settings. All three off = byte-identical to today's
+// render. The composition reads each flag and skips the layer when off so
+// no work is done.
+export interface MotionConfig {
+  micro_wiggle?: boolean;
+  label_pop?: boolean;
+  scribble_draw?: boolean;
+}
+
 export interface ShortVideoConfig {
   voiceover_url: string;
   title?: string;
@@ -43,4 +53,6 @@ export interface ShortVideoConfig {
   // resolveCaptionTemplate() in caption-style.ts fills missing fields from
   // DOODLE_CAPTION_STYLE so the existing doodle look is the safe default.
   caption_template?: CaptionTemplateInput;
+  // Wave 3 Phase 3 motion beats. Missing = all off.
+  motion?: MotionConfig;
 }

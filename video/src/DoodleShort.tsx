@@ -25,6 +25,9 @@ import {
 } from "./caption-style";
 import { findActiveWordIndex } from "./caption-words";
 import { FONT_FAMILY } from "./fonts";
+import { MicroWiggle } from "./motion/MicroWiggle";
+import { LabelPopOn } from "./motion/LabelPopOn";
+import { ScribbleDraw } from "./motion/ScribbleDraw";
 import type {
   ShortCaptionChunk,
   ShortCaptionWord,
@@ -88,12 +91,15 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
           from={f.fromFrames}
           durationInFrames={f.lengthFrames}
         >
-          <DoodleFrameImg
-            src={staticFile(f.url)}
-            kenBurns={!!config.ken_burns}
-            seed={i}
-            lengthFrames={f.lengthFrames}
-          />
+          <MicroWiggle seed={i} enabled={!!config.motion?.micro_wiggle}>
+            <DoodleFrameImg
+              src={staticFile(f.url)}
+              kenBurns={!!config.ken_burns}
+              seed={i}
+              lengthFrames={f.lengthFrames}
+            />
+          </MicroWiggle>
+          <ScribbleDraw enabled={!!config.motion?.scribble_draw} seed={i} />
         </Sequence>
       ))}
 
@@ -131,6 +137,14 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
 
       {activeCaption && (
         <DoodleCaption caption={activeCaption} elapsedMs={elapsedMs} style={captionTemplate} />
+      )}
+
+      {activeCaption && activeIndex >= 0 && (
+        <LabelPopOn
+          enabled={!!config.motion?.label_pop}
+          caption={activeCaption}
+          index={activeIndex}
+        />
       )}
 
       {config.channel_name && (

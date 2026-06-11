@@ -246,5 +246,30 @@ class ScopeChainTests(unittest.TestCase):
         self.assertEqual(t["entry_effect"], "fade")
 
 
+class MotionFlagTests(unittest.TestCase):
+    """Wave 3 Phase 3: motion beat flags share the same truthy-string parser
+    Ken-Burns uses. The parser is inlined inside generate_video()'s scope —
+    these cases reproduce the same logic to lock the accepted truthy values."""
+
+    @staticmethod
+    def _truthy(raw):
+        return (raw or "").strip().lower() in {"1", "true", "on", "yes"}
+
+    def test_truthy_strings(self):
+        for s in ("1", "true", "TRUE", " on ", "yes", "Yes"):
+            self.assertTrue(self._truthy(s), f"expected truthy: {s!r}")
+
+    def test_falsy_strings(self):
+        for s in ("", "0", "false", "off", "no", "nope", None):
+            self.assertFalse(self._truthy(s), f"expected falsy: {s!r}")
+
+    def test_unknown_strings_are_falsy(self):
+        # Anything not in the explicit allowlist is off — the parser is
+        # intentionally strict so a typo in /admin/settings never accidentally
+        # turns a beat on.
+        for s in ("enable", "active", "y", "ja", "si"):
+            self.assertFalse(self._truthy(s))
+
+
 if __name__ == "__main__":
     unittest.main()
