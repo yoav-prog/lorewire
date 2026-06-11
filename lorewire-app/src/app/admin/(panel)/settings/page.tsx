@@ -129,6 +129,28 @@ export default async function SettingsPage() {
     >
       <div className="space-y-8">
         <Section
+          title="Style presets"
+          description="Creative direction for everything the pipeline generates — narrator delivery, scene images, and prop cutouts. Pick a preset to fill the field, then tweak."
+        >
+          <SettingPresetText
+            settingKey="video.style"
+            label="Video & image style"
+            hint="Steers both the rendered video look and the static images the pipeline generates (scenes, prop cutouts, talking-head bust). Used everywhere a story needs a visual style note."
+            initial={videoStyle ?? ""}
+            presets={STYLE_PRESETS}
+            placeholder="doodle explainer, off-white paper, single marker"
+          />
+          <SettingPresetText
+            settingKey="voice.google_style_prompt"
+            label="Voice tone"
+            hint="Only used when a Google Gemini-TTS model is active. Steers narrator delivery (pace, tone, emotion). Counts toward Google's combined 8000-byte cap."
+            initial={geminiPrompt ?? ""}
+            presets={GEMINI_PROMPT_PRESETS}
+            placeholder="Read this in a calm, conversational tone, like a podcaster telling a story"
+          />
+        </Section>
+
+        <Section
           title="Pipeline"
           description="What the Python pipeline pulls and how much it spends."
         >
@@ -171,14 +193,6 @@ export default async function SettingsPage() {
             placeholder="en-US-Chirp3-HD-Aoede"
             emptyHint="Google credentials not configured — paste a voice id manually for now."
           />
-          <SettingPresetText
-            settingKey="voice.google_style_prompt"
-            label="Gemini-TTS style prompt"
-            hint="Only used when a Google Gemini-TTS model is active. Steers delivery (pace, tone, emotion). Counts toward Google's combined 8000-byte cap with the narration text."
-            initial={geminiPrompt ?? ""}
-            presets={GEMINI_PROMPT_PRESETS}
-            placeholder="Read this in a calm, conversational tone, like a podcaster telling a story"
-          />
           <SettingSelect
             settingKey="voice.elevenlabs_voice_id"
             label="ElevenLabs voice"
@@ -188,20 +202,15 @@ export default async function SettingsPage() {
             placeholder="21m00Tcm4TlvDq8ikWAM"
             emptyHint="ElevenLabs API key not configured — paste a voice id manually for now."
           />
+          <p className="rounded-lg border border-line bg-surface2/40 px-3 py-2 text-[12px] text-muted">
+            Narrator tone preset for Gemini-TTS lives in <strong className="text-ink">Style presets</strong> above.
+          </p>
         </Section>
 
         <Section
           title="Video look"
-          description="Visual style, scene count, and motion effects applied during render."
+          description="Scene count and motion effects applied during render. Visual style preset lives in Style presets above."
         >
-          <SettingPresetText
-            settingKey="video.style"
-            label="Video style note"
-            hint="Steers the look of the generated short. Reuses across the scene image generator."
-            initial={videoStyle ?? ""}
-            presets={STYLE_PRESETS}
-            placeholder="doodle explainer, off-white paper, single marker"
-          />
           <SettingNumber
             settingKey="media.scene_count"
             label="Scenes per story"
