@@ -26,6 +26,7 @@ import Breadcrumb from "@/app/admin/Breadcrumb";
 import { ArticleEditor } from "./ArticleEditor";
 import { ArticlePayloadSidebar } from "./ArticlePayloadSidebar";
 import { ArticleSeoPanel } from "./ArticleSeoPanel";
+import { SeoSuggestPanel } from "./SeoSuggestPanel";
 
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
@@ -169,6 +170,7 @@ export default async function EditArticlePage({
             ogImage={article.og_image ?? ""}
             jsonLdPreview={jsonLdPreview}
           />
+          <SeoSuggestPanel articleId={article.id} />
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Status</div>
             <div className="flex flex-wrap gap-2">
