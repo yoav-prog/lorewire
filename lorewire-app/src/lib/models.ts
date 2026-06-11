@@ -4,7 +4,7 @@
 
 import "server-only";
 import registry from "@/data/models.json";
-import { getSetting, setSetting } from "@/lib/repo";
+import { getSetting, getSettingsByPrefix, setSetting } from "@/lib/repo";
 
 export type Stage = "llm" | "images" | "voice";
 
@@ -56,8 +56,12 @@ export async function selectModel(stage: Stage, id: string): Promise<void> {
   await setSetting(`model.${stage}`, id);
 }
 
+// One settings query for every stage, vs. one round trip per stage. Used by
+// the dashboard and the /admin/models page; both showed up as the bulk of
+// their server time before this.
 export async function allSelected(): Promise<Record<Stage, string>> {
+  const rows = await getSettingsByPrefix("model.");
   const out = {} as Record<Stage, string>;
-  for (const s of STAGES) out[s] = await selected(s);
+  for (const s of STAGES) out[s] = rows[`model.${s}`] ?? defaultModel(s);
   return out;
 }

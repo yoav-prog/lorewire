@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { requireAdmin } from "@/lib/dal";
-import { listStories } from "@/lib/repo";
+import { dashboardSummary, listStoriesSlim } from "@/lib/repo";
 import { allSelected, STAGES, STAGE_LABEL } from "@/lib/models";
 import { statusClass } from "@/app/admin/ui";
 
@@ -19,15 +19,14 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 
 export default async function Dashboard() {
   await requireAdmin();
-  const stories = await listStories();
-  const models = await allSelected();
+  const [summary, recent, models] = await Promise.all([
+    dashboardSummary(),
+    listStoriesSlim({ limit: 8 }),
+    allSelected(),
+  ]);
 
-  const counts: Record<string, number> = {};
-  for (const s of stories) counts[s.status ?? "draft"] = (counts[s.status ?? "draft"] ?? 0) + 1;
-  const spentUsd = (
-    stories.reduce((a, s) => a + (s.cost_cents ?? 0), 0) / 100
-  ).toFixed(2);
-  const recent = stories.slice(0, 8);
+  const counts = summary.byStatus;
+  const spentUsd = (summary.totalCostCents / 100).toFixed(2);
 
   return (
     <div className="space-y-7">
@@ -41,7 +40,7 @@ export default async function Dashboard() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label="Total" value={stories.length} />
+        <Stat label="Total" value={summary.total} />
         <Stat label="In review" value={(counts.review ?? 0) + (counts.scripted ?? 0)} />
         <Stat label="Published" value={counts.published ?? 0} />
         <Stat label="Spend (USD)" value={`$${spentUsd}`} />

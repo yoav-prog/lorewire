@@ -36,7 +36,17 @@ async function makeDriver(): Promise<Driver> {
   const url = process.env.DATABASE_URL;
   if (url) {
     const postgres = (await import("postgres")).default;
-    const sql = postgres(url, { prepare: false });
+    // Serverless tuning: each function instance holds at most one connection
+    // (the driver's default of 10 exhausts the DB across cold starts and is
+    // the wrong shape for Vercel). prepare=false keeps us compatible with
+    // transaction-mode poolers (Neon, Supabase). The idle/connect timeouts
+    // recycle stalled handles rather than waiting forever on a dead pooler.
+    const sql = postgres(url, {
+      prepare: false,
+      max: 1,
+      idle_timeout: 20,
+      connect_timeout: 10,
+    });
     return {
       kind: "postgres",
       async all(text, params) {

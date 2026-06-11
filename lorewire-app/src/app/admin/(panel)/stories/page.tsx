@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { requireAdmin } from "@/lib/dal";
-import { listStories } from "@/lib/repo";
+import { listStoriesSlim } from "@/lib/repo";
 import { statusClass, STATUSES } from "@/app/admin/ui";
+
+// Soft cap on the table; over this and we render a hint instead of trying to
+// paint thousands of rows in one server pass. Pagination is a follow-up.
+const LIST_LIMIT = 200;
 
 export default async function StoriesPage({
   searchParams,
@@ -10,7 +14,7 @@ export default async function StoriesPage({
 }) {
   await requireAdmin();
   const { status } = await searchParams;
-  const stories = await listStories({ status });
+  const stories = await listStoriesSlim({ status, limit: LIST_LIMIT });
 
   const chip = (href: string, label: string, active: boolean) => (
     <Link
@@ -71,6 +75,13 @@ export default async function StoriesPage({
           ))
         )}
       </div>
+
+      {stories.length >= LIST_LIMIT && (
+        <p className="font-mono text-[11px] text-muted">
+          Showing the {LIST_LIMIT} most recently updated. Filter by status to
+          narrow the list.
+        </p>
+      )}
     </div>
   );
 }

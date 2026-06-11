@@ -45,6 +45,24 @@ export interface StoryRow {
 const COLS =
   "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, tokens, cost_cents, created_at, updated_at, published_at, payload";
 
+// Slim projection for list views (dashboard recent, /admin/stories). Drops the
+// large text columns (body, teleprompter, payload, summary, images, alignment)
+// that the list does not render — the full editor reads getStory() instead.
+const STORY_LIST_COLS =
+  "id, slug, category, title, status, cost_cents, created_at, updated_at";
+
+export type StoryListRow = Pick<
+  StoryRow,
+  | "id"
+  | "slug"
+  | "category"
+  | "title"
+  | "status"
+  | "cost_cents"
+  | "created_at"
+  | "updated_at"
+>;
+
 // Columns the admin editor is allowed to write directly.
 const EDITABLE = new Set([
   "slug",
@@ -85,8 +103,62 @@ export async function listStories(
   );
 }
 
+// List-view variant: slim columns and a real LIMIT so the dashboard does not
+// pull every body/teleprompter on every render. The full editor still uses
+// listStories / getStory when it needs the heavy fields.
+export async function listStoriesSlim(
+  opts: { status?: string; category?: string; limit?: number } = {},
+): Promise<StoryListRow[]> {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (opts.status) {
+    where.push("status = ?");
+    params.push(opts.status);
+  }
+  if (opts.category) {
+    where.push("category = ?");
+    params.push(opts.category);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
+  return all<StoryListRow>(
+    `SELECT ${STORY_LIST_COLS} FROM stories ${clause} ORDER BY COALESCE(updated_at, created_at) DESC ${limit}`,
+    params,
+  );
+}
+
 export async function getStory(id: string): Promise<StoryRow | null> {
   return one<StoryRow>(`SELECT ${COLS} FROM stories WHERE id = ?`, [id]);
+}
+
+// One-shot summary for the dashboard. Replaces the previous "pull every row,
+// reduce in JS" pattern that was loading every story's body and payload just
+// to compute three numbers.
+export interface DashboardSummary {
+  total: number;
+  byStatus: Record<string, number>;
+  totalCostCents: number;
+}
+
+export async function dashboardSummary(): Promise<DashboardSummary> {
+  const rows = await all<{
+    status: string | null;
+    c: number | string;
+    cost: number | string;
+  }>(
+    "SELECT status, COUNT(*) AS c, COALESCE(SUM(cost_cents), 0) AS cost FROM stories GROUP BY status",
+    [],
+  );
+  const byStatus: Record<string, number> = {};
+  let total = 0;
+  let totalCostCents = 0;
+  for (const r of rows) {
+    const count = Number(r.c);
+    byStatus[r.status ?? "draft"] = count;
+    total += count;
+    totalCostCents += Number(r.cost);
+  }
+  return { total, byStatus, totalCostCents };
 }
 
 export async function publishedStories(): Promise<StoryRow[]> {
@@ -142,6 +214,21 @@ export async function getSetting(key: string): Promise<string | null> {
     [key],
   );
   return r?.value ?? null;
+}
+
+// Batched read: every settings key matching the SQL LIKE prefix in one round
+// trip. Use when several keys are needed together so we do not pay N DB hops
+// (allSelected() / template loaders).
+export async function getSettingsByPrefix(
+  prefix: string,
+): Promise<Record<string, string>> {
+  const rows = await all<{ key: string; value: string }>(
+    "SELECT key, value FROM settings WHERE key LIKE ?",
+    [`${prefix}%`],
+  );
+  const out: Record<string, string> = {};
+  for (const r of rows) out[r.key] = r.value;
+  return out;
 }
 
 export async function setSetting(key: string, value: string): Promise<void> {

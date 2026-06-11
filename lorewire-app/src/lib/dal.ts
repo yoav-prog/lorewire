@@ -14,11 +14,17 @@ export const getSession = cache(async (): Promise<SessionData | null> => {
   return readSession();
 });
 
+// Per-request memoization of the DB user lookup. The panel layout calls
+// requireAdmin(), then each page calls requireAdmin() again, and currentUser()
+// re-asks. Without cache() each navigation paid 2-3 Postgres round trips just
+// to re-verify the same user.
+const getUserByIdCached = cache(getUserById);
+
 // Secure check: valid cookie AND the user still exists as an admin in the DB.
 export async function requireAdmin(): Promise<SessionData> {
   const session = await getSession();
   if (!session) redirect("/admin/login");
-  const user = await getUserById(session.userId);
+  const user = await getUserByIdCached(session.userId);
   if (!user || user.role !== "admin") redirect("/admin/login");
   return session;
 }
@@ -26,7 +32,7 @@ export async function requireAdmin(): Promise<SessionData> {
 export async function currentUser(): Promise<UserRow | null> {
   const session = await getSession();
   if (!session) return null;
-  return getUserById(session.userId);
+  return getUserByIdCached(session.userId);
 }
 
 // Bootstrap the first admin from env when the users table is empty, so a fresh

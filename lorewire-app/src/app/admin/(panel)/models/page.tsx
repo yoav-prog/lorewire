@@ -1,18 +1,18 @@
 import { requireAdmin } from "@/lib/dal";
-import { STAGES, STAGE_LABEL, options, selected } from "@/lib/models";
+import { STAGES, STAGE_LABEL, options, allSelected } from "@/lib/models";
 import { setModelAction } from "@/app/admin/actions";
 
 export default async function ModelsPage() {
   await requireAdmin();
 
-  const stages = await Promise.all(
-    STAGES.map(async (st) => ({
-      stage: st,
-      label: STAGE_LABEL[st],
-      opts: options(st),
-      current: await selected(st),
-    })),
-  );
+  // One settings query for every stage, then build the view model in sync.
+  const currentByStage = await allSelected();
+  const stages = STAGES.map((st) => ({
+    stage: st,
+    label: STAGE_LABEL[st],
+    opts: options(st),
+    current: currentByStage[st],
+  }));
 
   return (
     <div className="space-y-5">
