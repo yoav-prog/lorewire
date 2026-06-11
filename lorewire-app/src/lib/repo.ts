@@ -790,6 +790,142 @@ export async function getRevision(id: string): Promise<RevisionRow | null> {
   );
 }
 
+// --- unified content list (stories + articles in one inbox) ----------------
+// The admin's Content tab needs one feed across both kinds. We keep the two
+// tables (they have genuinely different lifecycles and write paths) but
+// project each into a common ContentRow shape and merge in-memory. With a
+// soft cap of 200 per kind we touch at most ~400 rows per request — small
+// enough to sort in JS and well below where a SQL UNION would pay off.
+
+export type ContentKind = "story" | "article";
+
+// `kind` is the row's storage type — drives routing to the right editor.
+// `subKind` is the user-visible category: for stories it's "video" (the
+// only Story product today); for articles it's the article type
+// (news/feature/listicle/review). The Content filter chips operate on
+// subKind so "Video" and "News" can sit next to each other in one row.
+export type ContentSubKind = "video" | ArticleType;
+
+export const CONTENT_SUBKINDS: ContentSubKind[] = [
+  "video",
+  ...ARTICLE_TYPES,
+];
+
+export interface ContentRow {
+  kind: ContentKind;
+  subKind: ContentSubKind;
+  id: string;
+  title: string | null;
+  slug: string | null;
+  status: string | null;
+  // Stories carry `category` (Drama/Entitled/…); articles carry no category,
+  // their type IS the badge. We surface a single optional label here so the
+  // list row can show one extra hint without branching on kind.
+  badge: string | null;
+  language: string | null; // articles only
+  hero_image: string | null;
+  updated_at: string | null;
+  created_at: string | null;
+  published_at: string | null;
+}
+
+export interface ListContentOpts {
+  subKind?: ContentSubKind;
+  status?: string;
+  language?: string; // narrows to articles
+  limit?: number;
+}
+
+export async function listContentSlim(
+  opts: ListContentOpts = {},
+): Promise<ContentRow[]> {
+  const limit = opts.limit ?? 200;
+  // Skip the table fetch entirely when the filter already excludes its kind:
+  // - subKind="video" or language set -> articles or stories only
+  // - subKind=any article type -> stories not needed
+  // - status that exists only on stories (scripted/rendering/ready) -> articles not needed
+  const isArticleSubKind =
+    opts.subKind && opts.subKind !== "video"
+      ? ARTICLE_TYPES.includes(opts.subKind as ArticleType)
+      : false;
+  const isStoryOnlyStatus =
+    opts.status === "scripted" ||
+    opts.status === "rendering" ||
+    opts.status === "ready";
+  const wantStories =
+    !opts.language &&
+    !isArticleSubKind &&
+    (opts.subKind === undefined || opts.subKind === "video");
+  const wantArticles =
+    !isStoryOnlyStatus && (opts.subKind === undefined || isArticleSubKind);
+
+  const articleType = isArticleSubKind ? (opts.subKind as ArticleType) : undefined;
+
+  const [stories, articles] = await Promise.all([
+    wantStories
+      ? listStoriesSlim({ status: opts.status, limit })
+      : Promise.resolve([] as StoryListRow[]),
+    wantArticles
+      ? listArticlesSlim({
+          status: opts.status,
+          type: articleType,
+          language: opts.language,
+          limit,
+        })
+      : Promise.resolve([] as ArticleListRow[]),
+  ]);
+
+  const merged: ContentRow[] = [
+    ...stories.map<ContentRow>((s) => ({
+      kind: "story",
+      subKind: "video",
+      id: s.id,
+      title: s.title,
+      slug: s.slug,
+      status: s.status,
+      badge: s.category,
+      language: null,
+      hero_image: null,
+      updated_at: s.updated_at,
+      created_at: s.created_at,
+      published_at: null, // slim story projection drops this
+    })),
+    ...articles.map<ContentRow>((a) => ({
+      kind: "article",
+      subKind: (a.type as ArticleType | null) ?? "feature",
+      id: a.id,
+      title: a.title,
+      slug: a.slug,
+      status: a.status,
+      badge: a.type,
+      language: a.language,
+      hero_image: a.hero_image,
+      updated_at: a.updated_at,
+      created_at: a.created_at,
+      published_at: a.published_at,
+    })),
+  ];
+
+  // Newest-first by updated_at, falling back to created_at. ISO-8601 strings
+  // sort lexicographically — no Date construction needed.
+  merged.sort((a, b) => {
+    const aT = a.updated_at ?? a.created_at ?? "";
+    const bT = b.updated_at ?? b.created_at ?? "";
+    return bT.localeCompare(aT);
+  });
+
+  const out = merged.slice(0, limit);
+  console.info("[content repo] list", {
+    count: out.length,
+    storyCount: stories.length,
+    articleCount: articles.length,
+    subKind: opts.subKind ?? null,
+    status: opts.status ?? null,
+    language: opts.language ?? null,
+  });
+  return out;
+}
+
 export interface UserRow {
   id: string;
   email: string;
