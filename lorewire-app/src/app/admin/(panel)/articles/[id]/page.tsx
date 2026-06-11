@@ -19,9 +19,11 @@ import {
   articleDirection,
 } from "@/lib/articles";
 import { parseArticlePayload } from "@/lib/article-payload";
+import { buildArticleJsonLd } from "@/lib/article-seo";
 import { statusClass } from "@/app/admin/ui";
 import { ArticleEditor } from "./ArticleEditor";
 import { ArticlePayloadSidebar } from "./ArticlePayloadSidebar";
+import { ArticleSeoPanel } from "./ArticleSeoPanel";
 
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
@@ -35,11 +37,17 @@ export default async function EditArticlePage({
     saved?: string;
     error?: string;
     payload?: string;
+    seo?: string;
   }>;
 }) {
   await requireAdmin();
   const { id } = await params;
-  const { saved, error, payload: payloadSaved } = await searchParams;
+  const {
+    saved,
+    error,
+    payload: payloadSaved,
+    seo: seoSaved,
+  } = await searchParams;
   const article = await getArticle(id);
   if (!article) notFound();
 
@@ -50,6 +58,13 @@ export default async function EditArticlePage({
     articleType && ["news", "feature", "listicle", "review"].includes(articleType)
       ? parseArticlePayload(articleType, article.payload)
       : null;
+
+  // JSON-LD preview for the SEO panel. We render here so the panel stays
+  // client-side and lightweight — buildArticleJsonLd reads the same parsed
+  // payload that drives the reader, so the preview never drifts.
+  const jsonLdPreview = articleType
+    ? JSON.stringify(buildArticleJsonLd({ article, siteName: "LoreWire" }), null, 2)
+    : "";
 
   // Status transitions exposed in the sidebar. Order is the workflow direction:
   // forward toward published, with archive as the exit. "draft" is always the
@@ -101,6 +116,11 @@ export default async function EditArticlePage({
           Details saved.
         </p>
       )}
+      {seoSaved === "saved" && (
+        <p className="rounded-lg border border-cat-wholesome/40 bg-cat-wholesome/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-wholesome">
+          SEO saved.
+        </p>
+      )}
       {error && (
         <p className="rounded-lg border border-cat-entitled/40 bg-cat-entitled/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-entitled">
           {(() => {
@@ -135,6 +155,16 @@ export default async function EditArticlePage({
               {...parsedPayload}
             />
           )}
+          <ArticleSeoPanel
+            articleId={article.id}
+            language={article.language ?? "en"}
+            direction={dir}
+            slug={article.slug ?? ""}
+            metaTitle={article.meta_title ?? ""}
+            metaDescription={article.meta_description ?? ""}
+            ogImage={article.og_image ?? ""}
+            jsonLdPreview={jsonLdPreview}
+          />
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Status</div>
             <div className="flex flex-wrap gap-2">

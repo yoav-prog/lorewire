@@ -48,6 +48,7 @@ import {
   ListiclePayloadSchema,
   ReviewPayloadSchema,
 } from "@/lib/article-payload";
+import { isValidSlugShape } from "@/lib/article-seo";
 import type { ArticleType } from "@/lib/repo";
 
 export interface LoginState {
@@ -588,6 +589,67 @@ export async function updateArticlePayloadAction(
   console.info("[articles action] payload-save", { id, type });
   revalidatePath(`/admin/articles/${id}`);
   redirectToArticle(id, { payload: "saved" });
+}
+
+// Save the SEO panel: slug + meta_title + meta_description + og_image in
+// one go. Slug uses its dedicated writer because of the per-language
+// collision check; the metadata fields are in ARTICLE_EDITABLE so the
+// regular updateArticle path covers them. Both validations run before any
+// write so a slug failure does not half-commit the metadata change.
+export async function updateArticleSeoAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  if (!id) redirectToArticles({ error: "missing-id" });
+  const article = await getArticle(id);
+  if (!article) redirectToArticles({ error: "not-found" });
+
+  const language = (article!.language ?? "en") as ArticleLanguage;
+  const newSlug = String(formData.get("slug") ?? "").trim().toLowerCase();
+  const metaTitle = String(formData.get("meta_title") ?? "").trim();
+  const metaDescription = String(formData.get("meta_description") ?? "").trim();
+  const ogImage = String(formData.get("og_image") ?? "").trim();
+
+  // Slug shape + uniqueness, but only when it has actually changed —
+  // otherwise a save with the writer's own current slug would needlessly
+  // pay the collision check.
+  if (newSlug && newSlug !== article!.slug) {
+    if (!isValidSlugShape(newSlug)) {
+      redirectToArticle(id, { error: "bad-slug" });
+    }
+    const available = await checkSlugAvailable(language, newSlug, id);
+    if (!available) {
+      redirectToArticle(id, { error: "slug-taken" });
+    }
+    await updateArticleSlug(id, newSlug);
+  }
+
+  // OG image is optional but must be http(s) when present; metadata fields
+  // get character-cap guards too so a paste of an entire essay into the
+  // description field can't bloat the row.
+  if (ogImage && !/^https?:\/\//.test(ogImage)) {
+    redirectToArticle(id, { error: "bad-og-image" });
+  }
+  if (metaTitle.length > 200 || metaDescription.length > 500) {
+    redirectToArticle(id, { error: "meta-too-long" });
+  }
+
+  await updateArticle(id, {
+    meta_title: metaTitle || null,
+    meta_description: metaDescription || null,
+    og_image: ogImage || null,
+  });
+  console.info("[articles seo] save", {
+    id,
+    slugChanged: newSlug !== article!.slug,
+    metaTitleLen: metaTitle.length,
+    metaDescLen: metaDescription.length,
+    hasOgImage: Boolean(ogImage),
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  revalidatePath("/admin/articles");
+  redirectToArticle(id, { seo: "saved" });
 }
 
 export async function deleteArticleAction(formData: FormData): Promise<void> {
