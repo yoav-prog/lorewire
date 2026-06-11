@@ -175,8 +175,8 @@ export default async function EditStory({
             <div className={LABEL}>Search visibility</div>
             <p className="mb-2 text-[12px] text-muted">
               {s.noindex
-                ? "Hidden from search engines."
-                : "Indexable. Search engines can crawl this story's public page when it exists."}
+                ? "Hidden from search engines. /v/${slug} emits noindex,nofollow."
+                : "Indexable. /v/${slug} can be crawled and ranked."}
             </p>
             <form action={setStoryNoindexAction}>
               <input type="hidden" name="id" value={s.id} />
