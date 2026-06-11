@@ -39,6 +39,19 @@ def _parse_json_col(raw, default):
         return default
 
 
+def _bust(url: str | None, version: str) -> str | None:
+    """Append `?v=<version>` to a media URL so a browser hit fetches the
+    re-uploaded bytes rather than the cached copy at the same URL. GCS
+    re-uploads at the same key don't change the URL, but we DO change
+    `stories.updated_at` on every backfill, so threading that as `version`
+    makes one updated_at per asset URL — and every refresh after a backfill
+    gets the new image."""
+    if not url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={version}"
+
+
 def main() -> None:
     rows = store.published_stories()
     # source_url isn't in published_stories' SELECT yet — pull it per row via
@@ -48,6 +61,20 @@ def main() -> None:
         full = store.fetch_story(r["id"])
         if full and full.get("source_url"):
             r["source_url"] = full["source_url"]
+        # Cache-bust signature derived from updated_at so a single GCS
+        # re-upload (same URL, new bytes) gets a fresh query string.
+        ts = (r.get("updated_at") or r.get("published_at") or "")
+        v = ts[:19].replace(":", "").replace("-", "").replace("T", "")
+        for k in ("hero_image", "hero_image_landscape", "audio_url", "video_url"):
+            if r.get(k):
+                r[k] = _bust(r[k], v)
+        # `images` is a JSON-encoded list of URLs; deserialize, bust, re-encode.
+        if r.get("images"):
+            try:
+                imgs = json.loads(r["images"]) if isinstance(r["images"], str) else r["images"]
+                r["images"] = json.dumps([_bust(u, v) for u in imgs])
+            except (ValueError, TypeError):
+                pass
     data = [
         {
             "id": r["id"],

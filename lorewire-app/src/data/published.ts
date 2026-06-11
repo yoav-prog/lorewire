@@ -34,16 +34,16 @@ export const PUBLISHED: PublishedStory[] = [
     "syn": "I volunteered to collect cash for our boss's retirement gift. The envelope had about 800 dollars in it by Friday. Over a long weekend it vanished from my drawer",
     "body": "By Friday, the retirement gift fund was looking solid. About $800 in cash and checks had been handed over, all of it stuffed into an envelope the poster had taken charge of after volunteering to collect for the boss's sendoff. The plan was simple: gather the money, keep it tucked away, and buy the gift.\n\nThen came the long weekend.\n\nWhen Monday rolled around, the envelope was gone.\n\nThe poster had left it in a drawer, and over the break, it vanished. Not a single bill. Not the envelope. Just empty drawer, blank stares, and a growing office problem that landed squarely on the person who'd offered to manage it.\n\nThe poster tried to calm things down by telling everyone the money was \"somewhere safe.\" But that answer did not sit well with the two coworkers who had helped fund the gift and wanted a clear accounting of where the cash had gone. They asked for details. They asked for proof. They asked, in effect, where the retirement money had gone and what exactly was happening with it.\n\nThe response was not what they expected.\n\nInstead of a breakdown, the poster sent them an invoice for their share.\n\nThe message was clear enough: if they wanted answers, they were going to be treated like customers. The coworkers, unsurprisingly, were not amused. The office mood shifted fast. People who had been casually chatting before now wanted no part of the situation. Half the floor stopped speaking to the poster.\n\nWhat started as a simple favor, collecting money for a retirement gift, turned into a missing-envelope mystery, a vague assurance that the funds were \"somewhere safe,\" and then a billing dispute nobody saw coming. The cash was gone from the drawer, the coworkers wanted an accounting, and the invoice only made things worse.\n\nBy the end of it, the retirement gift fund was still missing, the workplace was divided, and the person who had volunteered to handle the money was left with a quiet office and a very loud problem.",
     "source_url": "https://www.reddit.com/r/AmItheAsshole/comments/example/",
-    "heroImage": "https://storage.googleapis.com/aporia-unleash/envelope/hero.png",
-    "heroImageLandscape": "https://storage.googleapis.com/aporia-unleash/envelope/hero-landscape.png",
+    "heroImage": "https://storage.googleapis.com/aporia-unleash/envelope/hero.png?v=20260611063855",
+    "heroImageLandscape": "https://storage.googleapis.com/aporia-unleash/envelope/hero-landscape.png?v=20260611063855",
     "heroHasBakedTitle": true,
     "images": [
-      "https://storage.googleapis.com/aporia-unleash/envelope/scene-1.png",
-      "https://storage.googleapis.com/aporia-unleash/envelope/scene-2.png",
-      "https://storage.googleapis.com/aporia-unleash/envelope/scene-3.png"
+      "https://storage.googleapis.com/aporia-unleash/envelope/scene-1.png?v=20260611063855",
+      "https://storage.googleapis.com/aporia-unleash/envelope/scene-2.png?v=20260611063855",
+      "https://storage.googleapis.com/aporia-unleash/envelope/scene-3.png?v=20260611063855"
     ],
-    "audioUrl": "https://storage.googleapis.com/aporia-unleash/envelope/narration.mp3",
-    "videoUrl": "https://storage.googleapis.com/aporia-unleash/envelope/video.mp4",
+    "audioUrl": "https://storage.googleapis.com/aporia-unleash/envelope/narration.mp3?v=20260611063855",
+    "videoUrl": "https://storage.googleapis.com/aporia-unleash/envelope/video.mp4?v=20260611063855",
     "alignment": [
       {
         "word": "by",

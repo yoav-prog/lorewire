@@ -225,8 +225,8 @@ def published_stories() -> list[dict]:
     web side keeps the static-overlay pattern so the public site stays fast."""
     sql = (
         "SELECT id, title, category, summary, body, duration, published_at, "
-        "created_at, hero_image, hero_image_landscape, hero_has_baked_title, "
-        "images, audio_url, video_url, alignment "
+        "created_at, updated_at, hero_image, hero_image_landscape, "
+        "hero_has_baked_title, images, audio_url, video_url, alignment "
         "FROM stories WHERE status = "
         + ("%s" if _is_postgres() else "?")
         + " AND body IS NOT NULL AND body != "
