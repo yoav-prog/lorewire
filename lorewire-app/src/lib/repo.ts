@@ -611,6 +611,14 @@ export interface CreateArticleInput {
   slug: string;
   title: string;
   author_id: string | null;
+  // Optional fields populated by Sheets bootstrap import. NULL for
+  // hand-authored articles. `source_sheet_row_id` is the idempotency key:
+  // re-importing the same row finds the existing article via
+  // getArticleBySourceSheetRowId and skips the insert.
+  summary?: string | null;
+  document?: string | null;
+  payload?: string | null;
+  source_sheet_row_id?: string | null;
 }
 
 export async function createArticle(input: CreateArticleInput): Promise<void> {
@@ -623,18 +631,20 @@ export async function createArticle(input: CreateArticleInput): Promise<void> {
     content: [{ type: "paragraph" }],
   });
   await run(
-    `INSERT INTO articles (id, type, language, slug, title, document, status, author_id, payload, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO articles (id, type, language, slug, title, summary, document, status, author_id, payload, source_sheet_row_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.id,
       input.type,
       input.language,
       input.slug,
       input.title,
-      emptyDoc,
+      input.summary ?? null,
+      input.document ?? emptyDoc,
       "draft",
       input.author_id,
-      "{}",
+      input.payload ?? "{}",
+      input.source_sheet_row_id ?? null,
       now,
       now,
     ],
@@ -644,7 +654,21 @@ export async function createArticle(input: CreateArticleInput): Promise<void> {
     type: input.type,
     language: input.language,
     slug: input.slug,
+    fromSheet: Boolean(input.source_sheet_row_id),
   });
+}
+
+// Idempotency lookup for Sheets bootstrap import. The same row id maps to
+// the same article every time, so re-importing skips work without
+// double-inserting. Returns null when no prior import wrote this row.
+export async function getArticleBySourceSheetRowId(
+  rowId: string,
+): Promise<ArticleRow | null> {
+  if (!rowId) return null;
+  return one<ArticleRow>(
+    `SELECT ${ARTICLE_COLS} FROM articles WHERE source_sheet_row_id = ?`,
+    [rowId],
+  );
 }
 
 export async function updateArticle(

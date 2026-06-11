@@ -21,6 +21,7 @@ import {
   setStorySegmentOverride,
   createArticle,
   getArticle,
+  getArticleBySourceSheetRowId,
   updateArticle,
   setArticleStatus,
   deleteArticle,
@@ -50,6 +51,12 @@ import {
 } from "@/lib/article-payload";
 import { isValidSlugShape } from "@/lib/article-seo";
 import type { ArticleType } from "@/lib/repo";
+import {
+  isConfigured as isSheetsConfigured,
+  parseSheetRef,
+  readRows,
+  stableRowId,
+} from "@/lib/sheets";
 
 export interface LoginState {
   error?: string;
@@ -650,6 +657,190 @@ export async function updateArticleSeoAction(
   revalidatePath(`/admin/articles/${id}`);
   revalidatePath("/admin/articles");
   redirectToArticle(id, { seo: "saved" });
+}
+
+// --- Sheets bootstrap import (Phase 3 slice 2) ----------------------------
+// Two actions. previewSheetImport parses the URL, validates the env, and
+// redirects to the import page in "preview" mode so the page can render
+// headers + sample rows + the column mapper. commitSheetImport runs the
+// actual inserts; it's idempotent via source_sheet_row_id so the writer
+// can fix a typo in the sheet and re-import without double-creating rows.
+
+const IMPORT_PREVIEW_LIMIT = 5;
+const IMPORT_COMMIT_LIMIT = 200;
+
+function redirectToImport(params?: Record<string, string>): never {
+  const search = new URLSearchParams(params);
+  const qs = search.toString();
+  redirect(qs ? `/admin/articles/import?${qs}` : "/admin/articles/import");
+}
+
+export async function previewSheetImportAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  if (!isSheetsConfigured()) {
+    redirectToImport({ error: "sheets-not-configured" });
+  }
+  const url = String(formData.get("sheetUrl") ?? "").trim();
+  const ref = parseSheetRef(url);
+  if (!ref) redirectToImport({ error: "bad-url" });
+  console.info("[articles sheets-import] preview-requested", {
+    spreadsheetId: ref!.spreadsheetId,
+    gidFromUrl: ref!.gid,
+  });
+  const params: Record<string, string> = {
+    spreadsheet_id: ref!.spreadsheetId,
+  };
+  // The chosen tab arrives via the form's `tab` field; if blank we let the
+  // import page fall back to the URL's gid or the first tab.
+  const tab = String(formData.get("tab") ?? "").trim();
+  if (tab) params.tab = tab;
+  else if (ref!.gid !== null) params.gid = String(ref!.gid);
+  redirectToImport(params);
+}
+
+interface CommitMapping {
+  titleHeader: string;
+  summaryHeader: string;
+  bodyHeader: string;
+  rowIdHeader: string;
+}
+
+export async function commitSheetImportAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  if (!isSheetsConfigured()) {
+    redirectToImport({ error: "sheets-not-configured" });
+  }
+  const spreadsheetId = String(formData.get("spreadsheet_id") ?? "").trim();
+  if (!spreadsheetId) redirectToImport({ error: "missing-spreadsheet-id" });
+  const rawTab = String(formData.get("tab") ?? "").trim();
+  const rawGid = String(formData.get("gid") ?? "").trim();
+  // tab title takes precedence over gid when both are present — the import
+  // page passes the user's pick as `tab`. gid is a fallback from the URL.
+  const tabIdentifier: string | number = rawTab
+    ? rawTab
+    : rawGid
+      ? Number(rawGid)
+      : "";
+  if (tabIdentifier === "") redirectToImport({ error: "missing-tab" });
+
+  const type = String(formData.get("article_type") ?? "");
+  const language = String(formData.get("article_language") ?? "");
+  if (!isArticleType(type)) redirectToImport({ error: "bad-type" });
+  if (!isArticleLanguage(language)) redirectToImport({ error: "bad-language" });
+
+  const mapping: CommitMapping = {
+    titleHeader: String(formData.get("col_title") ?? "").trim(),
+    summaryHeader: String(formData.get("col_summary") ?? "").trim(),
+    bodyHeader: String(formData.get("col_body") ?? "").trim(),
+    rowIdHeader: String(formData.get("col_row_id") ?? "").trim(),
+  };
+  if (!mapping.titleHeader) redirectToImport({ error: "missing-title-column" });
+
+  // Read the rows fresh. We deliberately do NOT trust any preview cached on
+  // the page — by the time the user clicks Confirm the spreadsheet may have
+  // changed, and we want to import whatever's there NOW.
+  let sheet;
+  try {
+    sheet = await readRows(spreadsheetId, tabIdentifier, {
+      limit: IMPORT_COMMIT_LIMIT,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[articles sheets-import] read FAILED:", msg);
+    redirectToImport({ error: "sheets-read-failed" });
+  }
+
+  const headerIndex: Record<string, number> = {};
+  sheet!.headers.forEach((h, i) => {
+    headerIndex[h] = i;
+  });
+  const titleIdx = headerIndex[mapping.titleHeader];
+  if (titleIdx === undefined) {
+    redirectToImport({ error: "title-column-not-in-sheet" });
+  }
+  const summaryIdx = mapping.summaryHeader
+    ? headerIndex[mapping.summaryHeader]
+    : undefined;
+  const bodyIdx = mapping.bodyHeader
+    ? headerIndex[mapping.bodyHeader]
+    : undefined;
+  const rowIdIdx = mapping.rowIdHeader
+    ? headerIndex[mapping.rowIdHeader]
+    : undefined;
+
+  let inserted = 0;
+  let skippedExisting = 0;
+  let skippedNoTitle = 0;
+
+  for (const row of sheet!.rows) {
+    const title = (row[titleIdx] ?? "").trim();
+    if (!title) {
+      skippedNoTitle++;
+      continue;
+    }
+    const rowKey =
+      rowIdIdx !== undefined && row[rowIdIdx]
+        ? row[rowIdIdx].trim()
+        : title;
+    const sourceRowId = stableRowId({ spreadsheetId, rowKey });
+    const existing = await getArticleBySourceSheetRowId(sourceRowId);
+    if (existing) {
+      skippedExisting++;
+      continue;
+    }
+    const summary = summaryIdx !== undefined ? (row[summaryIdx] ?? "").trim() : "";
+    const bodyText = bodyIdx !== undefined ? (row[bodyIdx] ?? "").trim() : "";
+    // Body is wrapped in a Tiptap doc with one paragraph per non-empty line.
+    // Sheets cells often contain free-form prose with line breaks; preserving
+    // them as separate paragraphs is closer to what the writer expects when
+    // the article opens in the editor.
+    const lines = bodyText ? bodyText.split(/\r?\n/).filter((l) => l.trim()) : [];
+    const document = JSON.stringify(
+      lines.length === 0
+        ? { type: "doc", content: [{ type: "paragraph" }] }
+        : {
+            type: "doc",
+            content: lines.map((line) => ({
+              type: "paragraph",
+              content: [{ type: "text", text: line }],
+            })),
+          },
+    );
+    const newId = randomUUID();
+    await createArticle({
+      id: newId,
+      type,
+      language,
+      slug: slugifyTitle(title, newId),
+      title,
+      author_id: null,
+      summary: summary || null,
+      document,
+      source_sheet_row_id: sourceRowId,
+    });
+    inserted++;
+  }
+
+  console.info("[articles sheets-import] commit", {
+    spreadsheetId,
+    tab: typeof tabIdentifier === "string" ? tabIdentifier : `gid:${tabIdentifier}`,
+    inserted,
+    skippedExisting,
+    skippedNoTitle,
+    type,
+    language,
+  });
+
+  revalidatePath("/admin/articles");
+  revalidatePath("/admin/content");
+  redirect(
+    `/admin/articles?imported=${inserted}` +
+      (skippedExisting > 0 ? `&skipped=${skippedExisting}` : ""),
+  );
 }
 
 export async function deleteArticleAction(formData: FormData): Promise<void> {

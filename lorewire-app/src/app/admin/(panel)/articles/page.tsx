@@ -26,10 +26,12 @@ export default async function ArticlesPage({
     status?: string;
     type?: string;
     language?: string;
+    imported?: string;
+    skipped?: string;
   }>;
 }) {
   await requireAdmin();
-  const { status, type, language } = await searchParams;
+  const { status, type, language, imported, skipped } = await searchParams;
   const rows = await listArticlesSlim({
     status,
     type,
@@ -70,13 +72,28 @@ export default async function ArticlesPage({
         <h1 className="font-display text-[22px] font-extrabold tracking-tightest">
           Articles
         </h1>
-        <Link
-          href="/admin/articles/new"
-          className="rounded-lg bg-accent px-4 py-2 font-semibold text-bg transition-opacity hover:opacity-90"
-        >
-          New article
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/admin/articles/import"
+            className="rounded-lg border border-line px-4 py-2 font-mono text-[12px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
+          >
+            Import from Sheets
+          </Link>
+          <Link
+            href="/admin/articles/new"
+            className="rounded-lg bg-accent px-4 py-2 font-semibold text-bg transition-opacity hover:opacity-90"
+          >
+            New article
+          </Link>
+        </div>
       </div>
+
+      {imported && (
+        <p className="rounded-lg border border-cat-wholesome/40 bg-cat-wholesome/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-wholesome">
+          Imported {imported} draft{imported === "1" ? "" : "s"} from Sheets
+          {skipped ? ` (skipped ${skipped} already imported)` : ""}.
+        </p>
+      )}
 
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-2">

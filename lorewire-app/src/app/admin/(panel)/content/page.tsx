@@ -107,12 +107,20 @@ export default async function ContentPage({
         <h1 className="font-display text-[22px] font-extrabold tracking-tightest">
           Content
         </h1>
-        <Link
-          href="/admin/articles/new"
-          className="rounded-lg bg-accent px-4 py-2 font-semibold text-bg transition-opacity hover:opacity-90"
-        >
-          New article
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/admin/articles/import"
+            className="rounded-lg border border-line px-4 py-2 font-mono text-[12px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
+          >
+            Import from Sheets
+          </Link>
+          <Link
+            href="/admin/articles/new"
+            className="rounded-lg bg-accent px-4 py-2 font-semibold text-bg transition-opacity hover:opacity-90"
+          >
+            New article
+          </Link>
+        </div>
       </div>
 
       <p className="font-mono text-[11px] text-muted">
