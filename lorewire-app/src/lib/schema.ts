@@ -76,6 +76,12 @@ export const USERS: Table = {
 // Wave 3 Phase 4 intro/outro library. Each row is one normalized clip in GCS;
 // the pipeline picks the active intro + outro per render and splices via
 // ffmpeg. Mirrors `video_segments` in pipeline/store.py.
+//
+// Status lifecycle (2026-06-11 upload-fix): pending -> uploading -> normalizing
+// -> ready, with `error` set on any failure. The admin signs a GCS resumable
+// upload session, the browser PUTs source bytes direct to GCS (bypassing
+// Vercel's 4.5 MB body cap), and pipeline/segments_worker.py picks pending
+// rows up to run ffmpeg normalize off-Vercel.
 export const VIDEO_SEGMENTS: Table = {
   name: "video_segments",
   columns: [
@@ -86,12 +92,75 @@ export const VIDEO_SEGMENTS: Table = {
     { name: "normalized_url", type: "TEXT" },
     { name: "duration_ms", type: "INTEGER" },
     { name: "enabled", type: "INTEGER" },
+    { name: "status", type: "TEXT" },
+    { name: "error", type: "TEXT" },
+    { name: "uploaded_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
     { name: "updated_at", type: "TEXT" },
   ],
 };
 
-export const TABLES: Table[] = [STORIES, SETTINGS, USERS, VIDEO_SEGMENTS];
+// Articles CMS (separate from STORIES — the Reddit/video pipeline). One row
+// per article. Body lives in `document` as Tiptap JSON; type-specific fields
+// (dateline for news, items[] for listicle, rating for review, etc.) live in
+// `payload` as JSON validated by per-type Zod schemas at the repo boundary.
+// `language` is "he" or "en"; slug uniqueness is enforced per-language at the
+// query layer. `source_sheet_row_id` is reserved for Phase 3 Sheets import
+// idempotency; null for hand-authored articles.
+export const ARTICLES: Table = {
+  name: "articles",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "type", type: "TEXT" },
+    { name: "language", type: "TEXT" },
+    { name: "slug", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "subtitle", type: "TEXT" },
+    { name: "summary", type: "TEXT" },
+    { name: "document", type: "TEXT" },
+    { name: "hero_image", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "author_id", type: "TEXT" },
+    { name: "meta_title", type: "TEXT" },
+    { name: "meta_description", type: "TEXT" },
+    { name: "og_image", type: "TEXT" },
+    { name: "payload", type: "TEXT" },
+    { name: "source_sheet_row_id", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+    { name: "published_at", type: "TEXT" },
+  ],
+};
+
+// Append-only history of article snapshots. `appendRevision` coalesces writes
+// inside a configurable window so autosave does not explode the table: if the
+// most recent revision for this article is unnamed and younger than the
+// window, the same row is updated in place; otherwise a new row is inserted.
+// Named revisions (is_named=1) survive retention pruning.
+export const ARTICLE_REVISIONS: Table = {
+  name: "article_revisions",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "article_id", type: "TEXT" },
+    { name: "document", type: "TEXT" },
+    { name: "payload", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "name", type: "TEXT" },
+    { name: "is_named", type: "INTEGER" },
+    { name: "author_id", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+export const TABLES: Table[] = [
+  STORIES,
+  SETTINGS,
+  USERS,
+  VIDEO_SEGMENTS,
+  ARTICLES,
+  ARTICLE_REVISIONS,
+];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
 export function createTableSql(t: Table): string {

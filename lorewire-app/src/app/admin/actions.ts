@@ -5,7 +5,8 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin, ensureSeedAdmin } from "@/lib/dal";
+import { randomUUID } from "node:crypto";
+import { requireAdmin, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
 import {
   getUserByEmail,
@@ -19,8 +20,18 @@ import {
   updateSegmentLabel,
   deleteSegment,
   setStorySegmentOverride,
+  createArticle,
+  getArticle,
+  updateArticle,
+  setArticleStatus,
+  deleteArticle,
+  appendRevision,
+  checkSlugAvailable,
+  updateArticleSlug,
   type StoryStatus,
   type SegmentKind,
+  type ArticleStatus,
+  type ArticleLanguage,
 } from "@/lib/repo";
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
@@ -34,6 +45,11 @@ import {
   normalizeAndPublish,
   sanitizeLabel,
 } from "@/lib/segments-server";
+import {
+  isArticleType,
+  isArticleLanguage,
+  slugifyTitle,
+} from "@/lib/articles";
 
 export interface LoginState {
   error?: string;
@@ -358,4 +374,169 @@ export async function setStoryOverrideAction(
   );
   revalidatePath(`/admin/stories/${storyId}`);
   redirect(`/admin/stories/${storyId}`);
+}
+
+// --- articles CMS actions (Phase 1) ----------------------------------------
+// All four actions follow the existing admin pattern: requireAdmin first,
+// validate input close to the data, log a single line per outcome, then
+// revalidate the touched paths. Errors that the editor can recover from
+// surface via ?error= on the redirect target rather than throwing.
+
+function redirectToArticles(params?: Record<string, string>): never {
+  const search = new URLSearchParams(params);
+  const qs = search.toString();
+  redirect(qs ? `/admin/articles?${qs}` : "/admin/articles");
+}
+
+function redirectToArticle(id: string, params?: Record<string, string>): never {
+  const search = new URLSearchParams(params);
+  const qs = search.toString();
+  redirect(qs ? `/admin/articles/${id}?${qs}` : `/admin/articles/${id}`);
+}
+
+export async function createArticleAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const user = await currentUser();
+  const type = formData.get("type");
+  const language = formData.get("language");
+  const title = String(formData.get("title") ?? "").trim();
+  if (!isArticleType(type)) redirectToArticles({ error: "bad-type" });
+  if (!isArticleLanguage(language)) redirectToArticles({ error: "bad-language" });
+  if (!title) redirectToArticles({ error: "missing-title" });
+
+  const id = randomUUID();
+  const slug = slugifyTitle(title, id);
+  await createArticle({
+    id,
+    type,
+    language,
+    slug,
+    title,
+    author_id: user?.id ?? null,
+  });
+  console.info("[articles action] create", {
+    id,
+    type,
+    language,
+    slug,
+    titleLen: title.length,
+  });
+  revalidatePath("/admin/articles");
+  redirect(`/admin/articles/${id}`);
+}
+
+export async function saveArticleAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const user = await currentUser();
+  const id = String(formData.get("id") ?? "");
+  if (!id) redirectToArticles({ error: "missing-id" });
+
+  const article = await getArticle(id);
+  if (!article) redirectToArticles({ error: "not-found" });
+
+  // Document is the Tiptap JSON serialized by the editor on submit. We do not
+  // try to re-validate the JSON structure here — that's the editor's job;
+  // a malformed document is recovered by the read path (Phase 2 will surface
+  // a "needs repair" view rather than crash the editor).
+  const document = String(formData.get("document") ?? "").trim();
+  const title = String(formData.get("title") ?? "").trim();
+  const subtitle = String(formData.get("subtitle") ?? "").trim();
+  const summary = String(formData.get("summary") ?? "").trim();
+  const heroImage = String(formData.get("hero_image") ?? "").trim();
+
+  await updateArticle(id, {
+    title: title || null,
+    subtitle: subtitle || null,
+    summary: summary || null,
+    hero_image: heroImage || null,
+    document: document || article.document,
+  });
+
+  // Append a revision so the autosave trail starts populating from day one.
+  // Coalescing in repo collapses fast-fire saves into a single row.
+  const revisionId = randomUUID();
+  const { coalesced } = await appendRevision({
+    id: revisionId,
+    article_id: id,
+    document: document || article.document || "{}",
+    payload: article.payload ?? "{}",
+    title: title || article.title || "",
+    status: article.status ?? "draft",
+    author_id: user?.id ?? null,
+  });
+  console.info("[articles action] save", {
+    id,
+    titleLen: title.length,
+    docLen: document.length,
+    revisionId,
+    coalesced,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  revalidatePath("/admin/articles");
+  redirectToArticle(id, { saved: "1" });
+}
+
+export async function setArticleStatusAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const status = String(formData.get("status") ?? "") as ArticleStatus;
+  if (!id) redirectToArticles({ error: "missing-id" });
+  if (
+    status !== "draft" &&
+    status !== "review" &&
+    status !== "published" &&
+    status !== "archived"
+  ) {
+    redirectToArticle(id, { error: "bad-status" });
+  }
+  await setArticleStatus(id, status);
+  console.info("[articles action] status", { id, status });
+  revalidatePath(`/admin/articles/${id}`);
+  revalidatePath("/admin/articles");
+  redirectToArticle(id, { status: "saved" });
+}
+
+// Slug change runs the per-language uniqueness check before writing. The
+// editor surfaces an `?error=slug-taken` query param so the SEO panel can
+// flag the collision without losing the user's input.
+export async function updateArticleSlugAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const slug = String(formData.get("slug") ?? "").trim();
+  if (!id) redirectToArticles({ error: "missing-id" });
+  if (!/^[a-z0-9-]+$/.test(slug)) {
+    redirectToArticle(id, { error: "bad-slug" });
+  }
+  const article = await getArticle(id);
+  if (!article) redirectToArticles({ error: "not-found" });
+  const language = (article.language ?? "en") as ArticleLanguage;
+  const available = await checkSlugAvailable(language, slug, id);
+  if (!available) redirectToArticle(id, { error: "slug-taken" });
+  await updateArticleSlug(id, slug);
+  console.info("[articles action] update-slug", { id, slug, language });
+  revalidatePath(`/admin/articles/${id}`);
+  revalidatePath("/admin/articles");
+  redirectToArticle(id, { slug: "saved" });
+}
+
+export async function deleteArticleAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  if (!id) redirectToArticles({ error: "missing-id" });
+  const article = await getArticle(id);
+  if (!article) redirectToArticles({ error: "not-found" });
+  // Hard delete is only allowed on archived rows. Anything else is a
+  // soft-delete (status='archived') via setArticleStatusAction, matching how
+  // the segments delete guards against accidental data loss.
+  if (article.status !== "archived") {
+    redirectToArticle(id, { error: "not-archived" });
+  }
+  await deleteArticle(id);
+  console.info("[articles action] delete", { id });
+  revalidatePath("/admin/articles");
+  redirectToArticles({ deleted: id });
 }

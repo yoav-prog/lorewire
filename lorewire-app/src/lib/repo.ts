@@ -34,6 +34,10 @@ export interface StoryRow {
   outro_segment_id: string | null;
   skip_intro: number | null;
   skip_outro: number | null;
+  // 2026-06-11 video editor: full ShortVideoConfig v2 JSON. NULL until the
+  // pipeline writes it on first render OR the editor lands cold and derives
+  // a default via defaultVideoConfig() in lib/video-config.ts.
+  video_config: string | null;
   tokens: number | null;
   cost_cents: number | null;
   created_at: string | null;
@@ -43,7 +47,7 @@ export interface StoryRow {
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, tokens, cost_cents, created_at, updated_at, published_at, payload";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
@@ -80,6 +84,7 @@ const EDITABLE = new Set([
   "duration",
   "alignment",
   "payload",
+  "video_config",
 ]);
 
 export async function listStories(
@@ -129,6 +134,42 @@ export async function listStoriesSlim(
 
 export async function getStory(id: string): Promise<StoryRow | null> {
   return one<StoryRow>(`SELECT ${COLS} FROM stories WHERE id = ?`, [id]);
+}
+
+// 2026-06-11 video editor: typed read/write helpers for stories.video_config.
+// The column stores a stringified ShortVideoConfig v2 (see
+// lib/video-config.ts). Callers should parseVideoConfig() the result before
+// trusting the shape — a row written by an older pipeline build, or a row
+// the editor hasn't written yet, may not match the current schema.
+
+export async function getStoryConfigJson(
+  storyId: string,
+): Promise<string | null> {
+  const r = await one<{ video_config: string | null }>(
+    "SELECT video_config FROM stories WHERE id = ?",
+    [storyId],
+  );
+  return r?.video_config ?? null;
+}
+
+// Writes the canonical JSON string into the column and bumps updated_at so
+// the existing `ORDER BY updated_at` queries surface freshly-edited videos
+// to the dashboard. Caller is responsible for serializing through
+// parseVideoConfig() first; passing raw JSON skips validation.
+export async function setStoryConfigJson(
+  storyId: string,
+  json: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE stories SET video_config = ?, updated_at = ? WHERE id = ?",
+    [json, now, storyId],
+  );
+  // eslint-disable-next-line no-console -- rule 14: observability from day one
+  console.info("[video editor config persist]", {
+    story_id: storyId,
+    bytes: json.length,
+  });
 }
 
 // One-shot summary for the dashboard. Replaces the previous "pull every row,
@@ -253,12 +294,19 @@ export interface SegmentRow {
   normalized_url: string | null;
   duration_ms: number | null;
   enabled: number | null;
+  // Lifecycle: pending -> uploading -> normalizing -> ready, with `error` set
+  // on any failure. See lorewire-app/src/lib/schema.ts and
+  // pipeline/segments_worker.py for the canonical state machine.
+  status: string | null;
+  error: string | null;
+  uploaded_at: string | null;
   created_at: string | null;
   updated_at: string | null;
 }
 
 const SEGMENT_COLS =
-  "id, kind, label, source_url, normalized_url, duration_ms, enabled, created_at, updated_at";
+  "id, kind, label, source_url, normalized_url, duration_ms, enabled, " +
+  "status, error, uploaded_at, created_at, updated_at";
 
 export async function listSegments(kind?: SegmentKind): Promise<SegmentRow[]> {
   if (kind) {
@@ -362,6 +410,383 @@ export async function setStorySegmentOverride(
   await run(
     `UPDATE stories SET ${idCol} = ?, ${skipCol} = ?, updated_at = ? WHERE id = ?`,
     [segId, skip, now, storyId],
+  );
+}
+
+// --- articles (CMS) ---------------------------------------------------------
+// Long-form editorial content authored in the admin. Separate from STORIES
+// (the Reddit/video pipeline). Body is Tiptap JSON in `document`; type-
+// specific fields live in `payload` validated by per-type Zod schemas in
+// the server-action layer. `language` is "he" or "en"; slug uniqueness is
+// enforced per-language by checkSlugAvailable() before writes.
+
+export type ArticleType = "news" | "feature" | "listicle" | "review";
+export type ArticleLanguage = "he" | "en";
+export type ArticleStatus =
+  | "draft"
+  | "review"
+  | "published"
+  | "archived";
+
+export const ARTICLE_TYPES: ArticleType[] = [
+  "news",
+  "feature",
+  "listicle",
+  "review",
+];
+export const ARTICLE_LANGUAGES: ArticleLanguage[] = ["he", "en"];
+export const ARTICLE_STATUSES: ArticleStatus[] = [
+  "draft",
+  "review",
+  "published",
+  "archived",
+];
+
+export interface ArticleRow {
+  id: string;
+  type: string | null;
+  language: string | null;
+  slug: string | null;
+  title: string | null;
+  subtitle: string | null;
+  summary: string | null;
+  document: string | null;
+  hero_image: string | null;
+  status: string | null;
+  author_id: string | null;
+  meta_title: string | null;
+  meta_description: string | null;
+  og_image: string | null;
+  payload: string | null;
+  source_sheet_row_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  published_at: string | null;
+}
+
+const ARTICLE_COLS =
+  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, payload, source_sheet_row_id, created_at, updated_at, published_at";
+
+// Slim projection for /admin/articles list. Drops the heavy text fields
+// (document, payload, summary, meta_*, og_image) the list does not render.
+const ARTICLE_LIST_COLS =
+  "id, type, language, slug, title, status, hero_image, created_at, updated_at, published_at";
+
+export type ArticleListRow = Pick<
+  ArticleRow,
+  | "id"
+  | "type"
+  | "language"
+  | "slug"
+  | "title"
+  | "status"
+  | "hero_image"
+  | "created_at"
+  | "updated_at"
+  | "published_at"
+>;
+
+// Columns the editor is allowed to write directly via updateArticle. `type`
+// and `language` are set at creation only — changing them mid-life would
+// invalidate the payload's type-specific shape, so they're handled by a
+// dedicated migration path if ever needed. `status` goes through
+// setArticleStatus so the publish timestamp is consistent. `slug` goes
+// through updateArticleSlug so the per-language collision check runs.
+const ARTICLE_EDITABLE = new Set([
+  "title",
+  "subtitle",
+  "summary",
+  "document",
+  "hero_image",
+  "meta_title",
+  "meta_description",
+  "og_image",
+  "payload",
+]);
+
+export async function listArticlesSlim(
+  opts: {
+    status?: string;
+    type?: string;
+    language?: string;
+    limit?: number;
+  } = {},
+): Promise<ArticleListRow[]> {
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (opts.status) {
+    where.push("status = ?");
+    params.push(opts.status);
+  }
+  if (opts.type) {
+    where.push("type = ?");
+    params.push(opts.type);
+  }
+  if (opts.language) {
+    where.push("language = ?");
+    params.push(opts.language);
+  }
+  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
+  const rows = await all<ArticleListRow>(
+    `SELECT ${ARTICLE_LIST_COLS} FROM articles ${clause} ORDER BY COALESCE(updated_at, created_at) DESC ${limit}`,
+    params,
+  );
+  console.info("[articles repo] list", {
+    count: rows.length,
+    status: opts.status ?? null,
+    type: opts.type ?? null,
+    language: opts.language ?? null,
+    limit: opts.limit ?? null,
+  });
+  return rows;
+}
+
+export async function getArticle(id: string): Promise<ArticleRow | null> {
+  if (!id) return null;
+  return one<ArticleRow>(
+    `SELECT ${ARTICLE_COLS} FROM articles WHERE id = ?`,
+    [id],
+  );
+}
+
+export async function getArticleBySlug(
+  language: ArticleLanguage,
+  slug: string,
+): Promise<ArticleRow | null> {
+  if (!slug || !language) return null;
+  return one<ArticleRow>(
+    `SELECT ${ARTICLE_COLS} FROM articles WHERE language = ? AND slug = ?`,
+    [language, slug],
+  );
+}
+
+// Slug uniqueness is scoped per language: /articles/he/foo and /articles/en/foo
+// are different documents, both valid. The optional excludeId lets the editor
+// re-save its current slug without colliding with itself.
+export async function checkSlugAvailable(
+  language: ArticleLanguage,
+  slug: string,
+  excludeId?: string,
+): Promise<boolean> {
+  if (!slug || !language) return false;
+  const sql = excludeId
+    ? "SELECT id FROM articles WHERE language = ? AND slug = ? AND id != ?"
+    : "SELECT id FROM articles WHERE language = ? AND slug = ?";
+  const params = excludeId ? [language, slug, excludeId] : [language, slug];
+  const row = await one<{ id: string }>(sql, params);
+  return row === null;
+}
+
+export interface CreateArticleInput {
+  id: string;
+  type: ArticleType;
+  language: ArticleLanguage;
+  slug: string;
+  title: string;
+  author_id: string | null;
+}
+
+export async function createArticle(input: CreateArticleInput): Promise<void> {
+  const now = new Date().toISOString();
+  // Tiptap empty document — one empty paragraph, no marks. Hard-coded here so
+  // the repo module does not import Tiptap; the editor produces the same
+  // shape via `generateJSON('', extensions)`.
+  const emptyDoc = JSON.stringify({
+    type: "doc",
+    content: [{ type: "paragraph" }],
+  });
+  await run(
+    `INSERT INTO articles (id, type, language, slug, title, document, status, author_id, payload, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.id,
+      input.type,
+      input.language,
+      input.slug,
+      input.title,
+      emptyDoc,
+      "draft",
+      input.author_id,
+      "{}",
+      now,
+      now,
+    ],
+  );
+  console.info("[articles repo] create", {
+    id: input.id,
+    type: input.type,
+    language: input.language,
+    slug: input.slug,
+  });
+}
+
+export async function updateArticle(
+  id: string,
+  fields: Record<string, unknown>,
+): Promise<void> {
+  const keys = Object.keys(fields).filter((k) => ARTICLE_EDITABLE.has(k));
+  if (keys.length === 0) return;
+  const sets = keys.map((k) => `${k} = ?`);
+  const params: unknown[] = keys.map((k) => fields[k] ?? null);
+  sets.push("updated_at = ?");
+  params.push(new Date().toISOString());
+  params.push(id);
+  await run(`UPDATE articles SET ${sets.join(", ")} WHERE id = ?`, params);
+  console.info("[articles repo] update", { id, fields: keys });
+}
+
+// Slug change has its own writer because of the per-language collision check;
+// callers must call checkSlugAvailable() first.
+export async function updateArticleSlug(
+  id: string,
+  slug: string,
+): Promise<void> {
+  await run(
+    "UPDATE articles SET slug = ?, updated_at = ? WHERE id = ?",
+    [slug, new Date().toISOString(), id],
+  );
+  console.info("[articles repo] update-slug", { id, slug });
+}
+
+export async function setArticleStatus(
+  id: string,
+  status: ArticleStatus,
+): Promise<void> {
+  const now = new Date().toISOString();
+  if (status === "published") {
+    await run(
+      "UPDATE articles SET status = ?, published_at = ?, updated_at = ? WHERE id = ?",
+      [status, now, now, id],
+    );
+  } else {
+    await run(
+      "UPDATE articles SET status = ?, updated_at = ? WHERE id = ?",
+      [status, now, id],
+    );
+  }
+  console.info("[articles repo] status", { id, status });
+}
+
+export async function deleteArticle(id: string): Promise<void> {
+  // Hard delete cascades to revisions so the table doesn't keep orphans. The
+  // admin UI gates this behind an archived-status confirmation; soft-delete
+  // (status='archived') is the normal "remove from view" path.
+  await run("DELETE FROM article_revisions WHERE article_id = ?", [id]);
+  await run("DELETE FROM articles WHERE id = ?", [id]);
+  console.info("[articles repo] delete", { id });
+}
+
+// --- article revisions (append-only with coalescing) ------------------------
+// Autosave fires often; a row per save would explode the table. `appendRevision`
+// coalesces: if the latest revision for this article is unnamed AND created
+// within `coalesceWindowSec` seconds of now, it updates that row in place
+// instead of inserting a new one. Named revisions and any revision older than
+// the window force an insert.
+
+export interface RevisionRow {
+  id: string;
+  article_id: string;
+  document: string | null;
+  payload: string | null;
+  title: string | null;
+  status: string | null;
+  name: string | null;
+  is_named: number | null;
+  author_id: string | null;
+  created_at: string | null;
+}
+
+const REVISION_COLS =
+  "id, article_id, document, payload, title, status, name, is_named, author_id, created_at";
+
+export interface AppendRevisionInput {
+  id: string; // candidate id used only when we INSERT
+  article_id: string;
+  document: string;
+  payload: string;
+  title: string;
+  status: string;
+  author_id: string | null;
+  // Window inside which an unnamed revision is updated in place. Default 60s.
+  coalesceWindowSec?: number;
+}
+
+export interface AppendRevisionResult {
+  revisionId: string;
+  coalesced: boolean;
+}
+
+export async function appendRevision(
+  input: AppendRevisionInput,
+): Promise<AppendRevisionResult> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const window = input.coalesceWindowSec ?? 60;
+  const latest = await one<RevisionRow>(
+    `SELECT ${REVISION_COLS} FROM article_revisions WHERE article_id = ? ORDER BY created_at DESC LIMIT 1`,
+    [input.article_id],
+  );
+  if (
+    latest &&
+    !latest.is_named &&
+    latest.created_at &&
+    now.getTime() - new Date(latest.created_at).getTime() < window * 1000
+  ) {
+    await run(
+      "UPDATE article_revisions SET document = ?, payload = ?, title = ?, status = ?, author_id = ?, created_at = ? WHERE id = ?",
+      [
+        input.document,
+        input.payload,
+        input.title,
+        input.status,
+        input.author_id,
+        nowIso,
+        latest.id,
+      ],
+    );
+    console.info("[articles revisions] coalesce", {
+      articleId: input.article_id,
+      revisionId: latest.id,
+      windowSec: window,
+    });
+    return { revisionId: latest.id, coalesced: true };
+  }
+  await run(
+    "INSERT INTO article_revisions (id, article_id, document, payload, title, status, is_named, author_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+      input.id,
+      input.article_id,
+      input.document,
+      input.payload,
+      input.title,
+      input.status,
+      0,
+      input.author_id,
+      nowIso,
+    ],
+  );
+  console.info("[articles revisions] append", {
+    articleId: input.article_id,
+    revisionId: input.id,
+  });
+  return { revisionId: input.id, coalesced: false };
+}
+
+export async function listRevisions(
+  articleId: string,
+): Promise<RevisionRow[]> {
+  return all<RevisionRow>(
+    `SELECT ${REVISION_COLS} FROM article_revisions WHERE article_id = ? ORDER BY created_at DESC`,
+    [articleId],
+  );
+}
+
+export async function getRevision(id: string): Promise<RevisionRow | null> {
+  if (!id) return null;
+  return one<RevisionRow>(
+    `SELECT ${REVISION_COLS} FROM article_revisions WHERE id = ?`,
+    [id],
   );
 }
 
