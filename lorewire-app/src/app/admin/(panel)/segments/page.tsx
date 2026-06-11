@@ -233,11 +233,14 @@ function SegmentRowCard({
         <div>
           {previewUrl ? (
             // Native video tag gives a free preview + scrubber without any
-            // extra dep. muted+preload=metadata keeps the page light.
+            // extra dep. preload=metadata avoids fetching the whole file just
+            // to show the poster; audio is left on so the admin hears the
+            // segment exactly as it will splice into a render. No autoplay
+            // here, so the browser's "muted to allow autoplay" requirement
+            // does not apply.
             <video
               src={previewUrl}
               controls
-              muted
               preload="metadata"
               className="w-full rounded-md border border-line bg-bg"
             />
