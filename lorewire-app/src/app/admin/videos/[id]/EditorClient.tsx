@@ -31,7 +31,12 @@ import {
   PreviewComposition,
   type PreviewProps,
 } from "@/components/video-preview/PreviewComposition";
-import { queueRender, saveVideoConfigPatch } from "./actions";
+import {
+  claimEditSession,
+  heartbeatEditSession,
+  queueRender,
+  saveVideoConfigPatch,
+} from "./actions";
 
 // Player is client-only (Remotion's runtime is not SSR-safe). next/dynamic
 // with ssr:false gives us code-splitting + no hydration mismatch.
@@ -64,6 +69,12 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: "metadata", label: "Metadata" },
 ];
 
+// 30-second heartbeat. Matches the planned
+// `video.editor.heartbeat_interval_ms` default in the settings spec and
+// keeps the 2-minute STALE_SESSION_MS window in lib/edit-session.ts at
+// 4 missed beats before another admin sees us as stale.
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
 export default function EditorClient({
   storyId,
   storyTitle,
@@ -73,6 +84,7 @@ export default function EditorClient({
   audioUrl,
   derivedDefault,
   latestRender,
+  foreignOwnerEmail,
 }: {
   storyId: string;
   storyTitle: string;
@@ -82,11 +94,65 @@ export default function EditorClient({
   audioUrl: string | null;
   derivedDefault: boolean;
   latestRender: RenderRow | null;
+  foreignOwnerEmail: string | null;
 }) {
+  const router = useRouter();
   const [tab, setTab] = useState<TabKey>("trim");
   const [selectedFrameIdx, setSelectedFrameIdx] = useState<number | null>(
     config.doodle_frames.length > 0 ? 0 : null,
   );
+
+  // Concurrency model: if the server saw a foreign live session, we start
+  // in "read-only" mode and show a banner. Clicking "Take over" calls
+  // claimEditSession and flips us out of read-only. Clicking "Open
+  // read-only" keeps the banner state but lets the admin browse. Reload
+  // re-classifies — by then either the foreign session is stale or we own
+  // the session.
+  const [readOnly, setReadOnly] = useState(foreignOwnerEmail !== null);
+  // Show the banner whenever a foreign session was detected on the server
+  // render. The admin dismisses it implicitly by taking over OR by
+  // navigating away — we don't add a close button to avoid surprises
+  // (someone closing the banner and then clobbering another admin's edits).
+  const [showForeignBanner, setShowForeignBanner] = useState(
+    foreignOwnerEmail !== null,
+  );
+
+  // Heartbeat: stamp _edit_session on mount, then refresh heartbeat_at
+  // every HEARTBEAT_INTERVAL_MS while we own the session. If a heartbeat
+  // returns `session-stolen`, fall back to read-only so we don't keep
+  // bumping the heartbeat over the new owner.
+  useEffect(() => {
+    if (readOnly) return; // don't claim if banner is up
+    let cancelled = false;
+    const stamp = async () => {
+      try {
+        const result = await heartbeatEditSession(storyId);
+        if (!cancelled && !result.ok && result.error === "session-stolen") {
+          setReadOnly(true);
+          setShowForeignBanner(true);
+          // Re-fetch the page to get the new owner's email for the banner.
+          router.refresh();
+        }
+      } catch {
+        /* transient — try again next tick */
+      }
+    };
+    // Initial claim (writes started_at = now too).
+    claimEditSession(storyId).catch(() => {
+      /* worst case: the next heartbeat will retry */
+    });
+    const id = setInterval(stamp, HEARTBEAT_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [storyId, readOnly, router]);
+
+  const handleTakeOver = () => {
+    setShowForeignBanner(false);
+    setReadOnly(false);
+    claimEditSession(storyId).then(() => router.refresh());
+  };
 
   // Draft config: overlays user edits on top of the persisted config so the
   // Player previews unsaved changes. Reset on persist (server revalidates →
@@ -142,6 +208,13 @@ export default function EditorClient({
       className="flex flex-col"
       style={{ height: "100svh", overflow: "hidden" }}
     >
+      {showForeignBanner && foreignOwnerEmail && (
+        <ForeignSessionBanner
+          ownerEmail={foreignOwnerEmail}
+          onTakeOver={handleTakeOver}
+        />
+      )}
+
       <Header
         storyId={storyId}
         storyTitle={storyTitle}
@@ -150,7 +223,8 @@ export default function EditorClient({
         durationMs={config.duration_ms}
         trimmedDurationMs={trimmedDurationMs}
         derivedDefault={derivedDefault}
-        latestRender={latestRender}
+        latestRender={readOnly ? null : latestRender}
+        renderDisabled={readOnly}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -229,10 +303,15 @@ export default function EditorClient({
           </div>
         </main>
 
-        {/* Right: tabs */}
+        {/* Right: tabs — pointer-events-none + reduced opacity when a
+            foreign session owns the editor. The banner above the header
+            is the user's only path forward (Take over). */}
         <aside
-          className="flex shrink-0 flex-col overflow-hidden border-l border-line bg-surface"
+          className={`flex shrink-0 flex-col overflow-hidden border-l border-line bg-surface transition-opacity ${
+            readOnly ? "pointer-events-none opacity-50" : ""
+          }`}
           style={{ width: 340 }}
+          aria-disabled={readOnly}
         >
           <div className="flex shrink-0 border-b border-line">
             {TABS.map((t) => {
@@ -296,6 +375,7 @@ function Header({
   trimmedDurationMs,
   derivedDefault,
   latestRender,
+  renderDisabled = false,
 }: {
   storyId: string;
   storyTitle: string;
@@ -305,6 +385,7 @@ function Header({
   trimmedDurationMs: number;
   derivedDefault: boolean;
   latestRender: RenderRow | null;
+  renderDisabled?: boolean;
 }) {
   const trimmed = trimmedDurationMs !== durationMs;
   return (
@@ -352,9 +433,55 @@ function Header({
         >
           {storyStatus}
         </span>
-        <RenderControl storyId={storyId} latestRender={latestRender} />
+        {renderDisabled ? (
+          <button
+            type="button"
+            disabled
+            className="rounded-md bg-accent/30 px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg/50 cursor-not-allowed"
+            title="Another admin owns this session — take over to enable"
+          >
+            Render
+          </button>
+        ) : (
+          <RenderControl storyId={storyId} latestRender={latestRender} />
+        )}
       </div>
     </header>
+  );
+}
+
+// ─── ForeignSessionBanner ────────────────────────────────────────────────────
+// Yellow strip above the header when a foreign edit session is fresh. Two
+// affordances: Take over (claims the session, hides banner, enables editing)
+// or just stay in read-only and browse. The banner is informational — no
+// server-side lock — but the editor stays disabled until the admin
+// explicitly takes over, so we never silently clobber another admin's
+// in-flight edits.
+
+function ForeignSessionBanner({
+  ownerEmail,
+  onTakeOver,
+}: {
+  ownerEmail: string;
+  onTakeOver: () => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center justify-between gap-4 border-b border-high/40 bg-high/10 px-5 py-2">
+      <p className="font-mono text-[11px] text-high">
+        <span className="font-semibold uppercase tracking-wider">
+          read-only
+        </span>{" "}
+        · <strong className="font-semibold">{ownerEmail}</strong> is editing
+        this video. Take over to make changes — their edits stay saved.
+      </p>
+      <button
+        type="button"
+        onClick={onTakeOver}
+        className="rounded-md border border-high/60 bg-high/30 px-3 py-1 font-mono text-[11px] font-semibold uppercase tracking-wider text-high transition-colors hover:bg-high/45"
+      >
+        Take over
+      </button>
+    </div>
   );
 }
 
@@ -443,7 +570,13 @@ function RenderControl({
     startTransition(async () => {
       const result = await queueRender(storyId);
       if (!result.ok) {
-        setError(result.error ?? "Enqueue failed");
+        if (result.error === "daily-cap-exceeded") {
+          setError(
+            `Daily render cap (${result.capLimit}) reached — ${result.capCount} renders in the last 24 h. Bump video.daily_renders_per_story in settings to lift the cap.`,
+          );
+        } else {
+          setError(result.error ?? "Enqueue failed");
+        }
         return;
       }
       if (result.render) setActive(result.render);

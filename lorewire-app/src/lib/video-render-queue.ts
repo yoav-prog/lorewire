@@ -136,3 +136,20 @@ export async function recentRendersForStory(
     [storyId, limit],
   );
 }
+
+// Counts renders requested for `storyId` since `sinceIso`. Used by the
+// queueRender action to enforce the `video.daily_renders_per_story` cap so
+// a stuck Render button (or an admin in a render-button-spam mood) can't
+// drain the worker's day. Idempotent rows count exactly once because we
+// query by (story_id, requested_at >= sinceIso) — a previous-day row is
+// excluded even if it shares the same config_hash as today's request.
+export async function countRendersSince(
+  storyId: string,
+  sinceIso: string,
+): Promise<number> {
+  const rows = await all<{ c: number | string }>(
+    "SELECT COUNT(*) AS c FROM video_renders WHERE story_id = ? AND requested_at >= ?",
+    [storyId, sinceIso],
+  );
+  return Number(rows[0]?.c ?? 0);
+}

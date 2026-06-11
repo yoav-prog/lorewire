@@ -20,7 +20,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/dal";
-import { getStory, setStoryConfigJson } from "@/lib/repo";
+import { getSetting, getStory, setStoryConfigJson } from "@/lib/repo";
 import {
   applyConfigPatch,
   defaultVideoConfig,
@@ -28,6 +28,7 @@ import {
   type ShortVideoConfig,
 } from "@/lib/video-config";
 import {
+  countRendersSince,
   enqueueRender,
   hashConfig,
   type RenderRow,
@@ -108,6 +109,23 @@ export interface QueueRenderResult {
   render?: RenderRow;
   /** True when the row already existed for this (story, config) pair. */
   idempotentHit?: boolean;
+  /** Used-of-cap when an enqueue is rejected on the daily limit. */
+  capCount?: number;
+  capLimit?: number;
+}
+
+// Default daily render cap per story. Overridable via the settings table
+// key `video.daily_renders_per_story` so an admin can bump it for a busy
+// day. The window is rolling 24h from `now`, not calendar day, so the cap
+// can't be reset by clock midnight tricks.
+const DEFAULT_DAILY_CAP = 20;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+async function resolveDailyCap(): Promise<number> {
+  const raw = await getSetting("video.daily_renders_per_story");
+  if (!raw) return DEFAULT_DAILY_CAP;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DAILY_CAP;
 }
 
 export async function queueRender(
@@ -117,6 +135,29 @@ export async function queueRender(
 
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
+
+  // Daily cap check (plan §Render queue). A 24h rolling window of all
+  // rows requested for this story — done/error rows count too because
+  // they cost worker time. Idempotent hits don't bump the count because
+  // they don't create a new row.
+  const cap = await resolveDailyCap();
+  const sinceIso = new Date(Date.now() - DAY_MS).toISOString();
+  const recentCount = await countRendersSince(storyId, sinceIso);
+  if (recentCount >= cap) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[render queue cap reject]", {
+      story_id: storyId,
+      user_id: session.userId,
+      recent_count: recentCount,
+      cap,
+    });
+    return {
+      ok: false,
+      error: "daily-cap-exceeded",
+      capCount: recentCount,
+      capLimit: cap,
+    };
+  }
 
   // Hash the *current* persisted config — not the editor's draft. If the
   // user hasn't saved their trim yet, the render will reflect the last
@@ -143,8 +184,91 @@ export async function queueRender(
     render_id: existing.id,
     idempotent_hit: idempotentHit,
     existing_status: existing.status,
+    recent_count: recentCount,
+    cap,
   });
 
   revalidatePath(`/admin/videos/${storyId}`);
   return { ok: true, render: existing, idempotentHit };
 }
+
+// ─── editSession actions (concurrency banner / heartbeat) ─────────────────────
+// Lightweight presence: write { user_id, started_at, heartbeat_at } onto the
+// config's _edit_session field on mount and re-stamp heartbeat_at every
+// `video.editor.heartbeat_interval_ms`. The page's server render computes
+// whether the session is foreign + still fresh; the client just decides what
+// banner to show.
+//
+// `claim` writes a new session (started_at = heartbeat_at = now), used on
+// mount and when the take-over button is clicked. `heartbeat` only bumps
+// heartbeat_at, keeping started_at stable so audit logs can see when the
+// admin first opened the editor. Both round-trip through the config so the
+// JSON column stays consistent with what the editor reads.
+
+export interface EditSessionResult {
+  ok: boolean;
+  error?: string;
+}
+
+export async function claimEditSession(
+  storyId: string,
+): Promise<EditSessionResult> {
+  const session = await requireAdmin();
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const base: ShortVideoConfig =
+    resolveBaseConfig(story.video_config) ?? defaultVideoConfig(story);
+
+  const now = new Date().toISOString();
+  const next: ShortVideoConfig = {
+    ...base,
+    _edit_session: {
+      user_id: session.userId,
+      started_at: now,
+      heartbeat_at: now,
+    },
+  };
+
+  await setStoryConfigJson(storyId, JSON.stringify(next));
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[video editor session claim]", {
+    story_id: storyId,
+    user_id: session.userId,
+  });
+  return { ok: true };
+}
+
+export async function heartbeatEditSession(
+  storyId: string,
+): Promise<EditSessionResult> {
+  const session = await requireAdmin();
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const base: ShortVideoConfig =
+    resolveBaseConfig(story.video_config) ?? defaultVideoConfig(story);
+
+  // Only bump heartbeat if this user owns the session — if a different
+  // admin took over, we don't want to silently steal the session back via
+  // the heartbeat tick. The banner will surface the foreign session on
+  // next page render.
+  const current = base._edit_session;
+  if (current && current.user_id !== session.userId) {
+    return { ok: false, error: "session-stolen" };
+  }
+
+  const now = new Date().toISOString();
+  const next: ShortVideoConfig = {
+    ...base,
+    _edit_session: {
+      user_id: session.userId,
+      started_at: current?.started_at ?? now,
+      heartbeat_at: now,
+    },
+  };
+
+  await setStoryConfigJson(storyId, JSON.stringify(next));
+  return { ok: true };
+}
+

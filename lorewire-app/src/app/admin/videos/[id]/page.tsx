@@ -12,12 +12,13 @@
 
 import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/dal";
-import { getStory } from "@/lib/repo";
+import { getStory, getUserById } from "@/lib/repo";
 import {
   defaultVideoConfig,
   parseVideoConfig,
   type ShortVideoConfig,
 } from "@/lib/video-config";
+import { classifyEditSession } from "@/lib/edit-session";
 import { latestRenderForStory } from "@/lib/video-render-queue";
 import EditorClient from "./EditorClient";
 
@@ -57,6 +58,19 @@ export default async function VideoEditorPage({
   // without having to remember a render id across reloads.
   const latestRender = await latestRenderForStory(story.id);
 
+  // Concurrency banner data. If a foreign session is fresh (<2 min), pull
+  // the owner's email so the banner can name them — "<email> is editing".
+  // Stale and self-owned sessions both render no banner.
+  const sessionInfo = classifyEditSession(
+    config._edit_session,
+    session.userId,
+  );
+  let foreignOwnerEmail: string | null = null;
+  if (sessionInfo.kind === "foreign-active" && sessionInfo.ownerUserId) {
+    const owner = await getUserById(sessionInfo.ownerUserId);
+    foreignOwnerEmail = owner?.email ?? sessionInfo.ownerUserId;
+  }
+
   // eslint-disable-next-line no-console -- rule 14: namespaced observability
   console.info("[video editor] page render", {
     story_id: story.id,
@@ -81,6 +95,7 @@ export default async function VideoEditorPage({
       audioUrl={story.audio_url}
       derivedDefault={!parsed?.ok}
       latestRender={latestRender}
+      foreignOwnerEmail={foreignOwnerEmail}
     />
   );
 }
