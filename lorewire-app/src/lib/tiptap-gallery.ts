@@ -132,3 +132,25 @@ export function countGalleryImagesMissingAlt(document: unknown): number {
   walk(document);
   return count;
 }
+
+// Like countGalleryImagesMissingAlt but counts ALL items across every
+// gallery node. Used by the asset re-render UI to estimate the cost of
+// regenerating every gallery image. Returns 0 when document is null or
+// unparseable.
+export function countGalleryImages(document: unknown): number {
+  if (!document || typeof document !== "object") return 0;
+  let count = 0;
+  function walk(node: unknown): void {
+    if (!node || typeof node !== "object") return;
+    const n = node as { type?: unknown; attrs?: unknown; content?: unknown };
+    if (n.type === "articleGallery") {
+      const items = safeItems((n.attrs as { items?: unknown } | undefined)?.items);
+      count += items.length;
+    }
+    if (Array.isArray(n.content)) {
+      for (const child of n.content) walk(child);
+    }
+  }
+  walk(document);
+  return count;
+}

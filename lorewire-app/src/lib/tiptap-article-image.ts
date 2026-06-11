@@ -155,3 +155,21 @@ export function countImagesMissingAlt(document: unknown): number {
   walk(document);
   return count;
 }
+
+// Like countImagesMissingAlt but counts ALL articleImage nodes. Used by
+// the asset re-render UI to estimate the cost of regenerating every body
+// image at once. Returns 0 when document is null / unparseable.
+export function countArticleImages(document: unknown): number {
+  if (!document || typeof document !== "object") return 0;
+  let count = 0;
+  function walk(node: unknown): void {
+    if (!node || typeof node !== "object") return;
+    const n = node as { type?: unknown; content?: unknown };
+    if (n.type === "articleImage") count++;
+    if (Array.isArray(n.content)) {
+      for (const child of n.content) walk(child);
+    }
+  }
+  walk(document);
+  return count;
+}

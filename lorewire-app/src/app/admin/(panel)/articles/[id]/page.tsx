@@ -23,6 +23,12 @@ import { parseArticlePayload } from "@/lib/article-payload";
 import { buildArticleJsonLd } from "@/lib/article-seo";
 import { statusClass } from "@/app/admin/ui";
 import Breadcrumb from "@/app/admin/Breadcrumb";
+import { countArticleImages } from "@/lib/tiptap-article-image";
+import { countGalleryImages } from "@/lib/tiptap-gallery";
+import {
+  MediaRegenPanel,
+  type MediaAssetSpec,
+} from "@/app/admin/(panel)/_components/MediaRegenPanel";
 import { ArticleEditor } from "./ArticleEditor";
 import { ArticlePayloadSidebar } from "./ArticlePayloadSidebar";
 import { ArticleSeoPanel } from "./ArticleSeoPanel";
@@ -81,6 +87,48 @@ export default async function EditArticlePage({
     { status: "published", label: "Publish" },
     { status: "archived", label: "Archive" },
   ];
+
+  // Re-render asset list for this article. Hero + OG are top-level columns.
+  // Body images and gallery items live in the Tiptap document — count them
+  // from the doc so the cost preview reflects what's actually there. The
+  // bulk slugs disappear from the panel when their count is zero so the
+  // admin doesn't see a "Regenerate 0 images" button.
+  let parsedDoc: unknown = null;
+  try {
+    parsedDoc = article.document ? JSON.parse(article.document) : null;
+  } catch {
+    parsedDoc = null;
+  }
+  const bodyImageCount = countArticleImages(parsedDoc);
+  const galleryImageCount = countGalleryImages(parsedDoc);
+  const articleAssets: MediaAssetSpec[] = [
+    {
+      asset: "hero",
+      label: "Hero image",
+      hint: "Main image at the top of the article and on social cards.",
+    },
+    {
+      asset: "og",
+      label: "OG image",
+      hint: "Dedicated social-card image when you want something different from the hero. Falls back to the hero when blank.",
+    },
+  ];
+  if (bodyImageCount > 0) {
+    articleAssets.push({
+      asset: "body_images",
+      label: `All body images (${bodyImageCount})`,
+      hint: "Every articleImage node in the document. Regenerated in one batch.",
+      imageCountOverride: bodyImageCount,
+    });
+  }
+  if (galleryImageCount > 0) {
+    articleAssets.push({
+      asset: "gallery_images",
+      label: `All gallery items (${galleryImageCount})`,
+      hint: "Every image across every gallery node. Regenerated in one batch.",
+      imageCountOverride: galleryImageCount,
+    });
+  }
 
   const dir = articleDirection(article.language);
   const lang = (article.language ?? "en") as keyof typeof ARTICLE_LANGUAGE_LABELS;
@@ -171,6 +219,12 @@ export default async function EditArticlePage({
             jsonLdPreview={jsonLdPreview}
           />
           <SeoSuggestPanel articleId={article.id} />
+
+          <MediaRegenPanel
+            ownerKind="article"
+            ownerId={article.id}
+            assets={articleAssets}
+          />
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Status</div>
             <div className="flex flex-wrap gap-2">

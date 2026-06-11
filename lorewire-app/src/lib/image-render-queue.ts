@@ -104,10 +104,18 @@ function clampInt(
   return Math.max(min, Math.min(max, n));
 }
 
-export async function estimateImageRegenCostCents(asset: string): Promise<number> {
+export async function estimateImageRegenCostCents(
+  asset: string,
+  /** Override the per-asset image count. Used by article-bulk slugs whose
+   *  count comes from the document, not a global setting. */
+  imageCountOverride?: number,
+): Promise<number> {
   const activeModel = await selected("images"); // e.g. "kie/gpt-image-2"
   const perImage = IMAGE_COST_USD[activeModel] ?? 0.05;
-  const count = await assetImageCount(asset);
+  const count =
+    imageCountOverride !== undefined && imageCountOverride >= 0
+      ? imageCountOverride
+      : await assetImageCount(asset);
   return Math.round(perImage * 100 * count);
 }
 

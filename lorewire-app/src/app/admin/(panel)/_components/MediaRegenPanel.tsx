@@ -27,6 +27,10 @@ export interface MediaAssetSpec {
   label: string;
   /** One-line description shown below the label. */
   hint: string;
+  /** Optional override for the image count when the asset's count comes from
+   *  somewhere other than admin settings — e.g. article body images counted
+   *  from the Tiptap doc. */
+  imageCountOverride?: number;
 }
 
 const TRANSITIONAL = new Set(["queued", "generating"]);
@@ -44,7 +48,10 @@ export async function MediaRegenPanel({
   const enriched = await Promise.all(
     assets.map(async (a) => ({
       ...a,
-      estimateCents: await estimateImageRegenCostCents(a.asset),
+      estimateCents: await estimateImageRegenCostCents(
+        a.asset,
+        a.imageCountOverride,
+      ),
       latest: await latestRenderForAsset(ownerKind, ownerId, a.asset),
     })),
   );
