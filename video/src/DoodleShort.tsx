@@ -190,6 +190,34 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         words={config.captions.flatMap((c) => c.words ?? [])}
       />
 
+      {/* Editor overlays — text plates the admin positions on top of the
+          composition. Each overlay is a single <Sequence> windowed to its
+          [start_ms, end_ms] in the trimmed timeline. Filtered out when
+          the trim removes its window; absolute positions are shifted by
+          -clipStartFrames the same way frame windows are. */}
+      {config.overlays?.map((o, i) => {
+        if (o.end_ms <= clipStartMs || o.start_ms >= clipEndMs) return null;
+        const absFrom = Math.max(0, Math.round((o.start_ms / 1000) * fps));
+        const fromFrames = Math.max(0, absFrom - clipStartFrames);
+        const lengthFrames = Math.max(
+          1,
+          Math.round(((o.end_ms - o.start_ms) / 1000) * fps),
+        );
+        const cappedLength = Math.max(
+          1,
+          Math.min(lengthFrames, durationInFrames - fromFrames),
+        );
+        return (
+          <Sequence
+            key={`overlay-${i}-${o.start_ms}`}
+            from={fromFrames}
+            durationInFrames={cappedLength}
+          >
+            <OverlayLayer overlay={o} />
+          </Sequence>
+        );
+      })}
+
       {config.channel_name && (
         <div
           style={{
@@ -355,3 +383,38 @@ function proportionalWords(caption: ShortCaptionChunk): ShortCaptionWord[] {
     end_ms: Math.round(caption.start_ms + (i + 1) * per),
   }));
 }
+
+// Single overlay layer. Plain white text with a heavy shadow so it reads
+// against any background (doodle bg #fbfaf4 OR a photo frame). Position
+// is anchored at the overlay's (x, y) — translate(-50%, -50%) centers the
+// box around that point so an overlay at (0.5, 0.5) is dead-center even
+// at long text lengths.
+const OverlayLayer: React.FC<{
+  overlay: { start_ms: number; end_ms: number; text: string; x: number; y: number };
+}> = ({ overlay }) => (
+  <div
+    style={{
+      position: "absolute",
+      left: `${Math.max(0, Math.min(1, overlay.x)) * 100}%`,
+      top: `${Math.max(0, Math.min(1, overlay.y)) * 100}%`,
+      transform: "translate(-50%, -50%)",
+      maxWidth: "80%",
+      pointerEvents: "none",
+    }}
+  >
+    <div
+      style={{
+        fontSize: 56,
+        fontWeight: 800,
+        color: "#fbfaf4",
+        textAlign: "center",
+        lineHeight: 1.1,
+        textShadow:
+          "0 0 12px rgba(15, 23, 42, 0.85), 0 4px 0 #0f172a, 0 -4px 0 #0f172a, 4px 0 0 #0f172a, -4px 0 0 #0f172a",
+        padding: "8px 16px",
+      }}
+    >
+      {overlay.text}
+    </div>
+  </div>
+);

@@ -29,10 +29,11 @@ import {
   AbsoluteFill,
   Audio,
   interpolate,
+  Sequence,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import type { ShortVideoConfig } from "@/lib/video-config";
+import type { Overlay, ShortVideoConfig } from "@/lib/video-config";
 
 const TITLE_VISIBLE_MS = 1200;
 const TITLE_FADE_MS = 600;
@@ -177,6 +178,32 @@ export function PreviewComposition({
         <CaptionBand caption={activeCaption} elapsedMs={elapsedMs} />
       )}
 
+      {/* Overlays — mirror of DoodleShort's overlay layer so the editor's
+          live preview matches what'll render. Each overlay is a Sequence
+          windowed to its [start_ms, end_ms] in the trimmed timeline. */}
+      {config.overlays?.map((o, i) => {
+        if (o.end_ms <= clipStartMs || o.start_ms >= clipEndMs) return null;
+        const absFrom = Math.max(0, Math.round((o.start_ms / 1000) * fps));
+        const fromFrames = Math.max(0, absFrom - clipStartFrames);
+        const lengthFrames = Math.max(
+          1,
+          Math.round(((o.end_ms - o.start_ms) / 1000) * fps),
+        );
+        const cappedLength = Math.max(
+          1,
+          Math.min(lengthFrames, durationInFrames - fromFrames),
+        );
+        return (
+          <Sequence
+            key={`overlay-${i}-${o.start_ms}`}
+            from={fromFrames}
+            durationInFrames={cappedLength}
+          >
+            <OverlayLayer overlay={o} />
+          </Sequence>
+        );
+      })}
+
       {config.channel_name && (
         <div
           style={{
@@ -206,6 +233,36 @@ export function PreviewComposition({
         </div>
       )}
     </AbsoluteFill>
+  );
+}
+
+function OverlayLayer({ overlay }: { overlay: Overlay }) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: `${Math.max(0, Math.min(1, overlay.x)) * 100}%`,
+        top: `${Math.max(0, Math.min(1, overlay.y)) * 100}%`,
+        transform: "translate(-50%, -50%)",
+        maxWidth: "80%",
+        pointerEvents: "none",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 56,
+          fontWeight: 800,
+          color: "#fbfaf4",
+          textAlign: "center",
+          lineHeight: 1.1,
+          textShadow:
+            "0 0 12px rgba(15, 23, 42, 0.85), 0 4px 0 #0f172a, 0 -4px 0 #0f172a, 4px 0 0 #0f172a, -4px 0 0 #0f172a",
+          padding: "8px 16px",
+        }}
+      >
+        {overlay.text}
+      </div>
+    </div>
   );
 }
 

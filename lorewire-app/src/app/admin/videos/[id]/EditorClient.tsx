@@ -23,6 +23,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { statusClass } from "@/app/admin/ui";
 import type {
+  Overlay,
   ShortCaptionChunk,
   ShortVideoConfig,
 } from "@/lib/video-config";
@@ -169,6 +170,9 @@ export default function EditorClient({
     ShortCaptionChunk[] | null
   >(null);
 
+  // Overlays draft mirrors the captions pattern — null when untouched.
+  const [draftOverlays, setDraftOverlays] = useState<Overlay[] | null>(null);
+
   // The config the Player actually renders — persisted base with the
   // current draft fields merged in. Memoised so the Player doesn't see a
   // new object reference on every render.
@@ -178,8 +182,15 @@ export default function EditorClient({
       clip_start_ms: draft.clip_start_ms,
       clip_end_ms: draft.clip_end_ms,
       captions: draftCaptions ?? config.captions,
+      overlays: draftOverlays ?? config.overlays,
     }),
-    [config, draft.clip_start_ms, draft.clip_end_ms, draftCaptions],
+    [
+      config,
+      draft.clip_start_ms,
+      draft.clip_end_ms,
+      draftCaptions,
+      draftOverlays,
+    ],
   );
 
   // Derived Player props — duration shrinks to the trimmed window so the
@@ -233,10 +244,19 @@ export default function EditorClient({
           className="flex shrink-0 flex-col overflow-hidden border-r border-line bg-surface"
           style={{ width: 300 }}
         >
-          <div className="shrink-0 border-b border-line px-4 py-3">
+          <div className="shrink-0 space-y-2 border-b border-line px-4 py-3">
             <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
               Storyboard · {config.doodle_frames.length} frames
             </p>
+            <a
+              href="http://localhost:3001/"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Requires `npx remotion studio` running in the /video/ project"
+              className="block font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+            >
+              Open in Remotion Studio ↗
+            </a>
           </div>
           <div className="flex-1 overflow-y-auto">
             {config.doodle_frames.length === 0 ? (
@@ -354,6 +374,13 @@ export default function EditorClient({
               <AudioPanel storyId={storyId} config={config} />
             ) : tab === "metadata" ? (
               <MetadataPanel storyId={storyId} config={config} />
+            ) : tab === "overlays" ? (
+              <OverlaysPanel
+                storyId={storyId}
+                config={config}
+                draft={draftOverlays}
+                onDraftChange={setDraftOverlays}
+              />
             ) : (
               <TabStub tab={tab} config={config} />
             )}
@@ -1495,6 +1522,322 @@ function MetadataPanel({
   );
 }
 
+// ─── Overlays panel ──────────────────────────────────────────────────────────
+// Add/edit/remove timed text overlays positioned by normalized (x, y) coords
+// over the 1080×1920 canvas. Each overlay is anchored at its (x, y) point
+// (centered via translate(-50%, -50%) in the renderer) so an overlay at
+// (0.5, 0.5) sits dead-center regardless of text length.
+//
+// Locking model: the whole `overlays` key is locked on any save because
+// overlays are an editor-only concept — the pipeline doesn't generate them.
+// One lock path keeps the merge simple, and locked-overlays survive
+// pipeline re-runs verbatim.
+
+const NEW_OVERLAY_DEFAULTS = {
+  text: "New overlay",
+  start_ms: 0,
+  end_ms: 2000,
+  x: 0.5,
+  y: 0.5,
+};
+
+function OverlaysPanel({
+  storyId,
+  config,
+  draft,
+  onDraftChange,
+}: {
+  storyId: string;
+  config: ShortVideoConfig;
+  draft: Overlay[] | null;
+  onDraftChange: (next: Overlay[] | null) => void;
+}) {
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [okFlash, setOkFlash] = useState(false);
+
+  const persisted = config.overlays ?? [];
+  const current = draft ?? persisted;
+  const dirty =
+    draft !== null &&
+    JSON.stringify(draft) !== JSON.stringify(persisted);
+  const locked = Boolean(config._locks?.overlays);
+
+  const totalMs = config.duration_ms;
+
+  const handleAdd = () => {
+    const base = draft ?? persisted;
+    const next: Overlay[] = [
+      ...base,
+      {
+        ...NEW_OVERLAY_DEFAULTS,
+        // Tail-pin the new overlay so a chain of adds doesn't stack at 0.
+        start_ms: 0,
+        end_ms: Math.min(NEW_OVERLAY_DEFAULTS.end_ms, totalMs),
+      },
+    ];
+    onDraftChange(next);
+  };
+
+  const handleUpdate = (idx: number, patch: Partial<Overlay>) => {
+    const base = draft ?? persisted;
+    const next = base.map((o, i) => (i === idx ? { ...o, ...patch } : o));
+    onDraftChange(next);
+  };
+
+  const handleRemove = (idx: number) => {
+    const base = draft ?? persisted;
+    onDraftChange(base.filter((_, i) => i !== idx));
+  };
+
+  const handleSave = () => {
+    if (!draft) return;
+    setError(null);
+    setOkFlash(false);
+    startTransition(async () => {
+      const result = await saveVideoConfigPatch(
+        storyId,
+        { overlays: draft },
+        ["overlays"],
+      );
+      if (result.ok) {
+        onDraftChange(null);
+        setOkFlash(true);
+        setTimeout(() => setOkFlash(false), 1500);
+      } else {
+        setError(result.error ?? "Save failed");
+      }
+    });
+  };
+
+  const handleReset = () => {
+    onDraftChange(null);
+    setError(null);
+  };
+
+  const handleUnlock = () => {
+    startTransition(async () => {
+      await saveVideoConfigPatch(storyId, {}, [], ["overlays"]);
+    });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          Overlays · {current.length}
+          {locked && <span className="ml-1.5 text-accent">🔒</span>}
+        </p>
+        <p className="text-[12px] leading-relaxed text-muted">
+          Timed text plates positioned by (x, y) normalized to the 1080×1920
+          canvas. Each anchors at its point and centers around it.
+        </p>
+      </div>
+
+      <button
+        type="button"
+        onClick={handleAdd}
+        disabled={pending}
+        className="w-full rounded-md border border-dashed border-line bg-bg px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        + Add overlay
+      </button>
+
+      <div className="space-y-2">
+        {current.length === 0 && (
+          <p className="rounded-md border border-line bg-bg px-3 py-4 text-center font-mono text-[11px] uppercase tracking-wider text-muted">
+            No overlays yet
+          </p>
+        )}
+        {current.map((overlay, idx) => (
+          <OverlayRow
+            key={idx}
+            index={idx}
+            overlay={overlay}
+            totalMs={totalMs}
+            onUpdate={(patch) => handleUpdate(idx, patch)}
+            onRemove={() => handleRemove(idx)}
+          />
+        ))}
+      </div>
+
+      {error && (
+        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
+          {error}
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!dirty || pending}
+          className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending ? "Saving…" : okFlash ? "Saved ✓" : "Save overlays"}
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          disabled={!dirty || pending}
+          className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Reset
+        </button>
+      </div>
+
+      {locked && (
+        <button
+          type="button"
+          onClick={handleUnlock}
+          className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+        >
+          Unlock overlays — let the pipeline rewrite them
+        </button>
+      )}
+    </div>
+  );
+}
+
+function OverlayRow({
+  index,
+  overlay,
+  totalMs,
+  onUpdate,
+  onRemove,
+}: {
+  index: number;
+  overlay: Overlay;
+  totalMs: number;
+  onUpdate: (patch: Partial<Overlay>) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="space-y-2 rounded-md border border-line bg-bg p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          overlay {String(index + 1).padStart(2, "0")}
+        </span>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="font-mono text-[10px] uppercase tracking-wider text-danger underline-offset-2 hover:underline"
+        >
+          remove
+        </button>
+      </div>
+
+      <textarea
+        value={overlay.text}
+        onChange={(e) => onUpdate({ text: e.target.value })}
+        rows={2}
+        className="w-full resize-none rounded border border-line bg-surface px-2 py-1 text-[12px] leading-snug text-ink outline-none focus:border-accent"
+      />
+
+      <div className="grid grid-cols-2 gap-2">
+        <NumberField
+          label="start"
+          suffix="ms"
+          value={overlay.start_ms}
+          min={0}
+          max={totalMs}
+          step={100}
+          onChange={(v) =>
+            onUpdate({ start_ms: clamp(v, 0, overlay.end_ms - 100) })
+          }
+        />
+        <NumberField
+          label="end"
+          suffix="ms"
+          value={overlay.end_ms}
+          min={overlay.start_ms + 100}
+          max={totalMs}
+          step={100}
+          onChange={(v) =>
+            onUpdate({ end_ms: clamp(v, overlay.start_ms + 100, totalMs) })
+          }
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <SliderField
+          label="x"
+          value={overlay.x}
+          onChange={(v) => onUpdate({ x: v })}
+        />
+        <SliderField
+          label="y"
+          value={overlay.y}
+          onChange={(v) => onUpdate({ y: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function NumberField({
+  label,
+  suffix,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string;
+  suffix?: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block space-y-1">
+      <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+        {label} {suffix ? `(${suffix})` : ""}
+      </span>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full rounded border border-line bg-surface px-2 py-1 text-right font-mono text-[11px] tabular-nums text-ink outline-none focus:border-accent"
+      />
+    </label>
+  );
+}
+
+function SliderField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block space-y-1">
+      <span className="flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-muted">
+        <span>{label}</span>
+        <span className="tabular-nums text-ink">{value.toFixed(2)}</span>
+      </span>
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.01}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full accent-accent"
+      />
+    </label>
+  );
+}
+
 function LabeledTextInput({
   label,
   value,
@@ -1637,18 +1980,8 @@ function TabStub({
       // Audio is now live (rendered by AudioPanel above the switch).
       return null;
     case "overlays":
-      return (
-        <ComingSoon
-          when="Day 10 · maybe v1.5"
-          summary="Timed text overlays"
-          detail="One overlay type. Filters/effects are explicitly out of scope."
-        >
-          <FieldRow
-            label="overlays"
-            value={String(config.overlays?.length ?? 0)}
-          />
-        </ComingSoon>
-      );
+      // Overlays is now live (rendered by OverlaysPanel above the switch).
+      return null;
     case "metadata":
       // Metadata is now live (rendered by MetadataPanel above the switch).
       return null;

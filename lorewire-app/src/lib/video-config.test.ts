@@ -506,6 +506,29 @@ describe("applyConfigPatch", () => {
     expect(out._locks).toBeUndefined();
   });
 
+  it("overlays edit pattern: patches whole array + locks the overlays key", () => {
+    // OverlaysPanel sends the full overlays array (add/edit/remove are
+    // all expressed as array deltas the editor computes locally) plus a
+    // single "overlays" lock path. Overlays are editor-only — the pipeline
+    // never generates them — so locking the whole array (instead of
+    // per-index) keeps the merge simple.
+    const out = applyConfigPatch(
+      base,
+      {
+        overlays: [
+          { start_ms: 0, end_ms: 2000, text: "hello", x: 0.5, y: 0.4 },
+          { start_ms: 4000, end_ms: 6000, text: "world", x: 0.5, y: 0.6 },
+        ],
+      },
+      ["overlays"],
+    );
+    expect(out.overlays).toHaveLength(2);
+    expect(out.overlays?.[0].text).toBe("hello");
+    expect(out._locks).toEqual({ overlays: true });
+    const r = parseVideoConfig(out);
+    expect(r.ok).toBe(true);
+  });
+
   it("audio edit pattern: patches music object + locks music.url + music.gain_db", () => {
     // AudioPanel sends the full music object on save so partial edits
     // (gain only / URL only) don't lose the other field. Lock paths are
