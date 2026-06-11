@@ -38,6 +38,13 @@ export const STORIES: Table = {
     { name: "video_url", type: "TEXT" },
     { name: "duration", type: "TEXT" },
     { name: "alignment", type: "TEXT" },
+    // Per-story intro/outro override (Wave 3 Phase 4). NULL/0 = inherit the
+    // global active pick. Resolution chain: skip flag -> story-pinned id ->
+    // settings.video.active_<kind>_id.
+    { name: "intro_segment_id", type: "TEXT" },
+    { name: "outro_segment_id", type: "TEXT" },
+    { name: "skip_intro", type: "INTEGER" },
+    { name: "skip_outro", type: "INTEGER" },
     { name: "tokens", type: "INTEGER" },
     { name: "cost_cents", type: "INTEGER" },
     { name: "created_at", type: "TEXT" },
@@ -66,7 +73,25 @@ export const USERS: Table = {
   ],
 };
 
-export const TABLES: Table[] = [STORIES, SETTINGS, USERS];
+// Wave 3 Phase 4 intro/outro library. Each row is one normalized clip in GCS;
+// the pipeline picks the active intro + outro per render and splices via
+// ffmpeg. Mirrors `video_segments` in pipeline/store.py.
+export const VIDEO_SEGMENTS: Table = {
+  name: "video_segments",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "kind", type: "TEXT" },
+    { name: "label", type: "TEXT" },
+    { name: "source_url", type: "TEXT" },
+    { name: "normalized_url", type: "TEXT" },
+    { name: "duration_ms", type: "INTEGER" },
+    { name: "enabled", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+export const TABLES: Table[] = [STORIES, SETTINGS, USERS, VIDEO_SEGMENTS];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
 export function createTableSql(t: Table): string {

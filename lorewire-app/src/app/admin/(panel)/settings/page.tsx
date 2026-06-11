@@ -94,6 +94,12 @@ const FIELDS: { key: string; label: string; placeholder: string; hint?: string }
       placeholder: "0",
       hint: "Set to 1 to enable. A small bottom-left bust of the protagonist with lip-flap mouth shapes timed to the narration. The next --media run generates a character portrait + a mouth-removed copy via kie (~$0.10 / story).",
     },
+    {
+      key: "video.intro_outro_enabled",
+      label: "Intro / outro splice master switch",
+      placeholder: "1",
+      hint: "Set to 0 to disable intro and outro splicing for every render. Defaults to on when unset. Manage the library and pick the active intro/outro at /admin/segments.",
+    },
   ];
 
 export default async function SettingsPage() {

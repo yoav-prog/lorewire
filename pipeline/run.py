@@ -120,6 +120,7 @@ def main() -> None:
                     category=idea.get("category"),
                     props_list=props_list,
                     character_image_mouth_removed=row.get("character_image_mouth_removed"),
+                    story_row=row,
                 )
                 row.update(video_cols)
         store.upsert_story(row)

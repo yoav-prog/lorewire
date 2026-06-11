@@ -18,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from pipeline import gcs, media
+from pipeline import gcs, media, segments
 
 VIDEO_PROJECT_RELATIVE = Path("video")
 ENTRY_POINT = "src/Root.tsx"
@@ -167,6 +167,7 @@ def generate_video(
     category: str | None = None,
     props_list: list[dict] | None = None,
     character_image_mouth_removed: str | None = None,
+    story_row: dict | None = None,
 ) -> dict:
     """Render the doodle short and return DB columns for the story row.
 
@@ -347,6 +348,34 @@ def generate_video(
         for line in tail:
             print(f"  remotion: {line}")
         return {}
+
+    # Wave 3 Phase 4 intro/outro splice. Resolve through the same store this
+    # process already uses; the splice writes a temp sibling and atomically
+    # renames over out_mp4 so gcs.publish always uploads the final file. A
+    # splice failure logs and falls through to the body-only render rather
+    # than aborting — better to ship a bare video than no video.
+    try:
+        intro_seg = segments.pick_segment(
+            "intro", story_row, _store.get_setting, _store.fetch_segment
+        )
+        outro_seg = segments.pick_segment(
+            "outro", story_row, _store.get_setting, _store.fetch_segment
+        )
+        print(
+            f"[segment pick id={safe_id}] "
+            f"intro={(intro_seg or {}).get('id') or 'none'} "
+            f"outro={(outro_seg or {}).get('id') or 'none'}"
+        )
+        intro_local = segments.fetch_to_cache(intro_seg, repo_root) if intro_seg else None
+        outro_local = segments.fetch_to_cache(outro_seg, repo_root) if outro_seg else None
+        if intro_local or outro_local:
+            tmp_out = out_mp4.with_name(out_mp4.stem + ".spliced.mp4")
+            segments.splice(
+                out_mp4, intro_local, outro_local, tmp_out, context_id=safe_id
+            )
+            tmp_out.replace(out_mp4)
+    except Exception as e:
+        print(f"[video splice id={safe_id}] FAILED: {e}; using body-only render")
 
     size_mb = out_mp4.stat().st_size / (1024 * 1024) if out_mp4.exists() else 0.0
     local_url = f"{media.PUBLIC_URL_PREFIX}/{safe_id}/video.mp4"
@@ -592,6 +621,7 @@ def rerender_from_db(story_id: str, repo_root: Path) -> dict:
         category=row.get("category"),
         props_list=props_list,
         character_image_mouth_removed=row.get("character_image_mouth_removed"),
+        story_row=row,
     )
     if "video_url" in cols:
         # Merge the new video_url back through the same store the row came

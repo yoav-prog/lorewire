@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/admin/stories", label: "Stories" },
   { href: "/admin/models", label: "Models" },
   { href: "/admin/templates", label: "Templates" },
+  { href: "/admin/segments", label: "Intros & outros" },
   { href: "/admin/settings", label: "Settings" },
 ];
 

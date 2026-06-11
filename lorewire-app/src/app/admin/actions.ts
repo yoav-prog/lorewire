@@ -12,10 +12,28 @@ import {
   updateStory,
   setStatus,
   setSetting,
+  getSetting,
+  upsertSegment,
+  getSegment,
+  setSegmentEnabled,
+  updateSegmentLabel,
+  deleteSegment,
+  setStorySegmentOverride,
   type StoryStatus,
+  type SegmentKind,
 } from "@/lib/repo";
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
+import { run } from "@/lib/db";
+import {
+  ACCEPTED_EXT,
+  ACCEPTED_MIME,
+  MAX_UPLOAD_BYTES,
+  hasFtypHeader,
+  newSegmentId,
+  normalizeAndPublish,
+  sanitizeLabel,
+} from "@/lib/segments-server";
 
 export interface LoginState {
   error?: string;
@@ -163,4 +181,181 @@ export async function saveCaptionTemplateAction(
   }
   search.set("saved", "1");
   redirect(`/admin/templates?${search.toString()}`);
+}
+
+// --- intro/outro segment actions (Wave 3 Phase 4) ---------------------------
+// Upload, set-active, enable/disable, rename, delete, and per-story override.
+// Each action runs requireAdmin and validates inputs before touching state.
+// Errors surface to the page through a ?error= search param on the redirect
+// so the admin sees what went wrong without a thrown 500.
+
+function parseKind(raw: unknown): SegmentKind | null {
+  return raw === "intro" || raw === "outro" ? raw : null;
+}
+
+function activeKey(kind: SegmentKind): string {
+  return `video.active_${kind}_id`;
+}
+
+function redirectToSegments(params?: Record<string, string>): never {
+  const search = new URLSearchParams(params);
+  const qs = search.toString();
+  redirect(qs ? `/admin/segments?${qs}` : "/admin/segments");
+}
+
+export async function uploadSegmentAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const kind = parseKind(formData.get("kind"));
+  if (!kind) redirectToSegments({ error: "missing-kind" });
+
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    redirectToSegments({ error: "no-file" });
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    redirectToSegments({ error: "too-large" });
+  }
+  // The browser-supplied MIME and filename are advisory — we also sniff the
+  // first 12 bytes for the MP4/MOV `ftyp` box so a renamed payload is
+  // rejected before it reaches ffmpeg.
+  const mime = file.type || "";
+  if (mime && !ACCEPTED_MIME.has(mime)) {
+    redirectToSegments({ error: "bad-mime" });
+  }
+  const name = file.name || "upload.mp4";
+  const dot = name.lastIndexOf(".");
+  const ext = (dot >= 0 ? name.slice(dot).toLowerCase() : ".mp4") as
+    | ".mp4"
+    | ".mov";
+  if (!ACCEPTED_EXT.has(ext)) {
+    redirectToSegments({ error: "bad-ext" });
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!hasFtypHeader(bytes)) {
+    redirectToSegments({ error: "not-mp4" });
+  }
+
+  const label = sanitizeLabel(String(formData.get("label") ?? "")) ||
+    name.slice(0, dot >= 0 ? dot : undefined);
+  const id = newSegmentId();
+  try {
+    const { sourceUrl, normalizedUrl, durationMs } = await normalizeAndPublish({
+      id,
+      ext,
+      bytes,
+    });
+    await upsertSegment({
+      id,
+      kind,
+      label,
+      source_url: sourceUrl,
+      normalized_url: normalizedUrl,
+      duration_ms: durationMs,
+      enabled: 1,
+    });
+    // First segment of its kind auto-activates so the admin doesn't have to
+    // click twice on a fresh install. If there's already an active id, leave
+    // it alone — they explicitly chose it before.
+    const currentActive = await getSetting(activeKey(kind));
+    if (!currentActive) {
+      await setSetting(activeKey(kind), id);
+    }
+    console.info(`[admin segments] upload kind=${kind} id=${id} size=${bytes.byteLength}`);
+  } catch (e) {
+    console.error(`[admin segments] upload kind=${kind} id=${id} FAILED:`, e);
+    redirectToSegments({ error: "normalize-failed" });
+  }
+  revalidatePath("/admin/segments");
+  redirectToSegments({ uploaded: id });
+}
+
+export async function setActiveSegmentAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const kind = parseKind(formData.get("kind"));
+  if (!kind) redirectToSegments({ error: "missing-kind" });
+  const id = String(formData.get("id") ?? "");
+  if (!id) redirectToSegments({ error: "missing-id" });
+  const seg = await getSegment(id);
+  if (!seg || seg.kind !== kind) {
+    redirectToSegments({ error: "segment-not-found" });
+  }
+  await setSetting(activeKey(kind), id);
+  console.info(`[admin segments] set-active kind=${kind} id=${id}`);
+  revalidatePath("/admin/segments");
+  revalidatePath("/admin/settings");
+  redirectToSegments({ active: id });
+}
+
+export async function setSegmentEnabledAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const enabled = String(formData.get("enabled") ?? "") === "1";
+  if (!id) redirectToSegments({ error: "missing-id" });
+  await setSegmentEnabled(id, enabled);
+  console.info(`[admin segments] enabled id=${id} -> ${enabled}`);
+  revalidatePath("/admin/segments");
+  redirectToSegments();
+}
+
+export async function renameSegmentAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  if (!id) redirectToSegments({ error: "missing-id" });
+  const label = sanitizeLabel(String(formData.get("label") ?? ""));
+  await updateSegmentLabel(id, label);
+  console.info(`[admin segments] rename id=${id} label=${label.slice(0, 40)}`);
+  revalidatePath("/admin/segments");
+  redirectToSegments();
+}
+
+export async function deleteSegmentAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  if (!id) redirectToSegments({ error: "missing-id" });
+  const seg = await getSegment(id);
+  if (!seg) {
+    redirectToSegments({ error: "segment-not-found" });
+  }
+  // Clear the global active pointer if it pointed here, otherwise the next
+  // render would try to use a deleted id and fall back to no intro/outro
+  // silently. Also clear any per-story override that pinned this id so
+  // those stories revert to "use global active".
+  const kind = seg!.kind as SegmentKind;
+  const currentActive = await getSetting(activeKey(kind));
+  if (currentActive === id) {
+    await setSetting(activeKey(kind), "");
+  }
+  const overrideCol =
+    kind === "intro" ? "intro_segment_id" : "outro_segment_id";
+  await run(
+    `UPDATE stories SET ${overrideCol} = NULL WHERE ${overrideCol} = ?`,
+    [id],
+  );
+  await deleteSegment(id);
+  console.info(
+    `[admin segments] delete kind=${kind} id=${id} cleared_active=${currentActive === id}`,
+  );
+  revalidatePath("/admin/segments");
+  revalidatePath("/admin/settings");
+  redirectToSegments({ deleted: id });
+}
+
+export async function setStoryOverrideAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const storyId = String(formData.get("story_id") ?? "");
+  const kind = parseKind(formData.get("kind"));
+  const pick = String(formData.get("pick") ?? "inherit");
+  if (!storyId || !kind) {
+    redirect(`/admin/stories/${storyId}?error=missing-fields`);
+  }
+  await setStorySegmentOverride(storyId, kind, pick);
+  console.info(
+    `[admin story-edit] override kind=${kind} story=${storyId} pick=${pick}`,
+  );
+  revalidatePath(`/admin/stories/${storyId}`);
+  redirect(`/admin/stories/${storyId}`);
 }
