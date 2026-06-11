@@ -180,11 +180,22 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
 
 # --- image prompts ------------------------------------------------------------
 
-# Default style note appended to every image prompt. Overridden by the admin
-# `video.style` setting when present.
+# Scene style for the Article/Gallery illustrations and the Remotion doodle
+# short. Wave 2.5 shifts from pure black-ink doodle on cream paper to a
+# "cinematic stick-figure doodle" — the illustrations stay drawn (not
+# photographic), but pick up sparse accent color, better composition, and
+# occasional realistic detail on a single focal element. The thumbnail
+# (CATEGORY_THUMBNAIL_STYLES) is fully painted; the scenes meet it halfway.
+# This is now the standing default for every story we upload; the admin
+# `video.style` setting still overrides it per-deployment.
 DEFAULT_IMAGE_STYLE = (
-    "hand-drawn doodle illustration on off-white paper, single black marker, "
-    "loose linework, minimal palette, no text, no captions, no logos"
+    "Cinematic storyboard illustration in a stylized stick-figure / loose-ink "
+    "doodle aesthetic. Hand-drawn confident gesture lines, expressive but "
+    "simple characters. Sparse accent color (warm reds, ochres, deep blues) "
+    "used selectively on key elements, otherwise muted off-white background. "
+    "Occasional realistic detail on a single focal element (a hand, an object, "
+    "a face) while the rest stays loose linework. Strong narrative composition "
+    "with depth and lighting suggestion. No text, no captions, no logos."
 )
 
 
@@ -353,9 +364,13 @@ def _parse_title_synopsis(raw: str) -> tuple[str, str]:
 def make_image_prompts(idea: dict, body: str, dry_run: bool, n: int = 4) -> list[str]:
     """Build N image prompts grounded in the article (1 hero + n-1 scene shots).
 
-    Each prompt names the subject and a concrete visual moment from the body,
-    then appends the configured style note. Dry-run returns deterministic stub
-    prompts so the rest of the pipeline can run end to end without an LLM key.
+    The instruction explicitly asks the LLM to lock in 2-4 named characters
+    with short distinctive visual cues (hair, build, clothing) and to repeat
+    those cues verbatim in every prompt where the character recurs — gpt-image-2
+    needs the repetition because it has no memory across kie calls. Without
+    this, the same character ends up rendered as a different person in each
+    scene. Dry-run returns deterministic stubs so the rest of the pipeline can
+    run end to end without an LLM key.
     """
     from pipeline import llm, store
 
@@ -371,18 +386,29 @@ def make_image_prompts(idea: dict, body: str, dry_run: bool, n: int = 4) -> list
         f"You design illustrations for LoreWire shorts. Read the article and return "
         f"exactly {n} image prompts as a JSON array of strings: prompt 0 is the HERO "
         f"shot (the single most striking visual that represents the story); prompts "
-        f"1..{n - 1} are scene shots taken in story order. Each prompt: one sentence, "
-        f"concrete subject and action, NO text/captions/logos, NO faces of "
-        f"identifiable real people. Append this style note to every prompt verbatim "
-        f"at the end: \"{style}\". Return ONLY the JSON array.\n\n"
+        f"1..{n - 1} are scene shots taken in story order.\n\n"
+        f"CHARACTER CONTINUITY — this is critical. In your head, name the 2 to 4 "
+        f"recurring characters in this story and give each one short, distinctive "
+        f"visual cues (hair, build, clothing, accessories). Then in EVERY prompt "
+        f"that includes a character, repeat those same cues verbatim so the same "
+        f"characters keep showing up scene to scene. Example: if the main "
+        f"character is 'a woman with a tight bun, glasses, a blue cardigan', "
+        f"every prompt with her must say exactly that.\n\n"
+        f"Each prompt: one to two sentences max, concrete subject and action, "
+        f"describes the framing and the focal moment. NO text or captions in the "
+        f"image. NO faces of identifiable real people. NO logos.\n\n"
+        f"Append this style note to every prompt verbatim at the end: \"{style}\".\n\n"
+        f"Return ONLY the JSON array, no surrounding prose.\n\n"
         f"Headline: {idea['headline']}\n\n"
         f"Article:\n{body}"
     )
-    # gpt-5-nano is plenty for a structured JSON list this small and
-    # ~10x cheaper than gpt-5.4-mini (the default for the article rewrite).
-    # Override locally instead of switching the admin's stage selection so the
-    # article-rewrite stage keeps its higher-quality model.
-    raw = llm.chat(instruction, 800, model="openai/gpt-5-nano").strip()
+    # gpt-5.4-mini, not nano: the character-continuity instruction + a 4+
+    # prompt JSON list pushed nano past its hidden-reasoning budget and it
+    # returned empty strings (verified 2026-06-11). 5.4-mini has no reasoning
+    # overhead, costs ~5x more per token, but per-story we are still talking
+    # sub-cent for this call. Article rewrite still uses the admin's stage
+    # selection; this override is scoped to the image-prompt step.
+    raw = llm.chat(instruction, 4000, model="openai/gpt-5.4-mini").strip()
     prompts = _parse_prompt_list(raw, n, idea["headline"], style)
     return prompts
 
