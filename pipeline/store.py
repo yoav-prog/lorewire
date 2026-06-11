@@ -115,6 +115,29 @@ SCHEMA_STATEMENTS = [
     # Speeds up the worker's "claim oldest queued render" query — the
     # natural index on (story_id, config_hash) doesn't help that scan.
     "CREATE INDEX IF NOT EXISTS idx_video_renders_status_requested ON video_renders(status, requested_at)",
+    # 2026-06-12 asset re-render: image regen queue. The admin clicks
+    # Regenerate on any of a story's or article's image assets; the Next
+    # server action inserts a row here and the local
+    # pipeline/image_render_worker.py polls for status='queued' rows.
+    # No idempotency constraint — each click is a fresh row by design.
+    """CREATE TABLE IF NOT EXISTS image_renders (
+        id              TEXT PRIMARY KEY,
+        owner_kind      TEXT NOT NULL,
+        owner_id        TEXT NOT NULL,
+        asset           TEXT NOT NULL,
+        prompt_hash     TEXT,
+        status          TEXT NOT NULL,
+        progress        INTEGER DEFAULT 0,
+        error           TEXT,
+        output_url      TEXT,
+        cost_cents      INTEGER,
+        requested_by    TEXT,
+        requested_at    TEXT NOT NULL,
+        started_at      TEXT,
+        finished_at     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_image_renders_status_requested ON image_renders(status, requested_at)",
+    "CREATE INDEX IF NOT EXISTS idx_image_renders_owner ON image_renders(owner_kind, owner_id, asset, requested_at)",
     # Wave 3 Phase 4 video segment library: intros and outros are uploaded
     # through the admin, normalized once to 1080x1920 @ 30fps H.264+AAC, then
     # cached in GCS. Renders splice the active intro before and the active
@@ -821,3 +844,145 @@ def fail_render(render_id: str, error_message: str) -> None:
 def _now_iso() -> str:
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+# --- image_renders helpers (2026-06-12 asset re-render queue) -----------------
+# The Next admin enqueues an image regen via enqueueImageRegenAction; this
+# module's `claim_next_image_render` is what pipeline/image_render_worker.py
+# polls. Status transitions are queued → generating → done | error. Unlike
+# video_renders, there's no idempotency constraint — every click is a fresh
+# row (config-hash dedup would be confusing for "I want a different image").
+
+_IMAGE_RENDER_COLUMNS = [
+    "id", "owner_kind", "owner_id", "asset", "prompt_hash", "status",
+    "progress", "error", "output_url", "cost_cents", "requested_by",
+    "requested_at", "started_at", "finished_at",
+]
+
+
+def claim_next_image_render() -> dict | None:
+    """Atomically claim the oldest queued image regen and flip it to
+    'generating'. Returns the claimed row, or None when the queue is empty.
+    Mirrors claim_next_render — same race-free idiom on Postgres
+    (FOR UPDATE SKIP LOCKED), same conditional UPDATE on SQLite."""
+    cols = ", ".join(_IMAGE_RENDER_COLUMNS)
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE image_renders SET status = 'generating', "
+                    "started_at = %s WHERE id = ("
+                    "SELECT id FROM image_renders WHERE status = 'queued' "
+                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    f") RETURNING {cols}",
+                    (now,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT id FROM image_renders WHERE status='queued' "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        c.execute(
+            "UPDATE image_renders SET status='generating', started_at=? "
+            "WHERE id=? AND status='queued'",
+            (now, row["id"]),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {cols} FROM image_renders WHERE id=?", (row["id"],)
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def finish_image_render(
+    render_id: str, output_url: str, cost_cents: int
+) -> None:
+    """Mark an image regen done. Worker writes the kie-hosted URL (or local
+    /generated/ URL) plus the actual cost in cents."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE image_renders SET status='done', progress=100, "
+                    "output_url=%s, cost_cents=%s, finished_at=%s WHERE id=%s",
+                    (output_url, cost_cents, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE image_renders SET status='done', progress=100, "
+            "output_url=?, cost_cents=?, finished_at=? WHERE id=?",
+            (output_url, cost_cents, now, render_id),
+        )
+
+
+def fail_image_render(render_id: str, error_message: str) -> None:
+    """Mark an image regen failed. Worker calls this on any exception path
+    or on a NotImplementedError from a stub regenerator."""
+    now = _now_iso()
+    capped = (error_message or "unknown error")[:2000]
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE image_renders SET status='error', error=%s, "
+                    "finished_at=%s WHERE id=%s",
+                    (capped, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE image_renders SET status='error', error=?, "
+            "finished_at=? WHERE id=?",
+            (capped, now, render_id),
+        )
+
+
+def get_image_render(render_id: str) -> dict | None:
+    """Read a single image render row by id. Used by tests + ad-hoc queries."""
+    cols = ", ".join(_IMAGE_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM image_renders WHERE id = %s",
+                    (render_id,),
+                )
+                row = cur.fetchone()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM image_renders WHERE id=?", (render_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_story_hero(story_id: str, hero_url: str) -> None:
+    """Patch a single column. Used by the image regen worker after a hero
+    regen completes so the public reader sees the new image immediately."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET hero_image = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (hero_url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET hero_image = ?, updated_at = ? WHERE id = ?",
+            (hero_url, now, story_id),
+        )

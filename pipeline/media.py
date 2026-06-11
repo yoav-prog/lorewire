@@ -513,3 +513,97 @@ def generate_media(
 def public_root_for(repo_root: Path) -> Path:
     """Where this stage writes files. Exposed so callers (CLI/tests) can clear it."""
     return repo_root / PUBLIC_DIR_RELATIVE
+
+
+# ─── per-asset re-render (2026-06-12) ─────────────────────────────────────────
+# Called by pipeline/image_render_worker.py once per claimed queue row. Returns
+# (output_url, cost_cents). Raises NotImplementedError for slugs whose
+# generators aren't wired yet — the worker catches it and surfaces the message
+# to the admin UI verbatim. Implementing additional slugs means lifting the
+# inner generators out of generate_media() — see the TODOs inline.
+
+def regen_one(
+    story_id: str,
+    asset: str,
+    repo_root: Path,
+) -> tuple[str, int]:
+    """Regenerate one asset for one story. Used by the image_render queue
+    worker. Updates the relevant DB column and returns (public_url, cents).
+
+    Today only `asset='hero'` is wired end-to-end. Other slugs raise
+    NotImplementedError so the queue marks them error with a clear
+    message and the admin UI can show "scenes regen not yet wired" inline.
+    """
+    safe_id = _sanitize_id(story_id)
+    story = store.fetch_story(story_id)
+    if story is None:
+        raise ValueError(f"story {story_id!r} not found")
+
+    out_dir = repo_root / PUBLIC_DIR_RELATIVE / safe_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if asset == "hero":
+        return _regen_hero(story, out_dir, safe_id)
+
+    if asset == "scenes":
+        # TODO: lift the scene-prompt + per-scene image loop out of
+        # generate_media so it can be called with just (story, scene_count)
+        # and rewrite stories.images with the new GCS-hosted URLs.
+        raise NotImplementedError(
+            "scenes regen is not yet wired. The pipeline currently regenerates "
+            "all scenes only via `python -m pipeline.run --media` for a fresh "
+            "story; per-asset scene regen needs the inner loop extracted."
+        )
+
+    if asset == "props":
+        raise NotImplementedError(
+            "props regen is not yet wired. Today the props are generated as "
+            "part of generate_media() when video.prop_slide is on; the inner "
+            "generator needs extracting before per-asset regen is callable."
+        )
+
+    if asset == "mouth_swap":
+        raise NotImplementedError(
+            "mouth_swap regen is not yet wired. Today the portrait + "
+            "mouth-removed pair are generated inside generate_media(); the "
+            "inner _mouth_swap_block call needs surfacing so it can be invoked "
+            "standalone."
+        )
+
+    raise NotImplementedError(f"unknown asset slug {asset!r}")
+
+
+def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
+    """Regenerate just the portrait hero. Uses the same cinematic
+    thumbnail prompt the fresh-run pipeline uses, overwriting hero.png
+    in public/generated/<id>/. Updates stories.hero_image directly.
+    """
+    title = (story.get("title") or "").strip()
+    if not title:
+        raise ValueError(f"story {safe_id} has no title — cannot build a hero prompt")
+    body = (story.get("body") or "").strip()
+    category = (story.get("category") or "Drama").strip()
+
+    cinematic_prompt = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="3:4", dry_run=False,
+    )
+    print(f"[image regen hero] id={safe_id} title={title[:60]!r}")
+
+    kie_url = _generate_with_retry(
+        cinematic_prompt, f"id={safe_id} hero regen", aspect_ratio="3:4",
+    )
+    if kie_url is None:
+        raise RuntimeError("kie hero generation returned no URL after retries")
+
+    local_path = out_dir / "hero.png"
+    images.download(kie_url, local_path)
+    public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
+
+    store.update_story_hero(story["id"], public_url)
+
+    # Cost: one image at the active model's per-image rate.
+    active_model = models.get_selected("images")
+    per_image_usd = IMAGE_COST_USD.get(active_model, 0.05)
+    cost_cents = round(per_image_usd * 100)
+
+    return public_url, cost_cents
