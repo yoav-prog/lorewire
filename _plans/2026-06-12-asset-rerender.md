@@ -1,9 +1,31 @@
 # Asset re-render: videos and images on demand
 
 Date: 2026-06-12
-Status: **Scoping draft** — not approved, not yet branched. Lives here so
-the next session has the context to build it without rediscovering the
-state of the world.
+Status: **Approved and in progress** (2026-06-12 late session). User
+locked the four load-bearing decisions:
+
+  1. Scope: full coverage — story hero/scenes/props/mouth-swap AND
+     article hero/OG/body/gallery.
+  2. Backend: queue + worker, mirror the existing video_renders pattern.
+  3. Cost surfacing: inline `≈ $0.0X` badge next to each Regenerate
+     button + a "today: $X.XX of $Y daily cap" line in the panel.
+  4. Cap: reuse the existing `budget.daily_usd` setting. Image regens
+     count against the same daily budget the pipeline already enforces.
+
+Phasing (one branch, several commits):
+
+  C1. Schema (image_renders table) + TS queue + cost/budget helpers
+      + tests. Foundational, no UI yet.
+  C2. Story-side regen UI on /admin/stories/[id] and /admin/videos/[id].
+      Hero, scenes, props, mouth-swap.
+  C3. Article-side regen UI on /admin/articles/[id].
+      Hero, OG image, body images, gallery items.
+  C4. Python image_render_worker + media.regen_one() refactor +
+      pipeline tests.
+
+Article image gen is a NEW pipeline capability — today the article
+images are uploaded by hand. C3's UI scaffolds the affordances; the
+Python work to actually generate them lands in C4.
 
 ## What the user asked for
 

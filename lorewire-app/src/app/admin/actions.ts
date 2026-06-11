@@ -26,6 +26,7 @@ import {
   setArticleStatus,
   setArticleNoindex,
   setStoryNoindex,
+  getStory as getStoryRow,
   deleteArticle,
   appendRevision,
   checkSlugAvailable,
@@ -42,6 +43,10 @@ import {
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
 import { run } from "@/lib/db";
+import {
+  canEnqueueImageRegen,
+  enqueueImageRegen,
+} from "@/lib/image-render-queue";
 import { sanitizeLabel } from "@/lib/segments-upload";
 import {
   isArticleType,
@@ -132,6 +137,94 @@ export async function setStoryNoindexAction(
   console.info("[stories action] noindex", { id, noindex });
   revalidatePath(`/admin/stories/${id}`);
   revalidatePath(`/admin/videos/${id}`);
+}
+
+// ─── Asset re-render ─────────────────────────────────────────────────────────
+// Enqueue one image-regen request. Admin clicks Regenerate on a hero, scene,
+// prop, mouth-swap, OG, or gallery image; we run a budget pre-flight, queue
+// the row, and let pipeline/image_render_worker.py drain it.
+//
+// Returns a shape the client can branch on without try/catch. Cap rejection
+// surfaces as an explicit error so the UI can render "today: $X.XX of $Y
+// used — try tomorrow" instead of an opaque 500.
+
+export interface EnqueueImageRegenResult {
+  ok: boolean;
+  error?: string;
+  renderId?: string;
+  estimateCents?: number;
+  spentCents?: number;
+  capCents?: number;
+}
+
+export async function enqueueImageRegenAction(opts: {
+  ownerKind: "story" | "article";
+  ownerId: string;
+  asset: string;
+}): Promise<EnqueueImageRegenResult> {
+  const session = await requireAdmin();
+  const { ownerKind, ownerId, asset } = opts;
+  if (!ownerId || !asset) {
+    return { ok: false, error: "missing owner/asset" };
+  }
+  // Validate the owner exists before burning budget. Article and story
+  // tables are separate, so branch by kind.
+  if (ownerKind === "article") {
+    const row = await getArticle(ownerId);
+    if (!row) return { ok: false, error: "article not found" };
+  } else {
+    const row = await getStoryRow(ownerId);
+    if (!row) return { ok: false, error: "story not found" };
+  }
+
+  const pre = await canEnqueueImageRegen(asset);
+  if (!pre.ok) {
+    console.warn("[image regen action] budget exceeded", {
+      asset,
+      estimate_cents: pre.estimateCents,
+      spent_cents: pre.budget.spentCents,
+      cap_cents: pre.budget.capCents,
+    });
+    return {
+      ok: false,
+      error: "daily-budget-exceeded",
+      estimateCents: pre.estimateCents,
+      spentCents: pre.budget.spentCents,
+      capCents: pre.budget.capCents,
+    };
+  }
+
+  const fresh = await enqueueImageRegen({
+    ownerKind,
+    ownerId,
+    asset,
+    promptHash: null,
+    requestedBy: session.userId,
+  });
+
+  console.info("[image regen action] enqueued", {
+    render_id: fresh.id,
+    owner_kind: ownerKind,
+    owner_id: ownerId,
+    asset,
+    estimate_cents: pre.estimateCents,
+    user_id: session.userId,
+  });
+
+  if (ownerKind === "story") {
+    revalidatePath(`/admin/stories/${ownerId}`);
+    revalidatePath(`/admin/videos/${ownerId}`);
+  } else {
+    revalidatePath(`/admin/articles/${ownerId}`);
+  }
+
+  return {
+    ok: true,
+    renderId: fresh.id,
+    estimateCents: pre.estimateCents,
+    spentCents: pre.budget.spentCents,
+    capCents: pre.budget.capCents,
+  };
 }
 
 export async function setModelAction(formData: FormData): Promise<void> {

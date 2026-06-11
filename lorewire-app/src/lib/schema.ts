@@ -189,12 +189,42 @@ export const VIDEO_RENDERS: Table = {
   ],
 };
 
+// 2026-06-12 asset re-render. Mirrors VIDEO_RENDERS in shape — one queue
+// per asset regen request, polled by pipeline/image_render_worker.py.
+// `owner_kind` is "story" or "article"; `owner_id` is the row id; `asset`
+// is a slug like "hero" / "scene:0" / "scene:12" / "prop:3" / "mouth_swap"
+// for stories and "hero" / "og" / "body:<node-id>" / "gallery:<n>" for
+// articles. `prompt_hash` is a SHA-256 of the LLM-generated prompt used,
+// so requesting the same regen twice with no edits between can be
+// idempotent if we ever want it. `cost_cents` records the actual spend
+// once the worker finishes — admin UI sums it against budget.daily_usd.
+export const IMAGE_RENDERS: Table = {
+  name: "image_renders",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "owner_kind", type: "TEXT" },
+    { name: "owner_id", type: "TEXT" },
+    { name: "asset", type: "TEXT" },
+    { name: "prompt_hash", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "progress", type: "INTEGER" },
+    { name: "error", type: "TEXT" },
+    { name: "output_url", type: "TEXT" },
+    { name: "cost_cents", type: "INTEGER" },
+    { name: "requested_by", type: "TEXT" },
+    { name: "requested_at", type: "TEXT" },
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
   USERS,
   VIDEO_SEGMENTS,
   VIDEO_RENDERS,
+  IMAGE_RENDERS,
   ARTICLES,
   ARTICLE_REVISIONS,
 ];
