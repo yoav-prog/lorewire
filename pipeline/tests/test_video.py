@@ -132,5 +132,62 @@ class PublicUrlResolutionTests(unittest.TestCase):
         self.assertTrue(str(path).replace("\\", "/").endswith("/lorewire-app/public/generated/abc/hero.png"))
 
 
+class ResolveCaptionTemplateTests(unittest.TestCase):
+    def test_all_unset_returns_defaults(self):
+        t = video.resolve_caption_template(lambda k: None)
+        self.assertEqual(t["position_y"], 0.55)
+        self.assertEqual(t["color"], "#facc15")
+        self.assertEqual(t["entry_effect"], "fade")
+        self.assertEqual(t["word_highlight"], "karaoke")
+        self.assertEqual(t["font_weight"], 900)
+
+    def test_partial_override_merges_with_defaults(self):
+        store = {"caption.color": "#00ff00", "caption.position_y": "0.75"}
+        t = video.resolve_caption_template(lambda k: store.get(k))
+        # Overridden
+        self.assertEqual(t["color"], "#00ff00")
+        self.assertEqual(t["position_y"], 0.75)
+        # Untouched defaults
+        self.assertEqual(t["outline_color"], "#0f172a")
+        self.assertEqual(t["font_weight"], 900)
+
+    def test_invalid_numeric_falls_back(self):
+        store = {"caption.font_weight": "not a number", "caption.position_y": "abc"}
+        t = video.resolve_caption_template(lambda k: store.get(k))
+        self.assertEqual(t["font_weight"], 900)
+        self.assertEqual(t["position_y"], 0.55)
+
+    def test_numeric_clamped_to_range(self):
+        store = {"caption.position_y": "5", "caption.outline_width": "999", "caption.font_weight": "50"}
+        t = video.resolve_caption_template(lambda k: store.get(k))
+        # position_y is 0..1
+        self.assertEqual(t["position_y"], 1.0)
+        # outline_width is 0..12
+        self.assertEqual(t["outline_width"], 12)
+        # font_weight is 100..900
+        self.assertEqual(t["font_weight"], 100)
+
+    def test_invalid_enum_falls_back(self):
+        store = {"caption.entry_effect": "explode", "caption.word_highlight": "blink"}
+        t = video.resolve_caption_template(lambda k: store.get(k))
+        self.assertEqual(t["entry_effect"], "fade")
+        self.assertEqual(t["word_highlight"], "karaoke")
+
+    def test_color_rejects_javascript_uri(self):
+        store = {"caption.color": "javascript:alert(1)"}
+        t = video.resolve_caption_template(lambda k: store.get(k))
+        # Falls back to default rather than letting a JS URI ride into the prop.
+        self.assertEqual(t["color"], "#facc15")
+
+    def test_integer_fields_stay_int(self):
+        store = {"caption.font_weight": "750.6", "caption.padding_x": "44.9"}
+        t = video.resolve_caption_template(lambda k: store.get(k))
+        # Integer fields: rounded, not floating.
+        self.assertEqual(t["font_weight"], 751)
+        self.assertEqual(t["padding_x"], 45)
+        self.assertIsInstance(t["font_weight"], int)
+        self.assertIsInstance(t["padding_x"], int)
+
+
 if __name__ == "__main__":
     unittest.main()

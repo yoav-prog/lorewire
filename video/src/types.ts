@@ -22,6 +22,12 @@ export interface ShortCaptionChunk {
   words?: ShortCaptionWord[]; // when present, drives the karaoke highlight
 }
 
+// CaptionTemplateInput lives in caption-style.ts (next to the resolver) and is
+// re-exported here so external consumers can import the whole props shape from
+// one module without reaching into the styling internals.
+import type { CaptionTemplateInput } from "./caption-style";
+export type { CaptionTemplateInput };
+
 export interface ShortVideoConfig {
   voiceover_url: string;
   title?: string;
@@ -33,4 +39,8 @@ export interface ShortVideoConfig {
   // pan/zoom so 30-60 scenes don't feel static between cuts. Off by default
   // to preserve the doodle look.
   ken_burns?: boolean;
+  // Wave 3 Phase 1: admin-edited caption styling. Every field is optional;
+  // resolveCaptionTemplate() in caption-style.ts fills missing fields from
+  // DOODLE_CAPTION_STYLE so the existing doodle look is the safe default.
+  caption_template?: CaptionTemplateInput;
 }

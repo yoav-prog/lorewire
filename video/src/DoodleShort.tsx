@@ -20,6 +20,8 @@ import {
   CHUNK_FADE_MS,
   TITLE_VISIBLE_MS,
   TITLE_FADE_MS,
+  resolveCaptionTemplate,
+  type ResolvedTemplate,
 } from "./caption-style";
 import { findActiveWordIndex } from "./caption-words";
 import { FONT_FAMILY } from "./fonts";
@@ -33,6 +35,11 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
   const elapsedMs = (frame / fps) * 1000;
+
+  // Wave 3 Phase 1: resolve the caption template once so every chunk render
+  // shares the same style object. Missing fields fall back to the original
+  // doodle-yellow defaults so renders without an admin override are unchanged.
+  const captionTemplate = resolveCaptionTemplate(config.caption_template);
 
   // Map each doodle frame to a Sequence window. Frame i runs from its caption
   // chunk's start_ms until frame (i+1)'s caption.start_ms (or the end of the
@@ -123,7 +130,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
       )}
 
       {activeCaption && (
-        <DoodleCaption caption={activeCaption} elapsedMs={elapsedMs} />
+        <DoodleCaption caption={activeCaption} elapsedMs={elapsedMs} style={captionTemplate} />
       )}
 
       {config.channel_name && (
@@ -200,8 +207,8 @@ const DoodleFrameImg: React.FC<{
 const DoodleCaption: React.FC<{
   caption: ShortCaptionChunk;
   elapsedMs: number;
-}> = ({ caption, elapsedMs }) => {
-  const style = DOODLE_CAPTION_STYLE;
+  style: ResolvedTemplate;
+}> = ({ caption, elapsedMs, style }) => {
   const sinceStart = elapsedMs - caption.start_ms;
   const untilEnd = caption.end_ms - elapsedMs;
   const fadeIn = Math.min(1, Math.max(0, sinceStart / CHUNK_FADE_MS));
@@ -215,13 +222,15 @@ const DoodleCaption: React.FC<{
     caption.words && caption.words.length > 0
       ? caption.words
       : proportionalWords(caption);
-  const activeIdx = findActiveWordIndex(words, elapsedMs);
+  const activeIdx =
+    style.wordHighlight === "none" ? -1 : findActiveWordIndex(words, elapsedMs);
 
   // Auto-size: short chunks get bigger type so a 2-word hook punches at the
-  // same legibility budget as a 4-word phrase. Numbers from yt-studio's
-  // production renders.
+  // same legibility budget as a 4-word phrase. The admin's size_scale multiplies
+  // the base size so a global tweak shifts every chunk together.
   const wordCount = words.length;
-  const fontSize = wordCount <= 4 ? 96 : wordCount <= 6 ? 80 : 64;
+  const baseFontSize = wordCount <= 4 ? 96 : wordCount <= 6 ? 80 : 64;
+  const fontSize = Math.round(baseFontSize * style.sizeScale);
 
   return (
     <div

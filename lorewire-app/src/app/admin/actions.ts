@@ -89,3 +89,43 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
   await setSetting(key, String(formData.get("value") ?? ""));
   revalidatePath("/admin/settings");
 }
+
+// Wave 3 Phase 1: save all 14 caption template fields in one round-trip.
+// Each setting is written individually; the server logs the keys that
+// actually changed (compared to the form's prevValues) so an audit trail
+// shows which knob the admin touched without leaking the raw values.
+const CAPTION_TEMPLATE_KEYS = [
+  "caption.position_y",
+  "caption.size_scale",
+  "caption.padding_x",
+  "caption.text_transform",
+  "caption.letter_spacing",
+  "caption.line_height",
+  "caption.font_weight",
+  "caption.color",
+  "caption.outline_color",
+  "caption.outline_width",
+  "caption.active_word_color",
+  "caption.spoken_word_color",
+  "caption.entry_effect",
+  "caption.word_highlight",
+] as const;
+
+export async function saveCaptionTemplateAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const changedKeys: string[] = [];
+  for (const key of CAPTION_TEMPLATE_KEYS) {
+    const next = String(formData.get(key) ?? "").trim();
+    const prev = String(formData.get(`__prev__${key}`) ?? "").trim();
+    if (next !== prev) {
+      await setSetting(key, next);
+      changedKeys.push(key);
+    }
+  }
+  if (changedKeys.length > 0) {
+    console.info("[admin caption-template save]", { changed: changedKeys });
+  }
+  revalidatePath("/admin/templates");
+}

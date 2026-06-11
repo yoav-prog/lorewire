@@ -38,6 +38,90 @@ MAX_WORDS_PER_CHUNK = 4
 PAUSE_BREAK_MS = 400
 PUNCTUATION_BREAK_RE = re.compile(r"[.!?,;:]$")
 
+# --- caption template (Wave 3 Phase 1) ---------------------------------------
+# Field -> (parser, default). Parser is responsible for clamping; a malformed
+# value falls back to the default and emits a warning so a render that surprises
+# the admin can be traced back to which field misbehaved.
+_CAPTION_DEFAULTS: dict = {
+    "position_y": 0.55,
+    "size_scale": 1.0,
+    "padding_x": 64,
+    "text_transform": "uppercase",
+    "letter_spacing": -0.5,
+    "line_height": 1.05,
+    "font_weight": 900,
+    "color": "#facc15",
+    "outline_color": "#0f172a",
+    "outline_width": 6,
+    "active_word_color": "#ffffff",
+    "spoken_word_color": "rgba(250, 204, 21, 0.45)",
+    "entry_effect": "fade",
+    "word_highlight": "karaoke",
+}
+
+_CAPTION_ENUMS: dict = {
+    "text_transform": {"uppercase", "none", "lowercase"},
+    "entry_effect": {"none", "fade", "pop", "slide-up"},
+    "word_highlight": {"none", "karaoke", "color", "scale", "background"},
+}
+
+# (field, low, high) for numeric clamping.
+_CAPTION_NUMERIC_RANGES: dict = {
+    "position_y": (0.0, 1.0),
+    "size_scale": (0.1, 3.0),
+    "padding_x": (0, 200),
+    "letter_spacing": (-10, 10),
+    "line_height": (0.5, 3.0),
+    "font_weight": (100, 900),
+    "outline_width": (0, 12),
+}
+
+
+def _coerce_caption_field(field: str, raw: str | None):
+    """Parse a raw setting string into a typed value, clamped to range. Returns
+    the default + logs a warning on any parse failure so the operator can see
+    which field misbehaved."""
+    if raw is None or raw == "":
+        return _CAPTION_DEFAULTS[field]
+    default = _CAPTION_DEFAULTS[field]
+    if field in _CAPTION_ENUMS:
+        v = str(raw).strip().lower()
+        if v in _CAPTION_ENUMS[field]:
+            return v
+        print(f"[caption template] {field!r} invalid enum value {raw!r}, using default {default!r}")
+        return default
+    if field in _CAPTION_NUMERIC_RANGES:
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            print(f"[caption template] {field!r} non-numeric value {raw!r}, using default {default!r}")
+            return default
+        low, high = _CAPTION_NUMERIC_RANGES[field]
+        v = max(low, min(high, v))
+        # font_weight + padding_x + outline_width are integers; keep them whole.
+        if field in ("font_weight", "padding_x", "outline_width"):
+            return int(round(v))
+        return v
+    # Color / string passthrough. Defensive: a few obvious bad inputs fall back.
+    s = str(raw).strip()
+    if len(s) > 80 or "javascript:" in s.lower() or "<" in s:
+        print(f"[caption template] {field!r} rejected value (length/format), using default {default!r}")
+        return default
+    return s
+
+
+def resolve_caption_template(get_setting) -> dict:
+    """Walk the 14 `caption.*` settings keys, parse each, return a dict suitable
+    for the Remotion composition's `config.caption_template` prop.
+
+    `get_setting` is injected (function: key -> str | None) so tests can stub
+    a fake store without touching the real DB.
+    """
+    return {
+        field: _coerce_caption_field(field, get_setting(f"caption.{field}"))
+        for field in _CAPTION_DEFAULTS
+    }
+
 
 def generate_video(
     story_id: str,
@@ -84,6 +168,13 @@ def generate_video(
     ken_burns_raw = (_store.get_setting("video.ken_burns") or "").strip().lower()
     ken_burns = ken_burns_raw in {"1", "true", "on", "yes"}
 
+    # Wave 3 Phase 1: resolve the global caption template from settings and
+    # embed it in the props so the Remotion composition can read it instead of
+    # the old hardcoded constants. Defaults match the original doodle-yellow
+    # look so existing renders are unchanged when no admin override is set.
+    caption_template = resolve_caption_template(_store.get_setting)
+    print(f"[video id={safe_id} caption-template] {len(caption_template)} fields resolved")
+
     config = {
         "voiceover_url": static_audio,
         "title": _truncate_title(title),
@@ -92,6 +183,7 @@ def generate_video(
         "doodle_frames": doodle_frames,
         "captions": captions,
         "ken_burns": ken_burns,
+        "caption_template": caption_template,
     }
 
     props_dir = video_project / ".props"
