@@ -122,9 +122,16 @@ export async function saveCaptionTemplateAction(
   formData: FormData,
 ): Promise<void> {
   await requireAdmin();
-  const scope = String(formData.get("__scope") ?? "global");
+  const rawScope = String(formData.get("__scope") ?? "global");
   const cat = String(formData.get("__cat") ?? "") || undefined;
   const story = String(formData.get("__story") ?? "") || undefined;
+  // Scope guard: cat-scope without cat, or story-scope without story, is an
+  // incomplete selection. Refuse to write — otherwise the writes would land
+  // at the global prefix and silently overwrite the wrong tier.
+  const scope =
+    (rawScope === "cat" && !cat) || (rawScope === "story" && !story)
+      ? "global"
+      : rawScope;
   const prefix = captionPrefix(scope, cat, story);
 
   const changedKeys: string[] = [];
@@ -137,8 +144,23 @@ export async function saveCaptionTemplateAction(
       changedKeys.push(`${prefix}.${bare}`);
     }
   }
-  if (changedKeys.length > 0) {
-    console.info("[admin caption-template save]", { scope, cat, story, changed: changedKeys });
-  }
+  console.info("[admin caption-template save]", {
+    rawScope,
+    resolvedScope: scope,
+    cat,
+    story,
+    changed: changedKeys,
+    changedCount: changedKeys.length,
+  });
   revalidatePath("/admin/templates");
+  // Redirect back to the same scope view with ?saved=1 so the page renders a
+  // saved-banner instead of giving the admin no feedback.
+  const search = new URLSearchParams();
+  if (scope !== "global") {
+    search.set("scope", scope);
+    if (scope === "cat" && cat) search.set("cat", cat);
+    if (scope === "story" && story) search.set("story", story);
+  }
+  search.set("saved", "1");
+  redirect(`/admin/templates?${search.toString()}`);
 }

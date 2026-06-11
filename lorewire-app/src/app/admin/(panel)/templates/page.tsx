@@ -112,16 +112,26 @@ async function inheritedValue(
 }
 
 interface PageProps {
-  searchParams: Promise<{ scope?: string; cat?: string; story?: string }>;
+  searchParams: Promise<{ scope?: string; cat?: string; story?: string; saved?: string }>;
 }
 
 export default async function TemplatesPage({ searchParams }: PageProps) {
   await requireAdmin();
   const params = await searchParams;
-  const scope = params.scope === "cat" || params.scope === "story" ? params.scope : "global";
+  const requestedScope = params.scope === "cat" || params.scope === "story" ? params.scope : "global";
   const cat = params.cat;
   const story = params.story;
+  // Scope guard: cat scope without a category, or story scope without a story,
+  // is an incomplete selection. The form would otherwise read/write against
+  // the global prefix while showing "Save story/category overrides", silently
+  // overwriting global settings. Force such requests back to the empty-state
+  // view that asks the admin to pick before editing.
+  const scopeIsIncomplete =
+    (requestedScope === "cat" && !cat) ||
+    (requestedScope === "story" && !story);
+  const scope = scopeIsIncomplete ? "global" : requestedScope;
   const prefix = prefixFor(scope, cat, story);
+  const justSaved = params.saved === "1";
 
   // Stories list for the story-scope dropdown. Cap at 100 — the admin can
   // type-search via the browser's built-in select filtering.
@@ -167,6 +177,20 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
       </header>
 
       <ScopeSwitcher current={scope} cat={cat} story={story} stories={stories} />
+
+      {scopeIsIncomplete && (
+        <div className="rounded-xl border border-accent/50 bg-accent/10 px-4 py-3 text-[13px] text-ink">
+          {requestedScope === "story" ? "Pick a story" : "Pick a category"} from the
+          switcher above to edit overrides for that scope. Showing the global
+          template until you do.
+        </div>
+      )}
+
+      {justSaved && (
+        <div className="rounded-xl border border-green-500/50 bg-green-500/10 px-4 py-3 text-[13px] text-ink">
+          Saved.
+        </div>
+      )}
 
       <div className="rounded-xl border border-line bg-surface2 px-4 py-2.5">
         <span className="font-mono text-[11px] uppercase tracking-wider text-muted">Editing:</span>{" "}

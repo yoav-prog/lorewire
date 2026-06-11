@@ -203,6 +203,23 @@ def generate_video(
     ken_burns_raw = (_store.get_setting("video.ken_burns") or "").strip().lower()
     ken_burns = ken_burns_raw in {"1", "true", "on", "yes"}
 
+    # Wave 3 Phase 3: three composition-only motion beats. Each is off by
+    # default so renders are byte-identical to today's output when the admin
+    # hasn't touched the toggles. The composition reads each flag and skips
+    # the layer entirely when off (no work done, no extra render cost).
+    def _truthy(raw: str | None) -> bool:
+        return (raw or "").strip().lower() in {"1", "true", "on", "yes"}
+
+    motion = {
+        "micro_wiggle": _truthy(_store.get_setting("video.micro_wiggle")),
+        "label_pop": _truthy(_store.get_setting("video.label_pop")),
+        "scribble_draw": _truthy(_store.get_setting("video.scribble_draw")),
+    }
+    print(
+        f"[video id={safe_id} motion] micro_wiggle={motion['micro_wiggle']} "
+        f"label_pop={motion['label_pop']} scribble_draw={motion['scribble_draw']}"
+    )
+
     # Wave 3 Phase 2: walk the per-story -> per-category -> global scope chain
     # so a story override beats a category override beats the global default.
     # Falls back to defaults when nothing is set, identical to Phase 1 behavior.
@@ -221,6 +238,7 @@ def generate_video(
         "captions": captions,
         "ken_burns": ken_burns,
         "caption_template": caption_template,
+        "motion": motion,
     }
 
     props_dir = video_project / ".props"
