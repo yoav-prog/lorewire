@@ -44,6 +44,10 @@ button {
   -webkit-appearance: none;
   appearance: none;
 }
+button:not(:disabled),
+[role="button"]:not(:disabled) {
+  cursor: pointer;
+}
 
 /* hide scrollbars */
 .noscroll {
