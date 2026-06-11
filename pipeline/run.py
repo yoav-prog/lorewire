@@ -60,14 +60,18 @@ def main() -> None:
         idea = stages.make_idea(post, dry)
         research = stages.research(idea, post, dry)
         body = stages.write_article(idea, research, dry)
+        # Branded title + synopsis replace the raw Reddit headline so the live
+        # site doesn't show "AITA for ..." or a 160-char post excerpt. The
+        # original headline survives via reddit_id for debugging / audits.
+        branded_title, branded_syn = stages.make_title_and_synopsis(idea, body, dry)
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         row = {
             "id": idea["reddit_id"],
             "reddit_id": idea["reddit_id"],
             "slug": idea["reddit_id"],
             "category": idea["category"],
-            "title": idea["headline"],
-            "summary": post.get("selftext", "")[:160],
+            "title": branded_title or idea["headline"],
+            "summary": branded_syn or post.get("selftext", "")[:160],
             "body": body,
             # Fresh articles land in the review queue, not live.
             "status": "draft" if dry else "review",

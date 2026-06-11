@@ -188,6 +188,89 @@ DEFAULT_IMAGE_STYLE = (
 )
 
 
+# --- branded title + synopsis -------------------------------------------------
+
+# Style anchors derived from the sample catalog. Future LLM calls follow this
+# voice instead of leaking the raw Reddit headline (which is usually a question
+# starting with "AITA for ...") into the live site.
+TITLE_STYLE_EXAMPLES = [
+    "THE $800 ENVELOPE",
+    "THE NEIGHBOR'S FENCE",
+    "SHE REPLIED ALL",
+    "WRONG NUMBER, RIGHT GUY",
+    "GIVE ME YOUR SEAT",
+    "THE PARKING SPOT WAR",
+    "IT'S MY BIRTHDAY MONTH",
+    "THE WEDDING CRASHER",
+    "MY ROOMMATE'S 3AM RULES",
+]
+
+
+def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, str]:
+    """Generate a branded LoreWire title + 1-sentence synopsis from the article.
+
+    The Reddit headline ("AITA for ...") is fine in the DB as a debug trail
+    but should never reach the live site. This call returns the public-facing
+    title + synopsis the CMS publishes. Both are also Typography-cleaned so
+    smart quotes / em dashes never sneak in. Dry-run returns deterministic
+    stubs so the rest of the pipeline can run end to end without an LLM key.
+    """
+    from pipeline import llm
+
+    if dry_run:
+        # The dry-run stubs intentionally keep the brand voice so a screenshot
+        # of dry-run output already looks like a real LoreWire piece.
+        return (f"[DRY] {idea['headline'][:40].upper()}", idea["headline"][:140])
+
+    examples = "\n".join(f"- {t}" for t in TITLE_STYLE_EXAMPLES)
+    instruction = (
+        "You write headlines for LoreWire, where true internet stories are "
+        "retold as short, vivid pieces. Read the article below and return "
+        "exactly one JSON object with two keys:\n"
+        '  "title": a short branded title, ALL CAPS, 2 to 6 words, evocative, '
+        "no question marks, no Reddit-isms (\"AITA\", \"WIBTA\"), no leading "
+        '"THE STORY OF". The same voice as these:\n'
+        f"{examples}\n"
+        '  "synopsis": one sentence, 18 to 30 words, hook-y, written in the third '
+        "person, tells the reader what they're about to read without spoiling the "
+        "ending. No question marks, no clickbait.\n\n"
+        "Return ONLY the JSON object, no surrounding prose.\n\n"
+        f"Article:\n{body}"
+    )
+    # 2000 token budget: gpt-5-nano is a reasoning model and burns most of
+    # max_completion_tokens on hidden reasoning before emitting output. A
+    # 400-token cap returned empty strings; 2000 leaves ample headroom for
+    # the JSON object after reasoning.
+    raw = llm.chat(instruction, 2000, model="openai/gpt-5-nano").strip()
+    title, synopsis = _parse_title_synopsis(raw)
+    return _clean_typography(title), _clean_typography(synopsis)
+
+
+def _parse_title_synopsis(raw: str) -> tuple[str, str]:
+    """Best-effort JSON parse; falls back to a safe pair when the model misbehaves."""
+    snippet = raw
+    if "```" in snippet:
+        # Strip ``` fences and an optional language tag
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("{"):
+                snippet = stripped
+                break
+    start, end = snippet.find("{"), snippet.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(snippet[start : end + 1])
+            title = str(parsed.get("title", "")).strip()
+            synopsis = str(parsed.get("synopsis", "")).strip()
+            if title and synopsis:
+                return title, synopsis
+        except json.JSONDecodeError:
+            pass
+    return "", ""
+
+
 def make_image_prompts(idea: dict, body: str, dry_run: bool, n: int = 4) -> list[str]:
     """Build N image prompts grounded in the article (1 hero + n-1 scene shots).
 

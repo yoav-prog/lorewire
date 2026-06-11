@@ -59,5 +59,34 @@ class ParsePromptListTests(unittest.TestCase):
         self.assertEqual(out, ["hero shot", "scene"])
 
 
+class ParseTitleSynopsisTests(unittest.TestCase):
+    def test_clean_json(self):
+        raw = '{"title": "THE BIG ENVELOPE", "synopsis": "A coworker collects money for a gift and the envelope goes missing."}'
+        title, syn = stages._parse_title_synopsis(raw)
+        self.assertEqual(title, "THE BIG ENVELOPE")
+        self.assertTrue(syn.startswith("A coworker"))
+
+    def test_fenced_code_block(self):
+        raw = '```json\n{"title": "X Y Z", "synopsis": "abc"}\n```'
+        title, syn = stages._parse_title_synopsis(raw)
+        self.assertEqual(title, "X Y Z")
+        self.assertEqual(syn, "abc")
+
+    def test_strips_leading_prose(self):
+        raw = 'Here you go:\n\n{"title": "T", "synopsis": "S"}'
+        title, syn = stages._parse_title_synopsis(raw)
+        self.assertEqual(title, "T")
+        self.assertEqual(syn, "S")
+
+    def test_falls_back_on_garbage(self):
+        title, syn = stages._parse_title_synopsis("sorry can't do that")
+        self.assertEqual(title, "")
+        self.assertEqual(syn, "")
+
+    def test_falls_back_when_either_missing(self):
+        title, syn = stages._parse_title_synopsis('{"title": "X"}')
+        self.assertEqual((title, syn), ("", ""))
+
+
 if __name__ == "__main__":
     unittest.main()
