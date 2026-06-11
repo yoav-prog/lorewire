@@ -49,11 +49,7 @@ export async function chatCompletion(opts: ChatOpts): Promise<ChatResult> {
     return openaiChat(model, opts);
   }
   if (provider === "kie") {
-    return {
-      ok: false,
-      error:
-        "kie.ai LLM models are not wired on the Node side yet. Pick an OpenAI model in Settings → Models, or wire kie.ai's chat endpoint.",
-    };
+    return kieChat(model, opts);
   }
   if (provider === "anthropic") {
     return {
@@ -65,44 +61,92 @@ export async function chatCompletion(opts: ChatOpts): Promise<ChatResult> {
 }
 
 async function openaiChat(model: string, opts: ChatOpts): Promise<ChatResult> {
-  const key = process.env.OPENAI_API_KEY?.trim();
-  if (!key) {
-    return { ok: false, error: "OPENAI_API_KEY not configured" };
+  return openaiCompatibleChat({
+    label: "openai",
+    base: "https://api.openai.com/v1",
+    apiKey: process.env.OPENAI_API_KEY?.trim() ?? "",
+    apiKeyEnvName: "OPENAI_API_KEY",
+    model,
+    opts,
+  });
+}
+
+async function kieChat(model: string, opts: ChatOpts): Promise<ChatResult> {
+  // kie.ai operates as a unified gateway with an OpenAI-compatible chat
+  // completions endpoint. The image-side API at api.kie.ai/api/v1/jobs is
+  // an async createTask pattern; the LLM gateway uses the OpenAI shape at
+  // api.kie.ai/v1/chat/completions. KIE_BASE_URL can override if their
+  // routing ever changes — fail with the upstream body verbatim so the
+  // admin sees exactly what kie's server reported.
+  return openaiCompatibleChat({
+    label: "kie",
+    base: process.env.KIE_BASE_URL?.trim() || "https://api.kie.ai/v1",
+    apiKey: process.env.KIE_API_KEY?.trim() ?? "",
+    apiKeyEnvName: "KIE_API_KEY",
+    model,
+    opts,
+  });
+}
+
+interface OpenAICompatibleArgs {
+  label: string;
+  base: string;
+  apiKey: string;
+  apiKeyEnvName: string;
+  model: string;
+  opts: ChatOpts;
+}
+
+async function openaiCompatibleChat(
+  args: OpenAICompatibleArgs,
+): Promise<ChatResult> {
+  if (!args.apiKey) {
+    return { ok: false, error: `${args.apiKeyEnvName} not configured` };
   }
   try {
     const body: Record<string, unknown> = {
-      model,
-      messages: opts.messages,
-      temperature: opts.temperature ?? 0.7,
+      model: args.model,
+      messages: args.opts.messages,
+      temperature: args.opts.temperature ?? 0.7,
     };
-    if (opts.jsonMode) {
+    if (args.opts.jsonMode) {
       body.response_format = { type: "json_object" };
     }
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const url = `${args.base.replace(/\/$/, "")}/chat/completions`;
+    const r = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
+        Authorization: `Bearer ${args.apiKey}`,
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(45_000),
     });
     if (!r.ok) {
       const errBody = (await r.text()).slice(0, 300);
-      console.warn("[llm openai] non-ok", { status: r.status, model });
-      return { ok: false, error: `OpenAI ${r.status}: ${errBody}` };
+      console.warn(`[llm ${args.label}] non-ok`, {
+        status: r.status,
+        model: args.model,
+      });
+      return {
+        ok: false,
+        error: `${args.label} ${r.status}: ${errBody}`,
+      };
     }
     const data = (await r.json()) as {
       choices?: { message?: { content?: string } }[];
     };
     const content = data?.choices?.[0]?.message?.content ?? "";
     if (!content) {
-      return { ok: false, error: "OpenAI returned empty content" };
+      return { ok: false, error: `${args.label} returned empty content` };
     }
-    console.info("[llm openai] ok", { model, chars: content.length });
-    return { ok: true, content, provider: "openai", model };
+    console.info(`[llm ${args.label}] ok`, {
+      model: args.model,
+      chars: content.length,
+    });
+    return { ok: true, content, provider: args.label, model: args.model };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { ok: false, error: `OpenAI call failed: ${msg}` };
+    return { ok: false, error: `${args.label} call failed: ${msg}` };
   }
 }
