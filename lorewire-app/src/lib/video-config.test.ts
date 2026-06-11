@@ -506,6 +506,36 @@ describe("applyConfigPatch", () => {
     expect(out._locks).toBeUndefined();
   });
 
+  it("captions edit pattern: patches whole array + locks per-chunk text", () => {
+    // The CaptionsPanel in EditorClient sends the whole captions array
+    // (because the editor only sees them all together) plus per-chunk lock
+    // paths for the chunks the user actually edited. This test pins that
+    // contract end-to-end through applyConfigPatch → parseVideoConfig.
+    const baseWithMultiChunk: ShortVideoConfig = {
+      ...base,
+      duration_ms: 6000,
+      captions: [
+        { start_ms: 0, end_ms: 2000, text: "one" },
+        { start_ms: 2000, end_ms: 4000, text: "two" },
+        { start_ms: 4000, end_ms: 6000, text: "three" },
+      ],
+    };
+    const edited = [...baseWithMultiChunk.captions];
+    edited[1] = { ...edited[1], text: "TWO!" };
+    const out = applyConfigPatch(
+      baseWithMultiChunk,
+      { captions: edited },
+      ["captions[1].text"],
+    );
+    expect(out.captions[1].text).toBe("TWO!");
+    expect(out.captions[0].text).toBe("one");
+    expect(out.captions[2].text).toBe("three");
+    expect(out._locks).toEqual({ "captions[1].text": true });
+    // And the result must round-trip — caption timings stay valid.
+    const r = parseVideoConfig(out);
+    expect(r.ok).toBe(true);
+  });
+
   it("supports lock + unlock in the same call", () => {
     const withLocks: ShortVideoConfig = {
       ...base,

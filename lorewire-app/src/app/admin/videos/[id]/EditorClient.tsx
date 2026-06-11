@@ -22,7 +22,10 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { statusClass } from "@/app/admin/ui";
-import type { ShortVideoConfig } from "@/lib/video-config";
+import type {
+  ShortCaptionChunk,
+  ShortVideoConfig,
+} from "@/lib/video-config";
 import type { RenderRow, RenderStatus } from "@/lib/video-render-queue";
 import {
   PreviewComposition,
@@ -93,6 +96,13 @@ export default function EditorClient({
     clip_end_ms: config.clip_end_ms ?? config.duration_ms,
   });
 
+  // Caption draft is held separately from `draft` because it's an array
+  // (so the equality comparison costs more) and it's only owned by the
+  // captions tab. `null` means "no edits" — preview reads from `config`.
+  const [draftCaptions, setDraftCaptions] = useState<
+    ShortCaptionChunk[] | null
+  >(null);
+
   // The config the Player actually renders — persisted base with the
   // current draft fields merged in. Memoised so the Player doesn't see a
   // new object reference on every render.
@@ -101,8 +111,9 @@ export default function EditorClient({
       ...config,
       clip_start_ms: draft.clip_start_ms,
       clip_end_ms: draft.clip_end_ms,
+      captions: draftCaptions ?? config.captions,
     }),
-    [config, draft.clip_start_ms, draft.clip_end_ms],
+    [config, draft.clip_start_ms, draft.clip_end_ms, draftCaptions],
   );
 
   // Derived Player props — duration shrinks to the trimmed window so the
@@ -252,6 +263,13 @@ export default function EditorClient({
                 config={config}
                 draft={draft}
                 onDraftChange={setDraft}
+              />
+            ) : tab === "captions" ? (
+              <CaptionsPanel
+                storyId={storyId}
+                config={config}
+                draft={draftCaptions}
+                onDraftChange={setDraftCaptions}
               />
             ) : (
               <TabStub tab={tab} config={config} />
@@ -800,6 +818,234 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Math.round(n)));
 }
 
+// ─── Captions panel ──────────────────────────────────────────────────────────
+// Edit caption *text* per chunk; word-level timings are intentionally not
+// editable in v1 (see plan §Decisions). The pipeline's forced alignment is
+// the source of truth for `start_ms` / `end_ms` / `words[]`; we keep that
+// structure verbatim and only swap the `text` string so the karaoke
+// highlight keeps tracking the right audio window.
+//
+// Lock paths land per-chunk text (`captions[<i>].text`), so a pipeline
+// re-run that produces new alignment can still apply the user's edited
+// text to whichever chunks survived.
+
+function CaptionsPanel({
+  storyId,
+  config,
+  draft,
+  onDraftChange,
+}: {
+  storyId: string;
+  config: ShortVideoConfig;
+  draft: ShortCaptionChunk[] | null;
+  onDraftChange: (next: ShortCaptionChunk[] | null) => void;
+}) {
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [okFlash, setOkFlash] = useState(false);
+
+  // Source-of-truth captions for display. When draft is null (no edits),
+  // we render the persisted config; the draft array tracks edits.
+  const current = draft ?? config.captions;
+
+  // Diff against persisted to figure out which chunks the user changed —
+  // those are the lock paths we send.
+  const dirtyIndices: number[] = [];
+  if (draft) {
+    for (let i = 0; i < draft.length; i++) {
+      const persisted = config.captions[i]?.text ?? "";
+      if (draft[i].text !== persisted) dirtyIndices.push(i);
+    }
+  }
+
+  const dirty = dirtyIndices.length > 0;
+
+  const handleEdit = (idx: number, newText: string) => {
+    const base = draft ?? config.captions;
+    const next = base.map((c, i) =>
+      i === idx ? { ...c, text: newText } : c,
+    );
+    onDraftChange(next);
+  };
+
+  const handleSave = () => {
+    if (!draft || !dirty) return;
+    setError(null);
+    setOkFlash(false);
+    startTransition(async () => {
+      const lockPaths = dirtyIndices.map((i) => `captions[${i}].text`);
+      const result = await saveVideoConfigPatch(
+        storyId,
+        { captions: draft },
+        lockPaths,
+      );
+      if (result.ok) {
+        // Clearing the draft means the next render of EditorClient will
+        // read from the freshly revalidated `config` — no stale overlay.
+        onDraftChange(null);
+        setOkFlash(true);
+        setTimeout(() => setOkFlash(false), 1500);
+      } else {
+        setError(result.error ?? "Save failed");
+      }
+    });
+  };
+
+  const handleReset = () => {
+    onDraftChange(null);
+    setError(null);
+  };
+
+  const handleUnlock = (idx: number) => {
+    startTransition(async () => {
+      await saveVideoConfigPatch(
+        storyId,
+        {},
+        [],
+        [`captions[${idx}].text`],
+      );
+    });
+  };
+
+  if (current.length === 0) {
+    return (
+      <div className="space-y-3">
+        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          Captions
+        </p>
+        <p className="text-[12px] leading-relaxed text-muted">
+          No caption chunks yet. The pipeline’s alignment step populates
+          these from the voiceover transcript.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          Captions · {current.length} chunks
+        </p>
+        <p className="text-[12px] leading-relaxed text-muted">
+          Edit caption text per chunk. Timings stay locked to forced
+          alignment so the karaoke highlight tracks the right audio window.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {current.map((chunk, idx) => {
+          const persistedText = config.captions[idx]?.text ?? "";
+          const isDirty = draft ? chunk.text !== persistedText : false;
+          const isLocked = Boolean(config._locks?.[`captions[${idx}].text`]);
+          return (
+            <CaptionRow
+              key={idx}
+              index={idx}
+              chunk={chunk}
+              isDirty={isDirty}
+              isLocked={isLocked}
+              onEdit={(t) => handleEdit(idx, t)}
+              onUnlock={isLocked ? () => handleUnlock(idx) : undefined}
+            />
+          );
+        })}
+      </div>
+
+      {error && (
+        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
+          {error}
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!dirty || pending}
+          className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending
+            ? "Saving…"
+            : okFlash
+              ? "Saved ✓"
+              : dirty
+                ? `Save ${dirtyIndices.length} caption${
+                    dirtyIndices.length === 1 ? "" : "s"
+                  }`
+                : "Save"}
+        </button>
+        <button
+          type="button"
+          onClick={handleReset}
+          disabled={!dirty || pending}
+          className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Reset
+        </button>
+      </div>
+
+      <p className="font-mono text-[10px] leading-relaxed text-muted">
+        Saved edits stamp `captions[i].text` locks so the next pipeline run
+        keeps your text. Unlock a chunk to let the pipeline rewrite it.
+      </p>
+    </div>
+  );
+}
+
+function CaptionRow({
+  index,
+  chunk,
+  isDirty,
+  isLocked,
+  onEdit,
+  onUnlock,
+}: {
+  index: number;
+  chunk: ShortCaptionChunk;
+  isDirty: boolean;
+  isLocked: boolean;
+  onEdit: (next: string) => void;
+  onUnlock?: () => void;
+}) {
+  return (
+    <div
+      className="space-y-1.5 rounded-md border bg-bg p-3"
+      style={{
+        borderColor: isDirty
+          ? "var(--color-accent)"
+          : "var(--color-line)",
+      }}
+    >
+      <div className="flex items-center justify-between gap-2 text-[10px]">
+        <span className="font-mono uppercase tracking-wider text-muted">
+          chunk {String(index + 1).padStart(2, "0")}
+          {isLocked && <span className="ml-1.5 text-accent">🔒</span>}
+        </span>
+        <span className="font-mono tabular-nums text-muted">
+          {(chunk.start_ms / 1000).toFixed(2)}s &rarr;{" "}
+          {(chunk.end_ms / 1000).toFixed(2)}s
+        </span>
+      </div>
+      <textarea
+        value={chunk.text}
+        onChange={(e) => onEdit(e.target.value)}
+        rows={2}
+        className="w-full resize-none rounded border border-line bg-surface px-2 py-1 text-[12px] leading-snug text-ink outline-none focus:border-accent"
+      />
+      {isLocked && onUnlock && (
+        <button
+          type="button"
+          onClick={onUnlock}
+          className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+        >
+          Unlock — let the pipeline rewrite this
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── Tab stubs ────────────────────────────────────────────────────────────────
 // Each tab gets a tiny "what's coming" panel so the skeleton communicates
 // the plan to whichever admin opens it before the editing surfaces ship.
@@ -817,18 +1063,8 @@ function TabStub({
     case "trim":
       return null;
     case "captions":
-      return (
-        <ComingSoon
-          when="Day 8"
-          summary="Edit caption text · timings frozen"
-          detail="Edit text per chunk. Word-level timings stay locked to forced alignment so karaoke highlight never drifts."
-        >
-          <FieldRow
-            label="chunks"
-            value={String(config.captions.length)}
-          />
-        </ComingSoon>
-      );
+      // Captions is now live (rendered by CaptionsPanel above the switch).
+      return null;
     case "audio":
       return (
         <ComingSoon
