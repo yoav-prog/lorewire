@@ -131,35 +131,54 @@ export function SegmentUploadForm({ kind, singular }: Props) {
     );
 
     setStatus("uploading");
+    // GCS does not include Access-Control-Allow-Origin on the actual PUT
+    // response (only on the preflight), so Chrome rejects the 200 OK and
+    // `fetch` throws "Failed to fetch" even when bytes successfully landed
+    // in the bucket. We can't tell from the client which case we're in —
+    // so we always call finalize, which HEAD-checks GCS authoritatively.
+    let putError: Error | null = null;
     try {
       await putChunks(file, signed.sessionUri, contentType, (sent) => {
         setProgressPct(Math.round((sent / file.size) * 100));
       });
+      console.info(`[segment upload] PUT complete segId=${signed.segId}`);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[segment upload] PUT FAILED segId=${signed.segId}: ${msg}`);
-      setStatus("error");
-      setErrorMsg(`Upload failed: ${msg}`);
-      // Row stays `pending`. The worker's abandoned-sweep will mark it
-      // `error` after the configured threshold so it shows up in the admin
-      // list with a delete button.
-      return;
+      putError = e instanceof Error ? e : new Error(String(e));
+      console.warn(
+        `[segment upload] PUT threw segId=${signed.segId}: ${putError.message} ` +
+          `(may still have succeeded — finalize will HEAD-check GCS)`,
+      );
     }
-    console.info(`[segment upload] PUT complete segId=${signed.segId}`);
 
     setStatus("finalizing");
+    let finalizeResult: { status?: string; error?: string };
     try {
-      await finalize(signed.segId);
+      finalizeResult = await finalize(signed.segId, putError === null);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(
         `[segment upload] finalize FAILED segId=${signed.segId}: ${msg}`,
       );
       setStatus("error");
-      setErrorMsg(`Finalize failed: ${msg}`);
+      setErrorMsg(
+        putError
+          ? `Upload failed: ${putError.message}`
+          : `Finalize failed: ${msg}`,
+      );
       return;
     }
-    console.info(`[segment upload] done segId=${signed.segId}`);
+    console.info(
+      `[segment upload] finalize ok segId=${signed.segId} status=${finalizeResult.status}`,
+    );
+
+    if (finalizeResult.status === "error") {
+      setStatus("error");
+      setErrorMsg(
+        `Upload failed: ${finalizeResult.error ?? "bytes did not reach GCS"}`,
+      );
+      router.refresh();
+      return;
+    }
 
     setStatus("done");
     resetForm();
@@ -262,16 +281,26 @@ async function signUpload(body: {
   return (await resp.json()) as SignUploadResponse;
 }
 
-async function finalize(segId: string): Promise<void> {
+async function finalize(
+  segId: string,
+  clientReportedOk: boolean,
+): Promise<{ status?: string; error?: string }> {
   const resp = await fetch("/api/admin/segments/finalize", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ segId }),
+    body: JSON.stringify({ segId, clientReportedOk }),
   });
-  if (!resp.ok) {
-    const data = (await resp.json().catch(() => ({}))) as ErrorResponse;
+  // 502 here means "no bytes in GCS — the upload genuinely failed". The
+  // server already wrote status='error' to the row; we surface its body
+  // to the caller so the UI can render the message.
+  const data = (await resp.json().catch(() => ({}))) as {
+    status?: string;
+    error?: string;
+  };
+  if (!resp.ok && resp.status !== 502) {
     throw new Error(data.error || `HTTP ${resp.status}`);
   }
+  return data;
 }
 
 // PUT the file to `sessionUri` in `CHUNK_BYTES`-sized chunks. Each chunk

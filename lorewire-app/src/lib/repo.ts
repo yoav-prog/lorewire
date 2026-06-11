@@ -390,6 +390,21 @@ export async function markSegmentUploading(id: string): Promise<void> {
   );
 }
 
+// Flip a row to status='error' with a one-line message. Used by finalize
+// when the GCS HEAD check finds no bytes — the upload genuinely failed and
+// we want the admin to see the failure immediately, not after the 5-minute
+// abandoned-sweep. Idempotent on already-error rows.
+export async function setSegmentError(
+  id: string,
+  message: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE video_segments SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+    ["error", message.slice(0, 500), now, id],
+  );
+}
+
 export async function setSegmentEnabled(
   id: string,
   enabled: boolean,
