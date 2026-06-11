@@ -855,6 +855,66 @@ export async function getRevision(id: string): Promise<RevisionRow | null> {
   );
 }
 
+// Promote a revision to "named." Named revisions carry a writer-supplied
+// label and survive retention pruning so a known-good snapshot stays
+// reachable indefinitely. Idempotent: re-naming an already-named revision
+// just updates the label.
+export async function nameRevision(
+  id: string,
+  name: string,
+): Promise<void> {
+  if (!id) return;
+  const cleaned = name.trim().slice(0, 120);
+  await run(
+    "UPDATE article_revisions SET name = ?, is_named = 1 WHERE id = ?",
+    [cleaned || null, id],
+  );
+  console.info("[articles revisions] named", { id, nameLen: cleaned.length });
+}
+
+// Drop the named status from a revision. The label clears too — keeping
+// the label around would confuse "Last saved" timelines without serving a
+// purpose, since the only reason to demote is to let pruning take it.
+export async function unnameRevision(id: string): Promise<void> {
+  if (!id) return;
+  await run(
+    "UPDATE article_revisions SET name = NULL, is_named = 0 WHERE id = ?",
+    [id],
+  );
+  console.info("[articles revisions] unnamed", { id });
+}
+
+// Retention prune. Keeps the latest `keep` unnamed revisions plus every
+// named revision (regardless of age). Returns the count removed so the
+// caller can log it. We delete in one statement against an explicit list
+// of ids so SQLite and Postgres both behave identically.
+export async function pruneRevisions(
+  articleId: string,
+  keep: number = 50,
+): Promise<number> {
+  if (!articleId || keep < 0) return 0;
+  const unnamed = await all<{ id: string }>(
+    "SELECT id FROM article_revisions WHERE article_id = ? AND is_named = 0 ORDER BY created_at DESC",
+    [articleId],
+  );
+  if (unnamed.length <= keep) return 0;
+  const toDrop = unnamed.slice(keep);
+  // Build the IN clause with one placeholder per id. Cheaper than a single
+  // CTE-based delete and equally portable; we cap the slice at the unnamed
+  // count so the query stays bounded.
+  const placeholders = toDrop.map(() => "?").join(", ");
+  await run(
+    `DELETE FROM article_revisions WHERE id IN (${placeholders})`,
+    toDrop.map((r) => r.id),
+  );
+  console.info("[articles revisions] prune", {
+    articleId,
+    keep,
+    removed: toDrop.length,
+  });
+  return toDrop.length;
+}
+
 // --- unified content list (stories + articles in one inbox) ----------------
 // The admin's Content tab needs one feed across both kinds. We keep the two
 // tables (they have genuinely different lifecycles and write paths) but

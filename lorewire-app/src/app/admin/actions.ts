@@ -28,6 +28,10 @@ import {
   appendRevision,
   checkSlugAvailable,
   updateArticleSlug,
+  getRevision,
+  nameRevision,
+  unnameRevision,
+  pruneRevisions,
   type StoryStatus,
   type SegmentKind,
   type ArticleStatus,
@@ -841,6 +845,142 @@ export async function commitSheetImportAction(
     `/admin/articles?imported=${inserted}` +
       (skippedExisting > 0 ? `&skipped=${skippedExisting}` : ""),
   );
+}
+
+// --- revisions (Phase 5 slice 1) -------------------------------------------
+// Three actions cover the writer's revision workflow:
+//   nameRevision -> promote a snapshot with a writer-supplied label
+//   unnameRevision -> demote (label clears, retention can take it)
+//   restoreRevision -> write the snapshot's document back onto the article
+//                      and append a fresh revision marking the restore
+//
+// Restore is the load-bearing one: we don't replace the in-row document
+// silently — appending a new revision means the writer can undo the
+// undo just by restoring whatever was current before the restore landed.
+
+export async function nameRevisionAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const articleId = String(formData.get("article_id") ?? "");
+  const revisionId = String(formData.get("revision_id") ?? "");
+  const name = String(formData.get("name") ?? "").trim();
+  if (!articleId || !revisionId) {
+    redirectToArticles({ error: "missing-id" });
+  }
+  if (!name) {
+    redirect(
+      `/admin/articles/${articleId}/history/${revisionId}?error=missing-name`,
+    );
+  }
+  await nameRevision(revisionId, name);
+  console.info("[articles action] name-revision", { articleId, revisionId });
+  revalidatePath(`/admin/articles/${articleId}/history`);
+  revalidatePath(`/admin/articles/${articleId}/history/${revisionId}`);
+  redirect(
+    `/admin/articles/${articleId}/history/${revisionId}?named=1`,
+  );
+}
+
+export async function unnameRevisionAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const articleId = String(formData.get("article_id") ?? "");
+  const revisionId = String(formData.get("revision_id") ?? "");
+  if (!articleId || !revisionId) {
+    redirectToArticles({ error: "missing-id" });
+  }
+  await unnameRevision(revisionId);
+  console.info("[articles action] unname-revision", { articleId, revisionId });
+  revalidatePath(`/admin/articles/${articleId}/history`);
+  revalidatePath(`/admin/articles/${articleId}/history/${revisionId}`);
+  redirect(
+    `/admin/articles/${articleId}/history/${revisionId}?unnamed=1`,
+  );
+}
+
+export async function restoreRevisionAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const user = await currentUser();
+  const articleId = String(formData.get("article_id") ?? "");
+  const revisionId = String(formData.get("revision_id") ?? "");
+  if (!articleId || !revisionId) {
+    redirectToArticles({ error: "missing-id" });
+  }
+  const [article, revision] = await Promise.all([
+    getArticle(articleId),
+    getRevision(revisionId),
+  ]);
+  if (!article) redirectToArticles({ error: "not-found" });
+  if (!revision || revision.article_id !== articleId) {
+    redirect(`/admin/articles/${articleId}/history?error=revision-mismatch`);
+  }
+  // Append a revision capturing the CURRENT state BEFORE overwriting so the
+  // writer can undo the restore. Coalescing window doesn't apply here — we
+  // force an insert with coalesceWindowSec=0 because a restore is a
+  // deliberate action that should never be silently merged into a draft.
+  await appendRevision({
+    id: randomUUID(),
+    article_id: articleId,
+    document: article!.document ?? "{}",
+    payload: article!.payload ?? "{}",
+    title: article!.title ?? "",
+    status: article!.status ?? "draft",
+    author_id: user?.id ?? null,
+    coalesceWindowSec: 0,
+  });
+  // Now write the restored document onto the article. updateArticle pushes
+  // updated_at; we deliberately don't touch published_at — the public reader
+  // shouldn't see a "republished" timestamp on what is editorially the same
+  // piece moved backwards in history.
+  await updateArticle(articleId, {
+    document: revision!.document ?? "{}",
+    payload: revision!.payload ?? "{}",
+    title: revision!.title ?? article!.title ?? "",
+  });
+  // Then mark the restore in the trail by appending another revision; the
+  // name field carries the marker so the history list shows it explicitly.
+  const markerId = randomUUID();
+  await appendRevision({
+    id: markerId,
+    article_id: articleId,
+    document: revision!.document ?? "{}",
+    payload: revision!.payload ?? "{}",
+    title: revision!.title ?? article!.title ?? "",
+    status: article!.status ?? "draft",
+    author_id: user?.id ?? null,
+    coalesceWindowSec: 0,
+  });
+  await nameRevision(
+    markerId,
+    `Restored from ${revision!.created_at?.slice(0, 16) ?? "earlier"}`,
+  );
+  console.info("[articles action] restore-revision", {
+    articleId,
+    revisionId,
+    markerId,
+  });
+  revalidatePath(`/admin/articles/${articleId}`);
+  revalidatePath(`/admin/articles/${articleId}/history`);
+  redirect(`/admin/articles/${articleId}?restored=1`);
+}
+
+// Manual prune trigger from the history page. Keeps the latest 50 unnamed
+// plus every named revision. The default cap matches the plan; a future
+// settings entry can override.
+export async function pruneRevisionsAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const articleId = String(formData.get("article_id") ?? "");
+  if (!articleId) redirectToArticles({ error: "missing-id" });
+  const removed = await pruneRevisions(articleId, 50);
+  console.info("[articles action] prune-revisions", { articleId, removed });
+  revalidatePath(`/admin/articles/${articleId}/history`);
+  redirect(`/admin/articles/${articleId}/history?pruned=${removed}`);
 }
 
 export async function deleteArticleAction(formData: FormData): Promise<void> {

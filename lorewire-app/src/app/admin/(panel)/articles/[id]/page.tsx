@@ -38,6 +38,7 @@ export default async function EditArticlePage({
     error?: string;
     payload?: string;
     seo?: string;
+    restored?: string;
   }>;
 }) {
   await requireAdmin();
@@ -47,6 +48,7 @@ export default async function EditArticlePage({
     error,
     payload: payloadSaved,
     seo: seoSaved,
+    restored,
   } = await searchParams;
   const article = await getArticle(id);
   if (!article) notFound();
@@ -121,6 +123,11 @@ export default async function EditArticlePage({
           SEO saved.
         </p>
       )}
+      {restored === "1" && (
+        <p className="rounded-lg border border-cat-wholesome/40 bg-cat-wholesome/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-wholesome">
+          Snapshot restored. A marker version was added to history so this is undoable.
+        </p>
+      )}
       {error && (
         <p className="rounded-lg border border-cat-entitled/40 bg-cat-entitled/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-entitled">
           {(() => {
@@ -179,6 +186,16 @@ export default async function EditArticlePage({
               ))}
             </div>
           </div>
+
+          <Link
+            href={`/admin/articles/${article.id}/history`}
+            className="block rounded-xl border border-line bg-surface p-4 transition-colors hover:border-accent"
+          >
+            <div className={LABEL}>History</div>
+            <p className="font-mono text-[12px] text-ink">
+              Revisions, named versions, restore →
+            </p>
+          </Link>
 
           <div className="rounded-xl border border-line bg-surface p-4 font-mono text-[11px] text-muted">
             <div className={LABEL}>Meta</div>

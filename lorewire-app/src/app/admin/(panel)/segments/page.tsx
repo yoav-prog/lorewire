@@ -57,6 +57,14 @@ export default async function SegmentsPage({
   const masterExplicitlyOff = ["0", "false", "off", "no"].includes(
     masterRaw.trim().toLowerCase(),
   );
+  // Choose which upload path the form should use:
+  //   - Prod (Vercel): always GCS resumable. Fail loud if creds are missing
+  //     so the page surfaces "configure GCS" instead of silently breaking.
+  //   - Dev with GCS configured: GCS resumable (same as prod, easier debug).
+  //   - Dev without GCS: local multipart -> system ffmpeg -> public/segments.
+  const isVercel = process.env.VERCEL === "1";
+  const hasGcs = Boolean(process.env.GCS_BUCKET);
+  const uploadMode: "gcs" | "local" = isVercel || hasGcs ? "gcs" : "local";
 
   const [intros, outros] = await Promise.all([
     listSegments("intro"),
@@ -111,6 +119,7 @@ export default async function SegmentsPage({
         title="Intros"
         rows={intros}
         activeId={activeIntroId}
+        uploadMode={uploadMode}
       />
 
       <SegmentSection
@@ -118,6 +127,7 @@ export default async function SegmentsPage({
         title="Outros"
         rows={outros}
         activeId={activeOutroId}
+        uploadMode={uploadMode}
       />
     </div>
   );
@@ -128,11 +138,13 @@ function SegmentSection({
   title,
   rows,
   activeId,
+  uploadMode,
 }: {
   kind: SegmentKind;
   title: string;
   rows: SegmentRow[];
   activeId: string;
+  uploadMode: "gcs" | "local";
 }) {
   const singular = title.endsWith("s") ? title.slice(0, -1) : title;
   return (
@@ -146,7 +158,11 @@ function SegmentSection({
         </span>
       </div>
 
-      <SegmentUploadForm kind={kind} singular={singular} />
+      <SegmentUploadForm
+        kind={kind}
+        singular={singular}
+        uploadMode={uploadMode}
+      />
 
       {rows.length === 0 ? (
         <p className="rounded-xl border border-line bg-surface p-4 text-[13px] text-muted">

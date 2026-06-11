@@ -1,19 +1,29 @@
 "use client";
 
-// Client-side intro/outro uploader. Three-step flow:
-//   1. POST /api/admin/segments/sign-upload (tiny JSON) -> {segId, sessionUri}
-//   2. PUT the file in 8 MiB chunks to sessionUri (direct to GCS — no Vercel)
-//   3. POST /api/admin/segments/finalize so the worker picks it up
+// Client-side intro/outro uploader. Two flows, decided by the `uploadMode`
+// prop the server component sets based on whether `GCS_BUCKET` is configured:
 //
-// The whole point of doing the PUT browser->GCS is to bypass Vercel's 4.5 MB
+//   gcs (prod and dev-with-GCS):
+//     1. POST /api/admin/segments/sign-upload  -> {segId, sessionUri}
+//     2. PUT file in 8 MiB chunks to sessionUri (direct to GCS — no Vercel)
+//     3. POST /api/admin/segments/finalize     -> HEAD-checks GCS,
+//                                                 worker picks the row up
+//
+//   local (dev without GCS):
+//     1. POST multipart to /api/admin/segments/upload-local
+//        which runs system ffmpeg inline and writes both source + normalized
+//        copies under public/segments/. Row lands as `status='ready'`
+//        immediately. No worker, no chunking, no progress beyond the
+//        browser's upload progress (which we don't surface here — the
+//        admin's `next dev` server is the same machine).
+//
+// The whole point of the GCS direct flow is to bypass Vercel's 4.5 MB
 // function-body cap; video segments are 5-500 MB. We never proxy bytes
-// through a server route.
+// through a Vercel function in prod.
 //
 // Per rule 14 (observability), every step logs a `[segment upload]` line
 // with the values that matter so the admin can paste them when something
-// fails. Errors leave the row in `pending` so the worker's abandoned-sweep
-// (5 min default) eventually marks it `error` — UI surfaces both states
-// the same way ("Processing…" -> "Failed").
+// fails.
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -40,6 +50,10 @@ interface Props {
   // Used to render the file-input label and the upload button caption — the
   // server doesn't care about the visual nicety, so it stays purely a prop.
   singular: string;
+  // 'gcs' = browser -> GCS resumable (prod, or dev with GCS_BUCKET set).
+  // 'local' = browser -> /api/admin/segments/upload-local (dev without GCS).
+  // Decided server-side in page.tsx; the form just branches on it.
+  uploadMode: "gcs" | "local";
 }
 
 interface SignUploadResponse {
@@ -63,7 +77,7 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function SegmentUploadForm({ kind, singular }: Props) {
+export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
   const labelRef = useRef<HTMLInputElement>(null);
@@ -106,8 +120,46 @@ export function SegmentUploadForm({ kind, singular }: Props) {
     const label = labelRef.current?.value ?? "";
 
     console.info(
-      `[segment upload] start kind=${kind} file=${file.name} size=${file.size} contentType=${contentType}`,
+      `[segment upload] start mode=${uploadMode} kind=${kind} file=${file.name} size=${file.size} contentType=${contentType}`,
     );
+
+    if (uploadMode === "local") {
+      // Dev-only: multipart POST to upload-local. The handler runs ffmpeg
+      // inline and writes to public/segments/, so the response either says
+      // ready immediately or carries the failure reason.
+      setStatus("uploading");
+      try {
+        const fd = new FormData();
+        fd.append("kind", kind);
+        fd.append("label", label);
+        fd.append("file", file);
+        const resp = await fetch("/api/admin/segments/upload-local", {
+          method: "POST",
+          body: fd,
+        });
+        const data = (await resp.json().catch(() => ({}))) as {
+          segId?: string;
+          status?: string;
+          error?: string;
+        };
+        if (!resp.ok || data.status !== "ready") {
+          throw new Error(data.error || `HTTP ${resp.status}`);
+        }
+        console.info(
+          `[segment upload] upload-local ok segId=${data.segId}`,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`[segment upload] upload-local FAILED: ${msg}`);
+        setStatus("error");
+        setErrorMsg(`Upload failed: ${msg}`);
+        return;
+      }
+      setStatus("done");
+      resetForm();
+      router.refresh();
+      return;
+    }
 
     setStatus("signing");
     let signed: SignUploadResponse;
@@ -244,7 +296,9 @@ export function SegmentUploadForm({ kind, singular }: Props) {
 
       {status === "done" && !errorMsg && (
         <p className="font-mono text-[11px] uppercase tracking-wider text-high">
-          Upload complete. The pipeline worker will normalize it within ~5s.
+          {uploadMode === "gcs"
+            ? "Upload complete. The pipeline worker will normalize it within ~5s."
+            : "Upload complete. Ready to splice."}
         </p>
       )}
 
@@ -253,8 +307,9 @@ export function SegmentUploadForm({ kind, singular }: Props) {
       )}
 
       <p className="text-[12px] text-muted">
-        Source is normalized off-Vercel to 1080x1920 @ 30fps (center-crop for
-        landscape sources) and stored in GCS. {formatBytes(MAX_UPLOAD_BYTES)} max.
+        {uploadMode === "gcs"
+          ? `Source is normalized off-Vercel to 1080x1920 @ 30fps (center-crop for landscape sources) and stored in GCS. ${formatBytes(MAX_UPLOAD_BYTES)} max.`
+          : `Local dev (no GCS): source is normalized inline by system ffmpeg and written to public/segments/. ${formatBytes(MAX_UPLOAD_BYTES)} max.`}
       </p>
     </form>
   );
