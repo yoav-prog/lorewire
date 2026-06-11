@@ -490,7 +490,21 @@ def generate_media(
             narration_seconds = 0.0
     else:
         narration_seconds = 0.0
-    out["cost_cents"] = _story_cost_cents(len(image_urls), narration_chars, narration_seconds)
+    # Count every image we actually generated this run so the cost estimate
+    # tracks the real spend instead of the placeholder it shipped with. Hero
+    # (up to 2 aspect ratios), scenes, prop cutouts, plus the two mouth_swap
+    # frames when that beat is on. The edit pass is technically cheaper than
+    # the generate call, but the per-image average is close enough that we
+    # don't split the rate per call.
+    image_count = (
+        (1 if "hero_image" in out else 0)
+        + (1 if "hero_image_landscape" in out else 0)
+        + len(scene_urls)
+        + (len(json.loads(out["props"])) if out.get("props") else 0)
+        + (1 if "character_image" in out else 0)
+        + (1 if "character_image_mouth_removed" in out else 0)
+    )
+    out["cost_cents"] = _story_cost_cents(image_count, narration_chars, narration_seconds)
 
     print(f"[media id={safe_id} done] est cost ~${out['cost_cents'] / 100:.2f}")
     return out

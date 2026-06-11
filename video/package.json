@@ -5,7 +5,8 @@
   "description": "Remotion project for LoreWire doodle shorts.",
   "scripts": {
     "preview": "remotion preview src/Root.tsx",
-    "render": "remotion render src/Root.tsx"
+    "render": "remotion render src/Root.tsx",
+    "test:motion": "node --test src/motion/mouth-timing.test.mjs"
   },
   "dependencies": {
     "@remotion/cli": "^4.0.0",

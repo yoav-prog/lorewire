@@ -430,15 +430,35 @@ def make_character_prompt(idea: dict, body: str, dry_run: bool) -> str:
         f"Article:\n{body}"
     )
     raw = llm.chat(instruction, 1200, model="openai/gpt-5.4-mini").strip()
-    # The model occasionally wraps in quotes or fences; strip those.
-    if raw.startswith("```"):
-        raw = raw.strip("`").strip()
-        if raw.lower().startswith(("json", "text")):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw
-    return raw.strip().strip('"').strip("'") or (
+    cleaned = _strip_prompt_wrappers(raw)
+    return cleaned or (
         f"Tight bust shot of the protagonist of \"{idea['headline']}\". "
         f"{CHARACTER_BUST_STYLE}"
     )
+
+
+def _strip_prompt_wrappers(raw: str) -> str:
+    """Pull a plain-text prompt out of common LLM wrappers.
+
+    Handles three layers, in order:
+      1. Fenced code blocks anywhere in the response — ```...```, optionally
+         tagged ```text or ```json. The first fenced block wins; surrounding
+         prose ("Here is the prompt: ```...```") is dropped.
+      2. Outer quote pairs (matching " or ') wrapping the whole thing.
+      3. Leading / trailing whitespace.
+
+    Returns the empty string when nothing usable remains so the caller can
+    fall through to its default.
+    """
+    import re
+
+    fenced = re.search(r"```(?:\w+)?\s*\n?(.*?)```", raw, re.DOTALL)
+    if fenced:
+        raw = fenced.group(1)
+    cleaned = raw.strip()
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in ('"', "'"):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
 
 
 # Prompt for the kie edit pass that removes the mouth from the bust. Kept

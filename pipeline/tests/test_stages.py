@@ -88,5 +88,48 @@ class ParseTitleSynopsisTests(unittest.TestCase):
         self.assertEqual((title, syn), ("", ""))
 
 
+class StripPromptWrappersTests(unittest.TestCase):
+    """Used by make_character_prompt to pull a plain prompt out of whatever
+    surface the LLM wraps it in. Locks the contract so a small model that
+    drifts back to fenced or quoted output doesn't poison the prompt."""
+
+    def test_plain_text_passes_through(self):
+        self.assertEqual(stages._strip_prompt_wrappers("A bust."), "A bust.")
+
+    def test_fenced_with_text_tag(self):
+        self.assertEqual(
+            stages._strip_prompt_wrappers("```text\nA bust.\n```"), "A bust."
+        )
+
+    def test_fenced_without_tag(self):
+        self.assertEqual(
+            stages._strip_prompt_wrappers("```\nA bust.\n```"), "A bust."
+        )
+
+    def test_fenced_inside_prose_extracts_block(self):
+        raw = "Here is the prompt:\n```\nA bust.\n```\nLet me know."
+        self.assertEqual(stages._strip_prompt_wrappers(raw), "A bust.")
+
+    def test_outer_double_quotes_stripped(self):
+        self.assertEqual(stages._strip_prompt_wrappers('"A bust."'), "A bust.")
+
+    def test_outer_single_quotes_stripped(self):
+        self.assertEqual(stages._strip_prompt_wrappers("'A bust.'"), "A bust.")
+
+    def test_mismatched_outer_quotes_left_alone(self):
+        # Don't be clever about \"A bust.': mixing quote chars probably means
+        # the prompt itself contains the leading quote.
+        self.assertEqual(
+            stages._strip_prompt_wrappers("\"A bust.'"), "\"A bust.'"
+        )
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(stages._strip_prompt_wrappers(""), "")
+        self.assertEqual(stages._strip_prompt_wrappers("   \n  "), "")
+
+    def test_only_fence_markers_returns_empty(self):
+        self.assertEqual(stages._strip_prompt_wrappers("```\n\n```"), "")
+
+
 if __name__ == "__main__":
     unittest.main()
