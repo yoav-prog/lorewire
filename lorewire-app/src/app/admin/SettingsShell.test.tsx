@@ -10,7 +10,7 @@ import { renderToString } from "react-dom/server";
 import SettingsShell from "./SettingsShell";
 
 describe("SettingsShell", () => {
-  it("renders all three sub-nav entries", () => {
+  it("renders all four sub-nav entries", () => {
     const html = renderToString(
       <SettingsShell active="general" title="General">
         <p>Body</p>
@@ -18,6 +18,7 @@ describe("SettingsShell", () => {
     );
     expect(html).toContain("General");
     expect(html).toContain("Models");
+    expect(html).toContain("SEO");
     // React renders the literal '&' as the HTML entity '&amp;'.
     expect(html).toContain("Intros &amp; outros");
     // Captions is intentionally absent from the sub-nav (Phase 3 moves it
@@ -36,6 +37,11 @@ describe("SettingsShell", () => {
         <p>Body</p>
       </SettingsShell>,
     );
+    const seoHtml = renderToString(
+      <SettingsShell active="seo" title="SEO">
+        <p>Body</p>
+      </SettingsShell>,
+    );
     const introsHtml = renderToString(
       <SettingsShell active="intros" title="Intros & outros">
         <p>Body</p>
@@ -47,11 +53,13 @@ describe("SettingsShell", () => {
       (generalHtml.match(/aria-current="page"/g) ?? []).length,
     ).toBe(1);
     expect((modelsHtml.match(/aria-current="page"/g) ?? []).length).toBe(1);
+    expect((seoHtml.match(/aria-current="page"/g) ?? []).length).toBe(1);
     expect((introsHtml.match(/aria-current="page"/g) ?? []).length).toBe(1);
 
     // And the right entry is highlighted in each case.
     expect(generalHtml).toMatch(/aria-current="page"[^<]*<span[^>]*>\s*General/);
     expect(modelsHtml).toMatch(/aria-current="page"[^<]*<span[^>]*>\s*Models/);
+    expect(seoHtml).toMatch(/aria-current="page"[^<]*<span[^>]*>\s*SEO/);
     expect(introsHtml).toMatch(
       /aria-current="page"[^<]*<span[^>]*>\s*Intros &amp; outros/,
     );
@@ -80,6 +88,7 @@ describe("SettingsShell", () => {
     );
     expect(html).toMatch(/href="\/admin\/settings"/);
     expect(html).toMatch(/href="\/admin\/models"/);
+    expect(html).toMatch(/href="\/admin\/seo"/);
     expect(html).toMatch(/href="\/admin\/segments"/);
   });
 });
