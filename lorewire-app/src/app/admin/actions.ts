@@ -90,42 +90,55 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
   revalidatePath("/admin/settings");
 }
 
-// Wave 3 Phase 1: save all 14 caption template fields in one round-trip.
-// Each setting is written individually; the server logs the keys that
-// actually changed (compared to the form's prevValues) so an audit trail
-// shows which knob the admin touched without leaking the raw values.
-const CAPTION_TEMPLATE_KEYS = [
-  "caption.position_y",
-  "caption.size_scale",
-  "caption.padding_x",
-  "caption.text_transform",
-  "caption.letter_spacing",
-  "caption.line_height",
-  "caption.font_weight",
-  "caption.color",
-  "caption.outline_color",
-  "caption.outline_width",
-  "caption.active_word_color",
-  "caption.spoken_word_color",
-  "caption.entry_effect",
-  "caption.word_highlight",
+// Wave 3 Phase 1 + 2: save all 14 caption template fields for whatever scope
+// the form is editing (global / per-category / per-story). The form's hidden
+// __scope / __cat / __story fields tell us which key prefix to write under;
+// the bare field name in the form input (e.g. "caption.color") loses its
+// "caption." prefix here and gets re-keyed with the scope prefix.
+const CAPTION_TEMPLATE_FIELDS = [
+  "position_y",
+  "size_scale",
+  "padding_x",
+  "text_transform",
+  "letter_spacing",
+  "line_height",
+  "font_weight",
+  "color",
+  "outline_color",
+  "outline_width",
+  "active_word_color",
+  "spoken_word_color",
+  "entry_effect",
+  "word_highlight",
 ] as const;
+
+function captionPrefix(scope: string, cat?: string, story?: string): string {
+  if (scope === "story" && story) return `caption.story.${story}`;
+  if (scope === "cat" && cat) return `caption.cat.${cat}`;
+  return "caption";
+}
 
 export async function saveCaptionTemplateAction(
   formData: FormData,
 ): Promise<void> {
   await requireAdmin();
+  const scope = String(formData.get("__scope") ?? "global");
+  const cat = String(formData.get("__cat") ?? "") || undefined;
+  const story = String(formData.get("__story") ?? "") || undefined;
+  const prefix = captionPrefix(scope, cat, story);
+
   const changedKeys: string[] = [];
-  for (const key of CAPTION_TEMPLATE_KEYS) {
-    const next = String(formData.get(key) ?? "").trim();
-    const prev = String(formData.get(`__prev__${key}`) ?? "").trim();
+  for (const bare of CAPTION_TEMPLATE_FIELDS) {
+    const formKey = `caption.${bare}`;
+    const next = String(formData.get(formKey) ?? "").trim();
+    const prev = String(formData.get(`__prev__${bare}`) ?? "").trim();
     if (next !== prev) {
-      await setSetting(key, next);
-      changedKeys.push(key);
+      await setSetting(`${prefix}.${bare}`, next);
+      changedKeys.push(`${prefix}.${bare}`);
     }
   }
   if (changedKeys.length > 0) {
-    console.info("[admin caption-template save]", { changed: changedKeys });
+    console.info("[admin caption-template save]", { scope, cat, story, changed: changedKeys });
   }
   revalidatePath("/admin/templates");
 }

@@ -189,5 +189,62 @@ class ResolveCaptionTemplateTests(unittest.TestCase):
         self.assertIsInstance(t["padding_x"], int)
 
 
+class ScopeChainTests(unittest.TestCase):
+    """Phase 2: per-story -> per-category -> global -> defaults."""
+
+    def test_no_scope_falls_back_to_global(self):
+        store = {"caption.color": "#abcdef"}
+        t = video.resolve_caption_template_for(None, None, lambda k: store.get(k))
+        self.assertEqual(t["color"], "#abcdef")
+
+    def test_category_overrides_global(self):
+        store = {
+            "caption.color": "#111111",
+            "caption.cat.Drama.color": "#222222",
+        }
+        t = video.resolve_caption_template_for(None, "Drama", lambda k: store.get(k))
+        self.assertEqual(t["color"], "#222222")
+
+    def test_story_overrides_category_and_global(self):
+        store = {
+            "caption.color": "#111111",
+            "caption.cat.Drama.color": "#222222",
+            "caption.story.envelope.color": "#333333",
+        }
+        t = video.resolve_caption_template_for("envelope", "Drama", lambda k: store.get(k))
+        self.assertEqual(t["color"], "#333333")
+
+    def test_mixed_tiers_compose_per_field(self):
+        # Color comes from story, font_weight from category, position_y from global.
+        store = {
+            "caption.color": "#111111",
+            "caption.font_weight": "500",
+            "caption.position_y": "0.40",
+            "caption.cat.Drama.font_weight": "700",
+            "caption.cat.Drama.color": "#222222",
+            "caption.story.envelope.color": "#333333",
+        }
+        t = video.resolve_caption_template_for("envelope", "Drama", lambda k: store.get(k))
+        self.assertEqual(t["color"], "#333333")
+        self.assertEqual(t["font_weight"], 700)
+        self.assertEqual(t["position_y"], 0.40)
+
+    def test_empty_string_at_tier_falls_through(self):
+        # Story-tier override is intentionally empty to "inherit" — should
+        # fall through to category, then global.
+        store = {
+            "caption.color": "#111111",
+            "caption.cat.Drama.color": "#222222",
+            "caption.story.envelope.color": "",
+        }
+        t = video.resolve_caption_template_for("envelope", "Drama", lambda k: store.get(k))
+        self.assertEqual(t["color"], "#222222")
+
+    def test_completely_unset_returns_defaults(self):
+        t = video.resolve_caption_template_for("anything", "Drama", lambda k: None)
+        self.assertEqual(t["color"], "#facc15")
+        self.assertEqual(t["entry_effect"], "fade")
+
+
 if __name__ == "__main__":
     unittest.main()

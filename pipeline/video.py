@@ -123,6 +123,40 @@ def resolve_caption_template(get_setting) -> dict:
     }
 
 
+def resolve_caption_template_for(
+    story_id: str | None,
+    category: str | None,
+    get_setting,
+) -> dict:
+    """Same shape as `resolve_caption_template`, but walks a three-tier scope
+    chain so a per-story override beats a per-category override beats the
+    global default. Each tier stores values under a distinct key prefix:
+
+      story:    caption.story.<story_id>.<field>
+      category: caption.cat.<category>.<field>
+      global:   caption.<field>
+
+    Within a tier, an empty string means "unset" so the resolver falls through
+    to the next tier. That keeps the admin UX simple — clearing a field in the
+    story-scope form unsets the override and the category/global value takes
+    over without the admin having to delete the row by hand.
+    """
+    def pick(field: str) -> str | None:
+        for prefix in (
+            f"caption.story.{story_id}.{field}" if story_id else None,
+            f"caption.cat.{category}.{field}" if category else None,
+            f"caption.{field}",
+        ):
+            if prefix is None:
+                continue
+            v = get_setting(prefix)
+            if v is not None and v != "":
+                return v
+        return None
+
+    return {field: _coerce_caption_field(field, pick(field)) for field in _CAPTION_DEFAULTS}
+
+
 def generate_video(
     story_id: str,
     title: str,
@@ -130,6 +164,7 @@ def generate_video(
     audio_url: str,
     alignment: list[dict],
     repo_root: Path,
+    category: str | None = None,
 ) -> dict:
     """Render the doodle short and return DB columns for the story row.
 
@@ -168,12 +203,14 @@ def generate_video(
     ken_burns_raw = (_store.get_setting("video.ken_burns") or "").strip().lower()
     ken_burns = ken_burns_raw in {"1", "true", "on", "yes"}
 
-    # Wave 3 Phase 1: resolve the global caption template from settings and
-    # embed it in the props so the Remotion composition can read it instead of
-    # the old hardcoded constants. Defaults match the original doodle-yellow
-    # look so existing renders are unchanged when no admin override is set.
-    caption_template = resolve_caption_template(_store.get_setting)
-    print(f"[video id={safe_id} caption-template] {len(caption_template)} fields resolved")
+    # Wave 3 Phase 2: walk the per-story -> per-category -> global scope chain
+    # so a story override beats a category override beats the global default.
+    # Falls back to defaults when nothing is set, identical to Phase 1 behavior.
+    caption_template = resolve_caption_template_for(safe_id, category, _store.get_setting)
+    print(
+        f"[video id={safe_id} caption-template] {len(caption_template)} fields resolved"
+        f" (scope chain: story={safe_id!r}, cat={category!r})"
+    )
 
     config = {
         "voiceover_url": static_audio,
@@ -430,7 +467,7 @@ def rerender_from_db(story_id: str, repo_root: Path) -> dict:
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     raw = conn.execute(
-        "SELECT title, hero_image, images, audio_url, alignment "
+        "SELECT title, hero_image, images, audio_url, alignment, category "
         "FROM stories WHERE id = ?",
         (safe_id,),
     ).fetchone()
@@ -457,6 +494,7 @@ def rerender_from_db(story_id: str, repo_root: Path) -> dict:
         row.get("audio_url") or "",
         alignment,
         repo_root=repo_root,
+        category=row.get("category"),
     )
     if "video_url" in cols:
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()

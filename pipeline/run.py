@@ -112,6 +112,7 @@ def main() -> None:
                     row.get("audio_url") or "",
                     alignment,
                     repo_root=REPO_ROOT,
+                    category=idea.get("category"),
                 )
                 row.update(video_cols)
         store.upsert_story(row)
