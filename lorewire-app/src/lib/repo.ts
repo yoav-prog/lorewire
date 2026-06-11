@@ -337,11 +337,16 @@ export async function upsertSegment(s: {
   normalized_url?: string | null;
   duration_ms?: number | null;
   enabled?: number;
+  // Lifecycle state — see SegmentRow above and pipeline/segments_worker.py.
+  // Omitted on legacy callers; the column-level DEFAULT 'ready' covers them.
+  status?: string | null;
+  error?: string | null;
+  uploaded_at?: string | null;
 }): Promise<void> {
   const now = new Date().toISOString();
   await run(
-    `INSERT INTO video_segments (id, kind, label, source_url, normalized_url, duration_ms, enabled, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO video_segments (id, kind, label, source_url, normalized_url, duration_ms, enabled, status, error, uploaded_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        kind = excluded.kind,
        label = excluded.label,
@@ -349,6 +354,9 @@ export async function upsertSegment(s: {
        normalized_url = excluded.normalized_url,
        duration_ms = excluded.duration_ms,
        enabled = excluded.enabled,
+       status = excluded.status,
+       error = excluded.error,
+       uploaded_at = excluded.uploaded_at,
        updated_at = excluded.updated_at`,
     [
       s.id,
@@ -358,9 +366,27 @@ export async function upsertSegment(s: {
       s.normalized_url ?? null,
       s.duration_ms ?? null,
       s.enabled ?? 1,
+      s.status ?? "ready",
+      s.error ?? null,
+      s.uploaded_at ?? null,
       now,
       now,
     ],
+  );
+}
+
+// Targeted helpers the new upload flow uses. The sign-upload action calls
+// `markSegmentUploading()` once the browser confirms the GCS PUT finished,
+// flipping status `pending -> uploading` so pipeline/segments_worker.py
+// picks the row up. Pure status flips don't go through upsertSegment to
+// keep the SQL surgical and to avoid touching label/url columns the worker
+// has not authored yet.
+export async function markSegmentUploading(id: string): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE video_segments SET status = ?, uploaded_at = ?, updated_at = ? " +
+      "WHERE id = ? AND status = ?",
+    ["uploading", now, now, id, "pending"],
   );
 }
 

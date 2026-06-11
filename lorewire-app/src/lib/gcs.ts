@@ -148,3 +148,72 @@ export async function uploadFile(
   }
   return `${PUBLIC_BASE}/${bucket}/${key}`;
 }
+
+// Result of a resumable-upload init: the session URI the browser PUTs bytes
+// to, and the public URL the object will resolve to once the upload completes.
+// Both are returned at init time because we want to write `source_url` to the
+// DB before bytes flow — the worker uses it to discover what to download.
+export interface ResumableUploadSession {
+  sessionUri: string;
+  publicUrl: string;
+}
+
+// Initiate a GCS JSON-API resumable upload and return the session URI plus
+// the eventual public URL. Used by /api/admin/segments/sign-upload so the
+// browser can PUT video bytes straight to GCS (bypassing Vercel's 4.5 MB
+// function body cap). The session URI is unauthenticated but unguessable
+// (contains a server-issued `upload_id` token); it expires after one week
+// per the GCS contract — well beyond any plausible upload window.
+//
+// Reference: https://cloud.google.com/storage/docs/performing-resumable-uploads
+// Verified 2026-06-11.
+//
+// Note on CORS: the browser PUTs cross-origin to storage.googleapis.com, so
+// the bucket needs a CORS policy allowing PUT from our admin origin. That's
+// a one-time bucket-config step, documented in the plan's open questions —
+// not something this function can do.
+export async function createResumableUploadSession(
+  key: string,
+  contentType: string,
+): Promise<ResumableUploadSession> {
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) {
+    throw new Error("GCS_BUCKET is not set; cannot initiate upload.");
+  }
+  const token = await accessToken();
+  const url =
+    `${UPLOAD_BASE}/b/${encodeURIComponent(bucket)}/o` +
+    `?uploadType=resumable&name=${encodeURIComponent(key)}` +
+    `&predefinedAcl=publicRead`;
+  // Body is the object metadata GCS applies after the upload completes.
+  // Pinning contentType here means the served object has the right MIME
+  // without a follow-up PATCH. `name` is required when omitted from the
+  // querystring; we include it in both for defense in depth.
+  const meta = JSON.stringify({ name: key, contentType });
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json; charset=UTF-8",
+      // X-Upload-Content-Type tells GCS the MIME the *uploaded bytes* will
+      // carry, separate from the metadata Content-Type which describes the
+      // request body (JSON). Both are required for a clean resumable init.
+      "X-Upload-Content-Type": contentType,
+    },
+    body: meta,
+  });
+  if (resp.status !== 200) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `GCS resumable init HTTP ${resp.status}: ${text.slice(0, 200)}`,
+    );
+  }
+  const sessionUri = resp.headers.get("Location");
+  if (!sessionUri) {
+    throw new Error("GCS resumable init response is missing Location header.");
+  }
+  return {
+    sessionUri,
+    publicUrl: `${PUBLIC_BASE}/${bucket}/${key}`,
+  };
+}

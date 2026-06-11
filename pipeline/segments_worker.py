@@ -51,6 +51,16 @@ NormalizeFn = Callable[[Path, Path, str], dict]
 UploadFn = Callable[[Path, str], str]
 SetStatusFn = Callable[..., None]
 ListAbandonedFn = Callable[[str], Iterable[dict]]
+GetSettingFn = Callable[[str], Optional[str]]
+SetSettingFn = Callable[[str, str], None]
+
+
+def _active_setting_key(kind: str) -> str:
+    """Settings key for the global-active pointer of an intro/outro kind. Has
+    to match the key the admin's `setActiveSegmentAction` writes (see
+    lorewire-app/src/app/admin/actions.ts) and the picker `pick_segment`
+    in pipeline/segments.py reads."""
+    return f"video.active_{kind}_id"
 
 
 def _now_utc() -> datetime.datetime:
@@ -94,6 +104,8 @@ def process_segment(
     normalize_fn: NormalizeFn,
     upload_fn: UploadFn,
     set_status: SetStatusFn,
+    get_setting: GetSettingFn,
+    set_setting: SetSettingFn,
 ) -> None:
     """End-to-end processing for one `status='uploading'` row.
 
@@ -154,6 +166,27 @@ def process_segment(
             enabled=1,
             error=None,
         )
+
+        # Auto-activate the first segment of its kind, mirroring the UX the
+        # old (deleted) uploadSegmentAction provided: an admin who uploads
+        # their first intro shouldn't have to click "Set as active" too.
+        # Only fires when no active id is set — never overrides an explicit
+        # admin pick. Bracket this in a try so a transient settings hiccup
+        # cannot reverse the "ready" flip we just made above.
+        if kind in ("intro", "outro"):
+            try:
+                key = _active_setting_key(kind)
+                current_active = (get_setting(key) or "").strip()
+                if not current_active:
+                    set_setting(key, seg_id)
+                    print(
+                        f"[segments worker] auto-activate kind={kind} id={seg_id}"
+                    )
+            except Exception as inner:
+                print(
+                    f"[segments worker] auto-activate FAILED id={seg_id}: {inner!r}"
+                )
+
         print(f"[segments worker] done id={seg_id}")
     except Exception as e:
         err = _truncate_error(repr(e))
@@ -207,6 +240,8 @@ def tick(
     list_pending: Optional[Callable[[int], list[dict]]] = None,
     list_abandoned: Optional[ListAbandonedFn] = None,
     set_status: SetStatusFn = store.set_segment_status,
+    get_setting: GetSettingFn = store.get_setting,
+    set_setting: SetSettingFn = store.set_setting,
 ) -> bool:
     """One iteration of the worker loop. Returns True if a row was processed
     (caller can keep ticking without sleeping) or False if the queue was
@@ -235,6 +270,8 @@ def tick(
         normalize_fn=normalize_fn,
         upload_fn=upload_fn,
         set_status=set_status,
+        get_setting=get_setting,
+        set_setting=set_setting,
     )
     return True
 

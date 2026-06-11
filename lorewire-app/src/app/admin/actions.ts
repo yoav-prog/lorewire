@@ -14,7 +14,6 @@ import {
   setStatus,
   setSetting,
   getSetting,
-  upsertSegment,
   getSegment,
   setSegmentEnabled,
   updateSegmentLabel,
@@ -36,15 +35,7 @@ import {
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
 import { run } from "@/lib/db";
-import {
-  ACCEPTED_EXT,
-  ACCEPTED_MIME,
-  MAX_UPLOAD_BYTES,
-  hasFtypHeader,
-  newSegmentId,
-  normalizeAndPublish,
-  sanitizeLabel,
-} from "@/lib/segments-server";
+import { sanitizeLabel } from "@/lib/segments-upload";
 import {
   isArticleType,
   isArticleLanguage,
@@ -219,71 +210,11 @@ function redirectToSegments(params?: Record<string, string>): never {
   redirect(qs ? `/admin/segments?${qs}` : "/admin/segments");
 }
 
-export async function uploadSegmentAction(formData: FormData): Promise<void> {
-  await requireAdmin();
-  const kind = parseKind(formData.get("kind"));
-  if (!kind) redirectToSegments({ error: "missing-kind" });
-
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    redirectToSegments({ error: "no-file" });
-  }
-  if (file.size > MAX_UPLOAD_BYTES) {
-    redirectToSegments({ error: "too-large" });
-  }
-  // The browser-supplied MIME and filename are advisory — we also sniff the
-  // first 12 bytes for the MP4/MOV `ftyp` box so a renamed payload is
-  // rejected before it reaches ffmpeg.
-  const mime = file.type || "";
-  if (mime && !ACCEPTED_MIME.has(mime)) {
-    redirectToSegments({ error: "bad-mime" });
-  }
-  const name = file.name || "upload.mp4";
-  const dot = name.lastIndexOf(".");
-  const ext = (dot >= 0 ? name.slice(dot).toLowerCase() : ".mp4") as
-    | ".mp4"
-    | ".mov";
-  if (!ACCEPTED_EXT.has(ext)) {
-    redirectToSegments({ error: "bad-ext" });
-  }
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  if (!hasFtypHeader(bytes)) {
-    redirectToSegments({ error: "not-mp4" });
-  }
-
-  const label = sanitizeLabel(String(formData.get("label") ?? "")) ||
-    name.slice(0, dot >= 0 ? dot : undefined);
-  const id = newSegmentId();
-  try {
-    const { sourceUrl, normalizedUrl, durationMs } = await normalizeAndPublish({
-      id,
-      ext,
-      bytes,
-    });
-    await upsertSegment({
-      id,
-      kind,
-      label,
-      source_url: sourceUrl,
-      normalized_url: normalizedUrl,
-      duration_ms: durationMs,
-      enabled: 1,
-    });
-    // First segment of its kind auto-activates so the admin doesn't have to
-    // click twice on a fresh install. If there's already an active id, leave
-    // it alone — they explicitly chose it before.
-    const currentActive = await getSetting(activeKey(kind));
-    if (!currentActive) {
-      await setSetting(activeKey(kind), id);
-    }
-    console.info(`[admin segments] upload kind=${kind} id=${id} size=${bytes.byteLength}`);
-  } catch (e) {
-    console.error(`[admin segments] upload kind=${kind} id=${id} FAILED:`, e);
-    redirectToSegments({ error: "normalize-failed" });
-  }
-  revalidatePath("/admin/segments");
-  redirectToSegments({ uploaded: id });
-}
+// uploadSegmentAction was the original Server-Action-based uploader. It
+// failed in prod because Vercel caps Function request bodies at 4.5 MB and
+// videos are 5-500 MB. Replaced by /api/admin/segments/sign-upload + a
+// direct browser->GCS resumable PUT (see SegmentUploadForm.tsx). Ffmpeg
+// normalize moved off-Vercel into pipeline/segments_worker.py.
 
 export async function setActiveSegmentAction(formData: FormData): Promise<void> {
   await requireAdmin();

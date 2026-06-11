@@ -207,6 +207,8 @@ class ProcessSegmentTests(_SegmentsTestCase):
             normalize_fn=fake_normalize,
             upload_fn=fake_upload,
             set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
         )
 
         # Side effects all happened with the right args.
@@ -223,8 +225,44 @@ class ProcessSegmentTests(_SegmentsTestCase):
         self.assertEqual(after["enabled"], 1)
         self.assertIsNone(after["error"])
 
+        # First segment of its kind auto-activates so the admin doesn't have
+        # to click "Set as active" on a fresh install (matches the old
+        # uploadSegmentAction's behavior).
+        self.assertEqual(store.get_setting("video.active_intro_id"), "seg1")
+
         # Tmp workdir is cleaned up.
         self.assertFalse((self._tmp_root / "seg1").exists())
+
+    def test_auto_activate_does_not_override_existing_pick(self):
+        # If an admin has already picked an active intro, a later upload
+        # MUST NOT clobber that choice — the user already made an explicit
+        # decision.
+        store.set_setting("video.active_intro_id", "older-pick")
+        row = self._row("seg2")
+        def fake_download(url: str, dest: Path) -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"x")
+        def fake_normalize(src: Path, out: Path, sid: str) -> dict:
+            out.write_bytes(b"y")
+            return {"duration_ms": 1000}
+        def fake_upload(local: Path, key: str) -> str:
+            return f"https://example.test/{key}"
+
+        segments_worker.process_segment(
+            row,
+            tmp_root=self._tmp_root,
+            download=fake_download,
+            normalize_fn=fake_normalize,
+            upload_fn=fake_upload,
+            set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
+        )
+
+        # Active id is the admin's earlier pick, not the just-uploaded seg2.
+        self.assertEqual(store.get_setting("video.active_intro_id"), "older-pick")
+        # Row itself still went ready.
+        self.assertEqual(store.fetch_segment("seg2")["status"], "ready")
 
     def test_download_failure_flips_to_error(self):
         self._row("seg-dl")
@@ -238,6 +276,8 @@ class ProcessSegmentTests(_SegmentsTestCase):
             normalize_fn=mock.Mock(),     # must not be called
             upload_fn=mock.Mock(),         # must not be called
             set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
         )
 
         after = store.fetch_segment("seg-dl")
@@ -260,6 +300,8 @@ class ProcessSegmentTests(_SegmentsTestCase):
             normalize_fn=fake_normalize,
             upload_fn=mock.Mock(),
             set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
         )
 
         after = store.fetch_segment("seg-nm")
@@ -284,6 +326,8 @@ class ProcessSegmentTests(_SegmentsTestCase):
             normalize_fn=fake_normalize,
             upload_fn=fake_upload,
             set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
         )
 
         after = store.fetch_segment("seg-up")
@@ -302,6 +346,8 @@ class ProcessSegmentTests(_SegmentsTestCase):
             normalize_fn=mock.Mock(),
             upload_fn=mock.Mock(),
             set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
         )
         after = store.fetch_segment("seg-empty")
         self.assertEqual(after["status"], "error")
@@ -310,13 +356,16 @@ class ProcessSegmentTests(_SegmentsTestCase):
     def test_missing_id_is_a_noop(self):
         # The worker pulled a row that somehow has no id (truncated read?).
         # We log and skip rather than crash the loop.
+        must_not_call = mock.Mock(side_effect=AssertionError("must not be called"))
         segments_worker.process_segment(
             {"id": "", "source_url": "x", "kind": "intro"},
             tmp_root=self._tmp_root,
             download=mock.Mock(),
             normalize_fn=mock.Mock(),
             upload_fn=mock.Mock(),
-            set_status=mock.Mock(side_effect=AssertionError("must not be called")),
+            set_status=must_not_call,
+            get_setting=must_not_call,
+            set_setting=must_not_call,
         )
 
 

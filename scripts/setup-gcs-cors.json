@@ -1,0 +1,19 @@
+[
+  {
+    "origin": [
+      "https://lorewire.com",
+      "https://*.vercel.app",
+      "http://localhost:3000"
+    ],
+    "method": ["GET", "PUT", "POST", "OPTIONS"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Range",
+      "Content-Length",
+      "Range",
+      "X-Goog-Resumable",
+      "Authorization"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

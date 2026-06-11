@@ -305,8 +305,15 @@ def set_setting(key: str, value: str) -> None:
             conn.commit()
         return
     with _sqlite_conn() as c:
-        for stmt in SCHEMA_STATEMENTS:
-            c.execute(stmt)
+        # Ensure the settings table exists (idempotent) without re-running the
+        # full schema list — that list contains Postgres-only ALTER COLUMN
+        # IF NOT EXISTS statements SQLite cannot parse. init() owns the full
+        # migration and must run before set_setting in any real flow; this
+        # CREATE TABLE is only the bootstrap safety net for "set_setting
+        # called before init() ever did."
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
+        )
         c.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
