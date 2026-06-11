@@ -149,6 +149,51 @@ export async function uploadFile(
   return `${PUBLIC_BASE}/${bucket}/${key}`;
 }
 
+// Upload an in-memory buffer to <bucket>/<key>. Returns the public URL.
+// Used by the article CMS image uploader — images are typically <5 MB so the
+// browser can POST multipart through a Vercel Function without hitting the
+// 4.5 MB body cap that forced the segments uploader to go direct-to-GCS.
+// For anything that might exceed that cap, prefer createResumableUploadSession.
+export async function uploadBuffer(
+  body: ArrayBuffer | Uint8Array | Buffer,
+  key: string,
+  contentType: string,
+): Promise<string> {
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) {
+    throw new Error("GCS_BUCKET is not set; cannot upload.");
+  }
+  const token = await accessToken();
+  const encodedKey = encodeURIComponent(key);
+  const url =
+    `${UPLOAD_BASE}/b/${encodeURIComponent(bucket)}/o` +
+    `?uploadType=media&name=${encodedKey}&predefinedAcl=publicRead`;
+  // Copy bytes into a fresh ArrayBuffer so the Blob is typed cleanly under
+  // strict TS. Newer @types/node narrowed BlobPart to ArrayBufferView<
+  // ArrayBuffer> (excluding SharedArrayBuffer), and Uint8Array<ArrayBufferLike>
+  // — which is what you get from Buffer or a typed-array slice — no longer
+  // satisfies that. One small copy buys us a cast-free, robust path.
+  const sourceU8 =
+    body instanceof Uint8Array ? body : new Uint8Array(body);
+  const ab = new ArrayBuffer(sourceU8.byteLength);
+  new Uint8Array(ab).set(sourceU8);
+  const blob = new Blob([ab], { type: contentType });
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": contentType,
+      "Content-Length": String(blob.size),
+    },
+    body: blob,
+  });
+  if (resp.status !== 200 && resp.status !== 201) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`GCS upload HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  return `${PUBLIC_BASE}/${bucket}/${key}`;
+}
+
 // Result of a resumable-upload init: the session URI the browser PUTs bytes
 // to, and the public URL the object will resolve to once the upload completes.
 // Both are returned at init time because we want to write `source_url` to the

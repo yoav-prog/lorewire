@@ -41,6 +41,7 @@ import {
   isArticleLanguage,
   slugifyTitle,
 } from "@/lib/articles";
+import { countImagesMissingAlt } from "@/lib/tiptap-article-image";
 
 export interface LoginState {
   error?: string;
@@ -422,10 +423,34 @@ export async function setArticleStatusAction(
   ) {
     redirectToArticle(id, { error: "bad-status" });
   }
+  // Publish guard: every image block must carry alt text. The editor surfaces
+  // a warning band on missing-alt images so the writer sees the problem
+  // before they hit publish; this is the load-bearing server check.
+  if (status === "published") {
+    const article = await getArticle(id);
+    if (!article) redirectToArticles({ error: "not-found" });
+    let doc: unknown = null;
+    try {
+      doc = article!.document ? JSON.parse(article!.document) : null;
+    } catch {
+      doc = null;
+    }
+    const missing = countImagesMissingAlt(doc);
+    if (missing > 0) {
+      console.info("[articles action] publish-blocked alt-missing", {
+        id,
+        missing,
+      });
+      redirectToArticle(id, {
+        error: `alt-missing-${missing}`,
+      });
+    }
+  }
   await setArticleStatus(id, status);
   console.info("[articles action] status", { id, status });
   revalidatePath(`/admin/articles/${id}`);
   revalidatePath("/admin/articles");
+  revalidatePath("/admin/content");
   redirectToArticle(id, { status: "saved" });
 }
 

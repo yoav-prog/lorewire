@@ -83,7 +83,16 @@ export default async function EditArticlePage({
       )}
       {error && (
         <p className="rounded-lg border border-cat-entitled/40 bg-cat-entitled/15 px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-cat-entitled">
-          {error.replace(/-/g, " ")}
+          {(() => {
+            // Friendly rewrite for the publish-blocked case so the writer
+            // immediately sees what's wrong; everything else slugifies.
+            const m = error.match(/^alt-missing-(\d+)$/);
+            if (m) {
+              const n = Number(m[1]);
+              return `Cannot publish — ${n} image${n === 1 ? "" : "s"} need alt text.`;
+            }
+            return error.replace(/-/g, " ");
+          })()}
         </p>
       )}
 
