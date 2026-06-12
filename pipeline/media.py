@@ -563,6 +563,17 @@ def regen_one(
     if asset.startswith("prop:"):
         return _regen_one_prop(story, out_dir, safe_id, _parse_index(asset))
 
+    # Per-frame regens (video editor Phase 3): "frame:<uuid>" targets one
+    # doodle_frame inside stories.video_config. The TS server action wrote
+    # the new prompt + snapshotted prev_image before queuing, so we read
+    # the prompt off the persisted config and trust it; the worker's job
+    # is only to make the picture and stamp the new url back.
+    if asset.startswith("frame:"):
+        _, _, frame_id = asset.partition(":")
+        if not frame_id:
+            raise ValueError(f"asset {asset!r} missing frame id after colon")
+        return _regen_one_frame(story, out_dir, safe_id, frame_id)
+
     raise NotImplementedError(f"unknown asset slug {asset!r}")
 
 
@@ -899,6 +910,100 @@ def _regen_one_prop(
     store.update_story_props(story["id"], new_props)
 
     return stored_url, _per_image_cost_cents()
+
+
+# Video editor Phase 3 part 2. The TS server action
+# (lorewire-app/src/app/admin/videos/[id]/actions.ts::queueFrameImageRegen)
+# wrote the new prompt into stories.video_config.doodle_frames[i].image_prompt
+# and snapshotted the previous state into .prev_image BEFORE inserting
+# the queue row. Our job here is the picture, not the bookkeeping —
+# read the prompt off the persisted config, generate the image, and
+# stamp the new url back. prev_image stays untouched (the editor's
+# Revert action handles undo without another model call).
+#
+# Filename uses the stable frame id so a regen-followed-by-regen
+# overwrites the same path and CDN cache eviction is straightforward.
+# Two frames can never collide because UUIDs are unique per row.
+
+def _regen_one_frame(
+    story: dict, out_dir: Path, safe_id: str, frame_id: str,
+) -> tuple[str, int]:
+    """Regenerate the image for one doodle frame.
+
+    The frame is located by its stable `id` inside
+    stories.video_config.doodle_frames. The prompt is read off the
+    persisted config — the TS server action wrote it there before
+    queueing this row. Raises ValueError if the config can't be parsed,
+    the frame id isn't present, or the frame has no image_prompt.
+    """
+    raw = story.get("video_config")
+    if not raw:
+        raise ValueError(
+            f"story {safe_id} has no video_config — frame regen needs it"
+        )
+    try:
+        config = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(
+            f"story {safe_id} video_config is malformed JSON: {e}"
+        ) from e
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"story {safe_id} video_config is not a JSON object"
+        )
+
+    frames = config.get("doodle_frames")
+    if not isinstance(frames, list):
+        raise ValueError(
+            f"story {safe_id} video_config.doodle_frames is not a list"
+        )
+
+    frame_idx: int | None = None
+    for i, f in enumerate(frames):
+        if isinstance(f, dict) and f.get("id") == frame_id:
+            frame_idx = i
+            break
+    if frame_idx is None:
+        raise ValueError(
+            f"frame id {frame_id!r} not found in story {safe_id} doodle_frames"
+        )
+
+    frame = frames[frame_idx]
+    prompt = (frame.get("image_prompt") or "").strip()
+    if not prompt:
+        # The TS server action validates + writes image_prompt before
+        # enqueueing, so an empty prompt here means either a manual queue
+        # insert OR a regression in the editor. Fail loudly so the queue
+        # row's error column surfaces the cause in the admin UI.
+        raise ValueError(
+            f"frame {frame_id!r} on story {safe_id} has no image_prompt to regen from"
+        )
+
+    url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
+    filename = f"frame-{frame_id}.png"
+    public_url = f"{url_prefix}/{filename}"
+    label = f"frame-{frame_id}"
+
+    print(f"[regen frame] start id={safe_id} frame={frame_id} prompt_chars={len(prompt)}")
+
+    kie_url = _generate_with_retry(prompt, f"id={safe_id} {label} per-frame regen")
+    if kie_url is None:
+        raise RuntimeError(f"kie returned no URL for {label}")
+    local_path = out_dir / filename
+    images.download(kie_url, local_path)
+    stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+
+    # Stamp the new url into the live frame; leave image_prompt + prev_image
+    # alone (the TS action owns both). dict() copy so we don't mutate the
+    # parsed input by reference.
+    new_frames = [dict(f) if isinstance(f, dict) else f for f in frames]
+    new_frames[frame_idx] = {**frames[frame_idx], "url": stored_url}
+    new_config = {**config, "doodle_frames": new_frames}
+    store.update_story_video_config(story["id"], new_config)
+
+    cents = _per_image_cost_cents()
+    print(f"[regen frame] done id={safe_id} frame={frame_id} cents={cents}")
+    return stored_url, cents
 
 
 def _read_scene_urls(story: dict) -> list[str]:

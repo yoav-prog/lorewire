@@ -383,5 +383,209 @@ class PerPropRegenTests(unittest.TestCase):
                 media.regen_one("abc123", "prop:0", Path(tmp))
 
 
+class PerFrameRegenTests(unittest.TestCase):
+    """Tests for the `frame:<id>` slug — video editor Phase 3 part 2.
+
+    Verifies dispatch, prompt sourcing, sibling preservation, and the
+    fail-loud paths (missing config / malformed JSON / unknown id /
+    missing image_prompt). Mocks the network surface so no kie credits
+    are burned.
+    """
+
+    def _story_with_frames(self, frames: list[dict]) -> dict:
+        import json as _json
+        return {
+            **STORY,
+            "video_config": _json.dumps({
+                "config_version": 2,
+                "voiceover_url": "/v.mp3",
+                "duration_ms": 10000,
+                "doodle_frames": frames,
+                "captions": [
+                    {"start_ms": 0, "end_ms": 10000, "text": "Hi"}
+                ],
+            }),
+        }
+
+    def test_writes_new_url_into_video_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = [
+                {
+                    "id": "frame-a",
+                    "url": "/old-a.png",
+                    "caption_chunk_start_index": 0,
+                    "image_prompt": "a doodle of an accountant",
+                },
+                {
+                    "id": "frame-b",
+                    "url": "/old-b.png",
+                    "caption_chunk_start_index": 0,
+                    "image_prompt": "a doodle of a leaf blower",
+                },
+            ]
+            story = self._story_with_frames(frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, cents = media.regen_one("abc123", "frame:frame-a", Path(tmp))
+            self.assertEqual(cents, 5)
+            new_config = mocks["update_video_config"].call_args.args[1]
+            new_frames = new_config["doodle_frames"]
+            # Only frame-a's url changed; frame-b is preserved verbatim.
+            self.assertEqual(new_frames[0]["id"], "frame-a")
+            self.assertNotEqual(new_frames[0]["url"], "/old-a.png")
+            self.assertEqual(new_frames[0]["url"], url)
+            self.assertEqual(new_frames[1], frames[1])
+
+    def test_preserves_image_prompt_and_prev_image_on_target_frame(self):
+        # The TS server action owns image_prompt + prev_image. The Python
+        # worker must NOT touch them — Revert would lose its snapshot.
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = [
+                {
+                    "id": "frame-a",
+                    "url": "/old-a.png",
+                    "caption_chunk_start_index": 0,
+                    "image_prompt": "the new prompt",
+                    "prev_image": {
+                        "url": "/older.png",
+                        "image_prompt": "the older prompt",
+                        "replaced_at": "2026-06-12T11:00:00Z",
+                    },
+                },
+            ]
+            story = self._story_with_frames(frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "frame:frame-a", Path(tmp))
+            new_frames = mocks["update_video_config"].call_args.args[1]["doodle_frames"]
+            self.assertEqual(new_frames[0]["image_prompt"], "the new prompt")
+            self.assertEqual(
+                new_frames[0]["prev_image"],
+                frames[0]["prev_image"],
+            )
+
+    def test_missing_video_config_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            story = {**STORY}  # no video_config field at all
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(ValueError) as ctx:
+                media.regen_one("abc123", "frame:frame-a", Path(tmp))
+            self.assertIn("video_config", str(ctx.exception))
+
+    def test_malformed_video_config_json_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            story = {**STORY, "video_config": "{not valid json"}
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(ValueError) as ctx:
+                media.regen_one("abc123", "frame:frame-a", Path(tmp))
+            self.assertIn("malformed", str(ctx.exception).lower())
+
+    def test_unknown_frame_id_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = [
+                {
+                    "id": "frame-a",
+                    "url": "/old.png",
+                    "caption_chunk_start_index": 0,
+                    "image_prompt": "p",
+                },
+            ]
+            story = self._story_with_frames(frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(ValueError) as ctx:
+                media.regen_one("abc123", "frame:does-not-exist", Path(tmp))
+            self.assertIn("not found", str(ctx.exception))
+
+    def test_missing_image_prompt_raises_value_error(self):
+        # The TS server action validates + writes image_prompt before
+        # enqueueing; an empty prompt here means a regression or manual
+        # queue insert. Fail loud so the admin sees the cause.
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = [
+                {
+                    "id": "frame-a",
+                    "url": "/old.png",
+                    "caption_chunk_start_index": 0,
+                    # no image_prompt
+                },
+            ]
+            story = self._story_with_frames(frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(ValueError) as ctx:
+                media.regen_one("abc123", "frame:frame-a", Path(tmp))
+            self.assertIn("image_prompt", str(ctx.exception))
+
+    def test_empty_frame_id_after_colon_raises_value_error(self):
+        # A bare "frame:" slug (no id) is a malformed queue row.
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story_with_frames([])
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(ValueError) as ctx:
+                media.regen_one("abc123", "frame:", Path(tmp))
+            self.assertIn("missing frame id", str(ctx.exception))
+
+    def test_kie_returning_none_raises_runtime_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = [
+                {
+                    "id": "frame-a",
+                    "url": "/old.png",
+                    "caption_chunk_start_index": 0,
+                    "image_prompt": "p",
+                },
+            ]
+            story = self._story_with_frames(frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "generate_with_retry": mock.patch.object(
+                    media, "_generate_with_retry", return_value=None,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(RuntimeError):
+                media.regen_one("abc123", "frame:frame-a", Path(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()

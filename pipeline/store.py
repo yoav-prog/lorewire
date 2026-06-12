@@ -1009,6 +1009,37 @@ def update_story_scenes(story_id: str, scene_urls: list[str]) -> None:
         )
 
 
+def update_story_video_config(story_id: str, video_config: dict) -> None:
+    """Replace stories.video_config with a fresh JSON object.
+
+    Used by media.regen_one() for `frame:<id>` slugs: the per-frame regen
+    handler reads the prompt off the persisted config, generates a new
+    image, then writes the updated config back through this helper.
+
+    Caller is responsible for shaping the dict — this helper does no
+    validation. The editor's parseVideoConfig() is the canonical
+    validator; the pipeline trusts itself to write a shape that
+    round-trips through that parser.
+    """
+    now = _now_iso()
+    payload = json.dumps(video_config)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET video_config = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (payload, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET video_config = ?, updated_at = ? WHERE id = ?",
+            (payload, now, story_id),
+        )
+
+
 def update_story_props(story_id: str, prop_list: list[dict]) -> None:
     """Replace stories.props with a fresh JSON list of {url,label,side} dicts."""
     now = _now_iso()
