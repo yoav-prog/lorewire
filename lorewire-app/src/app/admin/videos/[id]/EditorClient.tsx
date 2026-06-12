@@ -1908,9 +1908,24 @@ function MetadataPanel({
   const persistedTitle = config.title ?? "";
   const persistedChannel = config.channel_name ?? "";
   const persistedKenBurns = config.ken_burns ?? false;
+  // Motion beats. ken_burns is a top-level field (predates the motion
+  // map); the other five live in config.motion (and default to off when
+  // the row was written before the field existed). Each one renders as
+  // its own toggle so the admin can suppress a beat per-video without
+  // touching the global pipeline setting.
+  const persistedMicroWiggle = config.motion?.micro_wiggle ?? false;
+  const persistedLabelPop = config.motion?.label_pop ?? false;
+  const persistedScribbleDraw = config.motion?.scribble_draw ?? false;
+  const persistedPropSlide = config.motion?.prop_slide ?? false;
+  const persistedMouthSwap = config.motion?.mouth_swap ?? false;
   const [title, setTitle] = useState(persistedTitle);
   const [channel, setChannel] = useState(persistedChannel);
   const [kenBurns, setKenBurns] = useState(persistedKenBurns);
+  const [microWiggle, setMicroWiggle] = useState(persistedMicroWiggle);
+  const [labelPop, setLabelPop] = useState(persistedLabelPop);
+  const [scribbleDraw, setScribbleDraw] = useState(persistedScribbleDraw);
+  const [propSlide, setPropSlide] = useState(persistedPropSlide);
+  const [mouthSwap, setMouthSwap] = useState(persistedMouthSwap);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [okFlash, setOkFlash] = useState(false);
@@ -1918,7 +1933,12 @@ function MetadataPanel({
   const dirty =
     title !== persistedTitle ||
     channel !== persistedChannel ||
-    kenBurns !== persistedKenBurns;
+    kenBurns !== persistedKenBurns ||
+    microWiggle !== persistedMicroWiggle ||
+    labelPop !== persistedLabelPop ||
+    scribbleDraw !== persistedScribbleDraw ||
+    propSlide !== persistedPropSlide ||
+    mouthSwap !== persistedMouthSwap;
 
   const titleLocked = Boolean(config._locks?.title);
   const channelLocked = Boolean(config._locks?.channel_name);
@@ -1941,6 +1961,26 @@ function MetadataPanel({
       patch.ken_burns = kenBurns;
       lockPaths.push("ken_burns");
     }
+    // Build the motion patch if any beat flipped. Spreading the current
+    // motion preserves any future beats the editor doesn't know about
+    // yet (config schema is additive-safe).
+    const motionDirty =
+      microWiggle !== persistedMicroWiggle ||
+      labelPop !== persistedLabelPop ||
+      scribbleDraw !== persistedScribbleDraw ||
+      propSlide !== persistedPropSlide ||
+      mouthSwap !== persistedMouthSwap;
+    if (motionDirty) {
+      patch.motion = {
+        ...(config.motion ?? {}),
+        micro_wiggle: microWiggle,
+        label_pop: labelPop,
+        scribble_draw: scribbleDraw,
+        prop_slide: propSlide,
+        mouth_swap: mouthSwap,
+      };
+      lockPaths.push("motion");
+    }
     startTransition(async () => {
       const result = await saveVideoConfigPatch(storyId, patch, lockPaths);
       if (result.ok) {
@@ -1956,10 +1996,17 @@ function MetadataPanel({
     setTitle(persistedTitle);
     setChannel(persistedChannel);
     setKenBurns(persistedKenBurns);
+    setMicroWiggle(persistedMicroWiggle);
+    setLabelPop(persistedLabelPop);
+    setScribbleDraw(persistedScribbleDraw);
+    setPropSlide(persistedPropSlide);
+    setMouthSwap(persistedMouthSwap);
     setError(null);
   };
 
-  const handleUnlock = (path: "title" | "channel_name" | "ken_burns") => {
+  const handleUnlock = (
+    path: "title" | "channel_name" | "ken_burns" | "motion",
+  ) => {
     startTransition(async () => {
       await saveVideoConfigPatch(storyId, {}, [], [path]);
     });
@@ -2006,23 +2053,55 @@ function MetadataPanel({
 
       <Section
         title="Visual options"
-        hint="Ken-Burns adds a slow zoom/pan to each frame so 30+ scene shorts don't feel static between cuts."
+        hint="Each toggle is a per-video override — turning it off here doesn't change the global Settings → General pipeline default, just this render."
       >
-        <Toggle
-          checked={kenBurns}
-          onChange={setKenBurns}
-          label={kenBurnsLocked ? "ken_burns  🔒" : "ken_burns"}
-          ariaLabel="ken_burns"
-        />
-        {kenBurnsLocked && (
-          <button
-            type="button"
-            onClick={() => handleUnlock("ken_burns")}
-            className="mt-2 font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
-          >
-            Unlock — let the pipeline rewrite this
-          </button>
-        )}
+        <div className="space-y-2">
+          <Toggle
+            checked={kenBurns}
+            onChange={setKenBurns}
+            label={kenBurnsLocked ? "ken_burns  🔒" : "ken_burns — slow zoom/pan per scene"}
+            ariaLabel="ken_burns"
+          />
+          {kenBurnsLocked && (
+            <button
+              type="button"
+              onClick={() => handleUnlock("ken_burns")}
+              className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+            >
+              Unlock ken_burns — let the pipeline rewrite this
+            </button>
+          )}
+          <Toggle
+            checked={mouthSwap}
+            onChange={setMouthSwap}
+            label="mouth_swap — bottom-left talking-head bust"
+            ariaLabel="mouth_swap"
+          />
+          <Toggle
+            checked={propSlide}
+            onChange={setPropSlide}
+            label="prop_slide — object cutouts slide in from edges"
+            ariaLabel="prop_slide"
+          />
+          <Toggle
+            checked={labelPop}
+            onChange={setLabelPop}
+            label="label_pop — caption first-word pops in a corner"
+            ariaLabel="label_pop"
+          />
+          <Toggle
+            checked={scribbleDraw}
+            onChange={setScribbleDraw}
+            label="scribble_draw — animated SVG stroke at scene cuts"
+            ariaLabel="scribble_draw"
+          />
+          <Toggle
+            checked={microWiggle}
+            onChange={setMicroWiggle}
+            label="micro_wiggle — tiny sinusoidal jitter on every frame"
+            ariaLabel="micro_wiggle"
+          />
+        </div>
       </Section>
 
       <Section

@@ -27,6 +27,7 @@ import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StatusStepIndicator } from "./StatusStepIndicator";
 import { StoryAspectControl } from "./StoryAspectControl";
 import { isVideoAspect, LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
+import { resolveSceneCount, readSceneCountMode } from "@/lib/scene-count";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -86,6 +87,22 @@ export default async function EditStory({
   const initialAspect: VideoAspect = storyConfigAspect ?? globalDefaultAspect;
   const aspectIsOverride = storyConfigAspect !== null;
 
+  // Resolve the scene count the pipeline WILL ask for so the rebuild
+  // estimate + the asset label both reflect reality — not just the
+  // default 30. Mirrors pipeline media.py's auto/manual chain (see
+  // `lib/scene-count.ts`).
+  const sceneCount = await resolveSceneCount({
+    body: s.body,
+    duration: s.duration,
+  });
+  const sceneMode = await readSceneCountMode();
+  const sceneCountLabel = sceneMode === "auto"
+    ? `All scene images (${sceneCount}, auto)`
+    : `All scene images (${sceneCount})`;
+  const sceneCountHint = sceneMode === "auto"
+    ? `${sceneCount} scenes — derived from the ${s.duration ?? "estimated"} voiceover at the Settings → General "Seconds per scene" rate. Auto adapts to the script length; switch to Manual in Settings to pin an exact number.`
+    : `${sceneCount} scenes — pinned in Settings → General → Scenes per story.`;
+
   // What this story owns that can be regenerated. Order is the order the
   // panel lists them in — hero first (most impactful), then bulk-asset
   // groups (scenes, props), then mouth-swap (specialty).
@@ -97,8 +114,9 @@ export default async function EditStory({
     },
     {
       asset: "scenes",
-      label: "All scene images",
-      hint: "Every scene image the doodle composition cycles through. Count comes from Settings → General → Scenes per story.",
+      label: sceneCountLabel,
+      hint: sceneCountHint,
+      imageCountOverride: sceneCount,
     },
   ];
   // Optional bulk regens that only appear when the relevant feature is on.
