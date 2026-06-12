@@ -35,6 +35,7 @@ import type {
 import CaptionStylePanel from "./CaptionStylePanel";
 import { FrameCard } from "./FrameCard";
 import { FrameRegenActions } from "./FrameRegenActions";
+import { BulkConfirmProvider } from "./BulkConfirmContext";
 import type { ImageRenderRow } from "@/lib/image-render-queue";
 import {
   PreviewComposition,
@@ -262,6 +263,7 @@ export default function EditorClient({
   });
 
   return (
+    <BulkConfirmProvider defaultEstimateCents={frameEstimateCents}>
     <div
       className="flex flex-col"
       style={{ height: "100svh", overflow: "hidden" }}
@@ -438,6 +440,7 @@ export default function EditorClient({
         </aside>
       </div>
     </div>
+    </BulkConfirmProvider>
   );
 }
 

@@ -23,6 +23,7 @@ import {
   type FrameRegenResult,
   type FrameRevertResult,
 } from "./actions";
+import { useBulkConfirmGate } from "./BulkConfirmContext";
 
 const TRANSITIONAL_STATUSES = new Set(["queued", "generating"]);
 
@@ -52,6 +53,7 @@ export function FrameRegenActions({
   enabled,
 }: FrameRegenActionsProps) {
   const router = useRouter();
+  const gate = useBulkConfirmGate();
   const [pending, startTransition] = useTransition();
   const [draftPrompt, setDraftPrompt] = useState(currentPrompt);
   const [regenResult, setRegenResult] = useState<FrameRegenResult | null>(null);
@@ -67,18 +69,32 @@ export function FrameRegenActions({
 
   const promptDirty = draftPrompt.trim() !== currentPrompt.trim();
 
-  function fireRegen() {
-    if (!enabled || pending || transitional) return;
+  // The actual work — wrapped in a startTransition so the button's
+  // pending state is set. Captured here so Retry can call it directly
+  // (skipping the bulk-confirm gate, since the user is explicitly
+  // reacting to an error rather than impulse-clicking).
+  function doActualRegen(payload: string | undefined) {
     startTransition(async () => {
-      // Only send the prompt if the user actually changed it — otherwise
-      // the action falls back to the persisted prompt (or scene prompt)
-      // which keeps the prompt-source attribution correct in logs.
-      const payload = promptDirty ? draftPrompt.trim() : undefined;
       const r = await queueFrameImageRegen(storyId, frameId, payload);
       setRegenResult(r);
       setRevertResult(null);
       if (r.ok) router.refresh();
     });
+  }
+
+  function fireRegen() {
+    if (!enabled || pending || transitional) return;
+    // Snapshot the prompt at click time — if the gate defers and the
+    // user changes the textarea before confirming, we still queue the
+    // prompt they originally clicked with.
+    const payload = promptDirty ? draftPrompt.trim() : undefined;
+    gate.request(() => doActualRegen(payload), { estimateCents });
+  }
+
+  function fireRetry() {
+    if (!enabled || pending || transitional) return;
+    const payload = promptDirty ? draftPrompt.trim() : undefined;
+    doActualRegen(payload);
   }
 
   function fireRevert() {
@@ -161,7 +177,7 @@ export function FrameRegenActions({
           <div className="flex items-center gap-3 font-mono text-[10px] uppercase tracking-wider">
             <button
               type="button"
-              onClick={fireRegen}
+              onClick={fireRetry}
               disabled={!enabled || pending || transitional}
               className="text-muted underline-offset-2 hover:text-accent hover:underline disabled:opacity-50"
             >
