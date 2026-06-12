@@ -23,6 +23,11 @@ import time
 from pathlib import Path
 
 from pipeline import config, gcs, images, models, stages, store, voice
+from pipeline.aspect import (
+    resolve_aspect_for_fresh_run,
+    resolve_aspect_for_story,
+    scene_aspect_for,
+)
 
 # Output goes under the Next app's public/ so it serves as /generated/<id>/...
 # The pipeline runs from the repo root; this is the relative path it writes to.
@@ -363,6 +368,19 @@ def generate_media(
     # prompts[0] from make_image_prompts is the doodle hero fallback we don't
     # need any more; the cinematic thumbnails own the hero slot now. Slice
     # everything after for the scene set.
+    #
+    # Phase 2 of _plans/2026-06-12-video-aspect-ratio.md: scenes now follow
+    # the resolved video aspect — portrait videos still ask kie for 3:4
+    # (byte-identical to the pre-Phase-2 flow), landscape videos ask for
+    # 16:9 so the wider canvas isn't getting object-fit-cropped. There's
+    # no story row yet at the fresh-run point, so the resolver only sees
+    # the global default + legacy 9:16 floor.
+    fresh_video_aspect = resolve_aspect_for_fresh_run()
+    scene_kie_aspect = scene_aspect_for(fresh_video_aspect)
+    print(
+        f"[media id={safe_id} aspect] video={fresh_video_aspect} "
+        f"scene_kie_aspect={scene_kie_aspect}"
+    )
     scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
     scene_urls: list[str] = []
     for i, prompt in enumerate(scene_prompts):
@@ -374,7 +392,9 @@ def generate_media(
             scene_urls.append(public_url)
             continue
         started = time.time()
-        kie_url = _generate_with_retry(prompt, f"id={safe_id} {label}")
+        kie_url = _generate_with_retry(
+            prompt, f"id={safe_id} {label}", aspect_ratio=scene_kie_aspect,
+        )
         if kie_url is None:
             continue
         local_path = out_dir / filename
@@ -387,7 +407,8 @@ def generate_media(
         elapsed = time.time() - started
         print(
             f"[media id={safe_id} {label}] doodle "
-            f"({models.get_selected('images')}) -> {stored_url} ({elapsed:.1f}s)"
+            f"({models.get_selected('images')}, {scene_kie_aspect}) "
+            f"-> {stored_url} ({elapsed:.1f}s)"
         )
         scene_urls.append(stored_url)
 
@@ -669,9 +690,14 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         idea, body, dry_run=False, n=scene_count + 1,
     )
     scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+    # Phase 2 of _plans/2026-06-12-video-aspect-ratio.md: resolve scene
+    # aspect from the story row. Existing portrait stories with no
+    # `aspect` field fall through to 3:4 — same kie call shape as before.
+    video_aspect = resolve_aspect_for_story(story)
+    scene_kie_aspect = scene_aspect_for(video_aspect)
     print(
         f"[image regen scenes] id={safe_id} count={len(scene_prompts)} "
-        f"target={scene_count}"
+        f"target={scene_count} aspect={video_aspect} kie={scene_kie_aspect}"
     )
 
     scene_urls: list[str] = []
@@ -681,7 +707,9 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         filename = f"scene-{i + 1}.png"
         public_url = f"{url_prefix}/{filename}"
         label = f"scene-{i + 1}"
-        kie_url = _generate_with_retry(prompt, f"id={safe_id} {label} regen")
+        kie_url = _generate_with_retry(
+            prompt, f"id={safe_id} {label} regen", aspect_ratio=scene_kie_aspect,
+        )
         if kie_url is None:
             print(f"[image regen scenes] id={safe_id} {label} FAILED, skipping")
             continue
@@ -856,7 +884,13 @@ def _regen_one_scene(
     filename = f"scene-{index + 1}.png"
     public_url = f"{url_prefix}/{filename}"
     label = f"scene-{index + 1}"
-    kie_url = _generate_with_retry(prompt, f"id={safe_id} {label} per-image regen")
+    # Phase 2: resolve the scene aspect from the story so a per-image regen
+    # on a 16:9 story asks kie for 16:9, not the 3:4 default.
+    scene_kie_aspect = scene_aspect_for(resolve_aspect_for_story(story))
+    kie_url = _generate_with_retry(
+        prompt, f"id={safe_id} {label} per-image regen",
+        aspect_ratio=scene_kie_aspect,
+    )
     if kie_url is None:
         raise RuntimeError(f"kie returned no URL for {label}")
     local_path = out_dir / filename

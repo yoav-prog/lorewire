@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from pipeline import gcs, media, segments
+from pipeline.aspect import resolve_aspect_for_story
 
 VIDEO_PROJECT_RELATIVE = Path("video")
 ENTRY_POINT = "src/Root.tsx"
@@ -282,10 +283,22 @@ def generate_video(
         f" (scope chain: story={safe_id!r}, cat={category!r})"
     )
 
+    # Phase 0/2 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
+    # canvas aspect for this render. The chain prefers the per-story
+    # override on the existing row, falls back to the global default
+    # setting, and finally to the legacy 9:16 portrait — so stories that
+    # predate this feature continue to render byte-identical 1080x1920.
+    # We stamp it onto the props file so the renderer's calculateMetadata
+    # picks it up AND onto the persisted video_config so re-runs preserve
+    # the editor's choice without needing the lock map.
+    resolved_aspect = resolve_aspect_for_story(story_row)
+    print(f"[video id={safe_id} aspect] resolved={resolved_aspect}")
+
     config = {
         "voiceover_url": static_audio,
         "title": _truncate_title(title),
         "channel_name": "lorewire",
+        "aspect": resolved_aspect,
         "duration_ms": duration_ms,
         "doodle_frames": doodle_frames,
         "captions": captions,
