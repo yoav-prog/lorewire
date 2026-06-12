@@ -66,9 +66,19 @@ Replace the left rail's text-only list with vertical frame cards:
 - Thumbnail from `previewFrameUrls[idx]`.
 - Frame index + caption snippet.
 - Filename (smaller).
-- **Prompt visible**, read-only for now. Derived from the source story scene at server-render time if `image_prompt` is absent (no schema change yet).
+- **Prompt slot is deferred to Phase 2.** Investigation 2026-06-12 found
+  prompts are never persisted anywhere — `make_image_prompts` runs at
+  pipeline time and only the `prompt_hash` is written (to
+  `IMAGE_RENDERS.prompt_hash`). The actual prompt text isn't on the
+  story, the scene, or the render row. So "derive from source story
+  scene" doesn't work and showing a placeholder under every card now
+  would just be UI debt. Phase 2 adds `image_prompt` to `DoodleFrame`
+  and either backfills via a one-shot pipeline pass or fills the slot
+  on first regen.
 
-No regen. No edit. Two surfaces of the user's complaint go away in a single small PR.
+Phase 1 ships: thumbnails + caption + filename. One of the user's three
+top complaints ("see every frame's image") goes away in a small PR
+with zero data-model risk.
 
 ### Phase 2 — Schema with stable IDs + Zod boundary
 - Add `id: string` to `DoodleFrame` (UUID, stable across edits) in `lib/schema.ts` + `lib/video-config.ts` Zod schema.

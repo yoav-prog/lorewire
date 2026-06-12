@@ -33,6 +33,7 @@ import type {
   ResolvedCaptionStyle,
 } from "@/lib/caption-style";
 import CaptionStylePanel from "./CaptionStylePanel";
+import { FrameCard } from "./FrameCard";
 import {
   PreviewComposition,
   type PreviewProps,
@@ -301,35 +302,17 @@ export default function EditorClient({
             ) : (
               config.doodle_frames.map((frame, idx) => {
                 const captionIdx = frame.caption_chunk_start_index;
-                const captionText =
-                  config.captions[captionIdx]?.text ?? "(no caption)";
-                const isSelected = selectedFrameIdx === idx;
+                const captionText = config.captions[captionIdx]?.text ?? "";
                 return (
-                  <button
+                  <FrameCard
                     key={`${frame.url}-${idx}`}
-                    type="button"
+                    index={idx}
+                    url={previewFrameUrls[idx] ?? ""}
+                    caption={captionText}
+                    filename={frameFilename(frame.url)}
+                    isSelected={selectedFrameIdx === idx}
                     onClick={() => setSelectedFrameIdx(idx)}
-                    className={`flex w-full items-start gap-3 border-b border-line px-3 py-3 text-left transition-colors ${
-                      isSelected ? "bg-surface2" : "hover:bg-surface2/60"
-                    }`}
-                    style={{
-                      borderLeft: isSelected
-                        ? "2px solid var(--color-accent)"
-                        : "2px solid transparent",
-                    }}
-                  >
-                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted">
-                      {String(idx + 1).padStart(2, "0")}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[12px] text-ink">
-                        {captionText}
-                      </span>
-                      <span className="mt-0.5 block truncate font-mono text-[10px] text-muted">
-                        {frameFilename(frame.url)}
-                      </span>
-                    </span>
-                  </button>
+                  />
                 );
               })
             )}
