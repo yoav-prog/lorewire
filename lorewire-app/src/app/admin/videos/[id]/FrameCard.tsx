@@ -26,6 +26,10 @@ export interface FrameCardProps {
   filename: string;
   isSelected: boolean;
   onClick: () => void;
+  /** Rendered below the card body when the frame is selected. Used by
+   *  EditorClient to inject FrameRegenActions (Phase 3) without forcing
+   *  this layout-only component to know about server actions. */
+  actions?: React.ReactNode;
 }
 
 export function FrameCard({
@@ -35,16 +39,18 @@ export function FrameCard({
   filename,
   isSelected,
   onClick,
+  actions,
 }: FrameCardProps) {
   const label = String(index + 1).padStart(2, "0");
+  // Container + inner-button split: an `actions` slot can contain
+  // interactive controls (textarea, buttons) which is invalid HTML nested
+  // inside the outer button. The button now wraps only the row body; the
+  // actions render below it inside the same selected-state border.
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={isSelected}
+    <div
       data-frame-index={index}
-      className={`block w-full border-b border-line p-3 text-left transition-colors ${
-        isSelected ? "bg-surface2" : "hover:bg-surface2/60"
+      className={`border-b border-line transition-colors ${
+        isSelected ? "bg-surface2" : ""
       }`}
       style={{
         borderLeft: isSelected
@@ -52,42 +58,52 @@ export function FrameCard({
           : "2px solid transparent",
       }}
     >
-      <div className="flex items-start gap-3">
-        <div
-          className="relative shrink-0 overflow-hidden rounded border border-line bg-surface"
-          style={{ width: 64, aspectRatio: "9 / 16" }}
-        >
-          {url ? (
-            // eslint-disable-next-line @next/next/no-img-element -- pipeline-generated thumbnails, not Next-optimised
-            <img
-              src={url}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              className="h-full w-full object-cover"
-            />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center font-mono text-[8px] uppercase tracking-wider text-muted">
-              no image
-            </div>
-          )}
-          <span className="absolute left-1 top-1 rounded bg-bg/85 px-1 font-mono text-[9px] tabular-nums text-ink">
-            {label}
-          </span>
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="line-clamp-3 text-[12px] leading-snug text-ink">
-            {caption ? (
-              caption
+      <button
+        type="button"
+        onClick={onClick}
+        aria-pressed={isSelected}
+        className={`block w-full p-3 text-left ${
+          isSelected ? "" : "hover:bg-surface2/60"
+        }`}
+      >
+        <div className="flex items-start gap-3">
+          <div
+            className="relative shrink-0 overflow-hidden rounded border border-line bg-surface"
+            style={{ width: 64, aspectRatio: "9 / 16" }}
+          >
+            {url ? (
+              // eslint-disable-next-line @next/next/no-img-element -- pipeline-generated thumbnails, not Next-optimised
+              <img
+                src={url}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                className="h-full w-full object-cover"
+              />
             ) : (
-              <span className="text-muted">(no caption)</span>
+              <div className="flex h-full w-full items-center justify-center font-mono text-[8px] uppercase tracking-wider text-muted">
+                no image
+              </div>
             )}
-          </p>
-          <p className="mt-1 truncate font-mono text-[10px] text-muted">
-            {filename}
-          </p>
+            <span className="absolute left-1 top-1 rounded bg-bg/85 px-1 font-mono text-[9px] tabular-nums text-ink">
+              {label}
+            </span>
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="line-clamp-3 text-[12px] leading-snug text-ink">
+              {caption ? (
+                caption
+              ) : (
+                <span className="text-muted">(no caption)</span>
+              )}
+            </p>
+            <p className="mt-1 truncate font-mono text-[10px] text-muted">
+              {filename}
+            </p>
+          </div>
         </div>
-      </div>
-    </button>
+      </button>
+      {actions && <div className="px-3 pb-3">{actions}</div>}
+    </div>
   );
 }

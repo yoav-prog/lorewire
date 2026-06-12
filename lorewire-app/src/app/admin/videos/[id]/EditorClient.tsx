@@ -34,6 +34,8 @@ import type {
 } from "@/lib/caption-style";
 import CaptionStylePanel from "./CaptionStylePanel";
 import { FrameCard } from "./FrameCard";
+import { FrameRegenActions } from "./FrameRegenActions";
+import type { ImageRenderRow } from "@/lib/image-render-queue";
 import {
   PreviewComposition,
   type PreviewProps,
@@ -105,6 +107,8 @@ export default function EditorClient({
   audioUrl,
   derivedDefault,
   latestRender,
+  frameRenderStatuses,
+  frameEstimateCents,
   foreignOwnerEmail,
   captionStyle,
   captionStylePreview,
@@ -117,6 +121,8 @@ export default function EditorClient({
   audioUrl: string | null;
   derivedDefault: boolean;
   latestRender: RenderRow | null;
+  frameRenderStatuses: (ImageRenderRow | null)[];
+  frameEstimateCents: number;
   foreignOwnerEmail: string | null;
   captionStyle: ResolvedCaptionStyle;
   captionStylePreview: CaptionStyleForPreview;
@@ -303,15 +309,29 @@ export default function EditorClient({
               config.doodle_frames.map((frame, idx) => {
                 const captionIdx = frame.caption_chunk_start_index;
                 const captionText = config.captions[captionIdx]?.text ?? "";
+                const selected = selectedFrameIdx === idx;
                 return (
                   <FrameCard
-                    key={`${frame.url}-${idx}`}
+                    key={frame.id}
                     index={idx}
                     url={previewFrameUrls[idx] ?? ""}
                     caption={captionText}
                     filename={frameFilename(frame.url)}
-                    isSelected={selectedFrameIdx === idx}
+                    isSelected={selected}
                     onClick={() => setSelectedFrameIdx(idx)}
+                    actions={
+                      selected ? (
+                        <FrameRegenActions
+                          storyId={storyId}
+                          frameId={frame.id}
+                          latestRender={frameRenderStatuses[idx] ?? null}
+                          estimateCents={frameEstimateCents}
+                          currentPrompt={frame.image_prompt ?? ""}
+                          canRevert={Boolean(frame.prev_image)}
+                          enabled={!readOnly}
+                        />
+                      ) : null
+                    }
                   />
                 );
               })

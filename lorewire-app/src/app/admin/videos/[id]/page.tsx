@@ -20,6 +20,11 @@ import {
 } from "@/lib/video-config";
 import { classifyEditSession } from "@/lib/edit-session";
 import { latestRenderForStory } from "@/lib/video-render-queue";
+import {
+  estimateImageRegenCostCents,
+  latestRenderForAsset,
+  type ImageRenderRow,
+} from "@/lib/image-render-queue";
 import { resolveCaptionStyle, toPreview } from "@/lib/caption-style";
 import EditorClient from "./EditorClient";
 
@@ -58,6 +63,21 @@ export default async function VideoEditorPage({
   // shows its status in the header so the admin sees an in-flight render
   // without having to remember a render id across reloads.
   const latestRender = await latestRenderForStory(story.id);
+
+  // Per-frame regen status (Phase 3). For every doodle_frame, fetch the
+  // latest IMAGE_RENDERS row keyed by `frame:<id>` so the storyboard rail
+  // can show queued / generating / error states inline. Fanned out via
+  // Promise.all because each frame's row is independent.
+  const frameRenderStatuses: (ImageRenderRow | null)[] = await Promise.all(
+    config.doodle_frames.map((f) =>
+      latestRenderForAsset("story", story.id, `frame:${f.id}`),
+    ),
+  );
+
+  // Cost estimate is per-image and depends on the active image model
+  // setting; the asset slug only matters for bulk counts. One value
+  // covers every frame card.
+  const frameEstimateCents = await estimateImageRegenCostCents("frame:_");
 
   // Concurrency banner data. If a foreign session is fresh (<2 min), pull
   // the owner's email so the banner can name them — "<email> is editing".
@@ -105,6 +125,8 @@ export default async function VideoEditorPage({
       audioUrl={story.audio_url}
       derivedDefault={!parsed?.ok}
       latestRender={latestRender}
+      frameRenderStatuses={frameRenderStatuses}
+      frameEstimateCents={frameEstimateCents}
       foreignOwnerEmail={foreignOwnerEmail}
       captionStyle={captionStyle}
       captionStylePreview={captionStylePreview}

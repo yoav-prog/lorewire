@@ -86,8 +86,25 @@ describe("FrameCard", () => {
     expect(html).toContain(`data-frame-index="4"`);
   });
 
-  it("renders as a real button so the click target is keyboard-accessible", () => {
+  it("renders the row body as a real button so the click target is keyboard-accessible", () => {
     const html = renderToString(<FrameCard {...BASE} />);
-    expect(html).toMatch(/^<button[^>]+type="button"/);
+    expect(html).toContain('<button type="button"');
+  });
+
+  it("renders an actions slot under the body when supplied", () => {
+    const html = renderToString(
+      <FrameCard
+        {...BASE}
+        isSelected
+        actions={<span data-test-actions="yes">action slot</span>}
+      />,
+    );
+    expect(html).toContain('data-test-actions="yes"');
+    expect(html).toContain("action slot");
+  });
+
+  it("does not render the actions slot when not supplied", () => {
+    const html = renderToString(<FrameCard {...BASE} isSelected />);
+    expect(html).not.toContain("action slot");
   });
 });
