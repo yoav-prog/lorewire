@@ -14,6 +14,7 @@ import {
   CURRENT_CONFIG_VERSION,
   defaultVideoConfig,
   migrateVideoConfig,
+  mintFrameId,
   parseVideoConfig,
   type ShortVideoConfig,
 } from "@/lib/video-config";
@@ -138,6 +139,220 @@ describe("parseVideoConfig — required fields", () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error).toMatch(/captions\[0\]/);
+  });
+});
+
+// ─── parseVideoConfig: DoodleFrame schema (Phase 2) ───────────────────────────
+//
+// Phase 2 of the video editor overhaul
+// (_plans/2026-06-12-video-editor-overhaul.md). Stable per-frame `id`,
+// optional `image_prompt`, and one-step `prev_image` Revert snapshot.
+// Legacy configs without `id` lazy-mint one at parse time; the next save
+// persists the value.
+
+describe("parseVideoConfig — DoodleFrame Phase 2 fields", () => {
+  it("mints a stable id when a legacy config is missing the field", () => {
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [{ url: "/a.png", caption_chunk_start_index: 0 }],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(typeof r.config.doodle_frames[0].id).toBe("string");
+      expect(r.config.doodle_frames[0].id.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("preserves an existing id verbatim (round-trip)", () => {
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [
+          {
+            id: "00000000-0000-4000-8000-000000000001",
+            url: "/a.png",
+            caption_chunk_start_index: 0,
+          },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.config.doodle_frames[0].id).toBe(
+        "00000000-0000-4000-8000-000000000001",
+      );
+    }
+  });
+
+  it("treats an empty-string id as missing and mints a fresh one", () => {
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [{ id: "", url: "/a.png", caption_chunk_start_index: 0 }],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.config.doodle_frames[0].id).not.toBe("");
+      expect(r.config.doodle_frames[0].id.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("mints DIFFERENT ids across two parses of the same legacy input", () => {
+    // Documents the lazy-mint contract: until the editor saves, ids are
+    // ephemeral per parse. Once persisted, the parser preserves them.
+    const raw = validConfig({
+      doodle_frames: [{ url: "/a.png", caption_chunk_start_index: 0 }],
+    });
+    const a = parseVideoConfig(raw);
+    const b = parseVideoConfig(raw);
+    expect(a.ok && b.ok).toBe(true);
+    if (a.ok && b.ok) {
+      expect(a.config.doodle_frames[0].id).not.toBe(
+        b.config.doodle_frames[0].id,
+      );
+    }
+  });
+
+  it("preserves image_prompt when supplied as a non-empty string", () => {
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [
+          {
+            id: "f1",
+            url: "/a.png",
+            caption_chunk_start_index: 0,
+            image_prompt: "a doodle of a confused accountant",
+          },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.config.doodle_frames[0].image_prompt).toBe(
+        "a doodle of a confused accountant",
+      );
+    }
+  });
+
+  it("omits image_prompt when empty, missing, or wrong type", () => {
+    const cases = [
+      { id: "f1", url: "/a.png", caption_chunk_start_index: 0 },
+      { id: "f1", url: "/a.png", caption_chunk_start_index: 0, image_prompt: "" },
+      { id: "f1", url: "/a.png", caption_chunk_start_index: 0, image_prompt: 42 },
+      {
+        id: "f1",
+        url: "/a.png",
+        caption_chunk_start_index: 0,
+        image_prompt: null,
+      },
+    ];
+    for (const frame of cases) {
+      const r = parseVideoConfig(validConfig({ doodle_frames: [frame] }));
+      expect(r.ok).toBe(true);
+      if (r.ok) {
+        expect(r.config.doodle_frames[0].image_prompt).toBeUndefined();
+      }
+    }
+  });
+
+  it("preserves a valid prev_image snapshot", () => {
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [
+          {
+            id: "f1",
+            url: "/new.png",
+            caption_chunk_start_index: 0,
+            image_prompt: "new prompt",
+            prev_image: {
+              url: "/old.png",
+              image_prompt: "old prompt",
+              replaced_at: "2026-06-12T12:00:00Z",
+            },
+          },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.config.doodle_frames[0].prev_image).toEqual({
+        url: "/old.png",
+        image_prompt: "old prompt",
+        replaced_at: "2026-06-12T12:00:00Z",
+      });
+    }
+  });
+
+  it("rejects prev_image with a missing field", () => {
+    // The Revert action depends on all three fields being present; a
+    // partial snapshot would silently corrupt the undo path.
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [
+          {
+            id: "f1",
+            url: "/new.png",
+            caption_chunk_start_index: 0,
+            prev_image: { url: "/old.png", image_prompt: "old" }, // no replaced_at
+          },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/prev_image|replaced_at/);
+  });
+
+  it("treats null prev_image as absent (the editor writes null to clear it)", () => {
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [
+          {
+            id: "f1",
+            url: "/a.png",
+            caption_chunk_start_index: 0,
+            prev_image: null,
+          },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.config.doodle_frames[0].prev_image).toBeUndefined();
+    }
+  });
+
+  it("rejects a non-object prev_image", () => {
+    const r = parseVideoConfig(
+      validConfig({
+        doodle_frames: [
+          {
+            id: "f1",
+            url: "/a.png",
+            caption_chunk_start_index: 0,
+            prev_image: "not an object",
+          },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/prev_image/);
+  });
+});
+
+describe("mintFrameId", () => {
+  it("returns a non-empty string", () => {
+    const id = mintFrameId();
+    expect(typeof id).toBe("string");
+    expect(id.length).toBeGreaterThan(0);
+  });
+
+  it("returns a unique value per call", () => {
+    // The native crypto.randomUUID has a 122-bit entropy collision space,
+    // so two calls in quick succession should never match in practice.
+    // If this ever fires, something's wrong with the host's Web Crypto.
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i++) seen.add(mintFrameId());
+    expect(seen.size).toBe(100);
   });
 });
 
@@ -443,7 +658,9 @@ describe("applyConfigPatch", () => {
     voiceover_url: "/v.mp3",
     title: "Old",
     duration_ms: 10000,
-    doodle_frames: [{ url: "/a.png", caption_chunk_start_index: 0 }],
+    doodle_frames: [
+      { id: "test-frame-a", url: "/a.png", caption_chunk_start_index: 0 },
+    ],
     captions: [{ start_ms: 0, end_ms: 10000, text: "Hi" }],
   };
 

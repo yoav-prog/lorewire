@@ -16,7 +16,7 @@ function baseConfig(overrides: Partial<ShortVideoConfig> = {}): ShortVideoConfig
     voiceover_url: "/v.mp3",
     title: "Hi",
     duration_ms: 10000,
-    doodle_frames: [{ url: "/a.png", caption_chunk_start_index: 0 }],
+    doodle_frames: [{ id: "test-frame-a", url: "/a.png", caption_chunk_start_index: 0 }],
     captions: [{ start_ms: 0, end_ms: 10000, text: "Hi" }],
     ...overrides,
   };
@@ -38,7 +38,7 @@ describe("hashConfig — canonical equality", () => {
         config_version: 2,
         title: "Hi",
         voiceover_url: "/v.mp3",
-        doodle_frames: [{ url: "/a.png", caption_chunk_start_index: 0 }],
+        doodle_frames: [{ id: "test-frame-a", url: "/a.png", caption_chunk_start_index: 0 }],
       },
     );
     expect(a).toBe(b);
@@ -111,8 +111,8 @@ describe("hashConfig — change detection", () => {
     const b = hashConfig(
       baseConfig({
         doodle_frames: [
-          { url: "/a.png", caption_chunk_start_index: 0 },
-          { url: "/b.png", caption_chunk_start_index: 0 },
+          { id: "test-frame-a", url: "/a.png", caption_chunk_start_index: 0 },
+          { id: "test-frame-b", url: "/b.png", caption_chunk_start_index: 0 },
         ],
       }),
     );

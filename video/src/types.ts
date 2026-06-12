@@ -17,8 +17,28 @@
 export const CURRENT_CONFIG_VERSION = 2;
 
 export interface DoodleFrame {
+  // Stable per-frame identifier. Phase 2 of the video editor overhaul
+  // (lorewire-app/_plans/2026-06-12-video-editor-overhaul.md). UUID minted
+  // on first parse if a legacy config is missing it; persisted on the
+  // next save. Once written, the id survives regens, prompt edits, and
+  // frame reordering — queue rows keyed by `frame:<id>` stay valid.
+  id: string;
   url: string;             // file:// or http(s):// path to the image
   caption_chunk_start_index: number; // index into ShortVideoConfig.captions
+  // The prompt that produced `url`. Optional during the rollout window
+  // before Phase 3's regen action backfills it on first regen. The
+  // renderer ignores this field — it exists for the editor and the queue
+  // worker.
+  image_prompt?: string;
+  // Single-step Revert history. Phase 3's regen action snapshots the
+  // pre-regen url + prompt here before writing the new image so the
+  // editor can undo without another model call. Cleared by an explicit
+  // Revert action. The renderer ignores this field.
+  prev_image?: {
+    url: string;
+    image_prompt: string;
+    replaced_at: string; // ISO-8601
+  };
 }
 
 export interface ShortCaptionWord {

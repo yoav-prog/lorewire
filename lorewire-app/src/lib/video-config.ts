@@ -16,9 +16,28 @@ export const CURRENT_CONFIG_VERSION = 2;
 
 // ─── Schema (mirror of video/src/types.ts) ────────────────────────────────────
 
+// ─── DoodleFrame: stable per-frame entity ────────────────────────────────────
+// Phase 2 of the video editor overhaul
+// (_plans/2026-06-12-video-editor-overhaul.md). `id` is a UUID minted on
+// first parse if a legacy config is missing it; persisted on the next
+// save. Once written, the id survives regens, prompt edits, and frame
+// reordering — queue rows keyed by `frame:<id>` stay valid. `image_prompt`
+// is the prompt that produced `url`. `prev_image` is the single-step
+// Revert snapshot Phase 3 writes before regen so the editor can undo
+// without another model call.
+
+export interface PrevImage {
+  url: string;
+  image_prompt: string;
+  replaced_at: string; // ISO-8601
+}
+
 export interface DoodleFrame {
+  id: string;
   url: string;
   caption_chunk_start_index: number;
+  image_prompt?: string;
+  prev_image?: PrevImage;
 }
 
 export interface ShortCaptionWord {
@@ -301,6 +320,7 @@ export function defaultVideoConfig(story: StoryRow): ShortVideoConfig {
   const totalMs = lastCaptionEnd(captions);
 
   const doodle_frames: DoodleFrame[] = images.map((url, i) => ({
+    id: mintFrameId(),
     url,
     caption_chunk_start_index: Math.floor(
       (i / Math.max(1, images.length)) * Math.max(1, captions.length),
@@ -551,7 +571,69 @@ function parseDoodleFrame(raw: unknown): FieldResult<DoodleFrame> {
   if (url.error) return { error: url.error };
   const idx = readNumber(raw, "caption_chunk_start_index", { min: 0 });
   if (idx.error) return { error: idx.error };
-  return ok({ url: url.value, caption_chunk_start_index: idx.value });
+
+  // `id` is the contract surface for Phase 3's regen action. Mint a fresh
+  // UUID when a legacy config is missing it — the next save persists the
+  // value. Empty-string ids are treated as missing (the renderer would
+  // otherwise carry a bogus key forward).
+  const rawId =
+    typeof raw.id === "string" && raw.id.length > 0 ? raw.id : null;
+  const id = rawId ?? mintFrameId();
+
+  const out: DoodleFrame = {
+    id,
+    url: url.value,
+    caption_chunk_start_index: idx.value,
+  };
+
+  // `image_prompt` is optional — present once a frame has been regenerated
+  // through Phase 3 (or backfilled). When missing or empty-string we omit
+  // it so the persisted JSON stays minimal.
+  if (typeof raw.image_prompt === "string" && raw.image_prompt.length > 0) {
+    out.image_prompt = raw.image_prompt;
+  }
+
+  // `prev_image` is the single-step Revert snapshot Phase 3 writes before
+  // a regen; missing on a fresh frame.
+  if (raw.prev_image !== undefined && raw.prev_image !== null) {
+    const prev = parsePrevImage(raw.prev_image);
+    if (prev.error) return { error: prev.error };
+    out.prev_image = prev.value;
+  }
+
+  return ok(out);
+}
+
+function parsePrevImage(raw: unknown): FieldResult<PrevImage> {
+  if (!isObject(raw)) return { error: err("prev_image: expected object") };
+  const url = readString(raw, "url");
+  if (url.error) return { error: url.error };
+  const image_prompt = readString(raw, "image_prompt");
+  if (image_prompt.error) return { error: image_prompt.error };
+  const replaced_at = readString(raw, "replaced_at");
+  if (replaced_at.error) return { error: replaced_at.error };
+  return ok({
+    url: url.value,
+    image_prompt: image_prompt.value,
+    replaced_at: replaced_at.value,
+  });
+}
+
+// `mintFrameId` is exported so server actions (Phase 3) can stamp ids on
+// freshly-derived frames before queuing a regen — the queue row's
+// `frame:<id>` reference must match a stable id the editor will write
+// back on save.
+export function mintFrameId(): string {
+  // globalThis.crypto.randomUUID is available in the browser, Node 18+,
+  // happy-dom (test env), and edge runtimes. The fallback only fires on
+  // a deeply broken host that's missing Web Crypto entirely — a frame
+  // still comes back with a unique-enough id rather than crashing.
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `frame-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
 }
 
 function parseCaptionChunk(raw: unknown): FieldResult<ShortCaptionChunk> {
