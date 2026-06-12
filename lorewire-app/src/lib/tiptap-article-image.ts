@@ -156,6 +156,49 @@ export function countImagesMissingAlt(document: unknown): number {
   return count;
 }
 
+// Slim view of an articleImage node, exposed for the asset-regen UI.
+// Indexed in document order (flat across the whole doc).
+export interface ArticleImageSummary {
+  index: number;
+  src: string;
+  alt: string;
+  caption: string;
+}
+
+// Returns every articleImage node in document order. The granular regen
+// grid uses this to render a thumbnail per node with a "Redo" button that
+// targets `body:<index>`.
+export function listArticleImages(
+  document: unknown,
+): ArticleImageSummary[] {
+  if (!document || typeof document !== "object") return [];
+  const out: ArticleImageSummary[] = [];
+  let idx = 0;
+  function walk(node: unknown): void {
+    if (!node || typeof node !== "object") return;
+    const n = node as { type?: unknown; attrs?: unknown; content?: unknown };
+    if (n.type === "articleImage") {
+      const attrs = (n.attrs ?? {}) as {
+        src?: unknown;
+        alt?: unknown;
+        caption?: unknown;
+      };
+      out.push({
+        index: idx,
+        src: typeof attrs.src === "string" ? attrs.src : "",
+        alt: typeof attrs.alt === "string" ? attrs.alt : "",
+        caption: typeof attrs.caption === "string" ? attrs.caption : "",
+      });
+      idx++;
+    }
+    if (Array.isArray(n.content)) {
+      for (const child of n.content) walk(child);
+    }
+  }
+  walk(document);
+  return out;
+}
+
 // Like countImagesMissingAlt but counts ALL articleImage nodes. Used by
 // the asset re-render UI to estimate the cost of regenerating every body
 // image at once. Returns 0 when document is null / unparseable.

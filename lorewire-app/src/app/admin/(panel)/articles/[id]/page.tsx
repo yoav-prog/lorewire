@@ -23,12 +23,16 @@ import { parseArticlePayload } from "@/lib/article-payload";
 import { buildArticleJsonLd } from "@/lib/article-seo";
 import { statusClass } from "@/app/admin/ui";
 import Breadcrumb from "@/app/admin/Breadcrumb";
-import { countArticleImages } from "@/lib/tiptap-article-image";
-import { countGalleryImages } from "@/lib/tiptap-gallery";
+import { countArticleImages, listArticleImages } from "@/lib/tiptap-article-image";
+import { countGalleryImages, listGalleryItems } from "@/lib/tiptap-gallery";
 import {
   MediaRegenPanel,
   type MediaAssetSpec,
 } from "@/app/admin/(panel)/_components/MediaRegenPanel";
+import {
+  GranularRegenGrid,
+  type GranularItem,
+} from "@/app/admin/(panel)/_components/GranularRegenGrid";
 import { ArticleEditor } from "./ArticleEditor";
 import { ArticlePayloadSidebar } from "./ArticlePayloadSidebar";
 import { ArticleSeoPanel } from "./ArticleSeoPanel";
@@ -130,6 +134,21 @@ export default async function EditArticlePage({
     });
   }
 
+  // Per-image granular regen grids — one thumbnail per articleImage and
+  // per gallery item. Empty when the doc has none of that kind.
+  const bodyImageItems = listArticleImages(parsedDoc).map((b): GranularItem => ({
+    asset: `body:${b.index}`,
+    src: b.src,
+    label: b.alt || `Body image ${b.index + 1}`,
+    meta: b.caption || undefined,
+  }));
+  const galleryItemSpecs = listGalleryItems(parsedDoc).map((g): GranularItem => ({
+    asset: `gallery:${g.index}`,
+    src: g.src,
+    label: g.alt || `Gallery ${g.index + 1}`,
+    meta: g.caption || undefined,
+  }));
+
   const dir = articleDirection(article.language);
   const lang = (article.language ?? "en") as keyof typeof ARTICLE_LANGUAGE_LABELS;
   const type = (article.type ?? "feature") as keyof typeof ARTICLE_TYPE_LABELS;
@@ -225,6 +244,26 @@ export default async function EditArticlePage({
             ownerId={article.id}
             assets={articleAssets}
           />
+
+          {bodyImageItems.length > 0 && (
+            <GranularRegenGrid
+              ownerKind="article"
+              ownerId={article.id}
+              title="Body images (per-image)"
+              description="Redo a single body image. Its alt and caption drive the prompt."
+              items={bodyImageItems}
+            />
+          )}
+
+          {galleryItemSpecs.length > 0 && (
+            <GranularRegenGrid
+              ownerKind="article"
+              ownerId={article.id}
+              title="Gallery items (per-image)"
+              description="Redo a single gallery item without touching the others."
+              items={galleryItemSpecs}
+            />
+          )}
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Status</div>
             <div className="flex flex-wrap gap-2">

@@ -261,5 +261,127 @@ class DispatchTests(unittest.TestCase):
                 media.regen_one("nope", "hero", Path(tmp))
 
 
+class ParseIndexTests(unittest.TestCase):
+    def test_parses_valid_indices(self):
+        self.assertEqual(media._parse_index("scene:0"), 0)
+        self.assertEqual(media._parse_index("scene:12"), 12)
+        self.assertEqual(media._parse_index("prop:3"), 3)
+
+    def test_rejects_missing_index(self):
+        with self.assertRaises(ValueError):
+            media._parse_index("scene:")
+
+    def test_rejects_non_numeric(self):
+        with self.assertRaises(ValueError):
+            media._parse_index("scene:abc")
+
+    def test_rejects_negative(self):
+        with self.assertRaises(ValueError):
+            media._parse_index("scene:-1")
+
+
+class PerSceneRegenTests(unittest.TestCase):
+    def _story_with_scenes(self, urls):
+        import json as _json
+        return {**STORY, "images": _json.dumps(urls)}
+
+    def test_one_scene_splices_only_that_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = [f"https://old/scene-{i + 1}.png" for i in range(5)]
+            story = self._story_with_scenes(existing)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero"] + [f"scene {i}" for i in range(5)],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=5,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, cents = media.regen_one("abc123", "scene:2", Path(tmp))
+            self.assertEqual(cents, 5)
+            # Only index 2 should change; the other four URLs preserved verbatim.
+            new_scenes = mocks["update_scenes"].call_args.args[1]
+            self.assertEqual(len(new_scenes), 5)
+            self.assertEqual(new_scenes[0], existing[0])
+            self.assertEqual(new_scenes[1], existing[1])
+            self.assertNotEqual(new_scenes[2], existing[2])
+            self.assertEqual(new_scenes[2], url)
+            self.assertEqual(new_scenes[3], existing[3])
+            self.assertEqual(new_scenes[4], existing[4])
+
+    def test_out_of_range_index_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story_with_scenes(["a", "b"])
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(ValueError) as ctx:
+                media.regen_one("abc123", "scene:99", Path(tmp))
+            self.assertIn("out of range", str(ctx.exception))
+
+
+class PerPropRegenTests(unittest.TestCase):
+    def _story_with_props(self, props):
+        import json as _json
+        return {**STORY, "props": _json.dumps(props)}
+
+    def test_one_prop_splices_url_preserves_label_and_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = [
+                {"url": "https://old/p1.png", "label": "leaf blower", "side": "right"},
+                {"url": "https://old/p2.png", "label": "kite", "side": "left"},
+                {"url": "https://old/p3.png", "label": "flag", "side": "right"},
+            ]
+            story = self._story_with_props(existing)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "prop_slide_enabled": mock.patch.object(
+                    media, "_prop_slide_enabled", return_value=True,
+                ),
+                "make_prop_image_prompt": mock.patch.object(
+                    media.stages, "make_prop_image_prompt",
+                    side_effect=lambda kw: f"prompt for {kw}",
+                ),
+                "update_props": mock.patch.object(
+                    media.store, "update_story_props",
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, cents = media.regen_one("abc123", "prop:1", Path(tmp))
+            self.assertEqual(cents, 5)
+            new_props = mocks["update_props"].call_args.args[1]
+            # Index 1 swaps url; label + side preserved verbatim.
+            self.assertEqual(new_props[0], existing[0])
+            self.assertEqual(new_props[1]["label"], "kite")
+            self.assertEqual(new_props[1]["side"], "left")
+            self.assertNotEqual(new_props[1]["url"], existing[1]["url"])
+            self.assertEqual(new_props[1]["url"], url)
+            self.assertEqual(new_props[2], existing[2])
+
+    def test_one_prop_blocked_when_setting_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches({
+                "prop_slide_enabled": mock.patch.object(
+                    media, "_prop_slide_enabled", return_value=False,
+                ),
+            })
+            _apply(patches, self)
+            with self.assertRaises(RuntimeError):
+                media.regen_one("abc123", "prop:0", Path(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -51,7 +51,7 @@ def _doc_with_gallery(items_per_gallery: list[int]) -> str:
             items.append({
                 "src": f"https://old/g-{flat_idx}.png",
                 "alt": f"alt {flat_idx}",
-                "label": f"label {flat_idx}",
+                "caption": f"caption {flat_idx}",
             })
             flat_idx += 1
         galleries.append({
@@ -249,6 +249,101 @@ class DispatchTests(unittest.TestCase):
                 article_media.regen_article_one(
                     "../etc/passwd", "hero", Path(tmp),
                 )
+
+
+class PerBodyImageRegenTests(unittest.TestCase):
+    def test_one_body_splices_only_that_node(self):
+        article = {**ARTICLE, "document": _doc_with_body_images(4)}
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches(article=article, extra={
+                "update_doc": mock.patch.object(
+                    article_media.store, "update_article_document",
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, cents = article_media.regen_article_one(
+                "art-1", "body:1", Path(tmp),
+            )
+            self.assertEqual(cents, 5)
+            new_doc = json.loads(mocks["update_doc"].call_args.args[1])
+            srcs = [n["attrs"]["src"] for n in new_doc["content"]]
+            # Only index 1 swapped; the other three preserved.
+            self.assertTrue(srcs[0].startswith("https://old/"))
+            self.assertIn("/article-body-2.png", srcs[1])
+            self.assertTrue(srcs[2].startswith("https://old/"))
+            self.assertTrue(srcs[3].startswith("https://old/"))
+            self.assertEqual(srcs[1], url)
+
+    def test_out_of_range_body_index_raises(self):
+        article = {**ARTICLE, "document": _doc_with_body_images(2)}
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches(article=article)
+            _apply(patches, self)
+            with self.assertRaises(ValueError) as ctx:
+                article_media.regen_article_one(
+                    "art-1", "body:5", Path(tmp),
+                )
+            self.assertIn("out of range", str(ctx.exception))
+
+
+class PerGalleryItemRegenTests(unittest.TestCase):
+    def test_one_gallery_item_splices_flat_index(self):
+        # Two galleries: 2 items then 3 items. Index 3 lands on the
+        # second gallery's second item (flat order: 0,1 | 2,3,4).
+        article = {**ARTICLE, "document": _doc_with_gallery([2, 3])}
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches(article=article, extra={
+                "update_doc": mock.patch.object(
+                    article_media.store, "update_article_document",
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, cents = article_media.regen_article_one(
+                "art-1", "gallery:3", Path(tmp),
+            )
+            self.assertEqual(cents, 5)
+            new_doc = json.loads(mocks["update_doc"].call_args.args[1])
+            galleries = new_doc["content"]
+            # First gallery unchanged.
+            self.assertEqual(
+                galleries[0]["attrs"]["items"][0]["src"], "https://old/g-0.png",
+            )
+            self.assertEqual(
+                galleries[0]["attrs"]["items"][1]["src"], "https://old/g-1.png",
+            )
+            # Second gallery: item 0 unchanged, item 1 (flat index 3) swapped,
+            # item 2 unchanged.
+            self.assertEqual(
+                galleries[1]["attrs"]["items"][0]["src"], "https://old/g-2.png",
+            )
+            self.assertIn(
+                "/article-gallery-4.png",
+                galleries[1]["attrs"]["items"][1]["src"],
+            )
+            self.assertEqual(
+                galleries[1]["attrs"]["items"][2]["src"], "https://old/g-4.png",
+            )
+            self.assertEqual(galleries[1]["attrs"]["items"][1]["src"], url)
+
+    def test_out_of_range_gallery_index_raises(self):
+        article = {**ARTICLE, "document": _doc_with_gallery([2])}
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches(article=article)
+            _apply(patches, self)
+            with self.assertRaises(ValueError):
+                article_media.regen_article_one(
+                    "art-1", "gallery:9", Path(tmp),
+                )
+
+
+class ArticleParseIndexTests(unittest.TestCase):
+    def test_parses_valid_indices(self):
+        self.assertEqual(article_media._parse_index("body:0"), 0)
+        self.assertEqual(article_media._parse_index("gallery:7"), 7)
+
+    def test_rejects_negative(self):
+        with self.assertRaises(ValueError):
+            article_media._parse_index("body:-3")
 
 
 class FindNodesTests(unittest.TestCase):

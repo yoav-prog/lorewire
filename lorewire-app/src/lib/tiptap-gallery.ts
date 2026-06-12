@@ -133,6 +133,46 @@ export function countGalleryImagesMissingAlt(document: unknown): number {
   return count;
 }
 
+// Slim view of a single gallery item, exposed for the asset-regen UI.
+// `index` is the flat position across every gallery in document order so
+// the regen UI's "gallery:N" slug targets the right item regardless of
+// which gallery node it lives in.
+export interface GalleryItemSummary {
+  index: number;
+  src: string;
+  alt: string;
+  caption: string;
+}
+
+export function listGalleryItems(
+  document: unknown,
+): GalleryItemSummary[] {
+  if (!document || typeof document !== "object") return [];
+  const out: GalleryItemSummary[] = [];
+  let idx = 0;
+  function walk(node: unknown): void {
+    if (!node || typeof node !== "object") return;
+    const n = node as { type?: unknown; attrs?: unknown; content?: unknown };
+    if (n.type === "articleGallery") {
+      const items = safeItems((n.attrs as { items?: unknown } | undefined)?.items);
+      for (const it of items) {
+        out.push({
+          index: idx,
+          src: it.src,
+          alt: it.alt,
+          caption: it.caption,
+        });
+        idx++;
+      }
+    }
+    if (Array.isArray(n.content)) {
+      for (const child of n.content) walk(child);
+    }
+  }
+  walk(document);
+  return out;
+}
+
 // Like countGalleryImagesMissingAlt but counts ALL items across every
 // gallery node. Used by the asset re-render UI to estimate the cost of
 // regenerating every gallery image. Returns 0 when document is null or

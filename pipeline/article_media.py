@@ -89,7 +89,31 @@ def regen_article_one(
         return _regen_body_images(article, out_dir, safe_id)
     if asset == "gallery_images":
         return _regen_gallery_images(article, out_dir, safe_id)
+
+    # Per-image granular regens. Indices are flat: body:N targets the Nth
+    # articleImage node in document order; gallery:N targets the Nth item
+    # across every articleGallery in document order.
+    if asset.startswith("body:"):
+        return _regen_one_body_image(article, out_dir, safe_id, _parse_index(asset))
+    if asset.startswith("gallery:"):
+        return _regen_one_gallery_item(article, out_dir, safe_id, _parse_index(asset))
+
     raise NotImplementedError(f"unknown article asset slug {asset!r}")
+
+
+def _parse_index(asset: str) -> int:
+    """Same shape as media._parse_index. Defensive against tampered queue
+    rows even though the TS UI only ever sends well-formed indices."""
+    _, _, suffix = asset.partition(":")
+    if not suffix:
+        raise ValueError(f"asset {asset!r} missing index after colon")
+    try:
+        n = int(suffix)
+    except ValueError as exc:
+        raise ValueError(f"asset {asset!r} has non-numeric index") from exc
+    if n < 0:
+        raise ValueError(f"asset {asset!r} has negative index")
+    return n
 
 
 # ─── prompts ─────────────────────────────────────────────────────────────────
@@ -280,8 +304,8 @@ def _regen_gallery_images(
             if not isinstance(item, dict):
                 continue
             alt = (item.get("alt") or "").strip()
-            label = (item.get("label") or "").strip()
-            context_parts = [p for p in (alt, label) if p]
+            caption = (item.get("caption") or "").strip()
+            context_parts = [p for p in (alt, caption) if p]
             if not context_parts:
                 context = f"a gallery image illustrating the article, item {flat_idx + 1}"
             else:
@@ -318,6 +342,126 @@ def _regen_gallery_images(
 
 
 # ─── doc walking ─────────────────────────────────────────────────────────────
+
+# ─── per-image regens ────────────────────────────────────────────────────────
+# Single-element variants. UI surfaces them from the per-thumbnail
+# Regenerate buttons in the granular grid. Each updates one image and
+# leaves the rest of the document untouched.
+
+def _regen_one_body_image(
+    article: dict, out_dir: Path, safe_id: str, index: int,
+) -> tuple[str, int]:
+    """Regenerate the Nth articleImage node in document order. The rest
+    of the doc is unchanged."""
+    doc_raw = article.get("document")
+    if not doc_raw:
+        raise ValueError(
+            f"article {safe_id} has no document — no body image to regenerate"
+        )
+    try:
+        doc = json.loads(doc_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"article {safe_id} document is not valid JSON: {exc}"
+        ) from exc
+
+    doc_copy = copy.deepcopy(doc)
+    nodes = _find_nodes(doc_copy, "articleImage")
+    if index >= len(nodes):
+        raise ValueError(
+            f"body image index {index} out of range "
+            f"(article has {len(nodes)} body images)"
+        )
+    node = nodes[index]
+    attrs = node.setdefault("attrs", {})
+    alt = (attrs.get("alt") or "").strip()
+    caption = (attrs.get("caption") or "").strip()
+    context_parts = [p for p in (alt, caption) if p]
+    if not context_parts:
+        context = (
+            f"a clean editorial illustration for the article body, "
+            f"image {index + 1}"
+        )
+    else:
+        context = ". ".join(context_parts)
+
+    prompt = _build_article_image_prompt(article, context, "3:2")
+    filename = f"article-body-{index + 1}.png"
+    public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/{filename}"
+    local_path = out_dir / filename
+    kie_url = images.generate(prompt=prompt, aspect_ratio="3:2")
+    images.download(kie_url, local_path)
+    stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+
+    attrs["src"] = stored_url
+    store.update_article_document(article["id"], json.dumps(doc_copy))
+    return stored_url, _per_image_cost_cents()
+
+
+def _regen_one_gallery_item(
+    article: dict, out_dir: Path, safe_id: str, index: int,
+) -> tuple[str, int]:
+    """Regenerate the Nth gallery item across the doc's gallery nodes.
+    Indexing is flat: a 2-item gallery followed by a 3-item gallery
+    addresses items 0-1 in the first node and 2-4 in the second."""
+    doc_raw = article.get("document")
+    if not doc_raw:
+        raise ValueError(
+            f"article {safe_id} has no document — no gallery item to regenerate"
+        )
+    try:
+        doc = json.loads(doc_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"article {safe_id} document is not valid JSON: {exc}"
+        ) from exc
+
+    doc_copy = copy.deepcopy(doc)
+    galleries = _find_nodes(doc_copy, "articleGallery")
+    target_item: dict | None = None
+    flat_idx = 0
+    for gallery in galleries:
+        items = gallery.get("attrs", {}).get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if flat_idx == index:
+                target_item = item
+                break
+            flat_idx += 1
+        if target_item is not None:
+            break
+
+    if target_item is None:
+        raise ValueError(
+            f"gallery item index {index} out of range "
+            f"(article has {flat_idx} gallery items)"
+        )
+
+    alt = (target_item.get("alt") or "").strip()
+    caption = (target_item.get("caption") or "").strip()
+    context_parts = [p for p in (alt, caption) if p]
+    if not context_parts:
+        context = (
+            f"a gallery image illustrating the article, item {index + 1}"
+        )
+    else:
+        context = ". ".join(context_parts)
+
+    prompt = _build_article_image_prompt(article, context, "1:1")
+    filename = f"article-gallery-{index + 1}.png"
+    public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/{filename}"
+    local_path = out_dir / filename
+    kie_url = images.generate(prompt=prompt, aspect_ratio="1:1")
+    images.download(kie_url, local_path)
+    stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+
+    target_item["src"] = stored_url
+    store.update_article_document(article["id"], json.dumps(doc_copy))
+    return stored_url, _per_image_cost_cents()
+
 
 def _find_nodes(root: object, node_type: str) -> list[dict]:
     """Depth-first walk of a Tiptap JSON doc, returning every node whose

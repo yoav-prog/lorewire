@@ -554,7 +554,33 @@ def regen_one(
     if asset == "mouth_swap":
         return _regen_mouth_swap(story, out_dir, safe_id)
 
+    # Per-image granular regens: "scene:N" and "prop:N" target a single
+    # element of the matching bulk asset. Slug format is strict — anything
+    # past the colon must parse as a non-negative integer.
+    if asset.startswith("scene:"):
+        return _regen_one_scene(story, out_dir, safe_id, _parse_index(asset))
+
+    if asset.startswith("prop:"):
+        return _regen_one_prop(story, out_dir, safe_id, _parse_index(asset))
+
     raise NotImplementedError(f"unknown asset slug {asset!r}")
+
+
+def _parse_index(asset: str) -> int:
+    """Parse the integer suffix from slugs like 'scene:12' or 'prop:3'.
+    Raises ValueError on non-numeric or negative input. The TS UI only ever
+    sends slugs with valid indices, but we double-check on the worker side
+    so a tampered queue row can't crash the worker."""
+    _, _, suffix = asset.partition(":")
+    if not suffix:
+        raise ValueError(f"asset {asset!r} missing index after colon")
+    try:
+        n = int(suffix)
+    except ValueError as e:
+        raise ValueError(f"asset {asset!r} has non-numeric index") from e
+    if n < 0:
+        raise ValueError(f"asset {asset!r} has negative index")
+    return n
 
 
 def _idea_from_story(story: dict) -> dict:
@@ -766,3 +792,136 @@ def _regen_mouth_swap(
     # the natural sample to surface in the queue row.
     sample = char_url or char_removed_url or ""
     return sample, total_cents
+
+
+# ─── per-image regens ────────────────────────────────────────────────────────
+# Surgical single-element updates for the bulk assets. Called when the admin
+# clicks Regenerate on a specific scene or prop thumbnail in the granular
+# grid. Each rebuilds only its own image; the rest of the bulk asset's list
+# stays untouched.
+#
+# Cost trade-off: we still call make_image_prompts(n=scene_count+1) for one
+# scene regen so character continuity holds across the prompt set. That's
+# one cheap LLM call (~$0.001-0.005) on top of the kie image gen
+# (~$0.05) — a per-image regen costs effectively the same as the bulk
+# per-image cost.
+
+def _regen_one_scene(
+    story: dict, out_dir: Path, safe_id: str, index: int,
+) -> tuple[str, int]:
+    """Regenerate just one scene image, leaving the rest of stories.images
+    untouched. `index` is the 0-based position into stories.images."""
+    body = (story.get("body") or "").strip()
+    if not body:
+        raise ValueError(
+            f"story {safe_id} has no body — scene prompts need it for context"
+        )
+    existing = _read_scene_urls(story)
+    if index >= len(existing):
+        # The TS UI computes indices from the current list, but a stale
+        # client (scene_count changed between render and click) could send
+        # an out-of-range index. Fail fast with a clear message.
+        raise ValueError(
+            f"scene index {index} out of range (story has {len(existing)} scenes)"
+        )
+    idea = _idea_from_story(story)
+    url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
+
+    scene_count = _resolve_scene_count(None)
+    prompts = stages.make_image_prompts(
+        idea, body, dry_run=False, n=scene_count + 1,
+    )
+    # prompts[0] is the cinematic hero slot we discard; scene prompts start
+    # at index 1. Clamp to the prompt set's bounds — if the LLM returned
+    # fewer prompts than requested, fall back to the last one rather than
+    # crash.
+    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+    if not scene_prompts:
+        raise RuntimeError(
+            "scene prompt build returned no prompts — cannot regen"
+        )
+    prompt = scene_prompts[min(index, len(scene_prompts) - 1)]
+
+    filename = f"scene-{index + 1}.png"
+    public_url = f"{url_prefix}/{filename}"
+    label = f"scene-{index + 1}"
+    kie_url = _generate_with_retry(prompt, f"id={safe_id} {label} per-image regen")
+    if kie_url is None:
+        raise RuntimeError(f"kie returned no URL for {label}")
+    local_path = out_dir / filename
+    images.download(kie_url, local_path)
+    stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+
+    # Splice into the existing list, leave the rest as-is.
+    new_scenes = list(existing)
+    new_scenes[index] = stored_url
+    store.update_story_scenes(story["id"], new_scenes)
+
+    return stored_url, _per_image_cost_cents()
+
+
+def _regen_one_prop(
+    story: dict, out_dir: Path, safe_id: str, index: int,
+) -> tuple[str, int]:
+    """Regenerate just one prop cutout. The existing prop's label doubles
+    as the keyword input — using make_prop_plan would re-pick keywords and
+    semantically change the prop set, which a single-prop regen shouldn't.
+    """
+    if not _prop_slide_enabled():
+        raise RuntimeError(
+            "prop regen blocked: video.prop_slide is off in Settings."
+        )
+    existing = _read_prop_list(story)
+    if index >= len(existing):
+        raise ValueError(
+            f"prop index {index} out of range (story has {len(existing)} props)"
+        )
+    prop = existing[index]
+    keyword = (prop.get("label") or "").strip() or "object"
+    url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
+
+    filename = f"prop-{index + 1}.png"
+    public_url = f"{url_prefix}/{filename}"
+    label = f"prop-{index + 1} ({keyword})"
+    prompt = stages.make_prop_image_prompt(keyword)
+    kie_url = _generate_with_retry(
+        prompt, f"id={safe_id} {label} per-image regen", aspect_ratio="1:1",
+    )
+    if kie_url is None:
+        raise RuntimeError(f"kie returned no URL for {label}")
+    local_path = out_dir / filename
+    images.download(kie_url, local_path)
+    stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+
+    # Update only this prop's url; preserve label + side.
+    new_props = [dict(p) for p in existing]
+    new_props[index] = {**existing[index], "url": stored_url}
+    store.update_story_props(story["id"], new_props)
+
+    return stored_url, _per_image_cost_cents()
+
+
+def _read_scene_urls(story: dict) -> list[str]:
+    """Parse stories.images JSON into a list. Tolerates null + invalid
+    inputs (returns []) so the per-image regen path always has a list to
+    work with."""
+    raw = story.get("images")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [u for u in parsed if isinstance(u, str)] if isinstance(parsed, list) else []
+
+
+def _read_prop_list(story: dict) -> list[dict]:
+    """Parse stories.props JSON into a list of {url,label,side} dicts."""
+    raw = story.get("props")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [p for p in parsed if isinstance(p, dict)] if isinstance(parsed, list) else []

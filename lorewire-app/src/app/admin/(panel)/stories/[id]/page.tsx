@@ -20,6 +20,10 @@ import {
   MediaRegenPanel,
   type MediaAssetSpec,
 } from "@/app/admin/(panel)/_components/MediaRegenPanel";
+import {
+  GranularRegenGrid,
+  type GranularItem,
+} from "@/app/admin/(panel)/_components/GranularRegenGrid";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -84,6 +88,35 @@ export default async function EditStory({
       hint: "Object cutouts that slide in across the video. Count comes from Settings → General → Props per story.",
     });
   }
+  // Build the granular per-image grid items from the already-parsed
+  // `gallery` (scene URLs) and the props JSON. Each item carries the
+  // queue-contract slug ("scene:N", "prop:N") so the Regenerate button
+  // targets exactly that index.
+  const sceneGranular: GranularItem[] = gallery.map((url, i) => ({
+    asset: `scene:${i}`,
+    src: url,
+    label: `Scene ${i + 1}`,
+  }));
+  let propsParsed: { url: string; label?: string; side?: string }[] = [];
+  try {
+    if (s.props) {
+      const raw = JSON.parse(s.props);
+      if (Array.isArray(raw)) {
+        propsParsed = raw.filter(
+          (p): p is { url: string } => p && typeof p === "object" && typeof p.url === "string",
+        );
+      }
+    }
+  } catch {
+    propsParsed = [];
+  }
+  const propGranular: GranularItem[] = propsParsed.map((p, i) => ({
+    asset: `prop:${i}`,
+    src: p.url,
+    label: p.label ?? `Prop ${i + 1}`,
+    meta: p.side ? `slides in from ${p.side}` : undefined,
+  }));
+
   const mouthSwapOn = String((await getSetting("video.mouth_swap")) ?? "0") !== "0";
   if (mouthSwapOn) {
     storyAssets.push({
@@ -233,6 +266,26 @@ export default async function EditStory({
             ownerId={s.id}
             assets={storyAssets}
           />
+
+          {sceneGranular.length > 0 && (
+            <GranularRegenGrid
+              ownerKind="story"
+              ownerId={s.id}
+              title="Scenes (per-image)"
+              description="Redo a single scene without touching the rest."
+              items={sceneGranular}
+            />
+          )}
+
+          {propGranular.length > 0 && (
+            <GranularRegenGrid
+              ownerKind="story"
+              ownerId={s.id}
+              title="Props (per-image)"
+              description="Redo a single prop. Label + side stay; only the image changes."
+              items={propGranular}
+            />
+          )}
 
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Media</div>

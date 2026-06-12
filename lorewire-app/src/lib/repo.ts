@@ -47,10 +47,16 @@ export interface StoryRow {
   // 0 or NULL = indexable; 1 = the public story page (when it exists)
   // should emit noindex,nofollow. Mirrors articles.noindex.
   noindex: number | null;
+  // Python-pipeline-owned media columns. JSON in props
+  // ([{url,label,side},...]); raw URLs in the two character_image* columns.
+  // Surfaced here so the admin UI's granular regen grid can list them.
+  props: string | null;
+  character_image: string | null;
+  character_image_mouth_removed: string | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)

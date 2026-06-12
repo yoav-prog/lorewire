@@ -61,6 +61,14 @@ export const STORIES: Table = {
     // data-only today; the per-story public reader, when it lands, must
     // honor it the same way the article reader does.
     { name: "noindex", type: "INTEGER" },
+    // Asset-rerender visibility columns. Originally added by the Python
+    // pipeline (see pipeline/store.py); mirrored here so the TS schema +
+    // StoryRow type expose them for the admin UI's granular regen grid.
+    // JSON in props ({url,label,side}[]); flat URLs in the two
+    // character_image columns.
+    { name: "props", type: "TEXT" },
+    { name: "character_image", type: "TEXT" },
+    { name: "character_image_mouth_removed", type: "TEXT" },
   ],
 };
 
