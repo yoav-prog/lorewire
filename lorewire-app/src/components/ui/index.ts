@@ -5,6 +5,10 @@ export { FieldRow, type FieldRowProps } from "./FieldRow";
 export { Slider, type SliderProps } from "./Slider";
 export { RangeSlider, type RangeSliderProps } from "./RangeSlider";
 export {
+  PositionPicker,
+  type PositionPickerProps,
+} from "./PositionPicker";
+export {
   ChipGroup,
   type ChipGroupProps,
   type ChipOption,

@@ -40,6 +40,7 @@ import type { ImageRenderRow } from "@/lib/image-render-queue";
 import type { CaptionPreset } from "@/lib/caption-presets";
 import {
   AutoSaveStatus,
+  PositionPicker,
   RangeSlider,
   useDebouncedSave,
 } from "@/components/ui";
@@ -2004,18 +2005,13 @@ function OverlayRow({
         />
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        <SliderField
-          label="x"
-          value={overlay.x}
-          onChange={(v) => onUpdate({ x: v })}
-        />
-        <SliderField
-          label="y"
-          value={overlay.y}
-          onChange={(v) => onUpdate({ y: v })}
-        />
-      </div>
+      <PositionPicker
+        x={overlay.x}
+        y={overlay.y}
+        onChange={(x, y) => onUpdate({ x, y })}
+        label="Position"
+        maxWidth={140}
+      />
     </div>
   );
 }
@@ -2050,34 +2046,6 @@ function NumberField({
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         className="w-full rounded border border-line bg-surface px-2 py-1 text-right font-mono text-[11px] tabular-nums text-ink outline-none focus:border-accent"
-      />
-    </label>
-  );
-}
-
-function SliderField({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <label className="block space-y-1">
-      <span className="flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-muted">
-        <span>{label}</span>
-        <span className="tabular-nums text-ink">{value.toFixed(2)}</span>
-      </span>
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-accent"
       />
     </label>
   );
