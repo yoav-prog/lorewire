@@ -34,6 +34,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import type { Overlay, ShortVideoConfig } from "@/lib/video-config";
+import { PreviewEmptyState } from "./PreviewEmptyState";
 
 const TITLE_VISIBLE_MS = 1200;
 const TITLE_FADE_MS = 600;
@@ -78,7 +79,36 @@ interface FrameWindow {
   lengthFrames: number;
 }
 
-export function PreviewComposition({
+// Outer guard: routes empty / unresolved inputs to a labeled diagnostic
+// rather than letting the player iframe paint an unlabeled cream (or worse,
+// the Player container's backdrop showing through). React's rules of hooks
+// mean the hook-using body has to live in a sibling component — see
+// `PreviewCompositionInner` below.
+export function PreviewComposition(props: PreviewProps) {
+  const { config, frameUrls } = props;
+  if (config.doodle_frames.length === 0) {
+    return (
+      <AbsoluteFill style={{ background: "#fbfaf4" }}>
+        <PreviewEmptyState reason="no-frames" />
+      </AbsoluteFill>
+    );
+  }
+  const noResolvedUrls =
+    frameUrls.length === 0 || frameUrls.every((u) => !u);
+  if (noResolvedUrls) {
+    return (
+      <AbsoluteFill style={{ background: "#fbfaf4" }}>
+        <PreviewEmptyState
+          reason="no-frame-urls"
+          detail={`${config.doodle_frames.length} frame(s) in config · 0 resolved URLs`}
+        />
+      </AbsoluteFill>
+    );
+  }
+  return <PreviewCompositionInner {...props} />;
+}
+
+function PreviewCompositionInner({
   config,
   frameUrls,
   audioUrl,

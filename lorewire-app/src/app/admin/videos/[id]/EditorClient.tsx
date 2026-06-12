@@ -37,6 +37,8 @@ import {
   PreviewComposition,
   type PreviewProps,
 } from "@/components/video-preview/PreviewComposition";
+import { PreviewEmptyState } from "@/components/video-preview/PreviewEmptyState";
+import type { ErrorFallback } from "@remotion/player";
 import {
   claimEditSession,
   heartbeatEditSession,
@@ -46,16 +48,21 @@ import {
 
 // Player is client-only (Remotion's runtime is not SSR-safe). next/dynamic
 // with ssr:false gives us code-splitting + no hydration mismatch.
+//
+// The `loading` fallback uses PreviewEmptyState so the loading state is
+// styled identically to every other "preview area can't paint right now"
+// state — keeps the editor's center area from ever showing an unlabeled
+// surface (Phase 0 of the video editor overhaul).
 const PlayerNoSSR = dynamic(
   () => import("@remotion/player").then((m) => m.Player),
   {
     ssr: false,
     loading: () => (
       <div
-        className="flex items-center justify-center rounded-lg border border-line bg-surface font-mono text-[11px] uppercase tracking-wider text-muted"
+        className="rounded-lg border border-line overflow-hidden"
         style={{ aspectRatio: "9 / 16", maxHeight: "70vh" }}
       >
-        Loading Player runtime…
+        <PreviewEmptyState reason="runtime-loading" />
       </div>
     ),
   },
@@ -334,6 +341,7 @@ export default function EditorClient({
           <div className="flex flex-1 items-center justify-center overflow-hidden p-6">
             {config.doodle_frames.length > 0 ? (
               <PreviewHost
+                storyId={storyId}
                 config={livePreviewConfig}
                 frameUrls={previewFrameUrls}
                 audioUrl={audioUrl}
@@ -341,7 +349,7 @@ export default function EditorClient({
                 captionStyle={captionStylePreview}
               />
             ) : (
-              <EmptyPreview />
+              <EmptyPreview storyId={storyId} />
             )}
           </div>
           <div className="shrink-0 border-t border-line bg-surface px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-muted">
@@ -719,35 +727,124 @@ function renderStatusLabel(
 // ─── PreviewHost ──────────────────────────────────────────────────────────────
 
 function PreviewHost({
+  storyId,
   config,
   frameUrls,
   audioUrl,
   durationInFrames,
   captionStyle,
 }: {
+  storyId: string;
   config: ShortVideoConfig;
   frameUrls: string[];
   audioUrl: string | null;
   durationInFrames: number;
   captionStyle: CaptionStyleForPreview;
 }) {
+  // Phase 0 observability: log key inputs whenever they change so a user
+  // reporting "the preview is broken" can paste the [video editor preview]
+  // events from devtools and we can name the cause without a screen share.
+  // We log the shape, not the full inputProps blob, to keep the console
+  // useful instead of noisy.
+  useEffect(() => {
+    const resolvedFrames = frameUrls.filter((u) => Boolean(u)).length;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[video editor preview] mounted", {
+      story_id: storyId,
+      frame_count: config.doodle_frames.length,
+      preview_url_count: frameUrls.length,
+      resolved_url_count: resolvedFrames,
+      has_audio: Boolean(audioUrl),
+      duration_in_frames: durationInFrames,
+    });
+  }, [
+    storyId,
+    config.doodle_frames.length,
+    frameUrls,
+    audioUrl,
+    durationInFrames,
+  ]);
+
   // Player wants `Record<string, unknown>` for inputProps + a similarly-
   // loose component type. We keep the strong PreviewProps type internally
   // and cast at the boundary — matches the SpikeClient pattern.
+  // Computed before the empty-state early-return so the rules-of-hooks
+  // contract is satisfied (hooks must run on every render); the empty
+  // branch just doesn't use the memoised value.
   const inputProps = useMemo<PreviewProps>(
     () => ({ config, frameUrls, audioUrl, captionStyle }),
     [config, frameUrls, audioUrl, captionStyle],
   );
+
+  // Pre-flight: if every URL is empty, there is nothing for the Player to
+  // paint and the iframe would sit blank. Render the labeled diagnostic
+  // straight away instead of mounting the Player into a void.
+  const resolvedUrlCount = frameUrls.filter((u) => Boolean(u)).length;
+  if (resolvedUrlCount === 0) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[video editor preview] empty", {
+      story_id: storyId,
+      reason: "no-frame-urls",
+      frame_count: config.doodle_frames.length,
+    });
+    return (
+      <div
+        className="rounded-lg border border-line overflow-hidden"
+        style={{ aspectRatio: `${WIDTH} / ${HEIGHT}`, maxHeight: "70vh" }}
+      >
+        <PreviewEmptyState
+          reason="no-frame-urls"
+          detail={`${config.doodle_frames.length} frame(s) in config · 0 resolved URLs`}
+          storyId={storyId}
+        />
+      </div>
+    );
+  }
 
   const Component = PreviewComposition as unknown as React.ComponentType<
     Record<string, unknown>
   >;
   const playerInputProps = inputProps as unknown as Record<string, unknown>;
 
+  // If the composition throws inside the Player iframe, surface the
+  // message inline (and log it) instead of letting the iframe disappear
+  // and the container's backdrop read as an unlabeled void.
+  const errorFallback: ErrorFallback = ({ error }) => {
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[video editor preview] player_error", {
+      story_id: storyId,
+      message: error.message,
+    });
+    return (
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+        }}
+      >
+        <PreviewEmptyState
+          reason="player-error"
+          detail={error.message}
+          storyId={storyId}
+        />
+      </div>
+    );
+  };
+
+  // Backdrop is deliberately NOT `#000` (the Phase 0 lesson): when the
+  // iframe failed to paint for any reason, the user saw an unlabeled black
+  // rectangle and assumed the editor was broken. The composition's own
+  // <AbsoluteFill> paints cream when it renders and `errorFallback`
+  // covers the throw path, so this backdrop only shows during the
+  // initialization window — match it to the editor's dark surface token
+  // so the area reads as editor chrome, not a void.
   return (
     <PlayerNoSSR
       component={Component}
       inputProps={playerInputProps}
+      errorFallback={errorFallback}
       durationInFrames={durationInFrames}
       compositionWidth={WIDTH}
       compositionHeight={HEIGHT}
@@ -759,7 +856,7 @@ function PreviewHost({
         width: "auto",
         borderRadius: 12,
         overflow: "hidden",
-        background: "#000",
+        background: "var(--color-surface)",
       }}
     />
   );
@@ -2100,18 +2197,13 @@ function EmptyHint({ label, hint }: { label: string; hint: string }) {
   );
 }
 
-function EmptyPreview() {
+function EmptyPreview({ storyId }: { storyId: string }) {
   return (
     <div
-      className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-line bg-surface px-8 text-center"
-      style={{ aspectRatio: "9 / 16", maxHeight: "70vh" }}
+      className="rounded-lg border border-dashed border-line overflow-hidden"
+      style={{ aspectRatio: `${WIDTH} / ${HEIGHT}`, maxHeight: "70vh" }}
     >
-      <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
-        No frames yet
-      </p>
-      <p className="max-w-[26ch] text-[12px] leading-relaxed text-muted">
-        Run the media + video pipeline so the preview has something to show.
-      </p>
+      <PreviewEmptyState reason="no-frames" storyId={storyId} />
     </div>
   );
 }
