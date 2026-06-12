@@ -45,6 +45,7 @@ import {
   type RegenError,
   type RevertError,
 } from "@/lib/frame-regen";
+import { canQueueFrameRegenForSession } from "@/lib/frame-session-spend";
 
 export interface PatchResult {
   ok: boolean;
@@ -277,6 +278,7 @@ export type FrameRegenError =
   | "session-stolen"
   | "no-session"
   | "budget-exceeded"
+  | "session-cap-exceeded"
   | RegenError;
 
 export interface FrameRegenResult {
@@ -285,6 +287,11 @@ export interface FrameRegenResult {
   /** Estimated USD cents for this regen — surfaced to the UI for the
    *  "regen will cost ~5¢" inline label. */
   estimateCents?: number;
+  /** Session-spend-so-far in cents. Set when error === "session-cap-exceeded"
+   *  so the UI can show "you've spent $X of $Y this session". */
+  sessionSpentCents?: number;
+  /** Session cap in cents. Set when error === "session-cap-exceeded". */
+  sessionCapCents?: number;
   /** The queued row. When idempotentHit is true this is the existing
    *  in-flight row rather than a fresh insert. */
   render?: ImageRenderRow;
@@ -344,6 +351,34 @@ export async function queueFrameImageRegen(
       ok: false,
       error: "budget-exceeded",
       estimateCents: budget.estimateCents,
+    };
+  }
+
+  // Per-session cap (Phase 4). Hard cap on (story, admin) spend since
+  // the current edit-session started. Counts completed regens at their
+  // actual cost_cents plus in-flight regens at the current estimate,
+  // so the cap stays honest under double-click bursts.
+  const sessionCap = await canQueueFrameRegenForSession({
+    storyId,
+    userId: session.userId,
+    sessionStartedAt: sessionOwner.started_at,
+  });
+  if (!sessionCap.ok) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[video editor regen] session_cap_exceeded", {
+      story_id: storyId,
+      frame_id: frameId,
+      user_id: session.userId,
+      spent_cents: sessionCap.spentCents,
+      cap_cents: sessionCap.capCents,
+      estimate_cents: sessionCap.estimateCents,
+    });
+    return {
+      ok: false,
+      error: "session-cap-exceeded",
+      estimateCents: sessionCap.estimateCents,
+      sessionSpentCents: sessionCap.spentCents,
+      sessionCapCents: sessionCap.capCents,
     };
   }
 

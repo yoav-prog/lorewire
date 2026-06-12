@@ -83,6 +83,7 @@ export default async function SettingsPage() {
     propCount,
     mouthSwap,
     introOutroEnabled,
+    frameRegenSessionCapCents,
     googleVoices,
     elevenLabsVoices,
   ] = await Promise.all([
@@ -102,6 +103,7 @@ export default async function SettingsPage() {
     getSetting("media.prop_count"),
     getSetting("video.mouth_swap"),
     getSetting("video.intro_outro_enabled"),
+    getSetting("video.editor.frame_regen.session_cap_cents"),
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
@@ -274,6 +276,20 @@ export default async function SettingsPage() {
             label="Splice intros and outros"
             hint="When on, the active intro and outro are spliced onto every rendered video. Per-story overrides still apply. Defaults to on."
             initialOn={readToggle(introOutroEnabled, true)}
+          />
+        </Section>
+
+        <Section
+          title="Video editor"
+          description="Per-frame image regen controls for /admin/videos/[id]. The cap is the safety net against a runaway click in the storyboard."
+        >
+          <SettingNumber
+            settingKey="video.editor.frame_regen.session_cap_cents"
+            label="Session cap (cents)"
+            hint="Hard cap on frame regen spend per editor session. Counts completed regens at actual cost plus in-flight regens at the per-image estimate. Default 500 cents ($5)."
+            initial={frameRegenSessionCapCents ?? "500"}
+            min={50}
+            max={10000}
           />
         </Section>
 

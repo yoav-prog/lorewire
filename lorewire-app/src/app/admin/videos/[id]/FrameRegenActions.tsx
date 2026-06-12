@@ -197,6 +197,12 @@ function explainRegenError(r: FrameRegenResult): string {
       return "Editor session expired. Refresh the page.";
     case "budget-exceeded":
       return "Daily image budget exceeded. Try later or raise the cap in Settings.";
+    case "session-cap-exceeded": {
+      const spent = r.sessionSpentCents ?? 0;
+      const cap = r.sessionCapCents ?? 0;
+      const fmt = (c: number) => `$${(c / 100).toFixed(2)}`;
+      return `Session spend cap reached (${fmt(spent)} of ${fmt(cap)}). Raise it in Settings → Video editor, or wait.`;
+    }
     case "frame-not-found":
       return "Frame not found — the editor may be out of sync. Refresh.";
     case "no-prompt-available":

@@ -109,6 +109,8 @@ export default function EditorClient({
   latestRender,
   frameRenderStatuses,
   frameEstimateCents,
+  mySessionSpendCents,
+  frameRegenSessionCapCents,
   foreignOwnerEmail,
   captionStyle,
   captionStylePreview,
@@ -123,6 +125,8 @@ export default function EditorClient({
   latestRender: RenderRow | null;
   frameRenderStatuses: (ImageRenderRow | null)[];
   frameEstimateCents: number;
+  mySessionSpendCents: number | null;
+  frameRegenSessionCapCents: number;
   foreignOwnerEmail: string | null;
   captionStyle: ResolvedCaptionStyle;
   captionStylePreview: CaptionStyleForPreview;
@@ -277,6 +281,8 @@ export default function EditorClient({
         derivedDefault={derivedDefault}
         latestRender={readOnly ? null : latestRender}
         renderDisabled={readOnly}
+        sessionSpendCents={mySessionSpendCents}
+        sessionCapCents={frameRegenSessionCapCents}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -444,6 +450,8 @@ function Header({
   derivedDefault,
   latestRender,
   renderDisabled = false,
+  sessionSpendCents,
+  sessionCapCents,
 }: {
   storyId: string;
   storyTitle: string;
@@ -454,6 +462,11 @@ function Header({
   derivedDefault: boolean;
   latestRender: RenderRow | null;
   renderDisabled?: boolean;
+  /** Cents spent on frame regens this session. null = this admin doesn't
+   *  own the edit session (read-only). Hides the chip. */
+  sessionSpendCents: number | null;
+  /** Hard cap for the chip. Read from settings server-side. */
+  sessionCapCents: number;
 }) {
   const trimmed = trimmedDurationMs !== durationMs;
   return (
@@ -494,6 +507,12 @@ function Header({
         </div>
       </div>
       <div className="flex items-center gap-3">
+        {sessionSpendCents !== null && (
+          <SessionSpendChip
+            spentCents={sessionSpendCents}
+            capCents={sessionCapCents}
+          />
+        )}
         <span
           className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
             storyStatus,
@@ -515,6 +534,39 @@ function Header({
         )}
       </div>
     </header>
+  );
+}
+
+// ─── SessionSpendChip ────────────────────────────────────────────────────────
+// Phase 4 of the video editor overhaul: running per-session spend on
+// frame regens with the hard cap from settings. Counts completed regens
+// at actual cost plus in-flight regens at the per-image estimate (the
+// "hard" cap stays honest under double-click bursts). Color flips warn
+// at 80% of cap and danger at 100% so the user gets a visible nudge
+// before queueFrameImageRegen starts rejecting.
+
+function SessionSpendChip({
+  spentCents,
+  capCents,
+}: {
+  spentCents: number;
+  capCents: number;
+}) {
+  const fraction = capCents > 0 ? spentCents / capCents : 0;
+  const tone =
+    fraction >= 1
+      ? "border-danger/40 bg-danger/15 text-danger"
+      : fraction >= 0.8
+        ? "border-warn/40 bg-warn/15 text-warn"
+        : "border-line bg-surface2 text-muted";
+  return (
+    <span
+      className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${tone}`}
+      title={`Frame regens spent this editor session, hard cap from Settings → Video editor → Session cap`}
+      data-testid="session-spend-chip"
+    >
+      Session ${(spentCents / 100).toFixed(2)} / ${(capCents / 100).toFixed(2)}
+    </span>
   );
 }
 

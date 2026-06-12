@@ -25,6 +25,10 @@ import {
   latestRenderForAsset,
   type ImageRenderRow,
 } from "@/lib/image-render-queue";
+import {
+  getFrameRegenSessionCapCents,
+  getSessionSpendCents,
+} from "@/lib/frame-session-spend";
 import { resolveCaptionStyle, toPreview } from "@/lib/caption-style";
 import EditorClient from "./EditorClient";
 
@@ -79,6 +83,25 @@ export default async function VideoEditorPage({
   // covers every frame card.
   const frameEstimateCents = await estimateImageRegenCostCents("frame:_");
 
+  // Phase 4 running session spend chip + hard per-session cap. Only
+  // computed when the current admin owns the edit session — a foreign
+  // session means we're read-only and the chip would be misleading.
+  // The cap setting is read regardless so the editor can still show a
+  // "Read-only — current cap ~$Y" hint in future iterations.
+  const frameRegenSessionCapCents = await getFrameRegenSessionCapCents();
+  let mySessionSpendCents: number | null = null;
+  if (
+    config._edit_session &&
+    config._edit_session.user_id === session.userId
+  ) {
+    const spend = await getSessionSpendCents(
+      story.id,
+      session.userId,
+      config._edit_session.started_at,
+    );
+    mySessionSpendCents = spend.totalCents;
+  }
+
   // Concurrency banner data. If a foreign session is fresh (<2 min), pull
   // the owner's email so the banner can name them — "<email> is editing".
   // Stale and self-owned sessions both render no banner.
@@ -127,6 +150,8 @@ export default async function VideoEditorPage({
       latestRender={latestRender}
       frameRenderStatuses={frameRenderStatuses}
       frameEstimateCents={frameEstimateCents}
+      mySessionSpendCents={mySessionSpendCents}
+      frameRegenSessionCapCents={frameRegenSessionCapCents}
       foreignOwnerEmail={foreignOwnerEmail}
       captionStyle={captionStyle}
       captionStylePreview={captionStylePreview}
