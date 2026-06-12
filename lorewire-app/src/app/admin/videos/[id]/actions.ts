@@ -33,6 +33,18 @@ import {
   hashConfig,
   type RenderRow,
 } from "@/lib/video-render-queue";
+import {
+  canEnqueueImageRegen,
+  enqueueImageRegen,
+  type ImageRenderRow,
+  latestRenderForAsset,
+} from "@/lib/image-render-queue";
+import {
+  planFrameRegen,
+  planFrameRevert,
+  type RegenError,
+  type RevertError,
+} from "@/lib/frame-regen";
 
 export interface PatchResult {
   ok: boolean;
@@ -237,6 +249,219 @@ export async function claimEditSession(
     user_id: session.userId,
   });
   return { ok: true };
+}
+
+// ─── Per-frame image regen (Phase 3) ──────────────────────────────────────────
+//
+// queueFrameImageRegen writes the new prompt + snapshot prev_image into the
+// frame, then enqueues an IMAGE_RENDERS row with `asset='frame:<id>'`. The
+// pipeline's regen_one() handler (Phase 3 part 2) picks the row up and
+// writes the new url back. revertFrameImage flips prev_image back into the
+// live fields for free (no model call).
+//
+// Auth model: requireAdmin + edit-session lock. Only the admin currently
+// holding the session can queue regens — prevents two-tab races on the
+// same story from double-charging. A stale session falls through as
+// "session-stolen" so the editor surfaces the take-over banner.
+//
+// Soft idempotency: before inserting a new queue row we check the latest
+// row for this (story, frame) asset. If it's still queued/generating AND
+// its prompt_hash matches the new prompt, we return that row instead of
+// creating another one. Catches double-clicks + form retries without
+// requiring a new DB column. Full key-based dedup can land in Phase 3.5
+// if the soft check proves insufficient.
+
+export type FrameRegenError =
+  | "story-not-found"
+  | "config-invalid"
+  | "session-stolen"
+  | "no-session"
+  | "budget-exceeded"
+  | RegenError;
+
+export interface FrameRegenResult {
+  ok: boolean;
+  error?: FrameRegenError;
+  /** Estimated USD cents for this regen — surfaced to the UI for the
+   *  "regen will cost ~5¢" inline label. */
+  estimateCents?: number;
+  /** The queued row. When idempotentHit is true this is the existing
+   *  in-flight row rather than a fresh insert. */
+  render?: ImageRenderRow;
+  idempotentHit?: boolean;
+}
+
+export async function queueFrameImageRegen(
+  storyId: string,
+  frameId: string,
+  newPrompt?: string,
+): Promise<FrameRegenResult> {
+  const session = await requireAdmin();
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const base: ShortVideoConfig =
+    resolveBaseConfig(story.video_config) ?? defaultVideoConfig(story);
+
+  // Edit-session lock: only the current session owner can queue regens.
+  // No session = we never claimed this editor (action invoked from a
+  // page that didn't mount the heartbeat) — also reject.
+  const sessionOwner = base._edit_session;
+  if (!sessionOwner) {
+    return { ok: false, error: "no-session" };
+  }
+  if (sessionOwner.user_id !== session.userId) {
+    return { ok: false, error: "session-stolen" };
+  }
+
+  // Pre-flight: pure planning. Resolves the prompt, validates it,
+  // snapshots prev_image, and returns the next config. No persistence
+  // or external calls yet.
+  const plan = planFrameRegen({
+    base,
+    frameId,
+    newPrompt,
+    now: new Date().toISOString(),
+    sceneFallbackPrompt: null, // Phase 3 part 2 wires scene fallback
+  });
+  if (!plan.ok) return { ok: false, error: plan.error };
+
+  // Daily budget check (mirrors the article-side regen flow). Cap is
+  // shared across all image regens through the same setting.
+  const asset = `frame:${frameId}`;
+  const budget = await canEnqueueImageRegen(asset);
+  if (!budget.ok) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[video editor regen] budget_exceeded", {
+      story_id: storyId,
+      frame_id: frameId,
+      user_id: session.userId,
+      estimate_cents: budget.estimateCents,
+      remaining_cents: budget.budget.remainingCents,
+    });
+    return {
+      ok: false,
+      error: "budget-exceeded",
+      estimateCents: budget.estimateCents,
+    };
+  }
+
+  // Final validation of the planned config — defence-in-depth against a
+  // future planner bug producing a shape parseVideoConfig would reject.
+  const validated = parseVideoConfig(plan.nextConfig);
+  if (!validated.ok) return { ok: false, error: "config-invalid" };
+
+  // Persist the prompt + snapshot BEFORE enqueueing. Order matters: if
+  // the worker picks up the row between insert and config write, it
+  // would read a stale prompt. Writing the config first means the queue
+  // row references state that's already on disk.
+  await setStoryConfigJson(storyId, JSON.stringify(validated.config));
+
+  // Soft idempotency: an in-flight row with a matching prompt_hash is
+  // probably this same click (double-tap, optimistic retry). Reuse it
+  // rather than charging twice.
+  const inFlight = await latestRenderForAsset("story", storyId, asset);
+  if (
+    inFlight &&
+    (inFlight.status === "queued" || inFlight.status === "generating") &&
+    inFlight.prompt_hash === plan.promptHash
+  ) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[video editor regen] idempotent_dedup", {
+      story_id: storyId,
+      frame_id: frameId,
+      user_id: session.userId,
+      render_id: inFlight.id,
+      status: inFlight.status,
+    });
+    return {
+      ok: true,
+      render: inFlight,
+      idempotentHit: true,
+      estimateCents: budget.estimateCents,
+    };
+  }
+
+  const render = await enqueueImageRegen({
+    ownerKind: "story",
+    ownerId: storyId,
+    asset,
+    promptHash: plan.promptHash,
+    requestedBy: session.userId,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[video editor regen] enqueued", {
+    story_id: storyId,
+    frame_id: frameId,
+    frame_index: plan.frameIndex,
+    user_id: session.userId,
+    render_id: render.id,
+    prompt_source: plan.promptSource,
+    prompt_hash: plan.promptHash.slice(0, 12),
+    estimate_cents: budget.estimateCents,
+  });
+
+  revalidatePath(`/admin/videos/${storyId}`);
+  return {
+    ok: true,
+    render,
+    idempotentHit: false,
+    estimateCents: budget.estimateCents,
+  };
+}
+
+export type FrameRevertResult = {
+  ok: boolean;
+  error?:
+    | "story-not-found"
+    | "config-invalid"
+    | "session-stolen"
+    | "no-session"
+    | RevertError;
+  /** The url restored from prev_image — surfaced so the UI can swap the
+   *  thumbnail without a refresh. */
+  restoredUrl?: string;
+};
+
+export async function revertFrameImage(
+  storyId: string,
+  frameId: string,
+): Promise<FrameRevertResult> {
+  const session = await requireAdmin();
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const base: ShortVideoConfig =
+    resolveBaseConfig(story.video_config) ?? defaultVideoConfig(story);
+
+  const sessionOwner = base._edit_session;
+  if (!sessionOwner) return { ok: false, error: "no-session" };
+  if (sessionOwner.user_id !== session.userId) {
+    return { ok: false, error: "session-stolen" };
+  }
+
+  const plan = planFrameRevert(base, frameId);
+  if (!plan.ok) return { ok: false, error: plan.error };
+
+  const validated = parseVideoConfig(plan.nextConfig);
+  if (!validated.ok) return { ok: false, error: "config-invalid" };
+
+  await setStoryConfigJson(storyId, JSON.stringify(validated.config));
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[video editor revert] action_invoked", {
+    story_id: storyId,
+    frame_id: frameId,
+    frame_index: plan.frameIndex,
+    user_id: session.userId,
+    restored_url: plan.restoredUrl,
+  });
+
+  revalidatePath(`/admin/videos/${storyId}`);
+  return { ok: true, restoredUrl: plan.restoredUrl };
 }
 
 export async function heartbeatEditSession(
