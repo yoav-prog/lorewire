@@ -2,6 +2,11 @@
 
 import { useEffect, useRef, useState, useTransition } from "react";
 import { saveSettingAction } from "@/app/admin/actions";
+import {
+  AutoSaveStatus,
+  Slider,
+  useDebouncedSave,
+} from "@/components/ui";
 
 // Setting input primitives for the Settings/General page. Five flavors:
 //   - SettingToggle: snappy on/off switch, optimistic via useTransition
@@ -98,10 +103,53 @@ export function SettingToggle({
 }
 
 // ─── SettingNumber ───────────────────────────────────────────────────────────
-// Number input with explicit Save button. Browser-native number stepper +
-// min/max so the field can't be put into a forbidden range from the keyboard.
+// Phase D of the admin UI overhaul: replaced with a polished Slider +
+// auto-save. The prefix arg (e.g. "$") + numeric stepper combo is gone
+// — the Slider's value display + optional unit covers both. Caller API
+// is the same shape so existing call sites work after a one-line
+// rename (SettingNumber → SettingSlider).
+//
+// Kept as a thin wrapper for backwards compatibility during the
+// migration. Once every call site moves to SettingSlider this becomes
+// a one-liner forwarder we can delete in a follow-up.
 
-export function SettingNumber({
+export function SettingNumber(props: {
+  settingKey: string;
+  label: string;
+  hint?: string;
+  initial: string;
+  min: number;
+  max: number;
+  step?: number;
+  /** Legacy: rendered as the Slider's `unit` suffix (e.g. "$", "px"). */
+  prefix?: string;
+  suffix?: string;
+}) {
+  return (
+    <SettingSlider
+      settingKey={props.settingKey}
+      label={props.label}
+      hint={props.hint}
+      initial={props.initial}
+      min={props.min}
+      max={props.max}
+      step={props.step}
+      // Map legacy prefix/suffix to the new unit on the value display.
+      unit={props.suffix ?? props.prefix}
+    />
+  );
+}
+
+// ─── SettingSlider ───────────────────────────────────────────────────────────
+// Slider-based numeric setting with 500ms-debounced auto-save. Uses
+// the Phase A UI library's Slider + AutoSaveStatus + useDebouncedSave
+// hook so the visual + behaviour matches the video editor's panels.
+//
+// Save callback wraps `saveSettingAction` (which is `Promise<void>`)
+// and converts thrown errors into a structured result the
+// useDebouncedSave hook can surface via the AutoSaveStatus pill.
+
+export function SettingSlider({
   settingKey,
   label,
   hint,
@@ -109,8 +157,9 @@ export function SettingNumber({
   min,
   max,
   step,
-  prefix,
-  suffix,
+  unit,
+  tickValue,
+  endpoints,
 }: {
   settingKey: string;
   label: string;
@@ -119,31 +168,82 @@ export function SettingNumber({
   min: number;
   max: number;
   step?: number;
-  prefix?: string;
-  suffix?: string;
+  /** Suffix on the value display (e.g. "px", "dB", "$"). */
+  unit?: string;
+  /** Optional tick mark for the default value. */
+  tickValue?: number;
+  /** Optional endpoint labels (e.g. ["MIN", "MAX"]). */
+  endpoints?: [string, string];
 }) {
+  const parsed = parseFloat(initial);
+  const safeInitial = Number.isFinite(parsed)
+    ? Math.max(min, Math.min(max, parsed))
+    : min;
+  const [value, setValue] = useState(safeInitial);
+
+  const save = useDebouncedSave(
+    async (next: number) => {
+      try {
+        const fd = new FormData();
+        fd.set("key", settingKey);
+        fd.set("value", String(next));
+        await saveSettingAction(fd);
+        return { ok: true };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : "save-failed",
+        };
+      }
+    },
+    { debounceMs: 500 },
+  );
+
+  function update(next: number) {
+    setValue(next);
+    save.request(next);
+  }
+
+  // Slider's value display only renders when its own `label` prop is
+  // set. We render the label inside this card so the inner Slider gets
+  // none — surface the live numeric value (with the unit) here next
+  // to the save status instead.
+  const stepDecimals = (() => {
+    const s = step ?? 1;
+    if (s >= 1) return 0;
+    if (s >= 0.1) return 1;
+    if (s >= 0.01) return 2;
+    return 3;
+  })();
+  const displayValue = `${value.toFixed(stepDecimals)}${unit ? unit : ""}`;
+
   return (
-    <FieldShell label={label} hint={hint}>
-      <form action={saveSettingAction} className="flex flex-wrap items-center gap-2">
-        <input type="hidden" name="key" value={settingKey} />
-        <div className="flex flex-1 items-center gap-1 rounded-lg border border-line bg-bg px-3 py-2 focus-within:border-accent">
-          {prefix && <span className="text-[14px] text-muted">{prefix}</span>}
-          <input
-            name="value"
-            type="number"
-            defaultValue={initial}
-            min={min}
-            max={max}
-            step={step ?? 1}
-            className="min-w-0 flex-1 bg-transparent text-[14px] text-ink outline-none"
+    <div className="rounded-xl border border-line bg-surface p-4">
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <label className="text-[13px] font-semibold text-ink">{label}</label>
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-[12px] tabular-nums text-ink">
+            {displayValue}
+          </span>
+          <AutoSaveStatus
+            state={save.state}
+            detail={save.lastError ?? undefined}
           />
-          {suffix && <span className="text-[14px] text-muted">{suffix}</span>}
         </div>
-        <button className="rounded-lg border border-line px-4 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:text-accent">
-          Save
-        </button>
-      </form>
-    </FieldShell>
+      </div>
+      {hint && <p className="mb-3 text-[12px] text-muted">{hint}</p>}
+      <Slider
+        value={value}
+        min={min}
+        max={max}
+        step={step ?? 1}
+        unit={unit}
+        tickValue={tickValue}
+        endpoints={endpoints}
+        onChange={update}
+        ariaLabel={label}
+      />
+    </div>
   );
 }
 
