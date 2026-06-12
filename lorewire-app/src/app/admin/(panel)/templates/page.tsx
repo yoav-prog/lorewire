@@ -182,38 +182,82 @@ const ALL_FIELDS: FieldDef[] = [
   ...ANIMATION_FIELDS,
 ];
 
-// Key prefix for a given scope. Empty story/cat falls back to global so a
-// missing search param defaults safely.
-function prefixFor(scope: string, cat?: string, story?: string): string {
-  if (scope === "story" && story) return `caption.story.${story}`;
-  if (scope === "cat" && cat) return `caption.cat.${cat}`;
-  return "caption";
+// Key prefix for a given scope + optional aspect. Empty story/cat falls
+// back to global so a missing search param defaults safely. Phase 5 of
+// _plans/2026-06-12-video-aspect-ratio.md adds the optional aspect
+// segment ("16x9" / "9x16") that layers onto every tier so the admin
+// can tune a per-aspect override at any scope.
+function prefixFor(
+  scope: string,
+  cat: string | undefined,
+  story: string | undefined,
+  aspect: "" | "16x9" | "9x16",
+): string {
+  const base =
+    scope === "story" && story
+      ? `caption.story.${story}`
+      : scope === "cat" && cat
+        ? `caption.cat.${cat}`
+        : "caption";
+  return aspect ? `${base}.${aspect}` : base;
 }
 
 // Pulls the value at the immediate parent tier so the form can show what the
-// admin's field would inherit if left empty. story -> cat -> global -> default.
+// admin's field would inherit if left empty. The chain expands when the
+// editor is on a per-aspect tier: per-aspect of this tier -> aspect-agnostic
+// of this tier (the "fall-through" if you clear the per-aspect override) ->
+// per-aspect of the parent tier -> aspect-agnostic of the parent tier -> ...
+// -> defaults.
 async function inheritedValue(
   bare: string,
   scope: string,
-  cat?: string,
-  story?: string,
+  cat: string | undefined,
+  story: string | undefined,
+  aspect: "" | "16x9" | "9x16",
 ): Promise<string> {
-  if (scope === "story") {
-    if (cat) {
-      const v = await getSetting(`caption.cat.${cat}.${bare}`);
-      if (v) return v;
+  // Build the candidate chain in priority order, then pull the first one
+  // that has a non-empty value.
+  const tiers: string[] = [];
+  // Fall-through inside the editing tier: per-aspect cleared -> aspect-
+  // agnostic of the same tier.
+  if (aspect) {
+    if (scope === "story" && story) {
+      tiers.push(`caption.story.${story}.${bare}`);
+    } else if (scope === "cat" && cat) {
+      tiers.push(`caption.cat.${cat}.${bare}`);
+    } else {
+      tiers.push(`caption.${bare}`);
     }
-    const v = await getSetting(`caption.${bare}`);
-    if (v) return v;
-  } else if (scope === "cat") {
-    const v = await getSetting(`caption.${bare}`);
+  }
+  // Per-aspect cat (only when editing story scope).
+  if (scope === "story" && cat && aspect) {
+    tiers.push(`caption.cat.${cat}.${aspect}.${bare}`);
+  }
+  if (scope === "story" && cat) {
+    tiers.push(`caption.cat.${cat}.${bare}`);
+  }
+  // Per-aspect global (when editing story or cat).
+  if (scope !== "global" && aspect) {
+    tiers.push(`caption.${aspect}.${bare}`);
+  }
+  if (scope !== "global") {
+    tiers.push(`caption.${bare}`);
+  }
+  for (const key of tiers) {
+    const v = await getSetting(key);
     if (v) return v;
   }
   return DEFAULTS[bare];
 }
 
 interface PageProps {
-  searchParams: Promise<{ scope?: string; cat?: string; story?: string; saved?: string }>;
+  searchParams: Promise<{
+    scope?: string;
+    cat?: string;
+    story?: string;
+    aspect?: string;
+    saved?: string;
+  }>;
 }
 
 export default async function TemplatesPage({ searchParams }: PageProps) {
@@ -222,6 +266,13 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
   const requestedScope = params.scope === "cat" || params.scope === "story" ? params.scope : "global";
   const cat = params.cat;
   const story = params.story;
+  // Phase 5: aspect dimension. The URL carries "16:9" / "9:16" verbatim
+  // so it's bookmarkable; the prefix builder uses the safe-key variant.
+  const rawAspect = params.aspect;
+  const aspectChoice: "" | "16:9" | "9:16" =
+    rawAspect === "16:9" ? "16:9" : rawAspect === "9:16" ? "9:16" : "";
+  const aspectSegment: "" | "16x9" | "9x16" =
+    aspectChoice === "16:9" ? "16x9" : aspectChoice === "9:16" ? "9x16" : "";
   // Scope guard: cat scope without a category, or story scope without a story,
   // is an incomplete selection. The form would otherwise read/write against
   // the global prefix while showing "Save story/category overrides", silently
@@ -231,7 +282,7 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
     (requestedScope === "cat" && !cat) ||
     (requestedScope === "story" && !story);
   const scope = scopeIsIncomplete ? "global" : requestedScope;
-  const prefix = prefixFor(scope, cat, story);
+  const prefix = prefixFor(scope, cat, story, aspectSegment);
   const justSaved = params.saved === "1";
 
   // Stories list for the story-scope dropdown. Cap at 100 — the admin can
@@ -246,14 +297,20 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
 
   // Explicit override values at THIS scope (empty = inherits). Also pull what
   // each field would inherit so the placeholder shows the effective value.
+  // The aspect dimension changes BOTH: the values come from the per-aspect
+  // subkey (or the aspect-agnostic key when the admin is editing the
+  // "Aspect-agnostic" tab), and the inheritance chain walks per-aspect
+  // first then aspect-agnostic at each tier.
   const values: Record<string, string> = {};
   const placeholders: Record<string, string> = {};
   await Promise.all(
     ALL_FIELDS.map(async (f) => {
       values[f.bare] = (await getSetting(`${prefix}.${f.bare}`)) ?? "";
-      placeholders[f.bare] = scope === "global"
+      // For global aspect-agnostic editing the inherited value is just the
+      // hardcoded floor (DEFAULTS) since nothing else above it exists.
+      placeholders[f.bare] = scope === "global" && !aspectSegment
         ? DEFAULTS[f.bare]
-        : await inheritedValue(f.bare, scope, cat, story);
+        : await inheritedValue(f.bare, scope, cat, story, aspectSegment);
     }),
   );
 
@@ -262,6 +319,9 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
     : scope === "cat"
     ? `Category: ${cat ?? "(none selected)"}`
     : "Global template";
+  const aspectLabel = aspectChoice
+    ? `${aspectChoice} layer`
+    : "Aspect-agnostic";
 
   return (
     <div className="space-y-6">
@@ -279,6 +339,13 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
 
       <ScopeSwitcher current={scope} cat={cat} story={story} stories={stories} />
 
+      <AspectSwitcher
+        current={aspectChoice}
+        scope={scope}
+        cat={cat}
+        story={story}
+      />
+
       {scopeIsIncomplete && (
         <div className="rounded-xl border border-accent/50 bg-accent/10 px-4 py-3 text-[13px] text-ink">
           {requestedScope === "story" ? "Pick a story" : "Pick a category"} from the
@@ -295,13 +362,18 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
 
       <div className="rounded-xl border border-line bg-surface2 px-4 py-2.5">
         <span className="font-mono text-[11px] uppercase tracking-wider text-muted">Editing:</span>{" "}
-        <span className="font-display text-[14px] font-semibold text-ink">{scopeLabel}</span>
+        <span className="font-display text-[14px] font-semibold text-ink">{scopeLabel}</span>{" "}
+        <span className="font-mono text-[11px] uppercase tracking-wider text-muted">·</span>{" "}
+        <span className="font-mono text-[11px] uppercase tracking-wider text-ink">{aspectLabel}</span>
       </div>
 
       <form action={saveCaptionTemplateAction} className="space-y-7">
         <input type="hidden" name="__scope" value={scope} />
         {cat && <input type="hidden" name="__cat" value={cat} />}
         {story && <input type="hidden" name="__story" value={story} />}
+        {aspectChoice && (
+          <input type="hidden" name="__aspect" value={aspectChoice} />
+        )}
         {ALL_FIELDS.map((f) => (
           <input key={`prev-${f.bare}`} type="hidden" name={`__prev__${f.bare}`} value={values[f.bare]} />
         ))}
@@ -421,6 +493,50 @@ function ScopeTab({
     >
       {label}
     </Link>
+  );
+}
+
+// Phase 5 of _plans/2026-06-12-video-aspect-ratio.md: aspect dimension
+// switcher. Each tab regenerates the URL with the SAME scope (global /
+// cat / story) and just flips the `aspect` search param. Aspect-agnostic
+// is the default tier the page edits when no aspect is set in the URL
+// — keeps the pre-Phase-5 behaviour for any link that doesn't know
+// about the new dimension yet.
+function AspectSwitcher({
+  current,
+  scope,
+  cat,
+  story,
+}: {
+  current: "" | "16:9" | "9:16";
+  scope: string;
+  cat?: string;
+  story?: string;
+}) {
+  const baseParams = new URLSearchParams();
+  if (scope !== "global") {
+    baseParams.set("scope", scope);
+    if (scope === "cat" && cat) baseParams.set("cat", cat);
+    if (scope === "story" && story) baseParams.set("story", story);
+  }
+  function hrefFor(aspect: "" | "16:9" | "9:16"): string {
+    const p = new URLSearchParams(baseParams);
+    if (aspect) p.set("aspect", aspect);
+    const qs = p.toString();
+    return qs ? `/admin/templates?${qs}` : "/admin/templates";
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-3">
+      <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
+        Aspect:
+      </span>
+      <ScopeTab href={hrefFor("")} active={current === ""} label="Aspect-agnostic" />
+      <ScopeTab href={hrefFor("16:9")} active={current === "16:9"} label="16:9 wide" />
+      <ScopeTab href={hrefFor("9:16")} active={current === "9:16"} label="9:16 tall" />
+      <p className="ml-2 font-mono text-[10px] uppercase tracking-wider text-muted">
+        per-aspect overrides layer on top of the aspect-agnostic tier
+      </p>
+    </div>
   );
 }
 

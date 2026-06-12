@@ -359,6 +359,17 @@ function captionPrefix(scope: string, cat?: string, story?: string): string {
   return "caption";
 }
 
+/** Phase 5 of _plans/2026-06-12-video-aspect-ratio.md: optional aspect
+ *  segment layered onto every settings-key prefix. "16:9" / "9:16"
+ *  encode as "16x9" / "9x16" so the dotted namespace stays unambiguous.
+ *  Anything else (including the literal "any") returns an empty string,
+ *  meaning "the aspect-agnostic tier" (the pre-Phase-5 behaviour). */
+function captionAspectSegment(aspect: string): string {
+  if (aspect === "16:9") return ".16x9";
+  if (aspect === "9:16") return ".9x16";
+  return "";
+}
+
 // Per-story caption style action. The video editor's Caption style tab
 // calls this with the bare field name + new value; an empty value clears
 // the story-scope override (so the field falls back to category → global →
@@ -587,6 +598,12 @@ export async function saveCaptionTemplateAction(
   const rawScope = String(formData.get("__scope") ?? "global");
   const cat = String(formData.get("__cat") ?? "") || undefined;
   const story = String(formData.get("__story") ?? "") || undefined;
+  // Phase 5 of _plans/2026-06-12-video-aspect-ratio.md: an optional
+  // aspect dimension layered on top of every tier. Anything other than
+  // the supported pair is treated as the aspect-agnostic tier so a
+  // tampered client cannot wedge writes into an arbitrary key namespace.
+  const rawAspect = String(formData.get("__aspect") ?? "");
+  const aspect = rawAspect === "16:9" || rawAspect === "9:16" ? rawAspect : "";
   // Scope guard: cat-scope without cat, or story-scope without story, is an
   // incomplete selection. Refuse to write — otherwise the writes would land
   // at the global prefix and silently overwrite the wrong tier.
@@ -594,7 +611,7 @@ export async function saveCaptionTemplateAction(
     (rawScope === "cat" && !cat) || (rawScope === "story" && !story)
       ? "global"
       : rawScope;
-  const prefix = captionPrefix(scope, cat, story);
+  const prefix = captionPrefix(scope, cat, story) + captionAspectSegment(aspect);
 
   const changedKeys: string[] = [];
   for (const bare of CAPTION_TEMPLATE_FIELDS) {
@@ -611,6 +628,7 @@ export async function saveCaptionTemplateAction(
     resolvedScope: scope,
     cat,
     story,
+    aspect: aspect || null,
     changed: changedKeys,
     changedCount: changedKeys.length,
   });
@@ -618,6 +636,9 @@ export async function saveCaptionTemplateAction(
   // Redirect back to the same scope view with ?saved=1 so the page renders a
   // saved-banner instead of giving the admin no feedback.
   const search = new URLSearchParams();
+  if (aspect) {
+    search.set("aspect", aspect);
+  }
   if (scope !== "global") {
     search.set("scope", scope);
     if (scope === "cat" && cat) search.set("cat", cat);

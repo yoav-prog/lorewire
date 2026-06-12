@@ -124,30 +124,74 @@ def resolve_caption_template(get_setting) -> dict:
     }
 
 
+def _aspect_segment(aspect: str | None) -> str | None:
+    """Settings-key segment for an aspect. Colons aren't legal anywhere
+    else in the dotted key namespace, so 16:9 / 9:16 become 16x9 / 9x16.
+    Anything else returns None so the resolver simply skips the per-aspect
+    tier."""
+    if aspect == "16:9":
+        return "16x9"
+    if aspect == "9:16":
+        return "9x16"
+    return None
+
+
 def resolve_caption_template_for(
     story_id: str | None,
     category: str | None,
     get_setting,
+    aspect: str | None = None,
 ) -> dict:
     """Same shape as `resolve_caption_template`, but walks a three-tier scope
     chain so a per-story override beats a per-category override beats the
-    global default. Each tier stores values under a distinct key prefix:
+    global default.
 
-      story:    caption.story.<story_id>.<field>
-      category: caption.cat.<category>.<field>
-      global:   caption.<field>
+    Phase 5 of _plans/2026-06-12-video-aspect-ratio.md adds an aspect
+    dimension to the chain. When `aspect` is None the lookup is exactly
+    the pre-Phase-5 three-tier chain — every existing render stays
+    byte-identical. When an aspect is supplied each tier first looks for
+    its aspect-specific subkey, then falls back to the aspect-agnostic
+    key at the same tier:
 
-    Within a tier, an empty string means "unset" so the resolver falls through
-    to the next tier. That keeps the admin UX simple — clearing a field in the
-    story-scope form unsets the override and the category/global value takes
-    over without the admin having to delete the row by hand.
+      story-aspect: caption.story.<story_id>.<aspect>.<field>
+      story:        caption.story.<story_id>.<field>
+      cat-aspect:   caption.cat.<category>.<aspect>.<field>
+      cat:          caption.cat.<category>.<field>
+      global-aspect: caption.<aspect>.<field>
+      global:       caption.<field>
+
+    Within a tier, an empty string means "unset" so the resolver falls
+    through to the next tier. That keeps the admin UX simple — clearing
+    a field in the story-scope form unsets the override and the category/
+    global value takes over without the admin having to delete the row
+    by hand. The aspect segment in the key uses the safe transform from
+    `_aspect_segment` (16x9 / 9x16) so the dotted namespace stays
+    unambiguous.
     """
+    aspect_segment = _aspect_segment(aspect)
+
     def pick(field: str) -> str | None:
-        for prefix in (
-            f"caption.story.{story_id}.{field}" if story_id else None,
-            f"caption.cat.{category}.{field}" if category else None,
-            f"caption.{field}",
-        ):
+        candidates: list[str | None] = []
+        # story tier
+        if story_id and aspect_segment:
+            candidates.append(
+                f"caption.story.{story_id}.{aspect_segment}.{field}"
+            )
+        if story_id:
+            candidates.append(f"caption.story.{story_id}.{field}")
+        # category tier
+        if category and aspect_segment:
+            candidates.append(
+                f"caption.cat.{category}.{aspect_segment}.{field}"
+            )
+        if category:
+            candidates.append(f"caption.cat.{category}.{field}")
+        # global tier
+        if aspect_segment:
+            candidates.append(f"caption.{aspect_segment}.{field}")
+        candidates.append(f"caption.{field}")
+
+        for prefix in candidates:
             if prefix is None:
                 continue
             v = get_setting(prefix)
@@ -274,25 +318,32 @@ def generate_video(
         except Exception as e:
             print(f"[video id={safe_id} mouth_swap] stage FAILED: {e}")
 
-    # Wave 3 Phase 2: walk the per-story -> per-category -> global scope chain
-    # so a story override beats a category override beats the global default.
-    # Falls back to defaults when nothing is set, identical to Phase 1 behavior.
-    caption_template = resolve_caption_template_for(safe_id, category, _store.get_setting)
-    print(
-        f"[video id={safe_id} caption-template] {len(caption_template)} fields resolved"
-        f" (scope chain: story={safe_id!r}, cat={category!r})"
-    )
-
     # Phase 0/2 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
-    # canvas aspect for this render. The chain prefers the per-story
-    # override on the existing row, falls back to the global default
-    # setting, and finally to the legacy 9:16 portrait — so stories that
-    # predate this feature continue to render byte-identical 1080x1920.
+    # canvas aspect for this render. Moved ahead of the caption template
+    # resolver in Phase 5 so the per-aspect tier keys can be walked when
+    # the admin has tuned a 16:9-specific caption layout.
     # We stamp it onto the props file so the renderer's calculateMetadata
     # picks it up AND onto the persisted video_config so re-runs preserve
     # the editor's choice without needing the lock map.
     resolved_aspect = resolve_aspect_for_story(story_row)
     print(f"[video id={safe_id} aspect] resolved={resolved_aspect}")
+
+    # Wave 3 Phase 2 caption template resolution, extended by Phase 5 of
+    # the aspect plan to walk an aspect dimension on top of the existing
+    # three-tier scope chain. When the admin hasn't tuned anything per-
+    # aspect, the resolver falls through to the aspect-agnostic tiers and
+    # the rendered caption is byte-identical to today's output.
+    caption_template = resolve_caption_template_for(
+        safe_id,
+        category,
+        _store.get_setting,
+        aspect=resolved_aspect,
+    )
+    print(
+        f"[video id={safe_id} caption-template] {len(caption_template)} fields "
+        f"resolved (scope chain: story={safe_id!r}, cat={category!r}, "
+        f"aspect={resolved_aspect})"
+    )
 
     config = {
         "voiceover_url": static_audio,

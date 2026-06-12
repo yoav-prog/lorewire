@@ -97,6 +97,97 @@ describe("resolveCaptionStyle: inheritance chain", () => {
   });
 });
 
+// ─── Phase 5 of _plans/2026-06-12-video-aspect-ratio.md ────────────────────
+
+describe("resolveCaptionStyle: aspect dimension", () => {
+  it("without an aspect arg, the resolver is byte-identical to pre-Phase-5", async () => {
+    // Setting only an aspect-specific key without passing aspect should
+    // leave the resolver on the legacy chain — the per-aspect key is
+    // invisible. Catches a regression where the resolver leaks per-
+    // aspect tuning into aspect-agnostic renders.
+    await setSetting("caption.16x9.color", "#16cafe");
+    const r = await resolveCaptionStyle({ storyId: "s1", category: "Drama" });
+    expect(r.fields.color.source).toBe("default");
+    expect(r.fields.color.effective).toBe(CAPTION_DEFAULTS.color);
+  });
+
+  it("global per-aspect tier wins over global aspect-agnostic", async () => {
+    await setSetting("caption.color", "#aaaaaa");
+    await setSetting("caption.16x9.color", "#16cafe");
+    const landscape = await resolveCaptionStyle({
+      storyId: "s1",
+      category: "Drama",
+      aspect: "16:9",
+    });
+    expect(landscape.fields.color.effective).toBe("#16cafe");
+    expect(landscape.fields.color.source).toBe("global-aspect");
+    // Portrait reads the aspect-agnostic key — the per-16:9 tier doesn't
+    // affect the other aspect.
+    const portrait = await resolveCaptionStyle({
+      storyId: "s1",
+      category: "Drama",
+      aspect: "9:16",
+    });
+    expect(portrait.fields.color.effective).toBe("#aaaaaa");
+    expect(portrait.fields.color.source).toBe("global");
+  });
+
+  it("category per-aspect beats global per-aspect", async () => {
+    await setSetting("caption.color", "#aaaaaa");
+    await setSetting("caption.16x9.color", "#16cafe");
+    await setSetting("caption.cat.Drama.color", "#dccccc");
+    await setSetting("caption.cat.Drama.16x9.color", "#16d666");
+    const r = await resolveCaptionStyle({
+      storyId: "s1",
+      category: "Drama",
+      aspect: "16:9",
+    });
+    expect(r.fields.color.effective).toBe("#16d666");
+    expect(r.fields.color.source).toBe("category-aspect");
+  });
+
+  it("story per-aspect tier is the highest-priority tier", async () => {
+    await setSetting("caption.color", "#aaaaaa");
+    await setSetting("caption.16x9.color", "#16cafe");
+    await setSetting("caption.cat.Drama.color", "#dccccc");
+    await setSetting("caption.cat.Drama.16x9.color", "#16d666");
+    await setSetting("caption.story.s1.color", "#story-agnostic"[0] + "abcd");
+    await setSetting("caption.story.s1.16x9.color", "#16ee77");
+    const r = await resolveCaptionStyle({
+      storyId: "s1",
+      category: "Drama",
+      aspect: "16:9",
+    });
+    expect(r.fields.color.effective).toBe("#16ee77");
+    expect(r.fields.color.source).toBe("story-aspect");
+  });
+
+  it("per-aspect tier with empty value falls through to aspect-agnostic", async () => {
+    // The admin's "clear this per-aspect override" UX writes empty string;
+    // the resolver should fall through to the aspect-agnostic key at the
+    // same tier before descending tiers.
+    await setSetting("caption.color", "#aaaaaa");
+    await setSetting("caption.16x9.color", "   ");
+    const r = await resolveCaptionStyle({
+      storyId: "s1",
+      category: "Drama",
+      aspect: "16:9",
+    });
+    expect(r.fields.color.source).toBe("global");
+    expect(r.fields.color.effective).toBe("#aaaaaa");
+  });
+
+  it("storyOverride surfaces whichever story-tier key is set", async () => {
+    await setSetting("caption.story.s1.16x9.color", "#16ee77");
+    const r = await resolveCaptionStyle({
+      storyId: "s1",
+      category: "Drama",
+      aspect: "16:9",
+    });
+    expect(r.fields.color.storyOverride).toBe("#16ee77");
+  });
+});
+
 describe("toPreview", () => {
   it("coerces numeric fields and validates enums", async () => {
     const r = await resolveCaptionStyle({ storyId: "s1", category: null });

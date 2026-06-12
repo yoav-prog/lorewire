@@ -141,10 +141,14 @@ export default async function VideoEditorPage({
 
   // Resolve the per-video caption style now so the editor can render both
   // the live preview overlay AND the Caption style tab with the right
-  // per-story-override values and inherited placeholders.
+  // per-story-override values and inherited placeholders. Phase 5 of
+  // _plans/2026-06-12-video-aspect-ratio.md: pass the story's resolved
+  // aspect so per-aspect caption tunings take priority over the aspect-
+  // agnostic tier — same chain the renderer + the pipeline walk.
   const captionStyle = await resolveCaptionStyle({
     storyId: story.id,
     category: story.category,
+    aspect: config.aspect,
   });
   const captionStylePreview = toPreview(captionStyle);
   const userCaptionPresets = await getUserCaptionPresetsForPage();

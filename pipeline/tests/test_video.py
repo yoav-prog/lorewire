@@ -246,6 +246,102 @@ class ScopeChainTests(unittest.TestCase):
         self.assertEqual(t["entry_effect"], "fade")
 
 
+class ResolveCaptionTemplateAspectTests(unittest.TestCase):
+    """Phase 5 of _plans/2026-06-12-video-aspect-ratio.md: the caption
+    resolver gains an aspect dimension. Per-aspect tiers must win over
+    their aspect-agnostic siblings; absent aspect must reproduce the
+    pre-Phase-5 four-tier chain byte-for-byte."""
+
+    def test_aspect_segment_safe_transform(self):
+        # The aspect string can't enter the dotted key namespace as
+        # "16:9" because the colon would parse ambiguously. The helper
+        # maps the two supported aspects to safe segments and rejects
+        # everything else.
+        self.assertEqual(video._aspect_segment("16:9"), "16x9")
+        self.assertEqual(video._aspect_segment("9:16"), "9x16")
+        self.assertIsNone(video._aspect_segment("4:3"))
+        self.assertIsNone(video._aspect_segment(None))
+        self.assertIsNone(video._aspect_segment(""))
+
+    def test_no_aspect_walks_legacy_chain(self):
+        # Same expectations as the pre-Phase-5 ResolveCaptionTemplateForTests
+        # — when aspect is omitted, the resolver behaves byte-identical.
+        store = {"caption.color": "#abcdef"}
+        t = video.resolve_caption_template_for(
+            None, None, lambda k: store.get(k)
+        )
+        self.assertEqual(t["color"], "#abcdef")
+
+    def test_global_per_aspect_beats_global_agnostic(self):
+        store = {
+            "caption.color": "#aaaaaa",
+            "caption.16x9.color": "#16cafe",
+        }
+        t_landscape = video.resolve_caption_template_for(
+            None, None, lambda k: store.get(k), aspect="16:9",
+        )
+        self.assertEqual(t_landscape["color"], "#16cafe")
+        # Portrait still reads the aspect-agnostic key — the per-16:9
+        # key is silent on the other aspect.
+        t_portrait = video.resolve_caption_template_for(
+            None, None, lambda k: store.get(k), aspect="9:16",
+        )
+        self.assertEqual(t_portrait["color"], "#aaaaaa")
+
+    def test_cat_per_aspect_beats_global_per_aspect(self):
+        store = {
+            "caption.color": "#aaaaaa",
+            "caption.16x9.color": "#16cafe",
+            "caption.cat.Drama.color": "#dccccc",
+            "caption.cat.Drama.16x9.color": "#16d666",
+        }
+        t = video.resolve_caption_template_for(
+            None, "Drama", lambda k: store.get(k), aspect="16:9",
+        )
+        self.assertEqual(t["color"], "#16d666")
+
+    def test_story_per_aspect_beats_everything(self):
+        store = {
+            "caption.color": "#aaaaaa",
+            "caption.16x9.color": "#16cafe",
+            "caption.cat.Drama.color": "#dccccc",
+            "caption.cat.Drama.16x9.color": "#16d666",
+            "caption.story.envelope.color": "#sssssss"[:7],
+            "caption.story.envelope.16x9.color": "#16ee77",
+        }
+        t = video.resolve_caption_template_for(
+            "envelope", "Drama", lambda k: store.get(k), aspect="16:9",
+        )
+        self.assertEqual(t["color"], "#16ee77")
+
+    def test_falls_through_per_aspect_to_aspect_agnostic_same_tier(self):
+        # When the admin only set the aspect-agnostic story key, that
+        # still wins over the cat / global aspect-agnostic tiers. The
+        # per-aspect tier at story scope is empty so the resolver moves
+        # on to the aspect-agnostic story key BEFORE descending tiers.
+        store = {
+            "caption.color": "#aaaaaa",
+            "caption.16x9.color": "#16cafe",
+            "caption.story.envelope.color": "#story-only"[:7],
+        }
+        t = video.resolve_caption_template_for(
+            "envelope", "Drama", lambda k: store.get(k), aspect="16:9",
+        )
+        self.assertEqual(t["color"], "#story-only"[:7])
+
+    def test_empty_string_at_per_aspect_tier_falls_through(self):
+        # An empty string at a tier means "unset at this tier" — the
+        # admin's UI uses this to clear a per-aspect override.
+        store = {
+            "caption.color": "#aaaaaa",
+            "caption.16x9.color": "",
+        }
+        t = video.resolve_caption_template_for(
+            None, None, lambda k: store.get(k), aspect="16:9",
+        )
+        self.assertEqual(t["color"], "#aaaaaa")
+
+
 class MotionFlagTests(unittest.TestCase):
     """Wave 3 Phase 3: motion beat flags share the same truthy-string parser
     Ken-Burns uses. The parser is inlined inside generate_video()'s scope —

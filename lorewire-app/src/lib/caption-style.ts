@@ -6,6 +6,24 @@
 //   caption.<bare>                      global value
 //   DEFAULTS[<bare>]                    bake-the-bin floor
 //
+// Phase 5 of _plans/2026-06-12-video-aspect-ratio.md adds an aspect
+// dimension on top of every tier so the admin can tune a 16:9-specific
+// caption position without disturbing the 9:16 default. When an aspect
+// is supplied to resolveCaptionStyle, each tier first looks for its
+// aspect-specific subkey then falls back to the aspect-agnostic key at
+// the same tier:
+//
+//   caption.story.<id>.<aspect>.<bare>  per-story per-aspect (highest)
+//   caption.story.<id>.<bare>           per-story aspect-agnostic
+//   caption.cat.<cat>.<aspect>.<bare>   per-category per-aspect
+//   caption.cat.<cat>.<bare>            per-category aspect-agnostic
+//   caption.<aspect>.<bare>             global per-aspect
+//   caption.<bare>                      global aspect-agnostic
+//   DEFAULTS[<bare>]                    floor
+//
+// When `aspect` is undefined the resolver walks the pre-Phase-5 four-tier
+// chain unchanged so every existing call site stays byte-identical.
+//
 // resolveCaptionStyle walks the chain and returns:
 //   - effective: the value the renderer should use
 //   - source: which tier it came from (so the UI can show "inherited from global")
@@ -17,6 +35,13 @@
 
 import "server-only";
 import { getSetting } from "@/lib/repo";
+import { type VideoAspect } from "@/lib/aspect";
+
+/** Settings-key segment for an aspect. Colons aren't safe inside the
+ *  dotted key namespace, so 16:9 / 9:16 become 16x9 / 9x16. */
+export function captionAspectSegment(aspect: VideoAspect): string {
+  return aspect === "16:9" ? "16x9" : "9x16";
+}
 
 export const CAPTION_STYLE_FIELDS = [
   "position_y",
@@ -58,7 +83,14 @@ export const CAPTION_DEFAULTS: Record<CaptionStyleField, string> = {
   word_highlight: "karaoke",
 };
 
-export type CaptionStyleSource = "story" | "category" | "global" | "default";
+export type CaptionStyleSource =
+  | "story"
+  | "story-aspect"
+  | "category"
+  | "category-aspect"
+  | "global"
+  | "global-aspect"
+  | "default";
 
 export interface ResolvedCaptionField {
   /** The value the renderer should use. */
@@ -78,45 +110,95 @@ export interface ResolvedCaptionStyle {
 export async function resolveCaptionStyle(opts: {
   storyId: string;
   category: string | null;
+  /** Optional aspect — when supplied, the resolver walks per-aspect tiers
+   *  in front of the aspect-agnostic tiers. When undefined, the resolver
+   *  is byte-identical to the pre-Phase-5 four-tier chain. */
+  aspect?: VideoAspect;
 }): Promise<ResolvedCaptionStyle> {
-  const { storyId, category } = opts;
+  const { storyId, category, aspect } = opts;
+  const aspectSeg = aspect ? captionAspectSegment(aspect) : null;
   const fields = {} as Record<CaptionStyleField, ResolvedCaptionField>;
+
+  async function readTrimmed(key: string): Promise<string | null> {
+    const raw = await getSetting(key);
+    if (!raw) return null;
+    const trimmed = raw.trim();
+    return trimmed ? trimmed : null;
+  }
+
   await Promise.all(
     CAPTION_STYLE_FIELDS.map(async (bare) => {
-      const storyVal = await getSetting(`caption.story.${storyId}.${bare}`);
-      const catVal = category
-        ? await getSetting(`caption.cat.${category}.${bare}`)
-        : null;
-      const globalVal = await getSetting(`caption.${bare}`);
+      // Pull every candidate at the same time so the network round-trips
+      // overlap. Each await is at most one settings_kv lookup so the
+      // worst-case cost is O(tiers) per field, parallel across fields.
+      const [
+        storyAspectVal,
+        storyVal,
+        catAspectVal,
+        catVal,
+        globalAspectVal,
+        globalVal,
+      ] = await Promise.all([
+        aspectSeg
+          ? readTrimmed(`caption.story.${storyId}.${aspectSeg}.${bare}`)
+          : Promise.resolve(null),
+        readTrimmed(`caption.story.${storyId}.${bare}`),
+        category && aspectSeg
+          ? readTrimmed(`caption.cat.${category}.${aspectSeg}.${bare}`)
+          : Promise.resolve(null),
+        category
+          ? readTrimmed(`caption.cat.${category}.${bare}`)
+          : Promise.resolve(null),
+        aspectSeg ? readTrimmed(`caption.${aspectSeg}.${bare}`) : Promise.resolve(null),
+        readTrimmed(`caption.${bare}`),
+      ]);
 
       // Inherited-from-parent: what the field would become if the story
-      // override were cleared. UI uses this for the placeholder text.
+      // override (either tier) were cleared. UI uses this for the
+      // placeholder text on the story-scope form.
       const inheritedFromParent =
-        (catVal && catVal.trim()) ||
-        (globalVal && globalVal.trim()) ||
+        catAspectVal ??
+        catVal ??
+        globalAspectVal ??
+        globalVal ??
         CAPTION_DEFAULTS[bare];
 
-      // Effective: the value the renderer reads.
+      // Effective: the value the renderer reads, picked in priority
+      // order story-aspect -> story -> cat-aspect -> cat -> global-aspect
+      // -> global -> default.
       let effective: string;
       let source: CaptionStyleSource;
-      if (storyVal && storyVal.trim()) {
-        effective = storyVal.trim();
+      if (storyAspectVal !== null) {
+        effective = storyAspectVal;
+        source = "story-aspect";
+      } else if (storyVal !== null) {
+        effective = storyVal;
         source = "story";
-      } else if (catVal && catVal.trim()) {
-        effective = catVal.trim();
+      } else if (catAspectVal !== null) {
+        effective = catAspectVal;
+        source = "category-aspect";
+      } else if (catVal !== null) {
+        effective = catVal;
         source = "category";
-      } else if (globalVal && globalVal.trim()) {
-        effective = globalVal.trim();
+      } else if (globalAspectVal !== null) {
+        effective = globalAspectVal;
+        source = "global-aspect";
+      } else if (globalVal !== null) {
+        effective = globalVal;
         source = "global";
       } else {
         effective = CAPTION_DEFAULTS[bare];
         source = "default";
       }
 
+      // storyOverride still surfaces either tier-aspect or tier-agnostic
+      // so the editor's input picks up whatever the admin wrote.
+      const storyOverride = storyAspectVal ?? storyVal ?? null;
+
       fields[bare] = {
         effective,
         source,
-        storyOverride: storyVal && storyVal.trim() ? storyVal.trim() : null,
+        storyOverride,
         inheritedFromParent,
       };
     }),
