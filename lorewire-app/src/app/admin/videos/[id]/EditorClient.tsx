@@ -99,6 +99,12 @@ const TABS: { key: TabKey; label: string }[] = [
 // 4 missed beats before another admin sees us as stale.
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
+// 2-second polling for in-flight frame regens (Phase 5 of the editor
+// overhaul plan). The image worker takes ~20s+ per regen so 2s is
+// cheap and visibly responsive without hammering the server. Polling
+// stops the moment every frame has settled.
+const FRAME_POLL_INTERVAL_MS = 2_000;
+
 export default function EditorClient({
   storyId,
   storyTitle,
@@ -191,6 +197,30 @@ export default function EditorClient({
     setReadOnly(false);
     claimEditSession(storyId).then(() => router.refresh());
   };
+
+  // Phase 5 live polling: while any frame regen is queued or generating,
+  // call router.refresh() every FRAME_POLL_INTERVAL_MS so the
+  // frameRenderStatuses + previewFrameUrls (which both feed FrameCard)
+  // come back fresh and the thumbnails + status pills update without
+  // the user manually reloading. Stops the moment every frame has
+  // settled (done/error/null) so we don't poll forever on an idle
+  // editor.
+  const anyFrameInFlight = frameRenderStatuses.some(
+    (r) => r !== null && (r.status === "queued" || r.status === "generating"),
+  );
+  useEffect(() => {
+    if (!anyFrameInFlight) return;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[video editor regen] poll_started", { story_id: storyId });
+    const id = setInterval(() => {
+      router.refresh();
+    }, FRAME_POLL_INTERVAL_MS);
+    return () => {
+      clearInterval(id);
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[video editor regen] poll_stopped", { story_id: storyId });
+    };
+  }, [anyFrameInFlight, router, storyId]);
 
   // Draft config: overlays user edits on top of the persisted config so the
   // Player previews unsaved changes. Reset on persist (server revalidates →
@@ -321,6 +351,11 @@ export default function EditorClient({
                 const captionIdx = frame.caption_chunk_start_index;
                 const captionText = config.captions[captionIdx]?.text ?? "";
                 const selected = selectedFrameIdx === idx;
+                const latestRender = frameRenderStatuses[idx] ?? null;
+                const inFlight =
+                  latestRender !== null &&
+                  (latestRender.status === "queued" ||
+                    latestRender.status === "generating");
                 return (
                   <FrameCard
                     key={frame.id}
@@ -329,13 +364,14 @@ export default function EditorClient({
                     caption={captionText}
                     filename={frameFilename(frame.url)}
                     isSelected={selected}
+                    isRegenerating={inFlight}
                     onClick={() => setSelectedFrameIdx(idx)}
                     actions={
                       selected ? (
                         <FrameRegenActions
                           storyId={storyId}
                           frameId={frame.id}
-                          latestRender={frameRenderStatuses[idx] ?? null}
+                          latestRender={latestRender}
                           estimateCents={frameEstimateCents}
                           currentPrompt={frame.image_prompt ?? ""}
                           canRevert={Boolean(frame.prev_image)}
@@ -458,6 +494,7 @@ function Header({
   renderDisabled = false,
   sessionSpendCents,
   sessionCapCents,
+  videoRenderStale,
 }: {
   storyId: string;
   storyTitle: string;

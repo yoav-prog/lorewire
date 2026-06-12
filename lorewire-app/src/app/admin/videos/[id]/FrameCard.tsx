@@ -30,6 +30,12 @@ export interface FrameCardProps {
    *  EditorClient to inject FrameRegenActions (Phase 3) without forcing
    *  this layout-only component to know about server actions. */
   actions?: React.ReactNode;
+  /** Phase 5: true when an IMAGE_RENDERS row for this frame is queued
+   *  or generating. Dims the thumbnail and overlays a "Regenerating"
+   *  pill so the user sees the in-flight state even on collapsed
+   *  cards (the FrameRegenActions status pill only shows when
+   *  selected). */
+  isRegenerating?: boolean;
 }
 
 export function FrameCard({
@@ -40,6 +46,7 @@ export function FrameCard({
   isSelected,
   onClick,
   actions,
+  isRegenerating = false,
 }: FrameCardProps) {
   const label = String(index + 1).padStart(2, "0");
   // Container + inner-button split: an `actions` slot can contain
@@ -78,7 +85,9 @@ export function FrameCard({
                 alt=""
                 loading="lazy"
                 decoding="async"
-                className="h-full w-full object-cover"
+                className={`h-full w-full object-cover transition-opacity ${
+                  isRegenerating ? "opacity-40" : ""
+                }`}
               />
             ) : (
               <div className="flex h-full w-full items-center justify-center font-mono text-[8px] uppercase tracking-wider text-muted">
@@ -88,6 +97,14 @@ export function FrameCard({
             <span className="absolute left-1 top-1 rounded bg-bg/85 px-1 font-mono text-[9px] tabular-nums text-ink">
               {label}
             </span>
+            {isRegenerating && (
+              <span
+                className="absolute inset-x-0 bottom-0 bg-bg/85 py-0.5 text-center font-mono text-[8px] uppercase tracking-wider text-warn"
+                data-testid="frame-regenerating-overlay"
+              >
+                regen…
+              </span>
+            )}
           </div>
           <div className="min-w-0 flex-1">
             <p className="line-clamp-3 text-[12px] leading-snug text-ink">

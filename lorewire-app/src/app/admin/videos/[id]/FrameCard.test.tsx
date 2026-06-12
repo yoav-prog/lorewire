@@ -107,4 +107,23 @@ describe("FrameCard", () => {
     const html = renderToString(<FrameCard {...BASE} isSelected />);
     expect(html).not.toContain("action slot");
   });
+
+  it("renders the regen overlay when isRegenerating is true", () => {
+    const html = renderToString(<FrameCard {...BASE} isRegenerating />);
+    expect(html).toContain('data-testid="frame-regenerating-overlay"');
+    expect(html).toContain("regen");
+  });
+
+  it("dims the thumbnail when isRegenerating is true", () => {
+    const html = renderToString(<FrameCard {...BASE} isRegenerating />);
+    // The img className gains opacity-40 while a regen is in flight so
+    // the user sees the live state on collapsed cards too.
+    expect(html).toMatch(/<img[^>]+class="[^"]*opacity-40/);
+  });
+
+  it("does NOT render the regen overlay by default", () => {
+    const html = renderToString(<FrameCard {...BASE} />);
+    expect(html).not.toContain('data-testid="frame-regenerating-overlay"');
+    expect(html).not.toMatch(/<img[^>]+class="[^"]*opacity-40/);
+  });
 });
