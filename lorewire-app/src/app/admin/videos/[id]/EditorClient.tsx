@@ -875,6 +875,29 @@ function PreviewHost({
     durationInFrames,
   ]);
 
+  // Diagnostic: report the Player container's ACTUAL computed dimensions
+  // a moment after mount. The 2026-06-12 bug that took 6 commits to find
+  // was the container collapsing to 0×0 because `max-height: 70vh` +
+  // `width: auto` + `aspect-ratio` inside a flex `items-center` parent
+  // doesn't give the browser a defined dimension to derive the other
+  // from. This log catches the same class of regression next time
+  // without needing a devtools deep dive.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const t = setTimeout(() => {
+      const rect = el.getBoundingClientRect();
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[video editor preview] container_size", {
+        story_id: storyId,
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      });
+    }, 100);
+    return () => clearTimeout(t);
+  }, [storyId]);
+
   // Player wants `Record<string, unknown>` for inputProps + a similarly-
   // loose component type. We keep the strong PreviewProps type internally
   // and cast at the boundary — matches the SpikeClient pattern.
@@ -943,32 +966,48 @@ function PreviewHost({
     );
   };
 
-  // Backdrop is deliberately NOT `#000` (the Phase 0 lesson): when the
-  // iframe failed to paint for any reason, the user saw an unlabeled black
-  // rectangle and assumed the editor was broken. The composition's own
-  // <AbsoluteFill> paints cream when it renders and `errorFallback`
-  // covers the throw path, so this backdrop only shows during the
-  // initialization window — match it to the editor's dark surface token
-  // so the area reads as editor chrome, not a void.
+  // Layout: the OUTER container has an explicit `height` (not max-height)
+  // so `aspect-ratio` + `width: auto` actually computes width. Earlier
+  // `max-height` alone left the box at 0×0 inside the flex parent. The
+  // `PreviewEmptyState` sits BEHIND the Player at z-index 0 so even if
+  // the iframe paints nothing the user sees labeled cream content rather
+  // than the surrounding chrome blending through. The Player covers it
+  // at z-index 1 when it actually renders.
   return (
-    <PlayerNoSSR
-      component={Component}
-      inputProps={playerInputProps}
-      errorFallback={errorFallback}
-      durationInFrames={durationInFrames}
-      compositionWidth={WIDTH}
-      compositionHeight={HEIGHT}
-      fps={FPS}
-      controls
+    <div
+      ref={containerRef}
       style={{
+        position: "relative",
         aspectRatio: `${WIDTH} / ${HEIGHT}`,
-        maxHeight: "70vh",
+        height: "min(70vh, 100%)",
         width: "auto",
         borderRadius: 12,
         overflow: "hidden",
-        background: "var(--color-surface)",
+        background: "#fbfaf4",
       }}
-    />
+    >
+      <div style={{ position: "absolute", inset: 0, zIndex: 0 }}>
+        <PreviewEmptyState reason="runtime-loading" storyId={storyId} />
+      </div>
+      <PlayerNoSSR
+        component={Component}
+        inputProps={playerInputProps}
+        errorFallback={errorFallback}
+        durationInFrames={durationInFrames}
+        compositionWidth={WIDTH}
+        compositionHeight={HEIGHT}
+        fps={FPS}
+        controls
+        acknowledgeRemotionLicense
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          zIndex: 1,
+        }}
+      />
+    </div>
   );
 }
 
