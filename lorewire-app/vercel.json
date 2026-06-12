@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/drain_image_renders",
+      "schedule": "*/1 * * * *"
+    }
+  ],
+  "functions": {
+    "api/drain_image_renders.py": {
+      "maxDuration": 60
+    }
+  }
+}

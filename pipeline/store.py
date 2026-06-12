@@ -975,6 +975,116 @@ def get_image_render(render_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def count_pending_image_renders() -> int:
+    """Cheap early-exit for the Vercel cron drain handler. Returns the number
+    of rows the drain would care about — queued (not yet picked up) plus
+    generating (in flight). When this is zero the handler can short-circuit
+    in <100ms and idle ticks bill near nothing on Active CPU."""
+    sql = (
+        "SELECT count(*) AS n FROM image_renders "
+        "WHERE status IN ('queued', 'generating')"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+        return int(row["n"]) if row else 0
+    with _sqlite_conn() as c:
+        row = c.execute(sql).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def reap_stale_image_render_claims(stale_after_s: int) -> int:
+    """Crash-recovery for the queue. A row stays at status='generating' with
+    `started_at` set from `claim_next_image_render`'s atomic flip; if the
+    worker that claimed it dies before calling finish/fail, the row would
+    sit there forever (the LLM Council flagged exactly this on the
+    2026-06-13 plan). Reset rows whose started_at is older than
+    `stale_after_s` back to queued so the next tick can re-claim them.
+
+    Returns the number of rows reset. Safe to call on every cron tick —
+    the WHERE clause is index-friendly and rows in flight under the
+    threshold are untouched."""
+    import datetime
+    cutoff = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(seconds=stale_after_s)
+    ).isoformat()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE image_renders SET status='queued', "
+                    "started_at=NULL WHERE status='generating' "
+                    "AND started_at IS NOT NULL AND started_at < %s",
+                    (cutoff,),
+                )
+                count = cur.rowcount
+            conn.commit()
+        return int(count)
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "UPDATE image_renders SET status='queued', started_at=NULL "
+            "WHERE status='generating' AND started_at IS NOT NULL "
+            "AND started_at < ?",
+            (cutoff,),
+        )
+        return int(cur.rowcount)
+
+
+class _AdvisoryLock:
+    """Postgres advisory lock context manager. Phase 1 of the drain
+    rollout uses this so two Vercel cron ticks landing within the same
+    minute can't both run the drain loop — the second one no-ops fast
+    and exits. On SQLite the function is a no-op (only one local worker
+    in dev, no concurrency)."""
+
+    def __init__(self, key: int) -> None:
+        self.key = key
+        self._conn = None
+        self._acquired = False
+
+    def __enter__(self) -> bool:
+        if not _is_postgres():
+            self._acquired = True
+            return True
+        import psycopg
+        self._conn = psycopg.connect(config.env("DATABASE_URL"))
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (self.key,))
+            row = cur.fetchone()
+        self._acquired = bool(row and row[0])
+        if not self._acquired:
+            self._conn.close()
+            self._conn = None
+        return self._acquired
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._conn is None:
+            return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (self.key,))
+            self._conn.commit()
+        finally:
+            self._conn.close()
+            self._conn = None
+
+
+# Lock key for the image_renders drain. A constant integer so every cron
+# tick contends on the same key. Chosen by hand (not derived from name)
+# so SQL audits stay obvious. If another drain is ever added, pick a
+# different integer.
+IMAGE_RENDER_DRAIN_LOCK_KEY = 8472301
+
+
+def image_render_drain_lock() -> _AdvisoryLock:
+    """Convenience wrapper so callers don't memorize the key. Used by
+    `lorewire-app/api/drain_image_renders.py`."""
+    return _AdvisoryLock(IMAGE_RENDER_DRAIN_LOCK_KEY)
+
+
 def update_story_hero(story_id: str, hero_url: str) -> None:
     """Patch a single column. Used by the image regen worker after a hero
     regen completes so the public reader sees the new image immediately."""

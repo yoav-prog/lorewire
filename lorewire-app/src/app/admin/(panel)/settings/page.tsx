@@ -95,6 +95,7 @@ export default async function SettingsPage() {
     defaultAspect,
     sceneCountMode,
     sceneTargetSecondsPerScene,
+    cronMaxRowsPerTick,
     googleVoices,
     elevenLabsVoices,
   ] = await Promise.all([
@@ -118,6 +119,7 @@ export default async function SettingsPage() {
     getSetting("video.default_aspect"),
     getSetting("media.scene_count_mode"),
     getSetting("media.scene_count_target_seconds_per_scene"),
+    getSetting("media.cron_max_rows_per_tick"),
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
@@ -193,6 +195,20 @@ export default async function SettingsPage() {
             min={1}
             max={500}
             prefix="$"
+          />
+          {/* Per-tick row cap for the Vercel cron drain (see
+              `lorewire-app/api/drain_image_renders.py` and
+              `_plans/2026-06-13-worker-host-stop-button-observability.md`).
+              The Python handler reads this from the env var
+              DRAIN_MAX_ROWS_PER_TICK, which the cron Pro-tier deploy
+              wires up; this knob exists for visibility + future bump. */}
+          <SettingNumber
+            settingKey="media.cron_max_rows_per_tick"
+            label="Cron drain rows per tick"
+            hint="Hard cap on how many image regens the Vercel cron drains per minute. 6 fits inside the 60s function budget at ~7s/image average; bump higher only after watching it run for a week."
+            initial={cronMaxRowsPerTick ?? "6"}
+            min={1}
+            max={60}
           />
         </Section>
 

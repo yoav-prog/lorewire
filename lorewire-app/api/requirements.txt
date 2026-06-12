@@ -1,0 +1,8 @@
+# Vercel-side Python deps for the image_renders cron drain.
+#
+# Mirrors `pipeline/requirements.txt` so the Vercel Python serverless
+# function ships the same wheels the local worker uses. Keep the two
+# files in sync — drift here means the local worker and the cron
+# worker have different libpq + JWT signers, which is a fun bug.
+google-auth>=2.50,<3
+psycopg[binary]>=3.1,<4

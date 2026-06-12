@@ -160,5 +160,97 @@ class ClaimTests(_WorkerTestCase):
         self.assertIsNone(store.claim_next_image_render())
 
 
+class CountPendingTests(_WorkerTestCase):
+    """Cron-drain handler short-circuits when the queue is empty. The
+    counter has to see both queued AND generating rows or a single
+    in-flight row would let a parallel tick claim nothing and the
+    reaper would never fire."""
+
+    def test_empty_queue_counts_zero(self):
+        self.assertEqual(store.count_pending_image_renders(), 0)
+
+    def test_queued_row_counts(self):
+        self._new_image_render_row()
+        self.assertEqual(store.count_pending_image_renders(), 1)
+
+    def test_generating_row_counts(self):
+        self._new_image_render_row()
+        store.claim_next_image_render()  # flips to generating
+        self.assertEqual(store.count_pending_image_renders(), 1)
+
+    def test_done_row_does_not_count(self):
+        render_id = self._new_image_render_row()
+        store.finish_image_render(render_id, "/x", 1)
+        self.assertEqual(store.count_pending_image_renders(), 0)
+
+    def test_error_row_does_not_count(self):
+        render_id = self._new_image_render_row()
+        store.fail_image_render(render_id, "nope")
+        self.assertEqual(store.count_pending_image_renders(), 0)
+
+
+class ReapStaleClaimsTests(_WorkerTestCase):
+    """Crash recovery: if a worker dies mid-claim the row sits at
+    'generating' with started_at frozen. Reaper resets it to queued so
+    the next tick can re-claim. Threshold chosen by caller, not baked."""
+
+    def test_fresh_claim_is_not_reaped(self):
+        self._new_image_render_row()
+        store.claim_next_image_render()  # started_at = now
+        reset = store.reap_stale_image_render_claims(stale_after_s=600)
+        self.assertEqual(reset, 0)
+
+    def test_stale_generating_row_is_reset_to_queued(self):
+        render_id = self._new_image_render_row()
+        store.claim_next_image_render()
+        # Backdate started_at to look like a 20-minute-old crash.
+        old_iso = "2020-01-01T00:00:00+00:00"
+        with store._sqlite_conn() as c:
+            c.execute(
+                "UPDATE image_renders SET started_at = ? WHERE id = ?",
+                (old_iso, render_id),
+            )
+        reset = store.reap_stale_image_render_claims(stale_after_s=600)
+        self.assertEqual(reset, 1)
+        row = store.get_image_render(render_id)
+        assert row is not None
+        self.assertEqual(row["status"], "queued")
+        self.assertIsNone(row["started_at"])
+
+    def test_queued_row_with_no_started_at_is_ignored(self):
+        # Brand-new queued rows never have started_at — reaper must not
+        # touch them, otherwise it would double-update every tick.
+        self._new_image_render_row()
+        reset = store.reap_stale_image_render_claims(stale_after_s=600)
+        self.assertEqual(reset, 0)
+
+    def test_done_row_is_not_reaped(self):
+        render_id = self._new_image_render_row()
+        store.claim_next_image_render()
+        store.finish_image_render(render_id, "/x", 1)
+        # Even with a stale started_at, a done row stays done.
+        old_iso = "2020-01-01T00:00:00+00:00"
+        with store._sqlite_conn() as c:
+            c.execute(
+                "UPDATE image_renders SET started_at = ? WHERE id = ?",
+                (old_iso, render_id),
+            )
+        reset = store.reap_stale_image_render_claims(stale_after_s=600)
+        self.assertEqual(reset, 0)
+
+
+class AdvisoryLockTests(_WorkerTestCase):
+    """Postgres advisory lock keeps two cron ticks from draining at
+    once. On SQLite (this test bed) it must no-op cleanly so the local
+    worker path stays unchanged."""
+
+    def test_sqlite_lock_is_a_noop_and_acquires(self):
+        with store.image_render_drain_lock() as acquired:
+            self.assertTrue(acquired)
+        # Re-acquire works because SQLite branch never actually locks.
+        with store.image_render_drain_lock() as acquired_again:
+            self.assertTrue(acquired_again)
+
+
 if __name__ == "__main__":
     unittest.main()

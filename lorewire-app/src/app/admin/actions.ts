@@ -316,6 +316,17 @@ const SETTING_VALUE_VALIDATORS: Record<
     if (v < 1 || v > 30) return null;
     return String(v);
   },
+  // Per-tick row cap for the Vercel cron drain (see
+  // `lorewire-app/api/drain_image_renders.py` and
+  // `_plans/2026-06-13-worker-host-stop-button-observability.md`).
+  // Range matches DRAIN_MAX_ROWS_PER_TICK env clamp on the Python
+  // side so the admin and the worker never disagree.
+  "media.cron_max_rows_per_tick": (raw) => {
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n)) return null;
+    if (n < 1 || n > 60) return null;
+    return String(n);
+  },
 };
 
 export async function saveSettingAction(formData: FormData): Promise<void> {
