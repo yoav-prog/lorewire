@@ -10,6 +10,7 @@ import React from "react";
 import { useCurrentFrame, useVideoConfig } from "remotion";
 import type { ShortCaptionChunk } from "../types";
 import { FONT_FAMILY } from "../fonts";
+import { useCompositionScale } from "../scale";
 
 interface Props {
   enabled: boolean;
@@ -19,7 +20,11 @@ interface Props {
 
 const POP_IN_MS = 140;
 const POP_OUT_MS = 100;
-const SAFE_INSET = 96;
+// Base SAFE_INSET in portrait-canvas px. Phase 1 of
+// _plans/2026-06-12-video-aspect-ratio.md scales it per axis at render
+// time so the label sits the same RELATIVE distance from the edge on
+// both 9:16 and 16:9 canvases.
+const SAFE_INSET_BASE = 96;
 
 type Corner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 const CORNERS: Corner[] = ["top-right", "bottom-left", "top-left", "bottom-right"];
@@ -27,6 +32,7 @@ const CORNERS: Corner[] = ["top-right", "bottom-left", "top-left", "bottom-right
 export const LabelPopOn: React.FC<Props> = ({ enabled, caption, index }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  const { scaleW, scaleH } = useCompositionScale();
 
   if (!enabled) return null;
 
@@ -51,7 +57,7 @@ export const LabelPopOn: React.FC<Props> = ({ enabled, caption, index }) => {
   const opacity = Math.min(entry, exit);
 
   const corner = CORNERS[index % CORNERS.length];
-  const positionStyle = positionFor(corner);
+  const positionStyle = positionFor(corner, scaleW, scaleH);
 
   return (
     <div
@@ -72,17 +78,17 @@ export const LabelPopOn: React.FC<Props> = ({ enabled, caption, index }) => {
     >
       <div
         style={{
-          padding: "10px 18px",
-          borderRadius: 10,
+          padding: `${scaleH(10)}px ${scaleW(18)}px`,
+          borderRadius: scaleW(10),
           background: "#FFD84D",
           color: "#0f172a",
-          border: "3px solid #0f172a",
+          border: `${Math.max(1, scaleW(3))}px solid #0f172a`,
           fontFamily: FONT_FAMILY,
           fontWeight: 900,
-          fontSize: 36,
+          fontSize: scaleW(36),
           letterSpacing: -0.5,
           textTransform: "uppercase",
-          boxShadow: "0 8px 18px rgba(0,0,0,.35)",
+          boxShadow: `0 ${scaleH(8)}px ${scaleW(18)}px rgba(0,0,0,.35)`,
           transform: `rotate(${corner.startsWith("top") ? -3 : 3}deg)`,
         }}
       >
@@ -92,15 +98,26 @@ export const LabelPopOn: React.FC<Props> = ({ enabled, caption, index }) => {
   );
 };
 
-function positionFor(corner: Corner): React.CSSProperties {
+function positionFor(
+  corner: Corner,
+  scaleW: (px: number) => number,
+  scaleH: (px: number) => number,
+): React.CSSProperties {
+  // SAFE_INSET is the edge buffer the label honors so it doesn't fight the
+  // title chip / channel pill. The "+ 64" on bottom corners lifts the
+  // bottom labels above the channel pill — scale that buffer with the
+  // vertical axis too.
+  const insetX = scaleW(SAFE_INSET_BASE);
+  const insetY = scaleH(SAFE_INSET_BASE);
+  const bottomLift = scaleH(64);
   switch (corner) {
     case "top-left":
-      return { top: SAFE_INSET, left: SAFE_INSET };
+      return { top: insetY, left: insetX };
     case "top-right":
-      return { top: SAFE_INSET, right: SAFE_INSET };
+      return { top: insetY, right: insetX };
     case "bottom-left":
-      return { bottom: SAFE_INSET + 64, left: SAFE_INSET };
+      return { bottom: insetY + bottomLift, left: insetX };
     case "bottom-right":
-      return { bottom: SAFE_INSET + 64, right: SAFE_INSET };
+      return { bottom: insetY + bottomLift, right: insetX };
   }
 }

@@ -11,6 +11,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
+import { useCompositionScale } from "../scale";
 
 export interface PropItem {
   // The composition resolves this through staticFile() — the pipeline writes
@@ -44,14 +45,26 @@ const SLIDE_IN_MS = 350;
 const HOLD_MS = 3000;
 const SLIDE_OUT_MS = 250;
 const TOTAL_MS = SLIDE_IN_MS + HOLD_MS + SLIDE_OUT_MS;
-const PROP_SIZE = 320;
-const SAFE_INSET = 96;
+// Base sizes in portrait-canvas px. Phase 1 of
+// _plans/2026-06-12-video-aspect-ratio.md scales them at render time.
+const PROP_SIZE_BASE = 320;
+const SAFE_INSET_BASE = 96;
 
 export const PropSlideIn: React.FC<PropSlideInProps> = ({ enabled, items, durationMs }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  const { scaleW, scaleH } = useCompositionScale();
 
   if (!enabled || items.length === 0) return null;
+
+  // Scale once per render — every loop iteration reads the same dims.
+  const propSize = scaleW(PROP_SIZE_BASE);
+  const insetX = scaleW(SAFE_INSET_BASE);
+  const insetY = scaleH(SAFE_INSET_BASE);
+  const padding = scaleW(16);
+  const radius = scaleW(12);
+  const shadowY = scaleH(12);
+  const shadowBlur = scaleW(22);
 
   const elapsedMs = (frame / fps) * 1000;
   // Even spacing — first prop starts at 1/(n+1) of the duration, last prop
@@ -74,9 +87,9 @@ export const PropSlideIn: React.FC<PropSlideInProps> = ({ enabled, items, durati
             key={`${p.url}-${i}`}
             style={{
               position: "absolute",
-              ...anchorFor(side, i),
-              width: PROP_SIZE,
-              height: PROP_SIZE,
+              ...anchorFor(side, i, propSize, insetX, insetY),
+              width: propSize,
+              height: propSize,
               opacity,
               transform: translate,
               transformOrigin: "center center",
@@ -85,9 +98,9 @@ export const PropSlideIn: React.FC<PropSlideInProps> = ({ enabled, items, durati
               // the cinematic scenes. drop-shadow keeps it "stuck on" feeling
               // without needing a real transparent PNG.
               background: "white",
-              borderRadius: 12,
-              padding: 16,
-              boxShadow: "0 12px 22px rgba(0,0,0,.35)",
+              borderRadius: radius,
+              padding,
+              boxShadow: `0 ${shadowY}px ${shadowBlur}px rgba(0,0,0,.35)`,
             }}
           >
             <Img
@@ -151,51 +164,56 @@ function phase(
 
 // Where the prop lands when fully on-frame. Cycles which corner of the
 // chosen side by index for more variety than just "always center of side".
+// Receives the already-scaled sizes so the layout reads off the live canvas
+// dims (16:9 vs 9:16) without recomputing per call.
 function anchorFor(
   side: NonNullable<PropItem["side"]>,
   i: number,
+  propSize: number,
+  insetX: number,
+  insetY: number,
 ): React.CSSProperties {
   const variant = Math.floor(i / SIDES.length) % 3; // 0=center, 1=upper, 2=lower
   switch (side) {
     case "left":
       return {
-        left: SAFE_INSET,
+        left: insetX,
         top:
           variant === 0
-            ? `calc(50% - ${PROP_SIZE / 2}px)`
+            ? `calc(50% - ${propSize / 2}px)`
             : variant === 1
-              ? SAFE_INSET * 3
-              : `calc(100% - ${PROP_SIZE + SAFE_INSET * 3}px)`,
+              ? insetY * 3
+              : `calc(100% - ${propSize + insetY * 3}px)`,
       };
     case "right":
       return {
-        right: SAFE_INSET,
+        right: insetX,
         top:
           variant === 0
-            ? `calc(50% - ${PROP_SIZE / 2}px)`
+            ? `calc(50% - ${propSize / 2}px)`
             : variant === 1
-              ? SAFE_INSET * 3
-              : `calc(100% - ${PROP_SIZE + SAFE_INSET * 3}px)`,
+              ? insetY * 3
+              : `calc(100% - ${propSize + insetY * 3}px)`,
       };
     case "top":
       return {
-        top: SAFE_INSET * 2,
+        top: insetY * 2,
         left:
           variant === 0
-            ? `calc(50% - ${PROP_SIZE / 2}px)`
+            ? `calc(50% - ${propSize / 2}px)`
             : variant === 1
-              ? SAFE_INSET
-              : `calc(100% - ${PROP_SIZE + SAFE_INSET}px)`,
+              ? insetX
+              : `calc(100% - ${propSize + insetX}px)`,
       };
     case "bottom":
       return {
-        bottom: SAFE_INSET * 2,
+        bottom: insetY * 2,
         left:
           variant === 0
-            ? `calc(50% - ${PROP_SIZE / 2}px)`
+            ? `calc(50% - ${propSize / 2}px)`
             : variant === 1
-              ? SAFE_INSET
-              : `calc(100% - ${PROP_SIZE + SAFE_INSET}px)`,
+              ? insetX
+              : `calc(100% - ${propSize + insetX}px)`,
       };
   }
 }

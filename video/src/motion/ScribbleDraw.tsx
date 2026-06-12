@@ -7,12 +7,14 @@
 
 import React from "react";
 import { useCurrentFrame, useVideoConfig } from "remotion";
+import { useCompositionScale } from "../scale";
 
 interface Props {
   enabled: boolean;
   seed: number;
-  // Where the scribble origins from in the 1080x1920 frame.
-  // Cycles by seed % 4 across the four corners.
+  // Where the scribble origins from in the canvas. Cycles by seed % 4
+  // across the four corners; the (px) inset + svg box dims scale by the
+  // composition scale helper so 16:9 renders look proportionally right.
 }
 
 const DRAW_DURATION_MS = 800;
@@ -34,6 +36,7 @@ const PATHS: string[] = [
 export const ScribbleDraw: React.FC<Props> = ({ enabled, seed }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  const { scaleW, scaleH } = useCompositionScale();
 
   if (!enabled) return null;
 
@@ -59,9 +62,9 @@ export const ScribbleDraw: React.FC<Props> = ({ enabled, seed }) => {
     <div
       style={{
         position: "absolute",
-        ...positionFor(corner),
-        width: 320,
-        height: 320,
+        ...positionFor(corner, scaleW, scaleH),
+        width: scaleW(320),
+        height: scaleW(320),
         opacity,
         pointerEvents: "none",
       }}
@@ -76,7 +79,7 @@ export const ScribbleDraw: React.FC<Props> = ({ enabled, seed }) => {
           d={d}
           fill="none"
           stroke="#0f172a"
-          strokeWidth={6}
+          strokeWidth={Math.max(1, scaleW(6))}
           strokeLinecap="round"
           strokeLinejoin="round"
           strokeDasharray={STROKE_LENGTH}
@@ -87,18 +90,25 @@ export const ScribbleDraw: React.FC<Props> = ({ enabled, seed }) => {
   );
 };
 
-function positionFor(corner: Corner): React.CSSProperties {
+function positionFor(
+  corner: Corner,
+  scaleW: (px: number) => number,
+  scaleH: (px: number) => number,
+): React.CSSProperties {
   // Inset a touch from the safe-area so the scribble sits in the corner band
-  // but doesn't get clipped by the device's rounded corners.
+  // but doesn't get clipped by the device's rounded corners. Per-axis scale
+  // so 16:9 (shorter canvas) keeps the same RELATIVE top/bottom offset.
   const INSET = 56;
+  const insetX = scaleW(INSET);
+  const insetY = scaleH(INSET);
   switch (corner) {
     case "top-left":
-      return { top: INSET, left: INSET };
+      return { top: insetY, left: insetX };
     case "top-right":
-      return { top: INSET, right: INSET };
+      return { top: insetY, right: insetX };
     case "bottom-left":
-      return { bottom: INSET, left: INSET };
+      return { bottom: insetY, left: insetX };
     case "bottom-right":
-      return { bottom: INSET, right: INSET };
+      return { bottom: insetY, right: insetX };
   }
 }

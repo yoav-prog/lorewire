@@ -30,6 +30,7 @@ import { LabelPopOn } from "./motion/LabelPopOn";
 import { ScribbleDraw } from "./motion/ScribbleDraw";
 import { PropSlideIn } from "./motion/PropSlideIn";
 import { MouthSwap } from "./motion/MouthSwap";
+import { useCompositionScale } from "./scale";
 import type {
   ShortCaptionChunk,
   ShortCaptionWord,
@@ -39,6 +40,13 @@ import type {
 export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
+  // Phase 1 of _plans/2026-06-12-video-aspect-ratio.md: every hardcoded
+  // "px" value in this composition was authored against the 1080x1920
+  // portrait baseline. `scaleW` / `scaleH` map a base-px to the current
+  // canvas so 16:9 (1920x1080) renders look like the portrait does — wider
+  // canvas gets bigger fonts + paddings; shorter canvas gets tighter
+  // top/bottom insets. Identity for portrait so back-compat holds.
+  const { scaleW, scaleH } = useCompositionScale();
 
   // Trim window. Both bounds are absolute against the unclipped audio /
   // caption timeline; missing means "no trim, render the full thing". The
@@ -138,7 +146,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         <div
           style={{
             position: "absolute",
-            top: 96,
+            top: scaleH(96),
             left: 0,
             right: 0,
             display: "flex",
@@ -148,15 +156,15 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         >
           <div
             style={{
-              fontSize: 40,
+              fontSize: scaleW(40),
               fontWeight: 800,
-              padding: "12px 28px",
-              borderRadius: 24,
+              padding: `${scaleH(12)}px ${scaleW(28)}px`,
+              borderRadius: scaleW(24),
               background: "rgba(255,255,255,0.92)",
               color: "#0f172a",
-              border: "3px solid #0f172a",
+              border: `${Math.max(1, scaleW(3))}px solid #0f172a`,
               letterSpacing: -0.5,
-              maxWidth: 900,
+              maxWidth: scaleW(900),
               textAlign: "center",
               lineHeight: 1.1,
             }}
@@ -167,7 +175,12 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
       )}
 
       {activeCaption && (
-        <DoodleCaption caption={activeCaption} elapsedMs={elapsedMs} style={captionTemplate} />
+        <DoodleCaption
+          caption={activeCaption}
+          elapsedMs={elapsedMs}
+          style={captionTemplate}
+          scaleW={scaleW}
+        />
       )}
 
       {activeCaption && activeIndex >= 0 && (
@@ -213,7 +226,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
             from={fromFrames}
             durationInFrames={cappedLength}
           >
-            <OverlayLayer overlay={o} />
+            <OverlayLayer overlay={o} scaleW={scaleW} scaleH={scaleH} />
           </Sequence>
         );
       })}
@@ -222,7 +235,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         <div
           style={{
             position: "absolute",
-            bottom: 96,
+            bottom: scaleH(96),
             left: 0,
             right: 0,
             display: "flex",
@@ -231,13 +244,13 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         >
           <div
             style={{
-              fontSize: 28,
+              fontSize: scaleW(28),
               fontWeight: 700,
-              padding: "8px 22px",
+              padding: `${scaleH(8)}px ${scaleW(22)}px`,
               borderRadius: 999,
               background: "rgba(255,255,255,0.92)",
               color: "#0f172a",
-              border: "2px solid #0f172a",
+              border: `${Math.max(1, scaleW(2))}px solid #0f172a`,
               letterSpacing: 0.4,
             }}
           >
@@ -293,7 +306,8 @@ const DoodleCaption: React.FC<{
   caption: ShortCaptionChunk;
   elapsedMs: number;
   style: ResolvedTemplate;
-}> = ({ caption, elapsedMs, style }) => {
+  scaleW: (px: number) => number;
+}> = ({ caption, elapsedMs, style, scaleW }) => {
   const sinceStart = elapsedMs - caption.start_ms;
   const untilEnd = caption.end_ms - elapsedMs;
   const fadeIn = Math.min(1, Math.max(0, sinceStart / CHUNK_FADE_MS));
@@ -312,10 +326,15 @@ const DoodleCaption: React.FC<{
 
   // Auto-size: short chunks get bigger type so a 2-word hook punches at the
   // same legibility budget as a 4-word phrase. The admin's size_scale multiplies
-  // the base size so a global tweak shifts every chunk together.
+  // the base size so a global tweak shifts every chunk together. The base
+  // tiers (96 / 80 / 64) were calibrated for the 1080-wide portrait canvas;
+  // `scaleW` maps them onto the live canvas so 16:9 captions read at the
+  // same relative size.
   const wordCount = words.length;
   const baseFontSize = wordCount <= 4 ? 96 : wordCount <= 6 ? 80 : 64;
-  const fontSize = Math.round(baseFontSize * style.sizeScale);
+  const fontSize = Math.round(scaleW(baseFontSize) * style.sizeScale);
+  const outlineWidth = scaleW(style.outlineWidth);
+  const shadowOffset = scaleW(4);
 
   return (
     <div
@@ -326,7 +345,7 @@ const DoodleCaption: React.FC<{
         right: 0,
         display: "flex",
         justifyContent: "center",
-        padding: `0 ${style.paddingX}px`,
+        padding: `0 ${scaleW(style.paddingX)}px`,
         opacity,
       }}
     >
@@ -340,9 +359,14 @@ const DoodleCaption: React.FC<{
           lineHeight: style.lineHeight,
           textAlign: "center",
           color: style.color,
-          WebkitTextStroke: `${style.outlineWidth}px ${style.outlineColor}`,
-          textShadow:
-            "0 0 1px #0f172a, 0 4px 0 #0f172a, 0 -4px 0 #0f172a, 4px 0 0 #0f172a, -4px 0 0 #0f172a",
+          WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
+          textShadow: [
+            `0 0 1px ${style.outlineColor}`,
+            `0 ${shadowOffset}px 0 ${style.outlineColor}`,
+            `0 -${shadowOffset}px 0 ${style.outlineColor}`,
+            `${shadowOffset}px 0 0 ${style.outlineColor}`,
+            `-${shadowOffset}px 0 0 ${style.outlineColor}`,
+          ].join(", "),
           maxWidth: "100%",
         }}
       >
@@ -356,7 +380,7 @@ const DoodleCaption: React.FC<{
                   : i < activeIdx
                     ? style.spokenWordColor
                     : style.color,
-              marginRight: i < words.length - 1 ? 16 : 0,
+              marginRight: i < words.length - 1 ? scaleW(16) : 0,
               display: "inline-block",
               transition: "color 80ms ease-out",
             }}
@@ -391,30 +415,41 @@ function proportionalWords(caption: ShortCaptionChunk): ShortCaptionWord[] {
 // at long text lengths.
 const OverlayLayer: React.FC<{
   overlay: { start_ms: number; end_ms: number; text: string; x: number; y: number };
-}> = ({ overlay }) => (
-  <div
-    style={{
-      position: "absolute",
-      left: `${Math.max(0, Math.min(1, overlay.x)) * 100}%`,
-      top: `${Math.max(0, Math.min(1, overlay.y)) * 100}%`,
-      transform: "translate(-50%, -50%)",
-      maxWidth: "80%",
-      pointerEvents: "none",
-    }}
-  >
+  scaleW: (px: number) => number;
+  scaleH: (px: number) => number;
+}> = ({ overlay, scaleW, scaleH }) => {
+  const shadowBlur = scaleW(12);
+  const shadowOffset = scaleW(4);
+  return (
     <div
       style={{
-        fontSize: 56,
-        fontWeight: 800,
-        color: "#fbfaf4",
-        textAlign: "center",
-        lineHeight: 1.1,
-        textShadow:
-          "0 0 12px rgba(15, 23, 42, 0.85), 0 4px 0 #0f172a, 0 -4px 0 #0f172a, 4px 0 0 #0f172a, -4px 0 0 #0f172a",
-        padding: "8px 16px",
+        position: "absolute",
+        left: `${Math.max(0, Math.min(1, overlay.x)) * 100}%`,
+        top: `${Math.max(0, Math.min(1, overlay.y)) * 100}%`,
+        transform: "translate(-50%, -50%)",
+        maxWidth: "80%",
+        pointerEvents: "none",
       }}
     >
-      {overlay.text}
+      <div
+        style={{
+          fontSize: scaleW(56),
+          fontWeight: 800,
+          color: "#fbfaf4",
+          textAlign: "center",
+          lineHeight: 1.1,
+          textShadow: [
+            `0 0 ${shadowBlur}px rgba(15, 23, 42, 0.85)`,
+            `0 ${shadowOffset}px 0 #0f172a`,
+            `0 -${shadowOffset}px 0 #0f172a`,
+            `${shadowOffset}px 0 0 #0f172a`,
+            `-${shadowOffset}px 0 0 #0f172a`,
+          ].join(", "),
+          padding: `${scaleH(8)}px ${scaleW(16)}px`,
+        }}
+      >
+        {overlay.text}
+      </div>
     </div>
-  </div>
-);
+  );
+};

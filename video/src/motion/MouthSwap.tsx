@@ -11,6 +11,7 @@ import React from "react";
 import { Img, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
 import { MOUTH_SHAPES } from "./mouths";
 import { activeShape } from "./mouth-timing";
+import { useCompositionScale } from "../scale";
 import type { ShortCaptionWord } from "../types";
 
 interface Props {
@@ -31,23 +32,26 @@ interface Props {
 // follow-up — see the plan's "Risks" / "Deferred" sections.
 const ANCHOR = { cx: 0.5, cy: 0.66 };
 
-// Overlay dimensions (in px on the 1080-wide composition). The card is 3:4
-// portrait (same aspect as the bust) so objectFit doesn't crop the image —
-// that keeps the mouth anchor accurate without a vision pass. Inset matches
-// PropSlideIn / LabelPopOn so the talking head doesn't fight the channel pill
-// or the caption band.
-const CARD_WIDTH = 240;
-const CARD_HEIGHT = 320;
-const SAFE_INSET = 96;
-// Mouth SVG width (px) on the composition. Sized so it sits naturally on
-// the rendered bust at this card size; mouths.ts uses a 100x60 viewBox so
-// the aspect is preserved.
-const MOUTH_WIDTH = 72;
-const MOUTH_HEIGHT = (MOUTH_WIDTH * 60) / 100;
+// Overlay dimensions (base px on the 1080x1920 portrait baseline). The
+// card is 3:4 portrait (same aspect as the bust) so objectFit doesn't
+// crop the image — that keeps the mouth anchor accurate without a vision
+// pass. Inset matches PropSlideIn / LabelPopOn so the talking head
+// doesn't fight the channel pill or the caption band. Phase 1 of
+// _plans/2026-06-12-video-aspect-ratio.md scales every value at render
+// time so 16:9 keeps the same RELATIVE composition.
+const CARD_WIDTH_BASE = 240;
+const CARD_HEIGHT_BASE = 320;
+const SAFE_INSET_BASE = 96;
+// Mouth SVG width (base px). Sized so it sits naturally on the rendered
+// bust at the base card size; mouths.ts uses a 100x60 viewBox so the
+// aspect is preserved.
+const MOUTH_WIDTH_BASE = 72;
+const MOUTH_HEIGHT_BASE = (MOUTH_WIDTH_BASE * 60) / 100;
 
 export const MouthSwap: React.FC<Props> = ({ enabled, characterUrl, words }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  const { scaleW, scaleH } = useCompositionScale();
 
   if (!enabled || !characterUrl) return null;
 
@@ -55,14 +59,31 @@ export const MouthSwap: React.FC<Props> = ({ enabled, characterUrl, words }) => 
   const shape = activeShape(elapsedMs, words);
   const mouth = MOUTH_SHAPES[shape];
 
+  // Scale the card + inset per axis. The card uses width-based scaling
+  // because it's a fixed-aspect 3:4 box — height tracks width so the
+  // bust never gets squashed.
+  const cardWidth = scaleW(CARD_WIDTH_BASE);
+  const cardHeight = scaleW(CARD_HEIGHT_BASE);
+  const insetX = scaleW(SAFE_INSET_BASE);
+  // Bottom inset stacks SAFE_INSET (above the channel pill) + 96 (a
+  // little extra so the head doesn't fight the pill). Both portions
+  // scale by the vertical axis.
+  const insetY = scaleH(SAFE_INSET_BASE) + scaleH(96);
+  const mouthW = scaleW(MOUTH_WIDTH_BASE);
+  const mouthH = scaleW(MOUTH_HEIGHT_BASE);
+  const radius = scaleW(18);
+  const borderPx = Math.max(1, scaleW(3));
+  const shadowY = scaleH(12);
+  const shadowBlur = scaleW(22);
+
   return (
     <div
       style={{
         position: "absolute",
-        left: SAFE_INSET,
-        bottom: SAFE_INSET + 96,
-        width: CARD_WIDTH,
-        height: CARD_HEIGHT,
+        left: insetX,
+        bottom: insetY,
+        width: cardWidth,
+        height: cardHeight,
         pointerEvents: "none",
       }}
     >
@@ -71,10 +92,10 @@ export const MouthSwap: React.FC<Props> = ({ enabled, characterUrl, words }) => 
           position: "absolute",
           inset: 0,
           background: "white",
-          borderRadius: 18,
+          borderRadius: radius,
           overflow: "hidden",
-          border: "3px solid #0f172a",
-          boxShadow: "0 12px 22px rgba(0,0,0,.35)",
+          border: `${borderPx}px solid #0f172a`,
+          boxShadow: `0 ${shadowY}px ${shadowBlur}px rgba(0,0,0,.35)`,
         }}
       >
         <Img
@@ -83,12 +104,12 @@ export const MouthSwap: React.FC<Props> = ({ enabled, characterUrl, words }) => 
         />
         <svg
           viewBox="0 0 100 60"
-          width={MOUTH_WIDTH}
-          height={MOUTH_HEIGHT}
+          width={mouthW}
+          height={mouthH}
           style={{
             position: "absolute",
-            left: `calc(${ANCHOR.cx * 100}% - ${MOUTH_WIDTH / 2}px)`,
-            top: `calc(${ANCHOR.cy * 100}% - ${MOUTH_HEIGHT / 2}px)`,
+            left: `calc(${ANCHOR.cx * 100}% - ${mouthW / 2}px)`,
+            top: `calc(${ANCHOR.cy * 100}% - ${mouthH / 2}px)`,
             pointerEvents: "none",
           }}
         >
