@@ -27,6 +27,8 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { AspectChipGroup } from "@/components/ui";
+import { LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
 
 // Must be a multiple of 256 KiB per the GCS resumable contract. 8 MiB is the
 // recommended minimum; keeps the chunk count low for typical 5-30 MB intros
@@ -86,6 +88,11 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
   >("idle");
   const [progressPct, setProgressPct] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
+  // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: the admin picks
+  // which canvas shape this segment normalises to. Defaults to the legacy
+  // 9:16 so every existing upload UX is unchanged; landscape stories now
+  // have a way to source a matching intro/outro.
+  const [aspect, setAspect] = useState<VideoAspect>(LEGACY_DEFAULT_ASPECT);
 
   function resetForm() {
     if (fileRef.current) fileRef.current.value = "";
@@ -132,6 +139,7 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
         const fd = new FormData();
         fd.append("kind", kind);
         fd.append("label", label);
+        fd.append("aspect", aspect);
         fd.append("file", file);
         const resp = await fetch("/api/admin/segments/upload-local", {
           method: "POST",
@@ -170,6 +178,7 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
         filename: file.name,
         size: file.size,
         contentType,
+        aspect,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -278,6 +287,19 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
         </div>
       </div>
 
+      <div>
+        <label className={LABEL}>Aspect</label>
+        <AspectChipGroup
+          value={aspect}
+          onChange={setAspect}
+          ariaLabel="Segment aspect"
+          disabled={uploading}
+        />
+        <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-muted">
+          Must match the story it ships with. Mismatched segments are dropped at render time.
+        </p>
+      </div>
+
       {uploading && (
         <div className="space-y-1">
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg">
@@ -323,6 +345,7 @@ async function signUpload(body: {
   filename: string;
   size: number;
   contentType: string;
+  aspect: VideoAspect;
 }): Promise<SignUploadResponse> {
   const resp = await fetch("/api/admin/segments/sign-upload", {
     method: "POST",

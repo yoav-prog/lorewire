@@ -4,6 +4,7 @@ import { getSetting } from "@/lib/repo";
 import { listGoogleVoices, listElevenLabsVoices } from "@/lib/voice-providers";
 import SettingsShell from "@/app/admin/SettingsShell";
 import {
+  SettingChipGroup,
   SettingToggle,
   SettingNumber,
   SettingPresetText,
@@ -11,6 +12,12 @@ import {
   type SelectOption,
 } from "./_components/SettingControls";
 import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
+import { ASPECT_CHIP_OPTIONS } from "@/components/ui";
+import {
+  isVideoAspect,
+  LEGACY_DEFAULT_ASPECT,
+  type VideoAspect,
+} from "@/lib/aspect";
 
 // Settings / General. Every field now uses the right control: toggles for
 // the booleans (previously stringy "0"/"1"), number inputs with min/max for
@@ -84,6 +91,7 @@ export default async function SettingsPage() {
     mouthSwap,
     introOutroEnabled,
     frameRegenSessionCapCents,
+    defaultAspect,
     googleVoices,
     elevenLabsVoices,
   ] = await Promise.all([
@@ -104,6 +112,7 @@ export default async function SettingsPage() {
     getSetting("video.mouth_swap"),
     getSetting("video.intro_outro_enabled"),
     getSetting("video.editor.frame_regen.session_cap_cents"),
+    getSetting("video.default_aspect"),
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
@@ -213,6 +222,19 @@ export default async function SettingsPage() {
           title="Video look"
           description="Scene count and motion effects applied during render. Visual style preset lives in Style presets above."
         >
+          {/* Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: pick the
+              default canvas shape for every NEW story. Existing stories
+              keep their per-story aspect; the global default flips them
+              only when the editor leaves the field unset. */}
+          <SettingChipGroup<VideoAspect>
+            settingKey="video.default_aspect"
+            label="Default aspect ratio"
+            hint="Used by every new story unless the editor overrides it. 16:9 fills the YouTube main feed + X / Twitter cards; 9:16 is for Shorts, TikTok, and Reels."
+            initial={
+              isVideoAspect(defaultAspect) ? defaultAspect : LEGACY_DEFAULT_ASPECT
+            }
+            options={ASPECT_CHIP_OPTIONS}
+          />
           <SettingNumber
             settingKey="media.scene_count"
             label="Scenes per story"

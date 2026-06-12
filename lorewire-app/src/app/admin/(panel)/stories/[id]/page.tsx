@@ -25,6 +25,8 @@ import {
 } from "@/app/admin/(panel)/_components/GranularRegenGrid";
 import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StatusStepIndicator } from "./StatusStepIndicator";
+import { StoryAspectControl } from "./StoryAspectControl";
+import { isVideoAspect, LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -51,12 +53,38 @@ export default async function EditStory({
   // Intro/outro override controls. The dropdown options are the enabled
   // segments for that kind plus an "inherit global" and "skip" sentinel; the
   // server action turns the choice into either a pinned id or a skip flag.
-  const [intros, outros, activeIntroId, activeOutroId] = await Promise.all([
-    listSegments("intro"),
-    listSegments("outro"),
-    getSetting("video.active_intro_id"),
-    getSetting("video.active_outro_id"),
-  ]);
+  // Also: pull the global default aspect + parse the per-story override so
+  // the editor shows the right starting value (Phase 4 of
+  // _plans/2026-06-12-video-aspect-ratio.md).
+  const [intros, outros, activeIntroId, activeOutroId, defaultAspectRaw] =
+    await Promise.all([
+      listSegments("intro"),
+      listSegments("outro"),
+      getSetting("video.active_intro_id"),
+      getSetting("video.active_outro_id"),
+      getSetting("video.default_aspect"),
+    ]);
+
+  // Resolve the aspect for THIS story's display. The chain is:
+  //   per-story video_config.aspect -> global default -> legacy 9:16.
+  // `overriddenAspect` distinguishes the per-story value from the
+  // inherited one so the UI can label the field accordingly.
+  let storyConfigAspect: VideoAspect | null = null;
+  if (s.video_config) {
+    try {
+      const parsed = JSON.parse(s.video_config);
+      if (parsed && typeof parsed === "object" && isVideoAspect((parsed as { aspect?: unknown }).aspect)) {
+        storyConfigAspect = (parsed as { aspect: VideoAspect }).aspect;
+      }
+    } catch {
+      // Malformed config — fall through to the global default.
+    }
+  }
+  const globalDefaultAspect: VideoAspect = isVideoAspect(defaultAspectRaw)
+    ? defaultAspectRaw
+    : LEGACY_DEFAULT_ASPECT;
+  const initialAspect: VideoAspect = storyConfigAspect ?? globalDefaultAspect;
+  const aspectIsOverride = storyConfigAspect !== null;
 
   // What this story owns that can be regenerated. Order is the order the
   // panel lists them in — hero first (most impactful), then bulk-asset
@@ -160,6 +188,15 @@ export default async function EditStory({
                 className={FIELD}
               />
             </div>
+          </div>
+
+          <div>
+            <label className={LABEL}>Aspect ratio</label>
+            <StoryAspectControl
+              storyId={s.id}
+              initialAspect={initialAspect}
+              globalDefault={!aspectIsOverride}
+            />
           </div>
 
           <div>

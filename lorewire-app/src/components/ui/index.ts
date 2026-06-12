@@ -14,6 +14,11 @@ export {
   type ChipGroupProps,
   type ChipOption,
 } from "./ChipGroup";
+export {
+  AspectChipGroup,
+  ASPECT_CHIP_OPTIONS,
+  type AspectChipGroupProps,
+} from "./AspectChipGroup";
 export { ColorPicker, type ColorPickerProps } from "./ColorPicker";
 export {
   AutoSaveStatus,

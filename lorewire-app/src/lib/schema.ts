@@ -113,6 +113,12 @@ export const VIDEO_SEGMENTS: Table = {
     { name: "status", type: "TEXT" },
     { name: "error", type: "TEXT" },
     { name: "uploaded_at", type: "TEXT" },
+    // Phase 3 of _plans/2026-06-12-video-aspect-ratio.md. NULL on rows
+    // that predate the column — the Python pipeline-side ALTER TABLE
+    // includes a DEFAULT '9:16' but the TS-side `ensureSchema` does
+    // not, so the resolver treats NULL as the legacy 9:16 default at
+    // both the picker and the normaliser.
+    { name: "aspect", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
     { name: "updated_at", type: "TEXT" },
   ],

@@ -33,6 +33,7 @@ import {
   newSegmentId,
   sanitizeLabel,
 } from "@/lib/segments-upload";
+import { isVideoAspect, LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
 
 function badRequest(error: string): NextResponse {
   return NextResponse.json({ error }, { status: 400 });
@@ -88,6 +89,15 @@ export async function POST(req: Request): Promise<NextResponse> {
       : file.name;
   const label = labelStr || filenameBase;
 
+  // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: the upload form
+  // picks which canvas shape this segment normalises to. Anything outside
+  // the supported pair falls through to the legacy 9:16 default so a
+  // malformed client cannot wedge the worker into a bad ffmpeg target.
+  const rawAspect = form.get("aspect");
+  const aspect: VideoAspect = isVideoAspect(rawAspect)
+    ? rawAspect
+    : LEGACY_DEFAULT_ASPECT;
+
   const segId = newSegmentId();
   const bytes = new Uint8Array(await file.arrayBuffer());
 
@@ -96,6 +106,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       id: segId,
       ext,
       bytes,
+      aspect,
     });
 
     await upsertSegment({
@@ -109,6 +120,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       status: "ready",
       error: null,
       uploaded_at: new Date().toISOString(),
+      aspect,
     });
 
     // Auto-activate the first segment of its kind so the admin doesn't

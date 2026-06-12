@@ -321,13 +321,18 @@ export interface SegmentRow {
   status: string | null;
   error: string | null;
   uploaded_at: string | null;
+  // Phase 3 of _plans/2026-06-12-video-aspect-ratio.md: which canvas
+  // shape this segment was normalised to. NULL on rows that predate the
+  // column — the pipeline treats those as 9:16 (the orientation the
+  // pipeline shipped with).
+  aspect: string | null;
   created_at: string | null;
   updated_at: string | null;
 }
 
 const SEGMENT_COLS =
   "id, kind, label, source_url, normalized_url, duration_ms, enabled, " +
-  "status, error, uploaded_at, created_at, updated_at";
+  "status, error, uploaded_at, aspect, created_at, updated_at";
 
 export async function listSegments(kind?: SegmentKind): Promise<SegmentRow[]> {
   if (kind) {
@@ -363,11 +368,14 @@ export async function upsertSegment(s: {
   status?: string | null;
   error?: string | null;
   uploaded_at?: string | null;
+  // Phase 3 of _plans/2026-06-12-video-aspect-ratio.md. Omitted on legacy
+  // callers; the column-level DEFAULT '9:16' covers them.
+  aspect?: string | null;
 }): Promise<void> {
   const now = new Date().toISOString();
   await run(
-    `INSERT INTO video_segments (id, kind, label, source_url, normalized_url, duration_ms, enabled, status, error, uploaded_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO video_segments (id, kind, label, source_url, normalized_url, duration_ms, enabled, status, error, uploaded_at, aspect, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        kind = excluded.kind,
        label = excluded.label,
@@ -378,6 +386,7 @@ export async function upsertSegment(s: {
        status = excluded.status,
        error = excluded.error,
        uploaded_at = excluded.uploaded_at,
+       aspect = excluded.aspect,
        updated_at = excluded.updated_at`,
     [
       s.id,
@@ -390,6 +399,7 @@ export async function upsertSegment(s: {
       s.status ?? "ready",
       s.error ?? null,
       s.uploaded_at ?? null,
+      s.aspect ?? "9:16",
       now,
       now,
     ],

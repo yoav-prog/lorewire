@@ -39,6 +39,7 @@ import { BulkConfirmProvider } from "./BulkConfirmContext";
 import type { ImageRenderRow } from "@/lib/image-render-queue";
 import type { CaptionPreset } from "@/lib/caption-presets";
 import {
+  AspectChipGroup,
   AutoSaveStatus,
   PositionPicker,
   RangeSlider,
@@ -46,6 +47,7 @@ import {
   Toggle,
   useDebouncedSave,
 } from "@/components/ui";
+import { LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
 import {
   PreviewComposition,
   type PreviewProps,
@@ -1605,9 +1607,16 @@ function MetadataPanel({
   const persistedTitle = config.title ?? "";
   const persistedChannel = config.channel_name ?? "";
   const persistedKenBurns = config.ken_burns ?? false;
+  // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: the per-story
+  // aspect override. Missing on the config means inheriting the global
+  // default at render time; show the legacy 9:16 in the picker so the
+  // user sees a deliberate starting state instead of an empty chip.
+  const persistedAspect: VideoAspect =
+    (config.aspect as VideoAspect | undefined) ?? LEGACY_DEFAULT_ASPECT;
   const [title, setTitle] = useState(persistedTitle);
   const [channel, setChannel] = useState(persistedChannel);
   const [kenBurns, setKenBurns] = useState(persistedKenBurns);
+  const [aspect, setAspect] = useState<VideoAspect>(persistedAspect);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [okFlash, setOkFlash] = useState(false);
@@ -1615,11 +1624,13 @@ function MetadataPanel({
   const dirty =
     title !== persistedTitle ||
     channel !== persistedChannel ||
-    kenBurns !== persistedKenBurns;
+    kenBurns !== persistedKenBurns ||
+    aspect !== persistedAspect;
 
   const titleLocked = Boolean(config._locks?.title);
   const channelLocked = Boolean(config._locks?.channel_name);
   const kenBurnsLocked = Boolean(config._locks?.ken_burns);
+  const aspectLocked = Boolean(config._locks?.aspect);
 
   const handleSave = () => {
     setError(null);
@@ -1638,6 +1649,10 @@ function MetadataPanel({
       patch.ken_burns = kenBurns;
       lockPaths.push("ken_burns");
     }
+    if (aspect !== persistedAspect) {
+      patch.aspect = aspect;
+      lockPaths.push("aspect");
+    }
     startTransition(async () => {
       const result = await saveVideoConfigPatch(storyId, patch, lockPaths);
       if (result.ok) {
@@ -1653,10 +1668,13 @@ function MetadataPanel({
     setTitle(persistedTitle);
     setChannel(persistedChannel);
     setKenBurns(persistedKenBurns);
+    setAspect(persistedAspect);
     setError(null);
   };
 
-  const handleUnlock = (path: "title" | "channel_name" | "ken_burns") => {
+  const handleUnlock = (
+    path: "title" | "channel_name" | "ken_burns" | "aspect",
+  ) => {
     startTransition(async () => {
       await saveVideoConfigPatch(storyId, {}, [], [path]);
     });
@@ -1690,6 +1708,27 @@ function MetadataPanel({
             channelLocked ? () => handleUnlock("channel_name") : undefined
           }
         />
+      </Section>
+
+      <Section
+        title="Aspect ratio"
+        hint="16:9 fills the YouTube main feed and X / Twitter cards; 9:16 is for Shorts, TikTok, and Reels. Flipping mid-flow may require re-running the pipeline so scene images match the new orientation."
+      >
+        <AspectChipGroup
+          value={aspect}
+          onChange={setAspect}
+          ariaLabel={aspectLocked ? "aspect (locked)" : "aspect"}
+          disabled={aspectLocked}
+        />
+        {aspectLocked && (
+          <button
+            type="button"
+            onClick={() => handleUnlock("aspect")}
+            className="mt-2 font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+          >
+            Unlock — let the pipeline rewrite this
+          </button>
+        )}
       </Section>
 
       <Section

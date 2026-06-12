@@ -14,6 +14,41 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
 import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { getSetting } from "@/lib/repo";
+import {
+  aspectDims,
+  isVideoAspect,
+  resolveAspect,
+  type VideoAspect,
+} from "@/lib/aspect";
+
+// Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
+// rendered aspect for a story so the reader's <video> container CSS
+// + the OG video card's width/height match what the renderer produced.
+// Goes through the same chain as the pipeline + renderer:
+//   per-story video_config.aspect -> global default -> legacy 9:16.
+async function resolveStoryAspect(
+  videoConfig: string | null | undefined,
+): Promise<VideoAspect> {
+  let configAspect: VideoAspect | undefined;
+  if (videoConfig) {
+    try {
+      const parsed = JSON.parse(videoConfig);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        isVideoAspect((parsed as { aspect?: unknown }).aspect)
+      ) {
+        configAspect = (parsed as { aspect: VideoAspect }).aspect;
+      }
+    } catch {
+      // malformed config column — fall through to the global default
+    }
+  }
+  const globalRaw = await getSetting("video.default_aspect");
+  const global = isVideoAspect(globalRaw) ? globalRaw : undefined;
+  return resolveAspect(configAspect, global);
+}
 
 interface Params {
   slug: string;
@@ -47,6 +82,8 @@ export async function generateMetadata({
   const ogImage = story.hero_image ?? seo.defaultOgImage ?? undefined;
   const videoUrl = story.video_url ?? undefined;
   const noindex = story.noindex === 1;
+  const videoAspect = await resolveStoryAspect(story.video_config);
+  const videoDims = aspectDims(videoAspect);
 
   return {
     title,
@@ -67,8 +104,8 @@ export async function generateMetadata({
             {
               url: videoUrl,
               type: "video/mp4",
-              width: 1080,
-              height: 1920,
+              width: videoDims.width,
+              height: videoDims.height,
             },
           ]
         : undefined,
@@ -98,11 +135,15 @@ export default async function StoryReader({
   const story = await getPublishedStoryBySlug(slug);
   if (!story) notFound();
 
+  const videoAspect = await resolveStoryAspect(story.video_config);
+  const videoCssRatio = aspectDims(videoAspect).cssRatio;
+
   console.info("[story reader] render", {
     id: story.id,
     slug: story.slug,
     has_video: Boolean(story.video_url),
     has_audio: Boolean(story.audio_url),
+    aspect: videoAspect,
     bodyLen: story.body?.length ?? 0,
   });
 
@@ -142,7 +183,7 @@ export default async function StoryReader({
               preload="metadata"
               poster={story.hero_image ?? undefined}
               className="block w-full"
-              style={{ aspectRatio: "9 / 16" }}
+              style={{ aspectRatio: videoCssRatio }}
             />
           </div>
         ) : story.hero_image ? (

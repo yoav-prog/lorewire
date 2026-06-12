@@ -24,6 +24,7 @@ import {
   newSegmentId,
   sanitizeLabel,
 } from "@/lib/segments-upload";
+import { isVideoAspect, LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
 
 interface SignUploadRequest {
   kind: unknown;
@@ -31,6 +32,7 @@ interface SignUploadRequest {
   filename: unknown;
   size: unknown;
   contentType: unknown;
+  aspect: unknown;
 }
 
 function badRequest(error: string): NextResponse {
@@ -46,9 +48,18 @@ export async function POST(req: Request): Promise<NextResponse> {
   } catch {
     return badRequest("bad-json");
   }
-  const { kind, label, filename, size, contentType } = payload;
+  const { kind, label, filename, size, contentType, aspect: rawAspect } =
+    payload;
 
   if (!isAcceptedKind(kind)) return badRequest("bad-kind");
+  // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: validate at the
+  // boundary. A tampered client that posts an unsupported aspect falls
+  // back to the legacy default rather than the request failing — the
+  // worker's normalize would also reject the bad value at render time,
+  // but rejecting here keeps the row clean.
+  const aspect: VideoAspect = isVideoAspect(rawAspect)
+    ? rawAspect
+    : LEGACY_DEFAULT_ASPECT;
   if (typeof filename !== "string" || !filename) return badRequest("bad-filename");
   if (typeof size !== "number" || !Number.isFinite(size) || size <= 0) {
     return badRequest("bad-size");
@@ -94,10 +105,11 @@ export async function POST(req: Request): Promise<NextResponse> {
     status: "pending",
     error: null,
     uploaded_at: null,
+    aspect,
   });
 
   console.info(
-    `[admin segments sign-upload] ok kind=${kind} segId=${segId} size=${size} contentType=${contentType}`,
+    `[admin segments sign-upload] ok kind=${kind} segId=${segId} size=${size} contentType=${contentType} aspect=${aspect}`,
   );
 
   return NextResponse.json({

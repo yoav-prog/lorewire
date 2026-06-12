@@ -14,6 +14,8 @@ import {
   setStatus,
   setSetting,
   getSetting,
+  getStoryConfigJson,
+  setStoryConfigJson,
   getSegment,
   setSegmentEnabled,
   updateSegmentLabel,
@@ -145,6 +147,53 @@ export async function setStoryNoindexAction(
   revalidatePath(`/admin/videos/${id}`);
 }
 
+// Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: per-story aspect
+// override. Lives inside `video_config.aspect` (the same field the renderer
+// reads via `resolveAspect`). When the story has no video_config yet we
+// write a minimal `{"aspect":...}` blob — the pipeline's first-render
+// merge picks the existing aspect up and stamps the full config on top
+// without clobbering it. Re-runs preserve the choice through Phase 0's
+// merge logic.
+//
+// Validation is strict: only the two supported strings are accepted; any
+// other payload is silently rejected so a tampered client can't write a
+// garbage value the renderer would then trip on.
+export async function setStoryAspectAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const rawAspect = String(formData.get("aspect") ?? "");
+  if (!id) return { ok: false, error: "missing id" };
+  if (rawAspect !== "16:9" && rawAspect !== "9:16") {
+    console.warn("[stories action] aspect rejected", { id, rawAspect });
+    return { ok: false, error: "invalid aspect" };
+  }
+  const existingJson = await getStoryConfigJson(id);
+  let next: Record<string, unknown>;
+  if (existingJson) {
+    try {
+      const parsed = JSON.parse(existingJson);
+      next = parsed && typeof parsed === "object" ? { ...parsed } : {};
+    } catch {
+      // The column held something that can't round-trip. Refuse rather
+      // than clobber what might be salvageable by the pipeline's merge.
+      console.warn("[stories action] aspect: malformed video_config", { id });
+      return { ok: false, error: "video_config not parseable" };
+    }
+  } else {
+    next = {};
+  }
+  next.aspect = rawAspect;
+  await setStoryConfigJson(id, JSON.stringify(next));
+  console.info("[stories action] aspect", { id, aspect: rawAspect });
+  revalidatePath(`/admin/stories/${id}`);
+  revalidatePath(`/admin/videos/${id}`);
+  revalidatePath(`/v/${id}`);
+  return { ok: true };
+}
+
 // ─── Asset re-render ─────────────────────────────────────────────────────────
 // Enqueue one image-regen request. Admin clicks Regenerate on a hero, scene,
 // prop, mouth-swap, OG, or gallery image; we run a budget pre-flight, queue
@@ -242,11 +291,39 @@ export async function setModelAction(formData: FormData): Promise<void> {
   revalidatePath("/admin/models");
 }
 
+// Per-key value validators for `saveSettingAction`. Keys not listed accept
+// any string (the existing free-form behavior). Validators return either the
+// canonicalised value (often identical to the input) or null to reject the
+// write, in which case the action no-ops without surfacing an error — the
+// client UI already constrains the input, so a failed validation here means
+// either a stale form submit or a malicious client. Rejecting silently is
+// the safe default since the UI's optimistic state already showed the
+// (rejected) value to the user — better to leak nothing than to mask a
+// security-relevant rejection in a 4xx error stream.
+const SETTING_VALUE_VALIDATORS: Record<
+  string,
+  (raw: string) => string | null
+> = {
+  "video.default_aspect": (raw) =>
+    raw === "16:9" || raw === "9:16" ? raw : null,
+};
+
 export async function saveSettingAction(formData: FormData): Promise<void> {
   await requireAdmin();
   const key = String(formData.get("key") ?? "");
   if (!key) return;
-  await setSetting(key, String(formData.get("value") ?? ""));
+  const rawValue = String(formData.get("value") ?? "");
+  const validator = SETTING_VALUE_VALIDATORS[key];
+  const value = validator ? validator(rawValue) : rawValue;
+  if (value === null) {
+    console.warn(
+      `[admin setting] reject key=${key} value=${JSON.stringify(
+        rawValue.slice(0, 32),
+      )} (failed validator)`,
+    );
+    return;
+  }
+  await setSetting(key, value);
   // Settings show up in multiple admin pages (the master switch lives on
   // both /admin/settings and /admin/segments; the daily render cap setting
   // is read from /admin/videos/[id]). Revalidate the whole admin layout so
