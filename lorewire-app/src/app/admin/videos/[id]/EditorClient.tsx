@@ -39,6 +39,11 @@ import { BulkConfirmProvider } from "./BulkConfirmContext";
 import type { ImageRenderRow } from "@/lib/image-render-queue";
 import type { CaptionPreset } from "@/lib/caption-presets";
 import {
+  AutoSaveStatus,
+  RangeSlider,
+  useDebouncedSave,
+} from "@/components/ui";
+import {
   PreviewComposition,
   type PreviewProps,
 } from "@/components/video-preview/PreviewComposition";
@@ -1029,6 +1034,22 @@ interface DraftEdits {
   clip_end_ms: number;
 }
 
+// Phase C of the admin UI overhaul
+// (_plans/2026-06-12-admin-ui-overhaul.md): one unified RangeSlider
+// with two handles replaces the two-separate-sliders shape. Auto-save
+// on a 500ms debounce — no Save button. Lock indicators stay on
+// because the pipeline can still write these fields back if the user
+// unlocks them.
+
+function formatTrimTime(ms: number): string {
+  const totalSeconds = ms / 1000;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds - minutes * 60;
+  return `${String(minutes).padStart(2, "0")}:${seconds
+    .toFixed(2)
+    .padStart(5, "0")}`;
+}
+
 function TrimPanel({
   storyId,
   config,
@@ -1041,228 +1062,152 @@ function TrimPanel({
   onDraftChange: (next: DraftEdits) => void;
 }) {
   const total = config.duration_ms;
-  const [pending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
-  const [okFlash, setOkFlash] = useState(false);
+  const [, startTransition] = useTransition();
 
   const startLocked = Boolean(config._locks?.clip_start_ms);
   const endLocked = Boolean(config._locks?.clip_end_ms);
-  const dirty =
-    draft.clip_start_ms !== (config.clip_start_ms ?? 0) ||
-    draft.clip_end_ms !== (config.clip_end_ms ?? total);
   const valid =
     draft.clip_start_ms >= 0 &&
     draft.clip_end_ms > draft.clip_start_ms &&
     draft.clip_end_ms <= total;
 
-  const handleSave = () => {
-    setError(null);
-    setOkFlash(false);
-    startTransition(async () => {
-      const result = await saveVideoConfigPatch(
+  const save = useDebouncedSave(
+    async (next: { clip_start_ms: number; clip_end_ms: number }) => {
+      return saveVideoConfigPatch(
         storyId,
-        {
-          clip_start_ms: draft.clip_start_ms,
-          clip_end_ms: draft.clip_end_ms,
-        },
+        next,
         ["clip_start_ms", "clip_end_ms"],
       );
-      if (result.ok) {
-        setOkFlash(true);
-        setTimeout(() => setOkFlash(false), 1500);
-      } else {
-        setError(result.error ?? "Save failed");
-      }
-    });
-  };
+    },
+    { debounceMs: 500 },
+  );
 
-  const handleReset = () => {
-    onDraftChange({
-      clip_start_ms: config.clip_start_ms ?? 0,
-      clip_end_ms: config.clip_end_ms ?? total,
+  function update(low: number, high: number) {
+    onDraftChange({ clip_start_ms: low, clip_end_ms: high });
+    if (low >= 0 && high > low && high <= total) {
+      save.request({ clip_start_ms: low, clip_end_ms: high });
+    }
+  }
+
+  function handleUnlock(path: "clip_start_ms" | "clip_end_ms") {
+    startTransition(async () => {
+      await saveVideoConfigPatch(storyId, {}, [], [path]);
     });
-    setError(null);
-  };
+  }
+
+  function handleResetToFull() {
+    update(0, total);
+  }
+
+  const clipMs = draft.clip_end_ms - draft.clip_start_ms;
+  const trimmed = clipMs !== total;
 
   return (
     <div className="space-y-5">
-      <div className="space-y-1">
-        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
-          Trim window
-        </p>
-        <p className="text-[12px] leading-relaxed text-muted">
-          The MP4 will render only between these two timestamps. Source audio
-          and images are never modified — undo by clearing the values or
-          unlocking the field.
-        </p>
-      </div>
+      <header className="flex items-start justify-between gap-3">
+        <div className="space-y-1">
+          <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Trim window
+          </p>
+          <p className="text-[12px] leading-relaxed text-muted">
+            Drag the handles to set the start and end. Auto-saves 500ms after
+            you let go. The MP4 renders only the trimmed window.
+          </p>
+        </div>
+        <AutoSaveStatus
+          state={save.state}
+          detail={save.lastError ?? undefined}
+          hideIdle={false}
+        />
+      </header>
 
-      <TrimRow
-        label="clip_start_ms"
-        value={draft.clip_start_ms}
-        max={total}
-        locked={startLocked}
-        onChange={(v) =>
-          onDraftChange({ ...draft, clip_start_ms: clamp(v, 0, total) })
-        }
-        onUnlock={
-          startLocked
-            ? () => {
-                startTransition(async () => {
-                  await saveVideoConfigPatch(
-                    storyId,
-                    {},
-                    [],
-                    ["clip_start_ms"],
-                  );
-                });
-              }
-            : undefined
-        }
+      <RangeSlider
+        low={Math.max(0, Math.min(total, draft.clip_start_ms))}
+        high={Math.max(0, Math.min(total, draft.clip_end_ms))}
+        min={0}
+        max={Math.max(total, 1)}
+        step={50}
+        onChange={update}
+        label="Window"
+        formatValue={formatTrimTime}
+        endpoints={["START", "END"]}
+        ariaLabelLow="Clip start"
+        ariaLabelHigh="Clip end"
+        disabled={total <= 0}
       />
 
-      <TrimRow
-        label="clip_end_ms"
-        value={draft.clip_end_ms}
-        max={total}
-        locked={endLocked}
-        onChange={(v) =>
-          onDraftChange({ ...draft, clip_end_ms: clamp(v, 0, total) })
-        }
-        onUnlock={
-          endLocked
-            ? () => {
-                startTransition(async () => {
-                  await saveVideoConfigPatch(
-                    storyId,
-                    {},
-                    [],
-                    ["clip_end_ms"],
-                  );
-                });
-              }
-            : undefined
-        }
-      />
-
-      <div className="space-y-2 rounded-md border border-line bg-bg p-3">
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="font-mono uppercase tracking-wider text-muted">
+      <div className="rounded-md border border-line bg-bg p-3">
+        <div className="flex items-center justify-between gap-2 font-mono text-[11px]">
+          <span className="uppercase tracking-wider text-muted">
             Clip length
           </span>
           <span
-            className={`font-mono tabular-nums ${
-              valid ? "text-ink" : "text-danger"
-            }`}
+            className={`tabular-nums ${valid ? "text-ink" : "text-danger"}`}
           >
-            {((draft.clip_end_ms - draft.clip_start_ms) / 1000).toFixed(2)}s
-            {" / "}
-            {(total / 1000).toFixed(2)}s
+            {(clipMs / 1000).toFixed(2)}s
+            <span className="ml-2 text-muted/70">
+              / {(total / 1000).toFixed(2)}s source
+            </span>
           </span>
-        </div>
-        <div
-          className="relative h-2 overflow-hidden rounded bg-surface2"
-          aria-hidden
-        >
-          <div
-            className="absolute h-full bg-accent/60"
-            style={{
-              left: `${(draft.clip_start_ms / total) * 100}%`,
-              width: `${
-                Math.max(
-                  0,
-                  ((draft.clip_end_ms - draft.clip_start_ms) / total) * 100,
-                )
-              }%`,
-            }}
-          />
         </div>
       </div>
 
-      {error && (
+      {(startLocked || endLocked) && (
+        <div className="space-y-2 rounded-md border border-accent/30 bg-accent/5 p-3 font-mono text-[10px]">
+          <p className="uppercase tracking-wider text-muted">
+            Locks
+            <span className="ml-2 text-accent">
+              {startLocked && "🔒 start"}
+              {startLocked && endLocked && " · "}
+              {endLocked && "🔒 end"}
+            </span>
+          </p>
+          <p className="text-[11px] leading-relaxed text-muted">
+            The pipeline won&apos;t overwrite locked fields on its next run.
+          </p>
+          <div className="flex gap-2">
+            {startLocked && (
+              <button
+                type="button"
+                onClick={() => handleUnlock("clip_start_ms")}
+                className="rounded-md border border-line px-2.5 py-1 uppercase tracking-wider text-muted transition-colors hover:border-accent hover:text-accent"
+              >
+                Unlock start
+              </button>
+            )}
+            {endLocked && (
+              <button
+                type="button"
+                onClick={() => handleUnlock("clip_end_ms")}
+                className="rounded-md border border-line px-2.5 py-1 uppercase tracking-wider text-muted transition-colors hover:border-accent hover:text-accent"
+              >
+                Unlock end
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {trimmed && (
+        <button
+          type="button"
+          onClick={handleResetToFull}
+          className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+        >
+          Reset to full duration
+        </button>
+      )}
+
+      {!valid && (
         <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-danger">
-          {error}
+          Invalid window — end must be greater than start, and both within
+          source duration.
         </p>
       )}
 
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={!dirty || !valid || pending}
-          className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {pending ? "Saving…" : okFlash ? "Saved ✓" : "Save trim"}
-        </button>
-        <button
-          type="button"
-          onClick={handleReset}
-          disabled={!dirty || pending}
-          className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          Reset
-        </button>
-      </div>
-
       <p className="font-mono text-[10px] leading-relaxed text-muted">
-        Preview reflects unsaved edits live. Save + render to produce the
-        trimmed MP4.
+        Preview reflects unsaved edits live. Render to produce the trimmed MP4.
       </p>
-    </div>
-  );
-}
-
-function TrimRow({
-  label,
-  value,
-  max,
-  locked,
-  onChange,
-  onUnlock,
-}: {
-  label: string;
-  value: number;
-  max: number;
-  locked: boolean;
-  onChange: (v: number) => void;
-  onUnlock?: () => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-          {label}
-          {locked && <span className="ml-1.5 text-accent">🔒</span>}
-        </span>
-        <input
-          type="number"
-          min={0}
-          max={max}
-          step={50}
-          value={value}
-          onChange={(e) => onChange(clamp(Number(e.target.value), 0, max))}
-          className="w-24 rounded border border-line bg-bg px-2 py-1 text-right font-mono text-[11px] tabular-nums text-ink outline-none focus:border-accent"
-        />
-      </div>
-      <input
-        type="range"
-        min={0}
-        max={max}
-        step={50}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full accent-accent"
-        aria-label={label}
-      />
-      {locked && onUnlock && (
-        <button
-          type="button"
-          onClick={onUnlock}
-          className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
-        >
-          Unlock — let the pipeline rewrite this
-        </button>
-      )}
     </div>
   );
 }
