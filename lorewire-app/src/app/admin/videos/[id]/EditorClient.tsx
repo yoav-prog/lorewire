@@ -39,7 +39,6 @@ import { BulkConfirmProvider } from "./BulkConfirmContext";
 import type { ImageRenderRow } from "@/lib/image-render-queue";
 import type { CaptionPreset } from "@/lib/caption-presets";
 import {
-  AspectChipGroup,
   AutoSaveStatus,
   PositionPicker,
   RangeSlider,
@@ -280,12 +279,24 @@ export default function EditorClient({
   // Overlays draft mirrors the captions pattern — null when untouched.
   const [draftOverlays, setDraftOverlays] = useState<Overlay[] | null>(null);
 
+  // Aspect draft (caveat fix round 2 of
+  // _plans/2026-06-12-video-aspect-ratio.md): lifted here so the in-
+  // header chip group + the Metadata panel both share one source of
+  // truth AND the Remotion Player flips orientation live when the
+  // chip clicks — no save / page-revalidate round-trip needed. `null`
+  // means "no draft override; preview reads the persisted aspect".
+  const persistedAspect: VideoAspect =
+    (config.aspect as VideoAspect | undefined) ?? globalDefaultAspect;
+  const [draftAspect, setDraftAspect] = useState<VideoAspect | null>(null);
+  const liveAspect: VideoAspect = draftAspect ?? persistedAspect;
+
   // The config the Player actually renders — persisted base with the
   // current draft fields merged in. Memoised so the Player doesn't see a
   // new object reference on every render.
   const livePreviewConfig = useMemo<ShortVideoConfig>(
     () => ({
       ...config,
+      aspect: liveAspect,
       clip_start_ms: draft.clip_start_ms,
       clip_end_ms: draft.clip_end_ms,
       captions: draftCaptions ?? config.captions,
@@ -293,6 +304,7 @@ export default function EditorClient({
     }),
     [
       config,
+      liveAspect,
       draft.clip_start_ms,
       draft.clip_end_ms,
       draftCaptions,
@@ -313,6 +325,95 @@ export default function EditorClient({
     Math.ceil((trimmedDurationMs / 1000) * FPS),
     1,
   );
+
+  // Aspect-flip modal state lives at EditorClient so both the in-header
+  // chip group + the Metadata-tab chip group route through one machinery.
+  // `pendingAspect` holds the picker's choice while the admin reads the
+  // modal copy; null = no modal. When sceneCount is zero we skip the
+  // modal entirely and commit the change directly (no images to be
+  // mis-cropped on the new canvas).
+  const sceneCount = config.doodle_frames.length;
+  const sceneRegenEstimateCents = sceneCount * frameEstimateCents;
+  const [pendingAspectFlip, setPendingAspectFlip] = useState<{
+    nextAspect: VideoAspect;
+  } | null>(null);
+  const [aspectSaving, startAspectTransition] = useTransition();
+  const [aspectError, setAspectError] = useState<string | null>(null);
+
+  function commitAspectSave(
+    nextAspect: VideoAspect,
+    alsoQueueSceneRegen: boolean,
+    onSettled?: () => void,
+  ) {
+    setAspectError(null);
+    startAspectTransition(async () => {
+      const result = await saveVideoConfigPatch(
+        storyId,
+        { aspect: nextAspect },
+        ["aspect"],
+      );
+      if (!result.ok) {
+        setAspectError(result.error ?? "Aspect save failed");
+        // Revert preview to persisted on save failure so the chip can't
+        // mislead about what the renderer will pick.
+        setDraftAspect(null);
+        onSettled?.();
+        return;
+      }
+      if (alsoQueueSceneRegen) {
+        try {
+          console.info("[admin ui] aspect flip + scenes regen", {
+            storyId,
+            sceneCount,
+            estimateCents: sceneRegenEstimateCents,
+          });
+          const r = await enqueueImageRegenAction({
+            ownerKind: "story",
+            ownerId: storyId,
+            asset: "scenes",
+          });
+          if (!r.ok) {
+            // Save succeeded; just the regen enqueue failed. Surface the
+            // regen-specific message so the admin can retry from the
+            // granular grid without losing the aspect change.
+            setAspectError(r.error ?? "Scenes regen queue failed");
+            onSettled?.();
+            return;
+          }
+        } catch (e) {
+          setAspectError(
+            e instanceof Error ? e.message : "Scenes regen queue failed",
+          );
+          onSettled?.();
+          return;
+        }
+      }
+      // Persisted value matches draft now — clear the draft so future
+      // re-renders read off the (refreshed) persisted config.
+      setDraftAspect(null);
+      onSettled?.();
+    });
+  }
+
+  // The top-level handler the header + the Metadata panel both call.
+  // For stories with no scene images yet we skip the modal — there's
+  // nothing to be mis-cropped on the new canvas.
+  function handleAspectPick(nextAspect: VideoAspect) {
+    if (nextAspect === persistedAspect) {
+      // Picker re-clicked the same value: just clear any stale draft +
+      // any prior error and don't fire the save.
+      setDraftAspect(null);
+      setAspectError(null);
+      return;
+    }
+    setDraftAspect(nextAspect);
+    setAspectError(null);
+    if (sceneCount > 0) {
+      setPendingAspectFlip({ nextAspect });
+      return;
+    }
+    commitAspectSave(nextAspect, false);
+  }
 
   // eslint-disable-next-line no-console -- rule 14
   console.info("[video editor] client mounted", {
@@ -350,6 +451,10 @@ export default function EditorClient({
         sessionSpendCents={mySessionSpendCents}
         sessionCapCents={frameRegenSessionCapCents}
         videoRenderStale={videoRenderStale}
+        liveAspect={liveAspect}
+        aspectSaving={aspectSaving}
+        aspectError={aspectError}
+        onAspectPick={readOnly ? undefined : handleAspectPick}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -502,12 +607,7 @@ export default function EditorClient({
             ) : tab === "audio" ? (
               <AudioPanel storyId={storyId} config={config} />
             ) : tab === "metadata" ? (
-              <MetadataPanel
-                storyId={storyId}
-                config={config}
-                perImageEstimateCents={frameEstimateCents}
-                globalDefaultAspect={globalDefaultAspect}
-              />
+              <MetadataPanel storyId={storyId} config={config} />
             ) : tab === "overlays" ? (
               <OverlaysPanel
                 storyId={storyId}
@@ -521,6 +621,32 @@ export default function EditorClient({
           </div>
         </aside>
       </div>
+      {pendingAspectFlip && (
+        <AspectFlipModal
+          fromAspect={persistedAspect}
+          toAspect={pendingAspectFlip.nextAspect}
+          sceneCount={sceneCount}
+          estimateCents={sceneRegenEstimateCents}
+          pending={aspectSaving}
+          onCancel={() => {
+            if (aspectSaving) return;
+            setPendingAspectFlip(null);
+            // Revert the live preview to persisted so the chip can't
+            // mislead about what the renderer will pick.
+            setDraftAspect(null);
+          }}
+          onSaveOnly={() => {
+            commitAspectSave(pendingAspectFlip.nextAspect, false, () =>
+              setPendingAspectFlip(null),
+            );
+          }}
+          onSaveAndRegen={() => {
+            commitAspectSave(pendingAspectFlip.nextAspect, true, () =>
+              setPendingAspectFlip(null),
+            );
+          }}
+        />
+      )}
     </div>
     </BulkConfirmProvider>
   );
@@ -541,6 +667,10 @@ function Header({
   sessionSpendCents,
   sessionCapCents,
   videoRenderStale,
+  liveAspect,
+  aspectSaving,
+  aspectError,
+  onAspectPick,
 }: {
   storyId: string;
   storyTitle: string;
@@ -559,6 +689,16 @@ function Header({
   /** True when the latest video render is stale because frames have been
    *  regenerated since. Renders a badge with a Re-render CTA. */
   videoRenderStale: boolean;
+  /** The current live (draft-or-persisted) aspect — drives the in-header
+   *  chip group so the admin can flip aspect without entering the
+   *  Metadata tab. The preview updates immediately; the save fires via
+   *  `onAspectPick` and surfaces through `aspectSaving` / `aspectError`. */
+  liveAspect: VideoAspect;
+  aspectSaving: boolean;
+  aspectError: string | null;
+  /** Undefined when the admin doesn't own the session — the chip
+   *  renders disabled in that case. */
+  onAspectPick: ((next: VideoAspect) => void) | undefined;
 }) {
   const trimmed = trimmedDurationMs !== durationMs;
   return (
@@ -608,6 +748,12 @@ function Header({
             Stale render
           </span>
         )}
+        <HeaderAspectPicker
+          value={liveAspect}
+          onPick={onAspectPick}
+          saving={aspectSaving}
+          error={aspectError}
+        />
         {sessionSpendCents !== null && (
           <SessionSpendChip
             spentCents={sessionSpendCents}
@@ -635,6 +781,97 @@ function Header({
         )}
       </div>
     </header>
+  );
+}
+
+// ─── HeaderAspectPicker ──────────────────────────────────────────────────────
+// Compact 2-chip aspect picker rendered in the editor header so the admin
+// can flip between 16:9 and 9:16 without leaving the current tab. Clicking
+// a chip immediately reflects in the live Player preview (lifted state in
+// EditorClient) AND fires the save flow (with the regen-cost modal when
+// scene images exist). When `onPick` is undefined the picker renders as a
+// read-only display — the admin doesn't own the session.
+
+function HeaderAspectPicker({
+  value,
+  onPick,
+  saving,
+  error,
+}: {
+  value: VideoAspect;
+  onPick: ((next: VideoAspect) => void) | undefined;
+  saving: boolean;
+  error: string | null;
+}) {
+  const disabled = !onPick || saving;
+  function btn(next: VideoAspect, label: string, frame: React.ReactNode) {
+    const selected = value === next;
+    return (
+      <button
+        type="button"
+        role="radio"
+        aria-checked={selected}
+        data-aspect={next}
+        disabled={disabled || selected}
+        onClick={() => onPick?.(next)}
+        title={
+          !onPick
+            ? "Another admin owns this session"
+            : saving
+              ? "Saving aspect…"
+              : `Switch to ${next}`
+        }
+        className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+          selected
+            ? "border-accent bg-accent/15 text-ink"
+            : "border-line bg-bg text-muted hover:border-ink hover:text-ink"
+        } disabled:cursor-not-allowed`}
+      >
+        <span className="inline-flex">{frame}</span>
+        <span>{label}</span>
+      </button>
+    );
+  }
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Video aspect"
+      data-testid="header-aspect-picker"
+      className="flex items-center gap-1"
+      title={error ?? undefined}
+    >
+      {btn(
+        "16:9",
+        "16:9",
+        <span
+          aria-hidden
+          className="block rounded-sm border border-line bg-surface2"
+          style={{ width: 16, height: 9 }}
+        />,
+      )}
+      {btn(
+        "9:16",
+        "9:16",
+        <span
+          aria-hidden
+          className="block rounded-sm border border-line bg-surface2"
+          style={{ width: 9, height: 16 }}
+        />,
+      )}
+      {saving && (
+        <span className="font-mono text-[9px] uppercase tracking-wider text-warn">
+          saving…
+        </span>
+      )}
+      {error && !saving && (
+        <span
+          className="font-mono text-[9px] uppercase tracking-wider text-danger"
+          title={error}
+        >
+          save failed
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -1643,32 +1880,20 @@ function AudioPanel({
 function MetadataPanel({
   storyId,
   config,
-  perImageEstimateCents,
-  globalDefaultAspect,
 }: {
   storyId: string;
   config: ShortVideoConfig;
-  /** Active model's per-image rate in cents, used to size the regen-cost
-   *  confirmation modal when the admin flips aspect. */
-  perImageEstimateCents: number;
-  /** Value of `video.default_aspect` so the chip reflects what the
-   *  renderer will actually pick when the per-story override is unset. */
-  globalDefaultAspect: VideoAspect;
 }) {
+  // Aspect lives in the editor header now — the chip + the save flow +
+  // the regen-cost modal all live one level up so the live preview can
+  // track the picker without a round-trip. See `HeaderAspectPicker` and
+  // the lifted `pendingAspectFlip` state in EditorClient.
   const persistedTitle = config.title ?? "";
   const persistedChannel = config.channel_name ?? "";
   const persistedKenBurns = config.ken_burns ?? false;
-  // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: the per-story
-  // aspect override. When the per-story field is unset, show the global
-  // default instead of the legacy 9:16 — that matches what the renderer
-  // resolves to via `resolveAspect(config.aspect, globalDefault)`, so the
-  // chip and the rendered MP4 always agree.
-  const persistedAspect: VideoAspect =
-    (config.aspect as VideoAspect | undefined) ?? globalDefaultAspect;
   const [title, setTitle] = useState(persistedTitle);
   const [channel, setChannel] = useState(persistedChannel);
   const [kenBurns, setKenBurns] = useState(persistedKenBurns);
-  const [aspect, setAspect] = useState<VideoAspect>(persistedAspect);
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [okFlash, setOkFlash] = useState(false);
@@ -1676,33 +1901,15 @@ function MetadataPanel({
   const dirty =
     title !== persistedTitle ||
     channel !== persistedChannel ||
-    kenBurns !== persistedKenBurns ||
-    aspect !== persistedAspect;
+    kenBurns !== persistedKenBurns;
 
   const titleLocked = Boolean(config._locks?.title);
   const channelLocked = Boolean(config._locks?.channel_name);
   const kenBurnsLocked = Boolean(config._locks?.ken_burns);
-  const aspectLocked = Boolean(config._locks?.aspect);
 
-  // Phase 4 caveat fix of _plans/2026-06-12-video-aspect-ratio.md: when
-  // the admin flips aspect on a story that already has scene images,
-  // the existing PNGs were generated at the OLD aspect and will
-  // object-fit-cropped to the new canvas. Surface this with a
-  // confirmation modal so the admin can choose to queue a scene-regen
-  // at the new aspect at the same time as the save. The estimated cost
-  // uses the active model's per-image rate × the number of scenes.
-  const sceneCount = config.doodle_frames.length;
-  const sceneRegenEstimateCents = sceneCount * perImageEstimateCents;
-  const [aspectConfirm, setAspectConfirm] = useState<{
-    patch: Record<string, unknown>;
-    lockPaths: string[];
-    nextAspect: VideoAspect;
-  } | null>(null);
-
-  function buildPatch(): {
-    patch: Record<string, unknown>;
-    lockPaths: string[];
-  } {
+  const handleSave = () => {
+    setError(null);
+    setOkFlash(false);
     const patch: Record<string, unknown> = {};
     const lockPaths: string[] = [];
     if (title !== persistedTitle) {
@@ -1717,85 +1924,25 @@ function MetadataPanel({
       patch.ken_burns = kenBurns;
       lockPaths.push("ken_burns");
     }
-    if (aspect !== persistedAspect) {
-      patch.aspect = aspect;
-      lockPaths.push("aspect");
-    }
-    return { patch, lockPaths };
-  }
-
-  function commitSave(
-    patch: Record<string, unknown>,
-    lockPaths: string[],
-    alsoQueueSceneRegen: boolean,
-    onSettled?: () => void,
-  ) {
     startTransition(async () => {
       const result = await saveVideoConfigPatch(storyId, patch, lockPaths);
-      if (!result.ok) {
+      if (result.ok) {
+        setOkFlash(true);
+        setTimeout(() => setOkFlash(false), 1500);
+      } else {
         setError(result.error ?? "Save failed");
-        onSettled?.();
-        return;
       }
-      if (alsoQueueSceneRegen) {
-        try {
-          console.info("[admin ui] aspect flip + scenes regen", {
-            storyId,
-            sceneCount,
-            estimateCents: sceneRegenEstimateCents,
-          });
-          const r = await enqueueImageRegenAction({
-            ownerKind: "story",
-            ownerId: storyId,
-            asset: "scenes",
-          });
-          if (!r.ok) {
-            // Save succeeded; just the regen enqueue failed. Surface
-            // the regen-specific message so the admin can retry from
-            // the granular grid without losing the aspect change.
-            setError(r.error ?? "Scenes regen queue failed");
-            onSettled?.();
-            return;
-          }
-        } catch (e) {
-          setError(e instanceof Error ? e.message : "Scenes regen queue failed");
-          onSettled?.();
-          return;
-        }
-      }
-      setOkFlash(true);
-      setTimeout(() => setOkFlash(false), 1500);
-      onSettled?.();
     });
-  }
-
-  const handleSave = () => {
-    setError(null);
-    setOkFlash(false);
-    const { patch, lockPaths } = buildPatch();
-    // Only fire the modal when (a) the aspect actually changed AND
-    // (b) the story has scene images that would look wrong on the new
-    // canvas. A brand-new story with no scenes yet just saves through
-    // — the next pipeline run will pick up the new aspect from the
-    // start.
-    if (aspect !== persistedAspect && sceneCount > 0) {
-      setAspectConfirm({ patch, lockPaths, nextAspect: aspect });
-      return;
-    }
-    commitSave(patch, lockPaths, false);
   };
 
   const handleReset = () => {
     setTitle(persistedTitle);
     setChannel(persistedChannel);
     setKenBurns(persistedKenBurns);
-    setAspect(persistedAspect);
     setError(null);
   };
 
-  const handleUnlock = (
-    path: "title" | "channel_name" | "ken_burns" | "aspect",
-  ) => {
+  const handleUnlock = (path: "title" | "channel_name" | "ken_burns") => {
     startTransition(async () => {
       await saveVideoConfigPatch(storyId, {}, [], [path]);
     });
@@ -1833,23 +1980,11 @@ function MetadataPanel({
 
       <Section
         title="Aspect ratio"
-        hint="16:9 fills the YouTube main feed and X / Twitter cards; 9:16 is for Shorts, TikTok, and Reels. Flipping mid-flow may require re-running the pipeline so scene images match the new orientation."
+        hint="Lives in the editor header so the preview tracks your pick live. The save flow + the regen-cost confirmation modal are unchanged."
       >
-        <AspectChipGroup
-          value={aspect}
-          onChange={setAspect}
-          ariaLabel={aspectLocked ? "aspect (locked)" : "aspect"}
-          disabled={aspectLocked}
-        />
-        {aspectLocked && (
-          <button
-            type="button"
-            onClick={() => handleUnlock("aspect")}
-            className="mt-2 font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
-          >
-            Unlock — let the pipeline rewrite this
-          </button>
-        )}
+        <p className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          Pick from the chip group in the page header →
+        </p>
       </Section>
 
       <Section
@@ -1909,30 +2044,6 @@ function MetadataPanel({
           Reset
         </button>
       </div>
-
-      {aspectConfirm && (
-        <AspectFlipModal
-          fromAspect={persistedAspect}
-          toAspect={aspectConfirm.nextAspect}
-          sceneCount={sceneCount}
-          estimateCents={sceneRegenEstimateCents}
-          pending={pending}
-          onCancel={() => {
-            if (pending) return; // mid-save, cancel is a no-op
-            setAspectConfirm(null);
-          }}
-          onSaveOnly={() => {
-            commitSave(aspectConfirm.patch, aspectConfirm.lockPaths, false, () =>
-              setAspectConfirm(null),
-            );
-          }}
-          onSaveAndRegen={() => {
-            commitSave(aspectConfirm.patch, aspectConfirm.lockPaths, true, () =>
-              setAspectConfirm(null),
-            );
-          }}
-        />
-      )}
     </div>
   );
 }
