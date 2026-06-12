@@ -39,10 +39,13 @@ export interface ListPublishedStoriesOpts {
 export async function listPublishedStories(
   opts: ListPublishedStoriesOpts = {},
 ): Promise<PublicStoryListRow[]> {
+  // noindex filter mirrors articles-public — any story marked
+  // noindex stays out of the public list, RSS, and sitemap.
   const where: string[] = [
     "status = 'published'",
     "published_at IS NOT NULL",
     "slug IS NOT NULL",
+    "(noindex IS NULL OR noindex = 0)",
   ];
   const params: unknown[] = [];
   if (opts.category) {

@@ -49,7 +49,16 @@ export interface ListPublishedOpts {
 export async function listPublishedArticles(
   opts: ListPublishedOpts = {},
 ): Promise<PublicArticleListRow[]> {
-  const where: string[] = ["status = 'published'", "published_at IS NOT NULL"];
+  // noindex pieces are excluded from every public list by default. The
+  // whole point of marking something noindex is to keep it off the
+  // public surface — sitemap, RSS, article index, public reader links.
+  // Admin queries (listArticlesSlim) don't share this filter; admins
+  // still see everything.
+  const where: string[] = [
+    "status = 'published'",
+    "published_at IS NOT NULL",
+    "(noindex IS NULL OR noindex = 0)",
+  ];
   const params: unknown[] = [];
   if (opts.language) {
     where.push("language = ?");
@@ -63,7 +72,11 @@ export async function listPublishedArticles(
     where.push("published_at < ?");
     params.push(opts.beforePublishedAt);
   }
-  const limit = opts.limit ? Math.max(1, Math.min(100, Math.trunc(opts.limit))) : 20;
+  // Cap: 5000 supports the sitemap (which fetches every published article
+  // in one call) and the regular reader list (which paginates at 20 per
+  // page anyway). Google's sitemap protocol caps individual sitemap files
+  // at 50k URLs; we're well under.
+  const limit = opts.limit ? Math.max(1, Math.min(5000, Math.trunc(opts.limit))) : 20;
   const clause = `WHERE ${where.join(" AND ")}`;
   const rows = await all<PublicArticleListRow>(
     `SELECT ${PUBLIC_LIST_COLS} FROM articles ${clause} ORDER BY published_at DESC LIMIT ${limit}`,

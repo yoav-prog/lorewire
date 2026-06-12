@@ -2,6 +2,10 @@ import type { Metadata, Viewport } from "next";
 import { Archivo, Hanken_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
 import RegisterSW from "@/components/RegisterSW";
 import { getSiteSeo } from "@/lib/site-seo";
+import {
+  ThemeProvider,
+  THEME_INIT_SCRIPT,
+} from "@/components/ThemeProvider";
 import "./globals.css";
 
 const archivo = Archivo({ subsets: ["latin"], variable: "--font-archivo" });
@@ -59,8 +63,17 @@ export default function RootLayout({
       lang="en"
       className={`${archivo.variable} ${hanken.variable} ${spline.variable} ${caveat.variable}`}
     >
+      <head>
+        {/* Runs BEFORE React hydration so the document paints with the
+         * right palette on first paint. No FOUC. Reads localStorage,
+         * checks prefers-color-scheme when choice="system", applies
+         * data-theme="light" when needed. */}
+        <script
+          dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }}
+        />
+      </head>
       <body>
-        {children}
+        <ThemeProvider>{children}</ThemeProvider>
         <RegisterSW />
       </body>
     </html>

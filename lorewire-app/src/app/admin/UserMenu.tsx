@@ -1,12 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { useTheme, type ThemeChoice } from "@/components/ThemeProvider";
 
 // Header-right user menu. Replaces the bare email + sign-out button that lived
 // in the panel header. Dropdown opens on click, closes on outside click or
-// Escape. Theme and Account items are placeholders today — the rules-aligned
-// "all" decision (see _plans/2026-06-11-admin-reorg.md, open questions)
-// reserves the surface without building the systems.
+// Escape. Theme cycles dark / light / system and persists per-browser;
+// Account links to /admin/account.
 //
 // The Sign out form is passed in as a server-rendered slot so the server
 // action stays out of the client bundle and React's component-boundary
@@ -23,6 +24,14 @@ export default function UserMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const initial = (email.trim().charAt(0) || "?").toUpperCase();
+  const { choice: themeChoice, setChoice: setThemeChoice } = useTheme();
+
+  function cycleTheme() {
+    const order: ThemeChoice[] = ["dark", "light", "system"];
+    const idx = order.indexOf(themeChoice);
+    const next = order[(idx + 1) % order.length];
+    setThemeChoice(next);
+  }
 
   // Esc closes the menu. Outside-click handled by a separate transparent
   // backdrop element so we don't need a global document listener.
@@ -84,23 +93,26 @@ export default function UserMenu({
             <button
               type="button"
               role="menuitem"
-              disabled
-              title="Coming soon"
-              className="flex w-full cursor-not-allowed items-center justify-between rounded-md px-3 py-1.5 text-left font-mono text-[12px] text-muted/60"
+              onClick={cycleTheme}
+              title="Cycle dark / light / system"
+              className="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-left font-mono text-[12px] text-ink transition-colors hover:bg-surface2"
             >
               <span>Theme</span>
-              <span className="text-[10px] uppercase tracking-wider">soon</span>
+              <span className="text-[10px] uppercase tracking-wider text-muted">
+                {themeChoice}
+              </span>
             </button>
-            <button
-              type="button"
+            <Link
               role="menuitem"
-              disabled
-              title="Coming soon"
-              className="flex w-full cursor-not-allowed items-center justify-between rounded-md px-3 py-1.5 text-left font-mono text-[12px] text-muted/60"
+              href="/admin/account"
+              onClick={() => setOpen(false)}
+              className="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-left font-mono text-[12px] text-ink transition-colors hover:bg-surface2"
             >
               <span>Account</span>
-              <span className="text-[10px] uppercase tracking-wider">soon</span>
-            </button>
+              <span className="text-[10px] uppercase tracking-wider text-muted">
+                →
+              </span>
+            </Link>
             <div className="my-1 h-px bg-line" />
             <div role="menuitem">{signOutSlot}</div>
           </div>
