@@ -8,6 +8,7 @@ export {
   PositionPicker,
   type PositionPickerProps,
 } from "./PositionPicker";
+export { Toggle, type ToggleProps } from "./Toggle";
 export {
   ChipGroup,
   type ChipGroupProps,

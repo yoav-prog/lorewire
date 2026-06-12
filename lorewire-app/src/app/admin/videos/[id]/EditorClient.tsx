@@ -42,6 +42,8 @@ import {
   AutoSaveStatus,
   PositionPicker,
   RangeSlider,
+  Slider,
+  Toggle,
   useDebouncedSave,
 } from "@/components/ui";
 import {
@@ -1524,25 +1526,19 @@ function AudioPanel({
         </div>
 
         <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-              music.gain_db
-              {gainLocked && <span className="ml-1.5 text-accent">🔒</span>}
-            </span>
-            <span className="font-mono text-[11px] tabular-nums text-ink">
-              {musicGain} dB
-            </span>
-          </div>
-          <input
-            type="range"
+          <Slider
+            value={musicGain}
             min={MUSIC_GAIN_MIN}
             max={MUSIC_GAIN_MAX}
             step={1}
-            value={musicGain}
-            onChange={(e) => setMusicGain(Number(e.target.value))}
-            className="w-full accent-accent"
-            aria-label="music.gain_db"
+            unit="dB"
+            label={
+              gainLocked ? "music.gain_db  🔒" : "music.gain_db"
+            }
+            onChange={setMusicGain}
             disabled={!musicUrl.trim()}
+            tickValue={0}
+            ariaLabel="music.gain_db"
           />
           {gainLocked && (
             <button
@@ -1700,28 +1696,17 @@ function MetadataPanel({
         title="Visual options"
         hint="Ken-Burns adds a slow zoom/pan to each frame so 30+ scene shorts don't feel static between cuts."
       >
-        <label className="flex cursor-pointer items-center justify-between gap-3 rounded border border-line bg-surface px-3 py-2">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            ken_burns
-            {kenBurnsLocked && <span className="ml-1.5 text-accent">🔒</span>}
-          </span>
-          <span className="flex items-center gap-2">
-            <span className="font-mono text-[11px] text-ink">
-              {kenBurns ? "on" : "off"}
-            </span>
-            <input
-              type="checkbox"
-              checked={kenBurns}
-              onChange={(e) => setKenBurns(e.target.checked)}
-              className="accent-accent"
-            />
-          </span>
-        </label>
+        <Toggle
+          checked={kenBurns}
+          onChange={setKenBurns}
+          label={kenBurnsLocked ? "ken_burns  🔒" : "ken_burns"}
+          ariaLabel="ken_burns"
+        />
         {kenBurnsLocked && (
           <button
             type="button"
             onClick={() => handleUnlock("ken_burns")}
-            className="font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
+            className="mt-2 font-mono text-[10px] uppercase tracking-wider text-muted underline-offset-2 hover:text-accent hover:underline"
           >
             Unlock — let the pipeline rewrite this
           </button>
