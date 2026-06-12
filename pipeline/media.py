@@ -46,22 +46,133 @@ SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 DEFAULT_SCENE_COUNT = 30
 SCENE_COUNT_MIN = 6
 SCENE_COUNT_MAX = 60
+
+# Auto-derived scene count target. The default of one new scene every
+# ~5 seconds of voiceover puts a 60-second short at ~12 scenes (2-second
+# average shot) and a 3-minute long-form story at ~36 scenes. Lifted
+# from yt-studio's Doodle Short pacing — they cap variant count at
+# captions × pacing; we do the same kind of thing but from total
+# duration so the regen path doesn't need to re-chunk alignment.
+SCENE_TARGET_SECONDS_PER_SCENE_DEFAULT = 5.0
+SCENE_TARGET_SECONDS_PER_SCENE_MIN = 1.0
+SCENE_TARGET_SECONDS_PER_SCENE_MAX = 30.0
+
 # Legacy alias for old call sites that haven't been updated yet. Removed in a
 # follow-up once nothing imports it.
 DEFAULT_IMAGE_COUNT = 4
 
 
-def _resolve_scene_count(override: int | None) -> int:
-    """Order of precedence: explicit override > admin setting > default."""
+def _parse_duration_to_seconds(duration: str | None) -> float | None:
+    """Parse a `M:SS` or `H:MM:SS` duration string into seconds. Returns
+    None on missing / malformed input so the caller can fall through to
+    a coarser estimate."""
+    if not duration:
+        return None
+    parts = duration.strip().split(":")
+    if not parts:
+        return None
+    try:
+        nums = [int(p) for p in parts]
+    except (TypeError, ValueError):
+        return None
+    if any(n < 0 for n in nums):
+        return None
+    if len(nums) == 2:
+        return float(nums[0] * 60 + nums[1])
+    if len(nums) == 3:
+        return float(nums[0] * 3600 + nums[1] * 60 + nums[2])
+    return None
+
+
+def _estimate_duration_seconds(body: str | None, duration_str: str | None) -> float:
+    """Pick the best duration estimate we can: the persisted M:SS string
+    if present, otherwise a word-count estimate at ~150 wpm. Falls back
+    to 0 so the caller treats it as "unknown" and uses the configured
+    default scene count."""
+    parsed = _parse_duration_to_seconds(duration_str)
+    if parsed and parsed > 0:
+        return parsed
+    if body:
+        words = len(body.split())
+        if words > 0:
+            # 150 wpm is a typical TTS / audiobook narration cadence.
+            # Tuned slightly slow on purpose — over-estimating scene
+            # count is cheaper to fix than under-estimating it (the
+            # video feels static).
+            return words / 2.5
+    return 0.0
+
+
+def _read_scene_target_per_scene() -> float:
+    raw = store.get_setting("media.scene_count_target_seconds_per_scene")
+    if raw is None:
+        return SCENE_TARGET_SECONDS_PER_SCENE_DEFAULT
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return SCENE_TARGET_SECONDS_PER_SCENE_DEFAULT
+    return max(
+        SCENE_TARGET_SECONDS_PER_SCENE_MIN,
+        min(SCENE_TARGET_SECONDS_PER_SCENE_MAX, v),
+    )
+
+
+def _auto_scene_count(duration_seconds: float) -> int:
+    """Derive a scene count from voiceover duration so the video doesn't
+    hold each frame too long on a short clip or pile too many on a long
+    one. Mirrors yt-studio's Doodle Short pacing — one new scene every
+    `target` seconds, clamped to the absolute [SCENE_COUNT_MIN, MAX]
+    bounds so a wildly off duration can't trigger a runaway cost."""
+    target = _read_scene_target_per_scene()
+    if duration_seconds <= 0:
+        return DEFAULT_SCENE_COUNT
+    n = round(duration_seconds / target)
+    return max(SCENE_COUNT_MIN, min(SCENE_COUNT_MAX, int(n)))
+
+
+def _scene_count_mode() -> str:
+    """`auto` (default) or `manual`. Anything else falls through to auto."""
+    raw = (store.get_setting("media.scene_count_mode") or "").strip().lower()
+    if raw == "manual":
+        return "manual"
+    return "auto"
+
+
+def _resolve_scene_count(
+    override: int | None,
+    *,
+    story: dict | None = None,
+    body: str | None = None,
+) -> int:
+    """Order of precedence:
+        1. explicit override (e.g. the legacy `image_count` arg)
+        2. mode=manual + media.scene_count setting
+        3. mode=auto + duration-derived count (fall through if duration
+           unknown — covers fresh runs before TTS lands)
+
+    `story` is the persisted row dict; we pull `body` + `duration` off
+    of it when present. `body` overrides the row when the caller already
+    has a fresher copy (fresh-run path)."""
     if override is not None:
         return max(SCENE_COUNT_MIN, min(SCENE_COUNT_MAX, int(override)))
-    raw = store.get_setting("media.scene_count")
-    if raw is not None:
-        try:
-            return max(SCENE_COUNT_MIN, min(SCENE_COUNT_MAX, int(raw)))
-        except (ValueError, TypeError):
-            pass
-    return DEFAULT_SCENE_COUNT
+    if _scene_count_mode() == "manual":
+        raw = store.get_setting("media.scene_count")
+        if raw is not None:
+            try:
+                return max(SCENE_COUNT_MIN, min(SCENE_COUNT_MAX, int(raw)))
+            except (ValueError, TypeError):
+                pass
+        return DEFAULT_SCENE_COUNT
+    # mode == auto (default)
+    body_text = body if body is not None else ((story or {}).get("body") or "")
+    duration_str = (story or {}).get("duration") if story else None
+    duration_s = _estimate_duration_seconds(body_text, duration_str)
+    n = _auto_scene_count(duration_s)
+    print(
+        f"[scene count auto] mode=auto duration_s={duration_s:.1f} "
+        f"target_per_scene={_read_scene_target_per_scene()} -> {n} scenes"
+    )
+    return n
 
 # Rough USD cost bands per image (model -> avg). These are sized for budget
 # math, not invoiced totals. Refined when kie publishes a stable per-credit
@@ -317,10 +428,11 @@ def generate_media(
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
     # --- scene image prompts: still doodle, used for Article + Gallery + the
-    # Remotion composition's per-shot illustrations. Scene count is now driven
-    # from the admin's media.scene_count setting so a single story can host
-    # 30-60 shots without a code change.
-    scene_count = _resolve_scene_count(image_count)
+    # Remotion composition's per-shot illustrations. Scene count walks an
+    # explicit `image_count` override (legacy callers) -> `media.scene_count`
+    # when mode=manual -> the auto-derived count based on the body's word
+    # count (TTS isn't done yet at fresh-run, so no audio duration to read).
+    scene_count = _resolve_scene_count(image_count, body=body)
     # `make_image_prompts` still yields hero + scenes, but the hero slot is
     # overwritten downstream by the cinematic title-baked thumbnail. We keep
     # using slot 0 from make_image_prompts only as a doodle scene-style
@@ -730,8 +842,10 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
 
     # n=scene_count+1 because make_image_prompts returns hero at index 0
     # followed by scene prompts. We discard index 0 — hero owns its own
-    # cinematic prompt via _regen_hero.
-    scene_count = _resolve_scene_count(None)
+    # cinematic prompt via _regen_hero. On regen the story row has
+    # `duration` populated, so the auto path can read it directly
+    # instead of falling back to the body word-count estimate.
+    scene_count = _resolve_scene_count(None, story=story)
     prompts = stages.make_image_prompts(
         idea, body, dry_run=False, n=scene_count + 1,
     )
@@ -912,7 +1026,7 @@ def _regen_one_scene(
     idea = _idea_from_story(story)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
-    scene_count = _resolve_scene_count(None)
+    scene_count = _resolve_scene_count(None, story=story)
     prompts = stages.make_image_prompts(
         idea, body, dry_run=False, n=scene_count + 1,
     )

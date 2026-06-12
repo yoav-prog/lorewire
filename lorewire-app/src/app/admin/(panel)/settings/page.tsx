@@ -5,6 +5,7 @@ import { listGoogleVoices, listElevenLabsVoices } from "@/lib/voice-providers";
 import SettingsShell from "@/app/admin/SettingsShell";
 import {
   SettingChipGroup,
+  SettingSlider,
   SettingToggle,
   SettingNumber,
   SettingPresetText,
@@ -12,7 +13,7 @@ import {
   type SelectOption,
 } from "./_components/SettingControls";
 import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
-import { ASPECT_CHIP_OPTIONS } from "@/components/ui";
+import { ASPECT_CHIP_OPTIONS, type ChipOption } from "@/components/ui";
 import {
   isVideoAspect,
   LEGACY_DEFAULT_ASPECT,
@@ -92,6 +93,8 @@ export default async function SettingsPage() {
     introOutroEnabled,
     frameRegenSessionCapCents,
     defaultAspect,
+    sceneCountMode,
+    sceneTargetSecondsPerScene,
     googleVoices,
     elevenLabsVoices,
   ] = await Promise.all([
@@ -113,6 +116,8 @@ export default async function SettingsPage() {
     getSetting("video.intro_outro_enabled"),
     getSetting("video.editor.frame_regen.session_cap_cents"),
     getSetting("video.default_aspect"),
+    getSetting("media.scene_count_mode"),
+    getSetting("media.scene_count_target_seconds_per_scene"),
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
@@ -235,13 +240,10 @@ export default async function SettingsPage() {
             }
             options={ASPECT_CHIP_OPTIONS}
           />
-          <SettingNumber
-            settingKey="media.scene_count"
-            label="Scenes per story"
-            hint="Number of doodle scene images generated per story. 30 ≈ 4 s shots on a 2 min video; 60 ≈ 2 s shots."
-            initial={sceneCount ?? "30"}
-            min={6}
-            max={60}
+          <SceneCountControls
+            mode={sceneCountMode ?? ""}
+            sceneCount={sceneCount ?? ""}
+            targetSecondsPerScene={sceneTargetSecondsPerScene ?? ""}
           />
           <SettingToggle
             settingKey="video.ken_burns"
@@ -362,5 +364,72 @@ function Section({
       </div>
       <div className="space-y-3">{children}</div>
     </section>
+  );
+}
+
+// Scene count controls: a single Auto / Manual chip group up top with
+// the right secondary knob beneath it. Mirrors the pipeline's
+// `_resolve_scene_count` precedence (override > manual > auto) so the
+// admin and the renderer agree without round-tripping through reading
+// the raw key namespace.
+type SceneCountMode = "auto" | "manual";
+
+const SCENE_COUNT_MODE_OPTIONS: ChipOption<SceneCountMode>[] = [
+  {
+    id: "auto",
+    label: "Auto",
+    hint: "LLM-style heuristic: one new scene every ~5 seconds of voiceover. Tunable below.",
+  },
+  {
+    id: "manual",
+    label: "Manual",
+    hint: "Pin the exact scene count.",
+  },
+];
+
+function SceneCountControls({
+  mode,
+  sceneCount,
+  targetSecondsPerScene,
+}: {
+  mode: string;
+  sceneCount: string;
+  targetSecondsPerScene: string;
+}) {
+  const resolvedMode: SceneCountMode = mode === "manual" ? "manual" : "auto";
+  return (
+    <div className="space-y-3">
+      <SettingChipGroup<SceneCountMode>
+        settingKey="media.scene_count_mode"
+        label="Scene count"
+        hint="Auto picks a sensible scene count from the voiceover's length (≈ one new scene every N seconds). Manual pins an exact number that every story uses regardless of duration."
+        initial={resolvedMode}
+        options={SCENE_COUNT_MODE_OPTIONS}
+      />
+      {resolvedMode === "auto" ? (
+        <SettingSlider
+          settingKey="media.scene_count_target_seconds_per_scene"
+          label="Seconds per scene"
+          hint="The voiceover is divided by this number to pick how many scene images to generate. Lower = denser cuts (more images, more cost). Clamped to [6, 60] scenes per story."
+          initial={targetSecondsPerScene || "5"}
+          min={1}
+          max={30}
+          step={0.5}
+          unit=" s"
+          tickValue={5}
+        />
+      ) : (
+        <SettingSlider
+          settingKey="media.scene_count"
+          label="Scenes per story"
+          hint="Number of doodle scene images generated per story. 30 ≈ 4 s shots on a 2 min video; 60 ≈ 2 s shots."
+          initial={sceneCount || "30"}
+          min={6}
+          max={60}
+          step={1}
+          tickValue={30}
+        />
+      )}
+    </div>
   );
 }

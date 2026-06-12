@@ -306,6 +306,16 @@ const SETTING_VALUE_VALIDATORS: Record<
 > = {
   "video.default_aspect": (raw) =>
     raw === "16:9" || raw === "9:16" ? raw : null,
+  "media.scene_count_mode": (raw) =>
+    raw === "auto" || raw === "manual" ? raw : null,
+  "media.scene_count_target_seconds_per_scene": (raw) => {
+    const v = Number.parseFloat(raw);
+    if (!Number.isFinite(v)) return null;
+    // Mirrors the pipeline-side clamp range so a tampered client can't
+    // wedge the pipeline into asking for absurd scene counts.
+    if (v < 1 || v > 30) return null;
+    return String(v);
+  },
 };
 
 export async function saveSettingAction(formData: FormData): Promise<void> {

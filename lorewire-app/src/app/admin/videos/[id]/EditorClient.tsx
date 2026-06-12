@@ -342,7 +342,7 @@ export default function EditorClient({
 
   function commitAspectSave(
     nextAspect: VideoAspect,
-    alsoQueueSceneRegen: boolean,
+    regenAssets: readonly string[],
     onSettled?: () => void,
   ) {
     setAspectError(null);
@@ -360,29 +360,33 @@ export default function EditorClient({
         onSettled?.();
         return;
       }
-      if (alsoQueueSceneRegen) {
+      // Sequential regen enqueue so the budget gate sees the running
+      // total. Parallel would race on the cap and risk over-spend. A
+      // mid-list failure stops the chain so the admin sees the actual
+      // error instead of a partial enqueue silently swallowing it.
+      for (const asset of regenAssets) {
         try {
-          console.info("[admin ui] aspect flip + scenes regen", {
+          console.info("[admin ui] aspect flip + regen enqueue", {
             storyId,
-            sceneCount,
-            estimateCents: sceneRegenEstimateCents,
+            asset,
           });
           const r = await enqueueImageRegenAction({
             ownerKind: "story",
             ownerId: storyId,
-            asset: "scenes",
+            asset,
           });
           if (!r.ok) {
-            // Save succeeded; just the regen enqueue failed. Surface the
-            // regen-specific message so the admin can retry from the
-            // granular grid without losing the aspect change.
-            setAspectError(r.error ?? "Scenes regen queue failed");
+            setAspectError(
+              r.error ?? `${asset} regen queue failed`,
+            );
             onSettled?.();
             return;
           }
         } catch (e) {
           setAspectError(
-            e instanceof Error ? e.message : "Scenes regen queue failed",
+            e instanceof Error
+              ? e.message
+              : `${asset} regen queue failed`,
           );
           onSettled?.();
           return;
@@ -412,7 +416,7 @@ export default function EditorClient({
       setPendingAspectFlip({ nextAspect });
       return;
     }
-    commitAspectSave(nextAspect, false);
+    commitAspectSave(nextAspect, []);
   }
 
   // eslint-disable-next-line no-console -- rule 14
@@ -626,7 +630,8 @@ export default function EditorClient({
           fromAspect={persistedAspect}
           toAspect={pendingAspectFlip.nextAspect}
           sceneCount={sceneCount}
-          estimateCents={sceneRegenEstimateCents}
+          sceneEstimateCents={sceneRegenEstimateCents}
+          heroEstimateCents={frameEstimateCents * 2}
           pending={aspectSaving}
           onCancel={() => {
             if (aspectSaving) return;
@@ -636,13 +641,25 @@ export default function EditorClient({
             setDraftAspect(null);
           }}
           onSaveOnly={() => {
-            commitAspectSave(pendingAspectFlip.nextAspect, false, () =>
+            commitAspectSave(pendingAspectFlip.nextAspect, [], () =>
               setPendingAspectFlip(null),
             );
           }}
-          onSaveAndRegen={() => {
-            commitAspectSave(pendingAspectFlip.nextAspect, true, () =>
-              setPendingAspectFlip(null),
+          onSaveAndRegenScenes={() => {
+            commitAspectSave(
+              pendingAspectFlip.nextAspect,
+              ["scenes"],
+              () => setPendingAspectFlip(null),
+            );
+          }}
+          onSaveAndRegenAll={() => {
+            commitAspectSave(
+              pendingAspectFlip.nextAspect,
+              // Hero is 2 images (portrait + landscape); the modal's
+              // copy makes the cost explicit. Scenes count + cost
+              // already reflect the active model rate.
+              ["hero", "scenes"],
+              () => setPendingAspectFlip(null),
             );
           }}
         />
@@ -2052,22 +2069,28 @@ function AspectFlipModal({
   fromAspect,
   toAspect,
   sceneCount,
-  estimateCents,
+  sceneEstimateCents,
+  heroEstimateCents,
   pending,
   onCancel,
   onSaveOnly,
-  onSaveAndRegen,
+  onSaveAndRegenScenes,
+  onSaveAndRegenAll,
 }: {
   fromAspect: VideoAspect;
   toAspect: VideoAspect;
   sceneCount: number;
-  estimateCents: number;
+  sceneEstimateCents: number;
+  heroEstimateCents: number;
   pending: boolean;
   onCancel: () => void;
   onSaveOnly: () => void;
-  onSaveAndRegen: () => void;
+  onSaveAndRegenScenes: () => void;
+  onSaveAndRegenAll: () => void;
 }) {
-  const usd = (estimateCents / 100).toFixed(2);
+  const scenesUsd = (sceneEstimateCents / 100).toFixed(2);
+  const heroUsd = (heroEstimateCents / 100).toFixed(2);
+  const allUsd = ((sceneEstimateCents + heroEstimateCents) / 100).toFixed(2);
   return (
     <div
       role="dialog"
@@ -2089,21 +2112,38 @@ function AspectFlipModal({
           <span className="font-mono text-ink">{fromAspect}</span>. They&apos;ll
           object-fit-cover into the new {toAspect} canvas — meaning the
           subject will be cropped on the long axis. Regenerating the scenes
-          at {toAspect} fixes that but costs money.
+          at {toAspect} fixes that. The hero set (portrait + landscape) is
+          aspect-agnostic so a re-render is optional, but the title baking
+          + composition reflect the new orientation when you do.
         </p>
-        <p className="mt-3 rounded-md border border-line bg-bg px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted">
-          Estimated regen cost · <span className="text-ink">${usd}</span>
-          {" · "}
-          {sceneCount} image{sceneCount === 1 ? "" : "s"} at the active model rate
-        </p>
+        <div className="mt-3 space-y-1 rounded-md border border-line bg-bg px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted">
+          <div className="flex justify-between">
+            <span>Scenes regen</span>
+            <span className="text-ink">${scenesUsd}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Hero regen (portrait + landscape)</span>
+            <span className="text-ink">${heroUsd}</span>
+          </div>
+        </div>
         <div className="mt-4 flex flex-col gap-2">
           <button
             type="button"
-            onClick={onSaveAndRegen}
+            onClick={onSaveAndRegenAll}
             disabled={pending}
             className="rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {pending ? "Saving…" : `Save & queue scenes regen (~$${usd})`}
+            {pending
+              ? "Saving…"
+              : `Save & regen scenes + hero (~$${allUsd})`}
+          </button>
+          <button
+            type="button"
+            onClick={onSaveAndRegenScenes}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Save & regen scenes only (~${scenesUsd})
           </button>
           <button
             type="button"

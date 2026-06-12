@@ -19,6 +19,7 @@ import {
 } from "@/lib/image-render-queue";
 import { RegenButton } from "./RegenButton";
 import { RegenAutoRefresh } from "./RegenAutoRefresh";
+import { RebuildAllButton } from "./RebuildAllButton";
 
 export interface MediaAssetSpec {
   /** Stable slug stored on the render row. */
@@ -74,6 +75,18 @@ export async function MediaRegenPanel({
           capCents={budget.capCents}
         />
       </header>
+
+      <div className="mb-3">
+        <RebuildAllButton
+          ownerKind={ownerKind}
+          ownerId={ownerId}
+          specs={enriched.map((a) => ({
+            asset: a.asset,
+            label: a.label,
+            estimateCents: a.estimateCents,
+          }))}
+        />
+      </div>
 
       <ul className="space-y-2">
         {enriched.map((a) => (
