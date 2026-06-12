@@ -24,25 +24,67 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from pipeline import media
+from pipeline.aspect import LEGACY_DEFAULT_ASPECT, is_video_aspect
 
 # Output contract for normalize() and splice(). Must match the Remotion body
 # output exactly so the concat filter produces a stream without resamples.
-TARGET_WIDTH = 1080
-TARGET_HEIGHT = 1920
+# Phase 3 of _plans/2026-06-12-video-aspect-ratio.md: the target dimensions
+# now branch on the segment's `aspect` so a 16:9 segment is normalized to
+# 1920x1080 and a 9:16 segment is normalized to 1080x1920. fps + audio
+# rate + channel count are aspect-invariant.
 TARGET_FPS = 30
 TARGET_AUDIO_RATE = 48000
 TARGET_AUDIO_CHANNELS = 2
 
-# scale=...:force_original_aspect_ratio=increase scales so both target
-# dimensions are covered (so we never letterbox), then crop=1080:1920 takes
-# the center 9:16 window. This is the "center-crop landscape" path the admin
-# picked. Pinned in code (not a settings knob) — picking a different fit per
-# segment is out of scope for v1.
-NORMALIZE_VIDEO_FILTER = (
-    f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:force_original_aspect_ratio=increase,"
-    f"crop={TARGET_WIDTH}:{TARGET_HEIGHT},"
-    f"setsar=1,fps={TARGET_FPS}"
-)
+# Legacy width/height retained for downstream callers that import them by
+# name. New code should call `_target_dims(aspect)` for the right pair.
+TARGET_WIDTH = 1080
+TARGET_HEIGHT = 1920
+
+# Per-aspect target pixel dims. 9:16 stays at 1080x1920 (the orientation
+# the pipeline shipped with — every legacy normalized segment fits this
+# shape byte-for-byte). 16:9 is 1920x1080.
+_DIMS_BY_ASPECT: dict[str, tuple[int, int]] = {
+    "9:16": (1080, 1920),
+    "16:9": (1920, 1080),
+}
+
+
+def _resolve_segment_aspect(aspect: str | None) -> str:
+    """Normalize a string from the wire / a row / a caller into a valid
+    aspect. Anything we don't recognize falls through to the legacy
+    9:16 floor so a missing column / typo doesn't crash the worker."""
+    if is_video_aspect(aspect):
+        return aspect  # type: ignore[return-value]
+    return LEGACY_DEFAULT_ASPECT
+
+
+def _target_dims(aspect: str | None) -> tuple[int, int]:
+    return _DIMS_BY_ASPECT[_resolve_segment_aspect(aspect)]
+
+
+def _normalize_video_filter(aspect: str | None) -> str:
+    """Build the ffmpeg `vf` filter graph for the target aspect.
+
+    `scale=...:force_original_aspect_ratio=increase` scales so both target
+    dimensions are covered (so we never letterbox), then `crop=W:H` takes
+    the center window. This is the "center-crop" fit the admin picked when
+    portrait segments first shipped; landscape segments use the same fit
+    against the wider target. Pinned in code — picking a different fit
+    per segment is out of scope for v1.
+    """
+    w, h = _target_dims(aspect)
+    return (
+        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},"
+        f"setsar=1,fps={TARGET_FPS}"
+    )
+
+
+# Backwards-compatible default — same string as the pre-Phase-3 portrait
+# graph. Held for any external importer; the runtime path is
+# `_normalize_video_filter(aspect)`.
+NORMALIZE_VIDEO_FILTER = _normalize_video_filter(LEGACY_DEFAULT_ASPECT)
 
 # Audio normalization: resample to 48 kHz stereo so concat doesn't have to
 # splice mismatched rates. afade-in is not applied here so the admin's source
@@ -71,15 +113,23 @@ _SAFE_SEGMENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 # --- pure helpers (covered by pipeline/tests/test_segments.py) ---------------
 
-def _ffmpeg_normalize_cmd(source: Path, output: Path) -> list[str]:
+def _ffmpeg_normalize_cmd(
+    source: Path,
+    output: Path,
+    aspect: str | None = None,
+) -> list[str]:
     """Build the ffmpeg argv that normalizes a raw upload to the target
     contract. Pure — no side effects — so tests can assert the shape without
-    running ffmpeg."""
+    running ffmpeg.
+
+    `aspect` defaults to the legacy 9:16 portrait so any caller that hasn't
+    been updated produces the same argv as before Phase 3.
+    """
     return [
         "ffmpeg",
         "-y",
         "-i", str(source),
-        "-vf", NORMALIZE_VIDEO_FILTER,
+        "-vf", _normalize_video_filter(aspect),
         "-af", NORMALIZE_AUDIO_FILTER,
         "-r", str(TARGET_FPS),
         "-c:v", "libx264",
@@ -168,6 +218,14 @@ def pick_segment(
       4. `video.active_<kind>_id` points at an enabled row     -> that row.
       5. Otherwise -> None.
 
+    Phase 3 of _plans/2026-06-12-video-aspect-ratio.md adds an aspect
+    filter: each candidate's `aspect` must match the story's resolved
+    aspect or we drop it with a warning. The concat filter at splice time
+    refuses to glue clips of different resolutions, so an aspect mismatch
+    would either fail the render or silently letterbox; better to skip
+    here and emit a body-only render until the admin uploads a matching-
+    aspect segment.
+
     Pure: callers inject `get_setting` and `fetch_segment` so tests can stub
     a fake store.
     """
@@ -184,7 +242,7 @@ def pick_segment(
     pinned_id = row.get(f"{kind}_segment_id")
     if pinned_id:
         seg = fetch_segment(pinned_id)
-        return seg if seg else None
+        return _accept_if_aspect_matches(seg, story_row, kind, "pinned")
 
     # Step 3: global master switch (defaults to ON when unset).
     if _explicitly_off(get_setting("video.intro_outro_enabled")):
@@ -197,7 +255,40 @@ def pick_segment(
     seg = fetch_segment(active_id)
     if not seg or not seg.get("enabled"):
         return None
-    return seg
+    return _accept_if_aspect_matches(seg, story_row, kind, "global-active")
+
+
+def _accept_if_aspect_matches(
+    seg: dict | None,
+    story_row: dict | None,
+    kind: str,
+    source: str,
+) -> dict | None:
+    """Drop a picked segment whose aspect doesn't match the story's.
+
+    Logs a single-line warning naming the segment + the mismatch source so
+    the admin can grep the render log. Returns None on a mismatch; returns
+    `seg` unchanged otherwise. A segment row without an aspect column is
+    treated as 9:16 (the legacy default the column defaults to).
+    """
+    if not seg:
+        return None
+    # Late import to avoid circular imports — pipeline.aspect imports
+    # pipeline.store inside `_global_default_aspect`, which is fine, but
+    # importing it at module top from segments.py would touch the lazy
+    # store initialiser before tests get a chance to stub it.
+    from pipeline.aspect import resolve_aspect_for_story
+
+    story_aspect = resolve_aspect_for_story(story_row)
+    seg_aspect = _resolve_segment_aspect(seg.get("aspect"))
+    if seg_aspect == story_aspect:
+        return seg
+    print(
+        f"[segment pick] SKIP aspect-mismatch kind={kind} source={source} "
+        f"seg_id={seg.get('id')!r} seg_aspect={seg_aspect} "
+        f"story_aspect={story_aspect}"
+    )
+    return None
 
 
 # --- ffmpeg invocations -------------------------------------------------------
@@ -247,19 +338,31 @@ def _probe_duration_ms(path: Path) -> int:
         return 0
 
 
-def normalize(source_path: Path, output_path: Path, segment_id: str = "") -> dict:
+def normalize(
+    source_path: Path,
+    output_path: Path,
+    segment_id: str = "",
+    aspect: str | None = None,
+) -> dict:
     """Re-encode `source_path` to the target contract and write to `output_path`.
 
     Returns `{"duration_ms": int}` on success. Raises RuntimeError on ffmpeg
     failure with the last lines of stderr in the message so the admin sees
-    why an upload didn't take.
+    why an upload didn't take. `aspect` defaults to 9:16 portrait so any
+    caller that hasn't been updated produces byte-identical output to the
+    pre-Phase-3 normalize.
     """
-    tag = f"[segment normalize id={segment_id or '?'}]"
+    resolved_aspect = _resolve_segment_aspect(aspect)
+    w, h = _target_dims(resolved_aspect)
+    tag = f"[segment normalize id={segment_id or '?'} aspect={resolved_aspect}]"
     if not source_path.exists():
         raise RuntimeError(f"{tag} source missing: {source_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    argv = _ffmpeg_normalize_cmd(source_path, output_path)
-    print(f"{tag} start cmd={' '.join(argv[:8])} ... -> {output_path.name}")
+    argv = _ffmpeg_normalize_cmd(source_path, output_path, aspect=resolved_aspect)
+    print(
+        f"{tag} start target={w}x{h} cmd={' '.join(argv[:8])} "
+        f"... -> {output_path.name}"
+    )
     started = time.time()
     result = _run_ffmpeg(argv, context=f"segment normalize id={segment_id}")
     elapsed = time.time() - started

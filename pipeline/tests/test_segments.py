@@ -7,6 +7,7 @@ needs ffmpeg + ffprobe on PATH.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -221,6 +222,167 @@ class FfmpegCmdShapeTests(unittest.TestCase):
         fc_idx = argv.index("-filter_complex")
         self.assertIn("concat=n=2:v=1:a=0", argv[fc_idx + 1])
         self.assertNotIn("-c:a", argv)
+
+
+# ─── Phase 3 of _plans/2026-06-12-video-aspect-ratio.md ──────────────────────
+
+
+class AspectAwareNormalizeTests(unittest.TestCase):
+    """The ffmpeg normalize graph branches on aspect. Portrait keeps the
+    legacy 1080x1920 byte-for-byte; landscape produces 1920x1080. Calls
+    without an explicit aspect default to portrait so any caller that
+    hasn't been updated stays byte-identical."""
+
+    def test_default_aspect_keeps_legacy_1080x1920(self):
+        argv = segments._ffmpeg_normalize_cmd(Path("src.mp4"), Path("out.mp4"))
+        vf_idx = argv.index("-vf")
+        self.assertIn("1080:1920", argv[vf_idx + 1])
+        self.assertIn("crop=1080:1920", argv[vf_idx + 1])
+
+    def test_explicit_portrait_aspect_is_identical_to_default(self):
+        baseline = segments._ffmpeg_normalize_cmd(
+            Path("src.mp4"), Path("out.mp4")
+        )
+        explicit = segments._ffmpeg_normalize_cmd(
+            Path("src.mp4"), Path("out.mp4"), aspect="9:16"
+        )
+        self.assertEqual(baseline, explicit)
+
+    def test_landscape_aspect_produces_1920x1080(self):
+        argv = segments._ffmpeg_normalize_cmd(
+            Path("src.mp4"), Path("out.mp4"), aspect="16:9"
+        )
+        vf_idx = argv.index("-vf")
+        self.assertIn("1920:1080", argv[vf_idx + 1])
+        self.assertIn("crop=1920:1080", argv[vf_idx + 1])
+        self.assertIn("force_original_aspect_ratio=increase", argv[vf_idx + 1])
+
+    def test_invalid_aspect_falls_back_to_portrait(self):
+        # Defensive default — a typo / NULL column / forgotten migration
+        # must not crash the worker. Fall through to 9:16 portrait.
+        argv = segments._ffmpeg_normalize_cmd(
+            Path("src.mp4"), Path("out.mp4"), aspect="garbage"
+        )
+        vf_idx = argv.index("-vf")
+        self.assertIn("1080:1920", argv[vf_idx + 1])
+
+
+class PickSegmentAspectMatchTests(unittest.TestCase):
+    """Phase 3 adds an aspect filter to the picker so the splice's concat
+    filter never sees a clip whose dimensions disagree with the body.
+    Existing tests with no aspect column or no story video_config still
+    resolve to 9:16 on both sides, so the chain returns the same row as
+    before — back-compat is structural here."""
+
+    @staticmethod
+    def _store(settings: dict, rows: dict):
+        get_setting = lambda k: settings.get(k)  # noqa: E731
+        fetch_segment = lambda i: rows.get(i)  # noqa: E731
+        return get_setting, fetch_segment
+
+    def test_portrait_segment_matches_portrait_story(self):
+        # Both default to 9:16 implicitly — exact back-compat for legacy
+        # rows that pre-date the aspect column.
+        get_setting, fetch_segment = self._store(
+            settings={"video.active_intro_id": "active"},
+            rows={
+                "active": {
+                    "id": "active",
+                    "kind": "intro",
+                    "enabled": 1,
+                },  # no aspect column
+            },
+        )
+        story = {}  # no video_config; resolves to 9:16
+        result = segments.pick_segment(
+            "intro", story, get_setting, fetch_segment
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], "active")
+
+    def test_landscape_segment_matches_landscape_story(self):
+        get_setting, fetch_segment = self._store(
+            settings={"video.active_intro_id": "landscape-intro"},
+            rows={
+                "landscape-intro": {
+                    "id": "landscape-intro",
+                    "kind": "intro",
+                    "enabled": 1,
+                    "aspect": "16:9",
+                },
+            },
+        )
+        story = {
+            "video_config": json.dumps({
+                "voiceover_url": "/v.mp3",
+                "duration_ms": 10000,
+                "doodle_frames": [],
+                "captions": [],
+                "aspect": "16:9",
+            }),
+        }
+        result = segments.pick_segment(
+            "intro", story, get_setting, fetch_segment
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], "landscape-intro")
+
+    def test_portrait_segment_dropped_for_landscape_story(self):
+        # The splice's concat filter would either fail or letterbox a
+        # 1080x1920 intro onto a 1920x1080 body; safer to skip and emit
+        # a body-only render until the admin uploads a matching intro.
+        get_setting, fetch_segment = self._store(
+            settings={"video.active_intro_id": "portrait-intro"},
+            rows={
+                "portrait-intro": {
+                    "id": "portrait-intro",
+                    "kind": "intro",
+                    "enabled": 1,
+                    "aspect": "9:16",
+                },
+            },
+        )
+        story = {
+            "video_config": json.dumps({
+                "voiceover_url": "/v.mp3",
+                "duration_ms": 10000,
+                "doodle_frames": [],
+                "captions": [],
+                "aspect": "16:9",
+            }),
+        }
+        self.assertIsNone(
+            segments.pick_segment("intro", story, get_setting, fetch_segment)
+        )
+
+    def test_pinned_segment_also_filtered_on_aspect_mismatch(self):
+        # The aspect check fires on both pin-path and global-active path,
+        # so an admin who pinned a wrong-aspect segment doesn't accidentally
+        # ship a broken render.
+        get_setting, fetch_segment = self._store(
+            settings={},
+            rows={
+                "wrong": {
+                    "id": "wrong",
+                    "kind": "intro",
+                    "enabled": 1,
+                    "aspect": "9:16",
+                },
+            },
+        )
+        story = {
+            "intro_segment_id": "wrong",
+            "video_config": json.dumps({
+                "voiceover_url": "/v.mp3",
+                "duration_ms": 10000,
+                "doodle_frames": [],
+                "captions": [],
+                "aspect": "16:9",
+            }),
+        }
+        self.assertIsNone(
+            segments.pick_segment("intro", story, get_setting, fetch_segment)
+        )
 
 
 if __name__ == "__main__":

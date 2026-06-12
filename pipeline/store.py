@@ -165,6 +165,13 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'ready'",
     "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS error TEXT",
     "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS uploaded_at TEXT",
+    # Phase 3 of _plans/2026-06-12-video-aspect-ratio.md: each segment is
+    # ffmpeg-normalized to a single aspect at upload time. Mixing a 9:16
+    # intro into a 16:9 story would force the splice's concat filter to
+    # resample (or fail), so the picker filters by matching aspect at
+    # render time. Existing rows default to portrait, which matches what
+    # they actually are.
+    "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS aspect TEXT DEFAULT '9:16'",
     # The worker's hot path is "newest pending row first" — index it.
     "CREATE INDEX IF NOT EXISTS idx_video_segments_status_created ON video_segments(status, created_at)",
 ]
@@ -372,7 +379,8 @@ def fetch_story(story_id: str) -> dict | None:
 
 _SEGMENT_COLUMNS = [
     "id", "kind", "label", "source_url", "normalized_url", "duration_ms",
-    "enabled", "status", "error", "uploaded_at", "created_at", "updated_at",
+    "enabled", "status", "error", "uploaded_at", "aspect",
+    "created_at", "updated_at",
 ]
 _SEGMENT_UPDATE = [c for c in _SEGMENT_COLUMNS if c not in ("id", "created_at")]
 

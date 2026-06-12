@@ -47,7 +47,11 @@ _MAX_ERROR_LEN = 500
 # Type aliases so the dependency-injection signature of process_segment reads
 # cleanly. The worker is the only caller; tests substitute fakes for these.
 DownloadFn = Callable[[str, Path], None]
-NormalizeFn = Callable[[Path, Path, str], dict]
+# NormalizeFn signature: (source, dest, segment_id, aspect) -> {duration_ms}.
+# `aspect` was added in Phase 3 of _plans/2026-06-12-video-aspect-ratio.md;
+# `segments.normalize` falls back to 9:16 when omitted so any legacy caller
+# stays byte-identical.
+NormalizeFn = Callable[[Path, Path, str, str], dict]
 UploadFn = Callable[[Path, str], str]
 SetStatusFn = Callable[..., None]
 ListAbandonedFn = Callable[[str], Iterable[dict]]
@@ -133,7 +137,14 @@ def process_segment(
 
     source_url = str(row.get("source_url") or "")
     kind = str(row.get("kind") or "")
-    print(f"[segments worker] pick id={seg_id} kind={kind} source_url={source_url}")
+    # Phase 3 of _plans/2026-06-12-video-aspect-ratio.md: each row carries
+    # its target aspect explicitly. Missing column (legacy row) is treated
+    # as the legacy 9:16 default by segments.normalize itself.
+    seg_aspect = str(row.get("aspect") or "") or "9:16"
+    print(
+        f"[segments worker] pick id={seg_id} kind={kind} "
+        f"aspect={seg_aspect} source_url={source_url}"
+    )
 
     work_dir = tmp_root / seg_id
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +160,7 @@ def process_segment(
         size_mb = source_path.stat().st_size / (1024 * 1024)
         print(f"[segments worker] downloaded id={seg_id} size={size_mb:.1f} MB")
 
-        meta = normalize_fn(source_path, normalized_path, seg_id)
+        meta = normalize_fn(source_path, normalized_path, seg_id, seg_aspect)
         duration_ms = int(meta.get("duration_ms") or 0)
 
         normalized_url = upload_fn(normalized_path, f"segments/{seg_id}.norm.mp4")

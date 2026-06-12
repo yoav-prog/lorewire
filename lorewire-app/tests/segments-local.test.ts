@@ -69,3 +69,45 @@ describe("segments-local / buildProbeDurationArgs", () => {
     ]);
   });
 });
+
+// ─── Phase 3 of _plans/2026-06-12-video-aspect-ratio.md ─────────────────────
+
+describe("segments-local / buildNormalizeArgs — aspect branching", () => {
+  it("default aspect keeps the legacy portrait 1080x1920 graph", () => {
+    const argv = buildNormalizeArgs("/tmp/src.mp4", "/tmp/out.mp4");
+    const vf = argv[argv.indexOf("-vf") + 1];
+    expect(vf).toContain("scale=1080:1920");
+    expect(vf).toContain("crop=1080:1920");
+  });
+
+  it("explicit 9:16 aspect produces identical argv to the default", () => {
+    const baseline = buildNormalizeArgs("/tmp/src.mp4", "/tmp/out.mp4");
+    const explicit = buildNormalizeArgs("/tmp/src.mp4", "/tmp/out.mp4", "9:16");
+    expect(explicit).toEqual(baseline);
+  });
+
+  it("16:9 aspect produces a 1920x1080 vf filter", () => {
+    const argv = buildNormalizeArgs("/tmp/src.mp4", "/tmp/out.mp4", "16:9");
+    const vf = argv[argv.indexOf("-vf") + 1];
+    expect(vf).toContain("scale=1920:1080");
+    expect(vf).toContain("crop=1920:1080");
+    expect(vf).toContain("force_original_aspect_ratio=increase");
+    expect(vf).toContain("fps=30");
+  });
+
+  it("only the video filter changes between aspects — every other arg stays put", () => {
+    const portrait = buildNormalizeArgs("/tmp/src.mp4", "/tmp/out.mp4", "9:16");
+    const landscape = buildNormalizeArgs(
+      "/tmp/src.mp4",
+      "/tmp/out.mp4",
+      "16:9",
+    );
+    // The two argv lists differ only at the -vf value position.
+    const vfIdx = portrait.indexOf("-vf");
+    expect(portrait.length).toBe(landscape.length);
+    portrait.forEach((arg, i) => {
+      if (i === vfIdx + 1) return;
+      expect(landscape[i]).toBe(arg);
+    });
+  });
+});

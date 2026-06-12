@@ -190,7 +190,7 @@ class ProcessSegmentTests(_SegmentsTestCase):
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"fake source bytes")
 
-        def fake_normalize(src: Path, out: Path, seg_id: str) -> dict:
+        def fake_normalize(src: Path, out: Path, seg_id: str, aspect: str = "9:16") -> dict:
             # The contract is "writes `out`, returns duration_ms" — match it.
             out.write_bytes(b"fake normalized bytes")
             return {"duration_ms": 4180}
@@ -242,7 +242,7 @@ class ProcessSegmentTests(_SegmentsTestCase):
         def fake_download(url: str, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"x")
-        def fake_normalize(src: Path, out: Path, sid: str) -> dict:
+        def fake_normalize(src: Path, out: Path, sid: str, aspect: str = "9:16") -> dict:
             out.write_bytes(b"y")
             return {"duration_ms": 1000}
         def fake_upload(local: Path, key: str) -> str:
@@ -290,7 +290,7 @@ class ProcessSegmentTests(_SegmentsTestCase):
         def fake_download(url: str, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"fake")
-        def fake_normalize(src: Path, out: Path, seg_id: str) -> dict:
+        def fake_normalize(src: Path, out: Path, seg_id: str, aspect: str = "9:16") -> dict:
             raise RuntimeError("ffmpeg rc=1: invalid input")
 
         segments_worker.process_segment(
@@ -313,7 +313,7 @@ class ProcessSegmentTests(_SegmentsTestCase):
         def fake_download(url: str, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"fake")
-        def fake_normalize(src: Path, out: Path, seg_id: str) -> dict:
+        def fake_normalize(src: Path, out: Path, seg_id: str, aspect: str = "9:16") -> dict:
             out.write_bytes(b"fake")
             return {"duration_ms": 1000}
         def fake_upload(local: Path, key: str) -> str:
@@ -408,7 +408,7 @@ class TickTests(_SegmentsTestCase):
     def test_returns_false_when_queue_empty(self):
         called = {"download": 0, "normalize": 0, "upload": 0}
         def dl(u, p): called["download"] += 1
-        def nm(s, o, sid): called["normalize"] += 1; return {"duration_ms": 0}
+        def nm(s, o, sid, aspect="9:16"): called["normalize"] += 1; return {"duration_ms": 0}
         def up(p, k): called["upload"] += 1; return "u"
         processed = segments_worker.tick(
             tmp_root=self._tmp_root,
@@ -423,7 +423,7 @@ class TickTests(_SegmentsTestCase):
     def test_returns_true_and_processes_when_queue_has_a_row(self):
         self._insert("tick1", status="uploading")
         def dl(u, p): p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b"x")
-        def nm(s, o, sid): o.write_bytes(b"y"); return {"duration_ms": 100}
+        def nm(s, o, sid, aspect="9:16"): o.write_bytes(b"y"); return {"duration_ms": 100}
         def up(p, k): return f"https://example.test/{k}"
 
         processed = segments_worker.tick(

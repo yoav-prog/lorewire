@@ -19,11 +19,20 @@ import { spawn } from "node:child_process";
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  aspectDims,
+  isVideoAspect,
+  LEGACY_DEFAULT_ASPECT,
+  type VideoAspect,
+} from "@/lib/aspect";
 
 // Pinned to match pipeline/segments.py exactly — if you tune one side you
 // must tune the other or the concat filter at splice time will resample.
-const TARGET_WIDTH = 1080;
-const TARGET_HEIGHT = 1920;
+//
+// Phase 3 of _plans/2026-06-12-video-aspect-ratio.md: the target pixel
+// dimensions branch on a per-segment aspect (the same string the renderer
+// uses). 9:16 keeps the legacy 1080x1920 so any segment uploaded before
+// the column existed normalises to the exact same shape as before.
 const TARGET_FPS = 30;
 const TARGET_AUDIO_RATE = 48000;
 const TARGET_AUDIO_CHANNELS = 2;
@@ -31,13 +40,21 @@ const H264_PRESET = "fast";
 const H264_CRF = "20";
 const AAC_BITRATE = "192k";
 
-const VIDEO_FILTER =
-  `scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=increase,` +
-  `crop=${TARGET_WIDTH}:${TARGET_HEIGHT},` +
-  `setsar=1,fps=${TARGET_FPS}`;
+function buildVideoFilter(aspect: VideoAspect): string {
+  const { width, height } = aspectDims(aspect);
+  return (
+    `scale=${width}:${height}:force_original_aspect_ratio=increase,` +
+    `crop=${width}:${height},` +
+    `setsar=1,fps=${TARGET_FPS}`
+  );
+}
 
 const AUDIO_FILTER =
   `aformat=sample_rates=${TARGET_AUDIO_RATE}:channel_layouts=stereo`;
+
+function resolveSegmentAspect(aspect: VideoAspect | string | undefined): VideoAspect {
+  return isVideoAspect(aspect) ? aspect : LEGACY_DEFAULT_ASPECT;
+}
 
 // Public asset roots. We write under `lorewire-app/public/segments/<id>.*`
 // so Next dev's static-file middleware serves them at /segments/<id>.* —
@@ -47,13 +64,19 @@ const PUBLIC_RELATIVE_DIR = path.join("public", "segments");
 
 /**
  * Build the argv for the normalize ffmpeg invocation. Pure — kept separate
- * so tests can assert the shape without running ffmpeg.
+ * so tests can assert the shape without running ffmpeg. `aspect` defaults
+ * to the legacy 9:16 portrait so any caller that hasn't been updated
+ * produces argv byte-identical to the pre-Phase-3 normalize.
  */
-export function buildNormalizeArgs(source: string, output: string): string[] {
+export function buildNormalizeArgs(
+  source: string,
+  output: string,
+  aspect: VideoAspect = LEGACY_DEFAULT_ASPECT,
+): string[] {
   return [
     "-y",
     "-i", source,
-    "-vf", VIDEO_FILTER,
+    "-vf", buildVideoFilter(aspect),
     "-af", AUDIO_FILTER,
     "-r", String(TARGET_FPS),
     "-c:v", "libx264",
@@ -125,8 +148,15 @@ export async function normalizeAndPublishLocal(opts: {
   id: string;
   ext: ".mp4" | ".mov";
   bytes: Uint8Array;
+  /** Phase 3 of _plans/2026-06-12-video-aspect-ratio.md: the target
+   *  aspect for the normalised clip. Defaults to the legacy 9:16
+   *  portrait so any caller that hasn't been updated keeps the existing
+   *  contract. Once the upload form exposes an aspect picker (Phase 4),
+   *  the route handler will pass the chosen value through. */
+  aspect?: VideoAspect | string;
 }): Promise<NormalizeAndPublishLocalResult> {
-  const tag = `[segments local normalize id=${opts.id}]`;
+  const aspect = resolveSegmentAspect(opts.aspect);
+  const tag = `[segments local normalize id=${opts.id} aspect=${aspect}]`;
   const workDir = path.join(tmpdir(), `lw-segment-local-${opts.id}`);
   await mkdir(workDir, { recursive: true });
   const tmpSource = path.join(workDir, `source${opts.ext}`);
@@ -138,7 +168,7 @@ export async function normalizeAndPublishLocal(opts: {
     const startNormalize = Date.now();
     const normResult = await runProcess(
       "ffmpeg",
-      buildNormalizeArgs(tmpSource, tmpNormalized),
+      buildNormalizeArgs(tmpSource, tmpNormalized, aspect),
     );
     const elapsed = ((Date.now() - startNormalize) / 1000).toFixed(1);
     if (normResult.code !== 0) {
