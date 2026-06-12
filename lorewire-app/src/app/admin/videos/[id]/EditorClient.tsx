@@ -107,6 +107,7 @@ export default function EditorClient({
   audioUrl,
   derivedDefault,
   latestRender,
+  videoRenderStale,
   frameRenderStatuses,
   frameEstimateCents,
   mySessionSpendCents,
@@ -123,6 +124,7 @@ export default function EditorClient({
   audioUrl: string | null;
   derivedDefault: boolean;
   latestRender: RenderRow | null;
+  videoRenderStale: boolean;
   frameRenderStatuses: (ImageRenderRow | null)[];
   frameEstimateCents: number;
   mySessionSpendCents: number | null;
@@ -283,6 +285,7 @@ export default function EditorClient({
         renderDisabled={readOnly}
         sessionSpendCents={mySessionSpendCents}
         sessionCapCents={frameRegenSessionCapCents}
+        videoRenderStale={videoRenderStale}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -467,6 +470,9 @@ function Header({
   sessionSpendCents: number | null;
   /** Hard cap for the chip. Read from settings server-side. */
   sessionCapCents: number;
+  /** True when the latest video render is stale because frames have been
+   *  regenerated since. Renders a badge with a Re-render CTA. */
+  videoRenderStale: boolean;
 }) {
   const trimmed = trimmedDurationMs !== durationMs;
   return (
@@ -507,6 +513,15 @@ function Header({
         </div>
       </div>
       <div className="flex items-center gap-3">
+        {videoRenderStale && !renderDisabled && (
+          <span
+            className="rounded-full border border-warn/40 bg-warn/15 px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-warn"
+            title="Frame images have been regenerated since the last MP4 render. Re-render to refresh the video."
+            data-testid="stale-render-badge"
+          >
+            Stale render
+          </span>
+        )}
         {sessionSpendCents !== null && (
           <SessionSpendChip
             spentCents={sessionSpendCents}

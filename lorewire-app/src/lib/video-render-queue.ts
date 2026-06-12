@@ -153,3 +153,38 @@ export async function countRendersSince(
   );
   return Number(rows[0]?.c ?? 0);
 }
+
+// ─── Stale-render detection (Phase 4) ────────────────────────────────────────
+//
+// The video editor's frame regen (frame:<id>) writes new image URLs into
+// stories.video_config WITHOUT triggering a fresh MP4 render. That's a
+// deliberate cheap path — the user can swap a single frame's image for
+// pennies instead of re-rendering the whole video. But it leaves the
+// already-rendered MP4 stale: the URL on stories.video_url still points
+// at the OLD frames.
+//
+// `isVideoRenderStale` returns true when the most recent completed frame
+// regen happened AFTER the most recent video render was requested.
+// The header surfaces this as a "stale render" badge with a one-click
+// "Re-render video" CTA so the user knows they need to kick a fresh
+// render after editing frames.
+
+export async function isVideoRenderStale(storyId: string): Promise<boolean> {
+  const lastVideoRender = await latestRenderForStory(storyId);
+  if (!lastVideoRender) return false; // never rendered, not "stale"
+
+  const row = await one<{ finished_at: string | null }>(
+    `SELECT finished_at FROM image_renders
+     WHERE owner_kind = 'story'
+       AND owner_id = ?
+       AND asset LIKE 'frame:%'
+       AND status = 'done'
+       AND finished_at IS NOT NULL
+     ORDER BY finished_at DESC LIMIT 1`,
+    [storyId],
+  );
+  const lastFrameRegen = row?.finished_at;
+  if (!lastFrameRegen) return false;
+
+  return new Date(lastFrameRegen) > new Date(lastVideoRender.requested_at);
+}

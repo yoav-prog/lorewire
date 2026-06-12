@@ -154,7 +154,28 @@ export function FrameRegenActions({
       </div>
 
       {regenResult && !regenResult.ok && (
-        <p className="text-[11px] text-danger">{explainRegenError(regenResult)}</p>
+        <div className="space-y-1">
+          <p className="text-[11px] text-danger">
+            {explainRegenError(regenResult)}
+          </p>
+          <div className="flex items-center gap-3 font-mono text-[10px] uppercase tracking-wider">
+            <button
+              type="button"
+              onClick={fireRegen}
+              disabled={!enabled || pending || transitional}
+              className="text-muted underline-offset-2 hover:text-accent hover:underline disabled:opacity-50"
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={() => copyDiagnostics({ storyId, frameId, regenResult })}
+              className="text-muted underline-offset-2 hover:text-ink hover:underline"
+            >
+              Copy diagnostics
+            </button>
+          </div>
+        </div>
       )}
       {regenResult?.ok && regenResult.idempotentHit && (
         <p className="font-mono text-[10px] text-muted">
@@ -220,6 +241,39 @@ function explainRegenError(r: FrameRegenResult): string {
     default:
       return r.error ?? "Regenerate failed.";
   }
+}
+
+// Phase 4 error-UX polish: one-click "Copy diagnostics" so a user
+// reporting a failed regen has the exact context the dev needs without
+// having to dig through devtools. Plain text payload — fits in a Slack
+// or GitHub message verbatim.
+function copyDiagnostics(args: {
+  storyId: string;
+  frameId: string;
+  regenResult: FrameRegenResult;
+}) {
+  const payload = [
+    `[video editor regen diagnostics]`,
+    `timestamp: ${new Date().toISOString()}`,
+    `story_id: ${args.storyId}`,
+    `frame_id: ${args.frameId}`,
+    `error: ${args.regenResult.error ?? "unknown"}`,
+    args.regenResult.sessionSpentCents !== undefined
+      ? `session_spent_cents: ${args.regenResult.sessionSpentCents}`
+      : null,
+    args.regenResult.sessionCapCents !== undefined
+      ? `session_cap_cents: ${args.regenResult.sessionCapCents}`
+      : null,
+    args.regenResult.estimateCents !== undefined
+      ? `estimate_cents: ${args.regenResult.estimateCents}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  // navigator.clipboard.writeText is async; ignore the promise so the
+  // button stays snappy. Modern browsers surface their own permission
+  // banner if clipboard write is blocked.
+  void navigator.clipboard?.writeText(payload);
 }
 
 function explainRevertError(r: FrameRevertResult): string {

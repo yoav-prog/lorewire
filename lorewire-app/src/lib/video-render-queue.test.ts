@@ -6,8 +6,12 @@
 // the same (key order, lock changes, edit_session presence), and two
 // configs that produce different MP4s must hash differently.
 
-import { describe, expect, it } from "vitest";
-import { hashConfig } from "@/lib/video-render-queue";
+import { describe, expect, it, beforeEach } from "vitest";
+import { run } from "@/lib/db";
+import {
+  hashConfig,
+  isVideoRenderStale,
+} from "@/lib/video-render-queue";
 import type { ShortVideoConfig } from "@/lib/video-config";
 
 function baseConfig(overrides: Partial<ShortVideoConfig> = {}): ShortVideoConfig {
@@ -129,5 +133,141 @@ describe("hashConfig — change detection", () => {
     const a = hashConfig(baseConfig({ music: { url: "/a.mp3", gain_db: -12 } }));
     const b = hashConfig(baseConfig({ music: { url: "/a.mp3", gain_db: -6 } }));
     expect(a).not.toBe(b);
+  });
+});
+
+// ─── isVideoRenderStale (Phase 4) ─────────────────────────────────────────────
+
+const STORY_ID = "stale-test-story";
+
+async function insertVideoRender(opts: {
+  id: string;
+  story_id?: string;
+  requested_at: string;
+}) {
+  await run(
+    `INSERT INTO video_renders
+       (id, story_id, config_hash, status, progress, error, output_url,
+        requested_by, requested_at, started_at, finished_at)
+     VALUES (?, ?, 'hash', 'queued', 0, NULL, NULL, 'admin-1', ?, NULL, NULL)`,
+    [opts.id, opts.story_id ?? STORY_ID, opts.requested_at],
+  );
+}
+
+async function insertFrameRender(opts: {
+  id: string;
+  story_id?: string;
+  asset?: string;
+  status?: "queued" | "generating" | "done" | "error";
+  finished_at: string | null;
+}) {
+  await run(
+    `INSERT INTO image_renders
+      (id, owner_kind, owner_id, asset, prompt_hash, status, progress, error,
+       output_url, cost_cents, requested_by, requested_at, started_at, finished_at)
+     VALUES (?, 'story', ?, ?, NULL, ?, 0, NULL, NULL, NULL, 'admin-1',
+             '2026-06-12T10:00:00.000Z', NULL, ?)`,
+    [
+      opts.id,
+      opts.story_id ?? STORY_ID,
+      opts.asset ?? "frame:f1",
+      opts.status ?? "done",
+      opts.finished_at,
+    ],
+  );
+}
+
+describe("isVideoRenderStale", () => {
+  beforeEach(async () => {
+    // Clean ALL test rows (this story + the "other story" we use to
+    // verify isolation) so cross-test id collisions don't trip the
+    // image_renders UNIQUE constraint.
+    await run(`DELETE FROM video_renders WHERE story_id IN (?, ?)`, [
+      STORY_ID,
+      "other-story",
+    ]);
+    await run(`DELETE FROM image_renders WHERE owner_id IN (?, ?)`, [
+      STORY_ID,
+      "other-story",
+    ]);
+  });
+
+  it("returns false when the story has never been rendered", async () => {
+    expect(await isVideoRenderStale(STORY_ID)).toBe(false);
+  });
+
+  it("returns false when there are no frame regens", async () => {
+    await insertVideoRender({
+      id: "v1",
+      requested_at: "2026-06-12T11:00:00.000Z",
+    });
+    expect(await isVideoRenderStale(STORY_ID)).toBe(false);
+  });
+
+  it("returns true when a frame regen finished AFTER the latest render", async () => {
+    await insertVideoRender({
+      id: "v1",
+      requested_at: "2026-06-12T11:00:00.000Z",
+    });
+    await insertFrameRender({
+      id: "fr1",
+      status: "done",
+      finished_at: "2026-06-12T11:30:00.000Z",
+    });
+    expect(await isVideoRenderStale(STORY_ID)).toBe(true);
+  });
+
+  it("returns false when frame regens all happened before the latest render", async () => {
+    await insertFrameRender({
+      id: "fr1",
+      status: "done",
+      finished_at: "2026-06-12T10:30:00.000Z",
+    });
+    await insertVideoRender({
+      id: "v1",
+      requested_at: "2026-06-12T11:00:00.000Z",
+    });
+    expect(await isVideoRenderStale(STORY_ID)).toBe(false);
+  });
+
+  it("ignores in-flight frame regens (only completed counts)", async () => {
+    await insertVideoRender({
+      id: "v1",
+      requested_at: "2026-06-12T11:00:00.000Z",
+    });
+    await insertFrameRender({
+      id: "fr1",
+      status: "queued",
+      finished_at: null,
+    });
+    expect(await isVideoRenderStale(STORY_ID)).toBe(false);
+  });
+
+  it("ignores other stories' renders", async () => {
+    await insertVideoRender({
+      id: "v1",
+      requested_at: "2026-06-12T11:00:00.000Z",
+    });
+    await insertFrameRender({
+      id: "fr1",
+      story_id: "other-story",
+      status: "done",
+      finished_at: "2026-06-12T11:30:00.000Z",
+    });
+    expect(await isVideoRenderStale(STORY_ID)).toBe(false);
+  });
+
+  it("ignores non-frame assets (scene/prop/hero regens don't count)", async () => {
+    await insertVideoRender({
+      id: "v1",
+      requested_at: "2026-06-12T11:00:00.000Z",
+    });
+    await insertFrameRender({
+      id: "fr1",
+      asset: "scene:0",
+      status: "done",
+      finished_at: "2026-06-12T11:30:00.000Z",
+    });
+    expect(await isVideoRenderStale(STORY_ID)).toBe(false);
   });
 });

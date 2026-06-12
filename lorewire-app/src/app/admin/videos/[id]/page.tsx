@@ -19,7 +19,10 @@ import {
   type ShortVideoConfig,
 } from "@/lib/video-config";
 import { classifyEditSession } from "@/lib/edit-session";
-import { latestRenderForStory } from "@/lib/video-render-queue";
+import {
+  isVideoRenderStale,
+  latestRenderForStory,
+} from "@/lib/video-render-queue";
 import {
   estimateImageRegenCostCents,
   latestRenderForAsset,
@@ -67,6 +70,12 @@ export default async function VideoEditorPage({
   // shows its status in the header so the admin sees an in-flight render
   // without having to remember a render id across reloads.
   const latestRender = await latestRenderForStory(story.id);
+
+  // Phase 4 stale-render badge: true when any per-frame regen finished
+  // after the latest video render was requested, which means the MP4 at
+  // stories.video_url still points at the old frames. The header
+  // surfaces this with a Re-render CTA.
+  const videoRenderStale = await isVideoRenderStale(story.id);
 
   // Per-frame regen status (Phase 3). For every doodle_frame, fetch the
   // latest IMAGE_RENDERS row keyed by `frame:<id>` so the storyboard rail
@@ -148,6 +157,7 @@ export default async function VideoEditorPage({
       audioUrl={story.audio_url}
       derivedDefault={!parsed?.ok}
       latestRender={latestRender}
+      videoRenderStale={videoRenderStale}
       frameRenderStatuses={frameRenderStatuses}
       frameEstimateCents={frameEstimateCents}
       mySessionSpendCents={mySessionSpendCents}
