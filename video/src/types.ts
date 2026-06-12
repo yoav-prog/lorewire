@@ -60,6 +60,13 @@ export interface ShortCaptionChunk {
 import type { CaptionTemplateInput } from "./caption-style";
 export type { CaptionTemplateInput };
 
+// Phase 0 of _plans/2026-06-12-video-aspect-ratio.md: per-story aspect
+// override. Missing field is interpreted as the legacy 9:16 default at
+// the resolver (`resolveAspect` in aspect.ts) so every existing render
+// stays byte-identical until a story or the global setting opts in.
+import type { VideoAspect } from "./aspect";
+export type { VideoAspect };
+
 // Wave 3 Phase 3: composition-only motion beats, each independently
 // togglable from /admin/settings. All off = byte-identical to today's
 // render. The composition reads each flag and skips the layer when off so
@@ -124,6 +131,11 @@ export interface ShortVideoConfig {
   voiceover_url: string;
   title?: string;
   channel_name?: string;
+  // Per-story aspect override. Missing means "fall through to the
+  // global default; if that's missing too, fall back to the legacy
+  // 9:16 portrait so pre-existing rows render unchanged" — the chain
+  // lives in `resolveAspect()` in ./aspect.ts.
+  aspect?: VideoAspect;
   duration_ms: number;
   // V1 editor trim: render only frames in [clip_start_ms, clip_end_ms].
   // Both default to the full duration so a missing trim is byte-identical

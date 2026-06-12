@@ -11,6 +11,7 @@
 // When you add a field here, add it to `video/src/types.ts` in the same PR.
 
 import type { StoryRow } from "@/lib/repo";
+import { isVideoAspect, type VideoAspect } from "@/lib/aspect";
 
 export const CURRENT_CONFIG_VERSION = 2;
 
@@ -98,6 +99,11 @@ export interface ShortVideoConfig {
   voiceover_url: string;
   title?: string;
   channel_name?: string;
+  // Per-story aspect override. Phase 0 of
+  // _plans/2026-06-12-video-aspect-ratio.md. Missing field is interpreted
+  // as the legacy 9:16 default in `resolveAspect()` so existing rows
+  // render byte-identical.
+  aspect?: VideoAspect;
   duration_ms: number;
   clip_start_ms?: number;
   clip_end_ms?: number;
@@ -210,6 +216,12 @@ export function parseVideoConfig(raw: unknown): ParseResult {
   if (typeof migrated.character_image_mouth_removed === "string") {
     config.character_image_mouth_removed =
       migrated.character_image_mouth_removed;
+  }
+  // Per-story aspect override. Only the two supported values survive; any
+  // other shape (legacy field, typo, malicious payload) is dropped silently
+  // so the resolver falls back to the global default / legacy 9:16.
+  if (isVideoAspect(migrated.aspect)) {
+    config.aspect = migrated.aspect;
   }
 
   if (clip_start_ms.value !== undefined) {

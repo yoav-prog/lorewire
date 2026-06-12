@@ -5,10 +5,17 @@ import React from "react";
 import { Composition, registerRoot, type CalculateMetadataFunction } from "remotion";
 import { DoodleShort } from "./DoodleShort";
 import type { ShortVideoConfig } from "./types";
+import { aspectDims, resolveAspect, LEGACY_DEFAULT_ASPECT } from "./aspect";
 
 const FPS = 30;
-const WIDTH = 1080;
-const HEIGHT = 1920;
+
+// Studio-preview fallback dimensions. The renderer hands real width/
+// height back from `calculateMetadata` on every actual render (one of
+// 1080x1920 portrait or 1920x1080 landscape via the aspect resolver),
+// so these only show up when an admin opens the composition in Remotion
+// Studio without supplying props. Kept at the legacy 9:16 so the Studio
+// preview matches what the pipeline produced before Phase 0.
+const STUDIO_FALLBACK_DIMS = aspectDims(LEGACY_DEFAULT_ASPECT);
 
 // Remotion's Composition + CalculateMetadataFunction generic accepts
 // Record<string, unknown>, not arbitrary structured types. We keep
@@ -24,13 +31,36 @@ const calculateMetadata: CalculateMetadataFunction<LooseProps> = ({
   // that's just the full duration; with a trim it's the clipped window. The
   // composition shifts all internal timing by clip_start_ms so absolute
   // caption/frame windows still line up while the rendered output is exactly
-  // [clip_start_ms, clip_end_ms]. fps + size are fixed by the visual contract.
+  // [clip_start_ms, clip_end_ms].
   const cfg = props as unknown as ShortVideoConfig;
   const clipStart = cfg.clip_start_ms ?? 0;
   const clipEnd = cfg.clip_end_ms ?? cfg.duration_ms;
   const renderedMs = Math.max(1, clipEnd - clipStart);
   const durationInFrames = Math.max(1, Math.ceil((renderedMs / 1000) * FPS));
-  return { durationInFrames };
+
+  // Phase 0 of _plans/2026-06-12-video-aspect-ratio.md: resolve the aspect
+  // for THIS render and emit the right canvas dimensions. The chain is
+  // per-story override -> global default -> legacy 9:16. The renderer
+  // can't read settings from here (calculateMetadata runs in the bundle,
+  // not against the live admin DB), so the pipeline is expected to stamp
+  // the resolved aspect onto the config before invoking the render. For
+  // an unset aspect the resolver returns the legacy default and we
+  // produce a byte-identical portrait frame.
+  const aspect = resolveAspect(cfg.aspect, undefined);
+  const dims = aspectDims(aspect);
+
+  console.info("[render aspect resolve]", {
+    config_aspect: cfg.aspect ?? null,
+    resolved: aspect,
+    width: dims.width,
+    height: dims.height,
+  });
+
+  return {
+    durationInFrames,
+    width: dims.width,
+    height: dims.height,
+  };
 };
 
 // Default props power the Studio preview when no --props is passed. They are
@@ -54,8 +84,8 @@ const Root: React.FC = () => (
     id="DoodleShort"
     component={DoodleShortLoose}
     fps={FPS}
-    width={WIDTH}
-    height={HEIGHT}
+    width={STUDIO_FALLBACK_DIMS.width}
+    height={STUDIO_FALLBACK_DIMS.height}
     defaultProps={DEFAULT_PROPS as unknown as LooseProps}
     calculateMetadata={calculateMetadata}
   />

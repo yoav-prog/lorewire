@@ -508,6 +508,40 @@ describe("parseVideoConfig — optional pass-throughs", () => {
   });
 });
 
+// ─── parseVideoConfig: aspect field (Phase 0 of the 16:9 plan) ───────────────
+
+describe("parseVideoConfig — aspect field", () => {
+  it("round-trips a per-story 16:9 aspect", () => {
+    const r = parseVideoConfig(validConfig({ aspect: "16:9" }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.config.aspect).toBe("16:9");
+  });
+
+  it("round-trips a per-story 9:16 aspect", () => {
+    const r = parseVideoConfig(validConfig({ aspect: "9:16" }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.config.aspect).toBe("9:16");
+  });
+
+  it("leaves aspect undefined when the field is missing (legacy back-compat)", () => {
+    const r = parseVideoConfig(validConfig());
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.config.aspect).toBeUndefined();
+  });
+
+  it("drops an unsupported aspect value rather than failing the parse", () => {
+    const r = parseVideoConfig(validConfig({ aspect: "4:3" }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.config.aspect).toBeUndefined();
+  });
+
+  it("drops a non-string aspect value", () => {
+    const r = parseVideoConfig(validConfig({ aspect: 16 }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.config.aspect).toBeUndefined();
+  });
+});
+
 // ─── parseVideoConfig: unknown-field tolerance ───────────────────────────────
 
 describe("parseVideoConfig — unknown-field tolerance", () => {
