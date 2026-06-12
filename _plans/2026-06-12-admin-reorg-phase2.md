@@ -201,21 +201,26 @@ config surfaces).
 
 **2f. QA + tests + lint + push.**
 
-### Phase 3 (next, not bundled here)
+### Phase 3 — DONE
 
-**Embed per-video captions in the video editor.** The visual editor at
-`/admin/videos/[id]` gets a Captions panel that edits the per-story scope
-(the same `caption.story.<id>.*` settings keys today's `/admin/templates`
-story-scope tab writes to). UX bar: discoverable from the editor surface,
-no nav detour, live preview on the same screen. The exact shape (tab vs.
-drawer vs. inspector panel) lands in a Phase 3 sub-plan once the existing
-editor tab structure is mapped. The user's exact ask:
+**Embed per-video captions in the video editor** — shipped late 2026-06-12.
+The visual editor at `/admin/videos/[id]` gained a "Style" tab between
+Captions (text) and Audio. Resolves the per-story caption style chain
+(story → category → global → defaults), shows a per-field inheritance
+badge, lets the admin set or clear per-story overrides, and the
+@remotion/player live preview reads the resolved style so changes show
+up immediately. /admin/templates still works for global + per-category
+defaults; per-story editing is now exclusively in the video editor.
 
-> by the way the captions need to be part of the video editor and not
-> their own page, but embed it there in a smart, ui ux friendly way,
-> intuitive and beautiful
-
-Lands as its own commit in this same reorg branch, after 2f is green.
+Key files:
+- `src/lib/caption-style.ts` — resolver + preview-shape coercion
+- `src/app/admin/videos/[id]/CaptionStylePanel.tsx` — the editor UI
+- `src/app/admin/actions.ts:saveStoryCaptionStyleAction` — per-story
+  setting writer that revalidates the editor page
+- `src/components/video-preview/PreviewComposition.tsx` — caption layer
+  now reads style props with defaults fallback for backward compat
+- `tests/lib/caption-style.test.ts` — 11 cases covering the inheritance
+  chain, whitespace handling, and the toPreview coercion contract.
 
 ## Lazy-user walkthrough (rule 10)
 

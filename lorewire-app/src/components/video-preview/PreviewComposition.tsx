@@ -43,10 +43,33 @@ const CHUNK_FADE_MS = 80;
 // add a parallel `frameUrls` array — the server resolves each
 // doodle_frame.url to an absolute browser URL so the preview can <img> them
 // directly without going through Remotion's staticFile resolver.
+//
+// captionStyle (optional) carries the resolved per-story caption style so
+// the Remotion overlay reflects edits in the Caption style tab. Backward
+// compat: when omitted, the layer uses the hardcoded defaults that
+// shipped before the per-video style work landed.
+export interface CaptionStyleProps {
+  position_y: number;
+  size_scale: number;
+  padding_x: number;
+  text_transform: "uppercase" | "none" | "lowercase";
+  font_weight: number;
+  letter_spacing: number;
+  line_height: number;
+  color: string;
+  active_word_color: string;
+  spoken_word_color: string;
+  outline_color: string;
+  outline_width: number;
+  entry_effect: "none" | "fade" | "pop" | "slide-up";
+  word_highlight: "none" | "karaoke" | "color" | "scale" | "background";
+}
+
 export interface PreviewProps extends Record<string, unknown> {
   config: ShortVideoConfig;
   frameUrls: string[];
   audioUrl: string | null;
+  captionStyle?: CaptionStyleProps;
 }
 
 interface FrameWindow {
@@ -59,6 +82,7 @@ export function PreviewComposition({
   config,
   frameUrls,
   audioUrl,
+  captionStyle,
 }: PreviewProps) {
   const frame = useCurrentFrame();
   const { fps, durationInFrames } = useVideoConfig();
@@ -175,7 +199,11 @@ export function PreviewComposition({
       )}
 
       {activeCaption && (
-        <CaptionBand caption={activeCaption} elapsedMs={elapsedMs} />
+        <CaptionBand
+          caption={activeCaption}
+          elapsedMs={elapsedMs}
+          style={captionStyle}
+        />
       )}
 
       {/* Overlays — mirror of DoodleShort's overlay layer so the editor's
@@ -269,9 +297,11 @@ function OverlayLayer({ overlay }: { overlay: Overlay }) {
 function CaptionBand({
   caption,
   elapsedMs,
+  style,
 }: {
   caption: { start_ms: number; end_ms: number; text: string };
   elapsedMs: number;
+  style?: CaptionStyleProps;
 }) {
   const sinceStart = elapsedMs - caption.start_ms;
   const untilEnd = caption.end_ms - elapsedMs;
@@ -285,33 +315,54 @@ function CaptionBand({
   });
   const opacity = Math.min(fadeIn, fadeOut);
 
+  // Resolve each style field — fall through to the historical hardcoded
+  // values when caption style is absent (e.g. legacy callers that haven't
+  // been updated). Base font size 88px is the pre-template behavior;
+  // size_scale multiplies it.
+  const positionY = style?.position_y ?? 0.55;
+  const sizeScale = style?.size_scale ?? 1;
+  const paddingX = style?.padding_x ?? 64;
+  const fontWeight = style?.font_weight ?? 900;
+  const letterSpacing = style?.letter_spacing ?? -0.5;
+  const lineHeight = style?.line_height ?? 1.05;
+  const textTransform = style?.text_transform ?? "uppercase";
+  const color = style?.color ?? "#facc15";
+  const outlineColor = style?.outline_color ?? "#0f172a";
+  const outlineWidth = style?.outline_width ?? 6;
+  const fontSize = 88 * sizeScale;
+
   return (
     <div
       style={{
         position: "absolute",
-        top: "55%",
+        top: `${positionY * 100}%`,
         left: 0,
         right: 0,
         display: "flex",
         justifyContent: "center",
-        padding: "0 64px",
+        padding: `0 ${paddingX}px`,
         opacity,
         pointerEvents: "none",
       }}
     >
       <div
         style={{
-          fontSize: 88,
-          fontWeight: 900,
+          fontSize,
+          fontWeight,
           fontFamily: "Arial Black, Arial, sans-serif",
-          textTransform: "uppercase",
-          letterSpacing: -0.5,
-          lineHeight: 1.05,
+          textTransform,
+          letterSpacing,
+          lineHeight,
           textAlign: "center",
-          color: "#facc15",
-          WebkitTextStroke: "6px #0f172a",
-          textShadow:
-            "0 0 1px #0f172a, 0 4px 0 #0f172a, 0 -4px 0 #0f172a, 4px 0 0 #0f172a, -4px 0 0 #0f172a",
+          color,
+          WebkitTextStroke: `${outlineWidth}px ${outlineColor}`,
+          textShadow: [
+            `0 0 1px ${outlineColor}`,
+            `0 ${outlineWidth - 2}px 0 ${outlineColor}`,
+            `0 -${outlineWidth - 2}px 0 ${outlineColor}`,
+            `${outlineWidth - 2}px 0 0 ${outlineColor}`,
+            `-${outlineWidth - 2}px 0 0 ${outlineColor}`,
+          ].join(", "),
           maxWidth: "100%",
         }}
       >

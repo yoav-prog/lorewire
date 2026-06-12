@@ -20,6 +20,7 @@ import {
 } from "@/lib/video-config";
 import { classifyEditSession } from "@/lib/edit-session";
 import { latestRenderForStory } from "@/lib/video-render-queue";
+import { resolveCaptionStyle, toPreview } from "@/lib/caption-style";
 import EditorClient from "./EditorClient";
 
 export default async function VideoEditorPage({
@@ -85,6 +86,15 @@ export default async function VideoEditorPage({
     parse_error: parsed && !parsed.ok ? parsed.error : null,
   });
 
+  // Resolve the per-video caption style now so the editor can render both
+  // the live preview overlay AND the Caption style tab with the right
+  // per-story-override values and inherited placeholders.
+  const captionStyle = await resolveCaptionStyle({
+    storyId: story.id,
+    category: story.category,
+  });
+  const captionStylePreview = toPreview(captionStyle);
+
   return (
     <EditorClient
       storyId={story.id}
@@ -96,6 +106,8 @@ export default async function VideoEditorPage({
       derivedDefault={!parsed?.ok}
       latestRender={latestRender}
       foreignOwnerEmail={foreignOwnerEmail}
+      captionStyle={captionStyle}
+      captionStylePreview={captionStylePreview}
     />
   );
 }

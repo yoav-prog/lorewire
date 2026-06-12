@@ -276,6 +276,65 @@ function captionPrefix(scope: string, cat?: string, story?: string): string {
   return "caption";
 }
 
+// Per-story caption style action. The video editor's Caption style tab
+// calls this with the bare field name + new value; an empty value clears
+// the story-scope override (so the field falls back to category → global →
+// defaults via lib/caption-style.ts).
+//
+// Returns a typed result so the client can branch on success/failure
+// without try/catch wrappers. Revalidates the video editor page so the
+// next render of the live preview reads the fresh resolved style.
+export interface SaveStoryCaptionStyleResult {
+  ok: boolean;
+  error?: string;
+}
+
+export async function saveStoryCaptionStyleAction(
+  storyId: string,
+  field: string,
+  value: string,
+): Promise<SaveStoryCaptionStyleResult> {
+  await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing-story" };
+  if (!CAPTION_STYLE_FIELDS_SET.has(field)) {
+    return { ok: false, error: `unknown caption field "${field}"` };
+  }
+  const key = `caption.story.${storyId}.${field}`;
+  // Empty value = clear the override. The renderer / inheritance chain
+  // falls back to category → global → defaults.
+  const trimmed = value.trim();
+  await setSetting(key, trimmed);
+  console.info("[admin caption-style save]", {
+    story_id: storyId,
+    field,
+    cleared: trimmed === "",
+  });
+  revalidatePath(`/admin/videos/${storyId}`);
+  revalidatePath(`/admin/templates`);
+  return { ok: true };
+}
+
+// Caption fields the action accepts. Mirrors lib/caption-style.ts's
+// CAPTION_STYLE_FIELDS. Duplicated here as a Set so the validation is one
+// hash lookup instead of an array scan; the type-level guarantee that the
+// two stay in sync is enforced by the test suite.
+const CAPTION_STYLE_FIELDS_SET = new Set<string>([
+  "position_y",
+  "size_scale",
+  "padding_x",
+  "text_transform",
+  "font_weight",
+  "letter_spacing",
+  "line_height",
+  "color",
+  "active_word_color",
+  "spoken_word_color",
+  "outline_color",
+  "outline_width",
+  "entry_effect",
+  "word_highlight",
+]);
+
 export async function saveCaptionTemplateAction(
   formData: FormData,
 ): Promise<void> {

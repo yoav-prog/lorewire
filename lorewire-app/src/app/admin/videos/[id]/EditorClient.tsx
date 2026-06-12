@@ -28,6 +28,11 @@ import type {
   ShortVideoConfig,
 } from "@/lib/video-config";
 import type { RenderRow, RenderStatus } from "@/lib/video-render-queue";
+import type {
+  CaptionStyleForPreview,
+  ResolvedCaptionStyle,
+} from "@/lib/caption-style";
+import CaptionStylePanel from "./CaptionStylePanel";
 import {
   PreviewComposition,
   type PreviewProps,
@@ -60,11 +65,18 @@ const FPS = 30;
 const WIDTH = 1080;
 const HEIGHT = 1920;
 
-type TabKey = "trim" | "captions" | "audio" | "overlays" | "metadata";
+type TabKey =
+  | "trim"
+  | "captions"
+  | "caption-style"
+  | "audio"
+  | "overlays"
+  | "metadata";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "trim", label: "Trim" },
   { key: "captions", label: "Captions" },
+  { key: "caption-style", label: "Style" },
   { key: "audio", label: "Audio" },
   { key: "overlays", label: "Overlays" },
   { key: "metadata", label: "Metadata" },
@@ -86,6 +98,8 @@ export default function EditorClient({
   derivedDefault,
   latestRender,
   foreignOwnerEmail,
+  captionStyle,
+  captionStylePreview,
 }: {
   storyId: string;
   storyTitle: string;
@@ -96,6 +110,8 @@ export default function EditorClient({
   derivedDefault: boolean;
   latestRender: RenderRow | null;
   foreignOwnerEmail: string | null;
+  captionStyle: ResolvedCaptionStyle;
+  captionStylePreview: CaptionStyleForPreview;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabKey>("trim");
@@ -322,6 +338,7 @@ export default function EditorClient({
                 frameUrls={previewFrameUrls}
                 audioUrl={audioUrl}
                 durationInFrames={durationInFrames}
+                captionStyle={captionStylePreview}
               />
             ) : (
               <EmptyPreview />
@@ -381,6 +398,8 @@ export default function EditorClient({
                 draft={draftCaptions}
                 onDraftChange={setDraftCaptions}
               />
+            ) : tab === "caption-style" ? (
+              <CaptionStylePanel storyId={storyId} resolved={captionStyle} />
             ) : tab === "audio" ? (
               <AudioPanel storyId={storyId} config={config} />
             ) : tab === "metadata" ? (
@@ -704,18 +723,20 @@ function PreviewHost({
   frameUrls,
   audioUrl,
   durationInFrames,
+  captionStyle,
 }: {
   config: ShortVideoConfig;
   frameUrls: string[];
   audioUrl: string | null;
   durationInFrames: number;
+  captionStyle: CaptionStyleForPreview;
 }) {
   // Player wants `Record<string, unknown>` for inputProps + a similarly-
   // loose component type. We keep the strong PreviewProps type internally
   // and cast at the boundary — matches the SpikeClient pattern.
   const inputProps = useMemo<PreviewProps>(
-    () => ({ config, frameUrls, audioUrl }),
-    [config, frameUrls, audioUrl],
+    () => ({ config, frameUrls, audioUrl, captionStyle }),
+    [config, frameUrls, audioUrl, captionStyle],
   );
 
   const Component = PreviewComposition as unknown as React.ComponentType<
