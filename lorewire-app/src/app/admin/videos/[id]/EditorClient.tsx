@@ -47,7 +47,7 @@ import {
   Toggle,
   useDebouncedSave,
 } from "@/components/ui";
-import { LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
+import { aspectDims, type VideoAspect } from "@/lib/aspect";
 import {
   PreviewComposition,
   type PreviewProps,
@@ -60,6 +60,7 @@ import {
   queueRender,
   saveVideoConfigPatch,
 } from "./actions";
+import { enqueueImageRegenAction } from "@/app/admin/actions";
 
 // Player is client-only (Remotion's runtime is not SSR-safe). next/dynamic
 // with ssr:false gives us code-splitting + no hydration mismatch.
@@ -84,8 +85,21 @@ const PlayerNoSSR = dynamic(
 );
 
 const FPS = 30;
-const WIDTH = 1080;
-const HEIGHT = 1920;
+
+// Resolve the canvas dims the Player + the editor frame should use. Phase
+// 4 of _plans/2026-06-12-video-aspect-ratio.md: the aspect chip group in
+// the Metadata panel feeds into config.aspect; this helper turns that
+// into the right pixel pair without the page ever round-tripping. The
+// fallback walks the SAME chain the renderer + pipeline walk (per-story
+// override -> global default -> legacy 9:16) so the live Player always
+// matches what the rendered MP4 will look like.
+function editorCanvasDims(
+  aspect: ShortVideoConfig["aspect"],
+  globalDefault: VideoAspect,
+) {
+  const { width, height } = aspectDims(aspect ?? globalDefault);
+  return { width, height };
+}
 
 type TabKey =
   | "trim"
@@ -128,6 +142,7 @@ export default function EditorClient({
   videoRenderStale,
   frameRenderStatuses,
   frameEstimateCents,
+  globalDefaultAspect,
   mySessionSpendCents,
   frameRegenSessionCapCents,
   foreignOwnerEmail,
@@ -146,6 +161,10 @@ export default function EditorClient({
   videoRenderStale: boolean;
   frameRenderStatuses: (ImageRenderRow | null)[];
   frameEstimateCents: number;
+  /** What `video.default_aspect` is in settings, used by the Metadata
+   *  panel's aspect chip when the per-story override is unset so the
+   *  picker reflects what the renderer actually uses. */
+  globalDefaultAspect: VideoAspect;
   mySessionSpendCents: number | null;
   frameRegenSessionCapCents: number;
   foreignOwnerEmail: string | null;
@@ -410,9 +429,14 @@ export default function EditorClient({
                 audioUrl={audioUrl}
                 durationInFrames={durationInFrames}
                 captionStyle={captionStylePreview}
+                globalDefaultAspect={globalDefaultAspect}
               />
             ) : (
-              <EmptyPreview storyId={storyId} />
+              <EmptyPreview
+                storyId={storyId}
+                aspect={config.aspect}
+                globalDefaultAspect={globalDefaultAspect}
+              />
             )}
           </div>
           <div className="shrink-0 border-t border-line bg-surface px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-muted">
@@ -478,7 +502,12 @@ export default function EditorClient({
             ) : tab === "audio" ? (
               <AudioPanel storyId={storyId} config={config} />
             ) : tab === "metadata" ? (
-              <MetadataPanel storyId={storyId} config={config} />
+              <MetadataPanel
+                storyId={storyId}
+                config={config}
+                perImageEstimateCents={frameEstimateCents}
+                globalDefaultAspect={globalDefaultAspect}
+              />
             ) : tab === "overlays" ? (
               <OverlaysPanel
                 storyId={storyId}
@@ -860,6 +889,7 @@ function PreviewHost({
   audioUrl,
   durationInFrames,
   captionStyle,
+  globalDefaultAspect,
 }: {
   storyId: string;
   config: ShortVideoConfig;
@@ -867,6 +897,7 @@ function PreviewHost({
   audioUrl: string | null;
   durationInFrames: number;
   captionStyle: CaptionStyleForPreview;
+  globalDefaultAspect: VideoAspect;
 }) {
   // Phase 0 observability: log key inputs whenever they change so a user
   // reporting "the preview is broken" can paste the [video editor preview]
@@ -929,6 +960,15 @@ function PreviewHost({
   // Pre-flight: if every URL is empty, there is nothing for the Player to
   // paint and the iframe would sit blank. Render the labeled diagnostic
   // straight away instead of mounting the Player into a void.
+  // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
+  // canvas dims from the config's aspect so the Player matches the
+  // shape the renderer will produce. Recomputed per render so flipping
+  // aspect from the Metadata panel + saving updates the preview live.
+  const { width: canvasWidth, height: canvasHeight } = editorCanvasDims(
+    config.aspect,
+    globalDefaultAspect,
+  );
+
   const resolvedUrlCount = frameUrls.filter((u) => Boolean(u)).length;
   if (resolvedUrlCount === 0) {
     // eslint-disable-next-line no-console -- rule 14
@@ -940,7 +980,10 @@ function PreviewHost({
     return (
       <div
         className="rounded-lg border border-line overflow-hidden"
-        style={{ aspectRatio: `${WIDTH} / ${HEIGHT}`, maxHeight: "70vh" }}
+        style={{
+          aspectRatio: `${canvasWidth} / ${canvasHeight}`,
+          maxHeight: "70vh",
+        }}
       >
         <PreviewEmptyState
           reason="no-frame-urls"
@@ -995,7 +1038,7 @@ function PreviewHost({
       ref={containerRef}
       style={{
         position: "relative",
-        aspectRatio: `${WIDTH} / ${HEIGHT}`,
+        aspectRatio: `${canvasWidth} / ${canvasHeight}`,
         height: "min(70vh, 100%)",
         width: "auto",
         borderRadius: 12,
@@ -1011,8 +1054,8 @@ function PreviewHost({
         inputProps={playerInputProps}
         errorFallback={errorFallback}
         durationInFrames={durationInFrames}
-        compositionWidth={WIDTH}
-        compositionHeight={HEIGHT}
+        compositionWidth={canvasWidth}
+        compositionHeight={canvasHeight}
         fps={FPS}
         controls
         acknowledgeRemotionLicense
@@ -1600,19 +1643,28 @@ function AudioPanel({
 function MetadataPanel({
   storyId,
   config,
+  perImageEstimateCents,
+  globalDefaultAspect,
 }: {
   storyId: string;
   config: ShortVideoConfig;
+  /** Active model's per-image rate in cents, used to size the regen-cost
+   *  confirmation modal when the admin flips aspect. */
+  perImageEstimateCents: number;
+  /** Value of `video.default_aspect` so the chip reflects what the
+   *  renderer will actually pick when the per-story override is unset. */
+  globalDefaultAspect: VideoAspect;
 }) {
   const persistedTitle = config.title ?? "";
   const persistedChannel = config.channel_name ?? "";
   const persistedKenBurns = config.ken_burns ?? false;
   // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: the per-story
-  // aspect override. Missing on the config means inheriting the global
-  // default at render time; show the legacy 9:16 in the picker so the
-  // user sees a deliberate starting state instead of an empty chip.
+  // aspect override. When the per-story field is unset, show the global
+  // default instead of the legacy 9:16 — that matches what the renderer
+  // resolves to via `resolveAspect(config.aspect, globalDefault)`, so the
+  // chip and the rendered MP4 always agree.
   const persistedAspect: VideoAspect =
-    (config.aspect as VideoAspect | undefined) ?? LEGACY_DEFAULT_ASPECT;
+    (config.aspect as VideoAspect | undefined) ?? globalDefaultAspect;
   const [title, setTitle] = useState(persistedTitle);
   const [channel, setChannel] = useState(persistedChannel);
   const [kenBurns, setKenBurns] = useState(persistedKenBurns);
@@ -1632,9 +1684,25 @@ function MetadataPanel({
   const kenBurnsLocked = Boolean(config._locks?.ken_burns);
   const aspectLocked = Boolean(config._locks?.aspect);
 
-  const handleSave = () => {
-    setError(null);
-    setOkFlash(false);
+  // Phase 4 caveat fix of _plans/2026-06-12-video-aspect-ratio.md: when
+  // the admin flips aspect on a story that already has scene images,
+  // the existing PNGs were generated at the OLD aspect and will
+  // object-fit-cropped to the new canvas. Surface this with a
+  // confirmation modal so the admin can choose to queue a scene-regen
+  // at the new aspect at the same time as the save. The estimated cost
+  // uses the active model's per-image rate × the number of scenes.
+  const sceneCount = config.doodle_frames.length;
+  const sceneRegenEstimateCents = sceneCount * perImageEstimateCents;
+  const [aspectConfirm, setAspectConfirm] = useState<{
+    patch: Record<string, unknown>;
+    lockPaths: string[];
+    nextAspect: VideoAspect;
+  } | null>(null);
+
+  function buildPatch(): {
+    patch: Record<string, unknown>;
+    lockPaths: string[];
+  } {
     const patch: Record<string, unknown> = {};
     const lockPaths: string[] = [];
     if (title !== persistedTitle) {
@@ -1653,15 +1721,68 @@ function MetadataPanel({
       patch.aspect = aspect;
       lockPaths.push("aspect");
     }
+    return { patch, lockPaths };
+  }
+
+  function commitSave(
+    patch: Record<string, unknown>,
+    lockPaths: string[],
+    alsoQueueSceneRegen: boolean,
+    onSettled?: () => void,
+  ) {
     startTransition(async () => {
       const result = await saveVideoConfigPatch(storyId, patch, lockPaths);
-      if (result.ok) {
-        setOkFlash(true);
-        setTimeout(() => setOkFlash(false), 1500);
-      } else {
+      if (!result.ok) {
         setError(result.error ?? "Save failed");
+        onSettled?.();
+        return;
       }
+      if (alsoQueueSceneRegen) {
+        try {
+          console.info("[admin ui] aspect flip + scenes regen", {
+            storyId,
+            sceneCount,
+            estimateCents: sceneRegenEstimateCents,
+          });
+          const r = await enqueueImageRegenAction({
+            ownerKind: "story",
+            ownerId: storyId,
+            asset: "scenes",
+          });
+          if (!r.ok) {
+            // Save succeeded; just the regen enqueue failed. Surface
+            // the regen-specific message so the admin can retry from
+            // the granular grid without losing the aspect change.
+            setError(r.error ?? "Scenes regen queue failed");
+            onSettled?.();
+            return;
+          }
+        } catch (e) {
+          setError(e instanceof Error ? e.message : "Scenes regen queue failed");
+          onSettled?.();
+          return;
+        }
+      }
+      setOkFlash(true);
+      setTimeout(() => setOkFlash(false), 1500);
+      onSettled?.();
     });
+  }
+
+  const handleSave = () => {
+    setError(null);
+    setOkFlash(false);
+    const { patch, lockPaths } = buildPatch();
+    // Only fire the modal when (a) the aspect actually changed AND
+    // (b) the story has scene images that would look wrong on the new
+    // canvas. A brand-new story with no scenes yet just saves through
+    // — the next pipeline run will pick up the new aspect from the
+    // start.
+    if (aspect !== persistedAspect && sceneCount > 0) {
+      setAspectConfirm({ patch, lockPaths, nextAspect: aspect });
+      return;
+    }
+    commitSave(patch, lockPaths, false);
   };
 
   const handleReset = () => {
@@ -1787,6 +1908,109 @@ function MetadataPanel({
         >
           Reset
         </button>
+      </div>
+
+      {aspectConfirm && (
+        <AspectFlipModal
+          fromAspect={persistedAspect}
+          toAspect={aspectConfirm.nextAspect}
+          sceneCount={sceneCount}
+          estimateCents={sceneRegenEstimateCents}
+          pending={pending}
+          onCancel={() => {
+            if (pending) return; // mid-save, cancel is a no-op
+            setAspectConfirm(null);
+          }}
+          onSaveOnly={() => {
+            commitSave(aspectConfirm.patch, aspectConfirm.lockPaths, false, () =>
+              setAspectConfirm(null),
+            );
+          }}
+          onSaveAndRegen={() => {
+            commitSave(aspectConfirm.patch, aspectConfirm.lockPaths, true, () =>
+              setAspectConfirm(null),
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AspectFlipModal({
+  fromAspect,
+  toAspect,
+  sceneCount,
+  estimateCents,
+  pending,
+  onCancel,
+  onSaveOnly,
+  onSaveAndRegen,
+}: {
+  fromAspect: VideoAspect;
+  toAspect: VideoAspect;
+  sceneCount: number;
+  estimateCents: number;
+  pending: boolean;
+  onCancel: () => void;
+  onSaveOnly: () => void;
+  onSaveAndRegen: () => void;
+}) {
+  const usd = (estimateCents / 100).toFixed(2);
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="aspect-flip-title"
+      data-testid="aspect-flip-modal"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="aspect-flip-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Switch aspect to {toAspect}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          This story has {sceneCount} scene image{sceneCount === 1 ? "" : "s"}
+          {" generated at "}
+          <span className="font-mono text-ink">{fromAspect}</span>. They&apos;ll
+          object-fit-cover into the new {toAspect} canvas — meaning the
+          subject will be cropped on the long axis. Regenerating the scenes
+          at {toAspect} fixes that but costs money.
+        </p>
+        <p className="mt-3 rounded-md border border-line bg-bg px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted">
+          Estimated regen cost · <span className="text-ink">${usd}</span>
+          {" · "}
+          {sceneCount} image{sceneCount === 1 ? "" : "s"} at the active model rate
+        </p>
+        <div className="mt-4 flex flex-col gap-2">
+          <button
+            type="button"
+            onClick={onSaveAndRegen}
+            disabled={pending}
+            className="rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Saving…" : `Save & queue scenes regen (~$${usd})`}
+          </button>
+          <button
+            type="button"
+            onClick={onSaveOnly}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Save without regen
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -2290,11 +2514,23 @@ function EmptyHint({ label, hint }: { label: string; hint: string }) {
   );
 }
 
-function EmptyPreview({ storyId }: { storyId: string }) {
+function EmptyPreview({
+  storyId,
+  aspect,
+  globalDefaultAspect,
+}: {
+  storyId: string;
+  aspect: ShortVideoConfig["aspect"];
+  globalDefaultAspect: VideoAspect;
+}) {
+  const { width, height } = editorCanvasDims(aspect, globalDefaultAspect);
   return (
     <div
       className="rounded-lg border border-dashed border-line overflow-hidden"
-      style={{ aspectRatio: `${WIDTH} / ${HEIGHT}`, maxHeight: "70vh" }}
+      style={{
+        aspectRatio: `${width} / ${height}`,
+        maxHeight: "70vh",
+      }}
     >
       <PreviewEmptyState reason="no-frames" storyId={storyId} />
     </div>

@@ -39,10 +39,11 @@ PUBLIC_URL_PREFIX = "/generated"
 
 # Mirrors media.IMAGE_COST_USD. Kept in sync deliberately — both worker
 # paths burn the same daily budget so the per-image rate has to match.
+# Verification notes live next to the source-of-truth copy in media.py.
 IMAGE_COST_USD = {
     "kie/gpt-image-2": 0.05,
     "kie/nano-banana-2": 0.04,
-    "kie/nano-banana-pro": 0.10,
+    "kie/nano-banana-pro": 0.09,
 }
 
 # Editorial illustration default. Articles aren't the doodle-short style

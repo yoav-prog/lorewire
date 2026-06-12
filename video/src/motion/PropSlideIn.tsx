@@ -53,16 +53,19 @@ const SAFE_INSET_BASE = 96;
 export const PropSlideIn: React.FC<PropSlideInProps> = ({ enabled, items, durationMs }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const { scaleW, scaleH } = useCompositionScale();
+  const { scaleW, scaleH, scaleMin } = useCompositionScale();
 
   if (!enabled || items.length === 0) return null;
 
   // Scale once per render — every loop iteration reads the same dims.
-  const propSize = scaleW(PROP_SIZE_BASE);
+  // Prop card is a fixed-aspect square so use `scaleMin` (the smaller of
+  // the two ratios). Scaling by width alone on landscape would balloon
+  // the card to ~53% of canvas height.
+  const propSize = scaleMin(PROP_SIZE_BASE);
   const insetX = scaleW(SAFE_INSET_BASE);
   const insetY = scaleH(SAFE_INSET_BASE);
-  const padding = scaleW(16);
-  const radius = scaleW(12);
+  const padding = scaleMin(16);
+  const radius = scaleMin(12);
   const shadowY = scaleH(12);
   const shadowBlur = scaleW(22);
 

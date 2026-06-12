@@ -66,10 +66,19 @@ def _resolve_scene_count(override: int | None) -> int:
 # Rough USD cost bands per image (model -> avg). These are sized for budget
 # math, not invoiced totals. Refined when kie publishes a stable per-credit
 # rate or the user wants to wire real billing.
+#
+# Last verified 2026-06-13 against kie.ai pricing pages + corroborating
+# market write-ups:
+#   - gpt-image-2: no kie.ai-published per-image rate; renderful's mirror
+#     prices it at $0.0300. Keeping the $0.05 over-estimate so the daily
+#     budget cap fires conservatively.
+#   - nano-banana-2: starts at $0.04 / image. Matches.
+#   - nano-banana-pro: $0.09 at 1K / 2K, $0.12 at 4K. Pipeline asks for 1K
+#     in `images.py:generate` so the 1K rate is the right one.
 IMAGE_COST_USD = {
     "kie/gpt-image-2": 0.05,
     "kie/nano-banana-2": 0.04,
-    "kie/nano-banana-pro": 0.10,
+    "kie/nano-banana-pro": 0.09,
 }
 
 # USD per character. Sized from each provider's public pricing as of 2026-06.
@@ -634,35 +643,72 @@ def _per_image_cost_cents() -> int:
 
 
 def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
-    """Regenerate just the portrait hero. Uses the same cinematic
-    thumbnail prompt the fresh-run pipeline uses, overwriting hero.png
-    in public/generated/<id>/. Updates stories.hero_image directly.
+    """Regenerate the hero set — portrait (3:4) AND landscape (16:9) —
+    so the article reader, the OG card, and the landscape video poster
+    all stay in sync. Mirrors what the fresh-run pipeline does in
+    `generate_media` so a regen on a 16:9 video story doesn't leave a
+    stale landscape hero on the row.
+
+    A landscape failure does NOT abort the portrait write — the public
+    reader's hero fallback chain prefers portrait when landscape is
+    missing, so the partial success is better than refusing the whole
+    operation. The returned cost only counts heroes that actually shipped
+    so the daily-spend cap reflects reality.
     """
     title = (story.get("title") or "").strip()
     if not title:
         raise ValueError(f"story {safe_id} has no title — cannot build a hero prompt")
     body = (story.get("body") or "").strip()
     category = (story.get("category") or "Drama").strip()
+    print(f"[image regen hero] id={safe_id} title={title[:60]!r} (both orientations)")
 
-    cinematic_prompt = stages.make_thumbnail_prompt(
+    per_image_cents = _per_image_cost_cents()
+    total_cents = 0
+    portrait_url: str | None = None
+
+    # ─── 1. Portrait hero (3:4) — same prompt + dimensions as before. ─────
+    portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
     )
-    print(f"[image regen hero] id={safe_id} title={title[:60]!r}")
-
-    kie_url = _generate_with_retry(
-        cinematic_prompt, f"id={safe_id} hero regen", aspect_ratio="3:4",
+    portrait_kie = _generate_with_retry(
+        portrait_prompt, f"id={safe_id} hero regen portrait", aspect_ratio="3:4",
     )
-    if kie_url is None:
-        raise RuntimeError("kie hero generation returned no URL after retries")
+    if portrait_kie is None:
+        raise RuntimeError("kie portrait hero generation returned no URL after retries")
+    portrait_local = out_dir / "hero.png"
+    images.download(portrait_kie, portrait_local)
+    portrait_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
+    store.update_story_hero(story["id"], portrait_url)
+    total_cents += per_image_cents
 
-    local_path = out_dir / "hero.png"
-    images.download(kie_url, local_path)
-    public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
+    # ─── 2. Landscape hero (16:9) — best-effort. ──────────────────────────
+    landscape_prompt = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="16:9", dry_run=False,
+    )
+    landscape_kie = _generate_with_retry(
+        landscape_prompt, f"id={safe_id} hero regen landscape", aspect_ratio="16:9",
+    )
+    if landscape_kie is None:
+        print(
+            f"[image regen hero] id={safe_id} landscape FAILED; "
+            "portrait still updated"
+        )
+    else:
+        try:
+            landscape_local = out_dir / "hero-landscape.png"
+            images.download(landscape_kie, landscape_local)
+            landscape_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
+            store.update_story_hero_landscape(story["id"], landscape_url)
+            total_cents += per_image_cents
+        except Exception as e:
+            print(
+                f"[image regen hero] id={safe_id} landscape download FAILED: {e}; "
+                "portrait still updated"
+            )
 
-    store.update_story_hero(story["id"], public_url)
-
-    # Cost: one image at the active model's per-image rate.
-    return public_url, _per_image_cost_cents()
+    # The queue's output_url shows the portrait by convention (the reader
+    # picks portrait as primary). The full success is reflected in total_cents.
+    return portrait_url, total_cents
 
 
 def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:

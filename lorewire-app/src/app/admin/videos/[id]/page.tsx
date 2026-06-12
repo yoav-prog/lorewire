@@ -12,7 +12,12 @@
 
 import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/dal";
-import { getStory, getUserById } from "@/lib/repo";
+import { getStory, getSetting, getUserById } from "@/lib/repo";
+import {
+  isVideoAspect,
+  LEGACY_DEFAULT_ASPECT,
+  type VideoAspect,
+} from "@/lib/aspect";
 import {
   defaultVideoConfig,
   parseVideoConfig,
@@ -57,6 +62,22 @@ export default async function VideoEditorPage({
   const config: ShortVideoConfig =
     parsed?.ok ? parsed.config : defaultVideoConfig(story);
 
+  // Phase 4 caveat fix (_plans/2026-06-12-video-aspect-ratio.md): when the
+  // admin sets aspect on a story that has NEVER rendered (so video_config
+  // is null or a minimal `{"aspect":...}` blob from `setStoryAspectAction`),
+  // parseVideoConfig rejects the partial shape and defaultVideoConfig
+  // doesn't carry the aspect through. Salvage it directly from the raw
+  // JSON so the editor's chip reflects what the row actually says.
+  if (!config.aspect && story.video_config) {
+    const raw = safeJsonParse(story.video_config);
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      const rawAspect = (raw as { aspect?: unknown }).aspect;
+      if (rawAspect === "16:9" || rawAspect === "9:16") {
+        config.aspect = rawAspect;
+      }
+    }
+  }
+
   // Resolve each doodle_frame.url to a browser-accessible URL so the live
   // preview can render via plain <img>. The pipeline stores URLs in the
   // staticFile() format the Remotion CLI expects (e.g. "envelope/hero.png");
@@ -99,6 +120,17 @@ export default async function VideoEditorPage({
   // The cap setting is read regardless so the editor can still show a
   // "Read-only — current cap ~$Y" hint in future iterations.
   const frameRegenSessionCapCents = await getFrameRegenSessionCapCents();
+
+  // Phase 4 QA fix: the MetadataPanel chip group should reflect the value
+  // the renderer WILL use — which falls through to the global default
+  // when the per-story aspect is unset. Without this the admin sees the
+  // legacy 9:16 chip even when the global default is 16:9, and only
+  // discovers the mismatch after the next render.
+  const globalDefaultAspectRaw = await getSetting("video.default_aspect");
+  const globalDefaultAspect: VideoAspect = isVideoAspect(globalDefaultAspectRaw)
+    ? globalDefaultAspectRaw
+    : LEGACY_DEFAULT_ASPECT;
+
   let mySessionSpendCents: number | null = null;
   if (
     config._edit_session &&
@@ -144,11 +176,15 @@ export default async function VideoEditorPage({
   // per-story-override values and inherited placeholders. Phase 5 of
   // _plans/2026-06-12-video-aspect-ratio.md: pass the story's resolved
   // aspect so per-aspect caption tunings take priority over the aspect-
-  // agnostic tier — same chain the renderer + the pipeline walk.
+  // agnostic tier — same chain the renderer + the pipeline walk. Falls
+  // through to the global default when the per-story aspect is unset
+  // so the inheritance hints match the real render path.
+  const resolvedAspect: VideoAspect =
+    config.aspect ?? globalDefaultAspect;
   const captionStyle = await resolveCaptionStyle({
     storyId: story.id,
     category: story.category,
-    aspect: config.aspect,
+    aspect: resolvedAspect,
   });
   const captionStylePreview = toPreview(captionStyle);
   const userCaptionPresets = await getUserCaptionPresetsForPage();
@@ -166,6 +202,7 @@ export default async function VideoEditorPage({
       videoRenderStale={videoRenderStale}
       frameRenderStatuses={frameRenderStatuses}
       frameEstimateCents={frameEstimateCents}
+      globalDefaultAspect={globalDefaultAspect}
       mySessionSpendCents={mySessionSpendCents}
       frameRegenSessionCapCents={frameRegenSessionCapCents}
       foreignOwnerEmail={foreignOwnerEmail}

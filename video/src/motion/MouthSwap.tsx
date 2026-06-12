@@ -51,7 +51,7 @@ const MOUTH_HEIGHT_BASE = (MOUTH_WIDTH_BASE * 60) / 100;
 export const MouthSwap: React.FC<Props> = ({ enabled, characterUrl, words }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const { scaleW, scaleH } = useCompositionScale();
+  const { scaleW, scaleH, scaleMin } = useCompositionScale();
 
   if (!enabled || !characterUrl) return null;
 
@@ -59,20 +59,23 @@ export const MouthSwap: React.FC<Props> = ({ enabled, characterUrl, words }) => 
   const shape = activeShape(elapsedMs, words);
   const mouth = MOUTH_SHAPES[shape];
 
-  // Scale the card + inset per axis. The card uses width-based scaling
-  // because it's a fixed-aspect 3:4 box — height tracks width so the
-  // bust never gets squashed.
-  const cardWidth = scaleW(CARD_WIDTH_BASE);
-  const cardHeight = scaleW(CARD_HEIGHT_BASE);
+  // The talking-head card is a fixed 3:4 portrait box. Scaling both
+  // dimensions by width alone makes the card ~422x563 on landscape
+  // (1920 wide) — almost the whole canvas height. Use `scaleMin` so
+  // the card stays proportional to the smaller canvas axis and fits
+  // comfortably on both aspects.
+  const cardWidth = scaleMin(CARD_WIDTH_BASE);
+  const cardHeight = scaleMin(CARD_HEIGHT_BASE);
   const insetX = scaleW(SAFE_INSET_BASE);
   // Bottom inset stacks SAFE_INSET (above the channel pill) + 96 (a
   // little extra so the head doesn't fight the pill). Both portions
   // scale by the vertical axis.
   const insetY = scaleH(SAFE_INSET_BASE) + scaleH(96);
-  const mouthW = scaleW(MOUTH_WIDTH_BASE);
-  const mouthH = scaleW(MOUTH_HEIGHT_BASE);
-  const radius = scaleW(18);
-  const borderPx = Math.max(1, scaleW(3));
+  // Mouth SVG dims track the card — same fixed-aspect treatment.
+  const mouthW = scaleMin(MOUTH_WIDTH_BASE);
+  const mouthH = scaleMin(MOUTH_HEIGHT_BASE);
+  const radius = scaleMin(18);
+  const borderPx = Math.max(1, scaleMin(3));
   const shadowY = scaleH(12);
   const shadowBlur = scaleW(22);
 

@@ -37,43 +37,52 @@ describe("estimateImageRegenCostCents", () => {
     expect(cents).toBeGreaterThan(0);
   });
 
-  it("doubles for mouth_swap (two images per regen)", async () => {
+  it("hero costs two images (portrait 3:4 + landscape 16:9)", async () => {
+    // The _regen_hero pipeline now generates both orientations so the
+    // public reader + landscape video poster stay in sync. See the
+    // caveat-fix round of _plans/2026-06-12-video-aspect-ratio.md.
+    const oneImage = await estimateImageRegenCostCents("scene:0");
     const hero = await estimateImageRegenCostCents("hero");
+    expect(hero).toBe(oneImage * 2);
+  });
+
+  it("doubles for mouth_swap (two images per regen)", async () => {
+    const oneImage = await estimateImageRegenCostCents("scene:0");
     const mouthSwap = await estimateImageRegenCostCents("mouth_swap");
-    expect(mouthSwap).toBe(hero * 2);
+    expect(mouthSwap).toBe(oneImage * 2);
   });
 
   it("treats scene:N and prop:N as single-image regens", async () => {
     const scene = await estimateImageRegenCostCents("scene:5");
     const prop = await estimateImageRegenCostCents("prop:3");
-    const hero = await estimateImageRegenCostCents("hero");
-    expect(scene).toBe(hero);
-    expect(prop).toBe(hero);
+    const oneImage = await estimateImageRegenCostCents("scene:0");
+    expect(scene).toBe(oneImage);
+    expect(prop).toBe(oneImage);
   });
 
   it("scales 'scenes' by media.scene_count setting (clamped)", async () => {
     await setSetting("media.scene_count", "20");
-    const hero = await estimateImageRegenCostCents("hero");
+    const oneImage = await estimateImageRegenCostCents("scene:0");
     const scenes = await estimateImageRegenCostCents("scenes");
-    expect(scenes).toBe(hero * 20);
+    expect(scenes).toBe(oneImage * 20);
   });
 
   it("'scenes' clamps a wildly large media.scene_count down to 60", async () => {
     await setSetting("media.scene_count", "9999");
-    const hero = await estimateImageRegenCostCents("hero");
+    const oneImage = await estimateImageRegenCostCents("scene:0");
     const scenes = await estimateImageRegenCostCents("scenes");
-    expect(scenes).toBe(hero * 60);
+    expect(scenes).toBe(oneImage * 60);
   });
 
   it("'props' uses media.prop_count when set, defaults to 5", async () => {
-    const hero = await estimateImageRegenCostCents("hero");
+    const oneImage = await estimateImageRegenCostCents("scene:0");
     // Default (setting cleared in beforeEach).
     const propsDefault = await estimateImageRegenCostCents("props");
-    expect(propsDefault).toBe(hero * 5);
+    expect(propsDefault).toBe(oneImage * 5);
 
     await setSetting("media.prop_count", "7");
     const propsSet = await estimateImageRegenCostCents("props");
-    expect(propsSet).toBe(hero * 7);
+    expect(propsSet).toBe(oneImage * 7);
   });
 });
 

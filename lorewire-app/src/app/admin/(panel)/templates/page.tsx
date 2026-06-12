@@ -337,7 +337,13 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
         </p>
       </header>
 
-      <ScopeSwitcher current={scope} cat={cat} story={story} stories={stories} />
+      <ScopeSwitcher
+        current={scope}
+        cat={cat}
+        story={story}
+        stories={stories}
+        currentAspect={aspectChoice}
+      />
 
       <AspectSwitcher
         current={aspectChoice}
@@ -425,22 +431,32 @@ function ScopeSwitcher({
   cat,
   story,
   stories,
+  currentAspect,
 }: {
   current: string;
   cat?: string;
   story?: string;
   stories: { id: string; title: string }[];
+  /** Phase 5 caveat fix: switching scope should keep whichever aspect
+   *  tier the admin is editing. Without this the aspect tab silently
+   *  resets to "Aspect-agnostic" every time the admin moves between
+   *  scopes — confusing and easy to overwrite the wrong key set. */
+  currentAspect: "" | "16:9" | "9:16";
 }) {
+  const aspectQs = currentAspect ? `&aspect=${encodeURIComponent(currentAspect)}` : "";
+  const globalHref = currentAspect
+    ? `/admin/templates?aspect=${encodeURIComponent(currentAspect)}`
+    : "/admin/templates";
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-3">
-      <ScopeTab href="/admin/templates" active={current === "global"} label="Global" />
+      <ScopeTab href={globalHref} active={current === "global"} label="Global" />
       <span className="text-line">|</span>
       <div className="flex items-center gap-2">
         <span className="font-mono text-[11px] uppercase tracking-wider text-muted">Category:</span>
         {CATEGORIES.map((c) => (
           <ScopeTab
             key={c}
-            href={`/admin/templates?scope=cat&cat=${encodeURIComponent(c)}`}
+            href={`/admin/templates?scope=cat&cat=${encodeURIComponent(c)}${aspectQs}`}
             active={current === "cat" && cat === c}
             label={c}
           />
@@ -451,6 +467,9 @@ function ScopeSwitcher({
         <span className="font-mono text-[11px] uppercase tracking-wider text-muted">Story:</span>
         <form method="GET" action="/admin/templates" className="flex items-center gap-2">
           <input type="hidden" name="scope" value="story" />
+          {currentAspect && (
+            <input type="hidden" name="aspect" value={currentAspect} />
+          )}
           <select
             name="story"
             defaultValue={current === "story" ? story : ""}

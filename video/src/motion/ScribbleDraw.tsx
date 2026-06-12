@@ -36,7 +36,7 @@ const PATHS: string[] = [
 export const ScribbleDraw: React.FC<Props> = ({ enabled, seed }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const { scaleW, scaleH } = useCompositionScale();
+  const { scaleW, scaleH, scaleMin } = useCompositionScale();
 
   if (!enabled) return null;
 
@@ -63,8 +63,11 @@ export const ScribbleDraw: React.FC<Props> = ({ enabled, seed }) => {
       style={{
         position: "absolute",
         ...positionFor(corner, scaleW, scaleH),
-        width: scaleW(320),
-        height: scaleW(320),
+        // Square overlay — use scaleMin so a landscape canvas (wider
+        // but shorter than portrait) doesn't balloon the box past the
+        // canvas height.
+        width: scaleMin(320),
+        height: scaleMin(320),
         opacity,
         pointerEvents: "none",
       }}
@@ -79,7 +82,7 @@ export const ScribbleDraw: React.FC<Props> = ({ enabled, seed }) => {
           d={d}
           fill="none"
           stroke="#0f172a"
-          strokeWidth={Math.max(1, scaleW(6))}
+          strokeWidth={Math.max(1, scaleMin(6))}
           strokeLinecap="round"
           strokeLinejoin="round"
           strokeDasharray={STROKE_LENGTH}

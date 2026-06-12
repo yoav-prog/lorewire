@@ -61,6 +61,22 @@ describe("computeScale", () => {
     expect(s.ratioW).toBeCloseTo(2160 / 1080, 6);
     expect(s.scaleW(10)).toBeCloseTo(20, 4);
   });
+
+  it("provides a min-axis ratio for fixed-aspect overlays", () => {
+    // QA caveat fix from the rollout's 6th caveat round: square / fixed-
+    // aspect overlays (prop card, mouth-swap bust, scribble box) used to
+    // balloon on landscape because they were scaled by width alone. The
+    // ratioMin / scaleMin pair returns the smaller of (ratioW, ratioH)
+    // so a 320x320 card stays under both canvas dimensions.
+    // Portrait 1080x1920: ratioMin = min(1, 1) = 1 (identity, no change).
+    const portrait = computeScale(BASE_WIDTH, BASE_HEIGHT);
+    expect(portrait.ratioMin).toBe(1);
+    expect(portrait.scaleMin(320)).toBe(320);
+    // Landscape 1920x1080: ratioW = 1.78, ratioH = 0.56 -> ratioMin = 0.56.
+    const landscape = computeScale(1920, 1080);
+    expect(landscape.ratioMin).toBeCloseTo(1080 / 1920, 6);
+    expect(landscape.scaleMin(320)).toBeCloseTo(320 * (1080 / 1920), 4);
+  });
 });
 
 // ─── Parity with video/src/scale.ts ──────────────────────────────────────────

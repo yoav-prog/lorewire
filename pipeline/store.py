@@ -996,6 +996,30 @@ def update_story_hero(story_id: str, hero_url: str) -> None:
         )
 
 
+def update_story_hero_landscape(story_id: str, hero_url: str) -> None:
+    """Sibling of `update_story_hero` for the 16:9 landscape variant. The
+    fresh-run pipeline writes both columns; the regen path mirrors it so
+    a landscape video story doesn't ship with a stale 16:9 hero after a
+    hero regen. Caller still updates the portrait column separately."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET hero_image_landscape = %s, "
+                    "updated_at = %s WHERE id = %s",
+                    (hero_url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET hero_image_landscape = ?, updated_at = ? "
+            "WHERE id = ?",
+            (hero_url, now, story_id),
+        )
+
+
 def update_story_scenes(story_id: str, scene_urls: list[str]) -> None:
     """Replace stories.images with a fresh JSON array of scene URLs."""
     now = _now_iso()

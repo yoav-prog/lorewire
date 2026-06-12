@@ -66,7 +66,12 @@ const IMAGE_COST_USD: Record<string, number> = {
 // from the same admin settings the pipeline uses, so the estimate stays
 // accurate as the admin tunes those numbers.
 const ASSET_FIXED_COUNT: Record<string, number> = {
-  hero: 1,
+  // hero regen now generates BOTH portrait (3:4) and landscape (16:9)
+  // so the public reader, OG card, and landscape video poster all stay
+  // in sync. See _plans/2026-06-12-video-aspect-ratio.md caveat fixes.
+  // Pre-flight estimate matches what `pipeline/media.py:_regen_hero`
+  // actually consumes from the kie budget.
+  hero: 2,
   og: 1,
   mouth_swap: 2,
 };
