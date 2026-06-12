@@ -37,6 +37,7 @@ import { FrameCard } from "./FrameCard";
 import { FrameRegenActions } from "./FrameRegenActions";
 import { BulkConfirmProvider } from "./BulkConfirmContext";
 import type { ImageRenderRow } from "@/lib/image-render-queue";
+import type { CaptionPreset } from "@/lib/caption-presets";
 import {
   PreviewComposition,
   type PreviewProps,
@@ -122,6 +123,7 @@ export default function EditorClient({
   foreignOwnerEmail,
   captionStyle,
   captionStylePreview,
+  userCaptionPresets,
 }: {
   storyId: string;
   storyTitle: string;
@@ -139,6 +141,7 @@ export default function EditorClient({
   foreignOwnerEmail: string | null;
   captionStyle: ResolvedCaptionStyle;
   captionStylePreview: CaptionStyleForPreview;
+  userCaptionPresets: CaptionPreset[];
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabKey>("trim");
@@ -457,7 +460,11 @@ export default function EditorClient({
                 onDraftChange={setDraftCaptions}
               />
             ) : tab === "caption-style" ? (
-              <CaptionStylePanel storyId={storyId} resolved={captionStyle} />
+              <CaptionStylePanel
+                storyId={storyId}
+                resolved={captionStyle}
+                userPresets={userCaptionPresets}
+              />
             ) : tab === "audio" ? (
               <AudioPanel storyId={storyId} config={config} />
             ) : tab === "metadata" ? (

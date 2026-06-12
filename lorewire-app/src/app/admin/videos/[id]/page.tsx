@@ -33,6 +33,7 @@ import {
   getSessionSpendCents,
 } from "@/lib/frame-session-spend";
 import { resolveCaptionStyle, toPreview } from "@/lib/caption-style";
+import { getUserCaptionPresetsForPage } from "@/app/admin/actions";
 import EditorClient from "./EditorClient";
 
 export default async function VideoEditorPage({
@@ -146,6 +147,7 @@ export default async function VideoEditorPage({
     category: story.category,
   });
   const captionStylePreview = toPreview(captionStyle);
+  const userCaptionPresets = await getUserCaptionPresetsForPage();
 
   return (
     <EditorClient
@@ -165,6 +167,7 @@ export default async function VideoEditorPage({
       foreignOwnerEmail={foreignOwnerEmail}
       captionStyle={captionStyle}
       captionStylePreview={captionStylePreview}
+      userCaptionPresets={userCaptionPresets}
     />
   );
 }

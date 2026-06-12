@@ -49,6 +49,12 @@ import {
 } from "@/lib/image-render-queue";
 import { sanitizeLabel } from "@/lib/segments-upload";
 import {
+  USER_CAPTION_PRESETS_SETTING_KEY,
+  findBuiltInCaptionPreset,
+  type CaptionPreset,
+  type CaptionStyleValues,
+} from "@/lib/caption-presets";
+import {
   isArticleType,
   isArticleLanguage,
   slugifyTitle,
@@ -334,6 +340,168 @@ const CAPTION_STYLE_FIELDS_SET = new Set<string>([
   "entry_effect",
   "word_highlight",
 ]);
+
+// ─── Caption presets (Phase B) ─────────────────────────────────────────────
+//
+// applyCaptionStylePresetAction batch-writes every field of one preset
+// into the story-scope settings. Built-ins live in
+// lib/caption-presets.ts; user presets live in the settings table
+// under USER_CAPTION_PRESETS_SETTING_KEY and are merged at apply time
+// so an admin's saved style works exactly like a built-in.
+//
+// clearStoryCaptionOverridesAction wipes all 14 story-scope keys so
+// the panel falls back to category → global → defaults. Used by the
+// "Reset all" action in the panel header.
+//
+// saveUserCaptionPresetAction appends to the user-presets list under
+// the user's account. Names are length-capped (60 chars) and
+// control-char rejected (rule 13 §Security).
+
+const MAX_PRESET_NAME_LEN = 60;
+// eslint-disable-next-line no-control-regex -- intentional: rejecting them
+const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+
+export interface ApplyCaptionPresetResult {
+  ok: boolean;
+  error?: string;
+  /** The applied preset's id, echoed back for the UI to highlight. */
+  presetId?: string;
+}
+
+async function listUserCaptionPresets(): Promise<CaptionPreset[]> {
+  const raw = await getSetting(USER_CAPTION_PRESETS_SETTING_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is CaptionPreset =>
+        Boolean(p) &&
+        typeof p === "object" &&
+        typeof (p as CaptionPreset).id === "string" &&
+        typeof (p as CaptionPreset).name === "string" &&
+        Boolean((p as CaptionPreset).values),
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function applyCaptionStylePresetAction(
+  storyId: string,
+  presetId: string,
+): Promise<ApplyCaptionPresetResult> {
+  await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing-story" };
+  if (!presetId) return { ok: false, error: "missing-preset" };
+
+  // Built-ins first; fall through to the user-presets list. Both
+  // share the CaptionPreset shape so the apply logic is identical.
+  let preset: CaptionPreset | undefined = findBuiltInCaptionPreset(presetId);
+  if (!preset) {
+    const userPresets = await listUserCaptionPresets();
+    preset = userPresets.find((p) => p.id === presetId);
+  }
+  if (!preset) return { ok: false, error: "unknown-preset" };
+
+  // Sequential because settings_kv writes are cheap and a parallel
+  // burst can still hit per-row locks under sqlite. 14 fields = ~14ms
+  // total locally, ~70ms across an edge function. Worth the simpler
+  // failure mode.
+  for (const [field, value] of Object.entries(preset.values)) {
+    if (!CAPTION_STYLE_FIELDS_SET.has(field)) continue;
+    await setSetting(`caption.story.${storyId}.${field}`, value);
+  }
+
+  console.info("[admin caption-style preset_applied]", {
+    story_id: storyId,
+    preset_id: preset.id,
+    field_count: Object.keys(preset.values).length,
+  });
+
+  revalidatePath(`/admin/videos/${storyId}`);
+  revalidatePath(`/admin/templates`);
+  return { ok: true, presetId: preset.id };
+}
+
+export interface ClearCaptionOverridesResult {
+  ok: boolean;
+  error?: string;
+}
+
+export async function clearStoryCaptionOverridesAction(
+  storyId: string,
+): Promise<ClearCaptionOverridesResult> {
+  await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing-story" };
+  for (const field of CAPTION_STYLE_FIELDS_SET) {
+    await setSetting(`caption.story.${storyId}.${field}`, "");
+  }
+  console.info("[admin caption-style overrides_cleared]", {
+    story_id: storyId,
+    field_count: CAPTION_STYLE_FIELDS_SET.size,
+  });
+  revalidatePath(`/admin/videos/${storyId}`);
+  revalidatePath(`/admin/templates`);
+  return { ok: true };
+}
+
+export interface SaveUserCaptionPresetResult {
+  ok: boolean;
+  error?: string;
+  presetId?: string;
+}
+
+export async function saveUserCaptionPresetAction(opts: {
+  name: string;
+  values: CaptionStyleValues;
+}): Promise<SaveUserCaptionPresetResult> {
+  await requireAdmin();
+  const name = opts.name.trim();
+  if (name.length === 0) return { ok: false, error: "name-empty" };
+  if (name.length > MAX_PRESET_NAME_LEN) {
+    return { ok: false, error: "name-too-long" };
+  }
+  if (CONTROL_CHAR_RE.test(name)) {
+    return { ok: false, error: "name-control-chars" };
+  }
+
+  // Validate every field actually IS a caption field. A drift from
+  // CAPTION_STYLE_FIELDS_SET would otherwise pollute the saved preset
+  // with bogus keys that subsequent apply calls would silently skip.
+  for (const k of Object.keys(opts.values)) {
+    if (!CAPTION_STYLE_FIELDS_SET.has(k)) {
+      return { ok: false, error: `unknown-field:${k}` };
+    }
+  }
+
+  const id = `user-${randomUUID().slice(0, 8)}`;
+  const fresh: CaptionPreset = {
+    id,
+    name,
+    tagline: `User preset · ${name}`,
+    values: opts.values,
+  };
+  const existing = await listUserCaptionPresets();
+  const next = [...existing, fresh];
+  await setSetting(USER_CAPTION_PRESETS_SETTING_KEY, JSON.stringify(next));
+
+  console.info("[admin caption-style user_preset_saved]", {
+    preset_id: id,
+    name,
+    total_user_presets: next.length,
+  });
+
+  revalidatePath(`/admin/videos`, "layout");
+  revalidatePath(`/admin/templates`);
+  return { ok: true, presetId: id };
+}
+
+// Server-only read helper exposed for the page's RSC pass.
+export async function getUserCaptionPresetsForPage(): Promise<CaptionPreset[]> {
+  await requireAdmin();
+  return listUserCaptionPresets();
+}
 
 export async function saveCaptionTemplateAction(
   formData: FormData,
