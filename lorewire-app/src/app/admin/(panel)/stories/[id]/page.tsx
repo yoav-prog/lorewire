@@ -10,11 +10,10 @@ import {
 } from "@/lib/repo";
 import {
   saveStory,
-  changeStatus,
   setStoryOverrideAction,
   setStoryNoindexAction,
 } from "@/app/admin/actions";
-import { CATEGORIES, statusClass } from "@/app/admin/ui";
+import { statusClass } from "@/app/admin/ui";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import {
   MediaRegenPanel,
@@ -24,6 +23,8 @@ import {
   GranularRegenGrid,
   type GranularItem,
 } from "@/app/admin/(panel)/_components/GranularRegenGrid";
+import { CategoryChipGroup } from "./CategoryChipGroup";
+import { StatusStepIndicator } from "./StatusStepIndicator";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -56,13 +57,6 @@ export default async function EditStory({
     getSetting("video.active_intro_id"),
     getSetting("video.active_outro_id"),
   ]);
-
-  const statusButtons: { status: string; label: string }[] = [
-    { status: "review", label: "Mark in review" },
-    { status: "ready", label: "Mark ready" },
-    { status: "published", label: "Publish" },
-    { status: "archived", label: "Archive" },
-  ];
 
   // What this story owns that can be regenerated. Order is the order the
   // panel lists them in — hero first (most impactful), then bulk-asset
@@ -149,20 +143,13 @@ export default async function EditStory({
             <input name="title" defaultValue={s.title ?? ""} className={FIELD} />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_180px]">
             <div>
               <label className={LABEL}>Category</label>
-              <select
+              <CategoryChipGroup
                 name="category"
-                defaultValue={s.category ?? "Entitled"}
-                className={FIELD}
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+                initial={s.category ?? "Entitled"}
+              />
             </div>
             <div>
               <label className={LABEL}>Duration</label>
@@ -225,20 +212,8 @@ export default async function EditStory({
         {/* Sidebar */}
         <aside className="space-y-4">
           <div className="rounded-xl border border-line bg-surface p-4">
-            <div className={LABEL}>Status</div>
-            <div className="flex flex-wrap gap-2">
-              {statusButtons.map((b) => (
-                <form key={b.status} action={changeStatus}>
-                  <input type="hidden" name="id" value={s.id} />
-                  <input type="hidden" name="status" value={b.status} />
-                  <button
-                    className="rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent"
-                  >
-                    {b.label}
-                  </button>
-                </form>
-              ))}
-            </div>
+            <div className={`${LABEL} mb-3`}>Status</div>
+            <StatusStepIndicator storyId={s.id} currentStatus={s.status} />
           </div>
 
           <div className="rounded-xl border border-line bg-surface p-4">

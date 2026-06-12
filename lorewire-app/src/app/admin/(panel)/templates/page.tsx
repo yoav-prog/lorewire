@@ -3,6 +3,11 @@ import { requireAdmin } from "@/lib/dal";
 import { getSetting, listStories } from "@/lib/repo";
 import { saveCaptionTemplateAction } from "@/app/admin/actions";
 import { CaptionTemplatePreview } from "./preview";
+import {
+  TemplateFieldGrid,
+  type FieldDef,
+  type SectionDef,
+} from "./TemplateFieldGrid";
 
 // Wave 3 Phase 2: the global template from Phase 1 is now the bottom of a
 // three-tier scope chain (per-story > per-category > global > defaults). The
@@ -17,6 +22,12 @@ import { CaptionTemplatePreview } from "./preview";
 // Per-story / per-category overrides are sparse: a field left empty inherits
 // from the parent tier. The pipeline-side resolve_caption_template_for()
 // walks the chain at render time.
+//
+// Phase E (admin UI overhaul, 2026-06-12): each input is now built on the
+// Phase A component library — Slider for numerics, ColorPicker for colors,
+// ChipGroup for enumerations + the font-weight scale, plus a per-field
+// Override/Inherit toggle for non-global tiers. The form's hidden-input
+// contract is unchanged so saveCaptionTemplateAction keeps working.
 
 const CATEGORIES = ["Drama", "Entitled", "Humor", "Wholesome", "Dating", "Roommate"] as const;
 
@@ -37,41 +48,131 @@ const DEFAULTS: Record<string, string> = {
   "word_highlight": "karaoke",
 };
 
-type FieldDef = {
-  bare: string; // the bare field name (e.g. "position_y")
-  label: string;
-  hint?: string;
-} & (
-  | { kind: "number"; min: number; max: number; step: number }
-  | { kind: "color" }
-  | { kind: "text" }
-  | { kind: "select"; options: string[] }
-);
-
 const POSITION_FIELDS: FieldDef[] = [
-  { bare: "position_y", label: "Position Y (0 = top, 1 = bottom)", kind: "number", min: 0, max: 1, step: 0.01, hint: "Where the caption band sits inside the 1920px-tall frame." },
-  { bare: "size_scale", label: "Size scale", kind: "number", min: 0.5, max: 2, step: 0.05, hint: "Multiplier on the auto-sized base font (96 / 80 / 64 px for 2-4 / 5-6 / 7+ word chunks)." },
-  { bare: "padding_x", label: "Side padding (px)", kind: "number", min: 0, max: 200, step: 4 },
+  {
+    bare: "position_y",
+    label: "Position Y",
+    kind: "slider",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    endpoints: ["TOP", "BOTTOM"],
+    tickValue: 0.55,
+    hint: "Where the caption band sits inside the 1920px-tall frame.",
+  },
+  {
+    bare: "size_scale",
+    label: "Size scale",
+    kind: "slider",
+    min: 0.5,
+    max: 2,
+    step: 0.05,
+    endpoints: ["S", "L"],
+    tickValue: 1,
+    hint: "Multiplier on the auto-sized base font (96 / 80 / 64 px for 2-4 / 5-6 / 7+ word chunks).",
+  },
+  {
+    bare: "padding_x",
+    label: "Side padding",
+    kind: "slider",
+    min: 0,
+    max: 200,
+    step: 4,
+    unit: "px",
+  },
 ];
 
 const TYPOGRAPHY_FIELDS: FieldDef[] = [
-  { bare: "text_transform", label: "Text transform", kind: "select", options: ["uppercase", "none", "lowercase"] },
-  { bare: "font_weight", label: "Font weight", kind: "number", min: 100, max: 900, step: 100 },
-  { bare: "letter_spacing", label: "Letter spacing (px)", kind: "number", min: -5, max: 5, step: 0.1 },
-  { bare: "line_height", label: "Line height", kind: "number", min: 0.8, max: 2, step: 0.05 },
+  {
+    bare: "text_transform",
+    label: "Text transform",
+    kind: "chip",
+    options: [
+      { id: "uppercase", label: "AA", preview: <span style={{ textTransform: "uppercase" }}>AA</span> },
+      { id: "none", label: "Aa", preview: <span>Aa</span> },
+      { id: "lowercase", label: "aa", preview: <span style={{ textTransform: "lowercase" }}>aa</span> },
+    ],
+  },
+  { bare: "font_weight", label: "Font weight", kind: "fontWeight" },
+  {
+    bare: "letter_spacing",
+    label: "Letter spacing",
+    kind: "slider",
+    min: -5,
+    max: 5,
+    step: 0.1,
+    unit: "px",
+    tickValue: 0,
+  },
+  {
+    bare: "line_height",
+    label: "Line height",
+    kind: "slider",
+    min: 0.8,
+    max: 2,
+    step: 0.05,
+    tickValue: 1,
+  },
 ];
 
 const COLOR_FIELDS: FieldDef[] = [
   { bare: "color", label: "Word color (default)", kind: "color" },
-  { bare: "active_word_color", label: "Active word color", kind: "color", hint: "The word currently being spoken." },
-  { bare: "spoken_word_color", label: "Spoken word color", kind: "text", hint: "Past words; supports rgba()." },
+  {
+    bare: "active_word_color",
+    label: "Active word color",
+    kind: "color",
+    hint: "The word currently being spoken.",
+  },
+  {
+    bare: "spoken_word_color",
+    label: "Spoken word color",
+    kind: "text",
+    hint: "Past words; supports rgba().",
+  },
   { bare: "outline_color", label: "Outline color", kind: "color" },
-  { bare: "outline_width", label: "Outline width (px)", kind: "number", min: 0, max: 12, step: 1 },
+  {
+    bare: "outline_width",
+    label: "Outline width",
+    kind: "slider",
+    min: 0,
+    max: 12,
+    step: 1,
+    unit: "px",
+  },
 ];
 
 const ANIMATION_FIELDS: FieldDef[] = [
-  { bare: "entry_effect", label: "Entry effect", kind: "select", options: ["none", "fade", "pop", "slide-up"] },
-  { bare: "word_highlight", label: "Word highlight style", kind: "select", options: ["none", "karaoke", "color", "scale", "background"], hint: "Karaoke is the dim-past + bright-current default." },
+  {
+    bare: "entry_effect",
+    label: "Entry effect",
+    kind: "chip",
+    options: [
+      { id: "none", label: "None" },
+      { id: "fade", label: "Fade" },
+      { id: "pop", label: "Pop" },
+      { id: "slide-up", label: "Slide up" },
+    ],
+  },
+  {
+    bare: "word_highlight",
+    label: "Word highlight",
+    kind: "chip",
+    options: [
+      { id: "none", label: "None" },
+      { id: "karaoke", label: "Karaoke" },
+      { id: "color", label: "Color" },
+      { id: "scale", label: "Scale" },
+      { id: "background", label: "Background" },
+    ],
+    hint: "Karaoke is the dim-past + bright-current default.",
+  },
+];
+
+const SECTIONS: SectionDef[] = [
+  { title: "Position & sizing", fields: POSITION_FIELDS },
+  { title: "Typography", fields: TYPOGRAPHY_FIELDS },
+  { title: "Color", fields: COLOR_FIELDS },
+  { title: "Animation", fields: ANIMATION_FIELDS },
 ];
 
 const ALL_FIELDS: FieldDef[] = [
@@ -205,10 +306,12 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
           <input key={`prev-${f.bare}`} type="hidden" name={`__prev__${f.bare}`} value={values[f.bare]} />
         ))}
 
-        <FieldGroup title="Position & sizing" fields={POSITION_FIELDS} values={values} placeholders={placeholders} />
-        <FieldGroup title="Typography" fields={TYPOGRAPHY_FIELDS} values={values} placeholders={placeholders} />
-        <FieldGroup title="Color" fields={COLOR_FIELDS} values={values} placeholders={placeholders} />
-        <FieldGroup title="Animation" fields={ANIMATION_FIELDS} values={values} placeholders={placeholders} />
+        <TemplateFieldGrid
+          sections={SECTIONS}
+          values={values}
+          placeholders={placeholders}
+          scope={scope as "global" | "cat" | "story"}
+        />
 
         <div className="rounded-xl border border-line bg-surface p-4">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-wider text-muted">
@@ -321,120 +424,3 @@ function ScopeTab({
   );
 }
 
-function FieldGroup({
-  title,
-  fields,
-  values,
-  placeholders,
-}: {
-  title: string;
-  fields: FieldDef[];
-  values: Record<string, string>;
-  placeholders: Record<string, string>;
-}) {
-  return (
-    <fieldset className="space-y-3">
-      <legend className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
-        {title}
-      </legend>
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        {fields.map((f) => (
-          <FieldInput
-            key={f.bare}
-            field={f}
-            value={values[f.bare]}
-            placeholder={placeholders[f.bare]}
-          />
-        ))}
-      </div>
-    </fieldset>
-  );
-}
-
-function FieldInput({
-  field,
-  value,
-  placeholder,
-}: {
-  field: FieldDef;
-  value: string;
-  placeholder: string;
-}) {
-  const baseClass =
-    "min-w-[120px] flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent placeholder:text-muted/50";
-  const inputName = `caption.${field.bare}`;
-  let control;
-  switch (field.kind) {
-    case "number":
-      control = (
-        <input
-          name={inputName}
-          type="number"
-          defaultValue={value}
-          placeholder={placeholder}
-          min={field.min}
-          max={field.max}
-          step={field.step}
-          className={baseClass}
-        />
-      );
-      break;
-    case "color":
-      // Color picker can't show "inherit" — when override is empty, use a
-      // text input so the user can see/edit hex AND inherit by clearing.
-      control = value ? (
-        <input
-          name={inputName}
-          type="color"
-          defaultValue={normalizeHex(value)}
-          className="h-10 w-20 rounded-lg border border-line bg-bg p-1"
-        />
-      ) : (
-        <input
-          name={inputName}
-          type="text"
-          defaultValue=""
-          placeholder={placeholder}
-          className={baseClass}
-        />
-      );
-      break;
-    case "select":
-      control = (
-        <select name={inputName} defaultValue={value} className={baseClass}>
-          <option value="">— inherit ({placeholder}) —</option>
-          {field.options.map((o) => (
-            <option key={o} value={o}>
-              {o}
-            </option>
-          ))}
-        </select>
-      );
-      break;
-    case "text":
-      control = (
-        <input
-          name={inputName}
-          type="text"
-          defaultValue={value}
-          placeholder={placeholder}
-          className={baseClass}
-        />
-      );
-      break;
-  }
-  return (
-    <label className="rounded-xl border border-line bg-surface p-3">
-      <div className="mb-1 font-mono text-[11px] uppercase tracking-wider text-muted">
-        {field.label}
-      </div>
-      <div className="flex items-center gap-2">{control}</div>
-      {field.hint && <p className="mt-2 text-[12px] text-muted">{field.hint}</p>}
-    </label>
-  );
-}
-
-function normalizeHex(value: string): string {
-  if (/^#[0-9a-fA-F]{6}$/.test(value)) return value;
-  return "#000000";
-}

@@ -4,8 +4,11 @@ import { useEffect, useRef, useState, useTransition } from "react";
 import { saveSettingAction } from "@/app/admin/actions";
 import {
   AutoSaveStatus,
+  ChipGroup,
+  ColorPicker,
   Slider,
   useDebouncedSave,
+  type ChipOption,
 } from "@/components/ui";
 
 // Setting input primitives for the Settings/General page. Five flavors:
@@ -240,6 +243,137 @@ export function SettingSlider({
         unit={unit}
         tickValue={tickValue}
         endpoints={endpoints}
+        onChange={update}
+        ariaLabel={label}
+      />
+    </div>
+  );
+}
+
+// ─── SettingColor ────────────────────────────────────────────────────────────
+// Phase E: color picker setting with 500ms-debounced auto-save. Wraps the
+// Phase A ColorPicker so the SEO theme color (and any future hex setting)
+// gets the polished swatch + palette + recents popover instead of a raw
+// text field.
+//
+// The picker stores hex with a leading '#'. The auto-save pipeline writes
+// the literal string into settings_kv via saveSettingAction.
+
+export function SettingColor({
+  settingKey,
+  label,
+  hint,
+  initial,
+  placeholder = "#000000",
+}: {
+  settingKey: string;
+  label: string;
+  hint?: string;
+  initial: string;
+  /** Used when the stored value is empty so the swatch isn't an undefined
+   *  color. Doesn't get written until the user picks something. */
+  placeholder?: string;
+}) {
+  const startValue = initial.trim() || placeholder;
+  const [value, setValue] = useState(startValue);
+
+  const save = useDebouncedSave(
+    async (next: string) => {
+      try {
+        const fd = new FormData();
+        fd.set("key", settingKey);
+        fd.set("value", next);
+        await saveSettingAction(fd);
+        return { ok: true };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : "save-failed",
+        };
+      }
+    },
+    { debounceMs: 500 },
+  );
+
+  function update(next: string) {
+    setValue(next);
+    save.request(next);
+  }
+
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4">
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <label className="text-[13px] font-semibold text-ink">{label}</label>
+        <AutoSaveStatus
+          state={save.state}
+          detail={save.lastError ?? undefined}
+        />
+      </div>
+      {hint && <p className="mb-3 text-[12px] text-muted">{hint}</p>}
+      <ColorPicker value={value} onChange={update} ariaLabel={label} />
+    </div>
+  );
+}
+
+// ─── SettingChipGroup ────────────────────────────────────────────────────────
+// Phase E: visual chip-group setting with auto-save. Wraps the Phase A
+// ChipGroup so an enumerated setting (e.g. seo.twitter_card_type) becomes
+// a row of visual chips with mini-previews instead of a dropdown.
+//
+// Generic over the option id type — caller passes `ChipOption<T>[]` and
+// gets a typed `onChange(next: T)` back through the auto-save pipeline.
+
+export function SettingChipGroup<T extends string>({
+  settingKey,
+  label,
+  hint,
+  initial,
+  options,
+}: {
+  settingKey: string;
+  label: string;
+  hint?: string;
+  initial: T;
+  options: ChipOption<T>[];
+}) {
+  const [value, setValue] = useState<T>(initial);
+
+  const save = useDebouncedSave(
+    async (next: T) => {
+      try {
+        const fd = new FormData();
+        fd.set("key", settingKey);
+        fd.set("value", next);
+        await saveSettingAction(fd);
+        return { ok: true };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : "save-failed",
+        };
+      }
+    },
+    { debounceMs: 500 },
+  );
+
+  function update(next: T) {
+    setValue(next);
+    save.request(next);
+  }
+
+  return (
+    <div className="rounded-xl border border-line bg-surface p-4">
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <label className="text-[13px] font-semibold text-ink">{label}</label>
+        <AutoSaveStatus
+          state={save.state}
+          detail={save.lastError ?? undefined}
+        />
+      </div>
+      {hint && <p className="mb-3 text-[12px] text-muted">{hint}</p>}
+      <ChipGroup
+        value={value}
+        options={options}
         onChange={update}
         ariaLabel={label}
       />

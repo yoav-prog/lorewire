@@ -101,13 +101,21 @@ export function ColorPicker({
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // Sync the draft input to the controlled value when the caller
-  // changes it externally (e.g. presets row applied).
-  useEffect(() => setDraft(value), [value]);
+  // changes it externally (e.g. presets row applied). React 19 forbids
+  // both setState-in-useEffect and ref reads during render, but the
+  // sibling-state "adjust state during render" pattern is blessed for
+  // exactly this case — comparing the cached prop to the live prop and
+  // resetting derived state before commit:
+  //   https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [lastValue, setLastValue] = useState(value);
+  if (lastValue !== value) {
+    setLastValue(value);
+    setDraft(value);
+  }
 
   // Lazy-load recents on first open so SSR/render is deterministic.
-  useEffect(() => {
-    if (open) setRecents(loadRecents());
-  }, [open]);
+  // Loaded synchronously in the open toggle instead of from an effect
+  // (avoids the React 19 setState-in-effect lint and one render cycle).
 
   // Close on outside click.
   useEffect(() => {
@@ -167,7 +175,13 @@ export function ColorPicker({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => !disabled && setOpen((o) => !o)}
+          onClick={() => {
+            if (disabled) return;
+            setOpen((o) => {
+              if (!o) setRecents(loadRecents());
+              return !o;
+            });
+          }}
           aria-label={ariaLabel ?? "Pick color"}
           aria-expanded={open}
           disabled={disabled}

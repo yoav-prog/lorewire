@@ -15,16 +15,46 @@ import { requireAdmin } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import SettingsShell from "@/app/admin/SettingsShell";
 import {
-  SettingNumber,
+  SettingChipGroup,
+  SettingColor,
   SettingPresetText,
-  SettingSelect,
-  type SelectOption,
+  SettingSlider,
 } from "@/app/admin/(panel)/settings/_components/SettingControls";
 import { SettingTextField } from "./_components/SettingTextField";
+import type { ChipOption } from "@/components/ui";
 
-const TWITTER_CARD_OPTIONS: SelectOption[] = [
-  { id: "summary_large_image", label: "Summary, large image (recommended)" },
-  { id: "summary", label: "Summary, small image" },
+type TwitterCardType = "summary_large_image" | "summary";
+
+// Tiny visual previews of the two card layouts. "Large image" stacks a
+// wide image rect over text rows; "small image" puts a square thumb
+// next to a stack of text rows. Pure CSS — no real image fetched.
+const TWITTER_CARD_OPTIONS: ChipOption<TwitterCardType>[] = [
+  {
+    id: "summary_large_image",
+    label: "Large image",
+    hint: "Summary card with large image (recommended)",
+    preview: (
+      <div className="flex w-12 flex-col gap-0.5 rounded border border-line bg-surface2 p-1">
+        <div className="h-3 w-full rounded-sm bg-accent/30" />
+        <div className="h-0.5 w-full rounded-full bg-muted/60" />
+        <div className="h-0.5 w-2/3 rounded-full bg-muted/40" />
+      </div>
+    ),
+  },
+  {
+    id: "summary",
+    label: "Small image",
+    hint: "Summary card with small image",
+    preview: (
+      <div className="flex w-12 gap-1 rounded border border-line bg-surface2 p-1">
+        <div className="h-4 w-4 rounded-sm bg-accent/30" />
+        <div className="flex flex-1 flex-col justify-center gap-0.5">
+          <div className="h-0.5 w-full rounded-full bg-muted/60" />
+          <div className="h-0.5 w-2/3 rounded-full bg-muted/40" />
+        </div>
+      </div>
+    ),
+  },
 ];
 
 const TITLE_TEMPLATE_PRESETS = [
@@ -115,10 +145,10 @@ export default async function SeoPage() {
             initial={defaultMetaDescription ?? ""}
             placeholder="Netflix for true internet stories. Watch the short, read the article."
           />
-          <SettingTextField
+          <SettingColor
             settingKey="seo.theme_color"
             label="Theme color"
-            hint="Color the browser uses for the address bar on mobile and PWA install chrome. Hex, e.g. #0A0A0C."
+            hint="Color the browser uses for the address bar on mobile and PWA install chrome."
             initial={themeColor ?? ""}
             placeholder="#0A0A0C"
           />
@@ -136,11 +166,13 @@ export default async function SeoPage() {
             placeholder="https://lorewire.com/og.png"
             inputType="url"
           />
-          <SettingSelect
+          <SettingChipGroup<TwitterCardType>
             settingKey="seo.twitter_card_type"
             label="Twitter card type"
             hint="Large image cards drive more engagement; small summary is faster to load. Recommended: large image."
-            initial={twitterCardType ?? "summary_large_image"}
+            initial={
+              (twitterCardType as TwitterCardType) ?? "summary_large_image"
+            }
             options={TWITTER_CARD_OPTIONS}
           />
           <SettingTextField
@@ -206,14 +238,16 @@ export default async function SeoPage() {
           description="Controls what /sitemap.xml exposes to crawlers."
         >
           <SitemapToggleHint sitemapDrafts={sitemapDrafts ?? ""} />
-          <SettingNumber
+          <SettingSlider
             settingKey="seo.sitemap_max_age_days"
             label="Maximum age in sitemap"
             hint="Pieces older than this drop off the sitemap. Set to 0 to keep everything forever. Older content can hurt crawl budget on a small site."
             initial={sitemapMaxAgeDays ?? "0"}
             min={0}
             max={3650}
-            suffix="days"
+            step={1}
+            unit=" days"
+            tickValue={0}
           />
         </Section>
       </div>
