@@ -52,7 +52,10 @@ export async function getSessionSpendCents(
   userId: string,
   sessionStartedAt: string,
 ): Promise<SessionSpend> {
-  const row = await one<{ completed: number; pending: number }>(
+  const row = await one<{
+    completed: number | string | null;
+    pending: number | string | null;
+  }>(
     `SELECT
        COALESCE(SUM(cost_cents), 0) AS completed,
        COALESCE(SUM(CASE WHEN status IN ('queued', 'generating') THEN 1 ELSE 0 END), 0) AS pending
@@ -64,8 +67,12 @@ export async function getSessionSpendCents(
        AND requested_at >= ?`,
     [storyId, userId, sessionStartedAt],
   );
-  const completedCents = row?.completed ?? 0;
-  const pendingCount = row?.pending ?? 0;
+  // Postgres returns SUM as bigint, which the `postgres` driver hands back
+  // as a string. Without explicit Number() coercion, downstream `+` and `>`
+  // do string operations and the session-cap gate misfires. Same root cause
+  // as the daily budget bug fixed in image-render-queue.getDailyImageBudget.
+  const completedCents = Number(row?.completed ?? 0) || 0;
+  const pendingCount = Number(row?.pending ?? 0) || 0;
 
   // One DB read for the estimate per call. The asset slug arg is only
   // used by the bulk slugs ("scenes" / "props"); for frame regens the

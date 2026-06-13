@@ -433,6 +433,87 @@ describe("latestBulkScenes", () => {
   });
 });
 
+describe("getDailyImageBudget — bigint regression", () => {
+  // Production incident 2026-06-13: Postgres SUM on `cost_cents` returned a
+  // bigint, the `postgres` driver passed it back as the string "80", and
+  // `spentCents + estimateCents` did string concat instead of numeric add.
+  // `"80" + 150 = "80150"`, `"80150" > 5100 = true`, so every "Regenerate
+  // all scenes" call was rejected as daily-budget-exceeded even with $0.80
+  // spent against a $51 cap. The SQLite test bed returns Number directly so
+  // this test exercises the COERCION, not the cross-engine return shape —
+  // but the helper that does the coercion is the load-bearing piece.
+  it("returns spentCents as a number (regression for the bigint-as-string bug)", async () => {
+    await setSetting("budget.daily_usd", "10");
+    const ownerId = randomUUID();
+    await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId,
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    await run(
+      "UPDATE image_renders SET cost_cents = ? WHERE owner_id = ?",
+      [80, ownerId],
+    );
+    const b = await getDailyImageBudget();
+    expect(typeof b.spentCents).toBe("number");
+    expect(b.spentCents).toBe(80);
+    // The bug manifested as: spent + estimate > cap, even when the numeric
+    // answer was tiny. Reproduce the math the gate uses and assert it
+    // returns the right side.
+    const estimateCents = 150;
+    expect(b.spentCents + estimateCents).toBe(230);
+    expect(b.spentCents + estimateCents <= b.capCents).toBe(true);
+  });
+
+  it("canEnqueueImageRegen('scenes') passes at $0.80 spent / $51 cap", async () => {
+    // The exact production scenario at the time of the incident.
+    await setSetting("budget.daily_usd", "51");
+    await setSetting("media.scene_count", "30");
+    const ownerId = randomUUID();
+    await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId,
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    await run(
+      "UPDATE image_renders SET cost_cents = ? WHERE owner_id = ?",
+      [80, ownerId],
+    );
+    const r = await canEnqueueImageRegen("scenes");
+    expect(r.ok).toBe(true);
+    expect(r.budget.spentCents).toBe(80);
+    expect(r.budget.capCents).toBe(5100);
+  });
+
+  it("enqueueScenesBulk passes at $0.80 spent / $51 cap", async () => {
+    await setSetting("budget.daily_usd", "51");
+    await setSetting("media.scene_count", "30");
+    const ownerId = randomUUID();
+    await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId,
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    await run(
+      "UPDATE image_renders SET cost_cents = ? WHERE owner_id = ?",
+      [80, ownerId],
+    );
+    const r = await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId: randomUUID(),
+      requestedBy: null,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.count).toBe(30);
+  });
+});
+
 describe("canEnqueueImageRegen", () => {
   it("allows when projected spend stays under the cap", async () => {
     await setSetting("budget.daily_usd", "10");

@@ -41,6 +41,22 @@ export type AssetOwnerKind = "story" | "article";
 export const ACTIVE_IMAGE_RENDER_STATUSES: ReadonlySet<ImageRenderStatus> =
   new Set(["queued", "generating"]);
 
+/**
+ * Coerce a Postgres bigint/numeric (returned as string by the `postgres`
+ * driver) or SQLite integer (returned as number) into a non-negative JS
+ * Number — clamped to 0 on NaN so a `null` or malformed value can't poison
+ * the downstream `+` and `>` math the budget gate relies on.
+ *
+ * Without this the daily-budget gate misfired in production (2026-06-13):
+ * `"80" + 150 = "80150"`, `"80150" > 5100 = true`, so every regen above
+ * the per-call estimate floor was rejected as budget-exceeded.
+ */
+function toIntCents(raw: number | string | null | undefined): number {
+  if (raw == null) return 0;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+}
+
 export interface ImageRenderRow {
   id: string;
   owner_kind: string;
@@ -276,13 +292,20 @@ export async function getDailyImageBudget(): Promise<BudgetState> {
   const capCents = Math.round(capUsd * 100);
 
   const sinceIso = new Date(Date.now() - DAY_MS).toISOString();
-  const row = await one<{ spent: number | null }>(
+  // `postgres` returns Postgres `bigint` / `numeric` as a string to avoid
+  // JS Number precision loss — and SUM on an integer column yields bigint.
+  // Without an explicit coerce, `spentCents + estimateCents` does STRING
+  // concat ("80" + 150 = "80150") and the daily-budget gate misfires on
+  // every regen above ~5¢. Found in production 2026-06-13 against story
+  // `envelope` with cap=$51 / spent=$0.80. SQLite returns a Number here
+  // so the cast is also safe in the local-dev branch.
+  const row = await one<{ spent: number | string | null }>(
     `SELECT COALESCE(SUM(cost_cents), 0) AS spent
      FROM image_renders
      WHERE requested_at >= ? AND cost_cents IS NOT NULL`,
     [sinceIso],
   );
-  const spentCents = row?.spent ?? 0;
+  const spentCents = toIntCents(row?.spent);
   return {
     spentCents,
     capCents,
