@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from pipeline import gcs, segments, store
+from pipeline.aspect import infer_aspect_from_dims
 
 # Defaults are tuned for the small-team upload cadence (rule 15: surface in
 # settings later if these ever become the wrong knobs). The poll interval and
@@ -57,6 +58,10 @@ SetStatusFn = Callable[..., None]
 ListAbandonedFn = Callable[[str], Iterable[dict]]
 GetSettingFn = Callable[[str], Optional[str]]
 SetSettingFn = Callable[[str, str], None]
+# ProbeDimsFn signature: (source_path) -> (width, height) | None.
+# Injected at the same seam as `normalize_fn` so tests can stub a probed
+# shape without standing up real ffprobe.
+ProbeDimsFn = Callable[[Path], Optional[tuple[int, int]]]
 
 
 def _active_setting_key(kind: str) -> str:
@@ -110,6 +115,7 @@ def process_segment(
     set_status: SetStatusFn,
     get_setting: GetSettingFn,
     set_setting: SetSettingFn,
+    probe_dims: ProbeDimsFn = segments.probe_video_dims,
 ) -> None:
     """End-to-end processing for one `status='uploading'` row.
 
@@ -160,6 +166,33 @@ def process_segment(
         size_mb = source_path.stat().st_size / (1024 * 1024)
         print(f"[segments worker] downloaded id={seg_id} size={size_mb:.1f} MB")
 
+        # Probe the source's actual aspect and override the declared
+        # value when they disagree — the upload form's chip silently
+        # defaulted to 9:16 in production, which is exactly the kind
+        # of client-claim regression the server has to absorb (rule 13:
+        # validate at boundaries, never trust the client).
+        corrected_aspect: Optional[str] = None
+        dims = probe_dims(source_path)
+        if dims is not None:
+            w, h = dims
+            actual_aspect = infer_aspect_from_dims(w, h)
+            print(
+                f"[segments worker] aspect probe id={seg_id} dims={w}x{h} "
+                f"actual={actual_aspect} declared={seg_aspect}"
+            )
+            if actual_aspect != seg_aspect:
+                print(
+                    f"[segments worker] aspect override id={seg_id} "
+                    f"declared={seg_aspect} actual={actual_aspect}"
+                )
+                seg_aspect = actual_aspect
+                corrected_aspect = actual_aspect
+        else:
+            print(
+                f"[segments worker] aspect probe FAILED id={seg_id} "
+                f"— using declared {seg_aspect}"
+            )
+
         meta = normalize_fn(source_path, normalized_path, seg_id, seg_aspect)
         duration_ms = int(meta.get("duration_ms") or 0)
 
@@ -169,6 +202,9 @@ def process_segment(
             f"normalized_url={normalized_url} duration_ms={duration_ms}"
         )
 
+        # `aspect` is only patched when the probe disagreed with the
+        # declared value — passing None leaves the column untouched
+        # (set_segment_status filters None values out of the update).
         set_status(
             seg_id,
             "ready",
@@ -176,6 +212,7 @@ def process_segment(
             duration_ms=duration_ms,
             enabled=1,
             error=None,
+            aspect=corrected_aspect,
         )
 
         # Auto-activate the first segment of its kind, mirroring the UX the

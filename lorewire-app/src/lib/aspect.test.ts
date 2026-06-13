@@ -17,6 +17,7 @@ import { resolve } from "node:path";
 
 import {
   aspectDims,
+  inferAspectFromDims,
   isVideoAspect,
   LEGACY_DEFAULT_ASPECT,
   resolveAspect,
@@ -93,6 +94,45 @@ describe("resolveAspect", () => {
 describe("VIDEO_ASPECTS enum", () => {
   it("enumerates both supported aspects in a predictable order", () => {
     expect(VIDEO_ASPECTS).toEqual(["16:9", "9:16"]);
+  });
+});
+
+// ─── inferAspectFromDims ─────────────────────────────────────────────────────
+// Used by SegmentUploadForm.tsx to auto-flip the chip on file pick.
+// 2026-06-14 plan: production diagnosis was that the chip defaulted to
+// 9:16 and silently stamped that on uploaded 16:9 sources.
+
+describe("inferAspectFromDims", () => {
+  it("classifies landscape sources as 16:9", () => {
+    expect(inferAspectFromDims(3840, 2160)).toBe("16:9"); // 4K — the triggering case
+    expect(inferAspectFromDims(1920, 1080)).toBe("16:9");
+    expect(inferAspectFromDims(1280, 720)).toBe("16:9");
+    expect(inferAspectFromDims(854, 480)).toBe("16:9");
+  });
+
+  it("classifies portrait sources as 9:16 (the legacy default)", () => {
+    expect(inferAspectFromDims(1080, 1920)).toBe("9:16");
+    expect(inferAspectFromDims(720, 1280)).toBe("9:16");
+  });
+
+  it("collapses square sources to the legacy default", () => {
+    // The renderer doesn't emit 1:1, so a square source has to become
+    // SOMETHING — picking 9:16 (legacy default) matches the worker
+    // and avoids the chip flipping to a value the resolver can't use.
+    expect(inferAspectFromDims(1080, 1080)).toBe(LEGACY_DEFAULT_ASPECT);
+  });
+
+  it("falls through to the legacy default on bad dims", () => {
+    // ffprobe failures get caught at the call site (probe returns
+    // None / undefined dims), but defense in depth here — a leaked
+    // zero or negative shouldn't produce a confidently-wrong answer.
+    for (const [w, h] of [[0, 1080], [1920, 0], [-1, 100], [100, -1], [0, 0]]) {
+      expect(inferAspectFromDims(w, h)).toBe(LEGACY_DEFAULT_ASPECT);
+    }
+    expect(inferAspectFromDims(Number.NaN, 1080)).toBe(LEGACY_DEFAULT_ASPECT);
+    expect(inferAspectFromDims(1920, Number.POSITIVE_INFINITY)).toBe(
+      LEGACY_DEFAULT_ASPECT,
+    );
   });
 });
 

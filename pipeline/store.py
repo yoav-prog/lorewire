@@ -564,7 +564,12 @@ def list_abandoned_pending_segments(older_than_iso: str) -> list[dict]:
 # allow-list so a typo in **fields can't smuggle a write into an unrelated
 # column (the worker's only privileged write surface).
 _SEGMENT_PATCH_COLUMNS = frozenset(
-    {"normalized_url", "duration_ms", "enabled", "error", "uploaded_at"}
+    {"normalized_url", "duration_ms", "enabled", "error", "uploaded_at",
+     # `aspect` was added 2026-06-14 so the worker can override a
+     # client-claimed aspect with the value it probed off the file
+     # itself (production diagnosis: upload form silently defaulted
+     # to 9:16 and the row stayed wrong even when the source was 16:9).
+     "aspect"}
 )
 
 

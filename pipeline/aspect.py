@@ -46,6 +46,31 @@ def is_video_aspect(value: object) -> bool:
     return value == "9:16" or value == "16:9"
 
 
+def infer_aspect_from_dims(width: int, height: int) -> VideoAspect:
+    """Derive the project's aspect enum from a probed file's pixel
+    dimensions. Used by the segments worker so a 3840x2160 source
+    always lands as 16:9 in the DB regardless of what the client
+    upload form claimed (production diagnosis 2026-06-14: form
+    defaulted to 9:16 and silently stamped that on landscape uploads).
+
+    Rule is intentionally narrow — the renderer only emits 9:16 and
+    16:9, so any other shape collapses to one of those:
+        width >  height  -> 16:9 (landscape)
+        width <= height  -> 9:16 (portrait, the legacy default)
+    Square (width == height) collapses to 9:16 so the legacy default
+    holds, since the pipeline shipped portrait first.
+
+    Non-positive dims (probe failure leaked through) also fall to the
+    legacy default — callers should log the bad probe at the call
+    site so a real shape regression doesn't hide behind this fallback.
+    """
+    if not isinstance(width, int) or not isinstance(height, int):
+        return LEGACY_DEFAULT_ASPECT
+    if width <= 0 or height <= 0:
+        return LEGACY_DEFAULT_ASPECT
+    return "16:9" if width > height else LEGACY_DEFAULT_ASPECT
+
+
 def resolve_aspect(
     config_aspect: object,
     global_default: object,

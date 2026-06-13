@@ -338,6 +338,47 @@ def _probe_duration_ms(path: Path) -> int:
         return 0
 
 
+def probe_video_dims(path: Path) -> tuple[int, int] | None:
+    """ffprobe the video stream's width and height in pixels. Returns
+    `(width, height)` on success or `None` on any failure (missing
+    ffprobe binary, no video stream, garbled output). Same fail-soft
+    convention as `_probe_duration_ms` — the caller (segments worker)
+    is expected to log the None case and fall back to the declared
+    aspect rather than crashing the loop."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return None
+    raw = (result.stdout or "").strip()
+    # ffprobe prints width then height on separate lines with this -of
+    # template. Anything else (blank, single line, non-numeric) is a
+    # signal that the file isn't a video we can normalize.
+    parts = [p for p in raw.split() if p]
+    if len(parts) < 2:
+        return None
+    try:
+        w = int(parts[0])
+        h = int(parts[1])
+    except ValueError:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
 def normalize(
     source_path: Path,
     output_path: Path,

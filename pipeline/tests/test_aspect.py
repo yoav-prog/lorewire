@@ -60,6 +60,58 @@ class IsVideoAspectTests(unittest.TestCase):
             self.assertFalse(aspect.is_video_aspect(v), msg=f"value={v!r}")
 
 
+class InferAspectFromDimsTests(unittest.TestCase):
+    """2026-06-14 plan: production diagnosis on the segments upload
+    form — the chip defaulted to 9:16 and stamped that on 16:9 sources.
+    This helper plus a server-side ffprobe override is how the worker
+    closes the loophole regardless of what the client claimed."""
+
+    def test_landscape_returns_16_9(self):
+        # The triggering case: a 4K source from the user's screenshot.
+        self.assertEqual(aspect.infer_aspect_from_dims(3840, 2160), "16:9")
+        # Standard 1080p / 720p / SD 16:9.
+        self.assertEqual(aspect.infer_aspect_from_dims(1920, 1080), "16:9")
+        self.assertEqual(aspect.infer_aspect_from_dims(1280, 720), "16:9")
+        self.assertEqual(aspect.infer_aspect_from_dims(854, 480), "16:9")
+
+    def test_portrait_returns_9_16(self):
+        # The legacy default — every vertical source lands here.
+        self.assertEqual(aspect.infer_aspect_from_dims(1080, 1920), "9:16")
+        self.assertEqual(aspect.infer_aspect_from_dims(720, 1280), "9:16")
+
+    def test_square_collapses_to_legacy_default(self):
+        # Square video isn't a renderer target — we collapse it to 9:16
+        # (the legacy default) so the worker still produces SOMETHING
+        # rather than rejecting the upload. ffmpeg will pad to portrait.
+        self.assertEqual(
+            aspect.infer_aspect_from_dims(1080, 1080),
+            aspect.LEGACY_DEFAULT_ASPECT,
+        )
+
+    def test_zero_or_negative_falls_through(self):
+        # A garbled ffprobe output is filtered at the call site (probe
+        # returns None), but defense in depth: bad dims that DO leak
+        # through should not produce a confidently-wrong answer.
+        for w, h in [(0, 1080), (1920, 0), (-1, 100), (100, -1), (0, 0)]:
+            self.assertEqual(
+                aspect.infer_aspect_from_dims(w, h),
+                aspect.LEGACY_DEFAULT_ASPECT,
+                msg=f"dims={w}x{h}",
+            )
+
+    def test_non_int_falls_through(self):
+        # The function takes ints from ffprobe; a typed-loose caller
+        # passing a float / string / None should not crash the worker.
+        self.assertEqual(
+            aspect.infer_aspect_from_dims("1920", "1080"),  # type: ignore[arg-type]
+            aspect.LEGACY_DEFAULT_ASPECT,
+        )
+        self.assertEqual(
+            aspect.infer_aspect_from_dims(None, None),  # type: ignore[arg-type]
+            aspect.LEGACY_DEFAULT_ASPECT,
+        )
+
+
 class PerAssetMappingTests(unittest.TestCase):
     def test_scene_follows_video_aspect(self):
         self.assertEqual(aspect.scene_aspect_for("9:16"), "3:4")

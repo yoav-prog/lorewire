@@ -52,6 +52,31 @@ export function isVideoAspect(value: unknown): value is VideoAspect {
 }
 
 /**
+ * Derive the project's aspect enum from a video file's pixel
+ * dimensions. MIRROR of `pipeline.aspect.infer_aspect_from_dims`.
+ *
+ * Used by the segments upload form so the chip auto-flips to match
+ * the picked file BEFORE the admin clicks Upload — production
+ * diagnosis 2026-06-14: form defaulted to 9:16 and the admin uploaded
+ * 16:9 sources without noticing the chip, which silently produced
+ * squashed 9:16 normalized copies.
+ *
+ * Rule is intentionally narrow — the renderer only emits 9:16 and
+ * 16:9, so any other shape collapses to one of those:
+ *     width >  height  -> 16:9 (landscape)
+ *     width <= height  -> 9:16 (portrait, the legacy default)
+ * Non-positive or non-finite inputs fall to the legacy default; the
+ * server probe (pipeline/segments_worker.py) is the final safety net.
+ */
+export function inferAspectFromDims(width: number, height: number): VideoAspect {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return LEGACY_DEFAULT_ASPECT;
+  }
+  if (width <= 0 || height <= 0) return LEGACY_DEFAULT_ASPECT;
+  return width > height ? "16:9" : LEGACY_DEFAULT_ASPECT;
+}
+
+/**
  * Walk the resolution chain to pick the aspect for one render:
  *   1. per-story `aspect` field on `ShortVideoConfig`,
  *   2. global default from settings (`video.default_aspect`),

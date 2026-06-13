@@ -28,7 +28,11 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AspectChipGroup } from "@/components/ui";
-import { LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
+import {
+  inferAspectFromDims,
+  LEGACY_DEFAULT_ASPECT,
+  type VideoAspect,
+} from "@/lib/aspect";
 
 // Must be a multiple of 256 KiB per the GCS resumable contract. 8 MiB is the
 // recommended minimum; keeps the chunk count low for typical 5-30 MB intros
@@ -93,11 +97,75 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
   // 9:16 so every existing upload UX is unchanged; landscape stories now
   // have a way to source a matching intro/outro.
   const [aspect, setAspect] = useState<VideoAspect>(LEGACY_DEFAULT_ASPECT);
+  // Auto-detected aspect from the picked file's video metadata (2026-06-14
+  // plan: stop silently uploading 16:9 sources with the chip stuck at
+  // 9:16). null = no file picked yet OR browser couldn't decode the
+  // metadata; the server's ffprobe override is the final safety net
+  // either way.
+  const [detectedAspect, setDetectedAspect] = useState<VideoAspect | null>(null);
+  const [detectedDims, setDetectedDims] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
 
   function resetForm() {
     if (fileRef.current) fileRef.current.value = "";
     if (labelRef.current) labelRef.current.value = "";
     setProgressPct(0);
+    setDetectedAspect(null);
+    setDetectedDims(null);
+  }
+
+  // Probe the picked file's video metadata in the browser so the aspect
+  // chip auto-flips to match. Pure side-effect — runs once per file pick
+  // and revokes its blob URL on success OR after a 5s safety timeout so
+  // a forgotten loadedmetadata event can't leak the handle.
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    setDetectedAspect(null);
+    setDetectedDims(null);
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      URL.revokeObjectURL(url);
+      video.removeAttribute("src");
+      video.load();
+    };
+    const timeout = window.setTimeout(() => {
+      console.info(
+        "[segment upload aspect] probe timeout — server probe will still verify",
+      );
+      cleanup();
+    }, 5000);
+    video.preload = "metadata";
+    video.muted = true;
+    video.onloadedmetadata = () => {
+      window.clearTimeout(timeout);
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const detected = inferAspectFromDims(w, h);
+      setDetectedAspect(detected);
+      setDetectedDims({ width: w, height: h });
+      setAspect(detected);
+      console.info("[segment upload aspect] detected", {
+        width: w,
+        height: h,
+        aspect: detected,
+      });
+      cleanup();
+    };
+    video.onerror = () => {
+      window.clearTimeout(timeout);
+      console.info(
+        "[segment upload aspect] browser could not decode metadata — server probe will catch it",
+      );
+      cleanup();
+    };
+    video.src = url;
   }
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -263,6 +331,7 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
             accept="video/mp4,video/quicktime,.mp4,.mov"
             required
             disabled={uploading}
+            onChange={handleFileChange}
             className="block w-full text-[13px] text-ink file:mr-3 file:rounded-md file:border file:border-line file:bg-bg file:px-3 file:py-1.5 file:text-[12px] file:text-ink hover:file:border-accent disabled:opacity-50"
           />
         </div>
@@ -295,9 +364,11 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
           ariaLabel="Segment aspect"
           disabled={uploading}
         />
-        <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Must match the story it ships with. Mismatched segments are dropped at render time.
-        </p>
+        <AspectDetectionNote
+          detectedAspect={detectedAspect}
+          detectedDims={detectedDims}
+          currentAspect={aspect}
+        />
       </div>
 
       {uploading && (
@@ -334,6 +405,45 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
           : `Local dev (no GCS): source is normalized inline by system ffmpeg and written to public/segments/. ${formatBytes(MAX_UPLOAD_BYTES)} max.`}
       </p>
     </form>
+  );
+}
+
+// Sub-component: live status under the aspect chip. Three states, in
+// priority order:
+//   1. no file picked yet         -> the original "must match" reminder
+//   2. detected and chip matches  -> "Detected 16:9 from file metadata"
+//   3. detected and chip differs  -> warn that letterboxing will result
+// The server probe still backs all of this up — see segments_worker.py.
+function AspectDetectionNote({
+  detectedAspect,
+  detectedDims,
+  currentAspect,
+}: {
+  detectedAspect: VideoAspect | null;
+  detectedDims: { width: number; height: number } | null;
+  currentAspect: VideoAspect;
+}) {
+  if (detectedAspect === null) {
+    return (
+      <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-muted">
+        Must match the story it ships with. Mismatched segments are dropped at render time.
+      </p>
+    );
+  }
+  const dimsLabel = detectedDims
+    ? ` (${detectedDims.width}×${detectedDims.height})`
+    : "";
+  if (detectedAspect === currentAspect) {
+    return (
+      <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-accent">
+        Detected {detectedAspect}{dimsLabel} from file metadata.
+      </p>
+    );
+  }
+  return (
+    <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-warn">
+      File is {detectedAspect}{dimsLabel}; uploading as {currentAspect} will letterbox or crop. The server will re-check on normalize.
+    </p>
   );
 }
 

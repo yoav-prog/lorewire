@@ -209,6 +209,13 @@ class ProcessSegmentTests(_SegmentsTestCase):
             set_status=store.set_segment_status,
             get_setting=store.get_setting,
             set_setting=store.set_setting,
+            # 2026-06-14 plan: process_segment now ffprobes the source
+            # to override declared aspect on mismatch. Existing tests
+            # use fake bytes that ffprobe can't parse — stub the probe
+            # to None so we keep their assertions about the declared
+            # path untouched. Probe-override behavior gets its own
+            # dedicated tests in ProbeAspectOverrideTests below.
+            probe_dims=lambda p: None,
         )
 
         # Side effects all happened with the right args.
@@ -257,6 +264,13 @@ class ProcessSegmentTests(_SegmentsTestCase):
             set_status=store.set_segment_status,
             get_setting=store.get_setting,
             set_setting=store.set_setting,
+            # 2026-06-14 plan: process_segment now ffprobes the source
+            # to override declared aspect on mismatch. Existing tests
+            # use fake bytes that ffprobe can't parse — stub the probe
+            # to None so we keep their assertions about the declared
+            # path untouched. Probe-override behavior gets its own
+            # dedicated tests in ProbeAspectOverrideTests below.
+            probe_dims=lambda p: None,
         )
 
         # Active id is the admin's earlier pick, not the just-uploaded seg2.
@@ -278,6 +292,13 @@ class ProcessSegmentTests(_SegmentsTestCase):
             set_status=store.set_segment_status,
             get_setting=store.get_setting,
             set_setting=store.set_setting,
+            # 2026-06-14 plan: process_segment now ffprobes the source
+            # to override declared aspect on mismatch. Existing tests
+            # use fake bytes that ffprobe can't parse — stub the probe
+            # to None so we keep their assertions about the declared
+            # path untouched. Probe-override behavior gets its own
+            # dedicated tests in ProbeAspectOverrideTests below.
+            probe_dims=lambda p: None,
         )
 
         after = store.fetch_segment("seg-dl")
@@ -302,6 +323,13 @@ class ProcessSegmentTests(_SegmentsTestCase):
             set_status=store.set_segment_status,
             get_setting=store.get_setting,
             set_setting=store.set_setting,
+            # 2026-06-14 plan: process_segment now ffprobes the source
+            # to override declared aspect on mismatch. Existing tests
+            # use fake bytes that ffprobe can't parse — stub the probe
+            # to None so we keep their assertions about the declared
+            # path untouched. Probe-override behavior gets its own
+            # dedicated tests in ProbeAspectOverrideTests below.
+            probe_dims=lambda p: None,
         )
 
         after = store.fetch_segment("seg-nm")
@@ -328,6 +356,13 @@ class ProcessSegmentTests(_SegmentsTestCase):
             set_status=store.set_segment_status,
             get_setting=store.get_setting,
             set_setting=store.set_setting,
+            # 2026-06-14 plan: process_segment now ffprobes the source
+            # to override declared aspect on mismatch. Existing tests
+            # use fake bytes that ffprobe can't parse — stub the probe
+            # to None so we keep their assertions about the declared
+            # path untouched. Probe-override behavior gets its own
+            # dedicated tests in ProbeAspectOverrideTests below.
+            probe_dims=lambda p: None,
         )
 
         after = store.fetch_segment("seg-up")
@@ -348,6 +383,13 @@ class ProcessSegmentTests(_SegmentsTestCase):
             set_status=store.set_segment_status,
             get_setting=store.get_setting,
             set_setting=store.set_setting,
+            # 2026-06-14 plan: process_segment now ffprobes the source
+            # to override declared aspect on mismatch. Existing tests
+            # use fake bytes that ffprobe can't parse — stub the probe
+            # to None so we keep their assertions about the declared
+            # path untouched. Probe-override behavior gets its own
+            # dedicated tests in ProbeAspectOverrideTests below.
+            probe_dims=lambda p: None,
         )
         after = store.fetch_segment("seg-empty")
         self.assertEqual(after["status"], "error")
@@ -367,6 +409,155 @@ class ProcessSegmentTests(_SegmentsTestCase):
             get_setting=must_not_call,
             set_setting=must_not_call,
         )
+
+
+class ProbeAspectOverrideTests(_SegmentsTestCase):
+    """2026-06-14 plan: the worker probes the source file's actual width
+    and height and overrides the row's `aspect` column when it disagrees
+    with what the client claimed. Production trigger: the upload form's
+    aspect chip silently defaulted to 9:16 so 16:9 uploads got stamped
+    9:16 and the segment-resolver dropped them on every 16:9 story."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._tmp_root = Path(tempfile.mkdtemp(prefix="lw-worker-probe-test-"))
+        self.addCleanup(_rmtree, self._tmp_root)
+
+    def _insert_with_aspect(self, seg_id: str, declared_aspect: str) -> dict:
+        """Insert a row with a specific declared aspect so we can drive
+        the override branch deterministically."""
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        store.upsert_segment({
+            "id": seg_id,
+            "kind": "intro",
+            "label": f"label-{seg_id}",
+            "source_url": "https://example.test/source.mp4",
+            "normalized_url": None,
+            "duration_ms": None,
+            "enabled": 0,
+            "status": "uploading",
+            "error": None,
+            "uploaded_at": None,
+            "created_at": now,
+            "updated_at": now,
+            "aspect": declared_aspect,
+        })
+        return store.fetch_segment(seg_id)
+
+    @staticmethod
+    def _fakes():
+        """Common stub bundle for the probe tests. Returns the four
+        injected collaborators plus a list the test can inspect to
+        confirm normalize was called with the corrected aspect."""
+        normalize_calls: list[tuple[str, str]] = []
+
+        def fake_download(url: str, dest: Path) -> None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"source")
+
+        def fake_normalize(src: Path, out: Path, sid: str, aspect: str = "9:16") -> dict:
+            normalize_calls.append((sid, aspect))
+            out.write_bytes(b"out")
+            return {"duration_ms": 1000}
+
+        def fake_upload(local: Path, key: str) -> str:
+            return f"https://example.test/{key}"
+
+        return fake_download, fake_normalize, fake_upload, normalize_calls
+
+    def test_landscape_source_overrides_declared_portrait(self):
+        # The triggering case: the form sent 9:16, the file is 16:9.
+        row = self._insert_with_aspect("seg-land", "9:16")
+        fake_download, fake_normalize, fake_upload, normalize_calls = self._fakes()
+
+        segments_worker.process_segment(
+            row,
+            tmp_root=self._tmp_root,
+            download=fake_download,
+            normalize_fn=fake_normalize,
+            upload_fn=fake_upload,
+            set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
+            probe_dims=lambda p: (3840, 2160),  # 4K landscape
+        )
+
+        # Normalize was called with the corrected aspect, not the declared.
+        self.assertEqual(normalize_calls, [("seg-land", "16:9")])
+        # Row's aspect column was patched to match reality.
+        after = store.fetch_segment("seg-land")
+        self.assertEqual(after["aspect"], "16:9")
+        self.assertEqual(after["status"], "ready")
+
+    def test_matching_aspect_leaves_column_untouched(self):
+        # Declared and actual agree — no override, row aspect stays as-is.
+        row = self._insert_with_aspect("seg-match", "16:9")
+        fake_download, fake_normalize, fake_upload, normalize_calls = self._fakes()
+
+        segments_worker.process_segment(
+            row,
+            tmp_root=self._tmp_root,
+            download=fake_download,
+            normalize_fn=fake_normalize,
+            upload_fn=fake_upload,
+            set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
+            probe_dims=lambda p: (1920, 1080),
+        )
+
+        self.assertEqual(normalize_calls, [("seg-match", "16:9")])
+        after = store.fetch_segment("seg-match")
+        # Aspect stays at declared (no override write fired).
+        self.assertEqual(after["aspect"], "16:9")
+        self.assertEqual(after["status"], "ready")
+
+    def test_probe_failure_falls_back_to_declared(self):
+        # ffprobe couldn't decode the source. The worker logs and
+        # proceeds with the declared aspect — same as the pre-2026-06-14
+        # behavior. The DB row's aspect column stays untouched.
+        row = self._insert_with_aspect("seg-probefail", "9:16")
+        fake_download, fake_normalize, fake_upload, normalize_calls = self._fakes()
+
+        segments_worker.process_segment(
+            row,
+            tmp_root=self._tmp_root,
+            download=fake_download,
+            normalize_fn=fake_normalize,
+            upload_fn=fake_upload,
+            set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
+            probe_dims=lambda p: None,
+        )
+
+        # Declared aspect used as before.
+        self.assertEqual(normalize_calls, [("seg-probefail", "9:16")])
+        after = store.fetch_segment("seg-probefail")
+        self.assertEqual(after["aspect"], "9:16")
+        self.assertEqual(after["status"], "ready")
+
+    def test_portrait_source_overrides_declared_landscape(self):
+        # Symmetric to the landscape case — a portrait file uploaded
+        # via a form stuck on 16:9 lands as 9:16 in the DB.
+        row = self._insert_with_aspect("seg-port", "16:9")
+        fake_download, fake_normalize, fake_upload, normalize_calls = self._fakes()
+
+        segments_worker.process_segment(
+            row,
+            tmp_root=self._tmp_root,
+            download=fake_download,
+            normalize_fn=fake_normalize,
+            upload_fn=fake_upload,
+            set_status=store.set_segment_status,
+            get_setting=store.get_setting,
+            set_setting=store.set_setting,
+            probe_dims=lambda p: (1080, 1920),
+        )
+
+        self.assertEqual(normalize_calls, [("seg-port", "9:16")])
+        after = store.fetch_segment("seg-port")
+        self.assertEqual(after["aspect"], "9:16")
 
 
 class SweepAbandonedTests(_SegmentsTestCase):

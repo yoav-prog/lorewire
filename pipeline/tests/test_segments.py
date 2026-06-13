@@ -385,5 +385,66 @@ class PickSegmentAspectMatchTests(unittest.TestCase):
         )
 
 
+class ProbeVideoDimsTests(unittest.TestCase):
+    """`probe_video_dims` is the load-bearing piece of the 2026-06-14
+    aspect auto-detect plan: the worker reads the source file's actual
+    width and height and overrides the client-claimed aspect when they
+    disagree. The function has to fail soft on every weird path
+    (missing ffprobe, no video stream, garbled output) so the worker
+    can fall back to the declared value instead of crashing the loop."""
+
+    def _patched(self, stdout: str = "", side_effect=None):
+        """Patch subprocess.run inside pipeline.segments with a stub that
+        returns the given stdout. Returns the patcher so the caller can
+        use the .start()/.stop() pair via `with`."""
+        from unittest import mock as _mock
+
+        class _Result:
+            def __init__(self, out: str):
+                self.stdout = out
+                self.stderr = ""
+                self.returncode = 0
+
+        kwargs = {}
+        if side_effect is not None:
+            kwargs["side_effect"] = side_effect
+        else:
+            kwargs["return_value"] = _Result(stdout)
+        return _mock.patch.object(segments.subprocess, "run", **kwargs)
+
+    def test_clean_landscape_output_parses(self):
+        with self._patched("3840\n2160\n"):
+            self.assertEqual(segments.probe_video_dims(Path("x.mp4")), (3840, 2160))
+
+    def test_clean_portrait_output_parses(self):
+        with self._patched("1080\n1920\n"):
+            self.assertEqual(segments.probe_video_dims(Path("x.mp4")), (1080, 1920))
+
+    def test_missing_ffprobe_returns_none(self):
+        with self._patched(side_effect=FileNotFoundError("ffprobe")):
+            self.assertIsNone(segments.probe_video_dims(Path("x.mp4")))
+
+    def test_blank_output_returns_none(self):
+        # No video stream means -select_streams v:0 prints nothing.
+        with self._patched(""):
+            self.assertIsNone(segments.probe_video_dims(Path("x.mp4")))
+
+    def test_single_line_output_returns_none(self):
+        with self._patched("1920\n"):
+            self.assertIsNone(segments.probe_video_dims(Path("x.mp4")))
+
+    def test_non_numeric_output_returns_none(self):
+        with self._patched("N/A\nN/A\n"):
+            self.assertIsNone(segments.probe_video_dims(Path("x.mp4")))
+
+    def test_zero_or_negative_dims_return_none(self):
+        # Defense in depth — a corrupt encode shouldn't drive an
+        # infer_aspect_from_dims call with garbage.
+        with self._patched("0\n1080\n"):
+            self.assertIsNone(segments.probe_video_dims(Path("x.mp4")))
+        with self._patched("1920\n-1\n"):
+            self.assertIsNone(segments.probe_video_dims(Path("x.mp4")))
+
+
 if __name__ == "__main__":
     unittest.main()
