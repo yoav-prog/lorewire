@@ -495,6 +495,42 @@ describe("enqueueScenesBulk — auto-derived count + pre-resize", () => {
     expect(arr[14]).toBe("url-14");
   });
 
+  it("clears video_config.scene_prompts so the next batch gets a fresh LLM call", async () => {
+    // Cache invariant: per-scene "Redo" via the granular grid keeps the
+    // cache so the redone scene stays consistent with its neighbors; a
+    // Rebuild-all click is the user saying "I want a NEW look" and so
+    // the cache MUST be cleared. Without this clear, a Rebuild-all
+    // would silently reuse stale prompts from a prior batch.
+    await setSetting("budget.daily_usd", "100");
+    await setSetting("media.scene_count", "5");
+    await setSetting("media.scene_count_mode", "manual");
+    const ownerId = randomUUID();
+    const priorConfig = {
+      doodle_frames: [{ id: "f-0", url: "x" }],
+      scene_prompts: ["stale prompt A", "stale prompt B", "stale prompt C"],
+      captions: [],
+    };
+    await run(
+      "INSERT INTO stories (id, video_config) VALUES (?, ?)",
+      [ownerId, JSON.stringify(priorConfig)],
+    );
+    await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId,
+      requestedBy: null,
+      storyBody: "x",
+      storyDuration: null,
+    });
+    const after = await one<{ video_config: string }>(
+      "SELECT video_config FROM stories WHERE id = ?",
+      [ownerId],
+    );
+    const parsed = JSON.parse(after!.video_config);
+    expect("scene_prompts" in parsed).toBe(false);
+    // Other fields untouched.
+    expect(parsed.doodle_frames).toEqual([{ id: "f-0", url: "x" }]);
+  });
+
   it("inserts exactly N queue rows with asset slugs scene:0..scene:N-1", async () => {
     await setSetting("budget.daily_usd", "100");
     await setSetting("media.scene_count", "7");

@@ -604,17 +604,34 @@ def make_image_prompts(idea: dict, body: str, dry_run: bool, n: int = 4) -> list
     # overhead, costs ~5x more per token, but per-story we are still talking
     # sub-cent for this call. Article rewrite still uses the admin's stage
     # selection; this override is scoped to the image-prompt step.
-    raw = llm.chat(instruction, 4000, model="openai/gpt-5.4-mini").strip()
-    prompts = _parse_prompt_list(raw, n, idea["headline"], style)
+    #
+    # max_tokens=16000: a 28-prompt array at ~150 tokens each (story scene +
+    # 80-token style suffix) is ~4.2k tokens of content plus JSON overhead —
+    # the previous 4000 ceiling truncated mid-array on roughly 60% of bulk
+    # scenes regens, so `_parse_prompt_list` fell through to the generic
+    # "Scene N from the story above" fallback and kie had no story context
+    # to draw from (production diagnosis 2026-06-14 on story `envelope`).
+    raw = llm.chat(instruction, 16000, model="openai/gpt-5.4-mini").strip()
+    prompts = _parse_prompt_list(raw, n, idea["headline"], style, body=body)
     return prompts
 
 
-def _parse_prompt_list(raw: str, n: int, headline: str, style: str) -> list[str]:
+def _parse_prompt_list(
+    raw: str, n: int, headline: str, style: str, body: str | None = None,
+) -> list[str]:
     """Best-effort JSON parse of the LLM's prompt list, with a safe fallback.
 
     Handles the common LLM cases: pure JSON array, fenced code block, or a
-    leading paragraph followed by the array. Falls back to a single-hero list
-    padded with generic scene prompts if nothing parses.
+    leading paragraph followed by the array. If the LLM returned a partial
+    list (truncated mid-array), the partial list is padded by repeating the
+    last valid prompt with a "(continued) scene N" suffix so every slot still
+    carries story context — better than the old "Scene N from the story
+    above" generic fallback that kie had no chance of rendering correctly.
+
+    If nothing parses at all, falls back to a story-grounded set built from
+    the headline + a body excerpt so kie still has the article in front of
+    it. `body` is required for the fully-grounded fallback; pass None on
+    callers that don't have it (older tests).
     """
     snippet = raw
     if "```" in snippet:
@@ -633,11 +650,33 @@ def _parse_prompt_list(raw: str, n: int, headline: str, style: str) -> list[str]
             if isinstance(parsed, list):
                 prompts = [str(p).strip() for p in parsed if str(p).strip()]
                 if prompts:
-                    return prompts[:n] if len(prompts) >= n else prompts
+                    if len(prompts) >= n:
+                        return prompts[:n]
+                    # Partial list — pad by repeating the last prompt with a
+                    # numbered continuation suffix so each slot still carries
+                    # the story-specific imagery instead of a blank generic.
+                    last = prompts[-1]
+                    padded = list(prompts)
+                    while len(padded) < n:
+                        padded.append(f"{last} Continuation scene {len(padded)}.")
+                    return padded
         except json.JSONDecodeError:
             pass
 
-    fallback = [f"Hero illustration capturing the moment of: {headline}. {style}"]
+    # Total parse failure. Embed the story so kie has SOMETHING grounded to
+    # draw from instead of the previous generic "Scene N from the story
+    # above" which had no context at all.
+    excerpt = ""
+    if body:
+        excerpt = " ".join(body.split())[:400]
+        if excerpt:
+            excerpt = f' Story context: "{excerpt}..."'
+    fallback = [
+        f"Hero illustration capturing the moment of: {headline}.{excerpt} {style}"
+    ]
     for i in range(1, n):
-        fallback.append(f"Scene {i} from the story above. {style}")
+        fallback.append(
+            f"Scene {i}: a story moment from the article "
+            f'"{headline}".{excerpt} {style}'
+        )
     return fallback

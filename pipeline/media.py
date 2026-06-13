@@ -1131,15 +1131,21 @@ def _regen_one_scene(
     idea = _idea_from_story(story)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
+    # Scene prompts are cached in `video_config.scene_prompts` so a 27-row
+    # Rebuild-all-scenes batch fires the LLM once instead of 27 times. Same
+    # prompt set across all scenes = consistent characters scene-to-scene;
+    # one call instead of 27 = the LLM's truncation rate goes from ~60%
+    # (the original bug — production diagnosis 2026-06-14 on `envelope`)
+    # down to one chance per batch. The TS bulk enqueue clears the cache
+    # on each click so a fresh Rebuild-all gets fresh prompts.
     scene_count = _resolve_scene_count(None, story=story)
-    prompts = stages.make_image_prompts(
-        idea, body, dry_run=False, n=scene_count + 1,
+    scene_prompts = _resolve_scene_prompts_cached(
+        story_id=story["id"],
+        story=story,
+        idea=idea,
+        body=body,
+        scene_count=scene_count,
     )
-    # prompts[0] is the cinematic hero slot we discard; scene prompts start
-    # at index 1. Clamp to the prompt set's bounds — if the LLM returned
-    # fewer prompts than requested, fall back to the last one rather than
-    # crash.
-    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
     if not scene_prompts:
         raise RuntimeError(
             "scene prompt build returned no prompts — cannot regen"
@@ -1414,6 +1420,105 @@ def _new_frame_id() -> str:
     so this module's import time doesn't pay for `uuid` until needed."""
     import uuid as _uuid
     return _uuid.uuid4().hex
+
+
+def _resolve_scene_prompts_cached(
+    story_id: str,
+    story: dict,
+    idea: dict,
+    body: str,
+    scene_count: int,
+) -> list[str]:
+    """Return the scene prompt list for `story`, building it via the LLM
+    only when `video_config.scene_prompts` is missing or smaller than
+    `scene_count`. Persists the freshly-built list back into video_config
+    so the next scene:N worker in the same batch reads from cache.
+
+    Returns the SCENE prompts only — the hero slot (prompts[0] from
+    `make_image_prompts`) is stripped before caching so callers can index
+    directly with their `scene:N` slug N.
+
+    Cache invalidation: the TS bulk enqueue clears the cache on each
+    Rebuild-all click, so a fresh batch always gets a fresh LLM call.
+    Per-scene "Redo" clicks via the granular grid keep the cache so the
+    new image is consistent with its neighbors.
+    """
+    cached = _read_cached_scene_prompts(story)
+    if cached and len(cached) >= scene_count:
+        print(
+            f"[scene prompts cache hit] story={story_id} "
+            f"cached_count={len(cached)} target={scene_count}"
+        )
+        return cached[:scene_count]
+    print(
+        f"[scene prompts cache miss] story={story_id} "
+        f"cached_count={len(cached) if cached else 0} target={scene_count} "
+        "— firing LLM call"
+    )
+    prompts = stages.make_image_prompts(
+        idea, body, dry_run=False, n=scene_count + 1,
+    )
+    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+    if scene_prompts:
+        _write_cached_scene_prompts(story_id, story, scene_prompts)
+    return scene_prompts
+
+
+def _read_cached_scene_prompts(story: dict) -> list[str] | None:
+    """Read `video_config.scene_prompts` from a story row. Returns None
+    when missing, malformed, or empty — caller treats that as a cache miss."""
+    raw = story.get("video_config")
+    if not raw:
+        return None
+    try:
+        config = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(config, dict):
+        return None
+    cached = config.get("scene_prompts")
+    if not isinstance(cached, list):
+        return None
+    cleaned = [str(p) for p in cached if isinstance(p, str) and p.strip()]
+    return cleaned or None
+
+
+def _write_cached_scene_prompts(
+    story_id: str, story: dict, scene_prompts: list[str],
+) -> None:
+    """Stamp the prompt list into `video_config.scene_prompts`. Leaves
+    every other field on the config untouched. Best-effort — a failure
+    here doesn't prevent the regen because the prompt is still being
+    used by this caller; cache just won't hit on the next scene.
+
+    Also rewrites `story["video_config"]` in place so the subsequent
+    `_persist_frame_prompt` call in the same regen reads the cache-
+    augmented config when it spreads `**config` to build the new value.
+    Without this, the prompt persist would silently wipe the cache by
+    overwriting video_config with the pre-cache value.
+    """
+    raw = story.get("video_config")
+    config: dict
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            config = parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            config = {}
+    else:
+        config = {}
+    new_config = {**config, "scene_prompts": list(scene_prompts)}
+    try:
+        store.update_story_video_config(story_id, new_config)
+        # Keep the in-memory story dict in sync — _persist_frame_prompt
+        # reads `story["video_config"]` later in the same regen and
+        # would otherwise clobber the cache it just wrote.
+        story["video_config"] = json.dumps(new_config)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[scene prompts cache write] story={story_id} FAILED: {e} — "
+            "continuing without cache"
+        )
 
 
 def _read_scene_urls(story: dict) -> list[str]:

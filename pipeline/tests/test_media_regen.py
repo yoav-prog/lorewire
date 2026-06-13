@@ -433,6 +433,165 @@ class PerSceneRegenTests(unittest.TestCase):
             self.assertEqual(len(new_scenes), 11)
 
 
+class ScenePromptCacheTests(unittest.TestCase):
+    """Production diagnosis 2026-06-14 on `envelope`: each scene:N regen
+    fired its own independent LLM call asking for 28 prompts. The 4000-
+    token ceiling truncated mid-array on roughly 60% of calls, the parser
+    fell through to the generic "Scene N from the story above" fallback,
+    and kie drew unrelated stock illustrations. Caching the prompt list
+    in video_config.scene_prompts and re-using it across the batch kills
+    both the cost (27x cheaper) AND the truncation rate (one chance per
+    batch, not 27).
+    """
+
+    def _story(self, scene_prompts=None, extra_config=None):
+        import json as _json
+        config = {}
+        if scene_prompts is not None:
+            config["scene_prompts"] = scene_prompts
+        if extra_config:
+            config.update(extra_config)
+        return {
+            **STORY,
+            "images": "[]",
+            "video_config": _json.dumps(config) if config else None,
+        }
+
+    def test_cache_hit_skips_llm_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cached = [f"cached prompt {i}" for i in range(27)]
+            story = self._story(scene_prompts=cached)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=27,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:5", Path(tmp))
+            # LLM never called — cache served the prompt.
+            mocks["make_image_prompts"].assert_not_called()
+
+    def test_cache_miss_calls_llm_and_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story()  # no cache
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero"] + [f"fresh {i}" for i in range(5)],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=5,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            # LLM fired once, prompts stamped into video_config.scene_prompts.
+            mocks["make_image_prompts"].assert_called_once()
+            # update_story_video_config is called twice in this flow:
+            # 1. cache write inside _resolve_scene_prompts_cached
+            # 2. _persist_frame_prompt at the end
+            # Look for the cache write specifically.
+            cache_writes = [
+                call.args[1] for call in mocks["update_video_config"].call_args_list
+                if isinstance(call.args[1], dict) and "scene_prompts" in call.args[1]
+            ]
+            self.assertTrue(cache_writes)
+            cached_now = cache_writes[0]["scene_prompts"]
+            self.assertEqual(len(cached_now), 5)
+            self.assertEqual(cached_now[0], "fresh 0")
+
+    def test_partial_cache_triggers_rebuild(self):
+        # Cache smaller than scene_count is treated as a miss.
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story(scene_prompts=["only-one"])
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero"] + [f"new {i}" for i in range(10)],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=10,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:5", Path(tmp))
+            mocks["make_image_prompts"].assert_called_once()
+
+
+class FallbackPromptTests(unittest.TestCase):
+    """The pre-fix fallback was "Scene N from the story above. <style>" with
+    zero story context — kie drew random stock illustrations. New fallback
+    embeds headline + body excerpt so even a parse failure has SOMETHING
+    grounded to draw from."""
+
+    def test_full_failure_embeds_headline_and_body(self):
+        from pipeline import stages
+        raw_unparseable = "I cannot return JSON, sorry."
+        result = stages._parse_prompt_list(
+            raw_unparseable,
+            n=5,
+            headline="The Missing Envelope",
+            style="doodle aesthetic",
+            body="A retirement gift fund of $800 went missing after a long weekend.",
+        )
+        self.assertEqual(len(result), 5)
+        # Every prompt carries the headline + body excerpt, not just "Scene N".
+        for p in result:
+            self.assertIn("envelope", p.lower() + " " + p.lower())
+            self.assertIn("retirement gift", p.lower())
+
+    def test_partial_parse_pads_with_continuation(self):
+        from pipeline import stages
+        # Trailing array bracket missing on purpose — only first 3 parse cleanly.
+        raw_partial = '["hero shot", "scene a", "scene b"]'
+        result = stages._parse_prompt_list(
+            raw_partial,
+            n=6,
+            headline="X",
+            style="s",
+            body="body",
+        )
+        self.assertEqual(len(result), 6)
+        # First three are LLM-returned verbatim.
+        self.assertEqual(result[0], "hero shot")
+        self.assertEqual(result[1], "scene a")
+        self.assertEqual(result[2], "scene b")
+        # Padded slots reference the last LLM prompt + a continuation note.
+        for i in range(3, 6):
+            self.assertIn("scene b", result[i])
+            self.assertIn("Continuation", result[i])
+
+
 class ScenePromptPersistTests(unittest.TestCase):
     """Bulk scenes regen now stamps the kie prompt onto the matching
     doodle_frame so the video editor's textarea fills with what the
@@ -482,8 +641,20 @@ class ScenePromptPersistTests(unittest.TestCase):
             })
             mocks = _apply(patches, self)
             url, _cents = media.regen_one("abc123", "scene:1", Path(tmp))
-            mocks["update_video_config"].assert_called_once()
-            new_config = mocks["update_video_config"].call_args.args[1]
+            # update_story_video_config is called twice on a cache miss:
+            # once to write scene_prompts cache, once to persist the frame
+            # prompt. Pick the persist call (the one whose payload has the
+            # new url stamped on a doodle_frame at the regen target index).
+            self.assertGreaterEqual(
+                mocks["update_video_config"].call_count, 1,
+            )
+            persist_calls = [
+                c for c in mocks["update_video_config"].call_args_list
+                if isinstance(c.args[1], dict)
+                and "doodle_frames" in c.args[1]
+            ]
+            self.assertTrue(persist_calls)
+            new_config = persist_calls[-1].args[1]
             self.assertEqual(
                 new_config["doodle_frames"][1]["image_prompt"],
                 "scene 1 prompt",
@@ -541,10 +712,11 @@ class ScenePromptPersistTests(unittest.TestCase):
 
     def test_noop_when_no_video_config(self):
         # Story that's never been opened in the editor has video_config=None.
-        # The URL still lands in stories.images; we just skip the prompt
-        # persist instead of crashing.
+        # The URL still lands in stories.images; the prompt persist skips
+        # (no doodle_frames to stamp into), but the cache write still
+        # seeds an empty config with scene_prompts so the next regen can
+        # cache-hit.
         with tempfile.TemporaryDirectory() as tmp:
-            existing = ["https://old/scene-1.png"]
             story = {**STORY, "images": '["https://old/scene-1.png"]', "video_config": None}
             patches = _patches({
                 "fetch_story": mock.patch.object(
@@ -566,8 +738,12 @@ class ScenePromptPersistTests(unittest.TestCase):
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:0", Path(tmp))
-            mocks["update_video_config"].assert_not_called()
             mocks["update_scenes"].assert_called_once()
+            # No call writes doodle_frames (there were none to grow into).
+            for c in mocks["update_video_config"].call_args_list:
+                payload = c.args[1]
+                if isinstance(payload, dict):
+                    self.assertNotIn("doodle_frames", payload)
 
     def test_grows_doodle_frames_when_scene_index_past_end(self):
         # Production case 2026-06-14: `envelope` had 3 doodle_frames and a
@@ -612,8 +788,20 @@ class ScenePromptPersistTests(unittest.TestCase):
             })
             mocks = _apply(patches, self)
             url, _ = media.regen_one("abc123", "scene:10", Path(tmp))
-            mocks["update_video_config"].assert_called_once()
-            new_config = mocks["update_video_config"].call_args.args[1]
+            # update_story_video_config is called twice on a cache miss:
+            # once to write scene_prompts cache, once to persist the frame
+            # prompt. Pick the persist call (the one whose payload has the
+            # new url stamped on a doodle_frame at the regen target index).
+            self.assertGreaterEqual(
+                mocks["update_video_config"].call_count, 1,
+            )
+            persist_calls = [
+                c for c in mocks["update_video_config"].call_args_list
+                if isinstance(c.args[1], dict)
+                and "doodle_frames" in c.args[1]
+            ]
+            self.assertTrue(persist_calls)
+            new_config = persist_calls[-1].args[1]
             new_frames = new_config["doodle_frames"]
             self.assertEqual(len(new_frames), 11)  # grown to index+1
             # Old frames preserved.
@@ -656,8 +844,15 @@ class ScenePromptPersistTests(unittest.TestCase):
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:0", Path(tmp))
-            mocks["update_video_config"].assert_not_called()
             mocks["update_scenes"].assert_called_once()
+            # Malformed config: cache write reseeds an empty config with
+            # scene_prompts (the only way to recover from a corrupted
+            # row), but no doodle_frames write since we couldn't parse
+            # what was there.
+            for c in mocks["update_video_config"].call_args_list:
+                payload = c.args[1]
+                if isinstance(payload, dict):
+                    self.assertNotIn("doodle_frames", payload)
 
 
 class PerPropRegenTests(unittest.TestCase):

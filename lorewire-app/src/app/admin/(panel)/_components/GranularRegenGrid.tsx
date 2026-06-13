@@ -33,6 +33,21 @@ export interface GranularItem {
 
 const TRANSITIONAL = new Set(["queued", "generating"]);
 
+// kie writes each regen back to the SAME public URL (e.g. .../scene-1.png),
+// which means an aggressive browser / CDN cache will keep showing the prior
+// image even after a successful regen — exactly what the user reported with
+// "the thumbnail shows one thing but opening it shows a different image"
+// (2026-06-14). Appending the latest render's finished_at as a query
+// string busts the cache without changing the canonical URL. Rows that
+// haven't finished yet (queued / generating / never regenerated) keep the
+// bare URL so the prior image still paints.
+function cacheBust(src: string, latest: ImageRenderRow | null): string {
+  if (!latest || !latest.finished_at) return src;
+  if (latest.status !== "done") return src;
+  const sep = src.includes("?") ? "&" : "?";
+  return `${src}${sep}v=${encodeURIComponent(latest.finished_at)}`;
+}
+
 function statusBadge(row: ImageRenderRow | null): string | null {
   if (!row) return null;
   if (row.status === "queued") return "Queued";
@@ -88,7 +103,7 @@ export async function GranularRegenGrid({
                 {it.src ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={it.src}
+                    src={cacheBust(it.src, it.latest)}
                     alt={it.label}
                     className={`h-full w-full object-cover transition-opacity ${
                       transitional ? "opacity-50" : ""

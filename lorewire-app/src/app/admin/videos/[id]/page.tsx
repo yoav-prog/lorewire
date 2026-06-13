@@ -85,9 +85,20 @@ export default async function VideoEditorPage({
   // those files also exist under lorewire-app/public/generated/<id>/ so
   // prepending /generated/ is the safe browser-side path. Absolute URLs
   // (GCS, /generated/...) pass through.
-  const previewFrameUrls = config.doodle_frames.map((f) =>
-    toBrowserAssetUrl(f.url),
-  );
+  //
+  // Cache-bust each URL with `stories.updated_at` so a successful regen
+  // actually shows the new image — kie writes each regen to the SAME
+  // stable URL (scene-N.png), and the browser cache would otherwise keep
+  // painting the prior bytes. updated_at bumps on every per-scene save,
+  // so the query string changes after every regen and the browser
+  // re-fetches.
+  const cacheBustToken = story.updated_at ?? "";
+  const previewFrameUrls = config.doodle_frames.map((f) => {
+    const base = toBrowserAssetUrl(f.url);
+    if (!base || !cacheBustToken) return base;
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}v=${encodeURIComponent(cacheBustToken)}`;
+  });
 
   // The render-queue row for this story (latest by requested_at). The editor
   // shows its status in the header so the admin sees an in-flight render

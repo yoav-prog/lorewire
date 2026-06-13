@@ -457,8 +457,16 @@ export async function enqueueScenesBulk(opts: {
   // public reader never reads a sparse list mid-rebuild — it sees the
   // existing URLs in slots 0..len-1 and empty strings in the rest until
   // each scene completes. Story-side only; article assets unaffected.
+  //
+  // Also clears `video_config.scene_prompts` so the first scene:N worker
+  // re-asks the LLM for a fresh prompt set keyed to the current body. A
+  // Rebuild-all click is the user saying "I want a new look"; reusing
+  // cached prompts from a prior batch defeats that intent. Per-scene
+  // "Redo" clicks (granular grid) leave the cache alone so a single redo
+  // stays consistent with its neighbors.
   if (opts.ownerKind === "story") {
     await preSizeStoryScenes(opts.ownerId, count);
+    await clearStoryScenePromptsCache(opts.ownerId);
   }
 
   const now = new Date().toISOString();
@@ -486,6 +494,35 @@ export async function enqueueScenesBulk(opts: {
     capCents: budget.capCents,
     firstRenderId: ids[0],
   };
+}
+
+// Clear `video_config.scene_prompts` on the story so the first scene:N
+// worker in the upcoming batch re-asks the LLM for a fresh prompt set
+// keyed to the current body. Noop when video_config has no cache or no
+// row at all. Best-effort: a failure here doesn't fail the bulk — the
+// worker would just hit a stale cache, which is still functionally
+// correct, just not "fresh prompts every click".
+async function clearStoryScenePromptsCache(storyId: string): Promise<void> {
+  const row = await one<{ video_config: string | null }>(
+    `SELECT video_config FROM stories WHERE id = ?`,
+    [storyId],
+  );
+  if (!row?.video_config) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.video_config);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const config = parsed as Record<string, unknown>;
+  if (!("scene_prompts" in config)) return;
+  const next = { ...config };
+  delete next.scene_prompts;
+  await run(
+    `UPDATE stories SET video_config = ?, updated_at = ? WHERE id = ?`,
+    [JSON.stringify(next), new Date().toISOString(), storyId],
+  );
 }
 
 // Grow stories.images to `targetCount` entries — existing URLs keep their
