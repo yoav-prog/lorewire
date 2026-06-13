@@ -17,14 +17,21 @@
  * Auto:         npm run build (via prebuild)
  */
 import { cp, mkdir, rm, stat, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const HERE = new URL(".", import.meta.url).pathname.replace(/^\/([a-zA-Z]:)/, "$1");
 const APP_ROOT = resolve(HERE, "..");
 const REPO_ROOT = resolve(APP_ROOT, "..");
-const SRC = resolve(REPO_ROOT, "pipeline");
+const SRC_PIPELINE = resolve(REPO_ROOT, "pipeline");
+// `pipeline/models.py:16` reads `<repo>/config/models.json` via
+// `Path(__file__).resolve().parent.parent / "config" / "models.json"`.
+// After vendoring, `__file__.parent.parent` is `_lib/`, so the registry
+// file has to land at `_lib/config/models.json` or the cron drain
+// errors with `[Errno 2] No such file or directory`.
+const SRC_CONFIG = resolve(REPO_ROOT, "config");
 const DEST_DIR = resolve(APP_ROOT, "api", "_lib");
-const DEST = resolve(DEST_DIR, "pipeline");
+const DEST_PIPELINE = resolve(DEST_DIR, "pipeline");
+const DEST_CONFIG = resolve(DEST_DIR, "config");
 
 // Skip anything that would balloon the function bundle past Vercel's
 // 500 MB cap or pull in test code the serverless function doesn't
@@ -64,17 +71,22 @@ async function copyTree(src, dest) {
   }
 }
 
-async function main() {
-  if (!(await exists(SRC))) {
-    console.error(`[vendor pipeline] source not found at ${SRC}`);
+async function vendor(src, dest, label) {
+  if (!(await exists(src))) {
+    console.error(`[vendor pipeline] ${label} source not found at ${src}`);
     process.exit(1);
   }
-  if (await exists(DEST)) {
-    await rm(DEST, { recursive: true, force: true });
+  if (await exists(dest)) {
+    await rm(dest, { recursive: true, force: true });
   }
-  await mkdir(DEST_DIR, { recursive: true });
-  await copyTree(SRC, DEST);
-  console.info(`[vendor pipeline] copied ${SRC} -> ${DEST}`);
+  await mkdir(dirname(dest), { recursive: true });
+  await copyTree(src, dest);
+  console.info(`[vendor pipeline] copied ${src} -> ${dest}`);
+}
+
+async function main() {
+  await vendor(SRC_PIPELINE, DEST_PIPELINE, "pipeline");
+  await vendor(SRC_CONFIG, DEST_CONFIG, "config");
 }
 
 main().catch((err) => {
