@@ -5,7 +5,7 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { run } from "@/lib/db";
+import { one, run } from "@/lib/db";
 import { setSetting } from "@/lib/repo";
 import {
   ACTIVE_IMAGE_RENDER_STATUSES,
@@ -392,6 +392,128 @@ describe("enqueueScenesBulk", () => {
     expect(r.firstRenderId).toBeTruthy();
     const first = await getImageRender(r.firstRenderId!);
     expect(first?.asset).toBe("scene:0");
+  });
+});
+
+describe("enqueueScenesBulk — auto-derived count + pre-resize", () => {
+  // The production regression that hit `envelope` 2026-06-14:
+  // bulk enqueue used `media.scene_count` static default (30), but the
+  // panel displayed 27 (auto-derived from body+duration). Every row past
+  // index `len(stories.images) - 1` then errored "out of range" in the
+  // worker. The new behavior threads story body+duration through so the
+  // bulk's count matches the panel's count, and pre-resizes stories.images
+  // so each scene:i has a slot to write into.
+
+  it("uses auto-derived count when story body is provided", async () => {
+    await setSetting("budget.daily_usd", "100");
+    // No media.scene_count -> auto mode. Body length picks the count via
+    // ~150wpm / 5s per scene formula.
+    const ownerId = randomUUID();
+    await run(
+      "INSERT INTO stories (id, body) VALUES (?, ?)",
+      [ownerId, Array(300).fill("word").join(" ")], // ~300 words → ~120s → ~24 scenes
+    );
+    const r = await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId,
+      requestedBy: null,
+      storyBody: Array(300).fill("word").join(" "),
+      storyDuration: null,
+    });
+    expect(r.ok).toBe(true);
+    // The exact number depends on the resolveSceneCount formula but it
+    // must be auto-derived, NOT the static 30 default.
+    expect(r.count).toBeDefined();
+    expect(r.count).toBeGreaterThan(0);
+    expect(r.count).toBeLessThanOrEqual(60);
+    // Same body + same setting => same count via resolveSceneCount.
+    const { resolveSceneCount } = await import("@/lib/scene-count");
+    const expected = await resolveSceneCount({
+      body: Array(300).fill("word").join(" "),
+      duration: null,
+    });
+    expect(r.count).toBe(expected);
+  });
+
+  it("pre-resizes stories.images to the target count, preserving existing URLs", async () => {
+    await setSetting("budget.daily_usd", "100");
+    await setSetting("media.scene_count", "10"); // force manual mode → fixed 10
+    await setSetting("media.scene_count_mode", "manual");
+    const ownerId = randomUUID();
+    const existing = ["url-a", "url-b", "url-c"];
+    await run(
+      "INSERT INTO stories (id, images) VALUES (?, ?)",
+      [ownerId, JSON.stringify(existing)],
+    );
+    const r = await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId,
+      requestedBy: null,
+      storyBody: "irrelevant in manual mode",
+      storyDuration: null,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.count).toBe(10);
+
+    // stories.images grew to 10 entries: 3 existing + 7 empty placeholders.
+    const after = await one<{ images: string }>(
+      "SELECT images FROM stories WHERE id = ?",
+      [ownerId],
+    );
+    const arr = JSON.parse(after!.images);
+    expect(arr).toHaveLength(10);
+    expect(arr[0]).toBe("url-a");
+    expect(arr[1]).toBe("url-b");
+    expect(arr[2]).toBe("url-c");
+    for (let i = 3; i < 10; i++) expect(arr[i]).toBe("");
+  });
+
+  it("does not shrink stories.images when current length >= target", async () => {
+    await setSetting("budget.daily_usd", "100");
+    await setSetting("media.scene_count", "10");
+    await setSetting("media.scene_count_mode", "manual");
+    const ownerId = randomUUID();
+    const existing = Array.from({ length: 15 }, (_, i) => `url-${i}`);
+    await run(
+      "INSERT INTO stories (id, images) VALUES (?, ?)",
+      [ownerId, JSON.stringify(existing)],
+    );
+    await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId,
+      requestedBy: null,
+      storyBody: "x",
+      storyDuration: null,
+    });
+    const after = await one<{ images: string }>(
+      "SELECT images FROM stories WHERE id = ?",
+      [ownerId],
+    );
+    const arr = JSON.parse(after!.images);
+    // Length preserved at 15; no truncation to the target of 10.
+    expect(arr).toHaveLength(15);
+    expect(arr[14]).toBe("url-14");
+  });
+
+  it("inserts exactly N queue rows with asset slugs scene:0..scene:N-1", async () => {
+    await setSetting("budget.daily_usd", "100");
+    await setSetting("media.scene_count", "7");
+    await setSetting("media.scene_count_mode", "manual");
+    const ownerId = randomUUID();
+    await run("INSERT INTO stories (id) VALUES (?)", [ownerId]);
+    await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId,
+      requestedBy: null,
+      storyBody: "x",
+      storyDuration: null,
+    });
+    const rows = await recentRendersForOwner("story", ownerId, 50);
+    expect(rows).toHaveLength(7);
+    const slugs = new Set(rows.map((r) => r.asset));
+    for (let i = 0; i < 7; i++) {
+      expect(slugs.has(`scene:${i}`)).toBe(true);
+    }
   });
 });
 

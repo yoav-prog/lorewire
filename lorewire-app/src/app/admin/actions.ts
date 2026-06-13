@@ -229,26 +229,35 @@ export async function enqueueImageRegenAction(opts: {
     return { ok: false, error: "missing owner/asset" };
   }
   // Validate the owner exists before burning budget. Article and story
-  // tables are separate, so branch by kind.
+  // tables are separate, so branch by kind. We keep the story row when
+  // we have one — the scenes bulk path needs body + duration to
+  // auto-derive the target scene count.
+  let storyRow: Awaited<ReturnType<typeof getStoryRow>> | null = null;
   if (ownerKind === "article") {
     const row = await getArticle(ownerId);
     if (!row) return { ok: false, error: "article not found" };
   } else {
-    const row = await getStoryRow(ownerId);
-    if (!row) return { ok: false, error: "story not found" };
+    storyRow = await getStoryRow(ownerId);
+    if (!storyRow) return { ok: false, error: "story not found" };
   }
 
   // Story scenes route to the per-scene bulk enqueue. The legacy single
   // 'scenes' row can't fit under Vercel's function deadline (the 2026-06-13
   // zombie incident). Article scenes don't exist as a slug today, so this
-  // dispatch is story-only. Return shape is normalised back into the
-  // EnqueueImageRegenResult the caller already handles, so the panel and the
-  // bulk Rebuild-all button keep working without per-call-site changes.
-  if (ownerKind === "story" && asset === "scenes") {
+  // dispatch is story-only. Pass body + duration so the bulk enqueue
+  // resolves the SAME auto-derived count the panel displays — otherwise
+  // a 27-scene story gets a 30-row queue and the trailing rows fall off
+  // the end of stories.images (the exact regression that hit `envelope`
+  // 2026-06-14). Return shape is normalised back into the
+  // EnqueueImageRegenResult the caller already handles, so the panel and
+  // the bulk Rebuild-all button keep working without per-call-site changes.
+  if (ownerKind === "story" && asset === "scenes" && storyRow) {
     const bulk = await enqueueScenesBulk({
       ownerKind,
       ownerId,
       requestedBy: session.userId,
+      storyBody: storyRow.body,
+      storyDuration: storyRow.duration,
     });
     return scenesBulkAsRegenResult(bulk, ownerId);
   }

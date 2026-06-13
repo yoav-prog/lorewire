@@ -392,18 +392,45 @@ class PerSceneRegenTests(unittest.TestCase):
             self.assertEqual(new_scenes[3], existing[3])
             self.assertEqual(new_scenes[4], existing[4])
 
-    def test_out_of_range_index_raises(self):
+    def test_out_of_range_index_grows_the_array(self):
+        # Production case 2026-06-13: `envelope` story had stories.images=
+        # [3 urls] but Rebuild-all enqueued 30 scene:N rows. The worker
+        # used to error every row past index 2. Now it pads with empty
+        # placeholders and stamps the new URL at the target index so a
+        # subsequent Rebuild-all finishes cleanly.
         with tempfile.TemporaryDirectory() as tmp:
-            story = self._story_with_scenes(["a", "b"])
+            existing = ["url-0", "url-1", "url-2"]
+            story = self._story_with_scenes(existing)
             patches = _patches({
                 "fetch_story": mock.patch.object(
                     media.store, "fetch_story", return_value=story,
                 ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero"] + [f"p{i}" for i in range(27)],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=27,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
             })
-            _apply(patches, self)
-            with self.assertRaises(ValueError) as ctx:
-                media.regen_one("abc123", "scene:99", Path(tmp))
-            self.assertIn("out of range", str(ctx.exception))
+            mocks = _apply(patches, self)
+            url, cents = media.regen_one("abc123", "scene:10", Path(tmp))
+            self.assertEqual(cents, 5)
+            new_scenes = mocks["update_scenes"].call_args.args[1]
+            # Pre-existing slots preserved.
+            self.assertEqual(new_scenes[0], existing[0])
+            self.assertEqual(new_scenes[1], existing[1])
+            self.assertEqual(new_scenes[2], existing[2])
+            # Target slot got the new URL.
+            self.assertEqual(new_scenes[10], url)
+            # Gap slots filled with empty placeholder strings.
+            for i in range(3, 10):
+                self.assertEqual(new_scenes[i], "")
+            # No accidental over-growth past the target index.
+            self.assertEqual(len(new_scenes), 11)
 
 
 class ScenePromptPersistTests(unittest.TestCase):
@@ -542,25 +569,39 @@ class ScenePromptPersistTests(unittest.TestCase):
             mocks["update_video_config"].assert_not_called()
             mocks["update_scenes"].assert_called_once()
 
-    def test_noop_when_doodle_frames_shorter(self):
-        # Editor config has fewer frames than stories.images (rare drift).
-        # The bulk URL still lands; the prompt persist silently skips.
+    def test_grows_doodle_frames_when_scene_index_past_end(self):
+        # Production case 2026-06-14: `envelope` had 3 doodle_frames and a
+        # bulk regen targeting index 10. The persist helper used to skip,
+        # which left the editor showing only 3 scene cards even after the
+        # scene URLs grew to 27. Now it grows doodle_frames to fit so the
+        # editor's storyboard rail matches the new scene count.
         with tempfile.TemporaryDirectory() as tmp:
-            existing = [f"https://old/scene-{i+1}.png" for i in range(3)]
+            existing = ["url-0", "url-1", "url-2"]
             frames = [
-                {"id": "frame-a", "url": existing[0], "image_prompt": ""},
-            ]  # only 1 frame for 3 scenes
-            story = self._story_with_config(existing, frames)
+                {"id": "f-0", "url": existing[0], "image_prompt": "", "caption_chunk_start_index": 0},
+                {"id": "f-1", "url": existing[1], "image_prompt": "", "caption_chunk_start_index": 1},
+                {"id": "f-2", "url": existing[2], "image_prompt": "", "caption_chunk_start_index": 2},
+            ]
+            captions = [{"text": f"chunk {i}", "start_ms": i * 1000, "end_ms": i * 1000 + 900} for i in range(20)]
+            import json as _json
+            story = {
+                **STORY,
+                "images": _json.dumps(existing),
+                "video_config": _json.dumps({
+                    "doodle_frames": frames,
+                    "captions": captions,
+                }),
+            }
             patches = _patches({
                 "fetch_story": mock.patch.object(
                     media.store, "fetch_story", return_value=story,
                 ),
                 "make_image_prompts": mock.patch.object(
                     media.stages, "make_image_prompts",
-                    return_value=["hero", "p0", "p1", "p2"],
+                    return_value=["hero"] + [f"p{i}" for i in range(20)],
                 ),
                 "resolve_scene_count": mock.patch.object(
-                    media, "_resolve_scene_count", return_value=3,
+                    media, "_resolve_scene_count", return_value=20,
                 ),
                 "update_scenes": mock.patch.object(
                     media.store, "update_story_scenes",
@@ -570,10 +611,22 @@ class ScenePromptPersistTests(unittest.TestCase):
                 ),
             })
             mocks = _apply(patches, self)
-            media.regen_one("abc123", "scene:2", Path(tmp))
-            # Out-of-range frame index -> no config write, but URL still updated.
-            mocks["update_video_config"].assert_not_called()
-            mocks["update_scenes"].assert_called_once()
+            url, _ = media.regen_one("abc123", "scene:10", Path(tmp))
+            mocks["update_video_config"].assert_called_once()
+            new_config = mocks["update_video_config"].call_args.args[1]
+            new_frames = new_config["doodle_frames"]
+            self.assertEqual(len(new_frames), 11)  # grown to index+1
+            # Old frames preserved.
+            self.assertEqual(new_frames[0]["id"], "f-0")
+            self.assertEqual(new_frames[1]["id"], "f-1")
+            self.assertEqual(new_frames[2]["id"], "f-2")
+            # Newly minted frames have ids + caption indices spread across captions.
+            for i in range(3, 11):
+                self.assertTrue(new_frames[i]["id"])
+                self.assertIn("caption_chunk_start_index", new_frames[i])
+            # Target frame holds the new URL + prompt.
+            self.assertEqual(new_frames[10]["url"], url)
+            self.assertEqual(new_frames[10]["image_prompt"], "p10")
 
     def test_malformed_video_config_skipped_silently(self):
         with tempfile.TemporaryDirectory() as tmp:

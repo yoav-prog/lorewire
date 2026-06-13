@@ -1107,21 +1107,27 @@ def _regen_mouth_swap(
 def _regen_one_scene(
     story: dict, out_dir: Path, safe_id: str, index: int,
 ) -> tuple[str, int]:
-    """Regenerate just one scene image, leaving the rest of stories.images
-    untouched. `index` is the 0-based position into stories.images."""
+    """Regenerate just one scene image. Grows stories.images if `index`
+    is past the current end of the list (e.g. a Rebuild-all-scenes batch
+    on a story whose images column got out of sync with the auto-derived
+    scene count — exact case that broke story `envelope` 2026-06-13:
+    stories.images had 3 URLs from a corrupted zombie loop, the bulk
+    enqueue made 30 rows, and the worker errored on indices 3..29).
+
+    Behavior:
+      - index <  len(existing): splice the new URL into that slot, rest
+        of the list untouched (the original per-image regen contract).
+      - index >= len(existing): pad the list with empty strings up to
+        `index`, then set slot `index` to the new URL. The empty slots
+        are placeholders that a later scene:N regen fills; the public
+        reader's hero/scene fallback chain treats them as "no image".
+    """
     body = (story.get("body") or "").strip()
     if not body:
         raise ValueError(
             f"story {safe_id} has no body — scene prompts need it for context"
         )
     existing = _read_scene_urls(story)
-    if index >= len(existing):
-        # The TS UI computes indices from the current list, but a stale
-        # client (scene_count changed between render and click) could send
-        # an out-of-range index. Fail fast with a clear message.
-        raise ValueError(
-            f"scene index {index} out of range (story has {len(existing)} scenes)"
-        )
     idea = _idea_from_story(story)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
@@ -1156,8 +1162,14 @@ def _regen_one_scene(
     images.download(kie_url, local_path)
     stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
 
-    # Splice into the existing list, leave the rest as-is.
+    # Splice into the existing list, leave the rest as-is. Grow with empty
+    # placeholders when the index points past the end — the bulk-scenes
+    # enqueue path normally pre-sizes stories.images, but a fast-path
+    # admin click on a stale story should still succeed instead of
+    # rejecting every row past `len(existing)`.
     new_scenes = list(existing)
+    while len(new_scenes) <= index:
+        new_scenes.append("")
     new_scenes[index] = stored_url
     store.update_story_scenes(story["id"], new_scenes)
 
@@ -1352,18 +1364,42 @@ def _persist_frame_prompt(
     frames = config.get("doodle_frames")
     if not isinstance(frames, list):
         return
-    if scene_index >= len(frames):
-        print(
-            f"[image regen scenes prompt persist] story={story_id} "
-            f"scene_index={scene_index} > doodle_frames len={len(frames)}, "
-            "skipping prompt persist (URL still updated)"
-        )
-        return
-    frame = frames[scene_index]
-    if not isinstance(frame, dict):
-        return
-    new_frame = {**frame, "url": stored_url, "image_prompt": prompt}
     new_frames = list(frames)
+    if scene_index >= len(new_frames):
+        # Grow doodle_frames to the target index so the editor's storyboard
+        # rail shows a card for every regenerated scene. Each newly minted
+        # frame gets a stable random id (per-frame regen + Revert routes
+        # key off it), the new image URL, the kie prompt, and a
+        # caption_chunk_start_index that interpolates across the existing
+        # captions so the new frames are roughly time-distributed instead
+        # of all colliding at chunk 0. The frame timing isn't pixel-perfect
+        # — the fresh-run pipeline owns that math — but it's better than
+        # leaving the editor showing only the stale 3 scenes from before
+        # the rebuild.
+        captions = config.get("captions") if isinstance(config.get("captions"), list) else []
+        cap_count = len(captions)
+        target_len = scene_index + 1
+        while len(new_frames) < target_len:
+            i = len(new_frames)
+            ci = (
+                min(cap_count - 1, max(0, int(round(i * cap_count / target_len))))
+                if cap_count > 0
+                else 0
+            )
+            new_frames.append({
+                "id": _new_frame_id(),
+                "url": "",
+                "image_prompt": "",
+                "caption_chunk_start_index": ci,
+            })
+    target = new_frames[scene_index]
+    if not isinstance(target, dict):
+        target = {"id": _new_frame_id(), "caption_chunk_start_index": 0}
+    new_frame = {**target, "url": stored_url, "image_prompt": prompt}
+    # Make sure freshly-grown frames have an id even if some weird
+    # legacy frame dict didn't carry one through the spread.
+    if not new_frame.get("id"):
+        new_frame["id"] = _new_frame_id()
     new_frames[scene_index] = new_frame
     new_config = {**config, "doodle_frames": new_frames}
     store.update_story_video_config(story_id, new_config)
@@ -1371,6 +1407,13 @@ def _persist_frame_prompt(
         f"[image regen scenes prompt persist] story={story_id} "
         f"index={scene_index} prompt_chars={len(prompt)} url={stored_url}"
     )
+
+
+def _new_frame_id() -> str:
+    """Stable random id for a freshly-grown doodle_frame. Imported lazily
+    so this module's import time doesn't pay for `uuid` until needed."""
+    import uuid as _uuid
+    return _uuid.uuid4().hex
 
 
 def _read_scene_urls(story: dict) -> list[str]:

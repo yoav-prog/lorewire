@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { selected } from "@/lib/models";
 import { getSetting } from "@/lib/repo";
+import { resolveSceneCount } from "@/lib/scene-count";
 
 export type ImageRenderStatus =
   | "queued"
@@ -412,8 +413,29 @@ export async function enqueueScenesBulk(opts: {
   ownerKind: AssetOwnerKind;
   ownerId: string;
   requestedBy: string | null;
+  /** Story body. Used to auto-derive the scene count when the admin's
+   *  mode setting is "auto" — same formula `resolveSceneCount` uses for
+   *  the panel display, so the queue size matches the number the user
+   *  clicked. Omit for article-side or test callers. */
+  storyBody?: string | null;
+  /** Story duration string ("M:SS" or "H:MM:SS"). Same source as above. */
+  storyDuration?: string | null;
 }): Promise<EnqueueScenesBulkResult> {
-  const count = await assetImageCount("scenes");
+  // Auto-derive the count from body + duration when the story args are
+  // available (the dispatch in `actions.ts` always passes them). This
+  // matches what the panel + the Python pipeline both resolve to —
+  // without it, the bulk enqueue used the static settings default of 30
+  // and a 27-scene story got 30 queue rows where the trailing 3 fall off
+  // the end of stories.images (the regression that broke `envelope`
+  // 2026-06-14). Falls back to `assetImageCount("scenes")` for callers
+  // (tests, legacy paths) that can't supply body + duration.
+  const count =
+    opts.storyBody !== undefined || opts.storyDuration !== undefined
+      ? await resolveSceneCount({
+          body: opts.storyBody ?? null,
+          duration: opts.storyDuration ?? null,
+        })
+      : await assetImageCount("scenes");
   const [perSceneCents, budget] = await Promise.all([
     estimateImageRegenCostCents("scene:0"),
     getDailyImageBudget(),
@@ -427,6 +449,16 @@ export async function enqueueScenesBulk(opts: {
       spentCents: budget.spentCents,
       capCents: budget.capCents,
     };
+  }
+
+  // Pre-size stories.images to the target count so each scene:N row has
+  // a slot to write into. The worker's `_regen_one_scene` can also grow
+  // the array on its own (post 2026-06-14 fix), but pre-sizing means the
+  // public reader never reads a sparse list mid-rebuild — it sees the
+  // existing URLs in slots 0..len-1 and empty strings in the rest until
+  // each scene completes. Story-side only; article assets unaffected.
+  if (opts.ownerKind === "story") {
+    await preSizeStoryScenes(opts.ownerId, count);
   }
 
   const now = new Date().toISOString();
@@ -454,6 +486,39 @@ export async function enqueueScenesBulk(opts: {
     capCents: budget.capCents,
     firstRenderId: ids[0],
   };
+}
+
+// Grow stories.images to `targetCount` entries — existing URLs keep their
+// slots, missing slots are empty strings. A noop when the array is already
+// at or past the target. Defined here next to enqueueScenesBulk because
+// the resize is part of the bulk's invariant (every scene:i has a slot to
+// write into); making it an internal helper keeps the contract together.
+async function preSizeStoryScenes(
+  storyId: string,
+  targetCount: number,
+): Promise<void> {
+  const row = await one<{ images: string | null }>(
+    `SELECT images FROM stories WHERE id = ?`,
+    [storyId],
+  );
+  let current: string[] = [];
+  if (row?.images) {
+    try {
+      const parsed = JSON.parse(row.images);
+      if (Array.isArray(parsed)) {
+        current = parsed.filter((u): u is string => typeof u === "string");
+      }
+    } catch {
+      // Malformed JSON: treat as empty and overwrite below.
+    }
+  }
+  if (current.length >= targetCount) return;
+  const grown = [...current];
+  while (grown.length < targetCount) grown.push("");
+  await run(
+    `UPDATE stories SET images = ?, updated_at = ? WHERE id = ?`,
+    [JSON.stringify(grown), new Date().toISOString(), storyId],
+  );
 }
 
 // Aggregate view of every scene:N row most-recently enqueued for an owner.
