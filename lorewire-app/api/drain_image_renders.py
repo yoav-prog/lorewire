@@ -146,21 +146,56 @@ def run_drain() -> dict:
                 owner=f"{row['owner_kind']}/{row['owner_id']}",
                 asset=row["asset"],
             )
-            try:
-                output_url, cost_cents = image_render_worker._default_regen(row)
-                store.finish_image_render(row["id"], output_url, cost_cents)
-                _log(
-                    "done",
-                    id=row["id"],
-                    cost_cents=cost_cents,
-                    output_url=output_url,
+            # Bind this row id as the current event-log target so the
+            # downstream regen helpers in pipeline/media can emit
+            # progress events (kie request sent, image saved, etc.)
+            # without every helper growing a render_id parameter.
+            with store.use_render_context(row["id"]):
+                store.log_render_event(
+                    "claim",
+                    f"Picked up by cron — asset={row['asset']}",
+                    payload={
+                        "owner_kind": row["owner_kind"],
+                        "owner_id": row["owner_id"],
+                        "asset": row["asset"],
+                    },
                 )
-            except NotImplementedError as nie:
-                store.fail_image_render(row["id"], str(nie))
-                _log("not_implemented", id=row["id"], error=str(nie))
-            except Exception as exc:  # noqa: BLE001 — surface to row
-                store.fail_image_render(row["id"], str(exc))
-                _log("err", id=row["id"], error=str(exc))
+                row_started = time.monotonic()
+                try:
+                    output_url, cost_cents = image_render_worker._default_regen(row)
+                    store.finish_image_render(row["id"], output_url, cost_cents)
+                    elapsed = round(time.monotonic() - row_started, 2)
+                    store.log_render_event(
+                        "done",
+                        f"Finished in {elapsed}s — cost ${(cost_cents or 0) / 100:.2f}",
+                        payload={
+                            "output_url": output_url,
+                            "cost_cents": cost_cents,
+                            "elapsed_s": elapsed,
+                        },
+                    )
+                    _log(
+                        "done",
+                        id=row["id"],
+                        cost_cents=cost_cents,
+                        output_url=output_url,
+                    )
+                except NotImplementedError as nie:
+                    store.fail_image_render(row["id"], str(nie))
+                    store.log_render_event(
+                        "not_implemented",
+                        str(nie),
+                        level="warn",
+                    )
+                    _log("not_implemented", id=row["id"], error=str(nie))
+                except Exception as exc:  # noqa: BLE001 — surface to row
+                    store.fail_image_render(row["id"], str(exc))
+                    store.log_render_event(
+                        "error",
+                        str(exc),
+                        level="error",
+                    )
+                    _log("err", id=row["id"], error=str(exc))
             drained += 1
 
     elapsed = round(time.monotonic() - start, 2)

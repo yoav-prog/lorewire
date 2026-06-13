@@ -138,6 +138,22 @@ SCHEMA_STATEMENTS = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_image_renders_status_requested ON image_renders(status, requested_at)",
     "CREATE INDEX IF NOT EXISTS idx_image_renders_owner ON image_renders(owner_kind, owner_id, asset, requested_at)",
+    # 2026-06-13 Phase 2 of _plans/2026-06-13-worker-host-stop-button-observability.md.
+    # Per-row event timeline so the admin can see what the worker is
+    # actually doing (kie request, kie response, image saved, etc.)
+    # without tailing Vercel logs. The bracketed `[drain claim]`-style
+    # logs stay; this table is the user-visible mirror of the same
+    # events.
+    """CREATE TABLE IF NOT EXISTS image_render_events (
+        id          TEXT PRIMARY KEY,
+        render_id   TEXT NOT NULL,
+        ts          TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        event       TEXT NOT NULL,
+        message     TEXT,
+        payload     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_image_render_events_render_id ON image_render_events(render_id, ts)",
     # Wave 3 Phase 4 video segment library: intros and outros are uploaded
     # through the admin, normalized once to 1080x1920 @ 30fps H.264+AAC, then
     # cached in GCS. Renders splice the active intro before and the active
@@ -1083,6 +1099,118 @@ def image_render_drain_lock() -> _AdvisoryLock:
     """Convenience wrapper so callers don't memorize the key. Used by
     `lorewire-app/api/drain_image_renders.py`."""
     return _AdvisoryLock(IMAGE_RENDER_DRAIN_LOCK_KEY)
+
+
+# ─── image_render_events (2026-06-13 Phase 2 observability) ───────────────────
+# A contextvar-based pattern so the regen helpers in pipeline/media.py can
+# emit events without every function in the chain growing a render_id
+# parameter. The drain handler wraps the regen call in
+# `with use_render_context(row['id']):` and the regen path calls
+# `log_render_event(...)` at meaningful checkpoints. Local pipeline
+# runs (no queue context set) call the same helper as a silent no-op.
+
+import contextvars as _ctxvars
+import uuid as _uuid
+
+_current_render_id: _ctxvars.ContextVar[str | None] = _ctxvars.ContextVar(
+    "current_render_id", default=None,
+)
+
+
+class _RenderContext:
+    """Context manager that binds the current render id so subsequent
+    log_render_event() calls know which row to attach to. Returns the
+    bound id so callers can grab it without re-reading the context."""
+
+    def __init__(self, render_id: str) -> None:
+        self.render_id = render_id
+        self._token: _ctxvars.Token | None = None
+
+    def __enter__(self) -> str:
+        self._token = _current_render_id.set(self.render_id)
+        return self.render_id
+
+    def __exit__(self, *exc) -> None:
+        if self._token is not None:
+            _current_render_id.reset(self._token)
+            self._token = None
+
+
+def use_render_context(render_id: str) -> _RenderContext:
+    """Bind `render_id` as the current event-log target for the
+    duration of a `with` block. Drain handler wraps the regen call
+    with this so events bubble up to the right row without parameter
+    plumbing through every regen helper."""
+    return _RenderContext(render_id)
+
+
+def log_render_event(
+    event: str,
+    message: str | None = None,
+    *,
+    level: str = "info",
+    payload: dict | None = None,
+    render_id: str | None = None,
+) -> None:
+    """Persist one timeline entry against the current (or explicit)
+    render row. When no `render_id` is passed AND no context is bound
+    (e.g. local pipeline run not via the queue), this function is a
+    silent no-op — by design, so emitting events from
+    `pipeline.media` is safe regardless of caller.
+
+    `event` is a short machine slug (e.g. 'kie_request_sent',
+    'image_saved'); `message` is the human-readable line shown in the
+    admin UI; `payload` carries structured fields (durations, costs,
+    URLs) and is JSON-encoded into a TEXT column for portability."""
+    target = render_id if render_id is not None else _current_render_id.get()
+    if target is None:
+        return
+    row_id = str(_uuid.uuid4())
+    ts = _now_iso()
+    payload_json = json.dumps(payload) if payload is not None else None
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO image_render_events "
+                    "(id, render_id, ts, level, event, message, payload) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (row_id, target, ts, level, event, message, payload_json),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "INSERT INTO image_render_events "
+            "(id, render_id, ts, level, event, message, payload) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (row_id, target, ts, level, event, message, payload_json),
+        )
+
+
+def list_render_events(render_id: str, limit: int = 200) -> list[dict]:
+    """Return events for one render row in chronological order
+    (oldest first). 200 is plenty for a 27-scene rebuild that emits
+    ~5 events per image (~135) plus the dispatch overhead."""
+    sql_pg = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = %s "
+        "ORDER BY ts ASC LIMIT %s"
+    )
+    sql_sqlite = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = ? "
+        "ORDER BY ts ASC LIMIT ?"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_pg, (render_id, limit))
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        return [
+            dict(r) for r in c.execute(sql_sqlite, (render_id, limit)).fetchall()
+        ]
 
 
 def update_story_hero(story_id: str, hero_url: str) -> None:

@@ -20,6 +20,7 @@ import {
 import { RegenButton } from "./RegenButton";
 import { RegenAutoRefresh } from "./RegenAutoRefresh";
 import { RebuildAllButton } from "./RebuildAllButton";
+import { RenderEventTimeline } from "./RenderEventTimeline";
 
 export interface MediaAssetSpec {
   /** Stable slug stored on the render row. */
@@ -95,12 +96,18 @@ export async function MediaRegenPanel({
             className="rounded-lg border border-line bg-bg p-3"
           >
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
+              <div className="min-w-0 flex-1">
                 <div className="text-[13px] font-semibold text-ink">
                   {a.label}
                 </div>
                 <p className="mt-0.5 text-[12px] text-muted">{a.hint}</p>
                 <LatestRenderLine row={a.latest} />
+                {a.latest && (
+                  <RenderEventTimeline
+                    renderId={a.latest.id}
+                    isActive={TRANSITIONAL.has(a.latest.status)}
+                  />
+                )}
               </div>
               <RegenButton
                 ownerKind={ownerKind}

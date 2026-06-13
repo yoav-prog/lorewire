@@ -232,6 +232,27 @@ export const IMAGE_RENDERS: Table = {
   ],
 };
 
+// 2026-06-13 Phase 2 of
+// _plans/2026-06-13-worker-host-stop-button-observability.md.
+// One row per checkpoint in a regen — claim, prompt_built,
+// kie_request_sent, kie_response_received, image_saved, done, error,
+// etc. The admin UI polls these to show a live progress timeline
+// under each image_renders row so "Generating · Xm ago" stops being
+// the only signal. Python-side writer is `store.log_render_event`;
+// reader on the TS side is `listRenderEvents` in image-render-queue.ts.
+export const IMAGE_RENDER_EVENTS: Table = {
+  name: "image_render_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "render_id", type: "TEXT" },
+    { name: "ts", type: "TEXT" },
+    { name: "level", type: "TEXT" },
+    { name: "event", type: "TEXT" },
+    { name: "message", type: "TEXT" },
+    { name: "payload", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -239,6 +260,7 @@ export const TABLES: Table[] = [
   VIDEO_SEGMENTS,
   VIDEO_RENDERS,
   IMAGE_RENDERS,
+  IMAGE_RENDER_EVENTS,
   ARTICLES,
   ARTICLE_REVISIONS,
 ];

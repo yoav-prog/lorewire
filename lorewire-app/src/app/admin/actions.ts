@@ -48,6 +48,8 @@ import { run } from "@/lib/db";
 import {
   canEnqueueImageRegen,
   enqueueImageRegen,
+  listRenderEvents,
+  type RenderEventRow,
 } from "@/lib/image-render-queue";
 import { sanitizeLabel } from "@/lib/segments-upload";
 import {
@@ -280,6 +282,18 @@ export async function enqueueImageRegenAction(opts: {
     spentCents: pre.budget.spentCents,
     capCents: pre.budget.capCents,
   };
+}
+
+// Per-row event timeline for image_renders (Phase 2 observability).
+// The RenderEventTimeline client component polls this every 3s while
+// the parent row is transitional. Cheap query — events for one render
+// are ~5-200 rows max with a primary-key-style index lookup.
+export async function listRenderEventsAction(
+  renderId: string,
+): Promise<RenderEventRow[]> {
+  await requireAdmin();
+  if (!renderId) return [];
+  return listRenderEvents(renderId);
 }
 
 export async function setModelAction(formData: FormData): Promise<void> {

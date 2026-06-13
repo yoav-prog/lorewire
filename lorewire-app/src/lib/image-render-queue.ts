@@ -184,6 +184,45 @@ export async function recentRendersForOwner(
   );
 }
 
+// ─── per-row event timeline (2026-06-13 Phase 2) ─────────────────────────────
+// The drain handler + the pipeline regen helpers write structured events
+// into `image_render_events` (one row per checkpoint). The admin UI
+// reads them through `listRenderEvents` and renders an inline timeline
+// under each row so "Generating · 4m ago" stops being the only signal.
+
+export type RenderEventLevel = "info" | "warn" | "error";
+
+export interface RenderEventRow {
+  id: string;
+  render_id: string;
+  ts: string;
+  level: RenderEventLevel;
+  event: string;
+  message: string | null;
+  /** JSON-encoded structured payload; UI parses + displays inline. */
+  payload: string | null;
+}
+
+const EVENT_COLS =
+  "id, render_id, ts, level, event, message, payload";
+
+/**
+ * Read the event timeline for one render row in chronological order
+ * (oldest first). 200 is enough for a 27-scene rebuild (~5 events per
+ * image = ~135) plus dispatch overhead.
+ */
+export async function listRenderEvents(
+  renderId: string,
+  limit = 200,
+): Promise<RenderEventRow[]> {
+  return all<RenderEventRow>(
+    `SELECT ${EVENT_COLS} FROM image_render_events
+     WHERE render_id = ?
+     ORDER BY ts ASC LIMIT ?`,
+    [renderId, limit],
+  );
+}
+
 // Most recent render for a specific asset of an owner. Used by the UI to
 // show "Last regenerated: 2m ago" + the latest output_url / error.
 export async function latestRenderForAsset(

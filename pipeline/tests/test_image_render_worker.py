@@ -252,5 +252,76 @@ class AdvisoryLockTests(_WorkerTestCase):
             self.assertTrue(acquired_again)
 
 
+class RenderEventLogTests(_WorkerTestCase):
+    """Phase 2 observability: per-row event timeline. The contextvar
+    pattern lets pipeline/media.py emit events without every regen
+    helper growing a render_id parameter, so we cover both the
+    explicit and the implicit (context-bound) call paths plus the
+    'no context, no-op' fallback that protects local pipeline runs."""
+
+    def test_event_written_when_render_id_passed_explicitly(self):
+        render_id = self._new_image_render_row()
+        store.log_render_event(
+            "prompt_built", "hi", payload={"x": 1}, render_id=render_id,
+        )
+        events = store.list_render_events(render_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "prompt_built")
+        self.assertEqual(events[0]["message"], "hi")
+        self.assertEqual(events[0]["level"], "info")
+        # payload is JSON-encoded TEXT — caller is responsible for parsing.
+        import json as _json
+        self.assertEqual(_json.loads(events[0]["payload"]), {"x": 1})
+
+    def test_event_written_when_context_is_bound(self):
+        render_id = self._new_image_render_row()
+        with store.use_render_context(render_id):
+            store.log_render_event("kie_request_sent", "go")
+            store.log_render_event(
+                "image_saved", "ok", payload={"url": "https://x/y.png"},
+            )
+        events = store.list_render_events(render_id)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "kie_request_sent")
+        self.assertEqual(events[1]["event"], "image_saved")
+
+    def test_log_render_event_is_noop_without_context(self):
+        # No context, no explicit render_id — must not raise, must not
+        # write anywhere. This is what keeps local pipeline runs from
+        # blowing up when they import code that emits events.
+        store.log_render_event("kie_request_sent", "should be silent")
+        # Nothing to assert beyond "no exception" — the absence of a
+        # writable target means there's no row to query against.
+
+    def test_events_returned_in_chronological_order(self):
+        render_id = self._new_image_render_row()
+        with store.use_render_context(render_id):
+            for i in range(5):
+                store.log_render_event(f"step_{i}", f"step {i}")
+        events = store.list_render_events(render_id)
+        self.assertEqual(len(events), 5)
+        for i, ev in enumerate(events):
+            self.assertEqual(ev["event"], f"step_{i}")
+
+    def test_context_pops_when_block_exits(self):
+        render_id = self._new_image_render_row()
+        with store.use_render_context(render_id):
+            store.log_render_event("inside", "captured")
+        # Outside the with — must be a no-op again.
+        store.log_render_event("outside", "should be lost")
+        events = store.list_render_events(render_id)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "inside")
+
+    def test_list_render_events_respects_limit(self):
+        render_id = self._new_image_render_row()
+        with store.use_render_context(render_id):
+            for i in range(10):
+                store.log_render_event(f"step_{i}", f"step {i}")
+        events = store.list_render_events(render_id, limit=3)
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0]["event"], "step_0")
+
+
 if __name__ == "__main__":
     unittest.main()

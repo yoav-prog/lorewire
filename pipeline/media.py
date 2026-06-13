@@ -801,16 +801,42 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
     )
+    store.log_render_event(
+        "prompt_built",
+        f"Portrait hero prompt ready ({len(portrait_prompt)} chars)",
+        payload={"variant": "portrait", "aspect": "3:4"},
+    )
+    store.log_render_event(
+        "kie_request_sent",
+        "Submitted to kie — waiting on portrait generation",
+        payload={"variant": "portrait", "aspect": "3:4"},
+    )
     portrait_kie = _generate_with_retry(
         portrait_prompt, f"id={safe_id} hero regen portrait", aspect_ratio="3:4",
     )
     if portrait_kie is None:
+        store.log_render_event(
+            "kie_failed",
+            "Portrait generation returned no URL after retries",
+            level="error",
+            payload={"variant": "portrait"},
+        )
         raise RuntimeError("kie portrait hero generation returned no URL after retries")
+    store.log_render_event(
+        "kie_response_received",
+        "kie returned a portrait image URL",
+        payload={"variant": "portrait"},
+    )
     portrait_local = out_dir / "hero.png"
     images.download(portrait_kie, portrait_local)
     portrait_public = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
     portrait_url = gcs.publish(
         portrait_local, f"{safe_id}/hero.png", portrait_public,
+    )
+    store.log_render_event(
+        "image_saved",
+        f"Portrait uploaded — {portrait_url}",
+        payload={"variant": "portrait", "url": portrait_url},
     )
     store.update_story_hero(story["id"], portrait_url)
     total_cents += per_image_cents
@@ -819,10 +845,21 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
     )
+    store.log_render_event(
+        "kie_request_sent",
+        "Submitted to kie — waiting on landscape generation",
+        payload={"variant": "landscape", "aspect": "16:9"},
+    )
     landscape_kie = _generate_with_retry(
         landscape_prompt, f"id={safe_id} hero regen landscape", aspect_ratio="16:9",
     )
     if landscape_kie is None:
+        store.log_render_event(
+            "kie_failed",
+            "Landscape failed; portrait still updated (partial success)",
+            level="warn",
+            payload={"variant": "landscape"},
+        )
         print(
             f"[image regen hero] id={safe_id} landscape FAILED; "
             "portrait still updated"
@@ -838,6 +875,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
                 landscape_local,
                 f"{safe_id}/hero-landscape.png",
                 landscape_public,
+            )
+            store.log_render_event(
+                "image_saved",
+                f"Landscape uploaded — {landscape_url}",
+                payload={"variant": "landscape", "url": landscape_url},
             )
             store.update_story_hero_landscape(story["id"], landscape_url)
             total_cents += per_image_cents
@@ -892,24 +934,52 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     scene_urls: list[str] = []
     per_image_cents = _per_image_cost_cents()
     total_cents = 0
+    total_scenes = len(scene_prompts)
+    store.log_render_event(
+        "scenes_start",
+        f"Generating {total_scenes} scenes — kie aspect {scene_kie_aspect}",
+        payload={"count": total_scenes, "aspect": scene_kie_aspect},
+    )
     for i, prompt in enumerate(scene_prompts):
         filename = f"scene-{i + 1}.png"
         public_url = f"{url_prefix}/{filename}"
         label = f"scene-{i + 1}"
+        store.log_render_event(
+            "kie_request_sent",
+            f"Scene {i + 1}/{total_scenes} submitted to kie",
+            payload={"index": i + 1, "of": total_scenes},
+        )
         kie_url = _generate_with_retry(
             prompt, f"id={safe_id} {label} regen", aspect_ratio=scene_kie_aspect,
         )
         if kie_url is None:
+            store.log_render_event(
+                "kie_failed",
+                f"Scene {i + 1} failed; continuing",
+                level="warn",
+                payload={"index": i + 1},
+            )
             print(f"[image regen scenes] id={safe_id} {label} FAILED, skipping")
             continue
         local_path = out_dir / filename
         try:
             images.download(kie_url, local_path)
         except Exception as e:
+            store.log_render_event(
+                "download_failed",
+                f"Scene {i + 1} download error: {e}",
+                level="warn",
+                payload={"index": i + 1},
+            )
             print(f"[image regen scenes] id={safe_id} {label} download FAILED: {e}")
             continue
         stored_url = gcs.publish(
             local_path, f"{safe_id}/{filename}", public_url,
+        )
+        store.log_render_event(
+            "image_saved",
+            f"Scene {i + 1}/{total_scenes} saved",
+            payload={"index": i + 1, "of": total_scenes, "url": stored_url},
         )
         scene_urls.append(stored_url)
         total_cents += per_image_cents
