@@ -929,14 +929,24 @@ def finish_image_render(
     render_id: str, output_url: str, cost_cents: int
 ) -> None:
     """Mark an image regen done. Worker writes the kie-hosted URL (or local
-    /generated/ URL) plus the actual cost in cents."""
+    /generated/ URL) plus the actual cost in cents.
+
+    Conditional on `status IN ('queued','generating')` so a row the admin
+    cancelled mid-flight stays cancelled, and a row already settled
+    (done/error/cancelled) isn't overwritten. The 'queued' branch supports
+    short-circuit short-circuit finishes from tests + paths where a regen
+    completes before claim_next ran (rare but legitimate). Without this
+    guard, a worker's eventual finish call would silently flip
+    cancelled → done.
+    """
     now = _now_iso()
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE image_renders SET status='done', progress=100, "
-                    "output_url=%s, cost_cents=%s, finished_at=%s WHERE id=%s",
+                    "output_url=%s, cost_cents=%s, finished_at=%s "
+                    "WHERE id=%s AND status IN ('queued','generating')",
                     (output_url, cost_cents, now, render_id),
                 )
             conn.commit()
@@ -944,14 +954,21 @@ def finish_image_render(
     with _sqlite_conn() as c:
         c.execute(
             "UPDATE image_renders SET status='done', progress=100, "
-            "output_url=?, cost_cents=?, finished_at=? WHERE id=?",
+            "output_url=?, cost_cents=?, finished_at=? "
+            "WHERE id=? AND status IN ('queued','generating')",
             (output_url, cost_cents, now, render_id),
         )
 
 
 def fail_image_render(render_id: str, error_message: str) -> None:
     """Mark an image regen failed. Worker calls this on any exception path
-    or on a NotImplementedError from a stub regenerator."""
+    or on a NotImplementedError from a stub regenerator.
+
+    Conditional on `status IN ('queued','generating')` for the same reason
+    as `finish_image_render`: an admin Stop racing with a worker error
+    shouldn't lose the cancelled state, and an already-settled row
+    shouldn't be overwritten.
+    """
     now = _now_iso()
     capped = (error_message or "unknown error")[:2000]
     if _is_postgres():
@@ -959,7 +976,8 @@ def fail_image_render(render_id: str, error_message: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE image_renders SET status='error', error=%s, "
-                    "finished_at=%s WHERE id=%s",
+                    "finished_at=%s "
+                    "WHERE id=%s AND status IN ('queued','generating')",
                     (capped, now, render_id),
                 )
             conn.commit()
@@ -967,7 +985,8 @@ def fail_image_render(render_id: str, error_message: str) -> None:
     with _sqlite_conn() as c:
         c.execute(
             "UPDATE image_renders SET status='error', error=?, "
-            "finished_at=? WHERE id=?",
+            "finished_at=? "
+            "WHERE id=? AND status IN ('queued','generating')",
             (capped, now, render_id),
         )
 

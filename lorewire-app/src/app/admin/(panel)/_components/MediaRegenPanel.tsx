@@ -11,8 +11,10 @@
 // transitional render. Idle panels stay quiet.
 
 import {
+  ACTIVE_IMAGE_RENDER_STATUSES,
   estimateImageRegenCostCents,
   getDailyImageBudget,
+  latestBulkScenes,
   latestRenderForAsset,
   type AssetOwnerKind,
   type ImageRenderRow,
@@ -21,6 +23,8 @@ import { RegenButton } from "./RegenButton";
 import { RegenAutoRefresh } from "./RegenAutoRefresh";
 import { RebuildAllButton } from "./RebuildAllButton";
 import { RenderEventTimeline } from "./RenderEventTimeline";
+import { StopButton } from "./StopButton";
+import { StopAllButton } from "./StopAllButton";
 
 export interface MediaAssetSpec {
   /** Stable slug stored on the render row. */
@@ -35,7 +39,7 @@ export interface MediaAssetSpec {
   imageCountOverride?: number;
 }
 
-const TRANSITIONAL = new Set(["queued", "generating"]);
+const TRANSITIONAL = ACTIVE_IMAGE_RENDER_STATUSES;
 
 export async function MediaRegenPanel({
   ownerKind,
@@ -47,21 +51,54 @@ export async function MediaRegenPanel({
   assets: MediaAssetSpec[];
 }) {
   // Resolve everything in one pass so the panel paints in a single tick.
+  // Story "scenes" reads its row state from the aggregate of scene:N rows
+  // because the legacy single 'scenes' row was retired in the 2026-06-13
+  // per-scene-queue migration. The card still surfaces as one entry to
+  // the admin; the aggregate carries the active count for Stop-all.
+  const scenesBulk =
+    ownerKind === "story" && assets.some((a) => a.asset === "scenes")
+      ? await latestBulkScenes(ownerKind, ownerId)
+      : null;
+
   const enriched = await Promise.all(
-    assets.map(async (a) => ({
-      ...a,
-      estimateCents: await estimateImageRegenCostCents(
-        a.asset,
-        a.imageCountOverride,
-      ),
-      latest: await latestRenderForAsset(ownerKind, ownerId, a.asset),
-    })),
+    assets.map(async (a) => {
+      const isScenes = ownerKind === "story" && a.asset === "scenes";
+      return {
+        ...a,
+        estimateCents: await estimateImageRegenCostCents(
+          a.asset,
+          a.imageCountOverride,
+        ),
+        latest:
+          isScenes && scenesBulk
+            ? scenesBulk.latest
+            : await latestRenderForAsset(ownerKind, ownerId, a.asset),
+        bulkActiveIds:
+          isScenes && scenesBulk ? scenesBulk.activeIds : ([] as string[]),
+        bulkProgress:
+          isScenes && scenesBulk
+            ? {
+                done: scenesBulk.done,
+                total: scenesBulk.total,
+                active: scenesBulk.active,
+                error: scenesBulk.error,
+                cancelled: scenesBulk.cancelled,
+              }
+            : null,
+      };
+    }),
   );
   const budget = await getDailyImageBudget();
 
-  const activeRows = enriched.filter(
-    (a) => a.latest && TRANSITIONAL.has(a.latest.status),
-  ).length;
+  // Sum every active queue row owned by this story/article, not just the
+  // visible cards. The scenes aggregate may contribute N rows from a single
+  // card, so totalActiveCount drives both the polling refresh and the
+  // header "Stop all" affordance.
+  const totalActiveCount = enriched.reduce((sum, a) => {
+    if (a.bulkProgress) return sum + a.bulkProgress.active;
+    return sum + (a.latest && TRANSITIONAL.has(a.latest.status) ? 1 : 0);
+  }, 0);
+  const activeRows = totalActiveCount;
 
   return (
     <div className="rounded-xl border border-line bg-surface p-4">
@@ -77,47 +114,76 @@ export async function MediaRegenPanel({
         />
       </header>
 
-      <div className="mb-3">
-        <RebuildAllButton
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <div className="min-w-[200px] flex-1">
+          <RebuildAllButton
+            ownerKind={ownerKind}
+            ownerId={ownerId}
+            specs={enriched.map((a) => ({
+              asset: a.asset,
+              label: a.label,
+              estimateCents: a.estimateCents,
+            }))}
+          />
+        </div>
+        <StopAllButton
           ownerKind={ownerKind}
           ownerId={ownerId}
-          specs={enriched.map((a) => ({
-            asset: a.asset,
-            label: a.label,
-            estimateCents: a.estimateCents,
-          }))}
+          activeCount={totalActiveCount}
         />
       </div>
 
       <ul className="space-y-2">
-        {enriched.map((a) => (
-          <li
-            key={a.asset}
-            className="rounded-lg border border-line bg-bg p-3"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-semibold text-ink">
-                  {a.label}
-                </div>
-                <p className="mt-0.5 text-[12px] text-muted">{a.hint}</p>
-                <LatestRenderLine row={a.latest} />
-                {a.latest && (
-                  <RenderEventTimeline
-                    renderId={a.latest.id}
-                    isActive={TRANSITIONAL.has(a.latest.status)}
+        {enriched.map((a) => {
+          const rowIsActive =
+            a.latest != null && TRANSITIONAL.has(a.latest.status);
+          // Bulk scenes use their own active count; per-row Stop on a
+          // single scene cancels just that row, so the card's Stop
+          // affordance has to cover every active scene:N at once.
+          const hasBulkActive = (a.bulkProgress?.active ?? 0) > 0;
+          return (
+            <li
+              key={a.asset}
+              className="rounded-lg border border-line bg-bg p-3"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold text-ink">
+                    {a.label}
+                  </div>
+                  <p className="mt-0.5 text-[12px] text-muted">{a.hint}</p>
+                  <LatestRenderLine
+                    row={a.latest}
+                    bulkProgress={a.bulkProgress}
                   />
-                )}
+                  {a.latest && (
+                    <RenderEventTimeline
+                      renderId={a.latest.id}
+                      isActive={TRANSITIONAL.has(a.latest.status)}
+                    />
+                  )}
+                </div>
+                <div className="flex flex-col items-end gap-2">
+                  <RegenButton
+                    ownerKind={ownerKind}
+                    ownerId={ownerId}
+                    asset={a.asset}
+                    estimateCents={a.estimateCents}
+                  />
+                  {hasBulkActive ? (
+                    <StopAllButton
+                      ownerKind={ownerKind}
+                      ownerId={ownerId}
+                      activeCount={a.bulkProgress!.active}
+                    />
+                  ) : rowIsActive && a.latest ? (
+                    <StopButton renderId={a.latest.id} />
+                  ) : null}
+                </div>
               </div>
-              <RegenButton
-                ownerKind={ownerKind}
-                ownerId={ownerId}
-                asset={a.asset}
-                estimateCents={a.estimateCents}
-              />
-            </div>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -152,7 +218,19 @@ function BudgetBar({
   );
 }
 
-function LatestRenderLine({ row }: { row: ImageRenderRow | null }) {
+function LatestRenderLine({
+  row,
+  bulkProgress,
+}: {
+  row: ImageRenderRow | null;
+  bulkProgress?: {
+    done: number;
+    total: number;
+    active: number;
+    error: number;
+    cancelled: number;
+  } | null;
+}) {
   if (!row) {
     return (
       <p className="mt-1 font-mono text-[11px] text-muted">
@@ -162,6 +240,27 @@ function LatestRenderLine({ row }: { row: ImageRenderRow | null }) {
   }
   const ts = row.finished_at ?? row.requested_at;
   const ago = formatAgo(ts);
+  // Bulk surfaces win over the single-row status: when 27 scene:N rows
+  // share a card, "12/27 done · 3 in flight" is what the admin needs to
+  // see, not the status of whichever row happened to be newest.
+  if (bulkProgress && bulkProgress.total > 0) {
+    const tone =
+      bulkProgress.active > 0
+        ? "text-warn"
+        : bulkProgress.error > 0 || bulkProgress.cancelled > 0
+          ? "text-muted"
+          : "text-muted";
+    const parts: string[] = [`${bulkProgress.done}/${bulkProgress.total} done`];
+    if (bulkProgress.active > 0) parts.push(`${bulkProgress.active} in flight`);
+    if (bulkProgress.error > 0) parts.push(`${bulkProgress.error} error`);
+    if (bulkProgress.cancelled > 0)
+      parts.push(`${bulkProgress.cancelled} cancelled`);
+    return (
+      <p className={`mt-1 font-mono text-[11px] ${tone}`}>
+        {parts.join(" · ")} · {ago}
+      </p>
+    );
+  }
   if (row.status === "queued") {
     return (
       <p className="mt-1 font-mono text-[11px] text-warn">
@@ -180,6 +279,13 @@ function LatestRenderLine({ row }: { row: ImageRenderRow | null }) {
     return (
       <p className="mt-1 font-mono text-[11px] text-danger">
         Error: {row.error ?? "unknown"} · {ago}
+      </p>
+    );
+  }
+  if (row.status === "cancelled") {
+    return (
+      <p className="mt-1 font-mono text-[11px] text-muted">
+        Cancelled · {ago}
       </p>
     );
   }

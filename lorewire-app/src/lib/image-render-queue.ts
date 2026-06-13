@@ -28,8 +28,18 @@ import { all, one, run } from "@/lib/db";
 import { selected } from "@/lib/models";
 import { getSetting } from "@/lib/repo";
 
-export type ImageRenderStatus = "queued" | "generating" | "done" | "error";
+export type ImageRenderStatus =
+  | "queued"
+  | "generating"
+  | "done"
+  | "error"
+  | "cancelled";
 export type AssetOwnerKind = "story" | "article";
+
+// Active = the row is doing work or about to. Terminal = the row is settled
+// and a Stop button shouldn't appear. Both UI and cancel helpers reuse this.
+export const ACTIVE_IMAGE_RENDER_STATUSES: ReadonlySet<ImageRenderStatus> =
+  new Set(["queued", "generating"]);
 
 export interface ImageRenderRow {
   id: string;
@@ -299,5 +309,200 @@ export async function canEnqueueImageRegen(asset: string): Promise<{
     ok: budget.spentCents + estimateCents <= budget.capCents,
     estimateCents,
     budget,
+  };
+}
+
+// ─── cancel ──────────────────────────────────────────────────────────────────
+// Soft cancel: flip the row to 'cancelled' so the cron drain stops touching
+// it. No kie cancel call (kie has no public cancel endpoint as of 2026-06-13);
+// if a generation finishes server-side after this flip, the result is simply
+// discarded because the worker checks status before writing the URL back.
+//
+// Conditional WHERE clause makes the call idempotent — racing with the cron
+// claim leaves whichever transition lands second as a noop. A row that's
+// already done/error/cancelled returns null so the caller can surface
+// "nothing to cancel" cleanly.
+
+export async function cancelImageRender(
+  renderId: string,
+  reason: string,
+): Promise<ImageRenderRow | null> {
+  const now = new Date().toISOString();
+  await run(
+    `UPDATE image_renders
+        SET status = 'cancelled', error = ?, finished_at = ?
+      WHERE id = ? AND status IN ('queued','generating')`,
+    [reason, now, renderId],
+  );
+  return getImageRender(renderId);
+}
+
+export async function cancelAllImageRendersForOwner(
+  ownerKind: AssetOwnerKind,
+  ownerId: string,
+  reason: string,
+): Promise<{ cancelled: string[] }> {
+  const now = new Date().toISOString();
+  // Snapshot the active row ids before the UPDATE so callers (and the event
+  // log writer in actions.ts) can iterate exactly the rows we touched.
+  const active = await all<{ id: string }>(
+    `SELECT id FROM image_renders
+       WHERE owner_kind = ? AND owner_id = ?
+         AND status IN ('queued','generating')`,
+    [ownerKind, ownerId],
+  );
+  if (active.length === 0) return { cancelled: [] };
+  await run(
+    `UPDATE image_renders
+        SET status = 'cancelled', error = ?, finished_at = ?
+      WHERE owner_kind = ? AND owner_id = ?
+        AND status IN ('queued','generating')`,
+    [reason, now, ownerKind, ownerId],
+  );
+  return { cancelled: active.map((r) => r.id) };
+}
+
+// ─── bulk scenes enqueue ─────────────────────────────────────────────────────
+// Replaces the legacy single 'scenes' row that walked all N scenes in one
+// Vercel function invocation — that pattern can't fit under maxDuration and
+// the row got reaped + re-claimed forever, with no scene_urls ever persisting
+// (see _plans/2026-06-13-stop-button-and-per-scene-queue.md).
+//
+// Each scene:N row regens one image (~30s, well under the per-tick deadline)
+// and `_regen_one_scene` already splices into stories.images after each save,
+// so partial progress survives a function death.
+//
+// One atomic budget check covers the whole batch: the user clicks once, they
+// shouldn't get half the scenes accepted and half rejected.
+
+export interface EnqueueScenesBulkResult {
+  ok: boolean;
+  count?: number;
+  estimateCents?: number;
+  spentCents?: number;
+  capCents?: number;
+  firstRenderId?: string;
+  error?: string;
+}
+
+export async function enqueueScenesBulk(opts: {
+  ownerKind: AssetOwnerKind;
+  ownerId: string;
+  requestedBy: string | null;
+}): Promise<EnqueueScenesBulkResult> {
+  const count = await assetImageCount("scenes");
+  const [perSceneCents, budget] = await Promise.all([
+    estimateImageRegenCostCents("scene:0"),
+    getDailyImageBudget(),
+  ]);
+  const totalCents = perSceneCents * count;
+  if (budget.spentCents + totalCents > budget.capCents) {
+    return {
+      ok: false,
+      error: "daily-budget-exceeded",
+      estimateCents: totalCents,
+      spentCents: budget.spentCents,
+      capCents: budget.capCents,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const ids = Array.from({ length: count }, () => randomUUID());
+  // Insert one row at a time inside a loop. Postgres would let us multi-row
+  // INSERT in one statement, but SQLite's wrapper here uses positional
+  // params and the cost is N tiny inserts on the same connection — well
+  // under a millisecond per row in practice. Trade-off is a tighter blast
+  // radius if any insert throws midway.
+  for (let i = 0; i < count; i++) {
+    await run(
+      `INSERT INTO image_renders
+         (id, owner_kind, owner_id, asset, prompt_hash, status, progress,
+          error, output_url, cost_cents, requested_by, requested_at,
+          started_at, finished_at)
+       VALUES (?, ?, ?, ?, NULL, 'queued', 0, NULL, NULL, NULL, ?, ?, NULL, NULL)`,
+      [ids[i], opts.ownerKind, opts.ownerId, `scene:${i}`, opts.requestedBy, now],
+    );
+  }
+  return {
+    ok: true,
+    count,
+    estimateCents: totalCents,
+    spentCents: budget.spentCents,
+    capCents: budget.capCents,
+    firstRenderId: ids[0],
+  };
+}
+
+// Aggregate view of every scene:N row most-recently enqueued for an owner.
+// Used by the MediaRegenPanel to render the "All scene images" card as a
+// single status with progress (12/27 done, 3 in flight, …) without losing
+// the underlying granularity. Looks back to the most recent batch by
+// finding the latest scene:* requested_at and pulling every row at-or-after
+// that timestamp minus a small fudge so rows inserted in the same ms tick
+// still group together.
+export interface BulkScenesAggregate {
+  /** Most-recent batch's representative row, used by LatestRenderLine. */
+  latest: ImageRenderRow | null;
+  /** Total rows in the most-recent batch. */
+  total: number;
+  /** Counts within the most-recent batch. */
+  done: number;
+  active: number;
+  error: number;
+  cancelled: number;
+  /** Render ids of currently active rows — stops target these. */
+  activeIds: string[];
+}
+
+export async function latestBulkScenes(
+  ownerKind: AssetOwnerKind,
+  ownerId: string,
+): Promise<BulkScenesAggregate> {
+  const newest = await one<ImageRenderRow>(
+    `SELECT ${COLS} FROM image_renders
+       WHERE owner_kind = ? AND owner_id = ? AND asset LIKE 'scene:%'
+       ORDER BY requested_at DESC LIMIT 1`,
+    [ownerKind, ownerId],
+  );
+  if (!newest) {
+    return {
+      latest: null,
+      total: 0,
+      done: 0,
+      active: 0,
+      error: 0,
+      cancelled: 0,
+      activeIds: [],
+    };
+  }
+  const batchRows = await all<ImageRenderRow>(
+    `SELECT ${COLS} FROM image_renders
+       WHERE owner_kind = ? AND owner_id = ? AND asset LIKE 'scene:%'
+         AND requested_at >= ?
+       ORDER BY requested_at ASC`,
+    [ownerKind, ownerId, newest.requested_at],
+  );
+  let done = 0;
+  let active = 0;
+  let errorCount = 0;
+  let cancelled = 0;
+  const activeIds: string[] = [];
+  for (const r of batchRows) {
+    if (r.status === "done") done++;
+    else if (r.status === "error") errorCount++;
+    else if (r.status === "cancelled") cancelled++;
+    else {
+      active++;
+      activeIds.push(r.id);
+    }
+  }
+  return {
+    latest: newest,
+    total: batchRows.length,
+    done,
+    active,
+    error: errorCount,
+    cancelled,
+    activeIds,
   };
 }

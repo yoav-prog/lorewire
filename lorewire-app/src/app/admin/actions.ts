@@ -47,8 +47,12 @@ import { selectModel, type Stage } from "@/lib/models";
 import { run } from "@/lib/db";
 import {
   canEnqueueImageRegen,
+  cancelAllImageRendersForOwner,
+  cancelImageRender,
   enqueueImageRegen,
+  enqueueScenesBulk,
   listRenderEvents,
+  type EnqueueScenesBulkResult,
   type RenderEventRow,
 } from "@/lib/image-render-queue";
 import { sanitizeLabel } from "@/lib/segments-upload";
@@ -234,6 +238,21 @@ export async function enqueueImageRegenAction(opts: {
     if (!row) return { ok: false, error: "story not found" };
   }
 
+  // Story scenes route to the per-scene bulk enqueue. The legacy single
+  // 'scenes' row can't fit under Vercel's function deadline (the 2026-06-13
+  // zombie incident). Article scenes don't exist as a slug today, so this
+  // dispatch is story-only. Return shape is normalised back into the
+  // EnqueueImageRegenResult the caller already handles, so the panel and the
+  // bulk Rebuild-all button keep working without per-call-site changes.
+  if (ownerKind === "story" && asset === "scenes") {
+    const bulk = await enqueueScenesBulk({
+      ownerKind,
+      ownerId,
+      requestedBy: session.userId,
+    });
+    return scenesBulkAsRegenResult(bulk, ownerId);
+  }
+
   const pre = await canEnqueueImageRegen(asset);
   if (!pre.ok) {
     console.warn("[image regen action] budget exceeded", {
@@ -268,12 +287,7 @@ export async function enqueueImageRegenAction(opts: {
     user_id: session.userId,
   });
 
-  if (ownerKind === "story") {
-    revalidatePath(`/admin/stories/${ownerId}`);
-    revalidatePath(`/admin/videos/${ownerId}`);
-  } else {
-    revalidatePath(`/admin/articles/${ownerId}`);
-  }
+  revalidateOwnerPanels(ownerKind, ownerId);
 
   return {
     ok: true,
@@ -294,6 +308,137 @@ export async function listRenderEventsAction(
   await requireAdmin();
   if (!renderId) return [];
   return listRenderEvents(renderId);
+}
+
+// Stop button — single row. Flips the queue row to 'cancelled' so the cron
+// drain skips it. No-op when the row is already settled.
+//
+// Companion to `enqueueImageRegenAction`. Both gated by `requireAdmin`. The
+// path-revalidation set must include every admin surface that renders the
+// MediaRegenPanel so cancelled rows visibly settle after one click.
+
+export interface CancelImageRenderResult {
+  ok: boolean;
+  error?: string;
+  /** Status the row had immediately before the flip — useful for telemetry. */
+  priorStatus?: string;
+}
+
+export async function cancelImageRenderAction(opts: {
+  renderId: string;
+  reason?: string;
+}): Promise<CancelImageRenderResult> {
+  const session = await requireAdmin();
+  const { renderId } = opts;
+  const reason = (opts.reason ?? "").trim() || "cancelled by admin";
+  if (!renderId) return { ok: false, error: "missing render id" };
+
+  const updated = await cancelImageRender(renderId, reason);
+  if (!updated) {
+    console.warn("[cancel image render] not-found", { render_id: renderId });
+    return { ok: false, error: "render not found" };
+  }
+  if (updated.status !== "cancelled") {
+    console.info("[cancel image render] not-cancellable", {
+      render_id: renderId,
+      status: updated.status,
+    });
+    return { ok: false, error: "not-cancellable", priorStatus: updated.status };
+  }
+
+  console.info("[cancel image render] ok", {
+    render_id: renderId,
+    asset: updated.asset,
+    owner_kind: updated.owner_kind,
+    owner_id: updated.owner_id,
+    user_id: session.userId,
+  });
+
+  revalidateOwnerPanels(updated.owner_kind, updated.owner_id);
+  return { ok: true };
+}
+
+// Stop button — every active row for one owner. Used by the panel header's
+// "Stop all" affordance and by the per-card "Stop all scenes" affordance on
+// the bulk scenes row. Returns the count flipped so the toast can read
+// "Cancelled 27 jobs."
+
+export interface CancelAllImageRendersResult {
+  ok: boolean;
+  cancelled: number;
+  error?: string;
+}
+
+export async function cancelAllImageRendersAction(opts: {
+  ownerKind: "story" | "article";
+  ownerId: string;
+  reason?: string;
+}): Promise<CancelAllImageRendersResult> {
+  const session = await requireAdmin();
+  const { ownerKind, ownerId } = opts;
+  const reason = (opts.reason ?? "").trim() || "stopped by admin (bulk)";
+  if (!ownerId) return { ok: false, cancelled: 0, error: "missing owner" };
+
+  const { cancelled } = await cancelAllImageRendersForOwner(
+    ownerKind,
+    ownerId,
+    reason,
+  );
+  console.info("[cancel all image renders] ok", {
+    owner_kind: ownerKind,
+    owner_id: ownerId,
+    cancelled_count: cancelled.length,
+    user_id: session.userId,
+  });
+  revalidateOwnerPanels(ownerKind, ownerId);
+  return { ok: true, cancelled: cancelled.length };
+}
+
+// Normalise an enqueueScenesBulk result into the EnqueueImageRegenResult
+// shape the panel + Rebuild-all button already speak. Defined alongside the
+// cancel actions because that's where the route-revalidation conventions
+// live; keeping both helpers next to each other makes the dispatch obvious.
+function scenesBulkAsRegenResult(
+  bulk: EnqueueScenesBulkResult,
+  ownerId: string,
+): EnqueueImageRegenResult {
+  if (!bulk.ok) {
+    return {
+      ok: false,
+      error: bulk.error ?? "scenes-bulk-failed",
+      estimateCents: bulk.estimateCents,
+      spentCents: bulk.spentCents,
+      capCents: bulk.capCents,
+    };
+  }
+  // Bulk enqueue logs once for the batch — per-row logging would flood the
+  // console with N nearly-identical lines.
+  console.info("[image regen action] scenes bulk enqueued", {
+    owner_id: ownerId,
+    count: bulk.count,
+    estimate_cents: bulk.estimateCents,
+    first_render_id: bulk.firstRenderId,
+  });
+  revalidateOwnerPanels("story", ownerId);
+  return {
+    ok: true,
+    renderId: bulk.firstRenderId,
+    estimateCents: bulk.estimateCents,
+    spentCents: bulk.spentCents,
+    capCents: bulk.capCents,
+  };
+}
+
+function revalidateOwnerPanels(
+  ownerKind: string,
+  ownerId: string,
+): void {
+  if (ownerKind === "story") {
+    revalidatePath(`/admin/stories/${ownerId}`);
+    revalidatePath(`/admin/videos/${ownerId}`);
+  } else {
+    revalidatePath(`/admin/articles/${ownerId}`);
+  }
 }
 
 export async function setModelAction(formData: FormData): Promise<void> {

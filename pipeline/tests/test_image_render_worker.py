@@ -239,6 +239,72 @@ class ReapStaleClaimsTests(_WorkerTestCase):
         self.assertEqual(reset, 0)
 
 
+class CancelledStatusTests(_WorkerTestCase):
+    """A row the admin Stops mid-flight must stay cancelled even when the
+    worker eventually calls finish_image_render or fail_image_render. The
+    drain handler doesn't check status between regen and finish, so the
+    guarantee has to live in store.py's UPDATE WHERE clause."""
+
+    def _set_status(self, render_id: str, status: str) -> None:
+        with store._sqlite_conn() as c:
+            c.execute(
+                "UPDATE image_renders SET status = ? WHERE id = ?",
+                (status, render_id),
+            )
+
+    def test_claim_does_not_pick_up_cancelled_rows(self):
+        render_id = self._new_image_render_row()
+        self._set_status(render_id, "cancelled")
+        self.assertIsNone(store.claim_next_image_render())
+
+    def test_reap_does_not_touch_cancelled_rows(self):
+        # Even with a stale started_at, a cancelled row stays cancelled.
+        render_id = self._new_image_render_row()
+        store.claim_next_image_render()  # flips to generating
+        self._set_status(render_id, "cancelled")
+        old_iso = "2020-01-01T00:00:00+00:00"
+        with store._sqlite_conn() as c:
+            c.execute(
+                "UPDATE image_renders SET started_at = ? WHERE id = ?",
+                (old_iso, render_id),
+            )
+        reset = store.reap_stale_image_render_claims(stale_after_s=600)
+        self.assertEqual(reset, 0)
+        row = store.get_image_render(render_id)
+        assert row is not None
+        self.assertEqual(row["status"], "cancelled")
+
+    def test_finish_image_render_is_noop_on_cancelled_row(self):
+        render_id = self._new_image_render_row()
+        store.claim_next_image_render()  # generating
+        self._set_status(render_id, "cancelled")
+        store.finish_image_render(render_id, "/x", 99)
+        row = store.get_image_render(render_id)
+        assert row is not None
+        self.assertEqual(row["status"], "cancelled")
+        # cost / url must NOT be persisted — the admin already cancelled.
+        self.assertIsNone(row["output_url"])
+        self.assertIsNone(row["cost_cents"])
+
+    def test_fail_image_render_is_noop_on_cancelled_row(self):
+        render_id = self._new_image_render_row()
+        store.claim_next_image_render()
+        self._set_status(render_id, "cancelled")
+        store.fail_image_render(render_id, "kie said no")
+        row = store.get_image_render(render_id)
+        assert row is not None
+        # status stays cancelled; error string from cancel action (or
+        # whatever the admin wrote) is the source of truth.
+        self.assertEqual(row["status"], "cancelled")
+
+    def test_count_pending_excludes_cancelled_rows(self):
+        # Drain handler's fast-exit relies on this — a row of cancelled
+        # work shouldn't keep the cron tick burning cycles.
+        render_id = self._new_image_render_row()
+        self._set_status(render_id, "cancelled")
+        self.assertEqual(store.count_pending_image_renders(), 0)
+
+
 class AdvisoryLockTests(_WorkerTestCase):
     """Postgres advisory lock keeps two cron ticks from draining at
     once. On SQLite (this test bed) it must no-op cleanly so the local

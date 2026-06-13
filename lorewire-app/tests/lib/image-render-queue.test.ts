@@ -8,11 +8,16 @@ import { randomUUID } from "node:crypto";
 import { run } from "@/lib/db";
 import { setSetting } from "@/lib/repo";
 import {
+  ACTIVE_IMAGE_RENDER_STATUSES,
   canEnqueueImageRegen,
+  cancelAllImageRendersForOwner,
+  cancelImageRender,
   enqueueImageRegen,
+  enqueueScenesBulk,
   estimateImageRegenCostCents,
   getDailyImageBudget,
   getImageRender,
+  latestBulkScenes,
   latestRenderForAsset,
   recentRendersForOwner,
 } from "@/lib/image-render-queue";
@@ -201,6 +206,230 @@ describe("getDailyImageBudget", () => {
     expect(b.spentCents).toBe(25);
     expect(b.remainingCents).toBe(b.capCents - 25);
     expect(b.exceeded).toBe(false);
+  });
+});
+
+describe("cancelImageRender", () => {
+  it("flips a queued row to cancelled and writes the reason as error", async () => {
+    const fresh = await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId: randomUUID(),
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    const updated = await cancelImageRender(fresh.id, "cancelled by admin");
+    expect(updated?.status).toBe("cancelled");
+    expect(updated?.error).toBe("cancelled by admin");
+    expect(updated?.finished_at).not.toBeNull();
+  });
+
+  it("flips a generating row to cancelled", async () => {
+    const fresh = await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId: randomUUID(),
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    await run(
+      "UPDATE image_renders SET status = 'generating', started_at = ? WHERE id = ?",
+      [new Date().toISOString(), fresh.id],
+    );
+    const updated = await cancelImageRender(fresh.id, "stopped by admin");
+    expect(updated?.status).toBe("cancelled");
+  });
+
+  it("is a no-op on done rows (status stays done)", async () => {
+    const fresh = await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId: randomUUID(),
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    await run(
+      "UPDATE image_renders SET status = 'done', cost_cents = 25 WHERE id = ?",
+      [fresh.id],
+    );
+    const updated = await cancelImageRender(fresh.id, "ignored");
+    expect(updated?.status).toBe("done");
+    expect(updated?.cost_cents).toBe(25);
+  });
+
+  it("ACTIVE_IMAGE_RENDER_STATUSES covers exactly queued and generating", () => {
+    expect(ACTIVE_IMAGE_RENDER_STATUSES.has("queued")).toBe(true);
+    expect(ACTIVE_IMAGE_RENDER_STATUSES.has("generating")).toBe(true);
+    expect(ACTIVE_IMAGE_RENDER_STATUSES.has("done")).toBe(false);
+    expect(ACTIVE_IMAGE_RENDER_STATUSES.has("error")).toBe(false);
+    expect(ACTIVE_IMAGE_RENDER_STATUSES.has("cancelled")).toBe(false);
+  });
+});
+
+describe("cancelAllImageRendersForOwner", () => {
+  it("cancels every active row for the owner and reports the ids", async () => {
+    const ownerId = randomUUID();
+    const a = await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId,
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    const b = await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId,
+      asset: "scene:0",
+      promptHash: null,
+      requestedBy: null,
+    });
+    await run(
+      "UPDATE image_renders SET status = 'generating', started_at = ? WHERE id = ?",
+      [new Date().toISOString(), b.id],
+    );
+    const { cancelled } = await cancelAllImageRendersForOwner(
+      "story",
+      ownerId,
+      "test bulk",
+    );
+    expect(cancelled).toHaveLength(2);
+    expect(new Set(cancelled)).toEqual(new Set([a.id, b.id]));
+    const refetchedA = await getImageRender(a.id);
+    const refetchedB = await getImageRender(b.id);
+    expect(refetchedA?.status).toBe("cancelled");
+    expect(refetchedB?.status).toBe("cancelled");
+  });
+
+  it("does not touch settled rows for the owner", async () => {
+    const ownerId = randomUUID();
+    const done = await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId,
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    await run("UPDATE image_renders SET status = 'done' WHERE id = ?", [
+      done.id,
+    ]);
+    const { cancelled } = await cancelAllImageRendersForOwner(
+      "story",
+      ownerId,
+      "should be a noop",
+    );
+    expect(cancelled).toEqual([]);
+    const refetched = await getImageRender(done.id);
+    expect(refetched?.status).toBe("done");
+  });
+
+  it("ignores rows for other owners", async () => {
+    const targetOwner = randomUUID();
+    const otherOwner = randomUUID();
+    const other = await enqueueImageRegen({
+      ownerKind: "story",
+      ownerId: otherOwner,
+      asset: "hero",
+      promptHash: null,
+      requestedBy: null,
+    });
+    const { cancelled } = await cancelAllImageRendersForOwner(
+      "story",
+      targetOwner,
+      "scoped",
+    );
+    expect(cancelled).toEqual([]);
+    const refetchedOther = await getImageRender(other.id);
+    expect(refetchedOther?.status).toBe("queued");
+  });
+});
+
+describe("enqueueScenesBulk", () => {
+  it("creates N scene:0..N-1 rows where N is media.scene_count", async () => {
+    await setSetting("media.scene_count", "12");
+    await setSetting("budget.daily_usd", "100");
+    const ownerId = randomUUID();
+    const r = await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId,
+      requestedBy: null,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.count).toBe(12);
+    const rows = await recentRendersForOwner("story", ownerId, 50);
+    expect(rows).toHaveLength(12);
+    const slugs = new Set(rows.map((row) => row.asset));
+    for (let i = 0; i < 12; i++) {
+      expect(slugs.has(`scene:${i}`)).toBe(true);
+    }
+    for (const row of rows) {
+      expect(row.status).toBe("queued");
+      expect(row.owner_kind).toBe("story");
+      expect(row.owner_id).toBe(ownerId);
+    }
+  });
+
+  it("rejects with daily-budget-exceeded when the batch would exceed the cap", async () => {
+    await setSetting("budget.daily_usd", "0.01");
+    await setSetting("media.scene_count", "10");
+    const r = await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId: randomUUID(),
+      requestedBy: null,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("daily-budget-exceeded");
+    expect(r.estimateCents).toBeGreaterThan(r.capCents!);
+  });
+
+  it("returns firstRenderId pointing at scene:0", async () => {
+    await setSetting("media.scene_count", "6");
+    await setSetting("budget.daily_usd", "100");
+    const r = await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId: randomUUID(),
+      requestedBy: null,
+    });
+    expect(r.firstRenderId).toBeTruthy();
+    const first = await getImageRender(r.firstRenderId!);
+    expect(first?.asset).toBe("scene:0");
+  });
+});
+
+describe("latestBulkScenes", () => {
+  it("returns total/done/active counts for the most recent batch", async () => {
+    await setSetting("budget.daily_usd", "100");
+    await setSetting("media.scene_count", "8");
+    const ownerId = randomUUID();
+    await enqueueScenesBulk({
+      ownerKind: "story",
+      ownerId,
+      requestedBy: null,
+    });
+    // Mark a couple as done, one as in-flight.
+    await run(
+      "UPDATE image_renders SET status = 'done' WHERE owner_id = ? AND asset = 'scene:0'",
+      [ownerId],
+    );
+    await run(
+      "UPDATE image_renders SET status = 'done' WHERE owner_id = ? AND asset = 'scene:1'",
+      [ownerId],
+    );
+    await run(
+      "UPDATE image_renders SET status = 'generating' WHERE owner_id = ? AND asset = 'scene:2'",
+      [ownerId],
+    );
+    const agg = await latestBulkScenes("story", ownerId);
+    expect(agg.total).toBe(8);
+    expect(agg.done).toBe(2);
+    expect(agg.active).toBe(6);
+    expect(agg.activeIds).toHaveLength(6);
+  });
+
+  it("returns an empty aggregate when no scenes have ever been queued", async () => {
+    const agg = await latestBulkScenes("story", randomUUID());
+    expect(agg.total).toBe(0);
+    expect(agg.latest).toBeNull();
+    expect(agg.activeIds).toEqual([]);
   });
 });
 
