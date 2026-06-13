@@ -36,6 +36,7 @@ import CaptionStylePanel from "./CaptionStylePanel";
 import { FrameCard } from "./FrameCard";
 import { FrameRegenActions } from "./FrameRegenActions";
 import { BulkConfirmProvider } from "./BulkConfirmContext";
+import { RegenerateAllImagesButton } from "./RegenerateAllImagesButton";
 import type { ImageRenderRow } from "@/lib/image-render-queue";
 import type { CaptionPreset } from "@/lib/caption-presets";
 import {
@@ -148,6 +149,8 @@ export default function EditorClient({
   captionStyle,
   captionStylePreview,
   userCaptionPresets,
+  editorIntro,
+  editorOutro,
 }: {
   storyId: string;
   storyTitle: string;
@@ -170,6 +173,11 @@ export default function EditorClient({
   captionStyle: ResolvedCaptionStyle;
   captionStylePreview: CaptionStyleForPreview;
   userCaptionPresets: CaptionPreset[];
+  /** Resolved intro segment for inline preview playback, or null when
+   *  none applies (story skipped it, no global default, aspect mismatch).
+   *  See pickSegmentPure in @/lib/segment-resolver. */
+  editorIntro: { url: string; durationMs: number; label: string | null } | null;
+  editorOutro: { url: string; durationMs: number; label: string | null } | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabKey>("trim");
@@ -321,8 +329,23 @@ export default function EditorClient({
     draft.clip_end_ms - draft.clip_start_ms,
     1,
   );
-  const durationInFrames = safePositiveInt(
+  const bodyDurationFrames = safePositiveInt(
     Math.ceil((trimmedDurationMs / 1000) * FPS),
+    1,
+  );
+  // Intro / outro contribute their own frames when they resolve. The
+  // Series inside PreviewComposition plays them inline; the Player's
+  // outer duration grows accordingly so the scrub bar covers the full
+  // intro + body + outro timeline. Math.max(0, ...) so a missing
+  // duration_ms (legacy segment rows) doesn't poison the addition.
+  const introDurationFrames = editorIntro
+    ? Math.max(0, Math.round(((editorIntro.durationMs ?? 0) / 1000) * FPS))
+    : 0;
+  const outroDurationFrames = editorOutro
+    ? Math.max(0, Math.round(((editorOutro.durationMs ?? 0) / 1000) * FPS))
+    : 0;
+  const durationInFrames = safePositiveInt(
+    bodyDurationFrames + introDurationFrames + outroDurationFrames,
     1,
   );
 
@@ -447,6 +470,7 @@ export default function EditorClient({
         storyTitle={storyTitle}
         storyStatus={storyStatus}
         frameCount={config.doodle_frames.length}
+        frameEstimateCents={frameEstimateCents}
         durationMs={config.duration_ms}
         trimmedDurationMs={trimmedDurationMs}
         derivedDefault={derivedDefault}
@@ -539,6 +563,17 @@ export default function EditorClient({
                 durationInFrames={durationInFrames}
                 captionStyle={captionStylePreview}
                 globalDefaultAspect={globalDefaultAspect}
+                intro={
+                  editorIntro && introDurationFrames > 0
+                    ? { url: editorIntro.url, durationFrames: introDurationFrames }
+                    : null
+                }
+                outro={
+                  editorOutro && outroDurationFrames > 0
+                    ? { url: editorOutro.url, durationFrames: outroDurationFrames }
+                    : null
+                }
+                bodyDurationFrames={bodyDurationFrames}
               />
             ) : (
               <EmptyPreview
@@ -676,6 +711,7 @@ function Header({
   storyTitle,
   storyStatus,
   frameCount,
+  frameEstimateCents,
   durationMs,
   trimmedDurationMs,
   derivedDefault,
@@ -693,6 +729,9 @@ function Header({
   storyTitle: string;
   storyStatus: string;
   frameCount: number;
+  /** Per-image cost estimate cents — drives the "Regenerate all images"
+   *  button's displayed total. Same number the per-frame card chips show. */
+  frameEstimateCents: number;
   durationMs: number;
   trimmedDurationMs: number;
   derivedDefault: boolean;
@@ -770,6 +809,12 @@ function Header({
           onPick={onAspectPick}
           saving={aspectSaving}
           error={aspectError}
+        />
+        <RegenerateAllImagesButton
+          storyId={storyId}
+          sceneCount={frameCount}
+          perImageEstimateCents={frameEstimateCents}
+          enabled={!renderDisabled}
         />
         {sessionSpendCents !== null && (
           <SessionSpendChip
@@ -1144,6 +1189,9 @@ function PreviewHost({
   durationInFrames,
   captionStyle,
   globalDefaultAspect,
+  intro,
+  outro,
+  bodyDurationFrames,
 }: {
   storyId: string;
   config: ShortVideoConfig;
@@ -1152,6 +1200,9 @@ function PreviewHost({
   durationInFrames: number;
   captionStyle: CaptionStyleForPreview;
   globalDefaultAspect: VideoAspect;
+  intro: { url: string; durationFrames: number } | null;
+  outro: { url: string; durationFrames: number } | null;
+  bodyDurationFrames: number;
 }) {
   // Phase 0 observability: log key inputs whenever they change so a user
   // reporting "the preview is broken" can paste the [video editor preview]
@@ -1207,8 +1258,16 @@ function PreviewHost({
   // contract is satisfied (hooks must run on every render); the empty
   // branch just doesn't use the memoised value.
   const inputProps = useMemo<PreviewProps>(
-    () => ({ config, frameUrls, audioUrl, captionStyle }),
-    [config, frameUrls, audioUrl, captionStyle],
+    () => ({
+      config,
+      frameUrls,
+      audioUrl,
+      captionStyle,
+      intro,
+      outro,
+      bodyDurationFrames,
+    }),
+    [config, frameUrls, audioUrl, captionStyle, intro, outro, bodyDurationFrames],
   );
 
   // Pre-flight: if every URL is empty, there is nothing for the Player to

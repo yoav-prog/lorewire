@@ -406,6 +406,207 @@ class PerSceneRegenTests(unittest.TestCase):
             self.assertIn("out of range", str(ctx.exception))
 
 
+class ScenePromptPersistTests(unittest.TestCase):
+    """Bulk scenes regen now stamps the kie prompt onto the matching
+    doodle_frame so the video editor's textarea fills with what the
+    pipeline used (per _plans/2026-06-13-editor-intro-outro-regen-all.md).
+    Per-frame Revert state (`prev_image`) must NOT be touched — that
+    belongs to the editor's per-frame edit flow."""
+
+    def _story_with_config(self, scene_urls, doodle_frames):
+        import json as _json
+        return {
+            **STORY,
+            "images": _json.dumps(scene_urls),
+            "video_config": _json.dumps({"doodle_frames": doodle_frames}),
+        }
+
+    def test_persists_image_prompt_onto_matching_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = [f"https://old/scene-{i+1}.png" for i in range(3)]
+            frames = [
+                {"id": "frame-a", "url": existing[0], "image_prompt": ""},
+                {"id": "frame-b", "url": existing[1], "image_prompt": ""},
+                {"id": "frame-c", "url": existing[2], "image_prompt": ""},
+            ]
+            story = self._story_with_config(existing, frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=[
+                        "hero",
+                        "scene 0 prompt",
+                        "scene 1 prompt",
+                        "scene 2 prompt",
+                    ],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, _cents = media.regen_one("abc123", "scene:1", Path(tmp))
+            mocks["update_video_config"].assert_called_once()
+            new_config = mocks["update_video_config"].call_args.args[1]
+            self.assertEqual(
+                new_config["doodle_frames"][1]["image_prompt"],
+                "scene 1 prompt",
+            )
+            self.assertEqual(new_config["doodle_frames"][1]["url"], url)
+            # Untouched frames stay identical.
+            self.assertEqual(new_config["doodle_frames"][0], frames[0])
+            self.assertEqual(new_config["doodle_frames"][2], frames[2])
+
+    def test_does_not_touch_prev_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = ["https://old/scene-1.png"]
+            frames = [
+                {
+                    "id": "frame-a",
+                    "url": existing[0],
+                    "image_prompt": "manual edit",
+                    "prev_image": {
+                        "url": "https://prev.png",
+                        "image_prompt": "earlier",
+                        "replaced_at": "2026-06-12T00:00:00Z",
+                    },
+                },
+            ]
+            story = self._story_with_config(existing, frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero", "bulk scene"],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=1,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            new_config = mocks["update_video_config"].call_args.args[1]
+            # prev_image untouched even though image_prompt + url changed.
+            self.assertEqual(
+                new_config["doodle_frames"][0]["prev_image"],
+                frames[0]["prev_image"],
+            )
+            self.assertEqual(
+                new_config["doodle_frames"][0]["image_prompt"], "bulk scene",
+            )
+
+    def test_noop_when_no_video_config(self):
+        # Story that's never been opened in the editor has video_config=None.
+        # The URL still lands in stories.images; we just skip the prompt
+        # persist instead of crashing.
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = ["https://old/scene-1.png"]
+            story = {**STORY, "images": '["https://old/scene-1.png"]', "video_config": None}
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero", "scene"],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=1,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            mocks["update_video_config"].assert_not_called()
+            mocks["update_scenes"].assert_called_once()
+
+    def test_noop_when_doodle_frames_shorter(self):
+        # Editor config has fewer frames than stories.images (rare drift).
+        # The bulk URL still lands; the prompt persist silently skips.
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = [f"https://old/scene-{i+1}.png" for i in range(3)]
+            frames = [
+                {"id": "frame-a", "url": existing[0], "image_prompt": ""},
+            ]  # only 1 frame for 3 scenes
+            story = self._story_with_config(existing, frames)
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero", "p0", "p1", "p2"],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:2", Path(tmp))
+            # Out-of-range frame index -> no config write, but URL still updated.
+            mocks["update_video_config"].assert_not_called()
+            mocks["update_scenes"].assert_called_once()
+
+    def test_malformed_video_config_skipped_silently(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = ["https://old/scene-1.png"]
+            story = {
+                **STORY,
+                "images": '["https://old/scene-1.png"]',
+                "video_config": "{not valid json",
+            }
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero", "scene"],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=1,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            mocks["update_video_config"].assert_not_called()
+            mocks["update_scenes"].assert_called_once()
+
+
 class PerPropRegenTests(unittest.TestCase):
     def _story_with_props(self, props):
         import json as _json

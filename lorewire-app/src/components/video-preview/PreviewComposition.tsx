@@ -15,12 +15,14 @@
 //   - Title chip top-center during the hook (first ~1.2 s)
 //   - clip_start_ms / clip_end_ms honored end-to-end
 //   - Voiceover audio with startFrom = clipStartFrames so playback lines up
+//   - Intro / outro segment MP4s spliced inline via Remotion <Series> +
+//     <OffthreadVideo>, so the editor's preview matches what the ffmpeg
+//     concat will produce on render (added 2026-06-13).
 //
 // What it deliberately DOESN'T:
 //   - Karaoke per-word highlight
 //   - Motion beats (MicroWiggle, ScribbleDraw, PropSlideIn, MouthSwap, LabelPopOn)
 //   - Ken-Burns pan/zoom
-//   - Intro/outro splice (those happen after the body render)
 //
 // Editors that need exact frame fidelity should hit "Render" — the queued
 // MP4 is the canonical output.
@@ -29,7 +31,9 @@ import {
   AbsoluteFill,
   Audio,
   interpolate,
+  OffthreadVideo,
   Sequence,
+  Series,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
@@ -66,11 +70,30 @@ export interface CaptionStyleProps {
   word_highlight: "none" | "karaoke" | "color" | "scale" | "background";
 }
 
+/** Resolved intro/outro segment for inline playback. URL is the segment's
+ *  `normalized_url` (GCS https or `/generated/...` path; both are
+ *  browser-playable). `durationFrames` is pre-computed from
+ *  `duration_ms` by the editor at fps=FPS so the composition doesn't have
+ *  to know about ms-to-frame math twice. */
+export interface PreviewSegmentSpec {
+  url: string;
+  durationFrames: number;
+}
+
 export interface PreviewProps extends Record<string, unknown> {
   config: ShortVideoConfig;
   frameUrls: string[];
   audioUrl: string | null;
   captionStyle?: CaptionStyleProps;
+  /** Resolved intro segment (or null when none applies — story has the
+   *  skip flag set, no global default, aspect mismatch, etc.). */
+  intro?: PreviewSegmentSpec | null;
+  /** Resolved outro segment. Same null-when-not-applicable contract. */
+  outro?: PreviewSegmentSpec | null;
+  /** Pre-computed body durationInFrames (the trim window). Pushed into
+   *  the body's Sequence so the Player's outer durationInFrames can grow
+   *  by intro + outro without the body recomputing anything. */
+  bodyDurationFrames: number;
 }
 
 interface FrameWindow {
@@ -84,8 +107,14 @@ interface FrameWindow {
 // the Player container's backdrop showing through). React's rules of hooks
 // mean the hook-using body has to live in a sibling component — see
 // `PreviewCompositionInner` below.
+//
+// Series wrapper: when an intro or outro segment resolves, splice them
+// inline so the editor preview shows what the ffmpeg concat will produce.
+// Each Sequence resets useCurrentFrame() to 0 inside its own range, so the
+// body composition's caption / image-window math doesn't need to know about
+// the intro offset.
 export function PreviewComposition(props: PreviewProps) {
-  const { config, frameUrls } = props;
+  const { config, frameUrls, intro, outro, bodyDurationFrames } = props;
   if (config.doodle_frames.length === 0) {
     return (
       <AbsoluteFill style={{ background: "#fbfaf4" }}>
@@ -105,7 +134,64 @@ export function PreviewComposition(props: PreviewProps) {
       </AbsoluteFill>
     );
   }
-  return <PreviewCompositionInner {...props} />;
+  // Body Sequence has to use the pre-computed body duration so the audio
+  // inside it gets the right window length. The Player's outer
+  // durationInFrames (set by EditorClient) covers intro + body + outro.
+  const safeBodyDuration = Math.max(1, bodyDurationFrames);
+  return (
+    <AbsoluteFill style={{ background: "#fbfaf4" }}>
+      <Series>
+        {intro && intro.url && intro.durationFrames > 0 && (
+          <Series.Sequence
+            durationInFrames={intro.durationFrames}
+            layout="none"
+          >
+            <SegmentClip url={intro.url} kind="intro" />
+          </Series.Sequence>
+        )}
+        <Series.Sequence durationInFrames={safeBodyDuration} layout="none">
+          <PreviewCompositionInner
+            {...props}
+            bodyDurationFrames={safeBodyDuration}
+          />
+        </Series.Sequence>
+        {outro && outro.url && outro.durationFrames > 0 && (
+          <Series.Sequence
+            durationInFrames={outro.durationFrames}
+            layout="none"
+          >
+            <SegmentClip url={outro.url} kind="outro" />
+          </Series.Sequence>
+        )}
+      </Series>
+    </AbsoluteFill>
+  );
+}
+
+// Intro / outro inline clip. OffthreadVideo is Remotion's recommended
+// component for sequenced video clips (per /remotion-dev/remotion docs,
+// 2026-06-13). The MP4 plays at native size into the canvas; we wrap it
+// in AbsoluteFill so it covers the editor's preview box at any aspect.
+// Audio is left unmuted — these segments carry their own music beds and
+// the body's <Audio> only plays during the body Sequence, so there's no
+// double-audio collision.
+function SegmentClip({ url, kind }: { url: string; kind: "intro" | "outro" }) {
+  return (
+    <AbsoluteFill>
+      <OffthreadVideo
+        src={url}
+        style={{
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+        }}
+        // Per rule 14, identify the clip in any Remotion log surface.
+        // The data-* attribute survives into the rendered DOM for browser
+        // inspectors without affecting Remotion's render.
+        data-segment-kind={kind}
+      />
+    </AbsoluteFill>
+  );
 }
 
 function PreviewCompositionInner({

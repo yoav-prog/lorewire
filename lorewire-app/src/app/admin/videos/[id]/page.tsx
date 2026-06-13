@@ -39,6 +39,7 @@ import {
 } from "@/lib/frame-session-spend";
 import { resolveCaptionStyle, toPreview } from "@/lib/caption-style";
 import { getUserCaptionPresetsForPage } from "@/app/admin/actions";
+import { resolveSegmentsForStory } from "@/lib/segment-resolver";
 import EditorClient from "./EditorClient";
 
 export default async function VideoEditorPage({
@@ -171,6 +172,56 @@ export default async function VideoEditorPage({
     parse_error: parsed && !parsed.ok ? parsed.error : null,
   });
 
+  // Resolve which intro / outro segment will splice for this story so the
+  // editor's Remotion preview plays the same clips inline. Mirrors the
+  // Python renderer's chain (skip flag -> pinned -> master enabled ->
+  // global active) plus the Phase 3 aspect-match filter. The reason field
+  // lets the editor surface "intro skipped: aspect-mismatch" inline
+  // instead of going silent.
+  const resolvedSegments = await resolveSegmentsForStory(
+    {
+      intro_segment_id: story.intro_segment_id,
+      outro_segment_id: story.outro_segment_id,
+      skip_intro: story.skip_intro,
+      skip_outro: story.skip_outro,
+      video_config: story.video_config,
+    },
+    globalDefaultAspect,
+  );
+  const editorIntro =
+    resolvedSegments.intro.segment &&
+    resolvedSegments.intro.segment.normalized_url
+      ? {
+          url: toBrowserAssetUrl(resolvedSegments.intro.segment.normalized_url),
+          durationMs:
+            resolvedSegments.intro.segment.duration_ms ?? 0,
+          label: resolvedSegments.intro.segment.label ?? null,
+        }
+      : null;
+  const editorOutro =
+    resolvedSegments.outro.segment &&
+    resolvedSegments.outro.segment.normalized_url
+      ? {
+          url: toBrowserAssetUrl(resolvedSegments.outro.segment.normalized_url),
+          durationMs:
+            resolvedSegments.outro.segment.duration_ms ?? 0,
+          label: resolvedSegments.outro.segment.label ?? null,
+        }
+      : null;
+
+  // eslint-disable-next-line no-console -- rule 14: namespaced observability
+  console.info("[video editor segments]", {
+    story_id: story.id,
+    intro: editorIntro
+      ? { label: editorIntro.label, duration_ms: editorIntro.durationMs }
+      : null,
+    intro_reason: resolvedSegments.intro.reason,
+    outro: editorOutro
+      ? { label: editorOutro.label, duration_ms: editorOutro.durationMs }
+      : null,
+    outro_reason: resolvedSegments.outro.reason,
+  });
+
   // Resolve the per-video caption style now so the editor can render both
   // the live preview overlay AND the Caption style tab with the right
   // per-story-override values and inherited placeholders. Phase 5 of
@@ -209,6 +260,8 @@ export default async function VideoEditorPage({
       captionStyle={captionStyle}
       captionStylePreview={captionStylePreview}
       userCaptionPresets={userCaptionPresets}
+      editorIntro={editorIntro}
+      editorOutro={editorOutro}
     />
   );
 }

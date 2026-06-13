@@ -1161,6 +1161,14 @@ def _regen_one_scene(
     new_scenes[index] = stored_url
     store.update_story_scenes(story["id"], new_scenes)
 
+    # Persist the prompt + new URL onto the matching doodle_frame so the
+    # video editor's per-frame textarea shows what kie was asked to draw.
+    # Bulk regens never used to touch video_config — that's why every
+    # frame's textarea was empty. Best-effort: a failure here doesn't
+    # roll back the scene URL because the image is already public; the
+    # admin can re-run the regen if the prompt didn't land.
+    _persist_frame_prompt(story["id"], story, index, prompt, stored_url)
+
     return stored_url, _per_image_cost_cents()
 
 
@@ -1297,6 +1305,72 @@ def _regen_one_frame(
     cents = _per_image_cost_cents()
     print(f"[regen frame] done id={safe_id} frame={frame_id} cents={cents}")
     return stored_url, cents
+
+
+def _persist_frame_prompt(
+    story_id: str,
+    story: dict,
+    scene_index: int,
+    prompt: str,
+    stored_url: str,
+) -> None:
+    """Stamp the kie prompt + new URL onto `video_config.doodle_frames[i]`
+    after a bulk scene regen so the editor's per-frame textarea fills with
+    something the admin can edit.
+
+    Convention: `doodle_frames[i].url` corresponds to `scene_urls[i]` by
+    index. The fresh-run pipeline writes them in lockstep; per-scene
+    regen preserves the same ordering.
+
+    Best-effort by design:
+      - Missing or malformed `video_config` is silently skipped (the row
+        will populate next time a fresh-run pipeline writes it; the URL
+        already landed in stories.images so the admin reader keeps working).
+      - An out-of-range `scene_index` (doodle_frames shorter than
+        scene_urls) is logged but doesn't fail — the bulk regen still
+        succeeds for its primary job (the image itself).
+      - `prev_image` is intentionally NOT touched. The per-frame Revert
+        flow owns that snapshot; a bulk regen isn't a frame edit and
+        shouldn't trigger Revert state.
+    """
+    raw = story.get("video_config")
+    if not raw:
+        # Story has no editor config yet — nothing to persist into.
+        # Next fresh-run pipeline write will populate doodle_frames; until
+        # then the editor's textarea stays empty (same as today).
+        return
+    try:
+        config = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        print(
+            f"[image regen scenes prompt persist] story={story_id} "
+            "video_config not parseable as JSON, skipping"
+        )
+        return
+    if not isinstance(config, dict):
+        return
+    frames = config.get("doodle_frames")
+    if not isinstance(frames, list):
+        return
+    if scene_index >= len(frames):
+        print(
+            f"[image regen scenes prompt persist] story={story_id} "
+            f"scene_index={scene_index} > doodle_frames len={len(frames)}, "
+            "skipping prompt persist (URL still updated)"
+        )
+        return
+    frame = frames[scene_index]
+    if not isinstance(frame, dict):
+        return
+    new_frame = {**frame, "url": stored_url, "image_prompt": prompt}
+    new_frames = list(frames)
+    new_frames[scene_index] = new_frame
+    new_config = {**config, "doodle_frames": new_frames}
+    store.update_story_video_config(story_id, new_config)
+    print(
+        f"[image regen scenes prompt persist] story={story_id} "
+        f"index={scene_index} prompt_chars={len(prompt)} url={stored_url}"
+    )
 
 
 def _read_scene_urls(story: dict) -> list[str]:
