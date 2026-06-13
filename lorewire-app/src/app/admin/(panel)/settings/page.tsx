@@ -96,6 +96,8 @@ export default async function SettingsPage() {
     sceneCountMode,
     sceneTargetSecondsPerScene,
     cronMaxRowsPerTick,
+    scenePromptGrounding,
+    characterBibleCache,
     googleVoices,
     elevenLabsVoices,
   ] = await Promise.all([
@@ -120,6 +122,8 @@ export default async function SettingsPage() {
     getSetting("media.scene_count_mode"),
     getSetting("media.scene_count_target_seconds_per_scene"),
     getSetting("media.cron_max_rows_per_tick"),
+    getSetting("video.scene_prompt_grounding"),
+    getSetting("video.character_bible_cache"),
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
@@ -165,6 +169,24 @@ export default async function SettingsPage() {
             initial={geminiPrompt ?? ""}
             presets={GEMINI_PROMPT_PRESETS}
             placeholder="Read this in a calm, conversational tone, like a podcaster telling a story"
+          />
+        </Section>
+
+        <Section
+          title="Image prompts"
+          description="How the pipeline builds the prompt sent to kie.ai for each scene image. Grounding ties each scene's prompt to the narration line spoken at that moment; turning it off reverts to the older article-body-only prompts."
+        >
+          <SettingToggle
+            settingKey="video.scene_prompt_grounding"
+            label="Ground scene prompts in narration"
+            hint="When on, each scene image prompt is built from the caption line the narrator says at that scene, plus a recurring-characters bible. When off, the pipeline asks the model to invent N scenes from the article body (the pre 2026-06-14 behavior). Default on."
+            initialOn={readToggle(scenePromptGrounding, true)}
+          />
+          <SettingToggle
+            settingKey="video.character_bible_cache"
+            label="Cache the character bible per story"
+            hint="Diagnostic toggle. When on, the bible (the 2-4 recurring characters with their visual cues) is computed once per story and reused across scene regens — same characters scene to scene. Off forces a fresh bible on every regen, useful when the cached bible turns out wrong. Default on."
+            initialOn={readToggle(characterBibleCache, true)}
           />
         </Section>
 

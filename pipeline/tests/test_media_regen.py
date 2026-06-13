@@ -442,13 +442,20 @@ class ScenePromptCacheTests(unittest.TestCase):
     in video_config.scene_prompts and re-using it across the batch kills
     both the cost (27x cheaper) AND the truncation rate (one chance per
     batch, not 27).
+
+    Phase 2 (2026-06-14 plan): each cached entry now carries a
+    `scene_prompts_built_with` marker so a future prompt-shape change
+    self-evicts every previously-cached batch. Stories cached before the
+    marker shipped show up here as "no marker" → evicted on first contact.
     """
 
-    def _story(self, scene_prompts=None, extra_config=None):
+    def _story(self, scene_prompts=None, marker=None, extra_config=None):
         import json as _json
         config = {}
         if scene_prompts is not None:
             config["scene_prompts"] = scene_prompts
+        if marker is not None:
+            config["scene_prompts_built_with"] = marker
         if extra_config:
             config.update(extra_config)
         return {
@@ -457,16 +464,22 @@ class ScenePromptCacheTests(unittest.TestCase):
             "video_config": _json.dumps(config) if config else None,
         }
 
-    def test_cache_hit_skips_llm_call(self):
+    def test_legacy_marker_cache_hit_skips_llm_call(self):
+        # Cached prompts with a matching legacy marker — story has no
+        # doodle_frames so the resolver picks legacy as its expected
+        # shape, the markers align, and we serve from cache.
         with tempfile.TemporaryDirectory() as tmp:
             cached = [f"cached prompt {i}" for i in range(27)]
-            story = self._story(scene_prompts=cached)
+            story = self._story(scene_prompts=cached, marker="legacy_v0")
             patches = _patches({
                 "fetch_story": mock.patch.object(
                     media.store, "fetch_story", return_value=story,
                 ),
                 "make_image_prompts": mock.patch.object(
                     media.stages, "make_image_prompts",
+                ),
+                "make_grounded_scene_prompts": mock.patch.object(
+                    media.stages, "make_grounded_scene_prompts",
                 ),
                 "resolve_scene_count": mock.patch.object(
                     media, "_resolve_scene_count", return_value=27,
@@ -477,11 +490,47 @@ class ScenePromptCacheTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                "grounding_enabled": mock.patch.object(
+                    media, "_scene_prompt_grounding_enabled", return_value=False,
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:5", Path(tmp))
-            # LLM never called — cache served the prompt.
+            # Neither prompt builder was called — cache served the prompt.
             mocks["make_image_prompts"].assert_not_called()
+            mocks["make_grounded_scene_prompts"].assert_not_called()
+
+    def test_unmarked_legacy_cache_is_evicted(self):
+        # Pre-marker caches are treated as poisoned and rebuilt on first
+        # contact. This is the recovery path for every story whose cache
+        # was populated before the 2026-06-14 fix shipped.
+        with tempfile.TemporaryDirectory() as tmp:
+            cached = [f"poisoned prompt {i}" for i in range(27)]
+            story = self._story(scene_prompts=cached)  # NO marker
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero"] + [f"new {i}" for i in range(27)],
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=27,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+                "grounding_enabled": mock.patch.object(
+                    media, "_scene_prompt_grounding_enabled", return_value=False,
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:5", Path(tmp))
+            mocks["make_image_prompts"].assert_called_once()
 
     def test_cache_miss_calls_llm_and_persists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,6 +594,186 @@ class ScenePromptCacheTests(unittest.TestCase):
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:5", Path(tmp))
+            mocks["make_image_prompts"].assert_called_once()
+
+
+class GroundedScenePromptTests(unittest.TestCase):
+    """2026-06-14 plan: scene prompts are derived from the per-frame
+    narration line (captions sliced by doodle_frames.caption_chunk_start_index)
+    rather than from the full article body. This binds prompt N to what
+    the narrator is actually saying when scene N appears on screen.
+    """
+
+    def _story_with_frames(self, marker=None, scene_prompts=None, bible=None):
+        import json as _json
+        config = {
+            "doodle_frames": [
+                {"id": "f-0", "url": "u0", "caption_chunk_start_index": 0},
+                {"id": "f-1", "url": "u1", "caption_chunk_start_index": 1},
+                {"id": "f-2", "url": "u2", "caption_chunk_start_index": 2},
+            ],
+            "captions": [
+                {"start_ms": 0, "end_ms": 1000, "text": "Once upon a time"},
+                {"start_ms": 1000, "end_ms": 2000, "text": "a neighbor woke us"},
+                {"start_ms": 2000, "end_ms": 3000, "text": "with a leaf blower"},
+            ],
+        }
+        if scene_prompts is not None:
+            config["scene_prompts"] = scene_prompts
+        if marker is not None:
+            config["scene_prompts_built_with"] = marker
+        if bible is not None:
+            config["character_bible"] = bible
+        return {**STORY, "images": "[]", "video_config": _json.dumps(config)}
+
+    def test_grounded_path_uses_narration_when_frames_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story_with_frames()
+            grounded = mock.MagicMock(
+                return_value=(
+                    ["grounded 0", "grounded 1", "grounded 2"],
+                    {"characters": [{"name": "N", "visual_cues": "tall, hat"}], "summary": ""},
+                ),
+            )
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_grounded_scene_prompts": mock.patch.object(
+                    media.stages, "make_grounded_scene_prompts", grounded,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:1", Path(tmp))
+            # Grounded builder was used, NOT the legacy one.
+            mocks["make_grounded_scene_prompts"].assert_called_once()
+            mocks["make_image_prompts"].assert_not_called()
+            call = mocks["make_grounded_scene_prompts"].call_args
+            narrations = call.args[2]
+            # Each scene narration line corresponds to its caption chunk.
+            self.assertEqual(narrations[0], "Once upon a time")
+            self.assertEqual(narrations[1], "a neighbor woke us")
+            self.assertEqual(narrations[2], "with a leaf blower")
+
+    def test_grounded_cache_hit_reuses_prompts_and_bible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cached = [f"cached grounded {i}" for i in range(3)]
+            bible = {"characters": [{"name": "X", "visual_cues": "cap, beard"}], "summary": ""}
+            story = self._story_with_frames(
+                marker="narration_v1", scene_prompts=cached, bible=bible,
+            )
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_grounded_scene_prompts": mock.patch.object(
+                    media.stages, "make_grounded_scene_prompts",
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            # Neither builder was called — both prompt set + bible cached.
+            mocks["make_grounded_scene_prompts"].assert_not_called()
+            mocks["make_image_prompts"].assert_not_called()
+
+    def test_legacy_marker_evicted_when_grounding_on_and_frames_exist(self):
+        # Cache was populated by an older legacy run. Now grounding is on
+        # (default) AND the story has frames + captions, so the resolver
+        # evicts the legacy cache and rebuilds via the grounded path.
+        with tempfile.TemporaryDirectory() as tmp:
+            cached = [f"old legacy {i}" for i in range(3)]
+            story = self._story_with_frames(
+                marker="legacy_v0", scene_prompts=cached,
+            )
+            grounded = mock.MagicMock(
+                return_value=(
+                    ["fresh grounded 0", "fresh grounded 1", "fresh grounded 2"],
+                    None,
+                ),
+            )
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_grounded_scene_prompts": mock.patch.object(
+                    media.stages, "make_grounded_scene_prompts", grounded,
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:1", Path(tmp))
+            mocks["make_grounded_scene_prompts"].assert_called_once()
+            # New cache written with narration_v1 marker.
+            cache_writes = [
+                call.args[1] for call in mocks["update_video_config"].call_args_list
+                if isinstance(call.args[1], dict)
+                and call.args[1].get("scene_prompts_built_with") == "narration_v1"
+            ]
+            self.assertTrue(cache_writes)
+
+    def test_grounding_off_via_setting_uses_legacy_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story_with_frames()  # has frames + captions
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "make_image_prompts": mock.patch.object(
+                    media.stages, "make_image_prompts",
+                    return_value=["hero"] + [f"legacy {i}" for i in range(3)],
+                ),
+                "make_grounded_scene_prompts": mock.patch.object(
+                    media.stages, "make_grounded_scene_prompts",
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+                "grounding_enabled": mock.patch.object(
+                    media, "_scene_prompt_grounding_enabled", return_value=False,
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            # Setting off → legacy path even though narrations are available.
+            mocks["make_grounded_scene_prompts"].assert_not_called()
             mocks["make_image_prompts"].assert_called_once()
 
 

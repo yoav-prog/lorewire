@@ -496,12 +496,21 @@ export async function enqueueScenesBulk(opts: {
   };
 }
 
-// Clear `video_config.scene_prompts` on the story so the first scene:N
-// worker in the upcoming batch re-asks the LLM for a fresh prompt set
-// keyed to the current body. Noop when video_config has no cache or no
-// row at all. Best-effort: a failure here doesn't fail the bulk — the
-// worker would just hit a stale cache, which is still functionally
-// correct, just not "fresh prompts every click".
+// Clear the scene-prompts cache cluster on the story so the first
+// scene:N worker in the upcoming batch builds a fully fresh set:
+//   - `scene_prompts`              — the per-scene prompt list itself
+//   - `scene_prompts_built_with`   — shape marker (otherwise the worker
+//                                    would see "no prompts, old marker"
+//                                    and not know to treat it as fresh)
+//   - `character_bible`            — fresh characters too, because a
+//                                    Rebuild click means "I want a new
+//                                    look"; reusing the bible would
+//                                    redraw the same characters into
+//                                    different moments
+// Noop when video_config has no row at all OR has none of these keys.
+// Best-effort: a failure here doesn't fail the bulk — the worker would
+// just hit stale state, which is still functionally correct, just not
+// "fresh prompts every click".
 async function clearStoryScenePromptsCache(storyId: string): Promise<void> {
   const row = await one<{ video_config: string | null }>(
     `SELECT video_config FROM stories WHERE id = ?`,
@@ -516,9 +525,15 @@ async function clearStoryScenePromptsCache(storyId: string): Promise<void> {
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
   const config = parsed as Record<string, unknown>;
-  if (!("scene_prompts" in config)) return;
+  const hadAny =
+    "scene_prompts" in config
+    || "scene_prompts_built_with" in config
+    || "character_bible" in config;
+  if (!hadAny) return;
   const next = { ...config };
   delete next.scene_prompts;
+  delete next.scene_prompts_built_with;
+  delete next.character_bible;
   await run(
     `UPDATE stories SET video_config = ?, updated_at = ? WHERE id = ?`,
     [JSON.stringify(next), new Date().toISOString(), storyId],

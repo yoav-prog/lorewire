@@ -680,3 +680,275 @@ def _parse_prompt_list(
             f'"{headline}".{excerpt} {style}'
         )
     return fallback
+
+
+# --- grounded per-scene prompts (Phase 1 of 2026-06-14 plan) -----------------
+# Image prompts that follow what the narrator is actually SAYING at each
+# scene, not just "the Nth visual the LLM imagined from the body." Two LLM
+# calls: a character bible (cached on video_config.character_bible so we
+# pay for it once per story) plus a single grounded-prompts call that
+# binds each prompt to its narration line and reuses the bible cues for
+# continuity. See _plans/2026-06-14-scene-prompts-grounded-in-narration.md.
+
+# Single-narration-line cap. Captions are short by construction (they
+# play in seconds), so 600 chars covers any real scene. The cap exists
+# so a malformed `captions` field can't drive an unbounded LLM bill.
+MAX_NARRATION_CHARS = 600
+
+
+def _truncate_narration(line: str) -> str:
+    """Defensive cap on a single scene's narration text so a malformed
+    captions field can't push the LLM prompt to absurd size."""
+    line = " ".join(line.split())
+    if len(line) <= MAX_NARRATION_CHARS:
+        return line
+    return line[:MAX_NARRATION_CHARS].rstrip() + "..."
+
+
+def _parse_character_bible(raw: str) -> dict | None:
+    """Parse the bible-call response into {"characters": [...], "summary": str}.
+    Returns None on any failure — the per-scene step still runs without a
+    bible, just without the continuity reinforcement (logged as the
+    fallback branch in media.py)."""
+    snippet = raw
+    if "```" in snippet:
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("{"):
+                snippet = stripped
+                break
+    start, end = snippet.find("{"), snippet.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(snippet[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    chars = parsed.get("characters")
+    if not isinstance(chars, list) or not chars:
+        return None
+    cleaned: list[dict] = []
+    for c in chars:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name", "")).strip()
+        cues = str(c.get("visual_cues", "")).strip()
+        if not name or not cues:
+            continue
+        cleaned.append({"name": name, "visual_cues": cues})
+    if not cleaned:
+        return None
+    summary = str(parsed.get("setting", "")).strip()
+    return {"characters": cleaned[:4], "summary": summary}
+
+
+def _bible_for_prompt(bible: dict | None) -> str:
+    """Render the bible into the human-readable block the per-scene call
+    embeds. Empty string when there's no usable bible — instruction
+    falls back to a 'no recurring characters' branch."""
+    if not bible:
+        return ""
+    lines = [f"- {c['name']}: {c['visual_cues']}" for c in bible["characters"]]
+    block = "RECURRING CHARACTERS (repeat their visual cues verbatim every "
+    block += "time they appear in a prompt):\n" + "\n".join(lines)
+    if bible.get("summary"):
+        block += f"\n\nSETTING: {bible['summary']}"
+    return block
+
+
+def build_character_bible(idea: dict, body: str, dry_run: bool) -> dict | None:
+    """First half of the grounded path. One short LLM call: name the 2-4
+    recurring characters and give each a distinctive visual cue. Returns
+    None on dry-run or on parse failure so the caller can still proceed
+    (per-scene call works without a bible, just less consistent)."""
+    from pipeline import llm
+
+    if dry_run:
+        return {
+            "characters": [
+                {"name": "Protagonist", "visual_cues": "[DRY] tall, dark coat"},
+                {"name": "Antagonist", "visual_cues": "[DRY] short, red scarf"},
+            ],
+            "summary": f"[DRY] setting derived from {idea['headline'][:60]}",
+        }
+
+    instruction = (
+        "You design illustrations for LoreWire shorts. Read the article and "
+        "identify the 2 to 4 most recurring on-screen characters. For each, "
+        "give a short distinctive visual description (hair, build, clothing, "
+        "accessories) that an illustrator would repeat verbatim every time "
+        "the character is drawn so the same person shows up scene to scene.\n\n"
+        "Also write a one-line setting summary (era, place, vibe).\n\n"
+        "Return ONLY this JSON object, no fences, no prose:\n"
+        '{"characters": [{"name": "...", "visual_cues": "..."}, ...], '
+        '"setting": "..."}\n\n'
+        f"Headline: {idea['headline']}\n\nArticle:\n{body}"
+    )
+    raw = llm.chat(instruction, 1500, model="openai/gpt-5.4-mini").strip()
+    return _parse_character_bible(raw)
+
+
+def make_grounded_scene_prompts(
+    idea: dict,
+    body: str,
+    scene_narrations: list[str],
+    dry_run: bool,
+    *,
+    cached_bible: dict | None = None,
+) -> tuple[list[str], dict | None]:
+    """Build one image prompt per scene where the prompt is grounded in the
+    narration line spoken at that scene, with recurring characters from the
+    bible re-stated verbatim.
+
+    Returns (prompts, bible). `prompts` is the same length as
+    `scene_narrations`. `bible` is the bible that was used — caller
+    persists it on video_config.character_bible so a sibling regen on the
+    same story doesn't pay for the bible call twice. `bible` is None when
+    the bible step failed; the prompts still came back, just without the
+    cross-scene continuity reinforcement.
+
+    Dry-run returns deterministic stubs that EMBED the narration line so
+    tests can assert binding survives without an LLM key.
+    """
+    from pipeline import llm, store
+
+    style = (store.get_setting("video.style") or DEFAULT_IMAGE_STYLE).strip()
+    narrations = [_truncate_narration(line or "") for line in scene_narrations]
+    n = len(narrations)
+
+    if dry_run:
+        bible = cached_bible or build_character_bible(idea, body, dry_run=True)
+        prompts = [
+            f"[DRY] scene {i + 1} grounded in narration: \"{narrations[i][:80]}\". "
+            f"Style: {style}"
+            for i in range(n)
+        ]
+        return prompts, bible
+
+    bible = cached_bible if cached_bible else build_character_bible(idea, body, dry_run=False)
+    bible_block = _bible_for_prompt(bible)
+
+    # Narration lines numbered the way the LLM should index them in the
+    # returned array — 1-based for the human-readable prompt, but parsed
+    # back to a 0-based list of length n.
+    numbered = "\n".join(
+        f"Scene {i + 1}: \"{narrations[i]}\"" for i in range(n)
+    )
+
+    instruction = (
+        f"You design illustrations for LoreWire shorts. Below is a list of "
+        f"{n} scenes from a video. Each scene shows ONE line of narration "
+        f"that plays under the image at that moment.\n\n"
+        f"Return a JSON array of EXACTLY {n} image prompts in the same order "
+        f"as the scenes. Prompt i depicts the moment described by Scene i's "
+        f"narration line — not the article in general, not the previous "
+        f"scene, THAT line specifically.\n\n"
+        + (bible_block + "\n\n" if bible_block else "")
+        + f"Each prompt: one to two sentences max, concrete subject and "
+        f"action, describes the framing and the focal moment shown by THAT "
+        f"narration line. NO text or captions in the image. NO faces of "
+        f"identifiable real people. NO logos.\n\n"
+        f"Append this style note to every prompt verbatim at the end: "
+        f'"{style}".\n\n'
+        f"Return ONLY the JSON array of {n} strings, no surrounding prose.\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Scenes (one per line of narration):\n{numbered}"
+    )
+    # Same model + token shape as make_image_prompts — character continuity
+    # instruction + N-prompt JSON list needs 5.4-mini's no-reasoning budget
+    # to survive long arrays. 16000 tokens covers a 30-prompt array at
+    # ~200 tokens each (narration line + bible cue + style suffix).
+    raw = llm.chat(instruction, 16000, model="openai/gpt-5.4-mini").strip()
+    prompts = _parse_grounded_prompts(raw, narrations, idea["headline"], style)
+    return prompts, bible
+
+
+def _parse_grounded_prompts(
+    raw: str, narrations: list[str], headline: str, style: str,
+) -> list[str]:
+    """Parse the grounded-prompts LLM response with a per-scene fallback.
+
+    Unlike `_parse_prompt_list`, a partial/failed parse here doesn't pad
+    with the last prompt — we PAD with a per-scene grounded fallback that
+    mentions THAT scene's narration line, because the whole point of this
+    function is that prompt N targets narration line N. Padding with
+    "continuation of scene 5" on scene 12 would defeat the binding."""
+    n = len(narrations)
+    snippet = raw
+    if "```" in snippet:
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("["):
+                snippet = stripped
+                break
+    parsed_prompts: list[str] = []
+    start, end = snippet.find("["), snippet.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(snippet[start : end + 1])
+            if isinstance(parsed, list):
+                parsed_prompts = [str(p).strip() for p in parsed if str(p).strip()]
+        except json.JSONDecodeError:
+            parsed_prompts = []
+    out: list[str] = []
+    for i in range(n):
+        if i < len(parsed_prompts):
+            out.append(parsed_prompts[i])
+            continue
+        # Per-scene grounded fallback — keeps prompt i bound to narration i
+        # even when the LLM truncated mid-array.
+        line = narrations[i] or ""
+        if line:
+            out.append(
+                f"Scene {i + 1}: depict the moment described by the "
+                f'narration "{line}", from the article "{headline}". {style}'
+            )
+        else:
+            out.append(
+                f"Scene {i + 1}: a story moment from the article "
+                f'"{headline}". {style}'
+            )
+    return out
+
+
+def derive_scene_narrations(
+    doodle_frames: list[dict],
+    captions: list[dict],
+) -> list[str]:
+    """For each doodle frame, return the joined caption text from
+    frame[i].caption_chunk_start_index up to (frame[i+1].caption_chunk_start_index - 1).
+    Last frame slices to end of captions.
+
+    Empty list when either input is empty or shapes don't match — caller
+    falls back to the legacy (article-body-only) prompt path."""
+    if not doodle_frames or not captions:
+        return []
+    starts: list[int] = []
+    for f in doodle_frames:
+        if not isinstance(f, dict):
+            return []
+        idx = f.get("caption_chunk_start_index")
+        if not isinstance(idx, int) or idx < 0:
+            return []
+        starts.append(idx)
+    out: list[str] = []
+    for i, start in enumerate(starts):
+        stop = starts[i + 1] if i + 1 < len(starts) else len(captions)
+        # Defensive clamp — pipeline upstream is supposed to keep these in
+        # range but a half-migrated config can violate it.
+        start = max(0, min(start, len(captions)))
+        stop = max(start, min(stop, len(captions)))
+        chunk_texts = []
+        for c in captions[start:stop]:
+            if isinstance(c, dict):
+                text = str(c.get("text", "")).strip()
+                if text:
+                    chunk_texts.append(text)
+        out.append(" ".join(chunk_texts))
+    return out

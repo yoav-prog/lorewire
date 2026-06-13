@@ -911,16 +911,22 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     idea = _idea_from_story(story)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
-    # n=scene_count+1 because make_image_prompts returns hero at index 0
-    # followed by scene prompts. We discard index 0 — hero owns its own
-    # cinematic prompt via _regen_hero. On regen the story row has
+    # Route through the resolver so the bulk path picks up the same
+    # narration-grounded prompts (and shares the cached character bible)
+    # with the per-scene queue workers. On regen the story row has
     # `duration` populated, so the auto path can read it directly
-    # instead of falling back to the body word-count estimate.
+    # instead of falling back to the body word-count estimate. The
+    # resolver evicts a stale-marker cache on its own; the TS bulk
+    # button has already cleared the prompts cache cluster before this
+    # function fires.
     scene_count = _resolve_scene_count(None, story=story)
-    prompts = stages.make_image_prompts(
-        idea, body, dry_run=False, n=scene_count + 1,
+    scene_prompts = _resolve_scene_prompts_cached(
+        story_id=story["id"],
+        story=story,
+        idea=idea,
+        body=body,
+        scene_count=scene_count,
     )
-    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
     # Phase 2 of _plans/2026-06-12-video-aspect-ratio.md: resolve scene
     # aspect from the story row. Existing portrait stories with no
     # `aspect` field fall through to 3:4 — same kie call shape as before.
@@ -983,6 +989,13 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         )
         scene_urls.append(stored_url)
         total_cents += per_image_cents
+
+        # Mirror the per-image path: stamp the prompt that produced THIS
+        # image onto doodle_frames[i].image_prompt so the editor textarea
+        # + the granular grid lightbox both show the actual prompt sent
+        # to kie. Without this, a bulk regen still leaves the per-frame
+        # field empty for every scene the user didn't redo individually.
+        _persist_frame_prompt(story["id"], story, i, prompt, stored_url)
 
     if not scene_urls:
         raise RuntimeError("scenes regen produced 0 images — all kie calls failed")
@@ -1422,6 +1435,35 @@ def _new_frame_id() -> str:
     return _uuid.uuid4().hex
 
 
+# Cache marker — bumped whenever the prompt-build shape changes in a way
+# that should evict every previously-cached batch. Legacy caches (no marker
+# present) are treated as poisoned for the grounded path: they pre-date
+# the narration-binding fix and would otherwise lock the story onto the
+# stale prompts that produced "wrong" images in the first place.
+SCENE_PROMPTS_BUILT_WITH_GROUNDED = "narration_v1"
+SCENE_PROMPTS_BUILT_WITH_LEGACY = "legacy_v0"
+
+
+def _scene_prompt_grounding_enabled() -> bool:
+    """Settings escape hatch — flipping `video.scene_prompt_grounding` to
+    "0" reverts the path to the legacy `make_image_prompts(idea, body, n)`
+    behavior. Default on, per the 2026-06-14 plan."""
+    raw = store.get_setting("video.scene_prompt_grounding")
+    if raw is None:
+        return True
+    return str(raw).strip() not in ("0", "false", "False", "off", "")
+
+
+def _character_bible_cache_enabled() -> bool:
+    """Diagnostic escape hatch — off forces a fresh bible call every
+    regen. Useful when the cached bible turns out wrong and we want one
+    regen to overwrite it. Default on."""
+    raw = store.get_setting("video.character_bible_cache")
+    if raw is None:
+        return True
+    return str(raw).strip() not in ("0", "false", "False", "off", "")
+
+
 def _resolve_scene_prompts_cached(
     story_id: str,
     story: dict,
@@ -1430,43 +1472,146 @@ def _resolve_scene_prompts_cached(
     scene_count: int,
 ) -> list[str]:
     """Return the scene prompt list for `story`, building it via the LLM
-    only when `video_config.scene_prompts` is missing or smaller than
-    `scene_count`. Persists the freshly-built list back into video_config
-    so the next scene:N worker in the same batch reads from cache.
+    only when `video_config.scene_prompts` is missing, too short, or
+    built with a previous prompt-shape (marker mismatch). Persists the
+    freshly-built list back into video_config so sibling workers in the
+    same batch read from cache.
 
-    Returns the SCENE prompts only — the hero slot (prompts[0] from
-    `make_image_prompts`) is stripped before caching so callers can index
-    directly with their `scene:N` slug N.
+    Returns the SCENE prompts only — the hero slot (prompts[0] from the
+    legacy hero+scenes builder) is stripped before caching so callers
+    can index directly with their `scene:N` slug N.
 
     Cache invalidation: the TS bulk enqueue clears the cache on each
     Rebuild-all click, so a fresh batch always gets a fresh LLM call.
     Per-scene "Redo" clicks via the granular grid keep the cache so the
-    new image is consistent with its neighbors.
+    new image is consistent with its neighbors — UNLESS the cached
+    entry's `built_with` marker doesn't match the current grounded
+    shape, in which case we evict and rebuild grounded. That's how
+    pre-fix stories self-recover on their first Redo click.
+
+    Grounded path (default): builds one prompt per scene bound to that
+    scene's narration line (from doodle_frames + captions). Falls back
+    to the legacy article-body-only builder when the setting is off OR
+    when narrations can't be derived (no doodle_frames yet, malformed
+    config). The fallback also writes a "legacy_v0" marker so when
+    grounding flips back on, the next regen evicts the legacy cache.
     """
-    cached = _read_cached_scene_prompts(story)
-    if cached and len(cached) >= scene_count:
+    grounding_on = _scene_prompt_grounding_enabled()
+    cached_prompts, cached_marker = _read_cached_scene_prompts_with_marker(story)
+    expected_marker = (
+        SCENE_PROMPTS_BUILT_WITH_GROUNDED if grounding_on
+        else SCENE_PROMPTS_BUILT_WITH_LEGACY
+    )
+
+    if (
+        cached_prompts
+        and len(cached_prompts) >= scene_count
+        and cached_marker == expected_marker
+    ):
         print(
             f"[scene prompts cache hit] story={story_id} "
-            f"cached_count={len(cached)} target={scene_count}"
+            f"cached_count={len(cached_prompts)} target={scene_count} "
+            f"marker={cached_marker}"
         )
-        return cached[:scene_count]
-    print(
-        f"[scene prompts cache miss] story={story_id} "
-        f"cached_count={len(cached) if cached else 0} target={scene_count} "
-        "— firing LLM call"
-    )
+        return cached_prompts[:scene_count]
+
+    if cached_prompts and cached_marker != expected_marker:
+        print(
+            f"[scene prompts cache evict] story={story_id} "
+            f"cached_marker={cached_marker or 'none'} "
+            f"expected={expected_marker} — rebuilding"
+        )
+    else:
+        print(
+            f"[scene prompts cache miss] story={story_id} "
+            f"cached_count={len(cached_prompts) if cached_prompts else 0} "
+            f"target={scene_count} — firing LLM call"
+        )
+
+    if grounding_on:
+        narrations = _scene_narrations_from_story(story, scene_count)
+        if narrations and len(narrations) == scene_count:
+            cached_bible = (
+                _read_cached_character_bible(story)
+                if _character_bible_cache_enabled()
+                else None
+            )
+            print(
+                f"[scene prompts bible] story={story_id} "
+                f"cached={cached_bible is not None}"
+            )
+            scene_prompts, bible = stages.make_grounded_scene_prompts(
+                idea, body, narrations, dry_run=False,
+                cached_bible=cached_bible,
+            )
+            print(
+                f"[scene prompts grounded] story={story_id} "
+                f"count={len(scene_prompts)} "
+                f"bible_chars={len(bible['characters']) if bible else 0}"
+            )
+            if scene_prompts:
+                _write_cached_scene_prompts(
+                    story_id, story, scene_prompts,
+                    marker=SCENE_PROMPTS_BUILT_WITH_GROUNDED,
+                    bible=bible,
+                )
+            return scene_prompts
+        print(
+            f"[scene prompts grounded] story={story_id} fallback=legacy "
+            "(no narrations available — story may pre-date doodle_frames)"
+        )
+
+    # Legacy path: setting off OR narrations unavailable. Use the original
+    # builder and stamp a legacy marker so a later grounded run evicts.
     prompts = stages.make_image_prompts(
         idea, body, dry_run=False, n=scene_count + 1,
     )
     scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
     if scene_prompts:
-        _write_cached_scene_prompts(story_id, story, scene_prompts)
+        _write_cached_scene_prompts(
+            story_id, story, scene_prompts,
+            marker=SCENE_PROMPTS_BUILT_WITH_LEGACY,
+            bible=None,
+        )
     return scene_prompts
 
 
-def _read_cached_scene_prompts(story: dict) -> list[str] | None:
-    """Read `video_config.scene_prompts` from a story row. Returns None
-    when missing, malformed, or empty — caller treats that as a cache miss."""
+def _scene_narrations_from_story(
+    story: dict, scene_count: int,
+) -> list[str]:
+    """Pull `video_config.doodle_frames` + `video_config.captions` off the
+    story and derive the per-scene narration list. Returns [] when either
+    is missing/malformed; caller falls back to the legacy article-only
+    prompt path. We don't require the lists to be equal length — if
+    doodle_frames is shorter than scene_count we still return what's
+    there so the caller can decide (it will fall back). When LONGER, we
+    trim to scene_count so the returned list lines up 1:1 with the kie
+    slot indices."""
+    raw = story.get("video_config")
+    if not raw:
+        return []
+    try:
+        config = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(config, dict):
+        return []
+    frames = config.get("doodle_frames")
+    captions = config.get("captions")
+    if not isinstance(frames, list) or not isinstance(captions, list):
+        return []
+    narrations = stages.derive_scene_narrations(frames, captions)
+    if not narrations:
+        return []
+    if len(narrations) > scene_count:
+        return narrations[:scene_count]
+    return narrations
+
+
+def _read_cached_character_bible(story: dict) -> dict | None:
+    """Read `video_config.character_bible` off a story row. Returns None
+    on any malformed shape — caller treats that as a miss and pays for
+    the bible call."""
     raw = story.get("video_config")
     if not raw:
         return None
@@ -1476,26 +1621,81 @@ def _read_cached_scene_prompts(story: dict) -> list[str] | None:
         return None
     if not isinstance(config, dict):
         return None
-    cached = config.get("scene_prompts")
-    if not isinstance(cached, list):
+    bible = config.get("character_bible")
+    if not isinstance(bible, dict):
         return None
+    chars = bible.get("characters")
+    if not isinstance(chars, list) or not chars:
+        return None
+    # Light shape validation — anything weirder than this drops to a
+    # miss because make_grounded_scene_prompts can't use it safely.
+    cleaned: list[dict] = []
+    for c in chars:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name", "")).strip()
+        cues = str(c.get("visual_cues", "")).strip()
+        if name and cues:
+            cleaned.append({"name": name, "visual_cues": cues})
+    if not cleaned:
+        return None
+    return {
+        "characters": cleaned[:4],
+        "summary": str(bible.get("summary", "")).strip(),
+    }
+
+
+def _read_cached_scene_prompts_with_marker(
+    story: dict,
+) -> tuple[list[str] | None, str | None]:
+    """Same as `_read_cached_scene_prompts` but also returns the
+    `scene_prompts_built_with` marker so the resolver can decide whether
+    to trust the cache or evict it on shape mismatch."""
+    raw = story.get("video_config")
+    if not raw:
+        return None, None
+    try:
+        config = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None, None
+    if not isinstance(config, dict):
+        return None, None
+    cached = config.get("scene_prompts")
+    marker = config.get("scene_prompts_built_with")
+    if not isinstance(cached, list):
+        return None, None
     cleaned = [str(p) for p in cached if isinstance(p, str) and p.strip()]
-    return cleaned or None
+    if not cleaned:
+        return None, None
+    return cleaned, str(marker) if isinstance(marker, str) else None
 
 
 def _write_cached_scene_prompts(
-    story_id: str, story: dict, scene_prompts: list[str],
+    story_id: str,
+    story: dict,
+    scene_prompts: list[str],
+    *,
+    marker: str,
+    bible: dict | None,
 ) -> None:
-    """Stamp the prompt list into `video_config.scene_prompts`. Leaves
-    every other field on the config untouched. Best-effort — a failure
-    here doesn't prevent the regen because the prompt is still being
-    used by this caller; cache just won't hit on the next scene.
+    """Stamp the prompt list + shape marker (+ optional character bible)
+    into `video_config`. Leaves every other field on the config untouched.
+    Best-effort — a failure here doesn't prevent the regen because the
+    prompt is still being used by this caller; cache just won't hit on
+    the next scene.
 
     Also rewrites `story["video_config"]` in place so the subsequent
     `_persist_frame_prompt` call in the same regen reads the cache-
     augmented config when it spreads `**config` to build the new value.
     Without this, the prompt persist would silently wipe the cache by
     overwriting video_config with the pre-cache value.
+
+    The `marker` keys the cache to its prompt-build shape so a future
+    code change that bumps the marker (or flips between grounded and
+    legacy) self-evicts every previously-cached batch on first contact.
+    The `bible` (when provided) is stored alongside so a sibling regen
+    on the same story reuses the same characters instead of paying for
+    a second bible call.
     """
     raw = story.get("video_config")
     config: dict
@@ -1507,7 +1707,13 @@ def _write_cached_scene_prompts(
             config = {}
     else:
         config = {}
-    new_config = {**config, "scene_prompts": list(scene_prompts)}
+    new_config: dict = {
+        **config,
+        "scene_prompts": list(scene_prompts),
+        "scene_prompts_built_with": marker,
+    }
+    if bible is not None:
+        new_config["character_bible"] = bible
     try:
         store.update_story_video_config(story_id, new_config)
         # Keep the in-memory story dict in sync — _persist_frame_prompt

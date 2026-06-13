@@ -16,9 +16,8 @@ import {
   estimateImageRegenCostCents,
   latestRenderForAsset,
   type AssetOwnerKind,
-  type ImageRenderRow,
 } from "@/lib/image-render-queue";
-import { RegenButton } from "./RegenButton";
+import { GranularImageCard } from "./GranularImageCard";
 
 export interface GranularItem {
   /** Asset slug stored on the queue row, e.g. "scene:3". */
@@ -29,31 +28,12 @@ export interface GranularItem {
   label: string;
   /** Optional second-line meta, e.g. "right · prop". */
   meta?: string;
-}
-
-const TRANSITIONAL = new Set(["queued", "generating"]);
-
-// kie writes each regen back to the SAME public URL (e.g. .../scene-1.png),
-// which means an aggressive browser / CDN cache will keep showing the prior
-// image even after a successful regen — exactly what the user reported with
-// "the thumbnail shows one thing but opening it shows a different image"
-// (2026-06-14). Appending the latest render's finished_at as a query
-// string busts the cache without changing the canonical URL. Rows that
-// haven't finished yet (queued / generating / never regenerated) keep the
-// bare URL so the prior image still paints.
-function cacheBust(src: string, latest: ImageRenderRow | null): string {
-  if (!latest || !latest.finished_at) return src;
-  if (latest.status !== "done") return src;
-  const sep = src.includes("?") ? "&" : "?";
-  return `${src}${sep}v=${encodeURIComponent(latest.finished_at)}`;
-}
-
-function statusBadge(row: ImageRenderRow | null): string | null {
-  if (!row) return null;
-  if (row.status === "queued") return "Queued";
-  if (row.status === "generating") return "Generating";
-  if (row.status === "error") return "Failed";
-  return null;
+  /** Stored prompt that produced this image — surfaced in the lightbox
+   *  so the admin can debug "why does this image look unrelated" without
+   *  digging into the DB. For story scenes this comes from
+   *  doodle_frames[i].image_prompt; other slugs may not have one
+   *  persisted yet. */
+  prompt?: string;
 }
 
 export async function GranularRegenGrid({
@@ -71,6 +51,11 @@ export async function GranularRegenGrid({
 }) {
   if (items.length === 0) return null;
 
+  // Server-side enrichment: each item picks up its per-image cost estimate
+  // and the latest queue row (drives the status badge + the cache-bust
+  // token on the thumbnail). Each card itself is a client component so
+  // the click-to-zoom modal + the prompt-copy button can be interactive
+  // without forcing the whole grid down the client bundle.
   const enriched = await Promise.all(
     items.map(async (it) => ({
       ...it,
@@ -88,64 +73,25 @@ export async function GranularRegenGrid({
         {description && (
           <p className="mt-0.5 text-[12px] text-muted">{description}</p>
         )}
+        <p className="mt-1 font-mono text-[10px] uppercase tracking-wider text-muted">
+          Tip: click any thumbnail to see it full-size + the prompt that drew it.
+        </p>
       </header>
       <ul className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {enriched.map((it) => {
-          const badge = statusBadge(it.latest);
-          const transitional =
-            it.latest !== null && TRANSITIONAL.has(it.latest.status);
-          return (
-            <li
-              key={it.asset}
-              className="overflow-hidden rounded-lg border border-line bg-bg"
-            >
-              <div className="relative aspect-square overflow-hidden bg-surface2">
-                {it.src ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={cacheBust(it.src, it.latest)}
-                    alt={it.label}
-                    className={`h-full w-full object-cover transition-opacity ${
-                      transitional ? "opacity-50" : ""
-                    }`}
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center font-mono text-[10px] text-muted">
-                    no image
-                  </div>
-                )}
-                {badge && (
-                  <span
-                    className={`absolute right-1.5 top-1.5 rounded-full border px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider ${
-                      it.latest?.status === "error"
-                        ? "border-danger/40 bg-danger/15 text-danger"
-                        : "border-warn/40 bg-warn/15 text-warn"
-                    }`}
-                  >
-                    {badge}
-                  </span>
-                )}
-              </div>
-              <div className="space-y-1 p-2">
-                <p className="truncate text-[11px] font-semibold text-ink">
-                  {it.label}
-                </p>
-                {it.meta && (
-                  <p className="truncate font-mono text-[10px] text-muted">
-                    {it.meta}
-                  </p>
-                )}
-                <RegenButton
-                  ownerKind={ownerKind}
-                  ownerId={ownerId}
-                  asset={it.asset}
-                  estimateCents={it.estimateCents}
-                  label="Redo"
-                />
-              </div>
-            </li>
-          );
-        })}
+        {enriched.map((it) => (
+          <GranularImageCard
+            key={it.asset}
+            ownerKind={ownerKind}
+            ownerId={ownerId}
+            asset={it.asset}
+            src={it.src}
+            label={it.label}
+            meta={it.meta}
+            estimateCents={it.estimateCents}
+            latest={it.latest}
+            prompt={it.prompt ?? ""}
+          />
+        ))}
       </ul>
     </div>
   );

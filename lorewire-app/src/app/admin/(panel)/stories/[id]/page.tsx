@@ -70,12 +70,26 @@ export default async function EditStory({
   //   per-story video_config.aspect -> global default -> legacy 9:16.
   // `overriddenAspect` distinguishes the per-story value from the
   // inherited one so the UI can label the field accordingly.
+  //
+  // Same parse also lifts `scene_prompts` so the granular grid's
+  // lightbox can display the exact prompt that produced each thumbnail
+  // — without this, the modal renders "no prompt captured" for every
+  // scene even though the prompts are sitting right here on the row.
   let storyConfigAspect: VideoAspect | null = null;
+  let scenePromptsFromConfig: string[] = [];
   if (s.video_config) {
     try {
       const parsed = JSON.parse(s.video_config);
-      if (parsed && typeof parsed === "object" && isVideoAspect((parsed as { aspect?: unknown }).aspect)) {
-        storyConfigAspect = (parsed as { aspect: VideoAspect }).aspect;
+      if (parsed && typeof parsed === "object") {
+        if (isVideoAspect((parsed as { aspect?: unknown }).aspect)) {
+          storyConfigAspect = (parsed as { aspect: VideoAspect }).aspect;
+        }
+        const rawPrompts = (parsed as { scene_prompts?: unknown }).scene_prompts;
+        if (Array.isArray(rawPrompts)) {
+          scenePromptsFromConfig = rawPrompts.map((p) =>
+            typeof p === "string" ? p : "",
+          );
+        }
       }
     } catch {
       // Malformed config — fall through to the global default.
@@ -136,6 +150,7 @@ export default async function EditStory({
     asset: `scene:${i}`,
     src: url,
     label: `Scene ${i + 1}`,
+    prompt: scenePromptsFromConfig[i] ?? "",
   }));
   let propsParsed: { url: string; label?: string; side?: string }[] = [];
   try {

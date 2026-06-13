@@ -495,12 +495,16 @@ describe("enqueueScenesBulk — auto-derived count + pre-resize", () => {
     expect(arr[14]).toBe("url-14");
   });
 
-  it("clears video_config.scene_prompts so the next batch gets a fresh LLM call", async () => {
+  it("clears the scene-prompts cache cluster so the next batch starts fresh", async () => {
     // Cache invariant: per-scene "Redo" via the granular grid keeps the
     // cache so the redone scene stays consistent with its neighbors; a
     // Rebuild-all click is the user saying "I want a NEW look" and so
-    // the cache MUST be cleared. Without this clear, a Rebuild-all
-    // would silently reuse stale prompts from a prior batch.
+    // the WHOLE prompt cluster MUST be cleared — prompts, shape marker,
+    // and character bible. Without clearing the marker, the worker
+    // would see a missing-prompts + stale-marker state and treat it
+    // weirdly; without clearing the bible, the same characters get
+    // redrawn into different moments which is not what a Rebuild click
+    // is asking for.
     await setSetting("budget.daily_usd", "100");
     await setSetting("media.scene_count", "5");
     await setSetting("media.scene_count_mode", "manual");
@@ -508,6 +512,11 @@ describe("enqueueScenesBulk — auto-derived count + pre-resize", () => {
     const priorConfig = {
       doodle_frames: [{ id: "f-0", url: "x" }],
       scene_prompts: ["stale prompt A", "stale prompt B", "stale prompt C"],
+      scene_prompts_built_with: "narration_v1",
+      character_bible: {
+        characters: [{ name: "Old Hero", visual_cues: "old hat" }],
+        summary: "old setting",
+      },
       captions: [],
     };
     await run(
@@ -527,6 +536,8 @@ describe("enqueueScenesBulk — auto-derived count + pre-resize", () => {
     );
     const parsed = JSON.parse(after!.video_config);
     expect("scene_prompts" in parsed).toBe(false);
+    expect("scene_prompts_built_with" in parsed).toBe(false);
+    expect("character_bible" in parsed).toBe(false);
     // Other fields untouched.
     expect(parsed.doodle_frames).toEqual([{ id: "f-0", url: "x" }]);
   });
