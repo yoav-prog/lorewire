@@ -657,6 +657,21 @@ def public_root_for(repo_root: Path) -> Path:
     return repo_root / PUBLIC_DIR_RELATIVE
 
 
+def _regen_out_dir(repo_root: Path, safe_id: str) -> Path:
+    """Where per-asset regen writes the intermediate local file before
+    GCS upload. When GCS is configured (= production) the local file is
+    just a scratch upload buffer that gets deleted afterward; use the
+    OS tempdir so the read-only filesystem on Vercel's serverless
+    functions works. When GCS is NOT configured (= dev without bucket
+    access) we keep writing under `lorewire-app/public/generated/` so
+    the local Next dev server can still serve `/generated/<id>/<file>`
+    as before."""
+    import tempfile
+    if gcs.is_configured():
+        return Path(tempfile.gettempdir()) / "lorewire-regen" / safe_id
+    return repo_root / PUBLIC_DIR_RELATIVE / safe_id
+
+
 # ─── per-asset re-render (2026-06-12) ─────────────────────────────────────────
 # Called by pipeline/image_render_worker.py once per claimed queue row. Returns
 # (output_url, cost_cents). Raises NotImplementedError for slugs whose
@@ -681,7 +696,11 @@ def regen_one(
     if story is None:
         raise ValueError(f"story {story_id!r} not found")
 
-    out_dir = repo_root / PUBLIC_DIR_RELATIVE / safe_id
+    # `_regen_out_dir` picks /tmp when GCS is configured so the
+    # read-only Vercel function filesystem works; falls back to the
+    # Next public/ dir for dev runs without GCS so /generated/... still
+    # serves locally.
+    out_dir = _regen_out_dir(repo_root, safe_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if asset == "hero":
@@ -789,7 +808,10 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         raise RuntimeError("kie portrait hero generation returned no URL after retries")
     portrait_local = out_dir / "hero.png"
     images.download(portrait_kie, portrait_local)
-    portrait_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
+    portrait_public = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
+    portrait_url = gcs.publish(
+        portrait_local, f"{safe_id}/hero.png", portrait_public,
+    )
     store.update_story_hero(story["id"], portrait_url)
     total_cents += per_image_cents
 
@@ -809,7 +831,14 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         try:
             landscape_local = out_dir / "hero-landscape.png"
             images.download(landscape_kie, landscape_local)
-            landscape_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
+            landscape_public = (
+                f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
+            )
+            landscape_url = gcs.publish(
+                landscape_local,
+                f"{safe_id}/hero-landscape.png",
+                landscape_public,
+            )
             store.update_story_hero_landscape(story["id"], landscape_url)
             total_cents += per_image_cents
         except Exception as e:

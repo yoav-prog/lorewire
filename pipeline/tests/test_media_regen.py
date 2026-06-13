@@ -65,8 +65,52 @@ class HeroRegenTests(unittest.TestCase):
             mocks = _apply(patches, self)
             url, cents = media.regen_one("abc123", "hero", Path(tmp))
             self.assertTrue(url.endswith("/hero.png"))
-            self.assertEqual(cents, 5)  # 1 image * $0.05
+            # _regen_hero generates BOTH portrait (3:4) and landscape
+            # (16:9) so the article reader, OG card, and 16:9 video
+            # poster stay in sync. 2 images at $0.05 each.
+            self.assertEqual(cents, 10)
             mocks["update_hero"].assert_called_once()
+            mocks["update_hero"].assert_called_with("abc123", url)
+
+    def test_hero_uploads_through_gcs_publish(self):
+        """2026-06-13 regression: _regen_hero used to write the local
+        URL straight to the DB, which broke production after the
+        Vercel cron drain shipped (read-only filesystem + admin can't
+        serve /generated/<id>/hero.png because the file lives nowhere
+        persistent). The portrait path must go through gcs.publish
+        with the right key so the URL stored is whatever GCS returns,
+        same shape as the fresh-run pipeline."""
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches({
+                "update_hero": mock.patch.object(media.store, "update_story_hero"),
+                "make_thumb": mock.patch.object(
+                    media.stages, "make_thumbnail_prompt",
+                    return_value="cinematic prompt",
+                ),
+                "publish": mock.patch.object(
+                    media.gcs, "publish",
+                    return_value="https://storage.googleapis.com/b/abc123/hero.png",
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, _ = media.regen_one("abc123", "hero", Path(tmp))
+            # Stored URL is whatever gcs.publish returned, not the
+            # /generated/... fallback.
+            self.assertEqual(
+                url,
+                "https://storage.googleapis.com/b/abc123/hero.png",
+            )
+            # publish was called with the canonical key + fallback URL
+            # at least once (portrait). Landscape attempts a second
+            # call but kie may decline; we don't strictly require it.
+            calls = mocks["publish"].call_args_list
+            self.assertGreaterEqual(len(calls), 1)
+            portrait_call = next(
+                c for c in calls if c.args[1] == "abc123/hero.png"
+            )
+            self.assertEqual(
+                portrait_call.args[2], "/generated/abc123/hero.png",
+            )
             mocks["update_hero"].assert_called_with("abc123", url)
 
     def test_hero_raises_when_kie_returns_none(self):
@@ -133,6 +177,37 @@ class ScenesRegenTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 media.regen_one("abc123", "scenes", Path(tmp))
             self.assertIn("0 images", str(ctx.exception))
+
+
+class RegenOutDirTests(unittest.TestCase):
+    """The Vercel cron drain runs from a read-only filesystem except
+    /tmp. `_regen_out_dir` has to honor gcs.is_configured() so prod
+    writes land in /tmp and dev writes still land under
+    lorewire-app/public/ where the local Next dev server can serve
+    /generated/<id>/<file>."""
+
+    def test_uses_tempdir_when_gcs_configured(self):
+        import tempfile as _tmp
+        with tempfile.TemporaryDirectory() as repo:
+            with mock.patch.object(
+                media.gcs, "is_configured", return_value=True,
+            ):
+                out = media._regen_out_dir(Path(repo), "abc123")
+            self.assertEqual(
+                out,
+                Path(_tmp.gettempdir()) / "lorewire-regen" / "abc123",
+            )
+
+    def test_uses_public_dir_when_gcs_not_configured(self):
+        with tempfile.TemporaryDirectory() as repo:
+            with mock.patch.object(
+                media.gcs, "is_configured", return_value=False,
+            ):
+                out = media._regen_out_dir(Path(repo), "abc123")
+            self.assertEqual(
+                out,
+                Path(repo) / "lorewire-app" / "public" / "generated" / "abc123",
+            )
 
 
 class PropsRegenTests(unittest.TestCase):
