@@ -40,6 +40,7 @@ import {
 import { resolveCaptionStyle, toPreview } from "@/lib/caption-style";
 import { getUserCaptionPresetsForPage } from "@/app/admin/actions";
 import { resolveSegmentsForStory } from "@/lib/segment-resolver";
+import { parsePreviewSegmentFit } from "@/lib/preview-segment-fit";
 import EditorClient from "./EditorClient";
 
 export default async function VideoEditorPage({
@@ -253,6 +254,16 @@ export default async function VideoEditorPage({
   const captionStylePreview = toPreview(captionStyle);
   const userCaptionPresets = await getUserCaptionPresetsForPage();
 
+  // 2026-06-14 toggle: how the preview renders a resolved intro/outro
+  // when its actual file shape disagrees with the editor canvas. Default
+  // "cover" preserves the pre-toggle behavior; "contain" letterboxes so
+  // a normalized file that lies about its aspect shows up as visible
+  // black bars instead of as a mystery zoom-crop. Parser lives in
+  // `@/lib/preview-segment-fit` so the rules are unit-tested.
+  const previewSegmentFit = parsePreviewSegmentFit(
+    await getSetting("video.preview_segment_fit"),
+  );
+
   return (
     <EditorClient
       storyId={story.id}
@@ -277,6 +288,7 @@ export default async function VideoEditorPage({
       editorOutro={editorOutro}
       editorIntroReason={editorIntroReason}
       editorOutroReason={editorOutroReason}
+      previewSegmentFit={previewSegmentFit}
     />
   );
 }

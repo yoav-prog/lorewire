@@ -94,6 +94,13 @@ export interface PreviewProps extends Record<string, unknown> {
    *  the body's Sequence so the Player's outer durationInFrames can grow
    *  by intro + outro without the body recomputing anything. */
   bodyDurationFrames: number;
+  /** How a resolved intro/outro fits into the preview canvas (2026-06-14
+   *  toggle). "cover" fills the frame and crops on aspect mismatch — the
+   *  original behavior; the segment looks full-bleed but a mismatched
+   *  file shape silently zoom-crops. "contain" letterboxes instead, so
+   *  a mismatch is visible. Defaults to "cover" so callers that don't
+   *  pass anything stay byte-identical to the pre-toggle behavior. */
+  previewSegmentFit?: "cover" | "contain";
 }
 
 interface FrameWindow {
@@ -114,7 +121,15 @@ interface FrameWindow {
 // body composition's caption / image-window math doesn't need to know about
 // the intro offset.
 export function PreviewComposition(props: PreviewProps) {
-  const { config, frameUrls, intro, outro, bodyDurationFrames } = props;
+  const {
+    config,
+    frameUrls,
+    intro,
+    outro,
+    bodyDurationFrames,
+    previewSegmentFit,
+  } = props;
+  const segmentFit = previewSegmentFit ?? "cover";
   if (config.doodle_frames.length === 0) {
     return (
       <AbsoluteFill style={{ background: "#fbfaf4" }}>
@@ -146,7 +161,7 @@ export function PreviewComposition(props: PreviewProps) {
             durationInFrames={intro.durationFrames}
             layout="none"
           >
-            <SegmentClip url={intro.url} kind="intro" />
+            <SegmentClip url={intro.url} kind="intro" fit={segmentFit} />
           </Series.Sequence>
         )}
         <Series.Sequence durationInFrames={safeBodyDuration} layout="none">
@@ -160,7 +175,7 @@ export function PreviewComposition(props: PreviewProps) {
             durationInFrames={outro.durationFrames}
             layout="none"
           >
-            <SegmentClip url={outro.url} kind="outro" />
+            <SegmentClip url={outro.url} kind="outro" fit={segmentFit} />
           </Series.Sequence>
         )}
       </Series>
@@ -175,20 +190,40 @@ export function PreviewComposition(props: PreviewProps) {
 // Audio is left unmuted — these segments carry their own music beds and
 // the body's <Audio> only plays during the body Sequence, so there's no
 // double-audio collision.
-function SegmentClip({ url, kind }: { url: string; kind: "intro" | "outro" }) {
+//
+// `fit` chooses how a segment renders when its actual pixel shape doesn't
+// match the editor canvas. "cover" fills the frame and crops (the original
+// behavior — looks full-bleed but silently hides shape mismatches).
+// "contain" letterboxes — the bars expose any mismatch instantly so a bad
+// normalized file shows up as a black-bar issue rather than as a mystery
+// zoom-crop on top of valid story content. Default "cover" preserves the
+// pre-toggle look for everyone who hasn't flipped the setting.
+function SegmentClip({
+  url,
+  kind,
+  fit = "cover",
+}: {
+  url: string;
+  kind: "intro" | "outro";
+  fit?: "cover" | "contain";
+}) {
   return (
-    <AbsoluteFill>
+    <AbsoluteFill style={fit === "contain" ? { background: "#000" } : undefined}>
       <OffthreadVideo
         src={url}
         style={{
           width: "100%",
           height: "100%",
-          objectFit: "cover",
+          objectFit: fit,
         }}
         // Per rule 14, identify the clip in any Remotion log surface.
         // The data-* attribute survives into the rendered DOM for browser
-        // inspectors without affecting Remotion's render.
+        // inspectors without affecting Remotion's render. `data-segment-fit`
+        // surfaces the active toggle value alongside the kind so a "why
+        // does this segment look wrong" debug session has the answer in
+        // DevTools without reading the setting back from the DB.
         data-segment-kind={kind}
+        data-segment-fit={fit}
       />
     </AbsoluteFill>
   );

@@ -98,6 +98,7 @@ export default async function SettingsPage() {
     cronMaxRowsPerTick,
     scenePromptGrounding,
     characterBibleCache,
+    previewSegmentFit,
     googleVoices,
     elevenLabsVoices,
   ] = await Promise.all([
@@ -124,6 +125,7 @@ export default async function SettingsPage() {
     getSetting("media.cron_max_rows_per_tick"),
     getSetting("video.scene_prompt_grounding"),
     getSetting("video.character_bible_cache"),
+    getSetting("video.preview_segment_fit"),
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
@@ -352,6 +354,16 @@ export default async function SettingsPage() {
             initial={frameRegenSessionCapCents ?? "500"}
             min={50}
             max={10000}
+          />
+          <SettingChipGroup<"cover" | "contain">
+            settingKey="video.preview_segment_fit"
+            label="Preview intro/outro fit"
+            hint="How the editor preview renders a resolved intro or outro when its actual file shape disagrees with the story canvas. Cover fills the frame and crops on mismatch — full-bleed look, but silently hides shape problems. Contain letterboxes — black bars expose any mismatch so a bad normalized file is obvious instead of looking like a mystery zoom. Default Cover."
+            initial={previewSegmentFit === "contain" ? "contain" : "cover"}
+            options={[
+              { id: "cover", label: "Cover (fill, may crop)" },
+              { id: "contain", label: "Contain (letterbox)" },
+            ]}
           />
         </Section>
 

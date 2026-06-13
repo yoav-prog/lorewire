@@ -153,6 +153,7 @@ export default function EditorClient({
   editorOutro,
   editorIntroReason,
   editorOutroReason,
+  previewSegmentFit,
 }: {
   storyId: string;
   storyTitle: string;
@@ -185,6 +186,14 @@ export default function EditorClient({
    *  often: aspect-mismatch between a 9:16 segment and a 16:9 story). */
   editorIntroReason: string;
   editorOutroReason: string;
+  /** How the preview renders a resolved intro/outro when the segment's
+   *  actual pixel shape doesn't match the editor canvas. "cover" fills
+   *  the frame and crops (the original look). "contain" letterboxes so
+   *  shape mismatches are visible as black bars instead of silent
+   *  zoom-crop artifacts. Sourced from `video.preview_segment_fit` in
+   *  Settings; page.tsx reads the setting and passes the resolved value
+   *  here. */
+  previewSegmentFit: "cover" | "contain";
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabKey>("trim");
@@ -581,6 +590,7 @@ export default function EditorClient({
                     : null
                 }
                 bodyDurationFrames={bodyDurationFrames}
+                previewSegmentFit={previewSegmentFit}
               />
             ) : (
               <EmptyPreview
@@ -1207,6 +1217,7 @@ function PreviewHost({
   intro,
   outro,
   bodyDurationFrames,
+  previewSegmentFit,
 }: {
   storyId: string;
   config: ShortVideoConfig;
@@ -1218,6 +1229,8 @@ function PreviewHost({
   intro: { url: string; durationFrames: number } | null;
   outro: { url: string; durationFrames: number } | null;
   bodyDurationFrames: number;
+  /** 2026-06-14 toggle — see EditorClient's prop docstring. */
+  previewSegmentFit: "cover" | "contain";
 }) {
   // Phase 0 observability: log key inputs whenever they change so a user
   // reporting "the preview is broken" can paste the [video editor preview]
@@ -1281,8 +1294,18 @@ function PreviewHost({
       intro,
       outro,
       bodyDurationFrames,
+      previewSegmentFit,
     }),
-    [config, frameUrls, audioUrl, captionStyle, intro, outro, bodyDurationFrames],
+    [
+      config,
+      frameUrls,
+      audioUrl,
+      captionStyle,
+      intro,
+      outro,
+      bodyDurationFrames,
+      previewSegmentFit,
+    ],
   );
 
   // Pre-flight: if every URL is empty, there is nothing for the Player to
