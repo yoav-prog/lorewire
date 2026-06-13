@@ -151,6 +151,8 @@ export default function EditorClient({
   userCaptionPresets,
   editorIntro,
   editorOutro,
+  editorIntroReason,
+  editorOutroReason,
 }: {
   storyId: string;
   storyTitle: string;
@@ -178,6 +180,11 @@ export default function EditorClient({
    *  See pickSegmentPure in @/lib/segment-resolver. */
   editorIntro: { url: string; durationMs: number; label: string | null } | null;
   editorOutro: { url: string; durationMs: number; label: string | null } | null;
+  /** Resolver reasons — surfaced in the Metadata panel's Intro/outro
+   *  Section so the admin sees WHY a segment is being skipped (most
+   *  often: aspect-mismatch between a 9:16 segment and a 16:9 story). */
+  editorIntroReason: string;
+  editorOutroReason: string;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabKey>("trim");
@@ -646,7 +653,15 @@ export default function EditorClient({
             ) : tab === "audio" ? (
               <AudioPanel storyId={storyId} config={config} />
             ) : tab === "metadata" ? (
-              <MetadataPanel storyId={storyId} config={config} />
+              <MetadataPanel
+                storyId={storyId}
+                config={config}
+                editorIntro={editorIntro}
+                editorOutro={editorOutro}
+                editorIntroReason={editorIntroReason}
+                editorOutroReason={editorOutroReason}
+                storyAspect={liveAspect}
+              />
             ) : tab === "overlays" ? (
               <OverlaysPanel
                 storyId={storyId}
@@ -1956,9 +1971,25 @@ function AudioPanel({
 function MetadataPanel({
   storyId,
   config,
+  editorIntro,
+  editorOutro,
+  editorIntroReason,
+  editorOutroReason,
+  storyAspect,
 }: {
   storyId: string;
   config: ShortVideoConfig;
+  /** Resolved intro pick — for the Intro/outro section's live status row. */
+  editorIntro: { url: string; durationMs: number; label: string | null } | null;
+  editorOutro: { url: string; durationMs: number; label: string | null } | null;
+  /** Reason the resolver returned — surfaced so the admin sees WHY a segment
+   *  is being skipped instead of guessing (the most common one in production
+   *  is "aspect-mismatch" between a 9:16 segment and a 16:9 story). */
+  editorIntroReason: string;
+  editorOutroReason: string;
+  /** Current live story aspect — included in the aspect-mismatch hint so
+   *  the recommended action is obvious. */
+  storyAspect: VideoAspect;
 }) {
   // Aspect lives in the editor header now — the chip + the save flow +
   // the regen-cost modal all live one level up so the live preview can
@@ -2165,14 +2196,34 @@ function MetadataPanel({
 
       <Section
         title="Intro / outro"
-        hint="Per-story override lives on the story row (intro_segment_id / outro_segment_id), not in video_config. Manage from the story edit page."
+        hint="The preview splices these inline. Per-story override + skip flags live on the story row; the pickers live on the story edit page."
       >
-        <Link
-          href={`/admin/stories/${storyId}`}
-          className="inline-flex w-full items-center justify-center rounded-md border border-line bg-surface px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
-        >
-          Open story page →
-        </Link>
+        <div className="space-y-2">
+          <SegmentStatusRow
+            kind="intro"
+            segment={editorIntro}
+            reason={editorIntroReason}
+            storyAspect={storyAspect}
+          />
+          <SegmentStatusRow
+            kind="outro"
+            segment={editorOutro}
+            reason={editorOutroReason}
+            storyAspect={storyAspect}
+          />
+          <Link
+            href={`/admin/stories/${storyId}`}
+            className="mt-2 inline-flex w-full items-center justify-center rounded-md border border-line bg-surface px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
+          >
+            Open story page →
+          </Link>
+          <Link
+            href="/admin/segments"
+            className="inline-flex w-full items-center justify-center rounded-md border border-line bg-surface px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
+          >
+            Manage segment library →
+          </Link>
+        </div>
       </Section>
 
       {error && (
@@ -2829,4 +2880,115 @@ function EmptyPreview({
 function frameFilename(url: string): string {
   const slash = url.lastIndexOf("/");
   return slash >= 0 ? url.slice(slash + 1) : url;
+}
+
+// Live row showing whether an intro/outro will splice on render. Pulls
+// from the resolver's `reason` so the admin doesn't have to guess why a
+// segment is missing — the most common one in production is an aspect
+// mismatch between a 9:16 segment and a 16:9 story (or vice versa),
+// because the pipeline's renderer can't concat clips of different
+// shapes without letterboxing.
+function SegmentStatusRow({
+  kind,
+  segment,
+  reason,
+  storyAspect,
+}: {
+  kind: "intro" | "outro";
+  segment: { url: string; durationMs: number; label: string | null } | null;
+  reason: string;
+  storyAspect: VideoAspect;
+}) {
+  const label = kind === "intro" ? "Intro" : "Outro";
+  if (segment) {
+    return (
+      <div className="rounded-md border border-line bg-bg p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            {label}
+          </span>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-accent">
+            plays inline
+          </span>
+        </div>
+        <p className="mt-1 text-[12px] text-ink">
+          {segment.label ?? "(unlabeled)"}{" "}
+          <span className="font-mono text-[10px] text-muted">
+            · {(segment.durationMs / 1000).toFixed(1)}s
+          </span>
+        </p>
+      </div>
+    );
+  }
+  // No segment resolved — explain why instead of staying silent.
+  const explain = explainSegmentReason(reason, kind, storyAspect);
+  return (
+    <div className="rounded-md border border-line bg-bg p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+          {label}
+        </span>
+        <span
+          className={`font-mono text-[10px] uppercase tracking-wider ${
+            explain.tone === "warn" ? "text-warn" : "text-muted"
+          }`}
+        >
+          {explain.statusLabel}
+        </span>
+      </div>
+      <p className="mt-1 text-[12px] text-muted">{explain.body}</p>
+    </div>
+  );
+}
+
+function explainSegmentReason(
+  reason: string,
+  kind: "intro" | "outro",
+  storyAspect: VideoAspect,
+): { statusLabel: string; body: string; tone: "muted" | "warn" } {
+  const otherAspect = storyAspect === "16:9" ? "9:16" : "16:9";
+  switch (reason) {
+    case "skip-flag":
+      return {
+        statusLabel: "skipped",
+        tone: "muted",
+        body: `Per-story skip_${kind} is on. Turn it off on the story edit page if you want this ${kind} to play.`,
+      };
+    case "pinned-missing":
+      return {
+        statusLabel: "missing",
+        tone: "warn",
+        body: `Pinned ${kind} segment id doesn't exist in the library. Pick a different one on the story edit page or remove the pin.`,
+      };
+    case "master-disabled":
+      return {
+        statusLabel: "off (global)",
+        tone: "muted",
+        body: `Intro/outro is turned off globally (Settings → video.intro_outro_enabled). Flip it on to splice ${kind}s.`,
+      };
+    case "no-default":
+      return {
+        statusLabel: "none",
+        tone: "muted",
+        body: `No global active ${kind} is set. Pick one in the segment library or assign one to this story.`,
+      };
+    case "global-active-missing":
+      return {
+        statusLabel: "disabled",
+        tone: "warn",
+        body: `The global active ${kind} row is soft-disabled. Enable it in the segment library or pick a different one.`,
+      };
+    case "aspect-mismatch":
+      return {
+        statusLabel: "aspect mismatch",
+        tone: "warn",
+        body: `The picked ${kind} is ${otherAspect} but this story is ${storyAspect}. Upload a ${storyAspect} ${kind}, or flip the story to ${otherAspect}.`,
+      };
+    default:
+      return {
+        statusLabel: "not resolved",
+        tone: "muted",
+        body: `No ${kind} will splice (${reason}).`,
+      };
+  }
 }

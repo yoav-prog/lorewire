@@ -208,6 +208,8 @@ export default async function VideoEditorPage({
           label: resolvedSegments.outro.segment.label ?? null,
         }
       : null;
+  const editorIntroReason = resolvedSegments.intro.reason;
+  const editorOutroReason = resolvedSegments.outro.reason;
 
   // eslint-disable-next-line no-console -- rule 14: namespaced observability
   console.info("[video editor segments]", {
@@ -262,6 +264,8 @@ export default async function VideoEditorPage({
       userCaptionPresets={userCaptionPresets}
       editorIntro={editorIntro}
       editorOutro={editorOutro}
+      editorIntroReason={editorIntroReason}
+      editorOutroReason={editorOutroReason}
     />
   );
 }
