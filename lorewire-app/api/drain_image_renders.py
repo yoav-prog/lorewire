@@ -54,20 +54,28 @@ if not LOG.handlers:
     _h.setFormatter(logging.Formatter("%(message)s"))
     LOG.addHandler(_h)
 
-# Per-tick budget. Vercel cron fires every minute, maxDuration is 60s
-# in vercel.ts, so the drain has to leave headroom for the response
-# write + Python finalizers. 55s is the largest value that doesn't
-# risk the platform killing us mid-write.
-DEADLINE_S = 55
-# Rows older than this at status='generating' get reset to queued. Long
-# enough that a real nano-banana-pro polling loop (~30s) finishes
-# untouched even with slack, short enough that a dead row gets retried
-# inside two cron ticks.
-STALE_AFTER_S = 600
-# Soft cap on how many rows one tick will drain. Each row is up to ~7s
-# average wall time, so 6 rows × 7s = 42s, comfortably under DEADLINE_S.
-# Override via the DRAIN_MAX_ROWS_PER_TICK env var if needed.
-DEFAULT_MAX_ROWS = 6
+# Per-tick budget. Vercel cron fires every minute; maxDuration is 300s
+# in vercel.json (Pro tier supports up to 800s on Fluid Compute).
+# 270s leaves 30s headroom for the response write + Python finalizers.
+# 300s was picked because _regen_hero does 2 kie calls (portrait +
+# landscape, ~60s combined) AND a 27-scene rebuild walks one row
+# through 27 images at ~7s each (~190s). Both fit comfortably under
+# 270s with room to spare.
+DEADLINE_S = 270
+# Rows older than this at status='generating' get reset to queued.
+# Tuned to (function maxDuration + slack): if a tick dies at 300s
+# without writing finish/fail, the next tick at minute+1 sees a row
+# that's only been "generating" for ~60s and wisely leaves it alone.
+# Past 180s the row is almost certainly orphaned — the only legitimate
+# in-flight work past that point is the 27-scene path, which is bounded
+# by DEADLINE_S anyway. Faster recovery than the original 600s.
+STALE_AFTER_S = 180
+# Soft cap on how many ROWS one tick will drain. Each row may contain
+# many sub-images (a single 'scenes' row generates ~27 images serially
+# inside _regen_scenes). 3 rows × ~190s worst case stays under the 270s
+# deadline thanks to the per-row escape inside the regen loop —
+# typical mixed batches are smaller. Override via DRAIN_MAX_ROWS_PER_TICK.
+DEFAULT_MAX_ROWS = 3
 
 
 def _log(event: str, **fields) -> None:

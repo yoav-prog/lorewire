@@ -8,7 +8,7 @@
   ],
   "functions": {
     "api/drain_image_renders.py": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   }
 }
