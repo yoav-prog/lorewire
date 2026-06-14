@@ -2243,20 +2243,33 @@ def enqueue_story_job(
     return row if inserted else None
 
 
-def claim_next_story_job() -> dict | None:
+def claim_next_story_job(text_only_only: bool = False) -> dict | None:
     """Atomically claim the oldest queued story_job and flip it to
     'processing'. Returns the claimed row, or None when empty. Mirrors
     claim_next_render's FOR UPDATE SKIP LOCKED on Postgres and the
-    conditional UPDATE on SQLite."""
+    conditional UPDATE on SQLite.
+
+    `text_only_only`: when True, only rows with `with_media=0` are
+    eligible. Used by the Vercel cron drain whose runtime can't render
+    video (no Node + Remotion) — without this filter, the drain would
+    race the local worker, claim a with_media=True row, and fail it
+    with DRAIN_UNSUPPORTED_MEDIA_REASON. The cumulative damage shows
+    up as a fleet of error rows whose source rows bounced back to
+    'imported' and then got re-enqueued + re-killed by the next drain
+    tick. Filtering at claim time means the drain physically can't
+    claim what it can't process; with_media=True rows wait patiently
+    for the local worker.
+    """
     cols = ", ".join(_STORY_JOB_COLUMNS)
     now = _now_iso()
+    extra_where = " AND with_media = 0" if text_only_only else ""
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"UPDATE story_jobs SET status = 'processing', "
                     "started_at = %s WHERE id = ("
-                    "SELECT id FROM story_jobs WHERE status = 'queued' "
+                    f"SELECT id FROM story_jobs WHERE status = 'queued'{extra_where} "
                     "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
                     f") RETURNING {cols}",
                     (now,),
@@ -2266,7 +2279,7 @@ def claim_next_story_job() -> dict | None:
         return dict(row) if row else None
     with _sqlite_conn() as c:
         row = c.execute(
-            "SELECT id FROM story_jobs WHERE status='queued' "
+            f"SELECT id FROM story_jobs WHERE status='queued'{extra_where} "
             "ORDER BY requested_at ASC LIMIT 1"
         ).fetchone()
         if not row:

@@ -325,7 +325,12 @@ def run_one_tick(
         print(f"[story-jobs budget-block] {block_reason}")
         return False
 
-    claimed = store.claim_next_story_job()
+    # When skip_with_media is set, push the filter ALL THE WAY DOWN to
+    # the claim SQL — we must not claim what we can't process, because
+    # claim-then-fail loses the race against the local worker that
+    # COULD have processed the row. Without this, the Vercel cron drain
+    # killed every with_media=True row the admin enqueued.
+    claimed = store.claim_next_story_job(text_only_only=skip_with_media)
     if claimed is None:
         return False
 

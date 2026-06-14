@@ -105,6 +105,52 @@ class ClaimAndTransitionTests(_IsolatedDB):
         self.assertEqual(claimed["status"], "processing")
         self.assertIsNotNone(claimed["started_at"])
 
+    def test_claim_with_text_only_only_filter_skips_media_jobs(self):
+        """Production regression: the Vercel cron drain previously
+        called run_one_tick(skip_with_media=True), which still let
+        claim_next_story_job claim ANY queued row and then failed it
+        with the unsupported-media error. That created a race against
+        the local worker — whichever fired first killed the row for
+        the other. Pushing the filter down to the SQL means the drain
+        physically can't claim what it can't process, so with_media=True
+        rows wait patiently for the local worker."""
+        # Seed a media row and a text-only row, with the media row
+        # older so it'd be claimed first by the default ORDER BY.
+        _seed_reddit_source(self.store, "media-row")
+        _seed_reddit_source(self.store, "text-row")
+        self.store.enqueue_story_job("media-job", "media-row", with_media=True)
+        # Tiny delay so requested_at differs in lexical sort.
+        import time as _t
+        _t.sleep(0.01)
+        self.store.enqueue_story_job("text-job", "text-row", with_media=False)
+
+        # text_only_only=True must skip the media row even though it's
+        # the oldest, and claim the text row instead.
+        claimed = self.store.claim_next_story_job(text_only_only=True)
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["reddit_id"], "text-row")
+        self.assertEqual(claimed["with_media"], 0)
+
+        # Media row is still queued, untouched.
+        media_job = self.store.get_story_job("media-job")
+        self.assertEqual(media_job["status"], "queued")
+        self.assertIsNone(media_job["started_at"])
+
+    def test_claim_with_text_only_only_returns_none_when_only_media_queued(self):
+        """If there are ONLY with_media=True rows queued, the
+        text-only-filtered claim must return None instead of falling
+        through to claim a media row."""
+        _seed_reddit_source(self.store, "media-row")
+        self.store.enqueue_story_job("media-job", "media-row", with_media=True)
+
+        claimed = self.store.claim_next_story_job(text_only_only=True)
+        self.assertIsNone(claimed)
+
+        # Default claim still picks it up — local worker path.
+        claimed = self.store.claim_next_story_job()
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["with_media"], 1)
+
     def test_claim_does_not_re_claim(self):
         _seed_reddit_source(self.store)
         self.store.enqueue_story_job("job-1", "abc")
@@ -387,16 +433,18 @@ class WorkerTickTests(_IsolatedDB):
         self.assertEqual(row["status"], "error")
         self.assertIn("not found", row["error"])
 
-    def test_skip_with_media_fails_video_job_before_processing(self):
-        """skip_with_media=True is the drain's opt-in to fail any claimed
-        with_media=True job before the process_fn is called. Verifies the
-        process_fn isn't invoked, the job is errored with the documented
-        reason, and the source row resets to 'imported' so a re-Process
-        with with_media=False can pick it up."""
+    def test_skip_with_media_does_not_claim_video_job_at_all(self):
+        """skip_with_media=True now pushes the filter all the way down
+        to the claim SQL — the drain doesn't see media jobs in the
+        first place, so it can't race the local worker and kill them.
+
+        Previously the drain claimed THEN failed, which meant whichever
+        drain fired first won the row: Vercel cron at minute boundaries
+        kept beating the local worker that polls every 5s, killing
+        every with_media=True job the admin enqueued (production bug,
+        25 dead rows on 2026-06-14)."""
         from pipeline import story_jobs_worker
         _seed_reddit_source(self.store, "abc")
-        # Simulate the bulkEnqueue flow that flips source 'imported' →
-        # 'queued' on the TS side. The pre-skip path should put it back.
         self.store.set_reddit_source_status("abc", "queued")
         self.store.enqueue_story_job("job-1", "abc", with_media=True)
 
@@ -409,23 +457,17 @@ class WorkerTickTests(_IsolatedDB):
         ran = story_jobs_worker.run_one_tick(
             process_fn=stub_process, skip_with_media=True,
         )
-        self.assertTrue(ran)
-        self.assertEqual(
-            process_calls, [],
-            "process_fn must NOT run for a pre-skipped video job — that's "
-            "the whole point of the pre-skip (no LLM/image spend).",
-        )
+        # The drain's tick sees an empty queue (text-only filter excludes
+        # the only row) and returns False.
+        self.assertFalse(ran)
+        self.assertEqual(process_calls, [])
+
+        # Critical: the row is UNTOUCHED. Local worker can still pick it up.
         row = self.store.get_story_job("job-1")
-        self.assertEqual(row["status"], "error")
-        self.assertEqual(
-            row["error"], story_jobs_worker.DRAIN_UNSUPPORTED_MEDIA_REASON,
-        )
+        self.assertEqual(row["status"], "queued")
+        self.assertIsNone(row["started_at"])
         src = self.store.fetch_reddit_source("abc")
-        self.assertEqual(
-            src["status"], "imported",
-            "Source must reset to 'imported' so bulkEnqueueStoryJobs can "
-            "re-enqueue it with with_media=False on next Process N.",
-        )
+        self.assertEqual(src["status"], "queued")
 
     def test_skip_with_media_lets_text_only_job_process_normally(self):
         """When the claimed job is with_media=False, skip_with_media=True
