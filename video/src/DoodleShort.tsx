@@ -352,8 +352,13 @@ const DoodleCaption: React.FC<{
   const wordCount = words.length;
   const baseFontSize = wordCount <= 4 ? 96 : wordCount <= 6 ? 80 : 64;
   const fontSize = Math.round(scaleMin(baseFontSize) * style.sizeScale);
-  const outlineWidth = scaleMin(style.outlineWidth);
-  const shadowOffset = scaleMin(4);
+  // Floor the stroke at 5 px because H.264 4:2:0 chroma subsampling can't
+  // carry sub-5 px navy/yellow boundaries cleanly across a frame — the
+  // encoder smears the high-frequency color transition and the user sees
+  // a ghosted second outline alongside the real one. Portrait (ratio = 1)
+  // already lands at 6 px so this is a no-op there; landscape sat at
+  // 3.36 px without the floor, which is what produced the artifacts.
+  const outlineWidth = Math.max(5, scaleMin(style.outlineWidth));
 
   // wordHighlight === "none": render the chunk as one block, no per-word
   // styling. Used for "I just want the text, no karaoke pulse".
@@ -382,13 +387,16 @@ const DoodleCaption: React.FC<{
             textAlign: "center",
             color: style.color,
             WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
-            textShadow: [
-              `0 0 1px ${style.outlineColor}`,
-              `0 ${shadowOffset}px 0 ${style.outlineColor}`,
-              `0 -${shadowOffset}px 0 ${style.outlineColor}`,
-              `${shadowOffset}px 0 0 ${style.outlineColor}`,
-              `-${shadowOffset}px 0 0 ${style.outlineColor}`,
-            ].join(", "),
+            // Single soft drop-shadow for depth, replacing the four
+            // directional offset shadows the original yt-studio look used.
+            // Each of those offsets painted a duplicate of the stroked
+            // glyph at +/-2.24 px on landscape — at small font sizes the
+            // offsets read as ghost outlines instead of fusing into the
+            // stroke. A single non-offset blur preserves the lifted feel
+            // without ever stepping outside the stroke. Portrait renders
+            // are functionally unchanged: the same blur reads as a hair
+            // of feathering inside the 6 px stroke.
+            textShadow: `0 0 2px ${style.outlineColor}`,
             maxWidth: "100%",
           }}
         >
@@ -479,13 +487,11 @@ const DoodleCaption: React.FC<{
           textAlign: "center",
           color: style.color,
           WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
-          textShadow: [
-            `0 0 1px ${style.outlineColor}`,
-            `0 ${shadowOffset}px 0 ${style.outlineColor}`,
-            `0 -${shadowOffset}px 0 ${style.outlineColor}`,
-            `${shadowOffset}px 0 0 ${style.outlineColor}`,
-            `-${shadowOffset}px 0 0 ${style.outlineColor}`,
-          ].join(", "),
+          // Single soft drop-shadow — see the matching comment in the
+          // wordHighlight === "none" branch above for why the four
+          // directional offsets the original yt-studio look used got
+          // dropped.
+          textShadow: `0 0 2px ${style.outlineColor}`,
           maxWidth: "100%",
         }}
       >
