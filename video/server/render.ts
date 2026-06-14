@@ -129,11 +129,11 @@ export async function renderAndUploadStory(
     throw new Error("GCS_BUCKET not configured");
   }
 
-  // Build the Storage client once and reuse it for BOTH the segment
-  // downloads (splice path) and the final body upload. Same credentials,
-  // same env shape — see the long comment in the upload section below
-  // for why we reuse Vercel's GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY pair
-  // instead of falling through to Cloud Run's metadata-server auth.
+  // Storage client used for both segment downloads (splice path) and
+  // the final body upload. Auth flows through Application Default
+  // Credentials — on Cloud Run that means the metadata server hands
+  // out OAuth tokens for whichever service account is attached at
+  // deploy time. See the docstring on makeStorageClient.
   const storage = makeStorageClient();
 
   const serveUrl = await getOrCreateBundle();
@@ -262,22 +262,25 @@ function sanitizeForFs(storyId: string): string {
 // over without modification.
 
 function makeStorageClient(): Storage {
-  // The .env shape stores GCS_PRIVATE_KEY with literal `\n` sequences
-  // (matches Vercel + pipeline/gcs.py + lib/gcs.ts); normalize to real
-  // newlines so the PEM parser accepts it.
-  const clientEmail = process.env.GCS_CLIENT_EMAIL;
-  const rawKey = process.env.GCS_PRIVATE_KEY;
-  if (!clientEmail || !rawKey) {
-    throw new Error(
-      "GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY must be set (use the same values Vercel does)",
-    );
-  }
-  const privateKey = rawKey.includes("\\n")
-    ? rawKey.replace(/\\n/g, "\n")
-    : rawKey;
-  return new Storage({
-    credentials: { client_email: clientEmail, private_key: privateKey },
-  });
+  // 2026-06-15: switched from inline GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY
+  // credentials to Application Default Credentials (ADC). On Cloud Run
+  // the metadata server hands the SDK a fresh OAuth token for whichever
+  // service account is attached to the Cloud Run service (passed via
+  // `--service-account` at deploy). No PEM is ever parsed in this Node
+  // process, so the OpenSSL 3 DECODER error that broke the inline path
+  // (google-auth-library's JWT signing failed with
+  // `error:1E08010C:DECODER routines::unsupported` on a freshly-rebuilt
+  // node:22-slim image) goes away.
+  //
+  // The Cloud Run SA needs `objectAdmin` on the bucket — the
+  // `videocreator@uplift-283910.iam.gserviceaccount.com` SA that the
+  // rest of the pipeline already uses for GCS writes carries that role,
+  // and is attached via the deploy command in video/package.json.
+  //
+  // Local dev path: outside Cloud Run, ADC falls back to whatever
+  // `gcloud auth application-default login` set up. That's the same
+  // dev-loop the Python pipeline uses, so no extra dev quirks.
+  return new Storage();
 }
 
 function spliceLog(event: string, fields: Record<string, unknown>): void {
