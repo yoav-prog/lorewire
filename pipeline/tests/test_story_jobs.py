@@ -719,6 +719,42 @@ class CostCaptureTests(_IsolatedDB):
         self.assertEqual(compute_job_cost_cents(0.0, 0), 0)
 
 
+class HeartbeatTests(_IsolatedDB):
+    """Worker liveness signal. The local worker writes a UTC ISO
+    timestamp to settings every poll; the admin UI reads it through
+    @/lib/worker-health.ts and uses it to drive the with_media toggle
+    default + the status pill on the budget bar."""
+
+    def test_write_heartbeat_round_trips_iso_timestamp(self):
+        from pipeline.story_jobs_worker import (
+            WORKER_HEARTBEAT_SETTING_KEY,
+            _write_heartbeat,
+        )
+        # No setting before.
+        self.assertIsNone(self.store.get_setting(WORKER_HEARTBEAT_SETTING_KEY))
+        _write_heartbeat()
+        raw = self.store.get_setting(WORKER_HEARTBEAT_SETTING_KEY)
+        self.assertIsNotNone(raw)
+        # Must parse as an ISO-8601 UTC timestamp.
+        import datetime as _dt
+        parsed = _dt.datetime.fromisoformat(raw)
+        # Within a couple of seconds of now.
+        now = _dt.datetime.now(_dt.timezone.utc)
+        self.assertLess(abs((now - parsed).total_seconds()), 5)
+
+    def test_write_heartbeat_swallows_db_errors(self):
+        """A transient DB hiccup must not crash the worker. The function
+        catches and prints — the worker loop continues."""
+        from pipeline.story_jobs_worker import _write_heartbeat
+        import unittest.mock as _mock
+        with _mock.patch.object(
+            self.store, "set_setting",
+            side_effect=RuntimeError("connection lost"),
+        ):
+            # Must not raise.
+            _write_heartbeat()
+
+
 class HelpersTests(_IsolatedDB):
     def test_category_for_known_subreddit(self):
         from pipeline.story_jobs_worker import _category_for

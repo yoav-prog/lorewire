@@ -23,6 +23,7 @@ import {
   getBudgetSummary,
   type BudgetSummary,
 } from "@/lib/story-jobs-budget";
+import { getWorkerHealth, type WorkerHealth } from "@/lib/worker-health";
 import { setDailyBudgetCapAction } from "@/app/admin/actions";
 import RedditSourceTable from "./RedditSourceTable";
 
@@ -128,7 +129,7 @@ export default async function RedditSourcesPage({
     search: sp.q?.trim() || undefined,
   };
 
-  const [rows, total, allSubs, budget] = await Promise.all([
+  const [rows, total, allSubs, budget, workerHealth] = await Promise.all([
     listRedditSources(filters, {
       limit: PAGE_SIZE,
       offset: (page - 1) * PAGE_SIZE,
@@ -137,6 +138,7 @@ export default async function RedditSourcesPage({
     countRedditSources(filters),
     listRedditSourceSubreddits(),
     getBudgetSummary(),
+    getWorkerHealth(),
   ]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -164,7 +166,7 @@ export default async function RedditSourcesPage({
 
       <FlashBanner sp={sp} />
 
-      <BudgetBar budget={budget} />
+      <BudgetBar budget={budget} workerHealth={workerHealth} />
 
       <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
         <FilterRail
@@ -178,6 +180,7 @@ export default async function RedditSourcesPage({
           <RedditSourceTable
             rows={rows}
             budgetExhausted={budget.exhausted}
+            workerOnline={workerHealth.isHealthy}
           />
           <Pagination
             page={page}
@@ -191,7 +194,54 @@ export default async function RedditSourcesPage({
   );
 }
 
-function BudgetBar({ budget }: { budget: BudgetSummary }) {
+function WorkerStatusPill({ workerHealth }: { workerHealth: WorkerHealth }) {
+  // Three states, each with copy that tells the admin EXACTLY what to do:
+  //   online:  confirmation; admin can use Full media without surprise
+  //   stale:   worker probably crashed or is mid-render — show last-seen
+  //   offline: surface the start command so a copy-paste fix is one line.
+  //            From the wrong cwd the bare command fails — names the
+  //            wrapper scripts (scripts/worker.ps1 / worker.sh) which
+  //            handle the cwd dance automatically.
+  if (workerHealth.state === "online") {
+    return (
+      <span
+        title={`Last heartbeat ${workerHealth.secondsSince}s ago`}
+        className="inline-flex items-center gap-1 rounded-full border border-cat-ok/40 bg-cat-ok/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-cat-ok"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-cat-ok" />
+        worker online · {workerHealth.secondsSince}s ago
+      </span>
+    );
+  }
+  if (workerHealth.state === "stale") {
+    return (
+      <span
+        title="Heartbeat missed the 60s window — worker may be mid-render or just stopped."
+        className="inline-flex items-center gap-1 rounded-full border border-cat-entitled/40 bg-cat-entitled/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-cat-entitled"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-cat-entitled" />
+        worker stale · {workerHealth.secondsSince}s
+      </span>
+    );
+  }
+  return (
+    <span
+      title="No heartbeat. Start the local worker from the repo root: python -m pipeline.story_jobs_worker. Or run scripts/worker.ps1 (Windows) / scripts/worker.sh (POSIX). Full-media jobs need this; text-only jobs run on the Vercel cron drain regardless."
+      className="inline-flex items-center gap-1 rounded-full border border-danger/40 bg-danger/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-danger"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-danger" />
+      worker offline
+    </span>
+  );
+}
+
+function BudgetBar({
+  budget,
+  workerHealth,
+}: {
+  budget: BudgetSummary;
+  workerHealth: WorkerHealth;
+}) {
   // Three visual states, in order of "you should pay attention":
   //   exhausted (red)   — next click would block at the worker
   //   approaching (amber) — past 75% of cap
@@ -247,6 +297,7 @@ function BudgetBar({ budget }: { budget: BudgetSummary }) {
           {budget.jobCount.toLocaleString()} job{budget.jobCount === 1 ? "" : "s"}{" "}
           (done today + active) · est. ~$0.50/job
         </span>
+        <WorkerStatusPill workerHealth={workerHealth} />
       </div>
       <form action={setDailyBudgetCapAction} className="flex items-center gap-2">
         <label className="font-mono text-[10px] uppercase tracking-wider opacity-70">

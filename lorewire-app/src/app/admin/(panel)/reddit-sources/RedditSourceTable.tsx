@@ -35,14 +35,22 @@ const STATUS_TONE: Record<RedditSourceStatus, string> = {
 export default function RedditSourceTable({
   rows,
   budgetExhausted = false,
+  workerOnline = false,
 }: {
   rows: RedditSourceRow[];
   /** When true, the Process N button is disabled with a tooltip so the
    *  admin can't enqueue rows the worker would just budget-block. The
    *  server action enforces the same gate; this is the UX mirror. */
   budgetExhausted?: boolean;
+  /** Whether the local Python worker has checked in recently. Drives the
+   *  default of the with_media toggle (online → full media; offline →
+   *  text-only so the hosted Vercel drain can take it). */
+  workerOnline?: boolean;
 }) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  // Default tracks workerOnline so the system's actual capability IS
+  // the default behaviour. Admin can override either way at click time.
+  const [withMedia, setWithMedia] = useState<boolean>(workerOnline);
 
   const allSelected = useMemo(
     () => rows.length > 0 && rows.every((r) => selected.has(r.reddit_id)),
@@ -180,6 +188,9 @@ export default function RedditSourceTable({
           ids={[...selected]}
           onClear={() => setSelected(new Set())}
           budgetExhausted={budgetExhausted}
+          workerOnline={workerOnline}
+          withMedia={withMedia}
+          setWithMedia={setWithMedia}
         />
       )}
     </>
@@ -203,10 +214,16 @@ function BulkFooter({
   ids,
   onClear,
   budgetExhausted,
+  workerOnline,
+  withMedia,
+  setWithMedia,
 }: {
   ids: string[];
   onClear: () => void;
   budgetExhausted: boolean;
+  workerOnline: boolean;
+  withMedia: boolean;
+  setWithMedia: (v: boolean) => void;
 }) {
   return (
     <div className="sticky bottom-3 z-10 mx-auto flex max-w-[760px] flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-bg/95 px-4 py-2.5 shadow-lg backdrop-blur">
@@ -272,17 +289,67 @@ function BulkFooter({
             Re-process {ids.length}
           </button>
         </form>
+        {/* Media-mode toggle. Two truths:
+              - Full media (article + images + video) — requires the LOCAL
+                Python worker; the Vercel cron drain pre-skips these
+                because it has no Node/Remotion runtime.
+              - Text only — article + summary + hero image, no video. Runs
+                fine on the hosted drain, no local worker needed.
+            The default tracks `workerOnline` so the system's actual
+            capability is the default behaviour. */}
+        <div
+          role="group"
+          aria-label="Processing mode"
+          className="flex overflow-hidden rounded-md border border-line text-[10px] uppercase tracking-wider font-mono"
+        >
+          <button
+            type="button"
+            onClick={() => setWithMedia(true)}
+            title={
+              workerOnline
+                ? "Full media — local worker is online and will pick these up"
+                : "Full media — local worker appears OFFLINE. Start it from the repo root: python -m pipeline.story_jobs_worker (or scripts/worker.ps1 / worker.sh). The hosted drain pre-skips media jobs."
+            }
+            className={`px-2.5 py-1.5 ${
+              withMedia ? "bg-accent text-bg" : "text-muted hover:text-ink"
+            }`}
+          >
+            Full media
+          </button>
+          <button
+            type="button"
+            onClick={() => setWithMedia(false)}
+            title="Text only — runs on the hosted Vercel drain. No video. No local worker needed."
+            className={`border-l border-line px-2.5 py-1.5 ${
+              !withMedia ? "bg-accent text-bg" : "text-muted hover:text-ink"
+            }`}
+          >
+            Text only
+          </button>
+        </div>
         <form
           action={processRedditSourcesAction}
           onSubmit={(e) => {
             // Lazy guard against accidental bulk-spend. The real cost is the
             // sum of LLM + kie images + voice + render across N rows; a
-            // dozen rows can easily run $5+. Confirm before submit.
+            // dozen rows can easily run $5+. Confirm before submit, and
+            // surface the mode-vs-worker mismatch warning when it applies.
+            const mismatchWarning =
+              withMedia && !workerOnline
+                ? "\n\n⚠ Full media is selected but the local worker is OFFLINE.\n" +
+                  "These jobs will fail at the Vercel drain. Either start the local worker:\n\n" +
+                  "    python -m pipeline.story_jobs_worker\n\n" +
+                  "(or use scripts/worker.ps1 / scripts/worker.sh)\n\n" +
+                  "or switch to Text only.\n"
+                : "";
+            const modeDescription = withMedia
+              ? "Full media (article + images + video)"
+              : "Text only (article + summary + hero, no video)";
             if (
               !window.confirm(
-                `Enqueue ${ids.length} row${ids.length === 1 ? "" : "s"} for full pipeline processing (article + images + video)?\n\n` +
-                  "Each row spends real LLM + image + voice credits. The local pipeline worker must be running:\n\n" +
-                  "    python -m pipeline.story_jobs_worker",
+                `Enqueue ${ids.length} row${ids.length === 1 ? "" : "s"} as: ${modeDescription}?\n\n` +
+                  "Each row spends real LLM + image + voice credits." +
+                  mismatchWarning,
               )
             ) {
               e.preventDefault();
@@ -292,7 +359,11 @@ function BulkFooter({
           {ids.map((id) => (
             <input key={id} type="hidden" name="reddit_id" value={id} />
           ))}
-          <input type="hidden" name="with_media" value="1" />
+          <input
+            type="hidden"
+            name="with_media"
+            value={withMedia ? "1" : "0"}
+          />
           <button
             type="submit"
             disabled={budgetExhausted}

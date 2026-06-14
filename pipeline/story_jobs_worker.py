@@ -64,6 +64,17 @@ DAILY_BUDGET_CAP_SETTING_KEY = "pipeline.story_jobs.daily_cap_cents"
 # tracking input/output separately or when the active model changes.
 LLM_USD_PER_TOKEN = 1e-6
 
+# Worker liveness. Every tick (busy or idle) the loop writes the current
+# ISO-8601 UTC timestamp to this settings key. The admin UI reads it
+# through @/lib/worker-health.ts and surfaces a status pill on the budget
+# bar, plus drives the default of the with_media toggle (online → full
+# media; offline → text-only so the hosted Vercel drain can take it).
+# 60s stale window matches the worker-health.ts comment; a tick mid-render
+# won't write the heartbeat until it returns to the top of the loop, and
+# we'd rather "still healthy" than scare the admin into thinking the
+# worker died mid-render.
+WORKER_HEARTBEAT_SETTING_KEY = "pipeline.story_jobs.worker_heartbeat_at"
+
 # Reason recorded on story_jobs.error when the Vercel drain pre-skips a
 # with_media=True job. The hosted Python runtime can't shell out to
 # Remotion via npx, so claiming + processing would burn LLM + image spend
@@ -393,16 +404,36 @@ def run_one_tick(
 
 def run_loop(poll_seconds: int = DEFAULT_POLL_SECONDS) -> None:
     """Drain the queue indefinitely. Sleeps `poll_seconds` between empty
-    ticks so an idle worker doesn't hammer the DB."""
+    ticks so an idle worker doesn't hammer the DB. Writes a liveness
+    heartbeat to the settings table on every iteration so the admin UI
+    can show whether a local worker is up."""
     print(
         f"[story-jobs worker] started "
         f"(poll={poll_seconds}s, stale_after={STALE_AFTER_SECONDS}s, "
         f"repo={REPO_ROOT})"
     )
+    # Immediate heartbeat on boot so the UI flips "online" without waiting
+    # for the first tick — important for an admin who started the worker
+    # specifically to drain a stuck batch and wants visual confirmation.
+    _write_heartbeat()
     while True:
         did_work = run_one_tick()
+        _write_heartbeat()
         if not did_work:
             time.sleep(poll_seconds)
+
+
+def _write_heartbeat() -> None:
+    """Stamp the current UTC ISO timestamp into the settings table. Safe
+    to call frequently — settings rows are a single key/value upsert.
+    Wrapped in try/except so a transient DB hiccup doesn't take down
+    the worker over an observability convenience."""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    try:
+        store.set_setting(WORKER_HEARTBEAT_SETTING_KEY, now)
+    except Exception as e:  # noqa: BLE001
+        print(f"[story-jobs heartbeat-write-failed] {type(e).__name__}: {e}")
 
 
 def _cli() -> int:
