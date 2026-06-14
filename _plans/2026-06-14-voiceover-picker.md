@@ -115,7 +115,24 @@ Each phase is independently mergeable. Worst-case revert is a single column drop
 1. Phase 1's columns + Phase 2's library shipped (#3).
 2. Phase 2.b bake script run (#4) so preview MP3s exist.
 3. Phase 3's picker shipped (#5) so the admin can choose a voice.
-4. **This PR (#6)** — flip `voice.picker_enabled = "1"` in Settings and run `python -m pipeline.voice_renders_worker` locally OR add the Vercel cron drain (Phase 4.b).
+4. Phase 4's regen action + worker (#6) so clicking the button enqueues + the worker drains.
+5. **Phase 4.b's Vercel cron drain (#7)** so the queue drains in prod without a local worker running. Local dev keeps using `python -m pipeline.voice_renders_worker`.
+
+### Phase 4.b — Vercel cron drain (shipped 2026-06-14)
+
+**Why:** Without this the queue only drains when an admin runs the local Python worker. Prod stories would sit in `status='queued'` indefinitely after a regen click. Mirrors the story_jobs + image_renders cron pattern.
+
+**Shipped:**
+- [lorewire-app/api/drain_voice_renders.py](lorewire-app/api/drain_voice_renders.py) — composes `voice_renders_worker.run_one_tick`. Auth (CRON_SECRET Bearer), distinct advisory lock (`VOICE_RENDERS_DRAIN_LOCK_KEY = 8472303`), per-tick deadline (270s under Vercel's 300s ceiling), structured `[drain_voice_renders <event>]` logs.
+- Cron: `*/1 * * * *` in [vercel.json](lorewire-app/vercel.json) (faster cadence than story_jobs because voice regen is lightweight — pure TTS + GCS upload, no LLM + kie + Remotion chain).
+- Soft cap: 5 rows/tick by default, override via `DRAIN_VOICE_RENDERS_MAX_ROWS_PER_TICK` (clamp [1, 30]).
+- **Filesystem fix:** `voice_renders_worker._default_process` previously wrote `narration.mp3` to `lorewire-app/public/generated/<id>/` which is read-only on Vercel. New `_is_serverless()` + `_resolve_output_dir()` helpers route the write to a per-invocation `/tmp/voice-regen-<id>-…/` subdir on Vercel; local dev keeps the original path so `gcs.publish`'s local fallback URL still serves. Tempdir cleanup happens after the GCS upload completes.
+- New store helpers: `count_pending_voice_renders` (idle short-circuit), `voice_renders_drain_lock` (advisory lock wrapper).
+- Tests: 12 new in [pipeline/tests/test_drain_voice_renders.py](pipeline/tests/test_drain_voice_renders.py) covering auth (4), max-rows env handling (4), idle, drain-happy-path, drain-failure-continue, max-rows cap.
+
+**Cost:** Vercel cron is free at this cadence (1/min × 1440/day under the Hobby free allowance). Idle ticks short-circuit via `count_pending_voice_renders == 0` so billing on Active CPU is negligible.
+
+**Runtime invariant:** unlike the story_jobs drain (which had to pre-skip `with_media=True` jobs because Vercel has no Node/Remotion), every queued `voice_renders` row drains end-to-end on Vercel. Voice synth is pure Python + HTTPS + a single GCS upload.
 
 ## Security (rule 13)
 
