@@ -1921,6 +1921,35 @@ export async function setDailyBudgetCapAction(
   redirect(`/admin/reddit-sources?budget_cap=${cents}`);
 }
 
+// Stop button. Cancels every active (queued or processing) story_job for
+// the selected reddit_ids and resets their source rows to 'imported'.
+// The worker keeps running its current LLM/image call (no IPC interrupt
+// yet), but its eventual finish/fail will no-op against the 'cancelled'
+// status guard. Spend already incurred is non-refundable — the confirm
+// dialog says so.
+export async function cancelActiveStoryJobsAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
+  if (ids.length === 0) {
+    redirect("/admin/reddit-sources?error=no-selection");
+  }
+  const { bulkCancelActiveStoryJobs } = await import("@/lib/story-jobs");
+  const result = await bulkCancelActiveStoryJobs(ids);
+  console.info("[story-jobs cancel]", {
+    requested: ids.length,
+    cancelled: result.cancelled,
+    reset_to_imported: result.reset_to_imported,
+    sample_ids: result.cancelled_reddit_ids.slice(0, 10),
+  });
+  revalidatePath("/admin/reddit-sources");
+  const qs = new URLSearchParams();
+  qs.set("status", "imported");
+  qs.set("cancelled", String(result.cancelled));
+  redirect(`/admin/reddit-sources?${qs.toString()}`);
+}
+
 // Phase 6: bulk version of the per-row Re-process action. The per-row
 // affordance on the review page stays permissive (the admin is being
 // deliberate when they open one row's surface); this bulk path is more

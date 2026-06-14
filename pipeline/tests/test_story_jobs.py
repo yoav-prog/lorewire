@@ -719,6 +719,95 @@ class CostCaptureTests(_IsolatedDB):
         self.assertEqual(compute_job_cost_cents(0.0, 0), 0)
 
 
+class CancelTests(_IsolatedDB):
+    """Stop button. Admin cancels a row → DB flips to 'cancelled'
+    immediately; any later finish/fail from the worker no-ops against
+    the existing `status IN ('queued','processing')` guards on those
+    helpers (see test_finish_after_cancellation_is_noop above)."""
+
+    def test_cancel_queued_job_succeeds(self):
+        _seed_reddit_source(self.store)
+        self.store.enqueue_story_job("job-1", "abc")
+        flipped = self.store.cancel_story_job("job-1")
+        self.assertTrue(flipped)
+        row = self.store.get_story_job("job-1")
+        self.assertEqual(row["status"], "cancelled")
+        self.assertIsNotNone(row["finished_at"])
+
+    def test_cancel_processing_job_succeeds(self):
+        """Mid-render cancel is the whole point of the Stop button."""
+        _seed_reddit_source(self.store)
+        self.store.enqueue_story_job("job-1", "abc")
+        self.store.claim_next_story_job()  # status -> processing
+        flipped = self.store.cancel_story_job("job-1")
+        self.assertTrue(flipped)
+        row = self.store.get_story_job("job-1")
+        self.assertEqual(row["status"], "cancelled")
+
+    def test_cancel_done_is_noop(self):
+        _seed_reddit_source(self.store)
+        self.store.enqueue_story_job("job-1", "abc")
+        claimed = self.store.claim_next_story_job()
+        self.store.finish_story_job(claimed["id"], "story-1")
+        flipped = self.store.cancel_story_job("job-1")
+        self.assertFalse(flipped)
+        row = self.store.get_story_job("job-1")
+        self.assertEqual(row["status"], "done")
+
+    def test_cancel_error_is_noop(self):
+        _seed_reddit_source(self.store)
+        self.store.enqueue_story_job("job-1", "abc")
+        claimed = self.store.claim_next_story_job()
+        self.store.fail_story_job(claimed["id"], "kie boom")
+        flipped = self.store.cancel_story_job("job-1")
+        self.assertFalse(flipped)
+
+    def test_cancel_unknown_id_is_noop(self):
+        self.assertFalse(self.store.cancel_story_job("does-not-exist"))
+
+    def test_late_finish_after_cancel_does_not_overwrite(self):
+        """Regression-protect the key invariant: cancellation is sticky.
+        Worker mid-render flips a row to cancelled — its eventual finish
+        call (which may land minutes later) must NOT overwrite."""
+        _seed_reddit_source(self.store)
+        self.store.enqueue_story_job("job-1", "abc")
+        claimed = self.store.claim_next_story_job()
+        self.store.cancel_story_job("job-1")
+        # Worker comes back from its LLM call and tries to finish.
+        self.store.finish_story_job(claimed["id"], "story-1")
+        row = self.store.get_story_job("job-1")
+        self.assertEqual(row["status"], "cancelled")
+
+    def test_bulk_cancel_targets_only_active_rows(self):
+        for rid in ("a", "b", "c"):
+            _seed_reddit_source(self.store, rid)
+        self.store.enqueue_story_job("ja", "a")
+        self.store.enqueue_story_job("jb", "b")
+        self.store.enqueue_story_job("jc", "c")
+        # Craft state: a queued, b processing, c done.
+        import sqlite3
+        with sqlite3.connect(self.store.DB_PATH) as conn:
+            conn.execute(
+                "UPDATE story_jobs SET status='processing', "
+                "started_at='2026-06-14T00:00:00+00:00' WHERE id='jb'"
+            )
+            conn.execute("UPDATE story_jobs SET status='done' WHERE id='jc'")
+
+        cancelled = self.store.cancel_active_jobs_for_reddit_ids(
+            ["a", "b", "c"]
+        )
+        self.assertEqual(cancelled, 2)
+        self.assertEqual(self.store.get_story_job("ja")["status"], "cancelled")
+        self.assertEqual(self.store.get_story_job("jb")["status"], "cancelled")
+        # Done row untouched.
+        self.assertEqual(self.store.get_story_job("jc")["status"], "done")
+
+    def test_bulk_cancel_empty_input_is_noop(self):
+        self.assertEqual(
+            self.store.cancel_active_jobs_for_reddit_ids([]), 0,
+        )
+
+
 class HelpersTests(_IsolatedDB):
     def test_category_for_known_subreddit(self):
         from pipeline.story_jobs_worker import _category_for

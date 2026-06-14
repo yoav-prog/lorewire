@@ -428,6 +428,89 @@ describe("bulkReprocessRedditSources", () => {
   });
 });
 
+describe("bulkCancelActiveStoryJobs", () => {
+  beforeEach(clear);
+
+  it("returns zero-result on empty input", async () => {
+    const { bulkCancelActiveStoryJobs } = await import("./story-jobs");
+    const result = await bulkCancelActiveStoryJobs([]);
+    expect(result).toEqual({
+      cancelled: 0,
+      reset_to_imported: 0,
+      cancelled_reddit_ids: [],
+    });
+  });
+
+  it("cancels a queued job and resets its source row to 'imported'", async () => {
+    await seedSource("a", "imported");
+    await bulkEnqueueStoryJobs(["a"]);
+    // source is now 'queued' + 1 active job exists.
+
+    const { bulkCancelActiveStoryJobs } = await import("./story-jobs");
+    const result = await bulkCancelActiveStoryJobs(["a"]);
+
+    expect(result.cancelled).toBe(1);
+    expect(result.reset_to_imported).toBe(1);
+    expect(result.cancelled_reddit_ids).toEqual(["a"]);
+
+    const job = await one<{ status: string }>(
+      "SELECT status FROM story_jobs WHERE reddit_id = ?",
+      ["a"],
+    );
+    expect(job?.status).toBe("cancelled");
+    const source = await one<{ status: string; story_id: string | null }>(
+      "SELECT status, story_id FROM reddit_source WHERE reddit_id = ?",
+      ["a"],
+    );
+    expect(source?.status).toBe("imported");
+    expect(source?.story_id).toBeNull();
+  });
+
+  it("skips rows without an active job (idempotent re-click)", async () => {
+    await seedSource("a", "imported");
+    const { bulkCancelActiveStoryJobs } = await import("./story-jobs");
+    const result = await bulkCancelActiveStoryJobs(["a"]);
+    expect(result.cancelled).toBe(0);
+    expect(result.reset_to_imported).toBe(0);
+    // Source row untouched.
+    const source = await one<{ status: string }>(
+      "SELECT status FROM reddit_source WHERE reddit_id = ?",
+      ["a"],
+    );
+    expect(source?.status).toBe("imported");
+  });
+
+  it("partitions a mixed batch (active vs done vs imported)", async () => {
+    // 'a' has an active job
+    await seedSource("a", "imported");
+    await bulkEnqueueStoryJobs(["a"]);
+    // 'b' had a job that's already done
+    await seedSource("b", "imported");
+    await bulkEnqueueStoryJobs(["b"]);
+    await run("UPDATE story_jobs SET status='done' WHERE reddit_id=?", ["b"]);
+    await run("UPDATE reddit_source SET status='used' WHERE reddit_id=?", ["b"]);
+    // 'c' never enqueued
+    await seedSource("c", "imported");
+
+    const { bulkCancelActiveStoryJobs } = await import("./story-jobs");
+    const result = await bulkCancelActiveStoryJobs(["a", "b", "c"]);
+
+    expect(result.cancelled).toBe(1);
+    expect(result.cancelled_reddit_ids).toEqual(["a"]);
+    // 'b' done row untouched
+    const bJob = await one<{ status: string }>(
+      "SELECT status FROM story_jobs WHERE reddit_id=?",
+      ["b"],
+    );
+    expect(bJob?.status).toBe("done");
+    const bSource = await one<{ status: string }>(
+      "SELECT status FROM reddit_source WHERE reddit_id=?",
+      ["b"],
+    );
+    expect(bSource?.status).toBe("used");
+  });
+});
+
 describe("listLatestStoryJobsForReddit", () => {
   beforeEach(clear);
 
