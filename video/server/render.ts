@@ -166,10 +166,35 @@ export async function renderAndUploadStory(
     }),
   );
 
-  // GCS upload via the runtime service account. The Storage client
-  // picks up credentials from the Cloud Run metadata server when
-  // running in GCP — no explicit auth config needed.
-  const storage = new Storage();
+  // GCS upload reusing the SAME credentials the rest of the
+  // LoreWire stack uses — Vercel functions, pipeline/gcs.py, and
+  // lib/gcs.ts all read GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY from
+  // env. Passing them explicitly to the Storage client (instead of
+  // letting it fall through to Cloud Run's metadata server) means:
+  //   - No separate IAM role to maintain on the Cloud Run side.
+  //   - One source of truth for credential rotation (rotate them
+  //     in Vercel + redeploy Cloud Run with the same values).
+  //   - Local `npm run dev:server` works against real GCS the moment
+  //     the developer has the env loaded — no `gcloud auth` quirks.
+  // The .env shape stores the key with literal `\n` sequences;
+  // normalize to real newlines like lib/gcs.ts does so the PEM
+  // parser accepts it.
+  const clientEmail = process.env.GCS_CLIENT_EMAIL;
+  const rawKey = process.env.GCS_PRIVATE_KEY;
+  if (!clientEmail || !rawKey) {
+    throw new Error(
+      "GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY must be set (use the same values Vercel does)",
+    );
+  }
+  const privateKey = rawKey.includes("\\n")
+    ? rawKey.replace(/\\n/g, "\n")
+    : rawKey;
+  const storage = new Storage({
+    credentials: {
+      client_email: clientEmail,
+      private_key: privateKey,
+    },
+  });
   const key = `${sanitizeForFs(storyId)}/video.mp4`;
   await storage.bucket(gcsBucket).upload(tmpPath, {
     destination: key,

@@ -12,7 +12,8 @@
     "dev:server": "tsx watch server/start.ts",
     "start:server": "node dist/server/start.js",
     "build:image": "docker build -t lorewire-render:dev .",
-    "deploy:cloud-run": "gcloud run deploy lorewire-render --source . --region ${CLOUD_RUN_REGION:-us-central1} --memory 4Gi --cpu 2 --timeout 3600 --no-allow-unauthenticated --set-env-vars CRON_SECRET=$CRON_SECRET,DATABASE_URL=$DATABASE_URL,GCS_BUCKET=$GCS_BUCKET"
+    "//deploy comment": "Reads the same env vars Vercel uses (CRON_SECRET + GCS_BUCKET + GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY). The .env.local stores GCS_PRIVATE_KEY with literal \\n escapes (same as lib/gcs.ts normalizes); that form passes through gcloud --set-env-vars without splitting on commas because a PEM has none.",
+    "deploy:cloud-run": "gcloud run deploy lorewire-render --source . --region ${CLOUD_RUN_REGION:-us-central1} --memory 4Gi --cpu 2 --timeout 3600 --no-allow-unauthenticated --update-env-vars CRON_SECRET=$CRON_SECRET --update-env-vars GCS_BUCKET=$GCS_BUCKET --update-env-vars GCS_CLIENT_EMAIL=$GCS_CLIENT_EMAIL --update-env-vars GCS_PRIVATE_KEY=\"$GCS_PRIVATE_KEY\""
   },
   "dependencies": {
     "@google-cloud/storage": "^7.10.0",
