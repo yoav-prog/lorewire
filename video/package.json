@@ -12,8 +12,8 @@
     "dev:server": "tsx watch server/start.ts",
     "start:server": "node dist/server/start.js",
     "build:image": "docker build -t lorewire-render:dev .",
-    "//deploy comment": "Reads the same env vars Vercel uses (CRON_SECRET + GCS_BUCKET + GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY). The .env.local stores GCS_PRIVATE_KEY with literal \\n escapes (same as lib/gcs.ts normalizes); that form passes through gcloud --set-env-vars without splitting on commas because a PEM has none. 8 vCPU/16 GB sized for 1920x1080 renders to stay under Vercel's 800 s cron timeout (2 vCPU runs ~3-5 fps and busts the timeout on a 3700-frame envelope).",
-    "deploy:cloud-run": "gcloud run deploy lorewire-render --source . --region ${CLOUD_RUN_REGION:-us-central1} --memory 16Gi --cpu 8 --timeout 3600 --no-allow-unauthenticated --update-env-vars CRON_SECRET=$CRON_SECRET --update-env-vars GCS_BUCKET=$GCS_BUCKET --update-env-vars GCS_CLIENT_EMAIL=$GCS_CLIENT_EMAIL --update-env-vars GCS_PRIVATE_KEY=\"$GCS_PRIVATE_KEY\""
+    "//deploy comment": "Auth via ADC (the --service-account flag attaches videocreator at the Cloud Run level; the SDK pulls fresh OAuth tokens from the metadata server). No PEM crypto inside Node, which sidesteps the OpenSSL 3 DECODER bug that broke the inline-credential path on node:22-slim. Env vars passed through: CRON_SECRET + GCS_BUCKET — that's it. 8 vCPU/16 GB sized for 1920x1080 renders to stay under Vercel's 800 s cron timeout (2 vCPU runs ~3-5 fps and busts the timeout on a 3700-frame envelope).",
+    "deploy:cloud-run": "gcloud run deploy lorewire-render --source . --region ${CLOUD_RUN_REGION:-us-central1} --memory 16Gi --cpu 8 --timeout 3600 --no-allow-unauthenticated --service-account=videocreator@uplift-283910.iam.gserviceaccount.com --update-env-vars CRON_SECRET=$CRON_SECRET --update-env-vars GCS_BUCKET=$GCS_BUCKET"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.10.0",
