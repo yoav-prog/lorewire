@@ -280,6 +280,43 @@ SCHEMA_STATEMENTS = [
     # app-level guard means no current rows violate the constraint.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_jobs_one_active "
     "ON story_jobs(reddit_id) WHERE status IN ('queued', 'processing')",
+    # 2026-06-14 Phase 4 of _plans/2026-06-14-voiceover-picker.md.
+    # Per-attempt queue for voice regen — admin clicks Regenerate
+    # voiceover in the picker UI, server action inserts a row here,
+    # the local pipeline/voice_renders_worker.py polls for
+    # status='queued', synthesizes new audio with the per-story voice
+    # override, uploads to GCS, rebuilds captions + duration_ms in
+    # video_config, and updates stories.audio_url + alignment.
+    # voice_provider + voice_id are SNAPSHOTTED at enqueue time so a
+    # mid-run picker change on the same story doesn't re-route an
+    # in-flight render to a different voice. text_hash idempotency:
+    # rapid double-clicks on the same (story_id, text_hash,
+    # voice_provider, voice_id) coalesce via the partial unique
+    # index below.
+    """CREATE TABLE IF NOT EXISTS voice_renders (
+        id              TEXT PRIMARY KEY,
+        story_id        TEXT NOT NULL,
+        voice_provider  TEXT,
+        voice_id        TEXT,
+        text_hash       TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        progress        INTEGER DEFAULT 0,
+        error           TEXT,
+        output_url      TEXT,
+        cost_cents      INTEGER,
+        requested_by    TEXT,
+        requested_at    TEXT NOT NULL,
+        started_at      TEXT,
+        finished_at     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_voice_renders_status_requested ON voice_renders(status, requested_at)",
+    "CREATE INDEX IF NOT EXISTS idx_voice_renders_story_id ON voice_renders(story_id, requested_at)",
+    # Same partial-unique pattern as story_jobs: at most one active
+    # render per (story, text, voice) combo so a confirm-dialog
+    # double-click can't burn the TTS spend twice.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_renders_one_active "
+    "ON voice_renders(story_id, text_hash, voice_provider, voice_id) "
+    "WHERE status IN ('queued', 'processing')",
 ]
 
 _COLUMNS = [
@@ -2482,3 +2519,296 @@ def reap_stale_story_jobs(stale_after_s: int) -> int:
             (cutoff,),
         )
         return int(cur.rowcount)
+
+
+# ─── voice_renders queue (Phase 4 of voiceover-picker plan) ──────────────────
+#
+# Same shape semantics as story_jobs / image_renders: atomic claim, partial
+# unique index for active-row idempotency, ISO-string timestamps, JSON
+# overlays for the editable bits. The fresh-pipeline narration synthesize
+# path does NOT go through this queue — it's only for admin-triggered
+# regens against a story that already has audio + alignment + a video
+# render in flight.
+
+_VOICE_RENDER_COLUMNS = [
+    "id", "story_id", "voice_provider", "voice_id", "text_hash",
+    "status", "progress", "error", "output_url", "cost_cents",
+    "requested_by", "requested_at", "started_at", "finished_at",
+]
+
+
+def enqueue_voice_render(
+    render_id: str,
+    story_id: str,
+    text_hash: str,
+    voice_provider: str | None,
+    voice_id: str | None,
+    requested_by: str | None = None,
+) -> dict | None:
+    """Insert one queued voice_render. Returns the inserted row, or None
+    on race-loss (an active render for the same (story, text, voice)
+    combo already exists). The partial unique index on
+    (story_id, text_hash, voice_provider, voice_id)
+    WHERE status IN ('queued', 'processing') is the DB-level guard.
+    """
+    cols = ", ".join(_VOICE_RENDER_COLUMNS)
+    now = _now_iso()
+    row = {
+        "id": render_id,
+        "story_id": story_id,
+        "voice_provider": voice_provider,
+        "voice_id": voice_id,
+        "text_hash": text_hash,
+        "status": "queued",
+        "progress": 0,
+        "error": None,
+        "output_url": None,
+        "cost_cents": None,
+        "requested_by": requested_by,
+        "requested_at": now,
+        "started_at": None,
+        "finished_at": None,
+    }
+    if _is_postgres():
+        placeholders = ", ".join(f"%({c})s" for c in _VOICE_RENDER_COLUMNS)
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO voice_renders ({cols}) VALUES ({placeholders}) "
+                    f"ON CONFLICT (story_id, text_hash, voice_provider, voice_id) "
+                    f"WHERE status IN ('queued', 'processing') DO NOTHING",
+                    row,
+                )
+                if cur.rowcount == 0:
+                    return None
+            conn.commit()
+        return dict(row)
+    placeholders = ", ".join(f":{c}" for c in _VOICE_RENDER_COLUMNS)
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            f"INSERT INTO voice_renders ({cols}) VALUES ({placeholders}) "
+            f"ON CONFLICT (story_id, text_hash, voice_provider, voice_id) "
+            f"WHERE status IN ('queued', 'processing') DO NOTHING",
+            row,
+        )
+        if cur.rowcount == 0:
+            return None
+    return dict(row)
+
+
+def claim_next_voice_render() -> dict | None:
+    """Atomically claim the oldest queued voice_render, flipping its
+    status to 'processing'. Returns the claimed row, or None when the
+    queue is empty. Mirrors claim_next_story_job's semantics."""
+    cols = ", ".join(_VOICE_RENDER_COLUMNS)
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE voice_renders SET status='processing', "
+                    "started_at=%s WHERE id = ("
+                    "SELECT id FROM voice_renders WHERE status='queued' "
+                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    f") RETURNING {cols}",
+                    (now,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT id FROM voice_renders WHERE status='queued' "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        c.execute(
+            "UPDATE voice_renders SET status='processing', started_at=? "
+            "WHERE id=? AND status='queued'",
+            (now, row["id"]),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {cols} FROM voice_renders WHERE id=?", (row["id"],),
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def finish_voice_render(
+    render_id: str,
+    output_url: str,
+    cost_cents: int | None,
+) -> None:
+    """Mark a voice_render done with the new audio URL + spend snapshot.
+    Conditional on status IN ('queued', 'processing') so a settled row
+    (done / error / cancelled) isn't overwritten — same contract as
+    finish_story_job."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE voice_renders SET status='done', progress=100, "
+                    "output_url=%s, cost_cents=%s, finished_at=%s "
+                    "WHERE id=%s AND status IN ('queued', 'processing')",
+                    (output_url, cost_cents, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE voice_renders SET status='done', progress=100, "
+            "output_url=?, cost_cents=?, finished_at=? "
+            "WHERE id=? AND status IN ('queued', 'processing')",
+            (output_url, cost_cents, now, render_id),
+        )
+
+
+def fail_voice_render(render_id: str, error_message: str) -> None:
+    """Mark a voice_render failed. Same status guard as finish_voice_render."""
+    now = _now_iso()
+    capped = (error_message or "unknown error")[:2000]
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE voice_renders SET status='error', error=%s, "
+                    "finished_at=%s WHERE id=%s "
+                    "AND status IN ('queued', 'processing')",
+                    (capped, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE voice_renders SET status='error', error=?, "
+            "finished_at=? WHERE id=? "
+            "AND status IN ('queued', 'processing')",
+            (capped, now, render_id),
+        )
+
+
+def get_voice_render(render_id: str) -> dict | None:
+    cols = ", ".join(_VOICE_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM voice_renders WHERE id = %s",
+                    (render_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM voice_renders WHERE id = ?", (render_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def latest_voice_render_for_story(story_id: str) -> dict | None:
+    """Most-recently-requested render for this story. The picker UI reads
+    this to surface the in-flight state ('Synthesizing...') and the last
+    error message when the previous attempt failed."""
+    cols = ", ".join(_VOICE_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM voice_renders WHERE story_id = %s "
+                    "ORDER BY requested_at DESC LIMIT 1",
+                    (story_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM voice_renders WHERE story_id = ? "
+            "ORDER BY requested_at DESC LIMIT 1",
+            (story_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_voice_render_progress(render_id: str, progress: int) -> None:
+    """Best-effort progress tick. Conditional on status='processing' so
+    a settled row isn't bumped back to a partial value."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE voice_renders SET progress = %s WHERE id = %s "
+                    "AND status = 'processing'",
+                    (int(progress), render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE voice_renders SET progress = ? WHERE id = ? "
+            "AND status = 'processing'",
+            (int(progress), render_id),
+        )
+
+
+def reap_stale_voice_renders(stale_after_s: int) -> int:
+    """Reset 'processing' rows whose started_at is older than the
+    threshold back to 'queued' so a crashed worker doesn't strand
+    the queue. Mirrors reap_stale_story_jobs."""
+    import datetime as _dt
+    cutoff = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(seconds=stale_after_s)
+    ).isoformat()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE voice_renders SET status='queued', started_at=NULL "
+                    "WHERE status='processing' AND started_at IS NOT NULL "
+                    "AND started_at < %s",
+                    (cutoff,),
+                )
+                count = cur.rowcount
+            conn.commit()
+        return int(count)
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "UPDATE voice_renders SET status='queued', started_at=NULL "
+            "WHERE status='processing' AND started_at IS NOT NULL "
+            "AND started_at < ?",
+            (cutoff,),
+        )
+        return int(cur.rowcount)
+
+
+def update_story_voice_render_output(
+    story_id: str,
+    audio_url: str,
+    alignment_json: str,
+    video_config_json: str,
+) -> None:
+    """Atomic three-column update the voice worker fires when a regen
+    finishes. We touch audio_url + alignment + video_config in one
+    UPDATE so a worker crash mid-write can't leave the row half-stale
+    (e.g. new audio but old captions in video_config — which would
+    paint the wrong words during playback)."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET audio_url = %s, alignment = %s, "
+                    "video_config = %s, updated_at = %s WHERE id = %s",
+                    (audio_url, alignment_json, video_config_json, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET audio_url = ?, alignment = ?, "
+            "video_config = ?, updated_at = ? WHERE id = ?",
+            (audio_url, alignment_json, video_config_json, now, story_id),
+        )

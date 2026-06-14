@@ -39,6 +39,7 @@ vi.mock("next/navigation", () => ({
 // here.
 vi.mock("@/app/admin/actions", () => ({
   setStoryVoiceAction: vi.fn(),
+  regenerateVoiceoverAction: vi.fn(),
 }));
 
 const FAKE_VOICES: VoiceEntry[] = [
@@ -174,18 +175,34 @@ describe("VoicePicker", () => {
     expect(html).toContain("cursor-not-allowed");
   });
 
-  it("marks the regen button disabled in Phase 3 (regen wiring is Phase 4)", () => {
+  it("renders the regen button ENABLED when no render is in flight", () => {
     const html = render();
     const buttonTag = extractTag(html, "voice-picker-regen");
     expect(buttonTag).not.toBeNull();
-    // React serialises `disabled` (boolean) as the attribute alone or
-    // `disabled=""`. Either way the attribute must appear in the
-    // button's opening tag — order-agnostic so a future React serializer
-    // bump doesn't fail us.
+    // Phase 4 enables the button — the picker can fire the regen
+    // action. Disabled state only fires when a render is in flight.
+    expect(hasDisabledAttr(buttonTag!)).toBe(false);
+    expect(html).toContain("Regenerate voiceover");
+  });
+
+  it("disables the regen button + swaps the label while a render is in flight", () => {
+    const html = render({ regenInFlight: true });
+    const buttonTag = extractTag(html, "voice-picker-regen");
+    expect(buttonTag).not.toBeNull();
+    // In-flight = disabled so a second click can't double-spend
+    // TTS credit while the first synth is still running.
     expect(hasDisabledAttr(buttonTag!)).toBe(true);
-    // The tooltip points to Phase 4 so the admin knows the absence is
-    // intentional + temporary, not a bug.
-    expect(html).toContain("Phase 4");
+    // The footer copy + button label switch to "Synthesizing…" so the
+    // admin sees their click landed even before the page refreshes.
+    expect(html).toContain("Synthesizing");
+  });
+
+  it("surfaces the last regen error inline so a failed render is visible", () => {
+    const html = render({
+      lastRegenError: "ElevenLabs HTTP 429: too many requests",
+    });
+    expect(html).toContain("voice-picker-regen-error");
+    expect(html).toContain("429");
   });
 
   it("renders the Reset chip as DISABLED when already on global", () => {

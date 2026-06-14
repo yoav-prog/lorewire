@@ -1009,6 +1009,67 @@ export async function setStoryVoiceAction(formData: FormData): Promise<{
   return { ok: true };
 }
 
+// Phase 4 of _plans/2026-06-14-voiceover-picker.md. Enqueues a
+// voice_renders row so the local Python worker (or, eventually, the
+// Vercel cron drain) can synthesize the new audio against the story's
+// body text using the per-story voice override + global setting
+// fallback chain.
+//
+// The action is a thin orchestrator: validate, read the story row's
+// snapshot, hand off to the queue helper. The heavy lifting (TTS,
+// caption rebuild, GCS upload, three-column atomic write to stories)
+// lives on the Python side in pipeline/voice_renders_worker.py — same
+// architectural seam the image_renders + story_jobs queues use.
+export async function regenerateVoiceoverAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+  renderId?: string;
+}> {
+  const session = await requireAdmin();
+  const storyId = String(formData.get("story_id") ?? "");
+  if (!storyId) {
+    return { ok: false, error: "missing story_id" };
+  }
+  const story = await getStoryRow(storyId);
+  if (!story) {
+    return { ok: false, error: "story not found" };
+  }
+  const body = (story.body ?? "").trim();
+  if (!body) {
+    return { ok: false, error: "story has no body to synthesize" };
+  }
+  // Snapshot the per-story override at enqueue time. If the picker
+  // changes the override after enqueue but before claim, the worker
+  // STILL processes with the snapshotted values — the regen the user
+  // asked for is the regen the worker performs. Mid-flight override
+  // swap would be a confusing race.
+  const { enqueueVoiceRender } = await import("@/lib/voice-render-queue");
+  const result = await enqueueVoiceRender({
+    storyId,
+    body,
+    voiceProvider: story.voice_provider,
+    voiceId: story.voice_id,
+    requestedBy: session.userId,
+  });
+  if (!result.ok) {
+    console.warn("[voice regen action] enqueue failed", {
+      story_id: storyId,
+      error: result.error,
+    });
+    return { ok: false, error: result.error };
+  }
+  console.info("[voice regen action] enqueued", {
+    story_id: storyId,
+    render_id: result.renderId,
+    voice_provider: story.voice_provider,
+    voice_id: story.voice_id,
+    requested_by: session.userId,
+  });
+  revalidatePath(`/admin/stories/${storyId}`);
+  revalidatePath(`/admin/videos/${storyId}`);
+  return { ok: true, renderId: result.renderId };
+}
+
 // --- articles CMS actions (Phase 1) ----------------------------------------
 // All four actions follow the existing admin pattern: requireAdmin first,
 // validate input close to the data, log a single line per outcome, then

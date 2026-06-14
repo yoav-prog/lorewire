@@ -87,13 +87,35 @@ Each phase is independently mergeable. Worst-case revert is a single column drop
 
 **To run in prod:** `python scripts/bake_voice_previews.py` — first invocation bakes all 24 objects (~$0.06, ~3-5 minutes). Subsequent runs are no-ops (skip-when-exists). Cost is amortized — once baked, the picker plays them forever without TTS calls.
 
-### Phase 3 — Shared `<VoicePicker />` + story-page surface (UI, behind flag)
+### Phase 3 — Shared `<VoicePicker />` + story-page surface (shipped 2026-06-14)
 
-Skeleton recorded; expanded once Phase 2 lands.
+**Shipped:**
+- `<VoicePicker />` client component at [lorewire-app/src/components/voice-picker/VoicePicker.tsx](lorewire-app/src/components/voice-picker/VoicePicker.tsx). Three provider sections, voice cards with name + accent + ▶ preview play. Single shared `<audio>` element so a second click stops the first preview cleanly.
+- Auto-save on click: clicking a voice card fires `setStoryVoiceAction` immediately; pending state via `useTransition`.
+- "Reset to global default" chip toggles between disabled (already on global) and active (clearing the override).
+- Server action `setStoryVoiceAction` validates `(provider, voice_id)` against the LIVE library — tampered form values are rejected (rule 13).
+- Repo helper `setStoryVoice` writes both columns in one UPDATE.
+- Story page integration at `/admin/stories/[id]`: picker renders in the sidebar above the Media card, only when `voice.picker_enabled = 1`.
+- 11 new tests in [VoicePicker.test.tsx](lorewire-app/src/components/voice-picker/VoicePicker.test.tsx).
 
-### Phase 4 — Editor AUDIO tab + regen action wiring (UI + worker)
+### Phase 4 — Editor AUDIO tab + regen action wiring (shipped 2026-06-14)
 
-Skeleton recorded; expanded once Phase 3 lands. Notable: new `voice_renders` queue table mirroring `image_renders` so the existing Vercel cron drain pattern carries over.
+**Shipped:**
+- New `voice_renders` queue table in [pipeline/store.py](pipeline/store.py) — mirrors `story_jobs` shape with status / progress / error / output_url / cost_cents / advisory partial unique index keyed on `(story_id, text_hash, voice_provider, voice_id) WHERE status IN ('queued','processing')`.
+- Python helpers: `enqueue_voice_render`, `claim_next_voice_render`, `finish_voice_render`, `fail_voice_render`, `get_voice_render`, `latest_voice_render_for_story`, `update_voice_render_progress`, `reap_stale_voice_renders`, `update_story_voice_render_output` (atomic three-column write to stories).
+- TS schema mirror in [schema.ts](lorewire-app/src/lib/schema.ts) so `ensureSchema` picks up the new table on cold boot.
+- Python worker [pipeline/voice_renders_worker.py](pipeline/voice_renders_worker.py) — claims a queued row, calls `voice.synthesize` with the per-story override args (Phase 1), uploads via `gcs.publish`, **rebuilds captions from new alignment via `video._chunk_alignment`**, updates `duration_ms`, clears `clip_start_ms` / `clip_end_ms`, clamps each `doodle_frames[i].caption_chunk_start_index` into the new captions count, writes audio_url + alignment + video_config in one atomic UPDATE. Per-render cost captured via the existing `media.running_cost_usd()` delta.
+- TS-side queue helper [lib/voice-render-queue.ts](lorewire-app/src/lib/voice-render-queue.ts) with `enqueueVoiceRender` (race-aware), `latestVoiceRenderForStory`, `hasActiveVoiceRender`, and a `textHash` helper that mirrors the Python sha256 so both sides hash to the same hex.
+- Server action `regenerateVoiceoverAction` in [actions.ts](lorewire-app/src/app/admin/actions.ts) — snapshots the per-story override at enqueue time so a mid-flight picker change doesn't reroute an in-flight render.
+- VoicePicker wired: the regen button is now functional. Pending state surfaces as "Synthesizing voiceover..." in the footer + a disabled button. Last error from the previous voice_render row shows inline so a failed regen is visible without a console open.
+- Editor AUDIO tab integration: when the picker flag is on AND voices are available, the AUDIO tab's Voiceover Section renders the live `<VoicePicker />` (with the current audio still playable underneath) instead of the read-only voiceover_url chip.
+- Tests: 16 new Python in [test_voice_renders.py](pipeline/tests/test_voice_renders.py) (enqueue race semantics, claim/finish/fail, worker tick paths, real `_default_process` end-to-end rebuild with caption clamp), 2 new TS in `VoicePicker.test.tsx` covering regen button state transitions and the inline error surface.
+
+**Live-run prerequisites for the regen to actually work:**
+1. Phase 1's columns + Phase 2's library shipped (#3).
+2. Phase 2.b bake script run (#4) so preview MP3s exist.
+3. Phase 3's picker shipped (#5) so the admin can choose a voice.
+4. **This PR (#6)** — flip `voice.picker_enabled = "1"` in Settings and run `python -m pipeline.voice_renders_worker` locally OR add the Vercel cron drain (Phase 4.b).
 
 ## Security (rule 13)
 

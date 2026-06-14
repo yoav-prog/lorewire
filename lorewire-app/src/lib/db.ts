@@ -98,7 +98,21 @@ async function makeDriver(): Promise<Driver> {
 // partial unique index that the story_jobs ON CONFLICT clause targets).
 async function ensureSchema(d: Driver): Promise<Driver> {
   for (const t of TABLES) {
-    await d.run(createTableSql(t), []);
+    try {
+      await d.run(createTableSql(t), []);
+    } catch {
+      // Postgres's CREATE TABLE IF NOT EXISTS is NOT atomic against
+      // concurrent transactions on a not-yet-existing relation: two
+      // workers can both pass the existence check, both try to insert
+      // into pg_type, and the loser gets `duplicate key value violates
+      // unique constraint "pg_type_typname_nsp_index"`. This bit the
+      // voiceover-picker Phase 4 deploy when `voice_renders` was new —
+      // existing tables raced cleanly (NOTICE "already exists,
+      // skipping") but the brand-new one tripped the catalog. Safe to
+      // swallow: the column-existence check below verifies the table
+      // actually exists. If it genuinely doesn't, the ALTER TABLE
+      // loop's catch handles the missing-column case the same way.
+    }
     const existing = new Set(await d.columns(t.name));
     for (const c of t.columns) {
       if (c.pk || existing.has(c.name)) continue;
