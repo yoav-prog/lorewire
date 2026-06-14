@@ -290,12 +290,73 @@ export async function getHomePagePicks(
       .map((r) => r.story_id);
 
   const billboardList = pick("billboard.featured");
-  const picks: HomePagePicks = {
-    billboard: billboardList[0] ?? null,
+  const pinned = {
     continueRow: pick("rail.continue"),
     top10: pick("rail.top10"),
     entitled: pick("rail.entitled"),
     newRow: pick("rail.new"),
+  };
+
+  // Phase 6 auto-fill: pad each opted-in rail with newest published
+  // stories. Build the skip set from EVERY rail's pinned ids so a story
+  // already on Top 10 doesn't also appear on New just because the
+  // catalog is short — keeps the home page visually distinct.
+  const autofillEnabled = await readAutofillSettings();
+  const wantsFill =
+    (autofillEnabled.has("rail.top10") && pinned.top10.length < RAIL_TARGET_LENGTH) ||
+    (autofillEnabled.has("rail.new") && pinned.newRow.length < RAIL_TARGET_LENGTH) ||
+    (autofillEnabled.has("rail.entitled") &&
+      pinned.entitled.length < RAIL_TARGET_LENGTH);
+  let filled = pinned;
+  if (wantsFill) {
+    const allPinned = new Set<string>([
+      ...pinned.top10,
+      ...pinned.newRow,
+      ...pinned.entitled,
+      ...pinned.continueRow,
+    ]);
+    if (billboardList[0]) allPinned.add(billboardList[0]);
+    const newest = await newestPublishedIds(
+      RAIL_TARGET_LENGTH * AUTOFILLABLE_RAILS.length,
+      allPinned,
+    );
+    // Each rail gets its own slice of `newest`, advancing the cursor so
+    // two rails don't show the same auto-filled story.
+    let cursor = 0;
+    const sliceFor = (count: number): string[] => {
+      const out = newest.slice(cursor, cursor + count);
+      cursor += out.length;
+      return out;
+    };
+    filled = {
+      continueRow: pinned.continueRow, // not auto-fillable by design
+      top10: autofillEnabled.has("rail.top10")
+        ? appendAutofill(
+            pinned.top10,
+            sliceFor(RAIL_TARGET_LENGTH - pinned.top10.length),
+            RAIL_TARGET_LENGTH,
+          )
+        : pinned.top10,
+      newRow: autofillEnabled.has("rail.new")
+        ? appendAutofill(
+            pinned.newRow,
+            sliceFor(RAIL_TARGET_LENGTH - pinned.newRow.length),
+            RAIL_TARGET_LENGTH,
+          )
+        : pinned.newRow,
+      entitled: autofillEnabled.has("rail.entitled")
+        ? appendAutofill(
+            pinned.entitled,
+            sliceFor(RAIL_TARGET_LENGTH - pinned.entitled.length),
+            RAIL_TARGET_LENGTH,
+          )
+        : pinned.entitled,
+    };
+  }
+
+  const picks: HomePagePicks = {
+    billboard: billboardList[0] ?? null,
+    ...filled,
   };
   console.info("[curation home]", {
     billboard: picks.billboard,
@@ -303,6 +364,7 @@ export async function getHomePagePicks(
     top10: picks.top10.length,
     entitled: picks.entitled.length,
     new: picks.newRow.length,
+    autofilled: wantsFill,
   });
   return picks;
 }
@@ -353,6 +415,179 @@ export async function setSlotStories(
     params,
   );
   return storyIds.length;
+}
+
+// ─── scheduled-replace write (Phase 6) ──────────────────────────────────────
+//
+// `setSlotStories` is the bulk write used when the admin only cares about
+// order. Phase 6 adds per-row scheduling — same atomic-replace shape, but
+// each pick can carry its own publish_at / expires_at. Empty array clears
+// the slot (matches setSlotStories).
+
+export interface SlotPickInput {
+  story_id: string;
+  /** ISO timestamp. NULL = active immediately. */
+  publish_at?: string | null;
+  /** ISO timestamp. NULL = no expiry. */
+  expires_at?: string | null;
+}
+
+export async function setSlotPicks(
+  slotKind: string,
+  picks: SlotPickInput[],
+  opts: { notes?: string | null } = {},
+): Promise<number> {
+  if (!slotKind) {
+    throw new Error("setSlotPicks requires slotKind");
+  }
+  const now = new Date().toISOString();
+  await run("DELETE FROM curation_slots WHERE slot_kind = ?", [slotKind]);
+  if (picks.length === 0) return 0;
+  const placeholders = picks.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(
+    ", ",
+  );
+  const params: unknown[] = [];
+  for (let i = 0; i < picks.length; i++) {
+    const p = picks[i];
+    params.push(
+      randomUUID(),
+      slotKind,
+      i,
+      p.story_id,
+      normalizeIso(p.publish_at ?? null),
+      normalizeIso(p.expires_at ?? null),
+      opts.notes ?? null,
+      now,
+      now,
+    );
+  }
+  await run(
+    `INSERT INTO curation_slots (${COLS}) VALUES ${placeholders}`,
+    params,
+  );
+  return picks.length;
+}
+
+// Accept any of: ISO string, `datetime-local` value ("2026-06-15T18:30"),
+// empty string. Returns a canonical ISO-with-Z string or null. We do NOT
+// try to validate calendar correctness — the SQL comparison is lexical
+// and tolerates partial timestamps as long as they sort right.
+function normalizeIso(v: string | null | undefined): string | null {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  // `datetime-local` widgets emit "YYYY-MM-DDTHH:mm" (no seconds, no zone).
+  // Treat as UTC so the value compares cleanly with the activeAt filter
+  // (also UTC). Admins picking "12:00" expect "12:00 UTC", which matches
+  // the implicit contract everywhere else in the codebase.
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) {
+    return new Date(`${s}:00Z`).toISOString();
+  }
+  // Try generic Date parse for full ISO inputs. Invalid -> null instead
+  // of throwing; the action will surface a soft error.
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
+// ─── auto-fill remainder (Phase 6) ──────────────────────────────────────────
+//
+// When a rail's pinned set is shorter than its target length, pad the
+// rest with the newest published stories. The toggle is per-slot kind so
+// the admin can pin everything for a curated rail and let auto-fill pad
+// only the rails that aren't worth babysitting.
+//
+// Settings layer (rule 15 in CLAUDE.md):
+//   - `curation.autofill.<slot_kind>`: "1" enables fill, "0" disables.
+//     Default is "1" — most rails want a populated UI even when admin
+//     hasn't curated.
+//   - rail.continue is NOT auto-fillable (semantically about user
+//     playback state, padding it with newest stories is misleading).
+//
+// Target length is fixed at 10 per rail today. If the admin pins MORE
+// than the target, all pinned stories still ship — auto-fill only
+// pads, never truncates.
+
+/** Rails that support auto-fill. Excludes rail.continue. */
+export const AUTOFILLABLE_RAILS = [
+  "rail.top10",
+  "rail.new",
+  "rail.entitled",
+] as const;
+
+export type AutofillableRail = (typeof AUTOFILLABLE_RAILS)[number];
+
+export function isAutofillableRail(s: string): s is AutofillableRail {
+  return (AUTOFILLABLE_RAILS as readonly string[]).includes(s);
+}
+
+export const RAIL_TARGET_LENGTH = 10;
+
+export function autofillSettingKey(slotKind: AutofillableRail): string {
+  return `curation.autofill.${slotKind}`;
+}
+
+/** Read every autofill toggle in one query. Returns the slot kinds for
+ *  which auto-fill is enabled. Missing settings default to enabled. */
+export async function readAutofillSettings(): Promise<Set<AutofillableRail>> {
+  const rows = await all<{ key: string; value: string }>(
+    "SELECT key, value FROM settings WHERE key LIKE ?",
+    ["curation.autofill.%"],
+  );
+  const explicit = new Map(rows.map((r) => [r.key, r.value]));
+  const enabled = new Set<AutofillableRail>();
+  for (const rail of AUTOFILLABLE_RAILS) {
+    const v = explicit.get(autofillSettingKey(rail));
+    // Default enabled: only "0"/"false"/"off" disables. Anything else
+    // (including missing) leaves auto-fill on.
+    if (v === undefined || (v !== "0" && v.toLowerCase() !== "false" && v.toLowerCase() !== "off")) {
+      enabled.add(rail);
+    }
+  }
+  return enabled;
+}
+
+/** Newest published stories across the catalog, excluding ids in `skip`.
+ *  Used by the home-page resolver to pad rails when auto-fill is on. */
+async function newestPublishedIds(
+  limit: number,
+  skip: Set<string>,
+): Promise<string[]> {
+  // Pull a slightly larger window than needed so we can drop the skips
+  // and still hit the limit without a second query. 3× headroom is more
+  // than enough at LoreWire's catalog size (low hundreds).
+  const window = Math.max(limit * 3, limit + skip.size);
+  const rows = await all<{ id: string }>(
+    "SELECT id FROM stories WHERE status = 'published' " +
+      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC " +
+      "LIMIT ?",
+    [window],
+  );
+  const out: string[] = [];
+  for (const r of rows) {
+    if (skip.has(r.id)) continue;
+    out.push(r.id);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** Append newest-first auto-fill onto a rail's admin picks. Pure helper —
+ *  exported for unit testing the dedup behaviour. */
+export function appendAutofill(
+  pinned: readonly string[],
+  newest: readonly string[],
+  target: number,
+): string[] {
+  const out = [...pinned];
+  const seen = new Set(pinned);
+  for (const id of newest) {
+    if (out.length >= target) break;
+    if (seen.has(id)) continue;
+    out.push(id);
+    seen.add(id);
+  }
+  return out;
 }
 
 /** Append one story to a slot (or insert at `position`). UNIQUE
@@ -430,4 +665,41 @@ export async function reorderSlot(
     );
   }
   return orderedIds.length;
+}
+
+// ─── cleanup (Phase 6) ──────────────────────────────────────────────────────
+//
+// Daily cron sweep that hard-deletes rows whose expires_at is older than
+// a grace window. Reads only — the active-at filter on the read path
+// already hides expired rows from users; this just keeps the table from
+// growing without bound. The 7-day default means an accidental
+// "expires_at last Tuesday" the admin sets via the date picker stays
+// recoverable for a week (just re-pin to a future date).
+
+export async function deleteExpiredSlotRows(
+  now: Date = new Date(),
+  graceDays: number = 7,
+): Promise<number> {
+  if (graceDays < 0) {
+    throw new Error("graceDays must be non-negative");
+  }
+  const cutoff = new Date(
+    now.getTime() - graceDays * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  const candidates = await all<{ id: string }>(
+    "SELECT id FROM curation_slots " +
+      "WHERE expires_at IS NOT NULL AND expires_at < ?",
+    [cutoff],
+  );
+  if (candidates.length === 0) return 0;
+  await run(
+    "DELETE FROM curation_slots " +
+      "WHERE expires_at IS NOT NULL AND expires_at < ?",
+    [cutoff],
+  );
+  console.info("[curation cleanup-expired]", {
+    cutoff,
+    removed: candidates.length,
+  });
+  return candidates.length;
 }

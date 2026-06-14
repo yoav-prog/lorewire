@@ -3256,3 +3256,46 @@ def list_slots_for_story(story_id: str) -> list[dict]:
             (story_id,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def delete_expired_curation_slots(
+    *, now_iso: str | None = None, grace_days: int = 7
+) -> int:
+    """Hard-delete curation_slots rows whose expires_at is older than the
+    grace window. Returns the number of rows removed. Phase 6 cleanup
+    cron of `_plans/2026-06-15-curation-system.md`.
+
+    The active-at filter in `list_curation_slots` already hides expired
+    rows from the public read path; this just keeps the table from
+    growing without bound. The 7-day grace means an admin who set the
+    wrong expires_at last Tuesday can still recover the row.
+    """
+    if grace_days < 0:
+        raise ValueError("grace_days must be non-negative")
+    if now_iso is None:
+        from datetime import datetime, timezone
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+    from datetime import datetime, timedelta
+
+    cutoff_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    cutoff = (cutoff_dt - timedelta(days=grace_days)).isoformat()
+
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM curation_slots "
+                    "WHERE expires_at IS NOT NULL AND expires_at < %s",
+                    (cutoff,),
+                )
+                removed = cur.rowcount or 0
+            conn.commit()
+        return removed
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "DELETE FROM curation_slots "
+            "WHERE expires_at IS NOT NULL AND expires_at < ?",
+            (cutoff,),
+        )
+        return cur.rowcount or 0

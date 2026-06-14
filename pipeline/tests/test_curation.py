@@ -173,5 +173,48 @@ class ListSlotsForStoryTests(_IsolatedDB):
         self.assertEqual(self.store.list_slots_for_story("nope"), [])
 
 
+class DeleteExpiredCurationSlotsTests(_IsolatedDB):
+    """Phase 6 cleanup cron — verifies the grace-window math is right and
+    that rows without an expires_at are never touched."""
+
+    def test_deletes_rows_older_than_grace(self):
+        now = datetime.datetime(2026, 6, 20, tzinfo=datetime.timezone.utc)
+        long_gone = (now - datetime.timedelta(days=14)).isoformat()
+        recent = (now - datetime.timedelta(days=2)).isoformat()
+        self.store.add_to_slot("rail.top10", "old", expires_at=long_gone)
+        self.store.add_to_slot("rail.top10", "recent", expires_at=recent)
+        self.store.add_to_slot("rail.top10", "live")
+        removed = self.store.delete_expired_curation_slots(
+            now_iso=now.isoformat(), grace_days=7,
+        )
+        self.assertEqual(removed, 1)
+        remaining = sorted(
+            r["story_id"]
+            for r in self.store.list_curation_slots("rail.top10")
+        )
+        self.assertEqual(remaining, ["live", "recent"])
+
+    def test_preserves_rows_without_expires_at(self):
+        self.store.add_to_slot("rail.top10", "a")
+        self.store.add_to_slot("rail.top10", "b")
+        self.assertEqual(self.store.delete_expired_curation_slots(), 0)
+
+    def test_rejects_negative_grace_days(self):
+        with self.assertRaises(ValueError):
+            self.store.delete_expired_curation_slots(grace_days=-1)
+
+    def test_grace_window_boundary(self):
+        # Exactly at the cutoff: NOT deleted (cutoff is exclusive — we
+        # use `<` rather than `<=` so an admin who set expires_at "today
+        # minus 7 days" still sees the row for one more tick).
+        now = datetime.datetime(2026, 6, 20, tzinfo=datetime.timezone.utc)
+        at_cutoff = (now - datetime.timedelta(days=7)).isoformat()
+        self.store.add_to_slot("rail.top10", "edge", expires_at=at_cutoff)
+        removed = self.store.delete_expired_curation_slots(
+            now_iso=now.isoformat(), grace_days=7,
+        )
+        self.assertEqual(removed, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

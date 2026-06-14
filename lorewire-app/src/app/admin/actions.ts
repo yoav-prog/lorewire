@@ -2169,24 +2169,70 @@ export async function setCurationSlotAction(
   formData: FormData,
 ): Promise<void> {
   await requireAdmin();
-  const { isCurationSlotKind, setSlotStories } = await import(
+  const { isCurationSlotKind, setSlotStories, setSlotPicks } = await import(
     "@/lib/curation"
   );
   const slotKind = String(formData.get("slot_kind") ?? "").trim();
   if (!isCurationSlotKind(slotKind)) {
     redirect("/admin/curation?error=bad-slot-kind");
   }
-  // story_ids arrives as a comma-separated string in the hidden input the
-  // client component maintains as it reorders. Empty = clear the slot.
-  const raw = String(formData.get("story_ids") ?? "").trim();
-  const ids = raw
-    ? raw.split(",").map((s) => s.trim()).filter(Boolean)
-    : [];
-  const count = await setSlotStories(slotKind, ids);
+  // Phase 6: the editor now ships an optional `picks_json` payload that
+  // carries the per-row publish_at / expires_at alongside the story id.
+  // For backwards compatibility (and the per-story panel that doesn't
+  // touch schedules), we still accept the comma-separated `story_ids`
+  // shape and treat every row as "active immediately, never expires".
+  const picksJsonRaw = String(formData.get("picks_json") ?? "").trim();
+  let count: number;
+  let idsSample: string[];
+  if (picksJsonRaw) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(picksJsonRaw);
+    } catch {
+      redirect(
+        `/admin/curation?error=bad-picks-json&slot=${encodeURIComponent(slotKind)}`,
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      redirect(
+        `/admin/curation?error=bad-picks-shape&slot=${encodeURIComponent(slotKind)}`,
+      );
+    }
+    const picks = (parsed as Array<Record<string, unknown>>)
+      .map((p) => {
+        const id =
+          typeof p?.story_id === "string" ? p.story_id.trim() : "";
+        if (!id) return null;
+        const publishAt =
+          typeof p?.publish_at === "string" && p.publish_at.trim() !== ""
+            ? p.publish_at.trim()
+            : null;
+        const expiresAt =
+          typeof p?.expires_at === "string" && p.expires_at.trim() !== ""
+            ? p.expires_at.trim()
+            : null;
+        return {
+          story_id: id,
+          publish_at: publishAt,
+          expires_at: expiresAt,
+        };
+      })
+      .filter((p): p is NonNullable<typeof p> => p !== null);
+    count = await setSlotPicks(slotKind, picks);
+    idsSample = picks.slice(0, 5).map((p) => p.story_id);
+  } else {
+    const raw = String(formData.get("story_ids") ?? "").trim();
+    const ids = raw
+      ? raw.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    count = await setSlotStories(slotKind, ids);
+    idsSample = ids.slice(0, 5);
+  }
   console.info("[curation set]", {
     slot_kind: slotKind,
     count,
-    ids_sample: ids.slice(0, 5),
+    ids_sample: idsSample,
+    with_schedule: picksJsonRaw !== "",
   });
   revalidatePath("/");
   revalidatePath("/admin/curation");
@@ -2194,6 +2240,38 @@ export async function setCurationSlotAction(
   // call now; Next ignores paths that don't exist yet.
   revalidatePath("/c/[category]", "page");
   redirect(`/admin/curation?saved=${encodeURIComponent(slotKind)}`);
+}
+
+// ─── auto-fill toggle (Phase 6) ────────────────────────────────────────────
+// Per-rail "auto-fill remainder" switch lives in `settings` as
+// `curation.autofill.<slot_kind>`. The curation page renders one toggle
+// per autofillable rail (rail.top10, rail.new, rail.entitled — NOT
+// rail.continue, which is semantically about playback state).
+export async function setCurationAutofillAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const { isAutofillableRail, autofillSettingKey } = await import(
+    "@/lib/curation"
+  );
+  const slotKind = String(formData.get("slot_kind") ?? "").trim();
+  if (!isAutofillableRail(slotKind)) {
+    redirect("/admin/curation?error=bad-autofill-slot");
+  }
+  // The form submits "1" for enable, "0" for disable. Treat anything
+  // other than "0" as enable so a missing/garbled value still defaults
+  // to the safer (populated rail) state.
+  const value = String(formData.get("enabled") ?? "1") === "0" ? "0" : "1";
+  await setSetting(autofillSettingKey(slotKind), value);
+  console.info("[curation autofill set]", {
+    slot_kind: slotKind,
+    enabled: value === "1",
+  });
+  revalidatePath("/");
+  revalidatePath("/admin/curation");
+  redirect(
+    `/admin/curation?autofill_saved=${encodeURIComponent(slotKind)}`,
+  );
 }
 
 // ─── per-story curation panel (Phase 5) ────────────────────────────────────

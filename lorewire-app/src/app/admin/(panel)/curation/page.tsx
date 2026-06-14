@@ -18,17 +18,21 @@ import {
   CATEGORY_KINDS,
   RAIL_SLOT_KINDS,
   SINGLETON_SLOT_KINDS,
+  isAutofillableRail,
   listAllSlots,
   listPublishedStoriesForCuration,
+  readAutofillSettings,
   type CurationStoryOption,
 } from "@/lib/curation";
-import CurationSlotEditor from "./CurationSlotEditor";
+import { setCurationAutofillAction } from "@/app/admin/actions";
+import CurationSlotEditor, { toDatetimeLocal } from "./CurationSlotEditor";
 
 export const dynamic = "force-dynamic";
 
 interface PageSearchParams {
   saved?: string;
   error?: string;
+  autofill_saved?: string;
 }
 
 const SLOT_LABELS: Record<string, string> = {
@@ -68,9 +72,10 @@ export default async function CurationPage({
   await requireAdmin();
   const sp = await searchParams;
 
-  const [slots, stories] = await Promise.all([
+  const [slots, stories, autofillEnabled] = await Promise.all([
     listAllSlots(),
     listPublishedStoriesForCuration(),
+    readAutofillSettings(),
   ]);
 
   return (
@@ -104,40 +109,102 @@ export default async function CurationPage({
         <div className="rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
           {sp.error === "bad-slot-kind"
             ? "Unknown slot kind. The form was tampered with — slot kinds are validated server-side."
-            : sp.error.replace(/-/g, " ")}
+            : sp.error === "bad-picks-json"
+              ? "Couldn't parse the schedule payload. Refresh and try again."
+              : sp.error === "bad-picks-shape"
+                ? "Schedule payload was malformed. Refresh and try again."
+                : sp.error === "bad-autofill-slot"
+                  ? "Auto-fill toggles only apply to rail.top10 / rail.new / rail.entitled."
+                  : sp.error.replace(/-/g, " ")}
+        </div>
+      )}
+      {sp.autofill_saved && (
+        <div className="rounded-xl border border-cat-ok/40 bg-cat-ok/10 px-3 py-2 text-[12px] text-cat-ok">
+          Auto-fill updated for{" "}
+          <code>{decodeURIComponent(sp.autofill_saved)}</code>.
         </div>
       )}
 
       {stories.length === 0 && (
         <div className="rounded-xl border border-line bg-surface px-3 py-3 text-[12px] text-muted">
           No published stories yet. Publish at least one story before curating —
-          there's nothing to pin.
+          there&rsquo;s nothing to pin.
         </div>
       )}
 
       <div className="space-y-5">
-        {SLOT_ORDER.map((slotKind) => (
-          <CurationSlotEditor
-            key={slotKind}
-            slotKind={slotKind}
-            label={SLOT_LABELS[slotKind] ?? slotKind}
-            hint={SLOT_HINTS[slotKind]}
-            initialPicks={(slots[slotKind] ?? []).map((r) => r.story_id)}
-            singleton={(SINGLETON_SLOT_KINDS as readonly string[]).includes(
-              slotKind,
-            )}
-            stories={
-              slotKind.startsWith("category.")
-                ? // Category slots only suggest stories of that category in
-                  // the picker — saves the admin from wading through every
-                  // published story to find Drama ones.
-                  filterByCategory(stories, slotKind.slice("category.".length))
-                : stories
-            }
-          />
-        ))}
+        {SLOT_ORDER.map((slotKind) => {
+          const showAutofill = isAutofillableRail(slotKind);
+          const fillOn = showAutofill && autofillEnabled.has(slotKind);
+          return (
+            <div key={slotKind} className="space-y-2">
+              <CurationSlotEditor
+                slotKind={slotKind}
+                label={SLOT_LABELS[slotKind] ?? slotKind}
+                hint={SLOT_HINTS[slotKind]}
+                initialPicks={(slots[slotKind] ?? []).map((r) => ({
+                  story_id: r.story_id,
+                  publish_at: toDatetimeLocal(r.publish_at),
+                  expires_at: toDatetimeLocal(r.expires_at),
+                }))}
+                singleton={(SINGLETON_SLOT_KINDS as readonly string[]).includes(
+                  slotKind,
+                )}
+                stories={
+                  slotKind.startsWith("category.")
+                    ? // Category slots only suggest stories of that category in
+                      // the picker — saves the admin from wading through every
+                      // published story to find Drama ones.
+                      filterByCategory(stories, slotKind.slice("category.".length))
+                    : stories
+                }
+              />
+              {showAutofill && (
+                <AutofillToggle slotKind={slotKind} enabled={fillOn} />
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+function AutofillToggle({
+  slotKind,
+  enabled,
+}: {
+  slotKind: string;
+  enabled: boolean;
+}) {
+  return (
+    <form
+      action={setCurationAutofillAction}
+      className="flex items-center justify-between rounded-lg border border-line bg-bg px-3 py-2"
+    >
+      <input type="hidden" name="slot_kind" value={slotKind} />
+      <input type="hidden" name="enabled" value={enabled ? "0" : "1"} />
+      <div>
+        <div className="font-mono text-[11px] uppercase tracking-wider text-ink">
+          Auto-fill remainder
+        </div>
+        <p className="font-mono text-[10px] text-muted">
+          {enabled
+            ? `On — newest published stories pad this rail to ${10} after your pins.`
+            : "Off — only your pinned stories render."}
+        </p>
+      </div>
+      <button
+        type="submit"
+        className={`rounded-md border px-3 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+          enabled
+            ? "border-accent/40 bg-accent/10 text-accent hover:bg-accent/20"
+            : "border-line text-muted hover:border-accent hover:text-accent"
+        }`}
+      >
+        {enabled ? "Disable" : "Enable"}
+      </button>
+    </form>
   );
 }
 

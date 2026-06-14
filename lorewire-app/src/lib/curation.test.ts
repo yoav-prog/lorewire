@@ -319,7 +319,22 @@ describe("resolveCategoryPage", () => {
 });
 
 describe("getHomePagePicks", () => {
-  beforeEach(clear);
+  // These tests focus on the picks the admin actually pinned. Phase 6
+  // adds auto-fill on by default; disable it here so the assertions
+  // only see what setSlotStories/addToSlot wrote. Auto-fill behaviour
+  // has its own describe block below.
+  beforeEach(async () => {
+    await clear();
+    await run(
+      "INSERT INTO settings (key, value) VALUES (?, ?), (?, ?), (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [
+        "curation.autofill.rail.top10", "0",
+        "curation.autofill.rail.new", "0",
+        "curation.autofill.rail.entitled", "0",
+      ],
+    );
+  });
 
   it("returns null billboard and empty rails when no slots set", async () => {
     const { getHomePagePicks } = await import("./curation");
@@ -409,5 +424,233 @@ describe("listAllSlots", () => {
       "SELECT count(*) AS n FROM curation_slots",
       [],
     )).toEqual({ n: 0 });
+  });
+});
+
+// ─── Phase 6: scheduling + auto-fill + cleanup ──────────────────────────────
+
+describe("setSlotPicks", () => {
+  beforeEach(clear);
+
+  it("round-trips publish_at and expires_at", async () => {
+    const { setSlotPicks, listSlots } = await import("./curation");
+    const pub = "2026-06-20T12:00:00.000Z";
+    const exp = "2026-07-01T00:00:00.000Z";
+    await setSlotPicks("rail.top10", [
+      { story_id: "a", publish_at: pub, expires_at: exp },
+      { story_id: "b", publish_at: null, expires_at: null },
+    ]);
+    const rows = await listSlots("rail.top10");
+    expect(rows.map((r) => r.story_id)).toEqual(["a", "b"]);
+    expect(rows[0].publish_at).toBe(pub);
+    expect(rows[0].expires_at).toBe(exp);
+    expect(rows[1].publish_at).toBeNull();
+    expect(rows[1].expires_at).toBeNull();
+  });
+
+  it("accepts datetime-local format and normalizes to ISO UTC", async () => {
+    const { setSlotPicks, listSlots } = await import("./curation");
+    // datetime-local widget output: no seconds, no zone.
+    await setSlotPicks("rail.top10", [
+      { story_id: "a", publish_at: "2026-06-20T12:00", expires_at: "" },
+    ]);
+    const rows = await listSlots("rail.top10");
+    expect(rows[0].publish_at).toBe("2026-06-20T12:00:00.000Z");
+    expect(rows[0].expires_at).toBeNull();
+  });
+
+  it("atomic replace clears prior rows including their schedules", async () => {
+    const { setSlotPicks, listSlots } = await import("./curation");
+    await setSlotPicks("rail.top10", [
+      { story_id: "a", publish_at: "2026-06-20T12:00:00.000Z" },
+    ]);
+    await setSlotPicks("rail.top10", [{ story_id: "b" }]);
+    const rows = await listSlots("rail.top10");
+    expect(rows.map((r) => r.story_id)).toEqual(["b"]);
+    expect(rows[0].publish_at).toBeNull();
+  });
+
+  it("scheduled rows hide from getHomePagePicks before publish_at", async () => {
+    const { setSlotPicks, getHomePagePicks } = await import("./curation");
+    const now = new Date("2026-06-20T00:00:00.000Z");
+    await setSlotPicks("rail.top10", [
+      { story_id: "future", publish_at: "2026-06-21T00:00:00.000Z" },
+      { story_id: "now", publish_at: "2026-06-19T00:00:00.000Z" },
+    ]);
+    // Disable auto-fill so the test only inspects the activeAt filter.
+    await run(
+      "INSERT INTO settings (key, value) VALUES (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      ["curation.autofill.rail.top10", "0"],
+    );
+    const picks = await getHomePagePicks(now);
+    expect(picks.top10).toEqual(["now"]);
+  });
+});
+
+describe("appendAutofill", () => {
+  it("pads pinned to target with newest, skipping duplicates", async () => {
+    const { appendAutofill } = await import("./curation");
+    expect(appendAutofill(["a", "b"], ["c", "a", "d", "e"], 4)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("respects pinned that's already at target", async () => {
+    const { appendAutofill } = await import("./curation");
+    expect(appendAutofill(["a", "b", "c"], ["d"], 3)).toEqual(["a", "b", "c"]);
+  });
+
+  it("does not exceed target even when newest has more", async () => {
+    const { appendAutofill } = await import("./curation");
+    expect(appendAutofill([], ["a", "b", "c", "d"], 2)).toEqual(["a", "b"]);
+  });
+});
+
+describe("auto-fill in getHomePagePicks", () => {
+  beforeEach(async () => {
+    await clear();
+    await run("DELETE FROM stories", []);
+    await run(
+      "DELETE FROM settings WHERE key LIKE 'curation.autofill.%'",
+      [],
+    );
+  });
+
+  async function seedStory(id: string, publishedAt: string) {
+    await run(
+      "INSERT INTO stories (id, status, title, category, created_at, " +
+        "updated_at, published_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [id, "published", id, "Drama", publishedAt, publishedAt, publishedAt],
+    );
+  }
+
+  it("pads empty rail.top10 with 10 newest published when autofill on", async () => {
+    const { getHomePagePicks } = await import("./curation");
+    for (let i = 0; i < 12; i++) {
+      const d = `2026-06-${String(i + 1).padStart(2, "0")}T00:00:00+00:00`;
+      await seedStory(`s${i}`, d);
+    }
+    const picks = await getHomePagePicks();
+    expect(picks.top10.length).toBe(10);
+    // Newest-first: s11 then s10 then s9 ...
+    expect(picks.top10[0]).toBe("s11");
+    expect(picks.top10[9]).toBe("s2");
+  });
+
+  it("does not pad when autofill disabled", async () => {
+    const { getHomePagePicks } = await import("./curation");
+    for (let i = 0; i < 12; i++) {
+      const d = `2026-06-${String(i + 1).padStart(2, "0")}T00:00:00+00:00`;
+      await seedStory(`s${i}`, d);
+    }
+    await run(
+      "INSERT INTO settings (key, value) VALUES (?, ?), (?, ?), (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [
+        "curation.autofill.rail.top10", "0",
+        "curation.autofill.rail.new", "0",
+        "curation.autofill.rail.entitled", "0",
+      ],
+    );
+    const picks = await getHomePagePicks();
+    expect(picks.top10).toEqual([]);
+    expect(picks.newRow).toEqual([]);
+    expect(picks.entitled).toEqual([]);
+  });
+
+  it("preserves pinned order and appends autofill after", async () => {
+    const { getHomePagePicks, setSlotStories } = await import("./curation");
+    for (let i = 0; i < 12; i++) {
+      const d = `2026-06-${String(i + 1).padStart(2, "0")}T00:00:00+00:00`;
+      await seedStory(`s${i}`, d);
+    }
+    await setSlotStories("rail.top10", ["s0", "s1"]);
+    const picks = await getHomePagePicks();
+    expect(picks.top10.length).toBe(10);
+    expect(picks.top10.slice(0, 2)).toEqual(["s0", "s1"]);
+    // Auto-fill is newest-first AND skips already-pinned, so s11, s10, ...
+    expect(picks.top10[2]).toBe("s11");
+    // Pinned ids appear exactly once even though they sit in both the
+    // pinned set and the newest-published query result.
+    expect(picks.top10.filter((id) => id === "s0").length).toBe(1);
+    expect(picks.top10.filter((id) => id === "s1").length).toBe(1);
+  });
+
+  it("excludes rail.continue from auto-fill", async () => {
+    const { getHomePagePicks } = await import("./curation");
+    for (let i = 0; i < 12; i++) {
+      const d = `2026-06-${String(i + 1).padStart(2, "0")}T00:00:00+00:00`;
+      await seedStory(`s${i}`, d);
+    }
+    const picks = await getHomePagePicks();
+    expect(picks.continueRow).toEqual([]);
+  });
+});
+
+describe("deleteExpiredSlotRows", () => {
+  beforeEach(clear);
+
+  it("hard-deletes rows whose expires_at is older than the grace window", async () => {
+    const { addToSlot, deleteExpiredSlotRows, listSlots } = await import(
+      "./curation"
+    );
+    const now = new Date("2026-06-20T00:00:00.000Z");
+    const longGone = "2026-06-01T00:00:00.000Z"; // 19 days before now
+    const recent = "2026-06-18T00:00:00.000Z"; // 2 days before now
+    await addToSlot("rail.top10", "old", { expiresAt: longGone });
+    await addToSlot("rail.top10", "recent", { expiresAt: recent });
+    await addToSlot("rail.top10", "live", { expiresAt: null });
+    const removed = await deleteExpiredSlotRows(now, 7);
+    expect(removed).toBe(1);
+    const remaining = await listSlots("rail.top10");
+    expect(remaining.map((r) => r.story_id).sort()).toEqual(["live", "recent"]);
+  });
+
+  it("leaves never-expiring rows alone", async () => {
+    const { addToSlot, deleteExpiredSlotRows } = await import("./curation");
+    await addToSlot("rail.top10", "a", { expiresAt: null });
+    await addToSlot("rail.top10", "b", { expiresAt: null });
+    expect(await deleteExpiredSlotRows(new Date(), 7)).toBe(0);
+  });
+
+  it("rejects negative grace days", async () => {
+    const { deleteExpiredSlotRows } = await import("./curation");
+    await expect(deleteExpiredSlotRows(new Date(), -1)).rejects.toThrow();
+  });
+});
+
+describe("readAutofillSettings", () => {
+  beforeEach(async () => {
+    await run(
+      "DELETE FROM settings WHERE key LIKE 'curation.autofill.%'",
+      [],
+    );
+  });
+
+  it("defaults every autofillable rail to enabled when no setting set", async () => {
+    const { readAutofillSettings } = await import("./curation");
+    const enabled = await readAutofillSettings();
+    expect(enabled.has("rail.top10")).toBe(true);
+    expect(enabled.has("rail.new")).toBe(true);
+    expect(enabled.has("rail.entitled")).toBe(true);
+  });
+
+  it("respects explicit 0/off/false as disabled", async () => {
+    const { readAutofillSettings } = await import("./curation");
+    await run(
+      "INSERT INTO settings (key, value) VALUES (?, ?), (?, ?), (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [
+        "curation.autofill.rail.top10", "0",
+        "curation.autofill.rail.new", "off",
+        "curation.autofill.rail.entitled", "false",
+      ],
+    );
+    const enabled = await readAutofillSettings();
+    expect(enabled.size).toBe(0);
   });
 });

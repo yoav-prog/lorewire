@@ -1,6 +1,6 @@
 # Public-site curation system
 
-**Status:** Phases 1-5 shipped 2026-06-15
+**Status:** Phases 1-6 shipped 2026-06-15 — feature complete
 **Owner:** Yoav (info@flexelent.com)
 **Date:** 2026-06-15
 **Trigger:** Front page Billboard + all rails are hardcoded in [src/lib/stories.ts](lorewire-app/src/lib/stories.ts). The CMS overlay grafts pipeline-generated stories on top of the static catalog but does not change which IDs occupy which slot. There are no category pages. Admin has zero control over what appears where.
