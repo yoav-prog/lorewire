@@ -14,6 +14,13 @@ import { activeShape } from "./mouth-timing";
 import { useCompositionScale } from "../scale";
 import type { ShortCaptionWord } from "../types";
 
+// Same helper as DoodleShort.tsx / PropSlideIn.tsx. Remote URLs from
+// the Cloud Run render path pass through verbatim; relative paths
+// go through staticFile().
+function assetSrc(url: string): string {
+  return /^(?:https?:)?\/\//.test(url) ? url : staticFile(url);
+}
+
 interface Props {
   enabled: boolean;
   // URL to the mouth-removed character image. When empty, the layer renders
@@ -102,7 +109,7 @@ export const MouthSwap: React.FC<Props> = ({ enabled, characterUrl, words }) => 
         }}
       >
         <Img
-          src={staticFile(characterUrl)}
+          src={assetSrc(characterUrl)}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
         <svg

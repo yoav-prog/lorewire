@@ -30,6 +30,15 @@ import { LabelPopOn } from "./motion/LabelPopOn";
 import { ScribbleDraw } from "./motion/ScribbleDraw";
 import { PropSlideIn } from "./motion/PropSlideIn";
 import { MouthSwap } from "./motion/MouthSwap";
+
+// Wrap in staticFile() ONLY for relative paths. The Cloud Run render
+// path supplies remote GCS URLs directly; passing those to staticFile()
+// throws TypeError per the Remotion contract — staticFile() is for
+// files inside `public/`. The CLI render path historically passed
+// staticFile-style basenames which still pass through unchanged.
+function assetSrc(url: string): string {
+  return /^(?:https?:)?\/\//.test(url) ? url : staticFile(url);
+}
 import { useCompositionScale } from "./scale";
 import type {
   ShortCaptionChunk,
@@ -119,7 +128,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         // When clip_start_ms is 0 (the default), startFrom=0 is a no-op and
         // the render is byte-identical to the pre-trim composition.
         <Audio
-          src={staticFile(config.voiceover_url)}
+          src={assetSrc(config.voiceover_url)}
           startFrom={clipStartFrames}
         />
       )}
@@ -132,7 +141,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
         >
           <MicroWiggle seed={i} enabled={!!config.motion?.micro_wiggle}>
             <DoodleFrameImg
-              src={staticFile(f.url)}
+              src={assetSrc(f.url)}
               kenBurns={!!config.ken_burns}
               seed={i}
               lengthFrames={f.lengthFrames}
