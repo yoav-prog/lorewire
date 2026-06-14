@@ -13,6 +13,13 @@ import {
 } from "remotion";
 import { useCompositionScale } from "../scale";
 
+// Same helper as DoodleShort.tsx. Remotion's staticFile() only accepts
+// paths under `public/`; remote URLs from the Cloud Run render path
+// must pass through verbatim.
+function assetSrc(url: string): string {
+  return /^(?:https?:)?\/\//.test(url) ? url : staticFile(url);
+}
+
 export interface PropItem {
   // The composition resolves this through staticFile() — the pipeline writes
   // each prop into video/public/<id>/prop-N.png the same way scene images go.
@@ -107,7 +114,7 @@ export const PropSlideIn: React.FC<PropSlideInProps> = ({ enabled, items, durati
             }}
           >
             <Img
-              src={staticFile(p.url)}
+              src={assetSrc(p.url)}
               style={{
                 width: "100%",
                 height: "100%",
