@@ -18,25 +18,18 @@ Hardening matches the image_renders drain:
   4. Structured logger.info at every meaningful step (claim, done, err,
      idle, tick summary, lock_busy, budget_block).
 
-Runtime limitation — `story_jobs_worker._default_process` calls
-`video.generate_video` when `with_media=True`, which shells out to
-Remotion via `npx`. Vercel's Python runtime has no Node or Remotion env,
-so we can't run that step here. To stop the drain from burning LLM + image
-credit on a job that will then crash at video, we pass `skip_with_media=True`
-to `run_one_tick`. That makes the worker fail any claimed `with_media=True`
-job immediately with `DRAIN_UNSUPPORTED_MEDIA_REASON` and flip its
-reddit_source row back to `imported` — so an admin can re-Process it with
-`with_media=False` and the drain will pick it up next tick.
+Two-queue handoff — `story_jobs_worker._default_process` no longer
+calls Remotion directly. It does LLM + media (kie images, voice,
+alignment) inline, then enqueues a `video_renders` row that the Cloud
+Run cron picks up and renders out of band. That makes EVERY story job
+fully completable inside Vercel's Python runtime — no local worker
+needed. The video render becomes a separate async step served by the
+existing video_renders queue (see _plans/2026-06-14-cloud-run-render.md).
 
-Pattern:
-
-  - Enqueue jobs with `with_media=False` when you want the hosted drain
-    to handle them — story + summary, no video.
-  - Enqueue with `with_media=True` only when the local
-    `pipeline/story_jobs_worker.py` is the drain you're relying on.
-  - If a `with_media=True` job sneaks into the hosted drain, it'll be
-    skipped within milliseconds and the admin will see the error message
-    on the row's latest story_job.
+That's why this drain no longer passes `skip_with_media=True` to
+run_one_tick: there's nothing about with_media=True jobs the hosted
+runtime can't handle now. The local worker still works the same way
+for offline-dev convenience.
 
 The pipeline package is vendored into `_lib/pipeline/` by the npm
 prebuild step (`scripts/vendor_pipeline.mjs`). The handler injects
@@ -136,10 +129,11 @@ def run_drain() -> dict:
         drained = 0
         while drained < cap and (time.monotonic() - start) < DEADLINE_S:
             row_started = time.monotonic()
-            # skip_with_media=True: the Vercel runtime can't render
-            # video, so video jobs are pre-failed at claim time instead
-            # of burning LLM + image spend. See module docstring.
-            did_work = story_jobs_worker.run_one_tick(skip_with_media=True)
+            # No skip_with_media — story_jobs_worker._default_process
+            # now does LLM + media inline and enqueues the actual MP4
+            # render into video_renders. Vercel handles everything up
+            # to the handoff; Cloud Run takes the render from there.
+            did_work = story_jobs_worker.run_one_tick()
             if not did_work:
                 # Queue empty OR budget-blocked OR all rows in flight.
                 # run_one_tick already logged the reason ([story-jobs

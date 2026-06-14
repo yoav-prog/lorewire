@@ -63,6 +63,7 @@ interface SearchParams {
   enqueued?: string;
   skipped_active?: string;
   reset?: string;
+  cancelled?: string;
   error?: string;
   // Phase 7 budget-cap flash.
   budget_cap?: string;
@@ -283,6 +284,18 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
   const enqueued = Number(sp.enqueued ?? 0);
   const skippedActive = Number(sp.skipped_active ?? 0);
   const reset = Number(sp.reset ?? 0);
+  const cancelled = Number(sp.cancelled ?? 0);
+
+  if (sp.cancelled !== undefined) {
+    return (
+      <div className="rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+        Stopped <strong>{cancelled}</strong> in-flight row
+        {cancelled === 1 ? "" : "s"}. They're back in the candidate pool as{" "}
+        <code>imported</code> — queue them again when you're ready. Any spend
+        already incurred by a worker mid-call is non-refundable.
+      </div>
+    );
+  }
 
   if (sp.error) {
     const friendly: Record<string, string> = {
@@ -322,8 +335,8 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
             Skipped {skippedActive} that already had an active job.
           </>
         )}{" "}
-        Make sure the worker is running:{" "}
-        <code className="text-ink">python -m pipeline.story_jobs_worker</code>
+        The hosted cron runs the article + media stages and hands the
+        video render off to Cloud Run; nothing to start locally.
       </div>
     );
   }

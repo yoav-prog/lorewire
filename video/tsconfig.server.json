@@ -1,0 +1,26 @@
+{
+  // Server-only tsconfig. Compiles the Express handler to plain JS for
+  // the Cloud Run runtime. The Remotion composition (src/Root.tsx etc.)
+  // is NOT compiled here — @remotion/renderer bundles it at request
+  // time via its own Webpack pipeline. Compiling it twice would fight
+  // remotion's Babel preset.
+  //
+  // Output goes to dist/server/ so the Dockerfile can `COPY dist` from
+  // the builder stage without dragging the composition along (it ships
+  // separately as TSX under src/).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": ".",
+    "noEmit": false,
+    "module": "CommonJS",
+    "target": "ES2022",
+    "moduleResolution": "Node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "strict": true
+  },
+  "include": ["server/**/*"],
+  "exclude": ["node_modules", "dist", "src", "public"]
+}

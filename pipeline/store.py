@@ -2243,20 +2243,33 @@ def enqueue_story_job(
     return row if inserted else None
 
 
-def claim_next_story_job() -> dict | None:
+def claim_next_story_job(text_only_only: bool = False) -> dict | None:
     """Atomically claim the oldest queued story_job and flip it to
     'processing'. Returns the claimed row, or None when empty. Mirrors
     claim_next_render's FOR UPDATE SKIP LOCKED on Postgres and the
-    conditional UPDATE on SQLite."""
+    conditional UPDATE on SQLite.
+
+    `text_only_only`: when True, only rows with `with_media=0` are
+    eligible. Used by the Vercel cron drain whose runtime can't render
+    video (no Node + Remotion) — without this filter, the drain would
+    race the local worker, claim a with_media=True row, and fail it
+    with DRAIN_UNSUPPORTED_MEDIA_REASON. The cumulative damage shows
+    up as a fleet of error rows whose source rows bounced back to
+    'imported' and then got re-enqueued + re-killed by the next drain
+    tick. Filtering at claim time means the drain physically can't
+    claim what it can't process; with_media=True rows wait patiently
+    for the local worker.
+    """
     cols = ", ".join(_STORY_JOB_COLUMNS)
     now = _now_iso()
+    extra_where = " AND with_media = 0" if text_only_only else ""
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"UPDATE story_jobs SET status = 'processing', "
                     "started_at = %s WHERE id = ("
-                    "SELECT id FROM story_jobs WHERE status = 'queued' "
+                    f"SELECT id FROM story_jobs WHERE status = 'queued'{extra_where} "
                     "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
                     f") RETURNING {cols}",
                     (now,),
@@ -2266,7 +2279,7 @@ def claim_next_story_job() -> dict | None:
         return dict(row) if row else None
     with _sqlite_conn() as c:
         row = c.execute(
-            "SELECT id FROM story_jobs WHERE status='queued' "
+            f"SELECT id FROM story_jobs WHERE status='queued'{extra_where} "
             "ORDER BY requested_at ASC LIMIT 1"
         ).fetchone()
         if not row:
@@ -2361,6 +2374,85 @@ def fail_story_job(job_id: str, error_message: str) -> None:
             "AND status IN ('queued', 'processing')",
             (capped, now, job_id),
         )
+
+
+def cancel_story_job(job_id: str) -> bool:
+    """Flip a queued or processing story_job to 'cancelled'. Returns True
+    when the UPDATE actually changed a row — useful so the caller can
+    tell "cancelled now" from "already done / cancelled / error".
+
+    The existing finish_story_job and fail_story_job both gate on
+    `status IN ('queued', 'processing')`, so a worker that's mid-render
+    when cancellation lands will silently no-op its eventual
+    finish/fail call instead of overwriting the cancelled state. The
+    LLM/image spend already incurred is lost (the worker keeps running
+    until its current call returns), but the result is discarded —
+    which is the contract the admin's Stop button signs up for.
+    """
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET status='cancelled', "
+                    "finished_at=%s WHERE id=%s "
+                    "AND status IN ('queued', 'processing')",
+                    (now, job_id),
+                )
+                changed = cur.rowcount > 0
+            conn.commit()
+        return changed
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "UPDATE story_jobs SET status='cancelled', "
+            "finished_at=? WHERE id=? "
+            "AND status IN ('queued', 'processing')",
+            (now, job_id),
+        )
+        return (cur.rowcount or 0) > 0
+
+
+def cancel_active_jobs_for_reddit_ids(reddit_ids: list[str]) -> int:
+    """Bulk-cancel every active (queued or processing) story_job whose
+    reddit_id is in the list. Returns the count of rows actually
+    flipped. Mirrors the chunked-IN pattern used elsewhere in this
+    module for the dual-driver bind limit (SQLite default 999 /
+    Postgres 32767).
+
+    Idempotent: rows already done / error / cancelled stay untouched
+    by the `status IN ('queued', 'processing')` guard, so re-running
+    the same batch is safe."""
+    if not reddit_ids:
+        return 0
+    cancelled = 0
+    now = _now_iso()
+    for i in range(0, len(reddit_ids), 500):
+        batch = reddit_ids[i:i + 500]
+        if _is_postgres():
+            placeholders = ", ".join("%s" for _ in batch)
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE story_jobs SET status='cancelled', "
+                        f"finished_at=%s "
+                        f"WHERE reddit_id IN ({placeholders}) "
+                        f"AND status IN ('queued', 'processing')",
+                        (now, *batch),
+                    )
+                    cancelled += cur.rowcount
+                conn.commit()
+        else:
+            placeholders = ", ".join("?" for _ in batch)
+            with _sqlite_conn() as c:
+                cur = c.execute(
+                    f"UPDATE story_jobs SET status='cancelled', "
+                    f"finished_at=? "
+                    f"WHERE reddit_id IN ({placeholders}) "
+                    f"AND status IN ('queued', 'processing')",
+                    (now, *batch),
+                )
+                cancelled += cur.rowcount or 0
+    return cancelled
 
 
 def get_story_job(job_id: str) -> dict | None:

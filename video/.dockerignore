@@ -1,0 +1,31 @@
+# Cloud Build tarballs `video/` when `gcloud run deploy --source .`
+# runs. Without this, every deploy uploads ~500 MB of node_modules /
+# build output / dotfiles for no reason — the builder stage of the
+# Dockerfile reinstalls deps from package.json anyway.
+
+node_modules
+dist
+.props
+.tsbuildinfo
+**/.DS_Store
+**/Thumbs.db
+
+# Keep package-lock.json IN the context — `npm ci` in the Dockerfile
+# requires it to enforce reproducible installs.
+
+# Local-only env files. Cloud Run reads its env from --set-env-vars at
+# deploy time; never bake secrets into the image.
+.env
+.env.local
+.env.*.local
+
+# Editor scratch
+.vscode
+.idea
+*.swp
+
+# Tests aren't run in the image; they're fine to omit so the layer
+# stays small.
+**/*.test.ts
+**/*.test.tsx
+**/*.test.mjs

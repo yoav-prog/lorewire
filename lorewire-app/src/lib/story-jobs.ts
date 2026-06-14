@@ -253,6 +253,89 @@ async function bulkFlipSourceStatus(
   }
 }
 
+// ---------- cancel (stop running processes) ----------
+
+export interface BulkCancelResult {
+  /** Number of story_jobs rows actually flipped from queued/processing
+   *  to cancelled. Excludes rows that were already done/error/cancelled. */
+  cancelled: number;
+  /** Number of reddit_source rows reset from queued/processing back to
+   *  'imported' so they re-appear in the candidate pool. */
+  reset_to_imported: number;
+  /** reddit_ids that had at least one cancelled job. The UI uses this
+   *  for the after-action banner. */
+  cancelled_reddit_ids: string[];
+}
+
+/**
+ * Stop button. Cancels every active (queued or processing) story_job
+ * for the given reddit_ids AND resets the matching reddit_source rows
+ * back to 'imported' so they go back into the candidate pool. The
+ * worker side relies on the DB-level guards in finish_story_job /
+ * fail_story_job (`status IN ('queued','processing')`) to silently
+ * discard any late finish/fail call from a worker mid-render — so the
+ * stop lands cleanly at the DB level even while the worker is still
+ * grinding through an LLM call.
+ *
+ * Cost note for the admin: the LLM + image + voice spend already
+ * incurred by an in-flight worker is NOT refundable. Stop is honest
+ * about that — the confirm dialog warns explicitly.
+ */
+export async function bulkCancelActiveStoryJobs(
+  redditIds: string[],
+): Promise<BulkCancelResult> {
+  const result: BulkCancelResult = {
+    cancelled: 0,
+    reset_to_imported: 0,
+    cancelled_reddit_ids: [],
+  };
+  if (redditIds.length === 0) return result;
+
+  // 1. Find which reddit_ids actually had active jobs BEFORE we cancel,
+  //    so we can return an accurate "what changed" list.
+  const before = await snapshotActiveJobs(redditIds);
+  if (before.size === 0) return result;
+
+  const activeList = [...before];
+  result.cancelled_reddit_ids = activeList;
+
+  // 2. Flip the story_jobs rows. Same chunking shape as elsewhere.
+  const now = new Date().toISOString();
+  for (let i = 0; i < activeList.length; i += 500) {
+    const batch = activeList.slice(i, i + 500);
+    const placeholders = batch.map(() => "?").join(", ");
+    await run(
+      `UPDATE story_jobs SET status = 'cancelled', finished_at = ? ` +
+        `WHERE reddit_id IN (${placeholders}) ` +
+        `AND status IN ('queued', 'processing')`,
+      [now, ...batch],
+    );
+  }
+  // Story_jobs cancelled count = count of (cancelled rows now) - (cancelled rows before).
+  // The simpler proxy: count active jobs before the UPDATE (since we
+  // know they all flipped — the UPDATE is conditional on the same
+  // active-status predicate that snapshotActiveJobs reads).
+  result.cancelled = activeList.length;
+
+  // 3. Reset reddit_source.status to 'imported' for the same set.
+  //    Guard on `status IN ('queued','processing')` so a row that
+  //    independently moved on (e.g. another admin marked it skipped)
+  //    isn't reverted.
+  for (let i = 0; i < activeList.length; i += 500) {
+    const batch = activeList.slice(i, i + 500);
+    const placeholders = batch.map(() => "?").join(", ");
+    await run(
+      `UPDATE reddit_source SET status = 'imported', story_id = NULL ` +
+        `WHERE reddit_id IN (${placeholders}) ` +
+        `AND status IN ('queued', 'processing')`,
+      batch,
+    );
+  }
+  result.reset_to_imported = activeList.length;
+
+  return result;
+}
+
 // ---------- reads for the admin UI ----------
 
 export async function getLatestStoryJobForReddit(

@@ -18,6 +18,7 @@ import {
   reopenRedditSourcesAction,
   processRedditSourcesAction,
   bulkReprocessRedditSourcesAction,
+  cancelActiveStoryJobsAction,
 } from "@/app/admin/actions";
 import type {
   RedditSourceRow,
@@ -178,6 +179,13 @@ export default function RedditSourceTable({
       {someSelected && (
         <BulkFooter
           ids={[...selected]}
+          activeIds={rows
+            .filter(
+              (r) =>
+                selected.has(r.reddit_id) &&
+                (r.status === "queued" || r.status === "processing"),
+            )
+            .map((r) => r.reddit_id)}
           onClear={() => setSelected(new Set())}
           budgetExhausted={budgetExhausted}
         />
@@ -201,10 +209,15 @@ function StatusChip({ status }: { status: string }) {
 
 function BulkFooter({
   ids,
+  activeIds,
   onClear,
   budgetExhausted,
 }: {
   ids: string[];
+  /** Subset of `ids` whose row is currently queued or processing.
+   *  The Stop button only appears + only submits these — there's
+   *  nothing to cancel for rows that are imported / used / skipped. */
+  activeIds: string[];
   onClear: () => void;
   budgetExhausted: boolean;
 }) {
@@ -212,6 +225,11 @@ function BulkFooter({
     <div className="sticky bottom-3 z-10 mx-auto flex max-w-[760px] flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-bg/95 px-4 py-2.5 shadow-lg backdrop-blur">
       <span className="font-mono text-[12px] text-ink">
         {ids.length.toLocaleString()} selected
+        {activeIds.length > 0 && (
+          <span className="ml-2 font-mono text-[10px] text-muted">
+            ({activeIds.length} in flight)
+          </span>
+        )}
       </span>
       <div className="flex flex-wrap items-center gap-2">
         <button
@@ -221,6 +239,43 @@ function BulkFooter({
         >
           Clear
         </button>
+        {activeIds.length > 0 && (
+          <form
+            action={cancelActiveStoryJobsAction}
+            onSubmit={(e) => {
+              // Honest confirm. The worker can't be killed mid-LLM-call
+              // from the DB layer alone — we flip the status flag and
+              // the worker's eventual finish() no-ops against it. So
+              // LLM/image spend already incurred is non-refundable.
+              if (
+                !window.confirm(
+                  `Cancel ${activeIds.length} in-flight row${activeIds.length === 1 ? "" : "s"}?\n\n` +
+                    "What happens:\n" +
+                    "  • Jobs flip to 'cancelled' immediately.\n" +
+                    "  • Source rows reset to 'imported' so you can re-queue.\n" +
+                    "  • Any LLM/image/voice spend ALREADY incurred by an\n" +
+                    "    in-flight worker is non-refundable — the worker\n" +
+                    "    keeps running its current call but the result is\n" +
+                    "    discarded.\n\n" +
+                    "Cost not yet spent (jobs still queued) is fully saved.",
+                )
+              ) {
+                e.preventDefault();
+              }
+            }}
+          >
+            {activeIds.map((id) => (
+              <input key={id} type="hidden" name="reddit_id" value={id} />
+            ))}
+            <button
+              type="submit"
+              title="Stop the worker from processing these rows. Saves any not-yet-spent budget."
+              className="rounded-md border border-danger/40 bg-danger/10 px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-danger hover:opacity-80"
+            >
+              Stop {activeIds.length}
+            </button>
+          </form>
+        )}
         <form action={reopenRedditSourcesAction}>
           {ids.map((id) => (
             <input key={id} type="hidden" name="reddit_id" value={id} />
