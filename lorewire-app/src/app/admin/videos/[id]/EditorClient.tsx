@@ -48,6 +48,8 @@ import {
   useDebouncedSave,
 } from "@/components/ui";
 import { aspectDims, type VideoAspect } from "@/lib/aspect";
+import { VoicePicker } from "@/components/voice-picker/VoicePicker";
+import type { VoiceEntry } from "@/lib/voice-library";
 import {
   PreviewComposition,
   type PreviewProps,
@@ -130,6 +132,18 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 // stops the moment every frame has settled.
 const FRAME_POLL_INTERVAL_MS = 2_000;
 
+// Phase 4 of _plans/2026-06-14-voiceover-picker.md. Forwarded from
+// the editor page through EditorClient down to AudioPanel so the
+// AUDIO tab's Voiceover section can swap its read-only URL display
+// for the live picker when the feature flag is on. Null = picker off.
+export interface VoicePickerPanelProps {
+  voices: VoiceEntry[];
+  currentProvider: string | null;
+  currentVoiceId: string | null;
+  regenInFlight: boolean;
+  lastRegenError: string | null;
+}
+
 export default function EditorClient({
   storyId,
   storyTitle,
@@ -154,6 +168,7 @@ export default function EditorClient({
   editorIntroReason,
   editorOutroReason,
   previewSegmentFit,
+  voicePicker,
 }: {
   storyId: string;
   storyTitle: string;
@@ -194,6 +209,12 @@ export default function EditorClient({
    *  Settings; page.tsx reads the setting and passes the resolved value
    *  here. */
   previewSegmentFit: "cover" | "contain";
+  /** Phase 4 of _plans/2026-06-14-voiceover-picker.md. Null when the
+   *  picker is dark (voice.picker_enabled = 0); otherwise carries the
+   *  full picker state the AudioPanel renders. Lumped into a single
+   *  prop so a future Phase-5 redesign can swap the shape without
+   *  another six-arg signature change. */
+  voicePicker: VoicePickerPanelProps | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabKey>("trim");
@@ -661,7 +682,11 @@ export default function EditorClient({
                 userPresets={userCaptionPresets}
               />
             ) : tab === "audio" ? (
-              <AudioPanel storyId={storyId} config={config} />
+              <AudioPanel
+                storyId={storyId}
+                config={config}
+                voicePicker={voicePicker}
+              />
             ) : tab === "metadata" ? (
               <MetadataPanel
                 storyId={storyId}
@@ -1816,9 +1841,11 @@ const MUSIC_GAIN_DEFAULT = -12;
 function AudioPanel({
   storyId,
   config,
+  voicePicker,
 }: {
   storyId: string;
   config: ShortVideoConfig;
+  voicePicker: VoicePickerPanelProps | null;
 }) {
   const persistedUrl = config.music?.url ?? "";
   const persistedGain = config.music?.gain_db ?? MUSIC_GAIN_DEFAULT;
@@ -1873,24 +1900,55 @@ function AudioPanel({
 
   return (
     <div className="space-y-5">
-      <Section
-        title="Voiceover"
-        hint="Derived from the pipeline's TTS step. Editable URL would desync the caption alignment, so the editor leaves this read-only — re-render the story if the voiceover regenerates."
-      >
-        <FieldRow
-          label="voiceover_url"
-          value={config.voiceover_url || "(unset)"}
-          mono
-        />
-        {config.voiceover_url && (
-          <audio
-            controls
-            src={config.voiceover_url}
-            className="mt-2 w-full"
-            style={{ height: 28 }}
+      {voicePicker && voicePicker.voices.length > 0 ? (
+        // Phase 4 of _plans/2026-06-14-voiceover-picker.md. When the
+        // flag is on AND the voice library has entries, the live
+        // picker replaces the read-only audio_url surface. The picker
+        // owns voice selection + the Regenerate voiceover CTA;
+        // playback of the CURRENT audio still happens via the small
+        // <audio> below so the admin can re-listen without leaving
+        // the tab.
+        <Section
+          title="Voiceover"
+          hint="Pick a narrator from the library and click Regenerate to swap the audio. Regen rebuilds captions + duration_ms to match the new word timings; trim window resets because the old ms boundaries no longer line up."
+        >
+          <VoicePicker
+            storyId={storyId}
+            voices={voicePicker.voices}
+            currentProvider={voicePicker.currentProvider}
+            currentVoiceId={voicePicker.currentVoiceId}
+            regenInFlight={voicePicker.regenInFlight}
+            lastRegenError={voicePicker.lastRegenError}
           />
-        )}
-      </Section>
+          {config.voiceover_url && (
+            <audio
+              controls
+              src={config.voiceover_url}
+              className="mt-3 w-full"
+              style={{ height: 28 }}
+            />
+          )}
+        </Section>
+      ) : (
+        <Section
+          title="Voiceover"
+          hint="Derived from the pipeline's TTS step. Editable URL would desync the caption alignment, so the editor leaves this read-only — re-render the story if the voiceover regenerates."
+        >
+          <FieldRow
+            label="voiceover_url"
+            value={config.voiceover_url || "(unset)"}
+            mono
+          />
+          {config.voiceover_url && (
+            <audio
+              controls
+              src={config.voiceover_url}
+              className="mt-2 w-full"
+              style={{ height: 28 }}
+            />
+          )}
+        </Section>
+      )}
 
       <Section
         title="Background music"

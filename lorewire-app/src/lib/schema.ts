@@ -93,6 +93,31 @@ export const STORIES: Table = {
   ],
 };
 
+// Phase 4 of _plans/2026-06-14-voiceover-picker.md. Per-attempt queue
+// for voice regen. Mirrors STORY_JOBS shape so the Vercel drain
+// pattern (Phase 4.b) can compose with run_one_tick the same way the
+// story_jobs drain does. text_hash + voice columns gate idempotency
+// via the partial unique index in pipeline/store.py.
+export const VOICE_RENDERS: Table = {
+  name: "voice_renders",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "voice_provider", type: "TEXT" },
+    { name: "voice_id", type: "TEXT" },
+    { name: "text_hash", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "progress", type: "INTEGER" },
+    { name: "error", type: "TEXT" },
+    { name: "output_url", type: "TEXT" },
+    { name: "cost_cents", type: "INTEGER" },
+    { name: "requested_by", type: "TEXT" },
+    { name: "requested_at", type: "TEXT" },
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+  ],
+};
+
 export const SETTINGS: Table = {
   name: "settings",
   columns: [
@@ -336,6 +361,7 @@ export const TABLES: Table[] = [
   ARTICLE_REVISIONS,
   REDDIT_SOURCE,
   STORY_JOBS,
+  VOICE_RENDERS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.

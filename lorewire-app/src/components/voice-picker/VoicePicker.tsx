@@ -28,6 +28,7 @@ import { useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   setStoryVoiceAction,
+  regenerateVoiceoverAction,
 } from "@/app/admin/actions";
 import type { VoiceEntry, VoiceProvider } from "@/lib/voice-library";
 
@@ -43,10 +44,16 @@ export interface VoicePickerProps {
   currentProvider: string | null;
   /** Currently-persisted override on `stories.voice_id`. */
   currentVoiceId: string | null;
-  /** When true, render the "Regenerate voiceover" button disabled with
-   *  the "Phase 4: regen action coming next" tooltip. Phase 4 flips
-   *  this to false and wires the onClick. */
-  regenDisabled?: boolean;
+  /** True when a queued OR processing voice_render row exists for this
+   *  story. The regen button is disabled while in-flight and the
+   *  footer copy switches to "Synthesizing voiceover..." so the admin
+   *  knows their click landed. Server passes the result of
+   *  `hasActiveVoiceRender(storyId)`. */
+  regenInFlight?: boolean;
+  /** Last error from the most-recent voice_render row, when status =
+   *  'error'. Surfaces under the regen button so a failed render is
+   *  visible without opening a console. */
+  lastRegenError?: string | null;
 }
 
 // Section headers, in display order. The label is what the admin sees;
@@ -81,16 +88,19 @@ export function VoicePicker({
   voices,
   currentProvider,
   currentVoiceId,
-  regenDisabled = true,
+  regenInFlight = false,
+  lastRegenError = null,
 }: VoicePickerProps) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+  const [regenPending, startRegenTransition] = useTransition();
   const [optimistic, setOptimistic] = useState<{
     provider: string | null;
     voice_id: string | null;
   } | null>(null);
   const [playingKey, setPlayingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [regenError, setRegenError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const effectiveProvider = optimistic?.provider ?? currentProvider;
@@ -138,6 +148,20 @@ export function VoicePicker({
       if (!result.ok) {
         setError(result.error ?? "Reset failed");
         setOptimistic(null);
+      } else {
+        router.refresh();
+      }
+    });
+  }
+
+  function regenerate() {
+    setRegenError(null);
+    const formData = new FormData();
+    formData.set("story_id", storyId);
+    startRegenTransition(async () => {
+      const result = await regenerateVoiceoverAction(formData);
+      if (!result.ok) {
+        setRegenError(result.error ?? "Regen failed");
       } else {
         router.refresh();
       }
@@ -274,25 +298,36 @@ export function VoicePicker({
         ))}
       </div>
 
-      <div className="mt-4 flex items-center justify-between gap-3 border-t border-line pt-3">
-        <p className="text-[11px] text-muted">
-          {usingGlobal
-            ? "Story uses the global default voice."
-            : `Selected: ${effectiveProvider} · ${effectiveVoiceId}`}
-        </p>
-        <button
-          type="button"
-          disabled
-          title={
-            regenDisabled
-              ? "Phase 4: regen action wiring lands in the next PR"
-              : undefined
-          }
-          className="rounded-md bg-accent/40 px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg/80 cursor-not-allowed"
-          data-testid="voice-picker-regen"
-        >
-          Regenerate voiceover
-        </button>
+      <div className="mt-4 space-y-2 border-t border-line pt-3">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[11px] text-muted">
+            {regenInFlight || regenPending
+              ? "Synthesizing voiceover..."
+              : usingGlobal
+                ? "Story uses the global default voice."
+                : `Selected: ${effectiveProvider} · ${effectiveVoiceId}`}
+          </p>
+          <button
+            type="button"
+            onClick={regenerate}
+            disabled={regenInFlight || regenPending}
+            className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            data-testid="voice-picker-regen"
+          >
+            {regenInFlight || regenPending
+              ? "Synthesizing…"
+              : "Regenerate voiceover"}
+          </button>
+        </div>
+        {(regenError || lastRegenError) && (
+          <p
+            role="alert"
+            className="rounded-md border border-danger/40 bg-danger/10 px-2 py-1.5 font-mono text-[10px] text-danger"
+            data-testid="voice-picker-regen-error"
+          >
+            {regenError ?? lastRegenError}
+          </p>
+        )}
       </div>
 
       {/* Shared audio element. We control src/play via the refs above so

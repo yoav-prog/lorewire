@@ -197,6 +197,22 @@ export default async function EditStory({
   // when the picker is dark wastes a round trip on every story render.
   const voices = voicePickerEnabled ? await listVoices() : [];
 
+  // In-flight regen state. Drives the "Synthesizing voiceover..."
+  // pending UI and the disabled regen button — a second click during a
+  // running synth would double-spend TTS credit on identical output.
+  const [latestVoiceRender, voiceRegenInFlight] = voicePickerEnabled
+    ? await Promise.all([
+        (await import("@/lib/voice-render-queue")).latestVoiceRenderForStory(
+          s.id,
+        ),
+        (await import("@/lib/voice-render-queue")).hasActiveVoiceRender(s.id),
+      ])
+    : [null, false];
+  const lastVoiceRegenError =
+    latestVoiceRender && latestVoiceRender.status === "error"
+      ? latestVoiceRender.error
+      : null;
+
   return (
     <div className="space-y-5">
       <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
@@ -363,6 +379,8 @@ export default async function EditStory({
               voices={voices}
               currentProvider={s.voice_provider}
               currentVoiceId={s.voice_id}
+              regenInFlight={voiceRegenInFlight}
+              lastRegenError={lastVoiceRegenError}
             />
           )}
 

@@ -264,6 +264,42 @@ export default async function VideoEditorPage({
     await getSetting("video.preview_segment_fit"),
   );
 
+  // Phase 4 of _plans/2026-06-14-voiceover-picker.md. The picker is
+  // gated behind voice.picker_enabled (default off). When dark, we
+  // skip the live ElevenLabs fetch + the queue lookups entirely so
+  // editor cold-loads stay fast for the existing flow.
+  const voicePickerEnabledRaw = await getSetting("voice.picker_enabled");
+  const voicePickerEnabled = String(voicePickerEnabledRaw ?? "0") !== "0";
+  let voicePicker: {
+    voices: Awaited<ReturnType<typeof import("@/lib/voice-library").listVoices>>;
+    currentProvider: string | null;
+    currentVoiceId: string | null;
+    regenInFlight: boolean;
+    lastRegenError: string | null;
+  } | null = null;
+  if (voicePickerEnabled) {
+    const { listVoices } = await import("@/lib/voice-library");
+    const {
+      latestVoiceRenderForStory,
+      hasActiveVoiceRender,
+    } = await import("@/lib/voice-render-queue");
+    const [voices, latestVoiceRender, voiceRegenInFlight] = await Promise.all([
+      listVoices(),
+      latestVoiceRenderForStory(story.id),
+      hasActiveVoiceRender(story.id),
+    ]);
+    voicePicker = {
+      voices,
+      currentProvider: story.voice_provider,
+      currentVoiceId: story.voice_id,
+      regenInFlight: voiceRegenInFlight,
+      lastRegenError:
+        latestVoiceRender && latestVoiceRender.status === "error"
+          ? latestVoiceRender.error
+          : null,
+    };
+  }
+
   return (
     <EditorClient
       storyId={story.id}
@@ -289,6 +325,7 @@ export default async function VideoEditorPage({
       editorIntroReason={editorIntroReason}
       editorOutroReason={editorOutroReason}
       previewSegmentFit={previewSegmentFit}
+      voicePicker={voicePicker}
     />
   );
 }
