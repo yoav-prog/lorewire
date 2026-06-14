@@ -17,6 +17,25 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The route imports `fetch` from `undici` (NOT global fetch) so it can
+// pass a long-running `Agent` with raised headersTimeout/bodyTimeout.
+// Mock the module at load time so the route's captured `undiciFetch`
+// reference is our spy. `Agent` is mocked as a no-op class so the
+// route's `new Agent({...})` doesn't try to open a real connection
+// pool in the test runtime.
+//
+// `vi.mock` is hoisted above all imports + locals; the mock factory
+// can only reference variables declared via `vi.hoisted`. That's why
+// `undiciFetchMock` is created inside hoisted() instead of as a plain
+// `const undiciFetchMock = vi.fn()`.
+const { undiciFetchMock } = vi.hoisted(() => ({
+  undiciFetchMock: vi.fn(),
+}));
+vi.mock("undici", () => ({
+  fetch: undiciFetchMock,
+  Agent: class MockAgent {},
+}));
+
 import { GET, POST } from "./route";
 import * as queue from "@/lib/video-render-queue";
 import * as repo from "@/lib/repo";
@@ -73,6 +92,7 @@ const FAKE_ROW: queue.RenderRow = {
 describe("/api/render_video (Vercel cron orchestrator)", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    undiciFetchMock.mockReset();
     vi.unstubAllEnvs();
     vi.stubEnv("CRON_SECRET", "test-secret");
     vi.stubEnv("CLOUD_RUN_RENDER_URL", "https://run.example.com");
@@ -80,6 +100,7 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    undiciFetchMock.mockReset();
     vi.unstubAllEnvs();
   });
 
@@ -107,12 +128,11 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
 
   it("returns { drained: 0 } when the queue is empty + does NOT fire fetch", async () => {
     vi.spyOn(queue, "claimNextRender").mockResolvedValue(null);
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
     const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.drained).toBe(0);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(undiciFetchMock).not.toHaveBeenCalled();
   });
 
   it("POSTs to Cloud Run + writes URL via finishRender on success", async () => {
@@ -132,14 +152,12 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({ url: "https://storage.googleapis.com/b/envelope/video.mp4" }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-      );
+    undiciFetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ url: "https://storage.googleapis.com/b/envelope/video.mp4" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
 
     const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
 
@@ -157,8 +175,11 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     // the previous Phase 2 code shipped `inputProps: {}` which would
     // render the composition's DEFAULT_PROPS (5-second preview) and
     // not the actual story.
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const [callUrl, callInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(undiciFetchMock).toHaveBeenCalledTimes(1);
+    const [callUrl, callInit] = undiciFetchMock.mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
     expect(callUrl).toBe("https://run.example.com/render");
     expect(callInit.method).toBe("POST");
     const authHeader = new Headers(callInit.headers as HeadersInit).get(
@@ -191,7 +212,6 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
     expect(resp.status).toBe(200);
@@ -199,7 +219,7 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     expect(body.status).toBe("error");
     expect(body.error).toContain("not found");
     // No fetch fired — orchestrator gave up before reaching Cloud Run.
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(undiciFetchMock).not.toHaveBeenCalled();
     expect(failSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -209,14 +229,13 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.status).toBe("error");
     expect(body.error).toContain("video_config");
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(undiciFetchMock).not.toHaveBeenCalled();
     expect(failSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -226,14 +245,13 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
-    const fetchSpy = vi.spyOn(globalThis, "fetch");
 
     const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.status).toBe("error");
     expect(body.error).toContain("valid JSON");
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(undiciFetchMock).not.toHaveBeenCalled();
     expect(failSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -248,7 +266,7 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    undiciFetchMock.mockResolvedValue(
       new Response("internal error", { status: 503 }),
     );
 
@@ -272,7 +290,7 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    undiciFetchMock.mockResolvedValue(
       new Response(JSON.stringify({ wrong: "shape" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -295,9 +313,7 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(
-      new Error("ECONNREFUSED"),
-    );
+    undiciFetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
 
     const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
     expect(resp.status).toBe(200);

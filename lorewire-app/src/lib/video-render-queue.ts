@@ -77,6 +77,15 @@ function canonicalize(value: unknown): string {
 // Uses SQLite's INSERT OR IGNORE / Postgres's ON CONFLICT DO NOTHING pattern
 // behind a single portable SQL: write attempt, then SELECT. The Python
 // `enqueue_render` uses the same approach.
+//
+// One special case: if the existing row is `status='error'`, reset it back
+// to `queued` so the user can retry the same (story, config) without having
+// to change the config first. Without this, a failed render permanently
+// blocks re-rendering until the config hash changes, which the user has no
+// natural reason to trigger after a transient infra failure (Cloud Run
+// down, image bug, etc.). The reset preserves the row id and requested_at
+// (it's still the same request) and bumps requested_at to `now` so the
+// cron orchestrator picks it up in FIFO order.
 export async function enqueueRender(
   storyId: string,
   configHash: string,
@@ -86,7 +95,30 @@ export async function enqueueRender(
     `SELECT ${COLS} FROM video_renders WHERE story_id = ? AND config_hash = ?`,
     [storyId, configHash],
   );
-  if (existing) return existing;
+  if (existing) {
+    if (existing.status === "error") {
+      const retryNow = new Date().toISOString();
+      await run(
+        `UPDATE video_renders
+           SET status = 'queued', progress = 0, error = NULL,
+               output_url = NULL, requested_by = ?, requested_at = ?,
+               started_at = NULL, finished_at = NULL
+         WHERE id = ? AND status = 'error'`,
+        [requestedBy, retryNow, existing.id],
+      );
+      const reset = await one<RenderRow>(
+        `SELECT ${COLS} FROM video_renders WHERE id = ?`,
+        [existing.id],
+      );
+      if (!reset) {
+        throw new Error(
+          "[video render queue] reset succeeded but row missing",
+        );
+      }
+      return reset;
+    }
+    return existing;
+  }
 
   const id = randomUUID();
   const now = new Date().toISOString();

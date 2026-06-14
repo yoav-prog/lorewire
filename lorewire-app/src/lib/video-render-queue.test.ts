@@ -7,10 +7,12 @@
 // configs that produce different MP4s must hash differently.
 
 import { describe, expect, it, beforeEach } from "vitest";
-import { run } from "@/lib/db";
+import { all, one, run } from "@/lib/db";
 import {
+  enqueueRender,
   hashConfig,
   isVideoRenderStale,
+  type RenderRow,
 } from "@/lib/video-render-queue";
 import type { ShortVideoConfig } from "@/lib/video-config";
 
@@ -269,5 +271,121 @@ describe("isVideoRenderStale", () => {
       finished_at: "2026-06-12T11:30:00.000Z",
     });
     expect(await isVideoRenderStale(STORY_ID)).toBe(false);
+  });
+});
+
+// ─── enqueueRender — retry-after-error path ─────────────────────────────────
+// The idempotency-on-(story, config_hash) key blocks the user from kicking
+// a fresh render when nothing about the config changed. That's correct for
+// the in-flight case (don't queue duplicates) and for already-done renders
+// (no work to do). It's wrong for `error` rows: a transient infra failure
+// would otherwise pin the user to a dead row until they edited the config.
+// These tests pin down the reset-to-queued behavior so a regression
+// silently re-blocks retries.
+
+const RETRY_STORY_ID = "retry-test-story";
+const RETRY_HASH = "retryhash";
+
+async function getRetryRow(): Promise<RenderRow | null> {
+  return one<RenderRow>(
+    `SELECT id, story_id, config_hash, status, progress, error, output_url,
+            requested_by, requested_at, started_at, finished_at
+     FROM video_renders WHERE story_id = ? AND config_hash = ?`,
+    [RETRY_STORY_ID, RETRY_HASH],
+  );
+}
+
+describe("enqueueRender — retry semantics", () => {
+  beforeEach(async () => {
+    await run(`DELETE FROM video_renders WHERE story_id = ?`, [RETRY_STORY_ID]);
+  });
+
+  it("resets an errored row back to queued (preserves id)", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'error', 0.5, 'Cloud Run failed', NULL,
+               'admin-1', '2026-06-14T10:00:00.000Z',
+               '2026-06-14T10:01:00.000Z', '2026-06-14T10:05:00.000Z')`,
+      ["retry-1", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    const result = await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+
+    expect(result.id).toBe("retry-1");
+    expect(result.status).toBe("queued");
+    expect(result.error).toBeNull();
+    expect(result.progress).toBe(0);
+    expect(result.output_url).toBeNull();
+    expect(result.started_at).toBeNull();
+    expect(result.finished_at).toBeNull();
+    expect(result.requested_by).toBe("admin-2");
+    expect(result.requested_at).not.toBe("2026-06-14T10:00:00.000Z");
+
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM video_renders WHERE story_id = ?`,
+      [RETRY_STORY_ID],
+    );
+    expect(rows).toHaveLength(1);
+  });
+
+  it("does NOT touch a queued row (no double-claim)", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'queued', 0, NULL, NULL,
+               'admin-1', '2026-06-14T10:00:00.000Z', NULL, NULL)`,
+      ["retry-2", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    const result = await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+    expect(result.id).toBe("retry-2");
+    expect(result.requested_by).toBe("admin-1");
+    expect(result.requested_at).toBe("2026-06-14T10:00:00.000Z");
+  });
+
+  it("does NOT touch a rendering row (mid-render)", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'rendering', 0.4, NULL, NULL,
+               'admin-1', '2026-06-14T10:00:00.000Z',
+               '2026-06-14T10:01:00.000Z', NULL)`,
+      ["retry-3", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    const result = await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+    expect(result.id).toBe("retry-3");
+    expect(result.status).toBe("rendering");
+    expect(result.progress).toBe(0.4);
+  });
+
+  it("does NOT touch a done row (already rendered)", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'done', 1.0, NULL, 'https://gcs/x.mp4',
+               'admin-1', '2026-06-14T10:00:00.000Z',
+               '2026-06-14T10:01:00.000Z', '2026-06-14T10:05:00.000Z')`,
+      ["retry-4", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    const result = await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+    expect(result.id).toBe("retry-4");
+    expect(result.status).toBe("done");
+    expect(result.output_url).toBe("https://gcs/x.mp4");
+  });
+
+  it("inserts a fresh row when none exists for (story, hash)", async () => {
+    const result = await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-1");
+    expect(result.status).toBe("queued");
+    expect(result.config_hash).toBe(RETRY_HASH);
+
+    const persisted = await getRetryRow();
+    expect(persisted?.id).toBe(result.id);
   });
 });
