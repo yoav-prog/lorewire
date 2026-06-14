@@ -80,6 +80,16 @@ export const STORIES: Table = {
     // The TS side never reads this column; it exists here so
     // ensureSchema's additive ALTER picks it up on prod boot.
     { name: "pipeline_cache", type: "TEXT" },
+    // 2026-06-14 voiceover picker per-story override (Phase 1 of
+    // _plans/2026-06-14-voiceover-picker.md). Both nullable; NULL = use
+    // the global `voice.elevenlabs_voice_id` / `voice.google_voice_name`
+    // setting. `voice_provider` mirrors models.get_selected("voice")
+    // shape (e.g. "elevenlabs", "google/chirp3-hd", "google/gemini-25-flash-tts");
+    // `voice_id` is the provider-native id (ElevenLabs voice_id GUID OR
+    // the full Google voice name like "en-US-Chirp3-HD-Aoede"). The
+    // server-side resolution chain lives in pipeline/voice.py:synthesize.
+    { name: "voice_provider", type: "TEXT" },
+    { name: "voice_id", type: "TEXT" },
   ],
 };
 

@@ -55,18 +55,45 @@ totals = {
 
 # --- public API ---------------------------------------------------------------
 
-def synthesize(text: str, dest_audio: Path) -> dict:
+def synthesize(
+    text: str,
+    dest_audio: Path,
+    override_provider: str | None = None,
+    override_voice_id: str | None = None,
+) -> dict:
     """Render narration to `dest_audio` and return word-level timings.
 
     Returns `{"audio": str, "words": [{"word", "start", "end"}, ...], "provider": str}`.
-    The provider is decided by `models.get_selected("voice")`.
+
+    Resolution chain (Phase 1 of `_plans/2026-06-14-voiceover-picker.md`):
+      1. `override_provider` (caller-supplied per-story override) wins.
+      2. Otherwise the active model selection from `models.get_selected("voice")`.
+    And independently for the voice id WITHIN the resolved provider:
+      1. `override_voice_id` wins.
+      2. Otherwise the admin's global setting for that provider
+         (`voice.elevenlabs_voice_id` / `voice.google_voice_name`).
+      3. Otherwise the provider's first-voice fallback (legacy behaviour).
+
+    Both override args independently default to None so existing callers
+    (fresh-pipeline path) keep the global-setting behaviour byte-for-byte.
+    The Phase 4 regen action threads per-story values through here.
     """
-    selected = models.get_selected("voice")  # e.g. "google/chirp3-hd"
+    selected = override_provider or models.get_selected("voice")
     provider, _, _tier = selected.partition("/")
+    print(
+        f"[voice resolve] provider={selected} "
+        f"voice_id_override={override_voice_id or '<none>'} "
+        f"source={'story-override' if override_provider else 'global'}"
+    )
     if provider == "google":
-        return _google_synthesize(text, dest_audio, selected)
+        return _google_synthesize(
+            text, dest_audio, selected,
+            voice_id_override=override_voice_id,
+        )
     if provider == "elevenlabs":
-        return _elevenlabs_synthesize(text, dest_audio)
+        return _elevenlabs_synthesize(
+            text, dest_audio, voice_id_override=override_voice_id,
+        )
     raise NotImplementedError(
         f"voice provider {provider!r} (model {selected!r}) is in the registry but not wired."
     )
@@ -90,7 +117,16 @@ def _elevenlabs_first_voice_id() -> str:
     return voices[0]["voice_id"]
 
 
-def _elevenlabs_voice_id() -> str:
+def _elevenlabs_voice_id(override: str | None = None) -> str:
+    """Resolve the ElevenLabs voice id to use.
+
+    Phase 1 override chain: caller-supplied `override` wins, then the
+    admin setting `voice.elevenlabs_voice_id`, then the first voice on
+    the account (legacy fallback — preserved so a fresh account with no
+    setting still ships audio).
+    """
+    if override:
+        return override
     return store.get_setting("voice.elevenlabs_voice_id") or _elevenlabs_first_voice_id()
 
 
@@ -116,10 +152,12 @@ def _chars_to_words(alignment: dict) -> list[dict]:
     return words
 
 
-def _elevenlabs_synthesize(text: str, dest_audio: Path) -> dict:
+def _elevenlabs_synthesize(
+    text: str, dest_audio: Path, voice_id_override: str | None = None,
+) -> dict:
     body = json.dumps({"text": text, "model_id": ELEVEN_DEFAULT_MODEL}).encode("utf-8")
     req = urllib.request.Request(
-        f"{ELEVEN_BASE}/text-to-speech/{_elevenlabs_voice_id()}/with-timestamps",
+        f"{ELEVEN_BASE}/text-to-speech/{_elevenlabs_voice_id(voice_id_override)}/with-timestamps",
         data=body,
         headers={
             "xi-api-key": _elevenlabs_key(),
@@ -171,12 +209,15 @@ def _is_gemini_tier(tier: str) -> bool:
     return tier in GEMINI_TIER_TO_MODEL_NAME
 
 
-def _google_voice_name(selected: str) -> str:
+def _google_voice_name(selected: str, override: str | None = None) -> str:
     """Resolve the full Google voice name (e.g. en-US-Chirp3-HD-Aoede).
 
-    Order: admin setting 'voice.google_voice_name' wins; otherwise the tier's
-    default. Caller is expected to be on a Google selection.
+    Phase 1 override chain: caller-supplied `override` wins, then the
+    admin setting `voice.google_voice_name`, then the tier's default.
+    Caller is expected to be on a Google selection.
     """
+    if override:
+        return override
     setting = (store.get_setting("voice.google_voice_name") or "").strip()
     if setting:
         return setting
@@ -224,8 +265,13 @@ def _google_post(url: str, body: dict, timeout: int = 180) -> dict:
         raise RuntimeError(f"Google HTTP {e.code} ({url.split('/')[-1]}): {detail}") from e
 
 
-def _google_synthesize(text: str, dest_audio: Path, selected: str) -> dict:
-    voice_name_setting = _google_voice_name(selected)
+def _google_synthesize(
+    text: str,
+    dest_audio: Path,
+    selected: str,
+    voice_id_override: str | None = None,
+) -> dict:
+    voice_name_setting = _google_voice_name(selected, voice_id_override)
     language_code = _google_language_code(voice_name_setting)
     tier = _google_tier(selected)
 
