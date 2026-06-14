@@ -335,8 +335,8 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
             Skipped {skippedActive} that already had an active job.
           </>
         )}{" "}
-        Make sure the worker is running:{" "}
-        <code className="text-ink">python -m pipeline.story_jobs_worker</code>
+        The hosted cron runs the article + media stages and hands the
+        video render off to Cloud Run; nothing to start locally.
       </div>
     );
   }

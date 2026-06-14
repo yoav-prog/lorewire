@@ -163,7 +163,16 @@ def reddit_source_to_post(row: dict) -> dict:
 def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     """Real process path: run the existing pipeline stages against the
     source row. Returns the story dict that was upserted into `stories`
-    so the worker can extract `story_id` for finish_story_job."""
+    so the worker can extract `story_id` for finish_story_job.
+
+    Story-jobs scope: LLM (idea/research/article/title) + optional
+    media (kie images + voice + alignment). Video render is NOT done
+    here — it's enqueued into the video_renders queue and rendered out
+    of band by the Cloud Run service (see
+    _plans/2026-06-14-cloud-run-render.md). This split means every
+    story job is fully completable on Vercel's runtime; only the MP4
+    render needs Node + Remotion, which lives in its own queue.
+    """
     post = reddit_source_to_post(reddit_row)
     with_media = bool(claimed_job.get("with_media", 1))
 
@@ -221,55 +230,12 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         )
         row.update(media_cols)
         row["tokens"] = llm.totals["total_tokens"] - before_tokens
-        store.update_story_job_progress(claimed_job["id"], 80)
-
-        # Video render mirrors run.py's --media --video flow.
-        hero = row.get("hero_image")
-        scenes_raw = row.get("images") or "[]"
-        try:
-            scenes = (
-                json.loads(scenes_raw)
-                if isinstance(scenes_raw, str)
-                else scenes_raw
-            )
-        except json.JSONDecodeError:
-            scenes = []
-        image_urls = ([hero] if hero else []) + list(scenes)
-
-        alignment_raw = row.get("alignment") or "[]"
-        try:
-            alignment = (
-                json.loads(alignment_raw)
-                if isinstance(alignment_raw, str)
-                else alignment_raw
-            )
-        except json.JSONDecodeError:
-            alignment = []
-
-        props_raw = row.get("props") or "[]"
-        try:
-            props_list = (
-                json.loads(props_raw)
-                if isinstance(props_raw, str)
-                else props_raw
-            )
-        except json.JSONDecodeError:
-            props_list = []
-
-        video_cols = video.generate_video(
-            idea["reddit_id"],
-            idea["headline"],
-            image_urls,
-            row.get("audio_url") or "",
-            alignment,
-            repo_root=REPO_ROOT,
-            category=idea.get("category"),
-            props_list=props_list,
-            character_image_mouth_removed=row.get("character_image_mouth_removed"),
-            story_row=row,
-        )
-        row.update(video_cols)
-        store.update_story_job_progress(claimed_job["id"], 95)
+        store.update_story_job_progress(claimed_job["id"], 90)
+        # Video render is OUT of band — enqueue into video_renders so the
+        # Cloud Run service (api/dispatch_video_render -> Cloud Run
+        # /render) picks it up. Done after upsert_story below because
+        # the video_renders FK is `story_id` and we need the story row
+        # to exist first.
 
     # Wrap up with the per-job spend delta. Three contributors:
     #   - media (kie images + voice + STT) via media.running_cost_usd()
@@ -287,7 +253,69 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         media_delta_usd, llm_token_delta,
     )
     store.upsert_story(row)
+
+    # Hand off to the video pipeline. The video_renders queue is what
+    # the editor's existing "Render" button uses; auto-enqueueing here
+    # means the admin doesn't have to remember to click it. The Cloud
+    # Run cron picks the row up within ~1 min and writes back
+    # stories.video_url. The publish gate already requires video_url
+    # IS NOT NULL, so the story stays at status='review' until then —
+    # admin doesn't need to know about the two-queue split.
+    if with_media:
+        _enqueue_video_render_for_story(row)
+
     return row
+
+
+def _enqueue_video_render_for_story(story_row: dict) -> None:
+    """Auto-enqueue a video_renders row for a freshly-upserted story so
+    the Cloud Run cron picks up the render. Idempotency on
+    (story_id, config_hash) means re-processing the same story (e.g.
+    after Re-process N) coalesces to a single render — UNLESS the
+    content changed, in which case the hash differs and a fresh render
+    fires. That's the desired behaviour: changed inputs → new MP4.
+    """
+    import hashlib as _hashlib
+    import uuid as _uuid
+    story_id = story_row["id"]
+    # Content hash covers everything the renderer reads from the
+    # story row. If any of these change between re-processes, we want
+    # a fresh render — the hash flipping is the signal.
+    parts = [
+        story_id,
+        story_row.get("title") or "",
+        story_row.get("body") or "",
+        story_row.get("hero_image") or "",
+        story_row.get("images") or "",
+        story_row.get("audio_url") or "",
+        story_row.get("alignment") or "",
+    ]
+    config_hash = _hashlib.sha256(
+        "\x1f".join(parts).encode("utf-8")
+    ).hexdigest()
+    render_id = str(_uuid.uuid4())
+    resulting = store.enqueue_render(
+        render_id=render_id,
+        story_id=story_id,
+        config_hash=config_hash,
+        requested_by="story_jobs_worker",
+    )
+    # enqueue_render's ON CONFLICT DO NOTHING means a row at the same
+    # (story_id, config_hash) survives; the returned dict is then the
+    # PRE-EXISTING row, whose id is the prior render's. Compare ids to
+    # distinguish "we inserted" from "no-op against existing row."
+    if resulting and resulting.get("id") == render_id:
+        print(
+            f"[story-jobs handoff] story_id={story_id} "
+            f"video_render={render_id} config_hash={config_hash[:12]}"
+        )
+    else:
+        existing_id = resulting.get("id") if resulting else None
+        print(
+            f"[story-jobs handoff-skip] story_id={story_id} "
+            f"existing_render={existing_id} "
+            f"reason=render-already-queued-at-same-hash"
+        )
 
 
 def run_one_tick(
@@ -300,12 +328,14 @@ def run_one_tick(
     Any exception in the process path is caught and recorded as a failed
     job so a single bad row doesn't crash the worker loop.
 
-    `skip_with_media`: when True, a claimed job whose `with_media=True`
-    flag is set is failed immediately with `DRAIN_UNSUPPORTED_MEDIA_REASON`
-    instead of being processed. Used by the Vercel drain
-    (lorewire-app/api/drain_story_jobs.py) whose runtime can't run
-    Remotion. Local CLI workers leave this False so video jobs process
-    normally.
+    `skip_with_media`: legacy flag from before the video step was
+    moved to the video_renders queue. Both branches (Vercel drain +
+    local CLI) now process media jobs the same way — the worker writes
+    LLM + media output and enqueues an MP4 render that Cloud Run
+    handles. The flag is kept for one release in case callers in
+    transition still pass it; both pre-claim filter and post-claim
+    fail-fast paths are wired so nothing breaks if a stale deploy is
+    still passing True.
     """
     pfn = process_fn if process_fn is not None else _default_process
 

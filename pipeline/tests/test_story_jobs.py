@@ -761,6 +761,65 @@ class CostCaptureTests(_IsolatedDB):
         self.assertEqual(compute_job_cost_cents(0.0, 0), 0)
 
 
+class VideoRenderHandoffTests(_IsolatedDB):
+    """The story-jobs worker no longer renders MP4 itself — instead it
+    enqueues a video_renders row that the Cloud Run cron drain picks
+    up. This split makes every story-job fully completable on Vercel's
+    Python runtime; the only thing that still needs Node + Remotion is
+    the render step, which lives behind its own queue and own service."""
+
+    def _story_row(self, **overrides) -> dict:
+        base = {
+            "id": "story-1",
+            "title": "T",
+            "body": "Body",
+            "hero_image": "https://example/hero.png",
+            "images": '["https://example/scene1.png"]',
+            "audio_url": "https://example/voice.mp3",
+            "alignment": "[]",
+        }
+        base.update(overrides)
+        return base
+
+    def test_enqueues_video_render_for_a_fresh_story(self):
+        from pipeline import story_jobs_worker
+        story_jobs_worker._enqueue_video_render_for_story(self._story_row())
+        # video_renders should now have exactly one row pointing at story-1.
+        # Use the latest_render_for_story helper as the read surface.
+        row = self.store.latest_render_for_story("story-1")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["story_id"], "story-1")
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["requested_by"], "story_jobs_worker")
+
+    def test_idempotent_against_same_content(self):
+        """Re-processing the same story (e.g. after a worker retry)
+        with identical content must NOT insert a second render — the
+        ON CONFLICT DO NOTHING on (story_id, config_hash) is the guard."""
+        from pipeline import story_jobs_worker
+        story_jobs_worker._enqueue_video_render_for_story(self._story_row())
+        first = self.store.latest_render_for_story("story-1")
+        story_jobs_worker._enqueue_video_render_for_story(self._story_row())
+        second = self.store.latest_render_for_story("story-1")
+        self.assertEqual(first["id"], second["id"])
+
+    def test_fresh_render_when_content_changes(self):
+        """If the body / hero / images change between re-processes, the
+        config hash flips and a fresh video_render row is inserted —
+        Cloud Run will then re-render with the new content."""
+        from pipeline import story_jobs_worker
+        story_jobs_worker._enqueue_video_render_for_story(self._story_row())
+        first = self.store.latest_render_for_story("story-1")
+        story_jobs_worker._enqueue_video_render_for_story(
+            self._story_row(body="An edited body — fresh content"),
+        )
+        # Two distinct render rows now exist for the same story.
+        # latest_render_for_story returns the newest by requested_at.
+        second = self.store.latest_render_for_story("story-1")
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(second["status"], "queued")
+
+
 class CancelTests(_IsolatedDB):
     """Stop button. Admin cancels a row → DB flips to 'cancelled'
     immediately; any later finish/fail from the worker no-ops against
