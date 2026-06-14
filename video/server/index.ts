@@ -15,6 +15,7 @@ import express, { type Request, type Response } from "express";
 import {
   renderAndUploadStory,
   type RenderFn,
+  type SpliceSegments,
 } from "./render.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -46,18 +47,43 @@ interface RenderRequestBody {
   // story's video_config. Phase 3 validates the full shape against
   // the composition's prop schema.
   inputProps?: unknown;
+  // Phase 3 of _plans/2026-06-15-cloud-run-intro-outro-splice.md.
+  // Optional — a stale dispatcher that hasn't been updated yet just
+  // omits the field, falls through to `{intro: null, outro: null}`,
+  // and gets a body-only render (the legacy behavior).
+  segments?: unknown;
 }
 
-function parseRenderBody(
-  body: RenderRequestBody | undefined,
-): { storyId: string; configHash: string; inputProps: unknown } | null {
+function parseSegments(raw: unknown): SpliceSegments {
+  // Default for missing / malformed shapes is "no segments" — a
+  // body-only render is the safe fallback and matches today's behavior.
+  if (!raw || typeof raw !== "object") return { intro: null, outro: null };
+  const obj = raw as { intro?: unknown; outro?: unknown };
+  const intro =
+    typeof obj.intro === "string" && obj.intro.length > 0 ? obj.intro : null;
+  const outro =
+    typeof obj.outro === "string" && obj.outro.length > 0 ? obj.outro : null;
+  return { intro, outro };
+}
+
+function parseRenderBody(body: RenderRequestBody | undefined): {
+  storyId: string;
+  configHash: string;
+  inputProps: unknown;
+  segments: SpliceSegments;
+} | null {
   if (!body || typeof body !== "object") return null;
-  const { storyId, configHash, inputProps } = body;
+  const { storyId, configHash, inputProps, segments } = body;
   if (typeof storyId !== "string" || storyId.length === 0) return null;
   if (typeof configHash !== "string" || configHash.length === 0) return null;
   // inputProps may be any JSON-serializable shape; deeper validation
   // is the renderer's job at Phase 3 prop-binding time.
-  return { storyId, configHash, inputProps };
+  return {
+    storyId,
+    configHash,
+    inputProps,
+    segments: parseSegments(segments),
+  };
 }
 
 // Factory so tests can inject a stubbed render function and exercise
@@ -99,10 +125,16 @@ export function createApp(render: RenderFn = renderAndUploadStory) {
       log("received", {
         story_id: parsed.storyId,
         config_hash: parsed.configHash.slice(0, 12),
+        has_intro: parsed.segments.intro !== null,
+        has_outro: parsed.segments.outro !== null,
       });
 
       try {
-        const result = await render(parsed.storyId, parsed.inputProps);
+        const result = await render(
+          parsed.storyId,
+          parsed.inputProps,
+          parsed.segments,
+        );
         log("done", {
           story_id: parsed.storyId,
           url_bytes: result.url.length,

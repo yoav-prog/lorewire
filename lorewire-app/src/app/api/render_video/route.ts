@@ -42,7 +42,13 @@ import {
   finishRender,
   logVideoRenderEvent,
 } from "@/lib/video-render-queue";
-import { getStory } from "@/lib/repo";
+import { getSetting, getStory } from "@/lib/repo";
+import {
+  isVideoAspect,
+  LEGACY_DEFAULT_ASPECT,
+  type VideoAspect,
+} from "@/lib/aspect";
+import { resolveSegmentsForStory } from "@/lib/segment-resolver";
 
 // Override undici's 300s default headers/body timeouts. Cloud Run
 // renders a 2:11 envelope-style composition in ~3-7 minutes (cold
@@ -68,6 +74,14 @@ const DEADLINE_MS = 770_000;
 interface CloudRunRenderResponse {
   url?: unknown;
   error?: unknown;
+}
+
+/** Resolved intro/outro URLs the cron picked for this render. Passed
+ *  verbatim to Cloud Run as the `segments` field on the /render body.
+ *  Phase 4 of _plans/2026-06-15-cloud-run-intro-outro-splice.md. */
+interface CloudRunSegments {
+  intro: string | null;
+  outro: string | null;
 }
 
 function namespacedLog(event: string, fields: Record<string, unknown>): void {
@@ -239,6 +253,31 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     });
   }
 
+  // Phase 4 of _plans/2026-06-15-cloud-run-intro-outro-splice.md.
+  // Resolve which intro / outro segment to splice for this story so
+  // Cloud Run can stitch them around the body. The TS resolver mirrors
+  // pipeline/segments.py:pick_segment exactly — skip flag wins, then
+  // story-pinned id, then global master switch, then global active id,
+  // with an aspect filter at the bottom that drops a segment whose
+  // shape doesn't match the story's resolved aspect. A failure here is
+  // recoverable: we log + fall through with {intro: null, outro: null}
+  // so the render still produces a body-only MP4 instead of failing
+  // the whole row over a missing segment row.
+  const segments = await resolveSegmentsSafe(claimed.id, story);
+  await logVideoRenderEvent(claimed.id, "segments_resolved", {
+    message: "Resolved intro/outro for this render.",
+    payload: {
+      intro_url: segments.intro,
+      outro_url: segments.outro,
+    },
+  });
+  namespacedLog("segments_resolved", {
+    render_id: claimed.id,
+    story_id: claimed.story_id,
+    has_intro: segments.intro !== null,
+    has_outro: segments.outro !== null,
+  });
+
   await logVideoRenderEvent(claimed.id, "dispatch_start", {
     message: "Posting render request to Cloud Run.",
     payload: { cloud_run_url: cloudRunUrl },
@@ -250,6 +289,7 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       storyId: claimed.story_id,
       configHash: claimed.config_hash,
       inputProps,
+      segments,
     },
     cronSecret,
   );
@@ -293,6 +333,41 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     status: "done",
     url: result.url,
   });
+}
+
+/** Resolve intro/outro for this story with a defensive fallback to
+ *  {intro: null, outro: null} on any error so a missing-segment row
+ *  or a setting-fetch hiccup degrades to a body-only render instead of
+ *  killing the whole queue row. Errors are logged + emitted to the
+ *  render history so the admin can see what went wrong.
+ *
+ *  The story is typed as the row coming out of getStory(); the
+ *  resolver only reads the four intro/outro columns + video_config so
+ *  passing the whole row is fine. */
+async function resolveSegmentsSafe(
+  renderId: string,
+  story: Awaited<ReturnType<typeof getStory>>,
+): Promise<CloudRunSegments> {
+  if (!story) return { intro: null, outro: null };
+  try {
+    const rawAspect = await getSetting("video.default_aspect");
+    const globalDefaultAspect: VideoAspect = isVideoAspect(rawAspect)
+      ? rawAspect
+      : LEGACY_DEFAULT_ASPECT;
+    const resolved = await resolveSegmentsForStory(story, globalDefaultAspect);
+    return {
+      intro: resolved.intro.segment?.normalized_url ?? null,
+      outro: resolved.outro.segment?.normalized_url ?? null,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    namespacedLog("segments_resolve_failed", { render_id: renderId, error: msg });
+    await logVideoRenderEvent(renderId, "segments_resolve_failed", {
+      level: "warn",
+      message: msg,
+    });
+    return { intro: null, outro: null };
+  }
 }
 
 // App Router's route handler shape — both GET (cron pings) and POST

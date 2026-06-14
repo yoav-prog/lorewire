@@ -332,4 +332,123 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     const body = await resp.json();
     expect(body.drained).toBe(0);
   });
+
+  // Phase 4 of _plans/2026-06-15-cloud-run-intro-outro-splice.md.
+  // The dispatcher resolves intro/outro per story and passes the URLs
+  // in the segments field on the Cloud Run POST body. When the
+  // resolver returns null for either end (skip flag, missing setting,
+  // aspect mismatch, etc.) we still POST a `segments` field — Cloud
+  // Run treats {intro: null, outro: null} as "body-only render", same
+  // as omitting the field entirely. We send it explicitly so a stale
+  // Cloud Run image can't accidentally splice old data.
+  describe("segments field on Cloud Run POST", () => {
+    it("includes resolved intro+outro URLs when both are picked", async () => {
+      vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+      vi.spyOn(repo, "getStory").mockResolvedValue({
+        ...makeStory(JSON.stringify({ aspect: "9:16" })),
+        intro_segment_id: "intro-1",
+        outro_segment_id: "outro-1",
+      } as unknown as repo.StoryRow);
+      vi.spyOn(repo, "getSetting").mockImplementation(async (k: string) => {
+        if (k === "video.default_aspect") return "9:16";
+        return null;
+      });
+      vi.spyOn(repo, "getSegment").mockImplementation(async (id: string) => {
+        if (id === "intro-1") {
+          return {
+            id: "intro-1",
+            kind: "intro",
+            normalized_url: "https://storage.googleapis.com/b/segments/i1.mp4",
+            enabled: 1,
+            aspect: "9:16",
+          } as unknown as repo.SegmentRow;
+        }
+        if (id === "outro-1") {
+          return {
+            id: "outro-1",
+            kind: "outro",
+            normalized_url: "https://storage.googleapis.com/b/segments/o1.mp4",
+            enabled: 1,
+            aspect: "9:16",
+          } as unknown as repo.SegmentRow;
+        }
+        return null;
+      });
+      vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+      undiciFetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ url: "https://gcs/x.mp4" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await GET(makeReq({ auth: "Bearer test-secret" }));
+
+      const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+      const sent = JSON.parse(callInit.body as string) as {
+        segments: { intro: string | null; outro: string | null };
+      };
+      expect(sent.segments.intro).toBe(
+        "https://storage.googleapis.com/b/segments/i1.mp4",
+      );
+      expect(sent.segments.outro).toBe(
+        "https://storage.googleapis.com/b/segments/o1.mp4",
+      );
+    });
+
+    it("sends {intro: null, outro: null} when the story opts out of both", async () => {
+      vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+      vi.spyOn(repo, "getStory").mockResolvedValue({
+        ...makeStory(JSON.stringify({ aspect: "9:16" })),
+        skip_intro: 1,
+        skip_outro: 1,
+      } as unknown as repo.StoryRow);
+      vi.spyOn(repo, "getSetting").mockResolvedValue(null);
+      vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+      undiciFetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ url: "https://gcs/x.mp4" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      await GET(makeReq({ auth: "Bearer test-secret" }));
+
+      const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+      const sent = JSON.parse(callInit.body as string) as {
+        segments: { intro: string | null; outro: string | null };
+      };
+      expect(sent.segments).toEqual({ intro: null, outro: null });
+    });
+
+    it("falls through to {intro: null, outro: null} when the resolver throws", async () => {
+      // The defensive try/catch in resolveSegmentsSafe should swallow
+      // the error so the render still produces a body-only MP4 instead
+      // of failing the whole row. Simulate by making getSetting throw.
+      vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+      vi.spyOn(repo, "getStory").mockResolvedValue(
+        makeStory(JSON.stringify({ aspect: "9:16" })),
+      );
+      vi.spyOn(repo, "getSetting").mockRejectedValue(new Error("db down"));
+      vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+      undiciFetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ url: "https://gcs/x.mp4" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
+
+      // Render still completes successfully — body-only mode.
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.status).toBe("done");
+      const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+      const sent = JSON.parse(callInit.body as string) as {
+        segments: { intro: string | null; outro: string | null };
+      };
+      expect(sent.segments).toEqual({ intro: null, outro: null });
+    });
+  });
 });

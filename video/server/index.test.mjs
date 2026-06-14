@@ -25,13 +25,18 @@ const SECRET = "test-secret";
 
 let server;
 let baseUrl;
+/** Captures the (storyId, inputProps, segments) tuple the stub last
+ *  received so the segments-parsing tests can assert what the HTTP
+ *  layer handed downstream. Reset before each segments-parsing case. */
+let lastRenderCall = null;
 
 before(async () => {
   process.env.CRON_SECRET = SECRET;
   // Stubbed renderer: never touches Remotion or GCS. The HTTP layer
   // only needs to know the contract — Promise<{ url, elapsed_ms }> —
   // not the implementation.
-  const render = async (storyId, inputProps) => {
+  const render = async (storyId, inputProps, segments) => {
+    lastRenderCall = { storyId, inputProps, segments };
     if (storyId === "boom") {
       throw new Error("renderMedia failed: bad composition");
     }
@@ -153,5 +158,69 @@ describe("Cloud Run render service /render error mapping", () => {
     });
     assert.equal(status, 500);
     assert.match(body.error, /renderMedia failed/);
+  });
+});
+
+// Phase 3 of _plans/2026-06-15-cloud-run-intro-outro-splice.md. The HTTP
+// layer parses the optional `segments` field, normalizes malformed shapes
+// to {intro: null, outro: null}, and passes the resolved tuple as the
+// third argument to the render fn.
+describe("Cloud Run render service /render segments parsing", () => {
+  it("passes intro + outro URLs through when both are provided", async () => {
+    lastRenderCall = null;
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    const outro = "https://storage.googleapis.com/test-bucket/segments/o1.mp4";
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        storyId: "envelope",
+        configHash: "abc",
+        inputProps: {},
+        segments: { intro, outro },
+      },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, { intro, outro });
+  });
+
+  it("defaults segments to {intro: null, outro: null} when omitted", async () => {
+    lastRenderCall = null;
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: { storyId: "envelope", configHash: "abc", inputProps: {} },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, { intro: null, outro: null });
+  });
+
+  it("normalizes malformed segments (non-object) to {intro: null, outro: null}", async () => {
+    lastRenderCall = null;
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        storyId: "envelope",
+        configHash: "abc",
+        inputProps: {},
+        segments: "intro-please",
+      },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, { intro: null, outro: null });
+  });
+
+  it("normalizes individual missing / empty / non-string fields to null", async () => {
+    lastRenderCall = null;
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        storyId: "envelope",
+        configHash: "abc",
+        inputProps: {},
+        segments: { intro, outro: "" },
+      },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, { intro, outro: null });
   });
 });
