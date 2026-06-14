@@ -40,6 +40,7 @@ import {
   failRender,
   finishRender,
 } from "@/lib/video-render-queue";
+import { getStory } from "@/lib/repo";
 
 // Vercel Pro cron functions get up to 800s. We leave 30s headroom for
 // the response write + Cloud Run's last-mile latency. The fetch below
@@ -142,16 +143,77 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     config_hash: claimed.config_hash.slice(0, 12),
   });
 
-  // The Cloud Run server expects { storyId, configHash, inputProps }.
-  // For Phase 2 the inputProps is just an empty object placeholder —
-  // Phase 3 wires the actual config-to-props translation (mirroring
-  // pipeline/video.py:generate_video's prop bag).
+  // Load the story's persisted video_config — this is the same JSON
+  // blob the local pipeline/render_worker.py reads + writes, and the
+  // editor's PreviewComposition reads to drive its inline player. The
+  // Remotion `Composition` in video/src/Root.tsx accepts the shape
+  // directly via the `inputProps` arg (matching what `npx remotion
+  // render --props=...` does for the local renderer).
+  //
+  // Three failure modes handled inline because they're row-specific
+  // (NOT cron-config issues — the cron itself is healthy):
+  //   - story row not found → likely a manual DB delete; fail the
+  //     render so the orchestrator gives up and the queue moves on.
+  //   - video_config missing → story never rendered; can't proceed.
+  //   - video_config malformed JSON → corrupt row; fail clearly.
+  const story = await getStory(claimed.story_id);
+  if (!story) {
+    const err = `story ${claimed.story_id} not found`;
+    namespacedLog("story_missing", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+    });
+    await failRender(claimed.id, err);
+    return NextResponse.json({
+      drained: 1,
+      render_id: claimed.id,
+      status: "error",
+      error: err,
+    });
+  }
+  if (!story.video_config) {
+    const err =
+      `story ${claimed.story_id} has no video_config — run a local ` +
+      `pipeline render first to seed it`;
+    namespacedLog("config_missing", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+    });
+    await failRender(claimed.id, err);
+    return NextResponse.json({
+      drained: 1,
+      render_id: claimed.id,
+      status: "error",
+      error: err,
+    });
+  }
+  let inputProps: unknown;
+  try {
+    inputProps = JSON.parse(story.video_config);
+  } catch (e) {
+    const err = `video_config not valid JSON: ${
+      e instanceof Error ? e.message : String(e)
+    }`;
+    namespacedLog("config_malformed", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      error: err,
+    });
+    await failRender(claimed.id, err);
+    return NextResponse.json({
+      drained: 1,
+      render_id: claimed.id,
+      status: "error",
+      error: err,
+    });
+  }
+
   const result = await postToCloudRun(
     `${cloudRunUrl.replace(/\/$/, "")}/render`,
     {
       storyId: claimed.story_id,
       configHash: claimed.config_hash,
-      inputProps: {},
+      inputProps,
     },
     cronSecret,
   );

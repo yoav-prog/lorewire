@@ -19,6 +19,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET, POST } from "./route";
 import * as queue from "@/lib/video-render-queue";
+import * as repo from "@/lib/repo";
+
+// Minimal story row stub. getStory returns a full StoryRow but the
+// dispatcher only reads `video_config`, so the test only fills that
+// + the id. Cast via `as` so TypeScript accepts the partial shape.
+function makeStory(
+  videoConfig: string | null,
+): repo.StoryRow {
+  return {
+    id: "envelope",
+    video_config: videoConfig,
+  } as unknown as repo.StoryRow;
+}
 
 // NextRequest is a thin wrapper over Request. For these tests a plain
 // Request suffices (Route handlers accept NextRequest but Request
@@ -104,6 +117,15 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
 
   it("POSTs to Cloud Run + writes URL via finishRender on success", async () => {
     vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(
+        JSON.stringify({
+          voiceover_url: "https://gcs/envelope/narration.mp3",
+          title: "Envelope",
+          duration_ms: 131000,
+        }),
+      ),
+    );
     const finishSpy = vi
       .spyOn(queue, "finishRender")
       .mockResolvedValue(undefined);
@@ -130,7 +152,11 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     );
 
     // Verify the Cloud Run POST went where we expect AND carries the
-    // shared-secret header.
+    // shared-secret header AND the real inputProps (not an empty
+    // placeholder). This is the load-bearing assertion of this PR —
+    // the previous Phase 2 code shipped `inputProps: {}` which would
+    // render the composition's DEFAULT_PROPS (5-second preview) and
+    // not the actual story.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [callUrl, callInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(callUrl).toBe("https://run.example.com/render");
@@ -139,6 +165,16 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
       "authorization",
     );
     expect(authHeader).toBe("Bearer test-secret");
+    const sentBody = JSON.parse(callInit.body as string) as {
+      storyId: string;
+      configHash: string;
+      inputProps: { voiceover_url?: string; title?: string };
+    };
+    expect(sentBody.storyId).toBe("envelope");
+    expect(sentBody.inputProps.voiceover_url).toBe(
+      "https://gcs/envelope/narration.mp3",
+    );
+    expect(sentBody.inputProps.title).toBe("Envelope");
 
     // Verify writeback chose the success path, not the failure path.
     expect(finishSpy).toHaveBeenCalledWith(
@@ -149,8 +185,63 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     expect(failSpy).not.toHaveBeenCalled();
   });
 
+  it("fails the render when the story row is gone", async () => {
+    vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(null);
+    const failSpy = vi
+      .spyOn(queue, "failRender")
+      .mockResolvedValue(undefined);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.status).toBe("error");
+    expect(body.error).toContain("not found");
+    // No fetch fired — orchestrator gave up before reaching Cloud Run.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(failSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the render when video_config is NULL", async () => {
+    vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(makeStory(null));
+    const failSpy = vi
+      .spyOn(queue, "failRender")
+      .mockResolvedValue(undefined);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.status).toBe("error");
+    expect(body.error).toContain("video_config");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(failSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the render when video_config is malformed JSON", async () => {
+    vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(makeStory("{not json"));
+    const failSpy = vi
+      .spyOn(queue, "failRender")
+      .mockResolvedValue(undefined);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    const resp = await GET(makeReq({ auth: "Bearer test-secret" }));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.status).toBe("error");
+    expect(body.error).toContain("valid JSON");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(failSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("calls failRender with HTTP status when Cloud Run returns 5xx", async () => {
     vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(JSON.stringify({ voiceover_url: "x" })),
+    );
     const finishSpy = vi
       .spyOn(queue, "finishRender")
       .mockResolvedValue(undefined);
@@ -175,6 +266,9 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
 
   it("calls failRender when Cloud Run returns 200 but a malformed body", async () => {
     vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(JSON.stringify({ voiceover_url: "x" })),
+    );
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
@@ -195,6 +289,9 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
 
   it("calls failRender when fetch throws (network error)", async () => {
     vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(JSON.stringify({ voiceover_url: "x" })),
+    );
     const failSpy = vi
       .spyOn(queue, "failRender")
       .mockResolvedValue(undefined);
