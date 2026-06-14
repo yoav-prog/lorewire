@@ -10,8 +10,11 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { all, one, run } from "@/lib/db";
 import {
   enqueueRender,
+  forceEnqueueRender,
   hashConfig,
   isVideoRenderStale,
+  listVideoRenderEvents,
+  logVideoRenderEvent,
   type RenderRow,
 } from "@/lib/video-render-queue";
 import type { ShortVideoConfig } from "@/lib/video-config";
@@ -387,5 +390,212 @@ describe("enqueueRender — retry semantics", () => {
 
     const persisted = await getRetryRow();
     expect(persisted?.id).toBe(result.id);
+  });
+});
+
+// ─── forceEnqueueRender — bypass idempotency ─────────────────────────────────
+// The Force re-render button asks for a fresh row regardless of any
+// existing row at the same (story, config_hash). These tests pin down
+// that contract so the regular idempotency path doesn't accidentally
+// merge them, and verify the new row carries a distinct config_hash
+// suffix so the next enqueueRender for the same logical config still
+// hits its own row.
+
+describe("forceEnqueueRender — bypass semantics", () => {
+  beforeEach(async () => {
+    await run(`DELETE FROM video_renders WHERE story_id = ?`, [RETRY_STORY_ID]);
+  });
+
+  it("inserts a NEW row even when a done row already exists at the same config_hash", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'done', 1.0, NULL, 'https://gcs/x.mp4',
+               'admin-1', '2026-06-14T10:00:00.000Z',
+               '2026-06-14T10:01:00.000Z', '2026-06-14T10:05:00.000Z')`,
+      ["force-1", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    const result = await forceEnqueueRender(
+      RETRY_STORY_ID,
+      RETRY_HASH,
+      "admin-2",
+    );
+
+    expect(result.id).not.toBe("force-1");
+    expect(result.status).toBe("queued");
+    expect(result.requested_by).toBe("admin-2");
+    // Suffix discriminator so the original row is untouched and the
+    // new row doesn't collide with the next regular enqueue.
+    expect(result.config_hash.startsWith(`${RETRY_HASH}:force-`)).toBe(true);
+
+    const rows = await all<{ id: string; status: string }>(
+      `SELECT id, status FROM video_renders WHERE story_id = ? ORDER BY requested_at ASC`,
+      [RETRY_STORY_ID],
+    );
+    expect(rows).toHaveLength(2);
+  });
+
+  it("does NOT touch the existing row's state when forcing", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'error', 0, 'old failure', NULL,
+               'admin-1', '2026-06-14T10:00:00.000Z', NULL,
+               '2026-06-14T10:05:00.000Z')`,
+      ["force-2", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    await forceEnqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+
+    const original = await one<RenderRow>(
+      `SELECT id, story_id, config_hash, status, progress, error, output_url,
+              requested_by, requested_at, started_at, finished_at
+       FROM video_renders WHERE id = ?`,
+      ["force-2"],
+    );
+    expect(original?.status).toBe("error");
+    expect(original?.error).toBe("old failure");
+  });
+
+  it("a subsequent regular enqueue at the same config_hash starts fresh (doesn't see the forced row)", async () => {
+    await forceEnqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-1");
+    const regular = await enqueueRender(
+      RETRY_STORY_ID,
+      RETRY_HASH,
+      "admin-1",
+    );
+    expect(regular.status).toBe("queued");
+    expect(regular.config_hash).toBe(RETRY_HASH);
+    // Two rows total: the forced one + the regular one.
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM video_renders WHERE story_id = ?`,
+      [RETRY_STORY_ID],
+    );
+    expect(rows).toHaveLength(2);
+  });
+});
+
+// ─── video_render_events — progress log ─────────────────────────────────────
+// The editor's RenderControl reads this timeline to surface a live
+// progress log under the Render button. Locking down the basic write +
+// chronological read contract here.
+
+const EVENT_RENDER_ID = "events-test-render";
+
+describe("video_render_events helpers", () => {
+  beforeEach(async () => {
+    await run(`DELETE FROM video_render_events WHERE render_id = ?`, [
+      EVENT_RENDER_ID,
+    ]);
+  });
+
+  it("appends rows that listVideoRenderEvents returns in chronological order", async () => {
+    await logVideoRenderEvent(EVENT_RENDER_ID, "queued", {
+      message: "first",
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    await logVideoRenderEvent(EVENT_RENDER_ID, "claimed", {
+      message: "second",
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    await logVideoRenderEvent(EVENT_RENDER_ID, "finished", {
+      message: "third",
+    });
+
+    const rows = await listVideoRenderEvents(EVENT_RENDER_ID);
+    expect(rows.map((r) => r.event)).toEqual([
+      "queued",
+      "claimed",
+      "finished",
+    ]);
+    expect(rows.map((r) => r.message)).toEqual(["first", "second", "third"]);
+  });
+
+  it("stringifies payload to JSON exactly once", async () => {
+    await logVideoRenderEvent(EVENT_RENDER_ID, "cloud_run_failure", {
+      level: "error",
+      message: "503",
+      payload: { http_status: 503, body: "internal" },
+    });
+
+    const rows = await listVideoRenderEvents(EVENT_RENDER_ID);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].level).toBe("error");
+    expect(rows[0].payload).toBe(
+      JSON.stringify({ http_status: 503, body: "internal" }),
+    );
+  });
+
+  it("writes message=null and payload=null when omitted (no default JSON)", async () => {
+    await logVideoRenderEvent(EVENT_RENDER_ID, "queued");
+    const rows = await listVideoRenderEvents(EVENT_RENDER_ID);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).toBeNull();
+    expect(rows[0].payload).toBeNull();
+    expect(rows[0].level).toBe("info");
+  });
+
+  it("isolates by render_id (other render's events don't leak in)", async () => {
+    await logVideoRenderEvent(EVENT_RENDER_ID, "queued");
+    await logVideoRenderEvent("other-render", "queued");
+    const rows = await listVideoRenderEvents(EVENT_RENDER_ID);
+    expect(rows).toHaveLength(1);
+  });
+});
+
+describe("enqueueRender — event emission", () => {
+  beforeEach(async () => {
+    await run(`DELETE FROM video_renders WHERE story_id = ?`, [RETRY_STORY_ID]);
+    // Clean any event rows we'd be checking; the test asserts against
+    // the render id returned from enqueueRender so we don't know it up
+    // front and just wipe by story_id-prefix via a join.
+    await run(
+      `DELETE FROM video_render_events
+       WHERE render_id IN (
+         SELECT id FROM video_renders WHERE story_id = ?
+       )`,
+      [RETRY_STORY_ID],
+    );
+  });
+
+  it("emits a 'queued' event on first insert", async () => {
+    const row = await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-1");
+    const events = await listVideoRenderEvents(row.id);
+    expect(events.map((e) => e.event)).toContain("queued");
+  });
+
+  it("emits a 'reset_from_error' event when resetting an errored row", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'error', 0, 'transient', NULL,
+               'admin-1', '2026-06-14T10:00:00.000Z', NULL,
+               '2026-06-14T10:05:00.000Z')`,
+      ["reset-evt-1", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+    const events = await listVideoRenderEvents("reset-evt-1");
+    expect(events.map((e) => e.event)).toContain("reset_from_error");
+  });
+
+  it("emits an 'idempotent_hit' event when the existing row is done", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'done', 1.0, NULL, 'https://gcs/x.mp4',
+               'admin-1', '2026-06-14T10:00:00.000Z',
+               '2026-06-14T10:01:00.000Z', '2026-06-14T10:05:00.000Z')`,
+      ["idem-evt-1", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+    const events = await listVideoRenderEvents("idem-evt-1");
+    expect(events.map((e) => e.event)).toContain("idempotent_hit");
   });
 });

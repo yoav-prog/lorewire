@@ -299,6 +299,28 @@ export const IMAGE_RENDER_EVENTS: Table = {
   ],
 };
 
+// 2026-06-14 video-render observability. Mirrors IMAGE_RENDER_EVENTS for
+// the video_renders queue. One row per checkpoint along the render
+// lifecycle (enqueue → reset_from_error → claim → dispatch → cloud_run
+// response → finish | fail). The editor's RenderControl polls these via
+// `listVideoRenderEvents` and renders an inline timeline under the
+// Render button so the admin sees exactly which step is in flight or
+// where it stalled. Writers live on both sides of the orchestrator:
+// `queueRender` (server action) for the click event, and
+// `/api/render_video` for every cron-tick phase.
+export const VIDEO_RENDER_EVENTS: Table = {
+  name: "video_render_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "render_id", type: "TEXT" },
+    { name: "ts", type: "TEXT" },
+    { name: "level", type: "TEXT" },
+    { name: "event", type: "TEXT" },
+    { name: "message", type: "TEXT" },
+    { name: "payload", type: "TEXT" },
+  ],
+};
+
 // 2026-06-14 Reddit DB sync (see _plans/2026-06-14-reddit-db-sync.md).
 // Candidate pool of Reddit posts imported from a CSV in the admin. PK is the
 // Reddit post id — the same identifier stories.reddit_id carries — so the
@@ -355,6 +377,7 @@ export const TABLES: Table[] = [
   USERS,
   VIDEO_SEGMENTS,
   VIDEO_RENDERS,
+  VIDEO_RENDER_EVENTS,
   IMAGE_RENDERS,
   IMAGE_RENDER_EVENTS,
   ARTICLES,
@@ -389,4 +412,10 @@ export const POST_TABLE_DDL: string[] = [
   // syntax on SQLite >= 3.8 and Postgres >= 9.5.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_jobs_one_active " +
     "ON story_jobs(reddit_id) WHERE status IN ('queued', 'processing')",
+  // 2026-06-14 video-render observability. Same shape + purpose as the
+  // image-render index — every read on the timeline picker filters by
+  // render_id and orders by ts, and we expect ~10-30 events per render
+  // so the lookup is hot-pathed.
+  "CREATE INDEX IF NOT EXISTS idx_video_render_events_render_id " +
+    "ON video_render_events(render_id, ts)",
 ];
