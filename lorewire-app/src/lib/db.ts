@@ -16,11 +16,17 @@ import {
 
 export type Row = Record<string, unknown>;
 
+export interface TxHandle {
+  all(sql: string, params?: unknown[]): Promise<Row[]>;
+  run(sql: string, params?: unknown[]): Promise<void>;
+}
+
 interface Driver {
   kind: "postgres" | "sqlite";
   all(sql: string, params: unknown[]): Promise<Row[]>;
   run(sql: string, params: unknown[]): Promise<void>;
   columns(table: string): Promise<string[]>;
+  tx<T>(fn: (tx: TxHandle) => Promise<T>): Promise<T>;
 }
 
 declare global {
@@ -67,6 +73,27 @@ async function makeDriver(): Promise<Driver> {
         )) as unknown as Array<{ column_name: string }>;
         return rows.map((r) => r.column_name);
       },
+      async tx<T>(fn: (tx: TxHandle) => Promise<T>): Promise<T> {
+        // porsager/postgres exposes `sql.begin(async tx => ...)` which
+        // pins a single connection for the whole block and rolls back on
+        // throw. We adapt its callback to our TxHandle shape so callers
+        // see the same `all`/`run` they'd use outside a transaction.
+        const txResult = await sql.begin(async (txSql) => {
+          const handle: TxHandle = {
+            async all(text, params = []) {
+              return (await txSql.unsafe(
+                toPg(text),
+                params as never[],
+              )) as unknown as Row[];
+            },
+            async run(text, params = []) {
+              await txSql.unsafe(toPg(text), params as never[]);
+            },
+          };
+          return await fn(handle);
+        });
+        return txResult as T;
+      },
     };
   }
   const { DatabaseSync } = await import("node:sqlite");
@@ -88,6 +115,35 @@ async function makeDriver(): Promise<Driver> {
         .prepare(`PRAGMA table_info(${table})`)
         .all() as Array<{ name: string }>;
       return rows.map((r) => r.name);
+    },
+    async tx<T>(fn: (tx: TxHandle) => Promise<T>): Promise<T> {
+      // node:sqlite shares one connection across the process, so BEGIN
+      // / COMMIT statements emitted via the same handle form a single
+      // transaction. We DO NOT support nested tx — guarded by the
+      // single shared handle (BEGIN inside BEGIN throws on SQLite). A
+      // throw inside `fn` triggers ROLLBACK and re-throws so the caller
+      // sees the original error.
+      handle.exec("BEGIN");
+      try {
+        const txHandle: TxHandle = {
+          async all(sql, params = []) {
+            return handle.prepare(sql).all(...(params as never[])) as Row[];
+          },
+          async run(sql, params = []) {
+            handle.prepare(sql).run(...(params as never[]));
+          },
+        };
+        const result = await fn(txHandle);
+        handle.exec("COMMIT");
+        return result;
+      } catch (err) {
+        try {
+          handle.exec("ROLLBACK");
+        } catch {
+          // If ROLLBACK itself fails the original error is more useful.
+        }
+        throw err;
+      }
     },
   };
 }
@@ -153,4 +209,14 @@ export async function one<T = Row>(sql: string, params: unknown[] = []): Promise
 
 export async function run(sql: string, params: unknown[] = []): Promise<void> {
   await (await db()).run(sql, params);
+}
+
+/** Run `fn` inside a database transaction. The handle exposes the same
+ *  `all` / `run` shape callers use outside a transaction. Throwing inside
+ *  `fn` rolls back; returning commits. Both drivers honour this contract:
+ *  Postgres via `sql.begin`, SQLite via shared-connection BEGIN/COMMIT. */
+export async function tx<T>(
+  fn: (tx: TxHandle) => Promise<T>,
+): Promise<T> {
+  return (await db()).tx(fn);
 }

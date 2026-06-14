@@ -591,8 +591,90 @@ describe("auto-fill in getHomePagePicks", () => {
   });
 });
 
+describe("normalizeIso", () => {
+  it("accepts datetime-local without seconds", async () => {
+    const { normalizeIso } = await import("./curation");
+    expect(normalizeIso("2026-06-20T12:00")).toBe("2026-06-20T12:00:00.000Z");
+  });
+
+  it("accepts datetime-local with seconds (Firefox step<60)", async () => {
+    const { normalizeIso } = await import("./curation");
+    expect(normalizeIso("2026-06-20T12:00:45")).toBe(
+      "2026-06-20T12:00:45.000Z",
+    );
+  });
+
+  it("accepts full ISO with Z", async () => {
+    const { normalizeIso } = await import("./curation");
+    expect(normalizeIso("2026-06-20T12:00:00.000Z")).toBe(
+      "2026-06-20T12:00:00.000Z",
+    );
+  });
+
+  it("accepts ISO with explicit offset", async () => {
+    const { normalizeIso } = await import("./curation");
+    // +02:00 -> shifts back to UTC.
+    expect(normalizeIso("2026-06-20T14:00:00+02:00")).toBe(
+      "2026-06-20T12:00:00.000Z",
+    );
+  });
+
+  it("rejects bare date (ambiguous instant)", async () => {
+    const { normalizeIso } = await import("./curation");
+    expect(normalizeIso("2026-06-20")).toBeNull();
+  });
+
+  it("rejects zoneless full ISO that isn't datetime-local shape", async () => {
+    const { normalizeIso } = await import("./curation");
+    // No Z and no offset — would silently shift by the server's tz.
+    expect(normalizeIso("garbage")).toBeNull();
+  });
+
+  it("returns null for empty / null / undefined", async () => {
+    const { normalizeIso } = await import("./curation");
+    expect(normalizeIso("")).toBeNull();
+    expect(normalizeIso(null)).toBeNull();
+    expect(normalizeIso(undefined)).toBeNull();
+  });
+});
+
+describe("setSlotPicks transactional behaviour", () => {
+  beforeEach(clear);
+
+  it("rolls back when the INSERT fails (no half-applied DELETE)", async () => {
+    const { setSlotPicks, listSlots } = await import("./curation");
+    // Seed an initial pick.
+    await setSlotPicks("rail.top10", [{ story_id: "keep" }]);
+    // Now attempt a write whose INSERT will explode (UNIQUE collision on
+    // the SAME slot_kind + story_id within the new batch). The
+    // post-DELETE state inside the failed transaction must not survive.
+    await expect(
+      setSlotPicks("rail.top10", [
+        { story_id: "dup" },
+        { story_id: "dup" }, // same story twice — UNIQUE violation
+      ]),
+    ).rejects.toThrow();
+    const rows = await listSlots("rail.top10");
+    expect(rows.map((r) => r.story_id)).toEqual(["keep"]);
+  });
+});
+
 describe("deleteExpiredSlotRows", () => {
   beforeEach(clear);
+
+  it("treats a row at exactly the cutoff as still-fresh (boundary is exclusive)", async () => {
+    const { addToSlot, deleteExpiredSlotRows, listSlots } = await import(
+      "./curation"
+    );
+    const now = new Date("2026-06-20T00:00:00.000Z");
+    // Exactly cutoff = now - 7 days.
+    const atCutoff = new Date(
+      now.getTime() - 7 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    await addToSlot("rail.top10", "edge", { expiresAt: atCutoff });
+    expect(await deleteExpiredSlotRows(now, 7)).toBe(0);
+    expect((await listSlots("rail.top10")).length).toBe(1);
+  });
 
   it("hard-deletes rows whose expires_at is older than the grace window", async () => {
     const { addToSlot, deleteExpiredSlotRows, listSlots } = await import(

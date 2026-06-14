@@ -15,7 +15,7 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
-import { all, one, run } from "@/lib/db";
+import { all, one, run, tx } from "@/lib/db";
 
 // ─── slot-kind registry ──────────────────────────────────────────────────────
 //
@@ -386,35 +386,35 @@ export async function setSlotStories(
     throw new Error("setSlotStories requires slotKind");
   }
   const now = new Date().toISOString();
-  // We don't have a portable BEGIN/COMMIT helper exposed by @/lib/db,
-  // but the dual-driver layer keeps the connection warm for the
-  // duration of the request — delete-then-insert in immediate
-  // succession is the smallest reasonable critical section.
-  await run("DELETE FROM curation_slots WHERE slot_kind = ?", [slotKind]);
-  if (storyIds.length === 0) return 0;
-  // Multi-row INSERT, same shape as bulk_insert_reddit_sources.
-  const placeholders = storyIds.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(
-    ", ",
-  );
-  const params: unknown[] = [];
-  for (let i = 0; i < storyIds.length; i++) {
-    params.push(
-      randomUUID(),
-      slotKind,
-      i,
-      storyIds[i],
-      null,
-      null,
-      opts.notes ?? null,
-      now,
-      now,
+  // Single transaction so a concurrent reader never observes the empty
+  // window between DELETE and INSERT. Matches the Python side
+  // (`store.set_slot_stories` uses BEGIN/COMMIT for the same reason).
+  return tx(async (t) => {
+    await t.run("DELETE FROM curation_slots WHERE slot_kind = ?", [slotKind]);
+    if (storyIds.length === 0) return 0;
+    const placeholders = storyIds.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(
+      ", ",
     );
-  }
-  await run(
-    `INSERT INTO curation_slots (${COLS}) VALUES ${placeholders}`,
-    params,
-  );
-  return storyIds.length;
+    const params: unknown[] = [];
+    for (let i = 0; i < storyIds.length; i++) {
+      params.push(
+        randomUUID(),
+        slotKind,
+        i,
+        storyIds[i],
+        null,
+        null,
+        opts.notes ?? null,
+        now,
+        now,
+      );
+    }
+    await t.run(
+      `INSERT INTO curation_slots (${COLS}) VALUES ${placeholders}`,
+      params,
+    );
+    return storyIds.length;
+  });
 }
 
 // ─── scheduled-replace write (Phase 6) ──────────────────────────────────────
@@ -441,50 +441,76 @@ export async function setSlotPicks(
     throw new Error("setSlotPicks requires slotKind");
   }
   const now = new Date().toISOString();
-  await run("DELETE FROM curation_slots WHERE slot_kind = ?", [slotKind]);
-  if (picks.length === 0) return 0;
-  const placeholders = picks.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(
-    ", ",
-  );
-  const params: unknown[] = [];
-  for (let i = 0; i < picks.length; i++) {
-    const p = picks[i];
-    params.push(
-      randomUUID(),
-      slotKind,
-      i,
-      p.story_id,
-      normalizeIso(p.publish_at ?? null),
-      normalizeIso(p.expires_at ?? null),
-      opts.notes ?? null,
-      now,
-      now,
+  // Same transactional contract as setSlotStories. Without this, a
+  // home-page render hitting the DB between DELETE and INSERT sees an
+  // empty slot — and when auto-fill is also off, the rail renders zero
+  // posters until the next save.
+  return tx(async (t) => {
+    await t.run("DELETE FROM curation_slots WHERE slot_kind = ?", [slotKind]);
+    if (picks.length === 0) return 0;
+    const placeholders = picks.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(
+      ", ",
     );
-  }
-  await run(
-    `INSERT INTO curation_slots (${COLS}) VALUES ${placeholders}`,
-    params,
-  );
-  return picks.length;
+    const params: unknown[] = [];
+    for (let i = 0; i < picks.length; i++) {
+      const p = picks[i];
+      params.push(
+        randomUUID(),
+        slotKind,
+        i,
+        p.story_id,
+        normalizeIso(p.publish_at ?? null),
+        normalizeIso(p.expires_at ?? null),
+        opts.notes ?? null,
+        now,
+        now,
+      );
+    }
+    await t.run(
+      `INSERT INTO curation_slots (${COLS}) VALUES ${placeholders}`,
+      params,
+    );
+    return picks.length;
+  });
 }
 
-// Accept any of: ISO string, `datetime-local` value ("2026-06-15T18:30"),
-// empty string. Returns a canonical ISO-with-Z string or null. We do NOT
-// try to validate calendar correctness — the SQL comparison is lexical
-// and tolerates partial timestamps as long as they sort right.
-function normalizeIso(v: string | null | undefined): string | null {
+// Accept any of: ISO string, `datetime-local` value ("2026-06-15T18:30"
+// or "2026-06-15T18:30:45"), an admin-typed full ISO with timezone,
+// empty string. Returns a canonical ISO-with-Z string or null on
+// unparseable input. We do NOT try to validate calendar correctness —
+// the SQL comparison is lexical and tolerates partial timestamps as
+// long as they sort right.
+//
+// Bare dates ("2026-06-20") are REJECTED because their interpretation
+// is ambiguous (UTC midnight vs local midnight) and admins who type
+// only a date rarely mean midnight UTC. Surfacing null lets the action
+// reject the input with a soft error instead of silently writing the
+// wrong instant.
+export function normalizeIso(v: string | null | undefined): string | null {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
   if (!s) return null;
-  // `datetime-local` widgets emit "YYYY-MM-DDTHH:mm" (no seconds, no zone).
-  // Treat as UTC so the value compares cleanly with the activeAt filter
-  // (also UTC). Admins picking "12:00" expect "12:00 UTC", which matches
-  // the implicit contract everywhere else in the codebase.
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s)) {
-    return new Date(`${s}:00Z`).toISOString();
+  // Bare date — refuse rather than guess a time.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  // `datetime-local` widgets emit "YYYY-MM-DDTHH:mm" with no seconds and
+  // no zone; Firefox with step<60 adds ":ss" and optionally ".fff".
+  // Treat all of these as UTC so the value compares cleanly with the
+  // activeAt filter — admins picking "12:00" expect "12:00 UTC", which
+  // matches the implicit contract everywhere else in the codebase.
+  const dtLocalMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/
+    .exec(s);
+  if (dtLocalMatch) {
+    const [, date, time] = dtLocalMatch;
+    const hms = time.length === 5 ? `${time}:00` : time;
+    const d = new Date(`${date}T${hms}Z`);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toISOString();
   }
-  // Try generic Date parse for full ISO inputs. Invalid -> null instead
-  // of throwing; the action will surface a soft error.
+  // Full ISO with timezone — let Date parse it. Reject anything else.
+  // Date.parse accepts a wider grammar than ISO 8601; we filter to the
+  // shapes that carry an explicit zone so we never accept a bare local
+  // time and silently shift it by the admin's tz offset.
+  if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) return null;
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();

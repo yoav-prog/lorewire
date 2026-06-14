@@ -3272,13 +3272,18 @@ def delete_expired_curation_slots(
     """
     if grace_days < 0:
         raise ValueError("grace_days must be non-negative")
-    if now_iso is None:
-        from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
+    if now_iso is None:
         now_iso = datetime.now(timezone.utc).isoformat()
-    from datetime import datetime, timedelta
 
     cutoff_dt = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+    # Treat naive timestamps as UTC so a manual/test caller passing a
+    # zoneless ISO doesn't fall out of phase with the aware values the
+    # cron handler writes. The cron always passes aware; the harden is
+    # for callers that don't.
+    if cutoff_dt.tzinfo is None:
+        cutoff_dt = cutoff_dt.replace(tzinfo=timezone.utc)
     cutoff = (cutoff_dt - timedelta(days=grace_days)).isoformat()
 
     if _is_postgres():

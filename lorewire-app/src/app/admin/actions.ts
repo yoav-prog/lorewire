@@ -46,6 +46,30 @@ import {
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
 import { run } from "@/lib/db";
+
+// Driver-aware UNIQUE-violation detection. Postgres surfaces SQLSTATE
+// `23505`; node:sqlite raises an Error whose `code` is
+// `ERR_SQLITE_ERROR` and whose `errcode`/message names the constraint.
+// We accept any of those signals; we deliberately do NOT match by free
+// text because "constraint" appears in many unrelated DB errors and
+// would silently swallow real failures.
+function isUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; errcode?: unknown; message?: unknown };
+  if (e.code === "23505") return true; // Postgres
+  // node:sqlite — the underlying SQLite extended code is 2067
+  // (SQLITE_CONSTRAINT_UNIQUE) or 1555 (SQLITE_CONSTRAINT_PRIMARYKEY).
+  // The Node binding surfaces these via `errcode` and the message
+  // begins with "UNIQUE constraint failed".
+  if (e.errcode === 2067 || e.errcode === 1555) return true;
+  if (
+    typeof e.message === "string" &&
+    /^UNIQUE constraint failed/i.test(e.message)
+  ) {
+    return true;
+  }
+  return false;
+}
 import {
   canEnqueueImageRegen,
   cancelAllImageRendersForOwner,
@@ -2320,11 +2344,12 @@ export async function addStoryToSlotAction(
       slot_kind: slotKind,
     });
   } catch (err) {
-    // UNIQUE(slot_kind, story_id) trips when the story is already pinned —
-    // surface that as a soft message instead of a 500. Any other failure
-    // re-throws so the request logs a real stack.
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/UNIQUE|duplicate|constraint/i.test(msg)) {
+    // UNIQUE(slot_kind, story_id) trips when the story is already pinned.
+    // Detect via driver-specific error code rather than free-text regex
+    // so unrelated DB errors (FK violations, check constraints, anything
+    // else with "constraint" in the message) don't get re-categorized as
+    // "already pinned" and silently swallowed.
+    if (isUniqueViolation(err)) {
       console.info("[curation story add skipped]", {
         story_id: storyId,
         slot_kind: slotKind,
