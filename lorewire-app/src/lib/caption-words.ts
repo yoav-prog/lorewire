@@ -1,13 +1,16 @@
 // Per-word helpers shared by the editor preview's CaptionBand and any
 // other surface that needs to walk a caption chunk word-by-word.
 //
-// MUST stay byte-identical to `lorewire-app/src/lib/caption-words.ts`
-// (with the import path swapped). The renderer can't import from
-// lorewire-app, so the two files are kept in sync by the parity test in
-// `lorewire-app/tests/lib/caption-words.test.ts`. When you change a
-// function body here, mirror it there in the same PR.
+// MUST stay byte-identical to `video/src/caption-words.ts` (with the
+// import path swapped). The renderer can't import from lorewire-app, so
+// the two files are kept in sync by the parity test in
+// `tests/lib/caption-words.test.ts`. When you change a function body
+// here, mirror it there in the same PR.
 
-import type { ShortCaptionChunk, ShortCaptionWord } from "./types";
+import type {
+  ShortCaptionChunk,
+  ShortCaptionWord,
+} from "@/lib/video-config";
 
 // Returns the word the karaoke / per-word highlight should land on at
 // the given elapsedMs. Linear scan because chunks have at most ~4 words

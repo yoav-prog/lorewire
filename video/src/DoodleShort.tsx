@@ -23,7 +23,7 @@ import {
   resolveCaptionTemplate,
   type ResolvedTemplate,
 } from "./caption-style";
-import { findActiveWordIndex } from "./caption-words";
+import { findActiveWordIndex, splitChunkWords } from "./caption-words";
 import { FONT_FAMILY } from "./fonts";
 import { MicroWiggle } from "./motion/MicroWiggle";
 import { LabelPopOn } from "./motion/LabelPopOn";
@@ -314,13 +314,10 @@ const DoodleCaption: React.FC<{
   const fadeOut = Math.min(1, Math.max(0, untilEnd / CHUNK_FADE_MS));
   const opacity = Math.min(fadeIn, fadeOut);
 
-  // Fall back to evenly-distributed tokens when alignment didn't produce
-  // word timings (e.g. STT skipped a chunk). The karaoke effect still has
-  // something to track even if the per-word boundaries are approximate.
-  const words: ShortCaptionWord[] =
-    caption.words && caption.words.length > 0
-      ? caption.words
-      : proportionalWords(caption);
+  // Word-level split. Prefers alignment-derived `caption.words` and falls
+  // back to a proportional split so a chunk without alignment still has a
+  // usable per-word timeline.
+  const words: ShortCaptionWord[] = splitChunkWords(caption);
   const activeIdx =
     style.wordHighlight === "none" ? -1 : findActiveWordIndex(words, elapsedMs);
 
@@ -335,6 +332,106 @@ const DoodleCaption: React.FC<{
   const fontSize = Math.round(scaleW(baseFontSize) * style.sizeScale);
   const outlineWidth = scaleW(style.outlineWidth);
   const shadowOffset = scaleW(4);
+
+  // wordHighlight === "none": render the chunk as one block, no per-word
+  // styling. Used for "I just want the text, no karaoke pulse".
+  if (style.wordHighlight === "none" || words.length === 0) {
+    return (
+      <div
+        style={{
+          position: "absolute",
+          top: `${style.positionY * 100}%`,
+          left: 0,
+          right: 0,
+          display: "flex",
+          justifyContent: "center",
+          padding: `0 ${scaleW(style.paddingX)}px`,
+          opacity,
+        }}
+      >
+        <div
+          style={{
+            fontSize,
+            fontWeight: style.fontWeight,
+            fontFamily: FONT_FAMILY,
+            textTransform: style.textTransform,
+            letterSpacing: style.letterSpacing,
+            lineHeight: style.lineHeight,
+            textAlign: "center",
+            color: style.color,
+            WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
+            textShadow: [
+              `0 0 1px ${style.outlineColor}`,
+              `0 ${shadowOffset}px 0 ${style.outlineColor}`,
+              `0 -${shadowOffset}px 0 ${style.outlineColor}`,
+              `${shadowOffset}px 0 0 ${style.outlineColor}`,
+              `-${shadowOffset}px 0 0 ${style.outlineColor}`,
+            ].join(", "),
+            maxWidth: "100%",
+          }}
+        >
+          {caption.text}
+        </div>
+      </div>
+    );
+  }
+
+  // Per-word render path. Each mode chooses how a single word should look
+  // given its position relative to the active index. Background pills get
+  // a little extra horizontal padding scaled with the font size so the
+  // pill doesn't crowd the glyphs at large sizes.
+  const pillPadX = Math.round(fontSize * 0.12);
+  const pillPadY = Math.round(fontSize * 0.04);
+  const pillRadius = Math.round(fontSize * 0.18);
+
+  function wordStyle(i: number): React.CSSProperties {
+    const isActive = i === activeIdx;
+    const isSpoken = i < activeIdx;
+    switch (style.wordHighlight) {
+      case "karaoke":
+        return {
+          color: isActive
+            ? style.activeWordColor
+            : isSpoken
+              ? style.spokenWordColor
+              : style.color,
+          transition: "color 80ms ease-out",
+        };
+      case "color":
+        return {
+          color: isActive ? style.activeWordColor : style.color,
+          transition: "color 80ms ease-out",
+        };
+      case "scale":
+        return {
+          color: isActive ? style.activeWordColor : style.color,
+          transform: isActive ? "scale(1.15)" : "scale(1)",
+          transformOrigin: "center bottom",
+          transition: "transform 120ms ease-out, color 80ms ease-out",
+        };
+      case "background":
+        // Padding is applied to every word (active or not) so swapping
+        // the active word doesn't push neighbors around — the highlight
+        // glides cleanly behind the words instead of reflowing the line.
+        // borderRadius is also constant; only `background` toggles.
+        return {
+          color: style.color,
+          background: isActive ? style.activeWordColor : "transparent",
+          padding: `${pillPadY}px ${pillPadX}px`,
+          borderRadius: pillRadius,
+          // The pill takes over the outline visually; drop the stroke on
+          // the active word so the glyph reads cleanly against the fill.
+          WebkitTextStroke: isActive ? "0" : undefined,
+          transition: "background 80ms ease-out",
+        };
+      default:
+        // "none" is handled by the early return above, but ResolvedTemplate
+        // types wordHighlight as a string-union and TS can't narrow through
+        // the closure — keep an explicit fallback so the component never
+        // returns undefined if the enum grows a new value.
+        return { color: style.color };
+    }
+  }
 
   return (
     <div
@@ -374,15 +471,9 @@ const DoodleCaption: React.FC<{
           <span
             key={i}
             style={{
-              color:
-                i === activeIdx
-                  ? style.activeWordColor
-                  : i < activeIdx
-                    ? style.spokenWordColor
-                    : style.color,
-              marginRight: i < words.length - 1 ? scaleW(16) : 0,
               display: "inline-block",
-              transition: "color 80ms ease-out",
+              marginRight: i < words.length - 1 ? scaleW(16) : 0,
+              ...wordStyle(i),
             }}
           >
             {w.word}
@@ -392,21 +483,6 @@ const DoodleCaption: React.FC<{
     </div>
   );
 };
-
-function proportionalWords(caption: ShortCaptionChunk): ShortCaptionWord[] {
-  const tokens = caption.text
-    .split(/\s+/)
-    .map((t) => t.trim())
-    .filter(Boolean);
-  if (tokens.length === 0) return [];
-  const span = Math.max(1, caption.end_ms - caption.start_ms);
-  const per = span / tokens.length;
-  return tokens.map((token, i) => ({
-    word: token,
-    start_ms: Math.round(caption.start_ms + i * per),
-    end_ms: Math.round(caption.start_ms + (i + 1) * per),
-  }));
-}
 
 // Single overlay layer. Plain white text with a heavy shadow so it reads
 // against any background (doodle bg #fbfaf4 OR a photo frame). Position

@@ -20,9 +20,16 @@
 //     concat will produce on render (added 2026-06-13).
 //
 // What it deliberately DOESN'T:
-//   - Karaoke per-word highlight
 //   - Motion beats (MicroWiggle, ScribbleDraw, PropSlideIn, MouthSwap, LabelPopOn)
 //   - Ken-Burns pan/zoom
+//
+// Per-word highlight (added 2026-06-14): the four non-`none` modes —
+// karaoke / color / scale / background — render the same per-word effect
+// the rendered MP4 will, using `splitChunkWords` + `findActiveWordIndex`
+// from `@/lib/caption-words`. That helper file is kept parity-locked
+// with the renderer's copy at `video/src/caption-words.ts` so the
+// editor's preview matches the final frame byte-for-byte at the
+// word-rendering level.
 //
 // Editors that need exact frame fidelity should hit "Render" — the queued
 // MP4 is the canonical output.
@@ -38,6 +45,10 @@ import {
   useVideoConfig,
 } from "remotion";
 import type { Overlay, ShortVideoConfig } from "@/lib/video-config";
+import {
+  findActiveWordIndex,
+  splitChunkWords,
+} from "@/lib/caption-words";
 import { PreviewEmptyState } from "./PreviewEmptyState";
 
 const TITLE_VISIBLE_MS = 1200;
@@ -450,7 +461,12 @@ function CaptionBand({
   elapsedMs,
   style,
 }: {
-  caption: { start_ms: number; end_ms: number; text: string };
+  caption: {
+    start_ms: number;
+    end_ms: number;
+    text: string;
+    words?: { word: string; start_ms: number; end_ms: number }[];
+  };
   elapsedMs: number;
   style?: CaptionStyleProps;
 }) {
@@ -478,46 +494,127 @@ function CaptionBand({
   const lineHeight = style?.line_height ?? 1.05;
   const textTransform = style?.text_transform ?? "uppercase";
   const color = style?.color ?? "#facc15";
+  const activeWordColor = style?.active_word_color ?? "#ffffff";
+  const spokenWordColor =
+    style?.spoken_word_color ?? "rgba(250, 204, 21, 0.45)";
   const outlineColor = style?.outline_color ?? "#0f172a";
   const outlineWidth = style?.outline_width ?? 6;
+  const wordHighlight = style?.word_highlight ?? "karaoke";
   const fontSize = 88 * sizeScale;
 
-  return (
-    <div
-      style={{
-        position: "absolute",
-        top: `${positionY * 100}%`,
-        left: 0,
-        right: 0,
-        display: "flex",
-        justifyContent: "center",
-        padding: `0 ${paddingX}px`,
-        opacity,
-        pointerEvents: "none",
-      }}
-    >
-      <div
-        style={{
-          fontSize,
-          fontWeight,
-          fontFamily: "Arial Black, Arial, sans-serif",
-          textTransform,
-          letterSpacing,
-          lineHeight,
-          textAlign: "center",
+  const containerStyle: React.CSSProperties = {
+    position: "absolute",
+    top: `${positionY * 100}%`,
+    left: 0,
+    right: 0,
+    display: "flex",
+    justifyContent: "center",
+    padding: `0 ${paddingX}px`,
+    opacity,
+    pointerEvents: "none",
+  };
+  const textBlockStyle: React.CSSProperties = {
+    fontSize,
+    fontWeight,
+    fontFamily: "Arial Black, Arial, sans-serif",
+    textTransform,
+    letterSpacing,
+    lineHeight,
+    textAlign: "center",
+    color,
+    WebkitTextStroke: `${outlineWidth}px ${outlineColor}`,
+    textShadow: [
+      `0 0 1px ${outlineColor}`,
+      `0 ${outlineWidth - 2}px 0 ${outlineColor}`,
+      `0 -${outlineWidth - 2}px 0 ${outlineColor}`,
+      `${outlineWidth - 2}px 0 0 ${outlineColor}`,
+      `-${outlineWidth - 2}px 0 0 ${outlineColor}`,
+    ].join(", "),
+    maxWidth: "100%",
+  };
+
+  // wordHighlight === "none" or no words → single block, no per-word styling.
+  // The split helper returns [] for an empty chunk; treat that the same as
+  // "none" so we don't render an empty span tree.
+  const words = splitChunkWords(caption);
+  if (wordHighlight === "none" || words.length === 0) {
+    return (
+      <div style={containerStyle}>
+        <div style={textBlockStyle}>{caption.text}</div>
+      </div>
+    );
+  }
+
+  const activeIdx = findActiveWordIndex(words, elapsedMs);
+
+  // Background-pill geometry scales with font size so the pill stays
+  // proportional whether the editor is showing a small zoom or full size.
+  const pillPadX = Math.round(fontSize * 0.12);
+  const pillPadY = Math.round(fontSize * 0.04);
+  const pillRadius = Math.round(fontSize * 0.18);
+
+  function wordStyle(i: number): React.CSSProperties {
+    const isActive = i === activeIdx;
+    const isSpoken = i < activeIdx;
+    switch (wordHighlight) {
+      case "karaoke":
+        return {
+          color: isActive
+            ? activeWordColor
+            : isSpoken
+              ? spokenWordColor
+              : color,
+          transition: "color 80ms ease-out",
+        };
+      case "color":
+        return {
+          color: isActive ? activeWordColor : color,
+          transition: "color 80ms ease-out",
+        };
+      case "scale":
+        return {
+          color: isActive ? activeWordColor : color,
+          transform: isActive ? "scale(1.15)" : "scale(1)",
+          transformOrigin: "center bottom",
+          transition: "transform 120ms ease-out, color 80ms ease-out",
+        };
+      case "background":
+        // Padding is applied to every word (active or not) so swapping
+        // the active word doesn't push neighbors around — the highlight
+        // glides cleanly behind the words instead of reflowing the line.
+        // borderRadius is also constant; only `background` toggles.
+        return {
           color,
-          WebkitTextStroke: `${outlineWidth}px ${outlineColor}`,
-          textShadow: [
-            `0 0 1px ${outlineColor}`,
-            `0 ${outlineWidth - 2}px 0 ${outlineColor}`,
-            `0 -${outlineWidth - 2}px 0 ${outlineColor}`,
-            `${outlineWidth - 2}px 0 0 ${outlineColor}`,
-            `-${outlineWidth - 2}px 0 0 ${outlineColor}`,
-          ].join(", "),
-          maxWidth: "100%",
-        }}
-      >
-        {caption.text}
+          background: isActive ? activeWordColor : "transparent",
+          padding: `${pillPadY}px ${pillPadX}px`,
+          borderRadius: pillRadius,
+          // The pill takes over the outline visually; drop the stroke on
+          // the active word so the glyph reads cleanly against the fill.
+          WebkitTextStroke: isActive ? "0" : undefined,
+          transition: "background 80ms ease-out",
+        };
+      default:
+        // "none" is handled by the early return above; this branch only
+        // fires if the enum grows a new value the renderer doesn't know.
+        return { color };
+    }
+  }
+
+  return (
+    <div style={containerStyle}>
+      <div style={textBlockStyle}>
+        {words.map((w, i) => (
+          <span
+            key={i}
+            style={{
+              display: "inline-block",
+              marginRight: i < words.length - 1 ? 16 : 0,
+              ...wordStyle(i),
+            }}
+          >
+            {w.word}
+          </span>
+        ))}
       </div>
     </div>
   );
