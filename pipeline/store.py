@@ -1275,6 +1275,20 @@ def story_jobs_drain_lock() -> _AdvisoryLock:
     return _AdvisoryLock(STORY_JOBS_DRAIN_LOCK_KEY)
 
 
+# Phase 4.b of _plans/2026-06-14-voiceover-picker.md.
+# Distinct integer so the voice_renders drain doesn't contend with the
+# image_renders or story_jobs drains on the same Postgres advisory lock.
+# Three queues, three keys — independent throughput for each.
+VOICE_RENDERS_DRAIN_LOCK_KEY = 8472303
+
+
+def voice_renders_drain_lock() -> _AdvisoryLock:
+    """Convenience wrapper for the voice_renders drain at
+    `lorewire-app/api/drain_voice_renders.py`. Same SQLite no-op /
+    Postgres advisory-lock semantics as the other queue locks."""
+    return _AdvisoryLock(VOICE_RENDERS_DRAIN_LOCK_KEY)
+
+
 # ─── image_render_events (2026-06-13 Phase 2 observability) ───────────────────
 # A contextvar-based pattern so the regen helpers in pipeline/media.py can
 # emit events without every function in the chain growing a render_id
@@ -2730,6 +2744,25 @@ def latest_voice_render_for_story(story_id: str) -> dict | None:
             (story_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def count_pending_voice_renders() -> int:
+    """Queue depth (queued + processing). Powers the drain's idle
+    short-circuit so an empty tick bills near-zero on Vercel Active
+    CPU. Mirrors count_pending_story_jobs."""
+    sql = (
+        "SELECT count(*) AS n FROM voice_renders "
+        "WHERE status IN ('queued', 'processing')"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+        return int(row["n"]) if row else 0
+    with _sqlite_conn() as c:
+        row = c.execute(sql).fetchone()
+        return int(row["n"]) if row else 0
 
 
 def update_voice_render_progress(render_id: str, progress: int) -> None:

@@ -30,6 +30,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 import time
 import traceback
 from pathlib import Path
@@ -43,6 +46,32 @@ DEFAULT_POLL_SECONDS = 5
 # returns in seconds for a 2500-char article, Google in <30s. Anything
 # longer is a network stall and the next tick's reap should clear it.
 STALE_AFTER_SECONDS = 15 * 60
+
+
+def _is_serverless() -> bool:
+    """True when the worker is running on Vercel's Python runtime. Used
+    by `_resolve_output_dir` to route filesystem writes to /tmp instead
+    of `public/generated/`, which is part of the deployed bundle and
+    read-only on Vercel.
+    Detection mirrors what Vercel docs suggest: VERCEL=1 is set on every
+    function invocation; VERCEL_ENV carries the deployment env. Either
+    is sufficient evidence we're serverless."""
+    return bool(os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"))
+
+
+def _resolve_output_dir(safe_id: str) -> Path:
+    """Pick the writable directory for the synthesized narration. In dev
+    we keep the existing pattern (write to public/generated/<id>/ so
+    `gcs.publish`'s local fallback can serve `/generated/<id>/narration.mp3`
+    without GCS configured). On Vercel, that path is read-only so we use
+    a per-invocation /tmp subdirectory — the file lives only long enough
+    to upload to GCS, and the drain DOESN'T make sense in a no-GCS
+    environment anyway (the local URL would 404 since /tmp isn't served).
+    Caller is responsible for cleanup; the drain wraps the call in a
+    finally block that removes the tempdir."""
+    if _is_serverless():
+        return Path(tempfile.mkdtemp(prefix=f"voice-regen-{safe_id}-"))
+    return REPO_ROOT / "lorewire-app" / "public" / "generated" / safe_id
 
 # Sample text for the regen path. Unlike Phase 2.b's preview script,
 # this isn't a fixed sentence — the body is the actual story text from
@@ -76,9 +105,10 @@ def _default_process(render_row: dict, story_row: dict) -> dict:
         raise RuntimeError("story has no body text to synthesize")
 
     safe_id = _sanitize_id(story_row["id"])
-    out_dir = REPO_ROOT / "lorewire-app" / "public" / "generated" / safe_id
+    out_dir = _resolve_output_dir(safe_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     narration_path = out_dir / "narration.mp3"
+    serverless_tempdir = out_dir if _is_serverless() else None
 
     # Snapshot media cost before/after so we can write per-render spend
     # to voice_renders.cost_cents — mirrors the story_jobs cost-capture
@@ -153,6 +183,19 @@ def _default_process(render_row: dict, story_row: dict) -> dict:
 
     after_usd = media.running_cost_usd()
     cost_cents = max(0, round((after_usd - before_usd) * 100))
+
+    # Best-effort cleanup of the per-invocation /tmp subdir on serverless.
+    # /tmp on Vercel is 512MB shared across invocations; a queue of 100
+    # voice renders without cleanup would eat ~5GB of stale narration.mp3
+    # files between cold boots. Errors here are swallowed because the
+    # synth + upload already succeeded — leaking a tempdir is a footnote
+    # next to losing the regen.
+    if serverless_tempdir is not None:
+        try:
+            shutil.rmtree(serverless_tempdir, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
+
     return {"audio_url": stored_url, "cost_cents": cost_cents}
 
 
