@@ -73,6 +73,20 @@ Each phase is independently mergeable. Worst-case revert is a single column drop
   - `getOrCreateVoicePreview` short-circuits when GCS object already exists (no double-spend).
   - Graceful degrade when `ELEVENLABS_API_KEY` is missing.
 
+### Phase 2.b — Preview MP3 bake script (shipped 2026-06-14)
+
+**Why:** Phase 2 ships `listVoices()` with constructed GCS URLs but the objects don't exist yet — the picker's ▶ play button would 404 on every Google/Gemini voice. This script populates `voice-previews/<provider>/<voice_id>.mp3` for the curated 8-voice catalog × 3 providers = 24 objects, ~$0.06 total one-time cost.
+
+**Shipped:**
+- ✅ `pipeline/gcs.py:exists(key)` helper — anonymous HEAD against the public URL so the bake can skip already-baked objects without consuming an access token. Treats any non-200 (including 404, 403, transport errors) as "doesn't exist" so the caller falls into the safe re-upload path.
+- ✅ [scripts/bake_voice_previews.py](scripts/bake_voice_previews.py) — synthesizes the preview text ("Hi, I'm your narrator for today's story.") for every (provider, voice_id) combo using the Phase 1 override args, uploads to the exact key shape `voice-library.ts:_previewUrlFor` reads. Flags: `--provider`, `--voice`, `--force`, `--dry-run`. Idempotent re-runs (skip-when-exists is the default).
+- ✅ Curated `GOOGLE_CHIRP3_HD_VOICE_IDS` tuple in the script mirrors the TS-side `GOOGLE_CHIRP3_HD_VOICES` constant in voice-library.ts. The Python parity test locks count + ordering + format so a one-sided edit fails CI.
+- ✅ Tests: 15 new in [pipeline/tests/test_bake_voice_previews.py](pipeline/tests/test_bake_voice_previews.py) — list parity (count, no duplicates, format, exclusion of ElevenLabs), GCS key shape (mirrors TS reader), filter logic (no filter / provider only / voice only / both), bake_one orchestration (skip when exists, force overrides skip, dry-run skips synth+upload, override args thread through, upload key shape).
+- ✅ End-to-end dry-run walks all 24 work items cleanly.
+- ✅ Suite: 15 bake + 36 voice + 8 gcs = 59 green.
+
+**To run in prod:** `python scripts/bake_voice_previews.py` — first invocation bakes all 24 objects (~$0.06, ~3-5 minutes). Subsequent runs are no-ops (skip-when-exists). Cost is amortized — once baked, the picker plays them forever without TTS calls.
+
 ### Phase 3 — Shared `<VoicePicker />` + story-page surface (UI, behind flag)
 
 Skeleton recorded; expanded once Phase 2 lands.

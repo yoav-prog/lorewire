@@ -194,6 +194,37 @@ def publish(local_path: Path, key: str, local_url: str) -> str:
     return local_url
 
 
+def exists(key: str) -> bool:
+    """Return True when `<bucket>/<key>` already exists in GCS.
+
+    Anonymous HEAD against the public URL — the bucket is configured
+    public-read so no auth is needed for an existence probe. Used by
+    the voice-preview bake script to make re-runs idempotent:
+    `scripts/bake_voice_previews.py` skips objects already present
+    instead of paying for the TTS call + upload twice.
+
+    Returns False on any non-200 (including 404, 403, and transport
+    errors) — treating "I can't tell" as "doesn't exist" means the
+    caller re-uploads, which is the safe fallback (uploads overwrite
+    cleanly on GCS).
+    """
+    bucket = config.env("GCS_BUCKET")
+    if not bucket:
+        return False
+    url = (
+        f"{PUBLIC_BASE}/{urllib.parse.quote(bucket, safe='')}"
+        f"/{urllib.parse.quote(key, safe='/')}"
+    )
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except urllib.error.HTTPError:
+        return False
+    except urllib.error.URLError:
+        return False
+
+
 def _reset_cache_for_tests() -> None:
     _cached["token"] = None
     _cached["expires_at"] = 0.0
