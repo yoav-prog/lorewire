@@ -64,6 +64,16 @@ DAILY_BUDGET_CAP_SETTING_KEY = "pipeline.story_jobs.daily_cap_cents"
 # tracking input/output separately or when the active model changes.
 LLM_USD_PER_TOKEN = 1e-6
 
+# Reason recorded on story_jobs.error when the Vercel drain pre-skips a
+# with_media=True job. The hosted Python runtime can't shell out to
+# Remotion via npx, so claiming + processing would burn LLM + image spend
+# only to crash at the video step. Pre-skipping at claim time lets the
+# admin see exactly why the row was rejected and how to recover.
+DRAIN_UNSUPPORTED_MEDIA_REASON = (
+    "drain runtime cannot generate video (no Node + Remotion); "
+    "re-enqueue with with_media=False or run the local worker"
+)
+
 ProcessFn = Callable[[dict, dict], dict]
 
 
@@ -280,12 +290,22 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     return row
 
 
-def run_one_tick(process_fn: ProcessFn | None = None) -> bool:
+def run_one_tick(
+    process_fn: ProcessFn | None = None,
+    skip_with_media: bool = False,
+) -> bool:
     """Claim and process one story_job. Returns True if a row was handled
     (success OR failure), False if the queue is empty.
 
     Any exception in the process path is caught and recorded as a failed
     job so a single bad row doesn't crash the worker loop.
+
+    `skip_with_media`: when True, a claimed job whose `with_media=True`
+    flag is set is failed immediately with `DRAIN_UNSUPPORTED_MEDIA_REASON`
+    instead of being processed. Used by the Vercel drain
+    (lorewire-app/api/drain_story_jobs.py) whose runtime can't run
+    Remotion. Local CLI workers leave this False so video jobs process
+    normally.
     """
     pfn = process_fn if process_fn is not None else _default_process
 
@@ -316,6 +336,22 @@ def run_one_tick(process_fn: ProcessFn | None = None) -> bool:
         f"[story-jobs claim] job={job_id} reddit_id={reddit_id} "
         f"with_media={with_media}"
     )
+
+    if skip_with_media and with_media:
+        # Pre-skip the moment we know this is a video job. Failing fast
+        # (before fetch_reddit_source / process_fn) means zero LLM + image
+        # spend on a row the runtime can't finish. Source row flips back
+        # to 'imported' (not 'queued' like the regular error path below)
+        # because bulkEnqueueStoryJobs guards re-enqueue on imported — so
+        # an admin can immediately re-Process this row with
+        # with_media=False and the drain will handle it next tick.
+        store.fail_story_job(job_id, DRAIN_UNSUPPORTED_MEDIA_REASON)
+        store.set_reddit_source_status(reddit_id, "imported")
+        print(
+            f"[story-jobs drain-skip] job={job_id} reddit_id={reddit_id} "
+            f"reason=with_media-unsupported"
+        )
+        return True
 
     reddit_row = store.fetch_reddit_source(reddit_id)
     if reddit_row is None:
