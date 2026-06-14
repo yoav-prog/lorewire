@@ -114,4 +114,4 @@ EXPOSE 8080
 # because long-tail Remotion render failures can leave headless Chrome
 # orphaned, and a Cloud Run instance is reused across requests.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/server/index.js"]
+CMD ["node", "dist/server/start.js"]
