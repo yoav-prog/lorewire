@@ -2,22 +2,34 @@
   "name": "lorewire-video",
   "private": true,
   "version": "0.0.1",
-  "description": "Remotion project for LoreWire doodle shorts.",
+  "description": "Remotion project for LoreWire doodle shorts. Also hosts the Cloud Run render service (Phase 1 of _plans/2026-06-14-cloud-run-render.md).",
   "scripts": {
     "preview": "remotion preview src/Root.tsx",
     "render": "remotion render src/Root.tsx",
-    "test:motion": "node --test src/motion/mouth-timing.test.mjs"
+    "test:motion": "node --test src/motion/mouth-timing.test.mjs",
+    "build:server": "tsc -p tsconfig.server.json",
+    "dev:server": "tsx watch server/index.ts",
+    "start:server": "node dist/server/index.js",
+    "build:image": "docker build -t lorewire-render:dev .",
+    "deploy:cloud-run": "gcloud run deploy lorewire-render --source . --region ${CLOUD_RUN_REGION:-us-central1} --memory 4Gi --cpu 2 --timeout 3600 --no-allow-unauthenticated --set-env-vars CRON_SECRET=$CRON_SECRET,DATABASE_URL=$DATABASE_URL,GCS_BUCKET=$GCS_BUCKET"
   },
   "dependencies": {
+    "@google-cloud/storage": "^7.10.0",
     "@remotion/cli": "^4.0.0",
     "@remotion/google-fonts": "^4.0.475",
+    "@remotion/renderer": "^4.0.0",
+    "express": "^4.19.2",
+    "postgres": "^3.4.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "remotion": "^4.0.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   }
 }
