@@ -54,6 +54,16 @@ ESTIMATED_JOB_COST_CENTS = 50
 # Admin-managed in settings; unset = no cap = unlimited.
 DAILY_BUDGET_CAP_SETTING_KEY = "pipeline.story_jobs.daily_cap_cents"
 
+# Blended LLM token rate for cost capture. gpt-5.4-mini (the model that
+# the article-writing and image-prompt stages use) bills roughly
+# $0.40 / 1M input + $1.50 / 1M output tokens. We don't separately track
+# input vs output here — llm.totals carries the combined `total_tokens`
+# counter, and a 60/40 input/output split lands the blended rate around
+# 1e-6 USD/token. The micro-phase ships with this number so cost_cents
+# stops reading $0 on every text-only job. Revisit when llm.py starts
+# tracking input/output separately or when the active model changes.
+LLM_USD_PER_TOKEN = 1e-6
+
 ProcessFn = Callable[[dict, dict], dict]
 
 
@@ -69,6 +79,26 @@ def _daily_budget_cap_cents() -> int | None:
     except (TypeError, ValueError):
         return None
     return n if n > 0 else None
+
+
+def compute_job_cost_cents(
+    media_delta_usd: float,
+    llm_token_delta: int,
+) -> int:
+    """Pure-function cost-delta → cents for the story_jobs cost-capture
+    path. Extracted from `_default_process` so the math is unit-testable
+    without mocking the whole pipeline.
+
+    `media_delta_usd` is the after-minus-before of `media.running_cost_usd()`
+    (covers kie images + voice + STT). `llm_token_delta` is the
+    after-minus-before of `llm.totals['total_tokens']`. LLM tokens are
+    priced at LLM_USD_PER_TOKEN (see constant for the rate).
+
+    Negative deltas are clamped at 0 — they should be impossible (totals
+    monotonically grow) but guarding against driver weirdness is cheap.
+    """
+    llm_delta_usd = max(0, llm_token_delta) * LLM_USD_PER_TOKEN
+    return max(0, round((media_delta_usd + llm_delta_usd) * 100))
 
 
 def _budget_block_reason() -> str | None:
@@ -231,13 +261,20 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         row.update(video_cols)
         store.update_story_job_progress(claimed_job["id"], 95)
 
-    # Wrap up with the per-job spend delta. The media stages (kie images +
-    # voice synth) bumped `media.running_cost_usd()` while running; the
-    # delta isolates THIS job's contribution from any prior jobs in the
-    # same worker process. We round to integer cents to match the
-    # stories.cost_cents column shape.
-    row["cost_cents"] = max(
-        0, round((media.running_cost_usd() - before_cost_usd) * 100)
+    # Wrap up with the per-job spend delta. Three contributors:
+    #   - media (kie images + voice + STT) via media.running_cost_usd()
+    #   - LLM tokens via llm.totals; rate constant lives at top of file
+    # Both snapshotted before/after so the delta isolates THIS job's
+    # contribution from any prior jobs in the same worker process. Round
+    # to integer cents for the stories.cost_cents INTEGER column.
+    #
+    # Without the LLM term, text-only jobs (with_media=False) reported
+    # cost_cents=0 even though the article-writing LLM calls burned real
+    # money. Now they reflect the true spend.
+    media_delta_usd = media.running_cost_usd() - before_cost_usd
+    llm_token_delta = llm.totals["total_tokens"] - before_tokens
+    row["cost_cents"] = compute_job_cost_cents(
+        media_delta_usd, llm_token_delta,
     )
     store.upsert_story(row)
     return row

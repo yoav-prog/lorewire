@@ -29,6 +29,7 @@ import {
   reprocessRedditSourceAction,
   reopenRedditSourcesAction,
 } from "@/app/admin/actions";
+import StoryVideoPreview from "./StoryVideoPreview";
 
 export const dynamic = "force-dynamic";
 
@@ -347,11 +348,21 @@ function StoryPane({
     );
   }
 
+  // stories.images is a TEXT-JSON blob shared with the pipeline and
+  // pre-dates this page. We type-check on read so a future schema drift
+  // (e.g. someone repurposing the column to `{url,label}[]`) doesn't
+  // render `[object Object]` into the gallery `<img src>`. Anything
+  // non-string is filtered.
   let gallery: string[] = [];
-  try {
-    gallery = story.images ? (JSON.parse(story.images) as string[]) : [];
-  } catch {
-    gallery = [];
+  if (story.images) {
+    try {
+      const parsed = JSON.parse(story.images);
+      if (Array.isArray(parsed)) {
+        gallery = parsed.filter((u): u is string => typeof u === "string");
+      }
+    } catch {
+      gallery = [];
+    }
   }
 
   return (
@@ -384,11 +395,7 @@ function StoryPane({
           <p className="font-mono text-[11px] text-muted">No hero image.</p>
         )}
         {story.video_url ? (
-          <video
-            controls
-            src={story.video_url}
-            className="w-full rounded-lg border border-line"
-          />
+          <StoryVideoPreview src={story.video_url} />
         ) : (
           <p className="font-mono text-[11px] text-muted">No video rendered.</p>
         )}

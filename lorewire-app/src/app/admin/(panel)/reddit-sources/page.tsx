@@ -175,8 +175,16 @@ export default async function RedditSourcesPage({
           sort={sort}
         />
         <div className="space-y-3">
-          <RedditSourceTable rows={rows} />
-          <Pagination page={page} totalPages={totalPages} total={total} />
+          <RedditSourceTable
+            rows={rows}
+            budgetExhausted={budget.exhausted}
+          />
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            searchParams={sp}
+          />
         </div>
       </div>
     </div>
@@ -277,9 +285,18 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
   const reset = Number(sp.reset ?? 0);
 
   if (sp.error) {
+    const friendly: Record<string, string> = {
+      "daily-budget-exhausted":
+        "Daily budget cap exhausted — clear it or raise the cap before processing more rows.",
+      "cap-must-be-positive-or-blank":
+        "Cap must be greater than zero, or blank for unlimited. To halt all processing temporarily, set a tiny cap like $0.01.",
+      "bad-cap-value": "Cap value must be a non-negative number.",
+      "no-selection": "Select at least one row before clicking the bulk action.",
+    };
+    const label = friendly[sp.error] ?? sp.error.replace(/-/g, " ");
     return (
       <div className="rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
-        {sp.error.replace(/-/g, " ")}
+        {label}
       </div>
     );
   }
@@ -507,10 +524,12 @@ function Pagination({
   page,
   totalPages,
   total,
+  searchParams,
 }: {
   page: number;
   totalPages: number;
   total: number;
+  searchParams: SearchParams;
 }) {
   if (totalPages <= 1) {
     return (
@@ -519,38 +538,62 @@ function Pagination({
       </p>
     );
   }
-  // Preserve the existing query string when paging. The simplest server-safe
-  // way is a thin client read of window.location — but the form submits
-  // GET, so the URL already has every filter we care about; building the
-  // href with just ?page= would drop them. We rebuild from a known set of
-  // keys that the page reads.
   return (
-    <PaginationLinks page={page} totalPages={totalPages} total={total} />
+    <PaginationLinks
+      page={page}
+      totalPages={totalPages}
+      total={total}
+      searchParams={searchParams}
+    />
   );
+}
+
+// Preserve every filter param on the Prev/Next links — previously these
+// dropped the querystring, which silently dumped the admin from "page 2
+// of filtered AITAH results" to "page 1 of unfiltered everything." We
+// rebuild from the SearchParams shape the page already parsed so the
+// destination URL carries the full filter state minus the page key.
+function buildPageHref(searchParams: SearchParams, page: number): string {
+  const qs = new URLSearchParams();
+  const append = (key: string, value: string | undefined) => {
+    if (value !== undefined && value !== "") qs.append(key, value);
+  };
+  const appendMany = (key: string, value: string | string[] | undefined) => {
+    if (!value) return;
+    const arr = Array.isArray(value) ? value : [value];
+    for (const v of arr) if (v) qs.append(key, v);
+  };
+  append("q", searchParams.q);
+  appendMany("status", searchParams.status);
+  appendMany("subreddits", searchParams.subreddits);
+  append("length_min", searchParams.length_min);
+  append("length_max", searchParams.length_max);
+  append("comments_min", searchParams.comments_min);
+  append("date_from", searchParams.date_from);
+  append("date_to", searchParams.date_to);
+  append("sort", searchParams.sort);
+  qs.set("page", String(page));
+  return `/admin/reddit-sources?${qs.toString()}`;
 }
 
 function PaginationLinks({
   page,
   totalPages,
   total,
+  searchParams,
 }: {
   page: number;
   totalPages: number;
   total: number;
+  searchParams: SearchParams;
 }) {
-  // No JS: server-rendered prev/next links. The current URL's query string
-  // is implicit because the filter form submits via GET — but page=N
-  // belongs there too, so we rebuild it from the props the page already
-  // received. We accept that prev/next clicks need a full server round
-  // trip; for a filter-heavy candidate list, that's the right trade.
   const prevDisabled = page <= 1;
   const nextDisabled = page >= totalPages;
-  const BASE = "/admin/reddit-sources";
   return (
     <div className="flex items-center justify-center gap-3 font-mono text-[11px]">
       <PrevNextLink
         disabled={prevDisabled}
-        href={`${BASE}?page=${page - 1}`}
+        href={buildPageHref(searchParams, page - 1)}
         label="← Prev"
       />
       <span className="text-muted">
@@ -559,7 +602,7 @@ function PaginationLinks({
       </span>
       <PrevNextLink
         disabled={nextDisabled}
-        href={`${BASE}?page=${page + 1}`}
+        href={buildPageHref(searchParams, page + 1)}
         label="Next →"
       />
     </div>

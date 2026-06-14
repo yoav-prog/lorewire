@@ -122,7 +122,19 @@ def parse_csv(path: Path | str) -> tuple[list[dict], list[str]]:
     # see in the export doesn't abort the whole sync. The replacement char
     # (U+FFFD) lands in the cell and the row goes through; the alternative
     # is dropping thousands of otherwise-good rows for one bad byte.
-    with p.open("r", encoding="utf-8", errors="replace", newline="") as f:
+    #
+    # NUL bytes (0x00) are valid UTF-8 but csv.reader chokes on them with
+    # an opaque "_csv.Error: line contains NUL". Sanitize them up-front:
+    # they're never meaningful in this dataset (the source is
+    # human-curated text), and stripping them lets the parser see the
+    # rest of the row.
+    import io as _io
+    raw = p.read_text(encoding="utf-8", errors="replace")
+    if "\x00" in raw:
+        nul_count = raw.count("\x00")
+        warnings.append(f"stripped {nul_count} NUL byte(s) from file before parse")
+        raw = raw.replace("\x00", "")
+    with _io.StringIO(raw, newline="") as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames or []
         missing = [h for h in EXPECTED_HEADERS if h not in headers]
@@ -238,18 +250,32 @@ def apply(rows: Iterable[dict], *, dry_run: bool = False) -> dict:
 
     errors = 0
     if not dry_run:
-        try:
-            if new_rows:
+        # Preserve tracebacks alongside the bracketed log so a constraint
+        # violation is debuggable, not just "1500 errors with no clue."
+        # The errors counter inflates to the WHOLE batch on rollback
+        # because we don't know which row tripped — admins seeing N>0 here
+        # should treat the sync as "needs investigation," not "mostly fine."
+        import traceback as _tb
+        if new_rows:
+            try:
                 store.bulk_insert_reddit_sources(new_rows)
-        except Exception as e:  # noqa: BLE001
-            errors += len(new_rows)
-            print(f"[reddit-sync bulk-insert-error] count={len(new_rows)} error={e}")
-        try:
-            if updated_rows:
+            except Exception as e:  # noqa: BLE001
+                errors += len(new_rows)
+                print(
+                    f"[reddit-sync bulk-insert-error] count={len(new_rows)} "
+                    f"error={type(e).__name__}: {e}"
+                )
+                _tb.print_exc()
+        if updated_rows:
+            try:
                 store.bulk_refresh_reddit_sources(updated_rows)
-        except Exception as e:  # noqa: BLE001
-            errors += len(updated_rows)
-            print(f"[reddit-sync bulk-update-error] count={len(updated_rows)} error={e}")
+            except Exception as e:  # noqa: BLE001
+                errors += len(updated_rows)
+                print(
+                    f"[reddit-sync bulk-update-error] count={len(updated_rows)} "
+                    f"error={type(e).__name__}: {e}"
+                )
+                _tb.print_exc()
 
     return {
         "new": len(new_rows),

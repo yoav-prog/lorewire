@@ -160,6 +160,65 @@ describe("parseCsvText", () => {
     expect(rows[0].reddit_id).toBe("x");
   });
 
+  it("strips thousands separators from numeric cells (Sheets exports '1,234')", () => {
+    const text = csv([
+      [
+        "x",
+        "AITAH",
+        "2026-01-01 00:00",
+        "t",
+        "b",
+        "1,234",
+        "",
+        "",
+        "12,500",
+      ],
+    ]);
+    const { rows, warnings } = parseCsvText(text);
+    expect(warnings).toEqual([]);
+    expect(rows[0].comments).toBe(1234);
+    expect(rows[0].length_chars).toBe(12500);
+  });
+
+  it("rejects scientific notation in numeric cells (was silently coerced before)", () => {
+    const text = csv([
+      [
+        "x",
+        "AITAH",
+        "2026-01-01 00:00",
+        "t",
+        "b",
+        "1e3",
+        "",
+        "",
+        "5",
+      ],
+    ]);
+    const { rows } = parseCsvText(text);
+    // "1e3" used to parse as 1000; we now reject it as not a clean integer.
+    expect(rows[0].comments).toBeNull();
+  });
+
+  it("preserves the true first-seen line across 3+ duplicates of the same Reddit ID", () => {
+    const text = csv([
+      ["dup", "AITAH", "2026-01-01 00:00", "first", "b1", "5", "", "", "2"],
+      ["dup", "AITAH", "2026-01-02 00:00", "second", "b2", "10", "", "", "2"],
+      ["dup", "AITAH", "2026-01-03 00:00", "third", "b3", "20", "", "", "2"],
+    ]);
+    const { warnings } = parseCsvText(text);
+    // Both warnings must point at the ORIGINAL first occurrence (line 2),
+    // not at the immediately preceding duplicate. Previously the 3rd
+    // occurrence said "first seen on line 3" because `seen.set(rid, lineNo)`
+    // overwrote on every iteration.
+    const firstSeenMentions = warnings.filter((w) =>
+      w.includes("duplicate Reddit ID 'dup'"),
+    );
+    expect(firstSeenMentions).toHaveLength(2);
+    for (const w of firstSeenMentions) {
+      expect(w).toMatch(/first seen on line 2/);
+    }
+  });
+
   it("skips rows that lack required content (subreddit/title/full_text)", () => {
     const text = csv([
       ["a", "", "2026-01-01 00:00", "t", "b", "1", "", "", "1"],

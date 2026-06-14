@@ -34,8 +34,13 @@ const STATUS_TONE: Record<RedditSourceStatus, string> = {
 
 export default function RedditSourceTable({
   rows,
+  budgetExhausted = false,
 }: {
   rows: RedditSourceRow[];
+  /** When true, the Process N button is disabled with a tooltip so the
+   *  admin can't enqueue rows the worker would just budget-block. The
+   *  server action enforces the same gate; this is the UX mirror. */
+  budgetExhausted?: boolean;
 }) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
 
@@ -174,6 +179,7 @@ export default function RedditSourceTable({
         <BulkFooter
           ids={[...selected]}
           onClear={() => setSelected(new Set())}
+          budgetExhausted={budgetExhausted}
         />
       )}
     </>
@@ -196,9 +202,11 @@ function StatusChip({ status }: { status: string }) {
 function BulkFooter({
   ids,
   onClear,
+  budgetExhausted,
 }: {
   ids: string[];
   onClear: () => void;
+  budgetExhausted: boolean;
 }) {
   return (
     <div className="sticky bottom-3 z-10 mx-auto flex max-w-[760px] flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-bg/95 px-4 py-2.5 shadow-lg backdrop-blur">
@@ -287,7 +295,13 @@ function BulkFooter({
           <input type="hidden" name="with_media" value="1" />
           <button
             type="submit"
-            className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg hover:opacity-90"
+            disabled={budgetExhausted}
+            title={
+              budgetExhausted
+                ? "Daily budget exhausted — clear or raise the cap to enqueue more"
+                : undefined
+            }
+            className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Process {ids.length}
           </button>

@@ -138,7 +138,7 @@ class ClaimAndTransitionTests(_IsolatedDB):
         # We don't have a cancellation surface yet, but the conditional
         # UPDATE in finish_story_job guards against future cancel paths
         # the same way finish_image_render does. Force the row out of
-        # 'processing' to simulate cancellation.
+        # 'processing'/'queued' to simulate cancellation.
         _seed_reddit_source(self.store)
         self.store.enqueue_story_job("job-1", "abc")
         claimed = self.store.claim_next_story_job()
@@ -152,6 +152,49 @@ class ClaimAndTransitionTests(_IsolatedDB):
         self.store.finish_story_job(claimed["id"], "story-1")
         row = self.store.get_story_job(claimed["id"])
         self.assertEqual(row["status"], "cancelled", "cancelled wins over done")
+
+    def test_finish_after_reap_does_not_silently_no_op(self):
+        """Regression: previously finish_story_job had a strict
+        `status='processing'` guard. When the reaper flipped a stale
+        row back to 'queued', the original worker's finish call would
+        silently no-op, leaving story_jobs.status='queued' while the
+        admin's reddit_source.status flipped to 'used' — an
+        inconsistency that triggered a double-process on the next tick
+        and burned LLM/kie cost twice. Softened to
+        `status IN ('queued', 'processing')`."""
+        _seed_reddit_source(self.store)
+        self.store.enqueue_story_job("job-1", "abc")
+        claimed = self.store.claim_next_story_job()
+        # Reaper kicks in mid-run — flip back to queued.
+        import sqlite3
+        with sqlite3.connect(self.store.DB_PATH) as c:
+            c.execute(
+                "UPDATE story_jobs SET status='queued', started_at=NULL "
+                "WHERE id=?",
+                (claimed["id"],),
+            )
+        # The original worker's finish call must still succeed.
+        self.store.finish_story_job(claimed["id"], "story-1")
+        row = self.store.get_story_job(claimed["id"])
+        self.assertEqual(row["status"], "done")
+        self.assertEqual(row["story_id"], "story-1")
+
+    def test_fail_after_reap_does_not_silently_no_op(self):
+        """Same regression, fail side."""
+        _seed_reddit_source(self.store)
+        self.store.enqueue_story_job("job-1", "abc")
+        claimed = self.store.claim_next_story_job()
+        import sqlite3
+        with sqlite3.connect(self.store.DB_PATH) as c:
+            c.execute(
+                "UPDATE story_jobs SET status='queued', started_at=NULL "
+                "WHERE id=?",
+                (claimed["id"],),
+            )
+        self.store.fail_story_job(claimed["id"], "ELK down")
+        row = self.store.get_story_job(claimed["id"])
+        self.assertEqual(row["status"], "error")
+        self.assertEqual(row["error"], "ELK down")
 
     def test_latest_for_reddit_returns_newest(self):
         _seed_reddit_source(self.store, "x")
@@ -446,6 +489,36 @@ class BudgetGateTests(_IsolatedDB):
         self.assertEqual(estimate, 2 * ESTIMATED_JOB_COST_CENTS)
         _ = _dt  # quiet pyflakes; future use
 
+    def test_estimate_includes_last_microsecond_of_today(self):
+        """Regression: the day-window upper bound used to be
+        '23:59:59.999999' which lex-compared as LESS than
+        '23:59:59.999999+00:00' (longer strings win), so timestamps
+        stamped with a timezone suffix at the very end of the day were
+        silently excluded. Half-open [day_start, next_midnight) fixes
+        that and includes every microsecond of today."""
+        import datetime as _dt
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        # A job that finished at the very last microsecond, with a
+        # timezone suffix — exactly the row that previously dropped.
+        _seed_reddit_source(self.store, "edge")
+        self.store.enqueue_story_job("j-edge", "edge")
+        claimed = self.store.claim_next_story_job()
+        # Manually rewrite finished_at to the end-of-day boundary.
+        import sqlite3
+        with sqlite3.connect(self.store.DB_PATH) as c:
+            c.execute(
+                "UPDATE story_jobs SET status='done', "
+                "finished_at=?, story_id='story-edge' WHERE id=?",
+                (f"{today}T23:59:59.999999+00:00", claimed["id"]),
+            )
+
+        from pipeline.story_jobs_worker import ESTIMATED_JOB_COST_CENTS
+        estimate = self.store.today_story_job_estimate_cents(
+            ESTIMATED_JOB_COST_CENTS,
+        )
+        # 1 done today (the edge row) = 1 × 50c.
+        self.assertEqual(estimate, ESTIMATED_JOB_COST_CENTS)
+
     def test_zero_estimate_when_no_jobs(self):
         """Empty queue + no done-today rows = $0 projected. Even with
         a small cap the gate lets the (non-existent) next tick proceed.
@@ -500,6 +573,62 @@ class ActualCostTests(_IsolatedDB):
         self._insert_story("legacy", None, f"{today}T01:00:00+00:00")
         self._insert_story("new", 33, f"{today}T02:00:00+00:00")
         self.assertEqual(self.store.today_actual_story_cost_cents(), 33)
+
+    def test_includes_last_microsecond_of_today(self):
+        """Same boundary regression as today_story_job_estimate_cents:
+        a row stamped at 23:59:59.999999 with a timezone suffix used to
+        drop out of the SUM. With half-open [day_start, next_midnight)
+        it counts."""
+        import datetime as _dt
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        self._insert_story("edge", 77, f"{today}T23:59:59.999999+00:00")
+        self.assertEqual(self.store.today_actual_story_cost_cents(), 77)
+
+
+class CostCaptureTests(_IsolatedDB):
+    """Regression coverage for `compute_job_cost_cents` — the pure helper
+    that turns the per-job media + LLM deltas into the integer cents
+    that lands in stories.cost_cents.
+
+    Before this micro-phase, `cost_cents` was computed inline in
+    `_default_process` and the formula excluded LLM token cost entirely.
+    Every `with_media=False` job reported $0 even though the article-
+    writing LLM calls cost real money. Extracting the formula and
+    testing it locks that down."""
+
+    def test_pure_media_delta_converts_to_cents(self):
+        from pipeline.story_jobs_worker import compute_job_cost_cents
+        # $0.32 media delta, 0 LLM tokens = 32 cents.
+        self.assertEqual(compute_job_cost_cents(0.32, 0), 32)
+
+    def test_pure_llm_delta_converts_to_cents(self):
+        """Regression for the LLM-cost gap. Pre-fix this returned 0."""
+        from pipeline.story_jobs_worker import (
+            compute_job_cost_cents,
+            LLM_USD_PER_TOKEN,
+        )
+        # 100k tokens × 1e-6 USD/token = $0.10 = 10 cents.
+        tokens = 100_000
+        expected = round(tokens * LLM_USD_PER_TOKEN * 100)
+        self.assertEqual(compute_job_cost_cents(0.0, tokens), expected)
+        self.assertEqual(expected, 10)
+
+    def test_combined_media_and_llm_delta(self):
+        from pipeline.story_jobs_worker import compute_job_cost_cents
+        # $0.32 media + 100k tokens ($0.10 LLM) = $0.42 = 42 cents.
+        self.assertEqual(compute_job_cost_cents(0.32, 100_000), 42)
+
+    def test_clamps_negative_deltas_to_zero(self):
+        """Defensive — `totals` should be monotonic, but driver quirks
+        could in principle return a negative read. Clamp."""
+        from pipeline.story_jobs_worker import compute_job_cost_cents
+        self.assertEqual(compute_job_cost_cents(-0.50, -100_000), 0)
+        # Mixed: negative LLM, positive media — media still wins.
+        self.assertEqual(compute_job_cost_cents(0.32, -100_000), 32)
+
+    def test_zero_deltas_yield_zero(self):
+        from pipeline.story_jobs_worker import compute_job_cost_cents
+        self.assertEqual(compute_job_cost_cents(0.0, 0), 0)
 
 
 class HelpersTests(_IsolatedDB):

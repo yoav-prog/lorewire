@@ -108,14 +108,53 @@ export async function bulkEnqueueStoryJobs(
 
   if (toInsert.length > 0) {
     await bulkInsertJobs(toInsert);
-    result.enqueued = toInsert.length;
-    result.enqueued_ids = toInsert.map((r) => r.reddit_id);
-  }
-  if (toFlipQueued.length > 0) {
-    await bulkFlipSourceStatus(toFlipQueued, "queued");
+    // Race-loss handling: bulkInsertJobs uses ON CONFLICT DO NOTHING
+    // against the partial unique index, so a concurrent enqueue can
+    // silently make one of our INSERTs no-op. Re-query story_jobs by id
+    // to learn which rows actually landed. Only flip the source rows
+    // whose INSERT genuinely succeeded — flipping a race-loser's source
+    // to 'queued' would leave it stranded (UI hides it from 'imported',
+    // no worker can claim it because no active job exists).
+    const insertedIds = await readBackInsertedJobIds(
+      toInsert.map((r) => r.id),
+    );
+    const insertedRedditIds = new Set<string>();
+    for (const r of toInsert) {
+      if (insertedIds.has(r.id)) insertedRedditIds.add(r.reddit_id);
+    }
+    result.enqueued = insertedRedditIds.size;
+    result.enqueued_ids = toInsert
+      .filter((r) => insertedRedditIds.has(r.reddit_id))
+      .map((r) => r.reddit_id);
+    // Anything in toInsert that DIDN'T land is a race-loser — bump
+    // skipped_active so the admin sees what happened.
+    result.skipped_active += toInsert.length - insertedRedditIds.size;
+    // Trim toFlipQueued to only the survivors.
+    const survivors = toFlipQueued.filter((rid) => insertedRedditIds.has(rid));
+    if (survivors.length > 0) {
+      await bulkFlipSourceStatus(survivors, "queued");
+    }
   }
 
   return result;
+}
+
+// Returns the subset of `jobIds` that actually exist in story_jobs. Used
+// by bulkEnqueueStoryJobs to detect which INSERTs survived an ON CONFLICT
+// DO NOTHING under concurrent enqueueing.
+async function readBackInsertedJobIds(jobIds: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (jobIds.length === 0) return out;
+  for (let i = 0; i < jobIds.length; i += 500) {
+    const batch = jobIds.slice(i, i + 500);
+    const placeholders = batch.map(() => "?").join(", ");
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM story_jobs WHERE id IN (${placeholders})`,
+      batch,
+    );
+    for (const r of rows) out.add(r.id);
+  }
+  return out;
 }
 
 async function snapshotSourceStatuses(
@@ -198,11 +237,17 @@ async function bulkFlipSourceStatus(
   redditIds: string[],
   status: string,
 ): Promise<void> {
+  // Conditional on `status = 'imported'` so a row already promoted to
+  // 'processing' by a worker between our snapshot and this UPDATE isn't
+  // demoted back to 'queued'. The caller (bulkEnqueueStoryJobs) only
+  // ever flips imported -> queued, so this guard never blocks a
+  // legitimate flip; it only prevents the race-window regression.
   for (let i = 0; i < redditIds.length; i += 500) {
     const batch = redditIds.slice(i, i + 500);
     const placeholders = batch.map(() => "?").join(", ");
     await run(
-      `UPDATE reddit_source SET status = ? WHERE reddit_id IN (${placeholders})`,
+      `UPDATE reddit_source SET status = ? ` +
+        `WHERE status = 'imported' AND reddit_id IN (${placeholders})`,
       [status, ...batch],
     );
   }

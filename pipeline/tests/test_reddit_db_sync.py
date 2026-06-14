@@ -146,6 +146,24 @@ class ParserTests(unittest.TestCase):
             rows, _ = parse_csv(p)
         self.assertEqual(rows[0]["length_chars"], 11)
 
+    def test_strips_nul_bytes_with_warning(self):
+        """Regression: csv.DictReader chokes on NUL bytes with
+        `_csv.Error: line contains NUL`. The parser now strips them
+        up-front with a warning so the rest of the row survives."""
+        from pipeline.reddit_db_sync import parse_csv
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "nul.csv"
+            # Write a CSV with a NUL byte in a cell.
+            with p.open("w", encoding="utf-8", newline="") as f:
+                f.write("Reddit ID,Subreddit,Date Written,Title,Full Text,"
+                        "Comments,URL,Summary,How Long it Is\n")
+                f.write("x,AITAH,2026-01-01 00:00,a\x00b,c,1,,,3\n")
+            rows, warnings = parse_csv(p)
+        self.assertEqual(len(rows), 1)
+        # Title should have the NUL stripped, leaving "ab".
+        self.assertEqual(rows[0]["title"], "ab")
+        self.assertTrue(any("NUL byte" in w for w in warnings))
+
     def test_real_export_smoke(self):
         """Smoke test: parse the actual export the user dropped under ref/.
         Count is loose (the sheet keeps growing); we just want to confirm

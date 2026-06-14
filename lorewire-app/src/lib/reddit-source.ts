@@ -175,8 +175,12 @@ export function parseCsvText(text: string): ParseResult {
       warnings.push(
         `line ${lineNo}: duplicate Reddit ID '${rid}' (first seen on line ${seen.get(rid)}); keeping later row`,
       );
+      // Don't overwrite the recorded "first seen" line — that's the whole
+      // point of the warning. Previously the third+ occurrence would
+      // misattribute its "first seen" to the previous duplicate.
+    } else {
+      seen.set(rid, lineNo);
     }
-    seen.set(rid, lineNo);
 
     const fullText = get("Full Text");
     const title = get("Title");
@@ -218,11 +222,18 @@ export function parseCsvText(text: string): ParseResult {
 }
 
 function parseIntCell(raw: string): number | null {
-  const s = raw.trim();
+  // Strip thousands separators that Sheets exports include ("1,234" /
+  // "12,000,000"). Without this, Number() returns NaN and the row
+  // would be inserted with NULL — silently misclassifying high-comment
+  // stories as "no engagement" in the admin's "Min comments" filter.
+  // Also accept "none" / blank as null. Pure-integer-only via
+  // /^-?\d+$/ to reject scientific notation ("1e3" → 1000) and
+  // Infinity that Number() would happily accept.
+  const s = raw.trim().replace(/,/g, "");
   if (!s || s.toLowerCase() === "none") return null;
+  if (!/^-?\d+$/.test(s)) return null;
   const n = Number(s);
-  if (Number.isFinite(n)) return Math.trunc(n);
-  return null;
+  return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
 function noneIfBlank(s: string): string | null {

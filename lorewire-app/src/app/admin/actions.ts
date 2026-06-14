@@ -1788,6 +1788,14 @@ export async function setDailyBudgetCapAction(
   if (!Number.isFinite(dollars) || dollars < 0) {
     redirect("/admin/reddit-sources?error=bad-cap-value");
   }
+  // A cap of exactly $0 is rejected (instead of silently becoming
+  // "unlimited" via getDailyBudgetCapCents's `<= 0 → null` rule). If the
+  // admin actually wants to halt all processing they should use a
+  // small-but-positive cap like $0.01 — that's unambiguous and the
+  // gate's `projected + next_estimate > cap` math handles it cleanly.
+  if (dollars === 0) {
+    redirect("/admin/reddit-sources?error=cap-must-be-positive-or-blank");
+  }
   // Round to whole cents and clamp at zero. Admin types "10" or "10.50";
   // either gets normalized.
   const cents = Math.max(0, Math.round(dollars * 100));
@@ -1964,6 +1972,23 @@ export async function processRedditSourcesAction(
   const withMedia = String(formData.get("with_media") ?? "1") === "1";
   if (ids.length === 0) {
     redirect("/admin/reddit-sources?error=no-selection");
+  }
+  // Server-side budget gate. The browse page disables the Process button
+  // when budget.exhausted, but a hand-crafted POST (or a stale-tab click
+  // after the cap was lowered) could bypass that. The worker would
+  // silently no-op every claim, which leaves the user wondering why
+  // nothing's happening — better to reject the enqueue up front with a
+  // clear message.
+  const { getBudgetSummary } = await import("@/lib/story-jobs-budget");
+  const budget = await getBudgetSummary();
+  if (budget.exhausted) {
+    console.warn("[story-jobs enqueue-blocked]", {
+      reason: "daily-budget-exhausted",
+      cap_cents: budget.capCents,
+      spent_cents: budget.spentCents,
+      requested: ids.length,
+    });
+    redirect("/admin/reddit-sources?error=daily-budget-exhausted");
   }
   const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
   const result = await bulkEnqueueStoryJobs(ids, {
