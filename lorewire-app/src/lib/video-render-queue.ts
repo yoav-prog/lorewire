@@ -115,8 +115,24 @@ export async function enqueueRender(
           "[video render queue] reset succeeded but row missing",
         );
       }
+      await logVideoRenderEvent(reset.id, "reset_from_error", {
+        message: "Previous render errored — reset to queued for retry.",
+        payload: {
+          previous_error: existing.error,
+          previous_requested_at: existing.requested_at,
+        },
+      });
       return reset;
     }
+    // Idempotent hit on an in-flight or done row. Log it so the user
+    // sees that their click was received but no new work was kicked
+    // off (this is the most common cause of "nothing happens when I
+    // click Render" — the row is already done at the current config
+    // hash, and only Force re-render produces a fresh attempt).
+    await logVideoRenderEvent(existing.id, "idempotent_hit", {
+      message: `Existing ${existing.status} render at this config — no new work queued.`,
+      payload: { status: existing.status },
+    });
     return existing;
   }
 
@@ -138,6 +154,55 @@ export async function enqueueRender(
     // race so it doesn't silently swallow.
     throw new Error("[video render queue] insert succeeded but row missing");
   }
+  await logVideoRenderEvent(fresh.id, "queued", {
+    message: "Render request received. Waiting for the next cron tick.",
+    payload: { config_hash_prefix: configHash.slice(0, 12) },
+  });
+  return fresh;
+}
+
+// Insert a *new* video_renders row regardless of any existing row for
+// the same (story, config_hash). Used by the "Force re-render" button
+// in the editor for cases when the user wants a fresh attempt without
+// touching the config (e.g. the existing row is `done` but the result
+// looked wrong, or they want to re-test the pipeline). The new row gets
+// a different (story_id, config_hash + suffix) tuple so the idempotency
+// path doesn't merge them. The suffix is a millisecond-precision ISO
+// stamp — readable in logs and globally unique per click.
+export async function forceEnqueueRender(
+  storyId: string,
+  configHash: string,
+  requestedBy: string | null,
+): Promise<RenderRow> {
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  // The suffix lets the same logical config produce N distinct rows
+  // (one per Force click). We keep the original hash as the prefix so
+  // a future tooling pass can still group attempts that share a config.
+  const forcedHash = `${configHash}:force-${now}`;
+  await run(
+    `INSERT INTO video_renders
+      (id, story_id, config_hash, status, progress, error, output_url,
+       requested_by, requested_at, started_at, finished_at)
+     VALUES (?, ?, ?, 'queued', 0, NULL, NULL, ?, ?, NULL, NULL)`,
+    [id, storyId, forcedHash, requestedBy, now],
+  );
+  const fresh = await one<RenderRow>(
+    `SELECT ${COLS} FROM video_renders WHERE id = ?`,
+    [id],
+  );
+  if (!fresh) {
+    throw new Error(
+      "[video render queue] force-insert succeeded but row missing",
+    );
+  }
+  await logVideoRenderEvent(fresh.id, "queued", {
+    message: "Force re-render: fresh row queued, bypassing idempotency.",
+    payload: {
+      config_hash_prefix: configHash.slice(0, 12),
+      forced: true,
+    },
+  });
   return fresh;
 }
 
@@ -185,6 +250,9 @@ export async function claimNextRender(): Promise<RenderRow | null> {
   if (fresh.status !== "rendering" || fresh.started_at !== now) {
     return null;
   }
+  await logVideoRenderEvent(fresh.id, "claimed", {
+    message: "Cron orchestrator claimed the row; preparing dispatch.",
+  });
   return fresh;
 }
 
@@ -261,6 +329,10 @@ export async function finishRender(
     story_id: storyId,
     bytes_in_url: outputUrl.length,
   });
+  await logVideoRenderEvent(renderId, "finished", {
+    message: "Render done. Story video_url updated to Cloud Run output.",
+    payload: { url: outputUrl },
+  });
 }
 
 // Phase 2 of _plans/2026-06-14-cloud-run-render.md. Mark a render
@@ -284,6 +356,104 @@ export async function failRender(
     render_id: renderId,
     error_chars: capped.length,
   });
+  await logVideoRenderEvent(renderId, "failed", {
+    level: "error",
+    message: "Render failed. Click Render again to retry (resets to queued).",
+    payload: { error: capped },
+  });
+}
+
+// ─── per-row event timeline (2026-06-14 progress log) ────────────────────────
+// Mirrors image_render_events on the image-render side: one row per
+// checkpoint along the render lifecycle so the editor's RenderControl can
+// surface a live timeline under the Render button. Writers live on both
+// sides of the orchestrator — `queueRender` (server action) for the click
+// event, and `/api/render_video` for every cron-tick phase. Reader is the
+// `listVideoRenderEvents` helper below + the matching server action.
+//
+// Why a separate events table vs piling everything onto the video_renders
+// row: the row reflects the LATEST state (one error string, one progress
+// fraction), not history. The events table is append-only and ordered, so
+// the user sees the sequence: "click → reset_from_error → claim → dispatch
+// → cloud_run_response → finish". When something goes wrong the failing
+// step's payload (HTTP status, error text) is preserved.
+
+export type VideoRenderEventLevel = "info" | "warn" | "error";
+
+export interface VideoRenderEventRow {
+  id: string;
+  render_id: string;
+  ts: string;
+  level: VideoRenderEventLevel;
+  event: string;
+  message: string | null;
+  /** JSON-encoded structured payload; UI parses + displays inline. */
+  payload: string | null;
+}
+
+const EVENT_COLS = "id, render_id, ts, level, event, message, payload";
+
+/**
+ * Append one event to the timeline for a render row. Cheap (~1 ms on
+ * SQLite, ~5 ms on Postgres), so we don't batch — every meaningful
+ * checkpoint gets its own row so a partial failure still preserves the
+ * trail up to the failure point. Swallows write errors (catch + log)
+ * because event logging must never break the orchestrator's main path.
+ *
+ * `payload` is stringified once at the boundary so callers don't have to
+ * remember JSON.stringify, and so the column always holds either a valid
+ * JSON string or NULL.
+ */
+export async function logVideoRenderEvent(
+  renderId: string,
+  event: string,
+  opts: {
+    message?: string;
+    level?: VideoRenderEventLevel;
+    payload?: Record<string, unknown>;
+  } = {},
+): Promise<void> {
+  const id = randomUUID();
+  const ts = new Date().toISOString();
+  const level = opts.level ?? "info";
+  const message = opts.message ?? null;
+  const payload =
+    opts.payload === undefined ? null : JSON.stringify(opts.payload);
+  try {
+    await run(
+      `INSERT INTO video_render_events
+         (id, render_id, ts, level, event, message, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, renderId, ts, level, event, message, payload],
+    );
+  } catch (e) {
+    // Don't let logging take down the render path. The bracketed
+    // console log still fires elsewhere on the call site so the data
+    // isn't lost — only the user-facing timeline misses a row.
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[video render queue] event log failed", {
+      render_id: renderId,
+      event,
+      err: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+/**
+ * Read the event timeline for one render row in chronological order
+ * (oldest first). 200 is more than enough for a render's lifecycle
+ * (typical: 6-8 events; failed-and-retried: ~15).
+ */
+export async function listVideoRenderEvents(
+  renderId: string,
+  limit = 200,
+): Promise<VideoRenderEventRow[]> {
+  return all<VideoRenderEventRow>(
+    `SELECT ${EVENT_COLS} FROM video_render_events
+     WHERE render_id = ?
+     ORDER BY ts ASC LIMIT ?`,
+    [renderId, limit],
+  );
 }
 
 // ─── Stale-render detection (Phase 4) ────────────────────────────────────────

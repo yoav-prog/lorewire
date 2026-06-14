@@ -178,6 +178,20 @@ SCHEMA_STATEMENTS = [
         payload     TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_image_render_events_render_id ON image_render_events(render_id, ts)",
+    # 2026-06-14 video-render observability. Same shape + purpose as the
+    # image-render variant — the Vercel cron orchestrator and the
+    # queueRender server action write structured rows here so the editor's
+    # RenderControl can render an inline timeline under the Render button.
+    """CREATE TABLE IF NOT EXISTS video_render_events (
+        id          TEXT PRIMARY KEY,
+        render_id   TEXT NOT NULL,
+        ts          TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        event       TEXT NOT NULL,
+        message     TEXT,
+        payload     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_video_render_events_render_id ON video_render_events(render_id, ts)",
     # Wave 3 Phase 4 video segment library: intros and outros are uploaded
     # through the admin, normalized once to 1080x1920 @ 30fps H.264+AAC, then
     # cached in GCS. Renders splice the active intro before and the active

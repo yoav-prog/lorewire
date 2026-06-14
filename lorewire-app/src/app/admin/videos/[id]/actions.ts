@@ -30,8 +30,12 @@ import {
 import {
   countRendersSince,
   enqueueRender,
+  forceEnqueueRender,
   hashConfig,
+  listVideoRenderEvents,
+  logVideoRenderEvent,
   type RenderRow,
+  type VideoRenderEventRow,
 } from "@/lib/video-render-queue";
 import {
   canEnqueueImageRegen,
@@ -143,6 +147,7 @@ async function resolveDailyCap(): Promise<number> {
 
 export async function queueRender(
   storyId: string,
+  opts: { force?: boolean } = {},
 ): Promise<QueueRenderResult> {
   const session = await requireAdmin();
 
@@ -180,14 +185,21 @@ export async function queueRender(
     resolveBaseConfig(story.video_config) ?? defaultVideoConfig(story);
   const configHash = hashConfig(base);
 
-  const existing = await enqueueRender(storyId, configHash, session.userId);
+  // Force re-render: produce a fresh row even when an existing
+  // (story, config_hash) row would normally be returned. Used when
+  // the user wants to retry an in-flight or already-done render
+  // without editing the config first.
+  const existing = opts.force
+    ? await forceEnqueueRender(storyId, configHash, session.userId)
+    : await enqueueRender(storyId, configHash, session.userId);
   // `enqueueRender` returns the row regardless — distinguishing first
   // insert from idempotent hit needs a status check. The PERFECT marker
   // would be a returning clause, but since we can't get it portably,
   // use status === 'queued' AND requested_by === this user as a heuristic
   // and let the UI tolerate both as "fine".
   const idempotentHit =
-    existing.status !== "queued" || existing.requested_by !== session.userId;
+    !opts.force &&
+    (existing.status !== "queued" || existing.requested_by !== session.userId);
 
   // eslint-disable-next-line no-console -- rule 14
   console.info("[render queue enqueue]", {
@@ -199,10 +211,37 @@ export async function queueRender(
     existing_status: existing.status,
     recent_count: recentCount,
     cap,
+    force: Boolean(opts.force),
   });
 
   revalidatePath(`/admin/videos/${storyId}`);
   return { ok: true, render: existing, idempotentHit };
+}
+
+// Server action wrapper for the editor's progress-log panel. Polls the
+// timeline every few seconds while the row is in flight. Cheap query
+// (one render's events = ~6-30 rows with a render_id-indexed lookup).
+export async function listVideoRenderEventsAction(
+  renderId: string,
+): Promise<VideoRenderEventRow[]> {
+  await requireAdmin();
+  if (!renderId) return [];
+  return listVideoRenderEvents(renderId);
+}
+
+// Server action: write one client-side checkpoint into the timeline.
+// The RenderControl uses this to record "click_received" the moment a
+// user clicks Render — so even when the existing-row idempotency path
+// makes the action LOOK like nothing happened, the timeline shows the
+// click hit the server and was processed. Diagnostic, not load-bearing.
+export async function logVideoRenderEventAction(
+  renderId: string,
+  event: string,
+  message?: string,
+): Promise<void> {
+  await requireAdmin();
+  if (!renderId || !event) return;
+  await logVideoRenderEvent(renderId, event, { message });
 }
 
 // ─── editSession actions (concurrency banner / heartbeat) ─────────────────────

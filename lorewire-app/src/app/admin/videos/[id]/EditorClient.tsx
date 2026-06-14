@@ -63,6 +63,7 @@ import {
   saveVideoConfigPatch,
 } from "./actions";
 import { enqueueImageRegenAction } from "@/app/admin/actions";
+import { VideoRenderEventTimeline } from "@/app/admin/(panel)/_components/VideoRenderEventTimeline";
 
 // Player is client-only (Remotion's runtime is not SSR-safe). next/dynamic
 // with ssr:false gives us code-splitting + no hydration mismatch.
@@ -1140,10 +1141,10 @@ function RenderControl({
     };
   }, [isInFlight, active, router]);
 
-  const handleClick = () => {
+  const handleClick = (force = false) => {
     setError(null);
     startTransition(async () => {
-      const result = await queueRender(storyId);
+      const result = await queueRender(storyId, { force });
       if (!result.ok) {
         if (result.error === "daily-cap-exceeded") {
           setError(
@@ -1164,6 +1165,10 @@ function RenderControl({
     : pending
       ? "Queueing…"
       : "Render";
+  // The Force re-render path is meaningful when there's a settled
+  // (done/error) row at the current config_hash AND we're not in
+  // flight. Otherwise the regular Render button covers the case.
+  const showForce = !isInFlight && !pending && active && (active.status === "done" || active.status === "error");
 
   return (
     <div className="flex flex-col items-end gap-1">
@@ -1176,15 +1181,32 @@ function RenderControl({
         )}
         <button
           type="button"
-          onClick={handleClick}
+          onClick={() => handleClick(false)}
           disabled={pending || isInFlight}
           className="rounded-md bg-accent px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
         >
           {buttonLabel}
         </button>
+        {showForce && (
+          <button
+            type="button"
+            onClick={() => handleClick(true)}
+            title="Bypass idempotency — queues a fresh row even if one already exists for this config."
+            className="rounded-md border border-line bg-surface2 px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted transition-colors hover:border-accent hover:text-accent"
+          >
+            Force re-render
+          </button>
+        )}
       </div>
       {error && (
         <p className="font-mono text-[10px] text-danger">{error}</p>
+      )}
+      {active && (
+        <VideoRenderEventTimeline
+          renderId={active.id}
+          isActive={isInFlight}
+          defaultOpen={isInFlight}
+        />
       )}
     </div>
   );

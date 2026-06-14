@@ -40,6 +40,7 @@ import {
   claimNextRender,
   failRender,
   finishRender,
+  logVideoRenderEvent,
 } from "@/lib/video-render-queue";
 import { getStory } from "@/lib/repo";
 
@@ -181,6 +182,10 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       render_id: claimed.id,
       story_id: claimed.story_id,
     });
+    await logVideoRenderEvent(claimed.id, "story_missing", {
+      level: "error",
+      message: err,
+    });
     await failRender(claimed.id, err);
     return NextResponse.json({
       drained: 1,
@@ -196,6 +201,10 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     namespacedLog("config_missing", {
       render_id: claimed.id,
       story_id: claimed.story_id,
+    });
+    await logVideoRenderEvent(claimed.id, "config_missing", {
+      level: "error",
+      message: err,
     });
     await failRender(claimed.id, err);
     return NextResponse.json({
@@ -217,6 +226,10 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       story_id: claimed.story_id,
       error: err,
     });
+    await logVideoRenderEvent(claimed.id, "config_malformed", {
+      level: "error",
+      message: err,
+    });
     await failRender(claimed.id, err);
     return NextResponse.json({
       drained: 1,
@@ -225,6 +238,11 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       error: err,
     });
   }
+
+  await logVideoRenderEvent(claimed.id, "dispatch_start", {
+    message: "Posting render request to Cloud Run.",
+    payload: { cloud_run_url: cloudRunUrl },
+  });
 
   const result = await postToCloudRun(
     `${cloudRunUrl.replace(/\/$/, "")}/render`,
@@ -241,6 +259,10 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       render_id: claimed.id,
       story_id: claimed.story_id,
       error: result.error,
+    });
+    await logVideoRenderEvent(claimed.id, "cloud_run_failure", {
+      level: "error",
+      message: result.error,
     });
     await failRender(claimed.id, result.error);
     // Return 200 — Vercel cron retries on 5xx, and we don't want a
@@ -259,6 +281,10 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     render_id: claimed.id,
     story_id: claimed.story_id,
     url_bytes: result.url.length,
+  });
+  await logVideoRenderEvent(claimed.id, "cloud_run_response", {
+    message: "Cloud Run finished. Writing video_url onto the story.",
+    payload: { url: result.url },
   });
   await finishRender(claimed.id, claimed.story_id, result.url);
   return NextResponse.json({
