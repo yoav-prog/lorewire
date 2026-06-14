@@ -225,6 +225,16 @@ function BudgetBar({ budget }: { budget: BudgetSummary }) {
             {pct}% used
           </span>
         )}
+        {budget.actualCents > 0 && (
+          // Actual billed cost (from stories.cost_cents). Only shown when
+          // at least one story has the column populated, which the
+          // worker now writes on every run. The projection above is the
+          // safety-net the worker gate uses; this number is what the
+          // run actually cost.
+          <span className="rounded-full border border-cat-ok/40 bg-cat-ok/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-cat-ok">
+            actual {formatCents(budget.actualCents)}
+          </span>
+        )}
         <span className="font-mono text-[10px] opacity-60">
           {budget.jobCount.toLocaleString()} job{budget.jobCount === 1 ? "" : "s"}{" "}
           (done today + active) · est. ~$0.50/job

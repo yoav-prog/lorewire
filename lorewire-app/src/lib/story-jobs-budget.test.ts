@@ -12,12 +12,26 @@ import {
   formatCents,
   getBudgetSummary,
   getDailyBudgetCapCents,
+  getTodayActualSpendCents,
   getTodayStoryJobsEstimate,
 } from "./story-jobs-budget";
 
 async function clear() {
   await run("DELETE FROM story_jobs", []);
   await run("DELETE FROM settings", []);
+  await run("DELETE FROM stories", []);
+}
+
+async function insertStory(
+  id: string,
+  costCents: number | null,
+  createdAt: string,
+) {
+  await run(
+    "INSERT INTO stories (id, status, cost_cents, created_at) " +
+      "VALUES (?, 'review', ?, ?)",
+    [id, costCents, createdAt],
+  );
 }
 
 // Seed a story_jobs row directly so we don't have to also stand up a
@@ -129,6 +143,49 @@ describe("getBudgetSummary", () => {
   // bug that erodes trust in the cap.
   it("ESTIMATED_JOB_COST_CENTS is the documented 50¢", async () => {
     expect(ESTIMATED_JOB_COST_CENTS).toBe(50);
+  });
+});
+
+describe("getTodayActualSpendCents", () => {
+  beforeEach(clear);
+
+  it("returns 0 when no stories", async () => {
+    expect(await getTodayActualSpendCents()).toBe(0);
+  });
+
+  it("sums today's populated cost_cents", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await insertStory("s1", 25, `${today}T01:00:00+00:00`);
+    await insertStory("s2", 73, `${today}T15:00:00+00:00`);
+    expect(await getTodayActualSpendCents()).toBe(98);
+  });
+
+  it("excludes other days and NULL cost rows", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await insertStory("s-today", 50, `${today}T01:00:00+00:00`);
+    await insertStory("s-old", 9999, "2020-01-01T00:00:00+00:00");
+    await insertStory("s-null", null, `${today}T02:00:00+00:00`);
+    expect(await getTodayActualSpendCents()).toBe(50);
+  });
+});
+
+describe("getBudgetSummary surfaces actual alongside projection", () => {
+  beforeEach(clear);
+
+  it("includes actualCents from stories.cost_cents", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await insertStory("s1", 42, `${today}T01:00:00+00:00`);
+    const summary = await getBudgetSummary();
+    expect(summary.actualCents).toBe(42);
+    // Projection is independent — count-based from story_jobs.
+    expect(summary.spentCents).toBe(0);
+  });
+
+  it("actualCents=0 when no story has cost_cents", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await insertStory("s-legacy", null, `${today}T01:00:00+00:00`);
+    const summary = await getBudgetSummary();
+    expect(summary.actualCents).toBe(0);
   });
 });
 

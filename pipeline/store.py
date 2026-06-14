@@ -1191,6 +1191,21 @@ def image_render_drain_lock() -> _AdvisoryLock:
     return _AdvisoryLock(IMAGE_RENDER_DRAIN_LOCK_KEY)
 
 
+# Phase 8 of _plans/2026-06-14-story-jobs-followups.md.
+# Distinct integer so the story_jobs drain doesn't contend with the
+# image_renders drain on the same Postgres advisory lock — they're
+# independent queues and either can be in flight without blocking the
+# other.
+STORY_JOBS_DRAIN_LOCK_KEY = 8472302
+
+
+def story_jobs_drain_lock() -> _AdvisoryLock:
+    """Convenience wrapper for the story_jobs drain at
+    `lorewire-app/api/drain_story_jobs.py`. Same SQLite no-op /
+    Postgres advisory-lock semantics as the image_renders lock."""
+    return _AdvisoryLock(STORY_JOBS_DRAIN_LOCK_KEY)
+
+
 # ─── image_render_events (2026-06-13 Phase 2 observability) ───────────────────
 # A contextvar-based pattern so the regen helpers in pipeline/media.py can
 # emit events without every function in the chain growing a render_id
@@ -2271,6 +2286,40 @@ def today_story_job_estimate_cents(estimate_per_job_cents: int) -> int:
         row = c.execute(sql_sqlite, (day_start, day_end)).fetchone()
         n = int(row["n"]) if row else 0
         return n * max(0, int(estimate_per_job_cents))
+
+
+def today_actual_story_cost_cents() -> int:
+    """Sum stories.cost_cents for stories created today (UTC).
+
+    Reads what the worker actually billed (kie images + voice + STT)
+    instead of the count-based projection. Returns 0 when no story has
+    a populated cost_cents — older rows pre-date the cost-capture
+    micro-phase and stay NULL, so this is a soft "today-and-newer-only"
+    counter. Used by the admin budget bar to show actual-vs-estimated.
+    """
+    import datetime as _dt
+    today_utc = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    day_start = today_utc + "T00:00:00"
+    day_end = today_utc + "T23:59:59.999999"
+    sql_pg = (
+        "SELECT COALESCE(SUM(cost_cents), 0) AS total FROM stories "
+        "WHERE created_at >= %s AND created_at < %s "
+        "AND cost_cents IS NOT NULL"
+    )
+    sql_sqlite = (
+        "SELECT COALESCE(SUM(cost_cents), 0) AS total FROM stories "
+        "WHERE created_at >= ? AND created_at < ? "
+        "AND cost_cents IS NOT NULL"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_pg, (day_start, day_end))
+                row = cur.fetchone()
+        return int(row["total"]) if row else 0
+    with _sqlite_conn() as c:
+        row = c.execute(sql_sqlite, (day_start, day_end)).fetchone()
+        return int(row["total"]) if row else 0
 
 
 def reap_stale_story_jobs(stale_after_s: int) -> int:

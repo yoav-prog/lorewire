@@ -395,6 +395,15 @@ def _budget_log() -> None:
     print(f"[media budget] cap = ${cap:.2f} / day{note}, est spend this process = ${spent:.2f}")
 
 
+def running_cost_usd() -> float:
+    """Public wrapper around the running-cost estimate. Used by callers
+    outside this module (notably story_jobs_worker._default_process)
+    to compute per-job spend by snapshotting before/after a single
+    pipeline run. Returns a USD float; multiply by 100 + round for
+    the integer cents that lands in stories.cost_cents."""
+    return _running_cost_usd()
+
+
 def _running_cost_usd() -> float:
     """Estimate spend so far in this process from the providers' totals."""
     images_used = images.totals.get("images", 0)

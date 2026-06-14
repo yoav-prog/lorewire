@@ -128,6 +128,14 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     with_media = bool(claimed_job.get("with_media", 1))
 
     before_tokens = llm.totals["total_tokens"]
+    # Snapshot of running cost so we can compute the per-job delta at the
+    # end and persist it to stories.cost_cents. This is what the budget
+    # bar's "actual today" line reads — without this write the column
+    # stays NULL forever and the bar can only ever show the count-based
+    # estimate. The pricing source is pipeline/media.py's IMAGE_COST_USD
+    # / TTS_COST_PER_CHAR / STT_COST_PER_SECOND tables.
+    before_cost_usd = media.running_cost_usd()
+
     idea = stages.make_idea(post, dry_run=False)
     print(f"[story-jobs idea] reddit_id={post['id']} category={idea['category']}")
     store.update_story_job_progress(claimed_job["id"], 15)
@@ -223,6 +231,14 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         row.update(video_cols)
         store.update_story_job_progress(claimed_job["id"], 95)
 
+    # Wrap up with the per-job spend delta. The media stages (kie images +
+    # voice synth) bumped `media.running_cost_usd()` while running; the
+    # delta isolates THIS job's contribution from any prior jobs in the
+    # same worker process. We round to integer cents to match the
+    # stories.cost_cents column shape.
+    row["cost_cents"] = max(
+        0, round((media.running_cost_usd() - before_cost_usd) * 100)
+    )
     store.upsert_story(row)
     return row
 

@@ -4,10 +4,17 @@
     {
       "path": "/api/drain_image_renders",
       "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/drain_story_jobs",
+      "schedule": "*/2 * * * *"
     }
   ],
   "functions": {
     "api/drain_image_renders.py": {
+      "maxDuration": 300
+    },
+    "api/drain_story_jobs.py": {
       "maxDuration": 300
     }
   }

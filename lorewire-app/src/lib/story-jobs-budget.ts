@@ -84,8 +84,15 @@ export function formatCents(cents: number): string {
 export interface BudgetSummary {
   /** Cap in cents; null when unset. */
   capCents: number | null;
-  /** Spend so far today (estimated). */
+  /** Count-based projection so far today (jobs × $0.50). The worker gate
+   *  uses this exact number; admin UI shows it as the primary figure. */
   spentCents: number;
+  /** Actual billed cents summed from stories.cost_cents for today. Stays
+   *  at 0 when no story has the column populated (older rows pre-date
+   *  the cost-capture wiring). When > 0, the UI surfaces this alongside
+   *  the projection so the admin sees "what really happened" vs the
+   *  conservative gate input. */
+  actualCents: number;
   /** Active + done-today job count. */
   jobCount: number;
   /** `spentCents / capCents` as 0–1; 1.0 when capped, 0 when no cap. */
@@ -95,14 +102,32 @@ export interface BudgetSummary {
 }
 
 /**
- * One-stop read for the admin UI. Bundles cap + spend + the derived
- * "would the next job be blocked" flag so the page doesn't have to know
- * the cost-model details.
+ * Sum of stories.cost_cents for stories created today (UTC). Returns 0
+ * when no row has the column populated. Mirrors
+ * pipeline/store.py:today_actual_story_cost_cents — both sides do the
+ * same range compare on the TEXT created_at column.
+ */
+export async function getTodayActualSpendCents(): Promise<number> {
+  const today = new Date().toISOString().slice(0, 10);
+  const dayStart = `${today}T00:00:00`;
+  const dayEnd = `${today}T23:59:59.999999`;
+  const row = await one<{ total: number | string }>(
+    `SELECT COALESCE(SUM(cost_cents), 0) AS total FROM stories ` +
+      `WHERE created_at >= ? AND created_at < ? AND cost_cents IS NOT NULL`,
+    [dayStart, dayEnd],
+  );
+  return Number(row?.total ?? 0);
+}
+
+/**
+ * One-stop read for the admin UI. Bundles cap + projected spend +
+ * actual billed + the derived "would the next job be blocked" flag.
  */
 export async function getBudgetSummary(): Promise<BudgetSummary> {
-  const [capCents, today] = await Promise.all([
+  const [capCents, today, actualCents] = await Promise.all([
     getDailyBudgetCapCents(),
     getTodayStoryJobsEstimate(),
+    getTodayActualSpendCents(),
   ]);
   const spentCents = today.estimatedSpendCents;
   const fraction =
@@ -114,6 +139,7 @@ export async function getBudgetSummary(): Promise<BudgetSummary> {
   return {
     capCents,
     spentCents,
+    actualCents,
     jobCount: today.count,
     fraction,
     exhausted,

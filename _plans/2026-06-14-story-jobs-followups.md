@@ -67,24 +67,19 @@ Phases here are **independent** — you can ship 5, then jump to 7, etc. They sh
 
 ---
 
-## Phase 8 — Vercel drain endpoint for `story_jobs`
+## Phase 8 — Vercel drain endpoint for `story_jobs` (shipped 2026-06-14)
 
 **Why:** Today the worker is a long-running local Python process. For a production deploy where the user isn't running anything locally, the queue would just stall. Mirroring the existing [api/drain_image_renders.py](lorewire-app/api/drain_image_renders.py) pattern lets a Vercel cron drain the story_jobs queue.
 
-**Scope:**
-- New `lorewire-app/api/drain_story_jobs.py` (or `.ts`, depending on which the existing drain uses — confirm by reading the file first).
-- Wraps `pipeline.story_jobs_worker.run_one_tick` in the existing `image_render_drain_lock` advisory-lock pattern (or its `story_jobs` sibling, see below).
-- Add `STORY_JOBS_DRAIN_LOCK_KEY` constant in [pipeline/store.py](pipeline/store.py) and a `story_jobs_drain_lock()` helper, mirroring `IMAGE_RENDER_DRAIN_LOCK_KEY` / `image_render_drain_lock()` exactly.
-- `vercel.json` cron entry to hit the drain endpoint (existing pattern in the file).
-- Test: parity with the existing drain-handler test pattern (`pipeline/tests/test_drain_image_renders.py` is the template).
+**Shipped:**
+- ✅ `STORY_JOBS_DRAIN_LOCK_KEY = 8472302` (distinct from image_renders' key so the two drains don't contend) + `story_jobs_drain_lock()` helper in [pipeline/store.py](pipeline/store.py). Reuses the existing `_AdvisoryLock` class.
+- ✅ [lorewire-app/api/drain_story_jobs.py](lorewire-app/api/drain_story_jobs.py) — the same auth + advisory-lock + per-tick budget + structured-log shape as the image_renders drain. Implementation is smaller because it composes `story_jobs_worker.run_one_tick` (which already does its own stale-claim reap + budget-gate check) instead of replicating the claim loop.
+- ✅ [vercel.json](lorewire-app/vercel.json): cron `*/2 * * * *` for drain_story_jobs (every 2 min — story_jobs are heavier per-row than image_renders so we halve the cadence), maxDuration 300s. Image_renders drain unchanged.
+- ✅ 13 tests in [pipeline/tests/test_drain_story_jobs.py](pipeline/tests/test_drain_story_jobs.py): auth (4), max-rows env (4), drain happy/fail/cap/budget-block/idle (5). Suite: **85 Python tests green**, including the image_renders drain tests confirming no regression from the new lock key.
 
-**Pre-work:** Read [pipeline/image_render_worker.py](pipeline/image_render_worker.py) and [api/drain_image_renders.py](lorewire-app/api/drain_image_renders.py) to confirm the exact pattern. They're the canonical reference.
+**Known limitation (documented in the drain's docstring):** `story_jobs_worker._default_process` calls `video.generate_video` for `with_media=True` jobs, which shells out to Remotion via `npx`. That doesn't work on Vercel's runtime. The drain happily picks up `with_media=True` jobs and the LLM + image spend happens; the video step then fails and the row is marked errored. For the hosted drain, enqueue with `with_media=False` (text-only stories). For full media + video, keep using the local worker. A future enhancement: pre-skip `with_media=True` jobs at the drain layer with a clear error message — recorded as a follow-up below.
 
-**Production cost:** Vercel cron is free at this rate (one tick / minute, ~720/day). Cron + advisory lock + the early-exit short-circuit in `count_pending_story_jobs()` means an idle tick bills near zero on Active CPU.
-
-**Caveat:** Worker runs the full `media.generate_media` + `video.generate_video` paths. The latter shells out to Remotion via npx; that won't work on Vercel's runtime without a separate render host. If `--no-media` is the default for the drain, this becomes useful for text-only candidate-pool work; full media + video stays on the local worker for now. Worth flagging at the top of the implementation.
-
-**Time estimate:** ~3 hours.
+**Production cost:** Vercel cron is free at this cadence (one tick / 2 min = ~720/day still under the free Hobby allowance). Cron + advisory lock + the early-exit short-circuit in `count_pending_story_jobs()` means an idle tick bills near zero on Active CPU.
 
 ---
 
@@ -96,3 +91,21 @@ Phases here are **independent** — you can ship 5, then jump to 7, etc. They sh
 4. **Phase 8** (3 hr) — only needed once you actually deploy and want the queue drained without a local worker. Defer until that day.
 
 Each phase passes the same gates as the parent plan: tests, namespaced logs, lint, typecheck, no destructive auto-actions.
+
+---
+
+## Micro-phase — Real cost capture (shipped 2026-06-14)
+
+**Why:** Phase 7 ships with a count-based estimate ($0.50/job) because the worker wasn't populating `stories.cost_cents`. The budget bar showed projection only. This wires the existing cost model in `pipeline/media.py` — already used by `_log_budget_remaining` and `_story_cost_cents` — into the story_jobs worker so the column gets real numbers, and surfaces those numbers in the bar.
+
+**Shipped:**
+- ✅ `media.running_cost_usd()` — public wrapper over the existing private `_running_cost_usd()` so callers outside `media.py` can snapshot before/after a single pipeline run.
+- ✅ `story_jobs_worker._default_process` snapshots `media.running_cost_usd()` at the top and writes `row["cost_cents"] = round((after - before) * 100)` before `upsert_story`. Rounded, clamped at 0. This is now persisted on every run.
+- ✅ `pipeline/store.py:today_actual_story_cost_cents()` — SUMs `stories.cost_cents` for today (UTC), excluding NULL rows so older pre-capture stories don't poison the average.
+- ✅ TS mirror `getTodayActualSpendCents()` in [story-jobs-budget.ts](lorewire-app/src/lib/story-jobs-budget.ts), added to `BudgetSummary.actualCents`. Subtle green pill on the budget bar shows `actual $X` when nonzero — sits beside the count-based projection so the admin sees both numbers.
+- ✅ The worker budget gate **still uses the count-based estimate**, not actual. Rationale: the gate is a pre-claim safety net that has to project the *next* job's cost — actual data lags by one job. Using estimate at the gate is conservative-by-design; actual is for reporting.
+- ✅ Tests: 4 new Python tests in `ActualCostTests` (zero baseline, today sum, exclude-other-days, exclude-NULL) + 5 new TS tests in `story-jobs-budget.test.ts` (`getTodayActualSpendCents` direct + `BudgetSummary.actualCents` integration). Suite total: **98 Python + 47 TS = 145 tests green.**
+
+**Pricing source:** `pipeline/media.py` already had `IMAGE_COST_USD`, `TTS_COST_PER_CHAR`, `STT_COST_PER_SECOND` tables sourced from each provider's public pricing as of 2026-06. Per CLAUDE.md rule 8 + 1, these should be re-verified every few months — the constants are clearly grouped at the top of [pipeline/media.py](pipeline/media.py) for that purpose.
+
+**Not in scope:** LLM token cost (not in `_running_cost_usd`'s current model). It's a rounding error vs images + voice (~$0.05 per story vs $0.30+ for images), but adding it is a clean follow-up if precision matters more than the writeup says.

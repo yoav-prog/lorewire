@@ -457,6 +457,51 @@ class BudgetGateTests(_IsolatedDB):
         self.assertIsNone(story_jobs_worker._budget_block_reason())
 
 
+class ActualCostTests(_IsolatedDB):
+    """Micro-phase: real cost capture. The worker now writes
+    stories.cost_cents on every run; this helper sums it for today UTC."""
+
+    def _insert_story(
+        self,
+        story_id: str,
+        cost_cents: int | None,
+        created_at: str,
+    ) -> None:
+        import sqlite3
+        with sqlite3.connect(self.store.DB_PATH) as c:
+            c.execute(
+                "INSERT INTO stories (id, status, cost_cents, created_at) "
+                "VALUES (?, 'review', ?, ?)",
+                (story_id, cost_cents, created_at),
+            )
+
+    def test_returns_zero_when_no_stories(self):
+        self.assertEqual(self.store.today_actual_story_cost_cents(), 0)
+
+    def test_sums_today_cost_cents(self):
+        import datetime as _dt
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        self._insert_story("s1", 25, f"{today}T01:00:00+00:00")
+        self._insert_story("s2", 73, f"{today}T15:00:00+00:00")
+        self.assertEqual(self.store.today_actual_story_cost_cents(), 98)
+
+    def test_excludes_other_days(self):
+        import datetime as _dt
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        self._insert_story("s-today", 50, f"{today}T01:00:00+00:00")
+        self._insert_story("s-old", 9999, "2020-01-01T00:00:00+00:00")
+        self.assertEqual(self.store.today_actual_story_cost_cents(), 50)
+
+    def test_excludes_null_cost_rows(self):
+        """Older rows that pre-date the cost-capture wiring have
+        cost_cents NULL. Those must not break the SUM."""
+        import datetime as _dt
+        today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+        self._insert_story("legacy", None, f"{today}T01:00:00+00:00")
+        self._insert_story("new", 33, f"{today}T02:00:00+00:00")
+        self.assertEqual(self.store.today_actual_story_cost_cents(), 33)
+
+
 class HelpersTests(_IsolatedDB):
     def test_category_for_known_subreddit(self):
         from pipeline.story_jobs_worker import _category_for
