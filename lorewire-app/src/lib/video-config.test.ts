@@ -62,6 +62,16 @@ function emptyStoryRow(overrides: Partial<StoryRow> = {}): StoryRow {
     updated_at: null,
     published_at: null,
     payload: null,
+    // Fields added to StoryRow after this fixture was first written.
+    // Listed explicitly so a future schema add fails the typecheck here
+    // and forces an honest fixture update.
+    noindex: null,
+    props: null,
+    character_image: null,
+    character_image_mouth_removed: null,
+    pipeline_cache: null,
+    voice_provider: null,
+    voice_id: null,
     ...overrides,
   };
 }

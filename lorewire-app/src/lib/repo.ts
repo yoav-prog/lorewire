@@ -286,6 +286,31 @@ export async function setStoryNoindex(
   console.info("[stories repo] noindex", { id, noindex });
 }
 
+// Phase 3 of _plans/2026-06-14-voiceover-picker.md. Set or clear the
+// per-story voice override. Pass `null` to either field to clear it —
+// NULL columns mean "use the global default", which is how the
+// resolution chain in pipeline/voice.py:synthesize falls through.
+//
+// Both fields are written together so an in-flight partial state is
+// impossible. If a caller wants to clear ONLY the voice_id while
+// keeping the provider override, they pass voice_id=null + the
+// existing provider value — the UI's "Reset to global" affordance
+// just passes nulls for both at once.
+export async function setStoryVoice(
+  id: string,
+  voice_provider: string | null,
+  voice_id: string | null,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE stories SET voice_provider = ?, voice_id = ?, updated_at = ? WHERE id = ?",
+    [voice_provider, voice_id, now, id],
+  );
+  console.info("[stories repo] voice", {
+    id, voice_provider, voice_id,
+  });
+}
+
 export async function getSetting(key: string): Promise<string | null> {
   const r = await one<{ value: string }>(
     "SELECT value FROM settings WHERE key = ?",
