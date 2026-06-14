@@ -35,7 +35,7 @@ RUN npm ci
 
 # Copy everything else AFTER deps install so a touch to src/ doesn't
 # bust the npm cache layer.
-COPY tsconfig.json remotion.config.ts ./
+COPY tsconfig.json tsconfig.server.json remotion.config.ts ./
 COPY src ./src
 COPY server ./server
 COPY public ./public
