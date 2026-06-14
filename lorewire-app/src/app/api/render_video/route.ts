@@ -35,12 +35,26 @@
 //     phase will add a stale-reap helper.
 
 import { NextResponse, type NextRequest } from "next/server";
+import { Agent, fetch as undiciFetch } from "undici";
 import {
   claimNextRender,
   failRender,
   finishRender,
 } from "@/lib/video-render-queue";
 import { getStory } from "@/lib/repo";
+
+// Override undici's 300s default headers/body timeouts. Cloud Run
+// renders a 2:11 envelope-style composition in ~3-7 minutes (cold
+// start + Chromium boot + 3936-frame render + GCS upload), so anything
+// under ~10 min causes the fetch to abort before the response comes
+// back. Vercel Pro's 800s function cap gives us headroom; this
+// agent's 900s is intentionally past it so the cron's own deadline
+// wins instead of undici truncating mid-render.
+const longRunAgent = new Agent({
+  headersTimeout: 900_000,
+  bodyTimeout: 900_000,
+  keepAliveTimeout: 60_000,
+});
 
 // Vercel Pro cron functions get up to 800s. We leave 30s headroom for
 // the response write + Cloud Run's last-mile latency. The fetch below
@@ -78,7 +92,10 @@ async function postToCloudRun(
   // Run returning a 200 with a malformed body is the most confusing
   // failure mode to diagnose without the body fields in the log.
   try {
-    const resp = await fetch(url, {
+    // Use undici directly (not the global fetch) so we control the
+    // headersTimeout / bodyTimeout. The global fetch defaults to 300s
+    // headers timeout which truncates ~5 min renders.
+    const resp = await undiciFetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -86,6 +103,7 @@ async function postToCloudRun(
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(DEADLINE_MS),
+      dispatcher: longRunAgent,
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
