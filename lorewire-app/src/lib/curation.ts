@@ -251,6 +251,62 @@ async function allPublishedInCategory(
   );
 }
 
+// ─── home-page resolver (Phase 4) ───────────────────────────────────────────
+//
+// Used by `src/app/page.tsx` (server component) to pre-resolve every slot
+// the home page renders. Returns story-id lists per slot so the client
+// shell can swap in admin picks where present and fall back to the
+// hardcoded arrays in `lib/stories.ts` where a slot is empty.
+//
+// One network round-trip — listAllSlots() returns every pinned row in
+// one query — then we partition in-memory. Cheaper than five
+// independent SELECTs and keeps the home page's TTFB tight.
+
+export interface HomePagePicks {
+  /** billboard.featured — singleton; null when admin hasn't picked. */
+  billboard: string | null;
+  /** rail.continue — admin order; empty array means "use fallback". */
+  continueRow: string[];
+  /** rail.top10 — admin order. */
+  top10: string[];
+  /** rail.entitled — admin order. */
+  entitled: string[];
+  /** rail.new — admin order. */
+  newRow: string[];
+}
+
+export async function getHomePagePicks(
+  now: Date = new Date(),
+): Promise<HomePagePicks> {
+  const grouped = await listAllSlots();
+  const iso = now.toISOString();
+  const isActive = (r: CurationSlotRow): boolean =>
+    (r.publish_at === null || r.publish_at <= iso) &&
+    (r.expires_at === null || r.expires_at > iso);
+  const pick = (kind: string): string[] =>
+    (grouped[kind] ?? [])
+      .filter(isActive)
+      .sort((a, b) => a.position - b.position)
+      .map((r) => r.story_id);
+
+  const billboardList = pick("billboard.featured");
+  const picks: HomePagePicks = {
+    billboard: billboardList[0] ?? null,
+    continueRow: pick("rail.continue"),
+    top10: pick("rail.top10"),
+    entitled: pick("rail.entitled"),
+    newRow: pick("rail.new"),
+  };
+  console.info("[curation home]", {
+    billboard: picks.billboard,
+    continue: picks.continueRow.length,
+    top10: picks.top10.length,
+    entitled: picks.entitled.length,
+    new: picks.newRow.length,
+  });
+  return picks;
+}
+
 // ─── writes ──────────────────────────────────────────────────────────────────
 
 /** Atomic replace: delete every row for `slotKind`, insert the new

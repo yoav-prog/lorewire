@@ -318,6 +318,73 @@ describe("resolveCategoryPage", () => {
   });
 });
 
+describe("getHomePagePicks", () => {
+  beforeEach(clear);
+
+  it("returns null billboard and empty rails when no slots set", async () => {
+    const { getHomePagePicks } = await import("./curation");
+    const picks = await getHomePagePicks();
+    expect(picks).toEqual({
+      billboard: null,
+      continueRow: [],
+      top10: [],
+      entitled: [],
+      newRow: [],
+    });
+  });
+
+  it("returns first billboard.featured row as billboard pick", async () => {
+    const { getHomePagePicks, setSlotStories } = await import("./curation");
+    await setSlotStories("billboard.featured", ["hero"]);
+    const picks = await getHomePagePicks();
+    expect(picks.billboard).toBe("hero");
+  });
+
+  it("returns each rail in admin order", async () => {
+    const { getHomePagePicks, setSlotStories } = await import("./curation");
+    await setSlotStories("rail.continue", ["c1", "c2"]);
+    await setSlotStories("rail.top10", ["t1", "t2", "t3"]);
+    await setSlotStories("rail.entitled", ["e1"]);
+    await setSlotStories("rail.new", ["n1", "n2"]);
+    const picks = await getHomePagePicks();
+    expect(picks.continueRow).toEqual(["c1", "c2"]);
+    expect(picks.top10).toEqual(["t1", "t2", "t3"]);
+    expect(picks.entitled).toEqual(["e1"]);
+    expect(picks.newRow).toEqual(["n1", "n2"]);
+  });
+
+  it("partitions independently — pinning one rail doesn't leak into another", async () => {
+    const { getHomePagePicks, setSlotStories } = await import("./curation");
+    await setSlotStories("rail.top10", ["a"]);
+    const picks = await getHomePagePicks();
+    expect(picks.top10).toEqual(["a"]);
+    expect(picks.continueRow).toEqual([]);
+    expect(picks.entitled).toEqual([]);
+    expect(picks.newRow).toEqual([]);
+    expect(picks.billboard).toBeNull();
+  });
+
+  it("respects activeAt — hides future-publish rows", async () => {
+    const { addToSlot, getHomePagePicks } = await import("./curation");
+    const now = new Date();
+    const future = new Date(now.getTime() + 3600_000).toISOString();
+    await addToSlot("rail.top10", "soon", { publishAt: future });
+    await addToSlot("rail.top10", "now");
+    const picks = await getHomePagePicks(now);
+    expect(picks.top10).toEqual(["now"]);
+  });
+
+  it("respects activeAt — hides expired rows", async () => {
+    const { addToSlot, getHomePagePicks } = await import("./curation");
+    const now = new Date();
+    const past = new Date(now.getTime() - 3600_000).toISOString();
+    await addToSlot("rail.top10", "dead", { expiresAt: past });
+    await addToSlot("rail.top10", "live");
+    const picks = await getHomePagePicks(now);
+    expect(picks.top10).toEqual(["live"]);
+  });
+});
+
 describe("listAllSlots", () => {
   beforeEach(clear);
 

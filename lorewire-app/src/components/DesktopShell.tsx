@@ -11,7 +11,36 @@ import {
   NEW_ROW,
   type Story,
 } from "@/lib/stories";
+import type { HomePagePicks } from "@/lib/curation";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+
+// Phase 4 of the curation plan. Same merge rules the mobile shell uses:
+// admin picks override the hardcoded list per slot; ids that no longer
+// resolve in STORIES are dropped with a warning rather than crashing.
+function resolveStories(ids: readonly string[]): Story[] {
+  const out: Story[] = [];
+  for (const id of ids) {
+    const story = STORIES.find((s) => s.id === id);
+    if (story) {
+      out.push(story);
+    } else {
+      console.warn("[curation home miss]", { id });
+    }
+  }
+  return out;
+}
+
+function pickBillboardStory(pickedId: string | null): Story {
+  if (pickedId) {
+    const story = STORIES.find((s) => s.id === pickedId);
+    if (story) return story;
+    console.warn("[curation home miss]", {
+      slot: "billboard.featured",
+      id: pickedId,
+    });
+  }
+  return byId("envelope");
+}
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -228,13 +257,13 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape }: { 
   );
 }
 
-function Top10Row({ onOpen }: { onOpen: OpenFn }) {
+function Top10Row({ onOpen, stories }: { onOpen: OpenFn; stories: Story[] }) {
   return (
     <>
-      {TOP10.slice(0, 10).map((id, i) => (
-        <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
+      {stories.slice(0, 10).map((story, i) => (
+        <button key={story.id} onClick={() => onOpen(story.id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
           <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
-          <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}><PosterArt story={byId(id)} /></div>
+          <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}><PosterArt story={story} /></div>
         </button>
       ))}
     </>
@@ -726,15 +755,41 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 }
 
 /* ----------------------------- PAGES ----------------------------- */
-function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
+function HomePage({
+  onOpen,
+  onShuffle,
+  picks,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  picks: HomePagePicks;
+}) {
+  // Same fallback rule the mobile shell uses: empty picks per slot fall
+  // through to the hardcoded arrays in lib/stories.ts.
+  const hero = pickBillboardStory(picks.billboard);
+  const continueItems: { id: string; p: number }[] =
+    picks.continueRow.length > 0
+      ? picks.continueRow
+          .filter((id) => STORIES.some((s) => s.id === id))
+          .map((id) => ({ id, p: 0 }))
+      : CONTINUE;
+  const top10Stories =
+    picks.top10.length > 0 ? resolveStories(picks.top10) : TOP10.map(byId);
+  const entitledStories =
+    picks.entitled.length > 0
+      ? resolveStories(picks.entitled)
+      : ENTITLED_ROW.map(byId);
+  const newStories =
+    picks.newRow.length > 0 ? resolveStories(picks.newRow) : NEW_ROW.map(byId);
+
   return (
     <div className="pb-20">
-      <Hero story={byId("envelope")} onOpen={onOpen} onShuffle={onShuffle} />
+      <Hero story={hero} onOpen={onOpen} onShuffle={onShuffle} />
       <div className="relative -mt-20 z-10">
-        <Rail title="Continue Watching">{CONTINUE.map(({ id, p }) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={300} h={170} progress={p} landscape />)}</Rail>
-        <Rail title="Top 10 Today"><Top10Row onOpen={onOpen} /></Rail>
-        <Rail title="Audacity: Entitled People">{ENTITLED_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}</Rail>
-        <Rail title="New on LoreWire">{NEW_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}</Rail>
+        <Rail title="Continue Watching">{continueItems.map(({ id, p }) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={300} h={170} progress={p} landscape />)}</Rail>
+        <Rail title="Top 10 Today"><Top10Row onOpen={onOpen} stories={top10Stories} /></Rail>
+        <Rail title="Audacity: Entitled People">{entitledStories.map((story) => <PosterCard key={story.id} story={story} onOpen={onOpen} />)}</Rail>
+        <Rail title="New on LoreWire">{newStories.map((story) => <PosterCard key={story.id} story={story} onOpen={onOpen} />)}</Rail>
       </div>
     </div>
   );
@@ -768,7 +823,11 @@ function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
 }
 
 /* ----------------------------- DESKTOP SHELL ----------------------------- */
-export default function DesktopShell() {
+export default function DesktopShell({
+  homePicks,
+}: {
+  homePicks: HomePagePicks;
+}) {
   const [view, setView] = useState("Home");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
   const [list, setList] = useState<string[]>(["stranger", "wrongnumber"]);
@@ -792,7 +851,7 @@ export default function DesktopShell() {
     <div className="min-h-screen bg-bg">
       <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
 
-      {view === "Home" && <HomePage onOpen={open} onShuffle={shuffle} />}
+      {view === "Home" && <HomePage onOpen={open} onShuffle={shuffle} picks={homePicks} />}
       {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} />}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} />}
       {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} />}

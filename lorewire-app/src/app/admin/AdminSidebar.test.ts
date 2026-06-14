@@ -104,13 +104,18 @@ describe("buildGroups", () => {
     );
   });
 
-  it("produces the three top-level entries in stable order", () => {
+  it("produces the top-level entries in stable order", () => {
+    // Order matters: Overview is the landing page, Content + Reddit Sources
+    // are the daily workspaces, Curation gates the public site, Settings is
+    // the rarely-touched config hub at the bottom.
     for (const dev of [false, true]) {
       const groups = buildGroups(dev);
       expect(groups[0].label).toBeNull();
       expect(groups[0].items.map((i) => i.label)).toEqual([
         "Overview",
         "Content",
+        "Reddit Sources",
+        "Curation",
         "Settings",
       ]);
     }

@@ -12,8 +12,39 @@ import {
   PILLS,
   type Story,
 } from "@/lib/stories";
+import type { HomePagePicks } from "@/lib/curation";
 import DesktopShell from "@/components/DesktopShell";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+
+// Phase 4 of the curation plan: AppShell receives server-resolved picks
+// and merges them into the rails (admin pick wins; empty slot falls back
+// to the hardcoded list in lib/stories.ts). These two helpers do the
+// resolution against the in-memory STORIES catalog and warn on missing
+// ids instead of throwing, so a stale pin can't crash the home page.
+function resolveStories(ids: readonly string[]): Story[] {
+  const out: Story[] = [];
+  for (const id of ids) {
+    const story = STORIES.find((s) => s.id === id);
+    if (story) {
+      out.push(story);
+    } else {
+      console.warn("[curation home miss]", { id });
+    }
+  }
+  return out;
+}
+
+function pickBillboardStory(pickedId: string | null): Story {
+  if (pickedId) {
+    const story = STORIES.find((s) => s.id === pickedId);
+    if (story) return story;
+    console.warn("[curation home miss]", {
+      slot: "billboard.featured",
+      id: pickedId,
+    });
+  }
+  return byId("envelope");
+}
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -178,8 +209,44 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
 }
 
 /* ----------------------------- HOME ----------------------------- */
-function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle: () => void; pill: string; setPill: (p: string) => void }) {
-  const featured = byId("envelope");
+// `picks` carries the admin-curated story ids resolved by the server
+// component at src/app/page.tsx. Per-slot rule: empty picks fall back
+// to the hardcoded list in lib/stories.ts; populated picks take over
+// completely (admin order wins). Phase 4 of the curation plan.
+function Home({
+  onOpen,
+  onShuffle,
+  pill,
+  setPill,
+  picks,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  pill: string;
+  setPill: (p: string) => void;
+  picks: HomePagePicks;
+}) {
+  const featured = pickBillboardStory(picks.billboard);
+
+  // Continue Watching needs {id, progress%} pairs because the rail draws
+  // the progress bar from `p`. We have no server-side playback state yet,
+  // so admin-pinned ids get progress=0 — the bar is empty but the row
+  // still renders. Fallback uses the hardcoded {id, p} demo data.
+  const continueItems: { id: string; p: number }[] =
+    picks.continueRow.length > 0
+      ? picks.continueRow
+          .filter((id) => STORIES.some((s) => s.id === id))
+          .map((id) => ({ id, p: 0 }))
+      : CONTINUE;
+  const top10Stories =
+    picks.top10.length > 0 ? resolveStories(picks.top10) : TOP10.map(byId);
+  const entitledStories =
+    picks.entitled.length > 0
+      ? resolveStories(picks.entitled)
+      : ENTITLED_ROW.map(byId);
+  const newStories =
+    picks.newRow.length > 0 ? resolveStories(picks.newRow) : NEW_ROW.map(byId);
+
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
     <div className="pb-28">
@@ -197,17 +264,17 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
       <section className="mt-1">
         <RailHead>Continue Watching</RailHead>
         <div className={railClass}>
-          {CONTINUE.map(({ id, p }) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={150} h={96} progress={p} />)}
+          {continueItems.map(({ id, p }) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={150} h={96} progress={p} />)}
         </div>
       </section>
 
       <section className="mt-7">
         <RailHead>Top 10 Today</RailHead>
         <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
-          {TOP10.map((id, i) => (
-            <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
+          {top10Stories.map((story, i) => (
+            <button key={story.id} onClick={() => onOpen(story.id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
               <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "2px rgba(255,255,255,.32)" }}>{i + 1}</span>
-              <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={byId(id)} /></div>
+              <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={story} /></div>
             </button>
           ))}
         </div>
@@ -216,14 +283,14 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
       <section className="mt-7">
         <RailHead>Audacity: Entitled People</RailHead>
         <div className={railClass}>
-          {ENTITLED_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}
+          {entitledStories.map((story) => <PosterCard key={story.id} story={story} onOpen={onOpen} />)}
         </div>
       </section>
 
       <section className="mt-7">
         <RailHead>New on LoreWire</RailHead>
         <div className={railClass}>
-          {NEW_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}
+          {newStories.map((story) => <PosterCard key={story.id} story={story} onOpen={onOpen} />)}
         </div>
       </section>
     </div>
@@ -898,7 +965,7 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
 }
 
 /* ----------------------------- MOBILE SHELL ----------------------------- */
-function MobileShell() {
+function MobileShell({ homePicks }: { homePicks: HomePagePicks }) {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
@@ -920,7 +987,7 @@ function MobileShell() {
   return (
     <div className="relative mx-auto w-full max-w-[480px] h-[100dvh] overflow-hidden bg-bg">
       <div ref={screenRef} className="screen noscroll">
-        {tab === "Home" && <Home onOpen={open} onShuffle={shuffle} pill={pill} setPill={setPill} />}
+        {tab === "Home" && <Home onOpen={open} onShuffle={shuffle} pill={pill} setPill={setPill} picks={homePicks} />}
         {tab === "Search" && <Search onOpen={open} />}
         {tab === "New" && <NewScreen onOpen={open} />}
         {tab === "My List" && <MyList onOpen={open} list={list} />}
@@ -945,14 +1012,31 @@ function MobileShell() {
 /* ----------------------------- RESPONSIVE APP ----------------------------- */
 // Mobile layout below the lg breakpoint, the desktop layout at lg and up.
 // Both mount; CSS shows exactly one, so neither layout regresses the other.
-export default function AppShell() {
+//
+// `initialHomePicks` is hydrated by the server component at
+// src/app/page.tsx (Phase 4 of the curation plan). When omitted — e.g.
+// a future caller that hasn't been migrated — every slot reports empty
+// and each rail falls back to its hardcoded list in lib/stories.ts.
+const EMPTY_HOME_PICKS: HomePagePicks = {
+  billboard: null,
+  continueRow: [],
+  top10: [],
+  entitled: [],
+  newRow: [],
+};
+
+export default function AppShell({
+  initialHomePicks = EMPTY_HOME_PICKS,
+}: {
+  initialHomePicks?: HomePagePicks;
+}) {
   return (
     <>
       <div className="lg:hidden">
-        <MobileShell />
+        <MobileShell homePicks={initialHomePicks} />
       </div>
       <div className="hidden lg:block">
-        <DesktopShell />
+        <DesktopShell homePicks={initialHomePicks} />
       </div>
     </>
   );
