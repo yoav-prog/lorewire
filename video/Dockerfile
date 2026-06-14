@@ -83,6 +83,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxshmfence1 \
         ca-certificates \
         tini \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Tell @remotion/renderer where the Chromium binary lives. Without this

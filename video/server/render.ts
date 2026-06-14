@@ -11,6 +11,7 @@
 // breaks vitest's node environment. The HTTP layer mocks
 // `renderAndUploadStory` from this module instead.
 
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -22,7 +23,17 @@ import {
 } from "@remotion/renderer";
 import { Storage } from "@google-cloud/storage";
 
+import { buildConcatArgv } from "./ffmpeg.js";
+
 const COMPOSITION_ID = "DoodleShort";
+
+/** Maximum size of a single intro/outro segment download, in bytes. Set
+ *  generously — normalized 4 s segments at the 1080p contract weigh in
+ *  around 2–5 MB; this guards against a misconfigured row pointing at a
+ *  100 MB upload (the segments table caps source upload at 200 MB but the
+ *  normalized output should always be small). Reject above this — we
+ *  don't want a single bad row OOM'ing the container. */
+const MAX_SEGMENT_BYTES = 50 * 1024 * 1024;
 
 // Bundle the Remotion project once. The first call kicks the actual
 // Webpack build (30-60s); subsequent calls return the cached promise.
@@ -70,12 +81,22 @@ export interface RenderResult {
   elapsed_ms: number;
 }
 
+/** Resolved intro / outro public GCS URLs the dispatcher picked for this
+ *  story. Either may be null — null means "no segment for that end" (the
+ *  resolver chose to skip, or no global active is set). Phase 3 of
+ *  _plans/2026-06-15-cloud-run-intro-outro-splice.md. */
+export interface SpliceSegments {
+  intro: string | null;
+  outro: string | null;
+}
+
 /** Test-side seam so the HTTP layer can stub the heavy lifting
  *  without pulling in @remotion/bundler or the GCS client at import
  *  time. Production wires the real function in via `server/index.ts`. */
 export type RenderFn = (
   storyId: string,
   inputProps: unknown,
+  segments?: SpliceSegments,
 ) => Promise<RenderResult>;
 
 /** Real implementation. Production server passes this through to the
@@ -100,12 +121,20 @@ export type RenderFn = (
 export async function renderAndUploadStory(
   storyId: string,
   inputProps: unknown,
+  segments: SpliceSegments = { intro: null, outro: null },
 ): Promise<RenderResult> {
   const started = Date.now();
   const gcsBucket = process.env.GCS_BUCKET;
   if (!gcsBucket) {
     throw new Error("GCS_BUCKET not configured");
   }
+
+  // Build the Storage client once and reuse it for BOTH the segment
+  // downloads (splice path) and the final body upload. Same credentials,
+  // same env shape — see the long comment in the upload section below
+  // for why we reuse Vercel's GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY pair
+  // instead of falling through to Cloud Run's metadata-server auth.
+  const storage = makeStorageClient();
 
   const serveUrl = await getOrCreateBundle();
 
@@ -166,35 +195,21 @@ export async function renderAndUploadStory(
     }),
   );
 
-  // GCS upload reusing the SAME credentials the rest of the
-  // LoreWire stack uses — Vercel functions, pipeline/gcs.py, and
-  // lib/gcs.ts all read GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY from
-  // env. Passing them explicitly to the Storage client (instead of
-  // letting it fall through to Cloud Run's metadata server) means:
-  //   - No separate IAM role to maintain on the Cloud Run side.
-  //   - One source of truth for credential rotation (rotate them
-  //     in Vercel + redeploy Cloud Run with the same values).
-  //   - Local `npm run dev:server` works against real GCS the moment
-  //     the developer has the env loaded — no `gcloud auth` quirks.
-  // The .env shape stores the key with literal `\n` sequences;
-  // normalize to real newlines like lib/gcs.ts does so the PEM
-  // parser accepts it.
-  const clientEmail = process.env.GCS_CLIENT_EMAIL;
-  const rawKey = process.env.GCS_PRIVATE_KEY;
-  if (!clientEmail || !rawKey) {
-    throw new Error(
-      "GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY must be set (use the same values Vercel does)",
-    );
-  }
-  const privateKey = rawKey.includes("\\n")
-    ? rawKey.replace(/\\n/g, "\n")
-    : rawKey;
-  const storage = new Storage({
-    credentials: {
-      client_email: clientEmail,
-      private_key: privateKey,
-    },
+  // Splice intro + body + outro IF the dispatcher resolved any. When
+  // both segments are null, this is a no-op and the body MP4 at
+  // tmpPath gets uploaded as-is — byte-identical to the pre-Phase-3
+  // render output. When one or both are set, ffmpeg downloads each to
+  // /tmp, concats them around the body, and replaces tmpPath with the
+  // spliced file in place. Downstream upload + cleanup paths don't
+  // need to know which happened.
+  await spliceWithSegments({
+    storyId,
+    bodyPath: tmpPath,
+    segments,
+    storage,
+    gcsBucket,
   });
+
   const key = `${sanitizeForFs(storyId)}/video.mp4`;
   await storage.bucket(gcsBucket).upload(tmpPath, {
     destination: key,
@@ -233,4 +248,226 @@ export async function renderAndUploadStory(
 function sanitizeForFs(storyId: string): string {
   const cleaned = storyId.replace(/[^A-Za-z0-9_-]/g, "");
   return cleaned.length > 0 ? cleaned : "unknown";
+}
+
+// ─── Phase 3: intro/outro splice ─────────────────────────────────────────────
+//
+// _plans/2026-06-15-cloud-run-intro-outro-splice.md.
+//
+// The dispatcher (Vercel cron) resolves which intro/outro to use and passes
+// the public GCS URLs in the /render request body. Here we download each
+// to /tmp, run one ffmpeg concat-filter pass, and replace the body MP4 at
+// `bodyPath` with the spliced output. The caller then uploads `bodyPath`
+// unchanged, so every existing path (URL shape, GCS key, cleanup) carries
+// over without modification.
+
+function makeStorageClient(): Storage {
+  // The .env shape stores GCS_PRIVATE_KEY with literal `\n` sequences
+  // (matches Vercel + pipeline/gcs.py + lib/gcs.ts); normalize to real
+  // newlines so the PEM parser accepts it.
+  const clientEmail = process.env.GCS_CLIENT_EMAIL;
+  const rawKey = process.env.GCS_PRIVATE_KEY;
+  if (!clientEmail || !rawKey) {
+    throw new Error(
+      "GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY must be set (use the same values Vercel does)",
+    );
+  }
+  const privateKey = rawKey.includes("\\n")
+    ? rawKey.replace(/\\n/g, "\n")
+    : rawKey;
+  return new Storage({
+    credentials: { client_email: clientEmail, private_key: privateKey },
+  });
+}
+
+function spliceLog(event: string, fields: Record<string, unknown>): void {
+  console.info(`[cloud-run splice ${event}]`, JSON.stringify(fields));
+}
+
+/** Parse a public GCS URL of the shape
+ *  `https://storage.googleapis.com/<bucket>/<key>.mp4` and return the key
+ *  (the part after the bucket). Returns null if the URL doesn't match the
+ *  expected shape OR points at a different bucket — the latter is the
+ *  defense-in-depth check: a misconfigured row pointing at a foreign
+ *  bucket fails closed instead of triggering an anonymous download. */
+export function parseGcsSegmentUrl(
+  url: string,
+  expectedBucket: string,
+): string | null {
+  const m = /^https:\/\/storage\.googleapis\.com\/([^/]+)\/(.+\.mp4)$/i.exec(url);
+  if (!m) return null;
+  if (m[1] !== expectedBucket) return null;
+  return m[2];
+}
+
+async function downloadSegment(
+  storage: Storage,
+  bucket: string,
+  key: string,
+  destination: string,
+  storyId: string,
+  kind: "intro" | "outro",
+): Promise<void> {
+  const file = storage.bucket(bucket).file(key);
+  const [meta] = await file.getMetadata();
+  const sizeRaw = meta.size;
+  const sizeBytes =
+    typeof sizeRaw === "string" ? parseInt(sizeRaw, 10) : sizeRaw ?? 0;
+  if (sizeBytes > MAX_SEGMENT_BYTES) {
+    throw new Error(
+      `segment ${key} is ${sizeBytes} bytes, exceeds ${MAX_SEGMENT_BYTES} cap`,
+    );
+  }
+  spliceLog("download", {
+    story_id: storyId,
+    kind,
+    bucket,
+    key,
+    bytes: sizeBytes,
+  });
+  await file.download({ destination });
+}
+
+function runFfmpeg(argv: string[], storyId: string): Promise<void> {
+  // Use spawn (not exec) with an explicit argv list so the input paths
+  // can never be interpreted by a shell. Even with paths containing
+  // spaces, semicolons, or quotes the binary sees them as standalone
+  // tokens — covered by the ffmpeg.test.mjs argv shape test.
+  return new Promise((resolve, reject) => {
+    const proc = spawn(argv[0], argv.slice(1), {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderrTail = "";
+    proc.stderr.on("data", (chunk: Buffer) => {
+      stderrTail += chunk.toString("utf8");
+      // Keep the tail bounded — ffmpeg is chatty about progress and a
+      // 30-minute render of a noisy input could otherwise accumulate
+      // tens of MB of stderr in memory.
+      if (stderrTail.length > 16384) {
+        stderrTail = stderrTail.slice(-16384);
+      }
+    });
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const tail = stderrTail.split("\n").slice(-8).join("\n");
+      spliceLog("failed", { story_id: storyId, rc: code, tail });
+      reject(new Error(`ffmpeg exited with code ${code}: ${tail}`));
+    });
+  });
+}
+
+async function spliceWithSegments(opts: {
+  storyId: string;
+  bodyPath: string;
+  segments: SpliceSegments;
+  storage: Storage;
+  gcsBucket: string;
+}): Promise<void> {
+  const { storyId, bodyPath, segments, storage, gcsBucket } = opts;
+  const hasIntro = typeof segments.intro === "string" && segments.intro.length > 0;
+  const hasOutro = typeof segments.outro === "string" && segments.outro.length > 0;
+
+  if (!hasIntro && !hasOutro) {
+    spliceLog("skipped", { story_id: storyId, reason: "no-segments" });
+    return;
+  }
+
+  // Validate URLs early — fail closed with a clear log so an admin can
+  // see WHICH URL the row pointed at, without trying to download it.
+  const introKey = hasIntro
+    ? parseGcsSegmentUrl(segments.intro as string, gcsBucket)
+    : null;
+  const outroKey = hasOutro
+    ? parseGcsSegmentUrl(segments.outro as string, gcsBucket)
+    : null;
+  if (hasIntro && !introKey) {
+    spliceLog("skipped", {
+      story_id: storyId,
+      reason: "invalid-intro-url",
+      url: segments.intro,
+    });
+    return;
+  }
+  if (hasOutro && !outroKey) {
+    spliceLog("skipped", {
+      story_id: storyId,
+      reason: "invalid-outro-url",
+      url: segments.outro,
+    });
+    return;
+  }
+
+  spliceLog("start", {
+    story_id: storyId,
+    has_intro: hasIntro,
+    has_outro: hasOutro,
+  });
+  const splicedStarted = Date.now();
+
+  // /tmp paths are derived from storyId + Date.now() so a concurrent
+  // retry on the same container can't clobber an in-flight splice.
+  const stamp = Date.now();
+  const sanitized = sanitizeForFs(storyId);
+  const introPath = introKey
+    ? path.join("/tmp", `${sanitized}-intro-${stamp}.mp4`)
+    : null;
+  const outroPath = outroKey
+    ? path.join("/tmp", `${sanitized}-outro-${stamp}.mp4`)
+    : null;
+  const splicedPath = path.join("/tmp", `${sanitized}-spliced-${stamp}.mp4`);
+
+  // Parallel downloads — both segments are small (~5 MB) and the GCS
+  // client multiplexes well.
+  await Promise.all([
+    introKey && introPath
+      ? downloadSegment(storage, gcsBucket, introKey, introPath, storyId, "intro")
+      : Promise.resolve(),
+    outroKey && outroPath
+      ? downloadSegment(storage, gcsBucket, outroKey, outroPath, storyId, "outro")
+      : Promise.resolve(),
+  ]);
+
+  // Inputs in playback order: intro → body → outro. Any missing end is
+  // simply skipped, matching `pipeline/segments.py:splice`.
+  const inputs: string[] = [];
+  if (introPath) inputs.push(introPath);
+  inputs.push(bodyPath);
+  if (outroPath) inputs.push(outroPath);
+
+  const argv = buildConcatArgv(inputs, splicedPath);
+  spliceLog("ffmpeg", { story_id: storyId, argv });
+  await runFfmpeg(argv, storyId);
+
+  // Replace the body file with the spliced one. fs.rename is atomic
+  // inside /tmp (same filesystem), so the upload step never sees a
+  // partial file.
+  await fs.rename(splicedPath, bodyPath);
+
+  // Best-effort cleanup of the downloaded segments. A leaked /tmp file
+  // gets reclaimed when the container recycles (every ~15 min idle),
+  // but logging it surfaces a leak pattern early.
+  await Promise.allSettled(
+    [introPath, outroPath]
+      .filter((p): p is string => p !== null)
+      .map((p) =>
+        fs.unlink(p).catch((e) => {
+          console.warn(
+            "[cloud-run splice cleanup-fail]",
+            JSON.stringify({
+              path: p,
+              error: e instanceof Error ? e.message : String(e),
+            }),
+          );
+        }),
+      ),
+  );
+
+  spliceLog("done", {
+    story_id: storyId,
+    in_ms: Date.now() - splicedStarted,
+  });
 }

@@ -7,7 +7,7 @@
     "preview": "remotion preview src/Root.tsx",
     "render": "remotion render src/Root.tsx",
     "test:motion": "node --test src/motion/mouth-timing.test.mjs",
-    "test:server": "tsc -p tsconfig.server.json && node --test server/index.test.mjs",
+    "test:server": "tsc -p tsconfig.server.json && node --test server/index.test.mjs server/ffmpeg.test.mjs",
     "build:server": "tsc -p tsconfig.server.json",
     "dev:server": "tsx watch server/start.ts",
     "start:server": "node dist/server/start.js",
