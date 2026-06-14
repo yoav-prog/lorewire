@@ -29,6 +29,8 @@ import { StatusStepIndicator } from "./StatusStepIndicator";
 import { StoryAspectControl } from "./StoryAspectControl";
 import { isVideoAspect, LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
 import { resolveSceneCount, readSceneCountMode } from "@/lib/scene-count";
+import { VoicePicker } from "@/components/voice-picker/VoicePicker";
+import { listVoices } from "@/lib/voice-library";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -58,14 +60,22 @@ export default async function EditStory({
   // Also: pull the global default aspect + parse the per-story override so
   // the editor shows the right starting value (Phase 4 of
   // _plans/2026-06-12-video-aspect-ratio.md).
-  const [intros, outros, activeIntroId, activeOutroId, defaultAspectRaw] =
+  //
+  // `voicePickerEnabled` gates the Phase 3 picker (per
+  // `_plans/2026-06-14-voiceover-picker.md`). The setting defaults to off
+  // ("0") so the picker is dark until the admin flips it on AND the
+  // Phase 2.b bake script has populated preview MP3s — that's the
+  // contract: don't ship UI that plays broken audio.
+  const [intros, outros, activeIntroId, activeOutroId, defaultAspectRaw, voicePickerEnabledRaw] =
     await Promise.all([
       listSegments("intro"),
       listSegments("outro"),
       getSetting("video.active_intro_id"),
       getSetting("video.active_outro_id"),
       getSetting("video.default_aspect"),
+      getSetting("voice.picker_enabled"),
     ]);
+  const voicePickerEnabled = String(voicePickerEnabledRaw ?? "0") !== "0";
 
   // Resolve the aspect for THIS story's display. The chain is:
   //   per-story video_config.aspect -> global default -> legacy 9:16.
@@ -181,6 +191,11 @@ export default async function EditStory({
       hint: "Protagonist portrait + mouth-removed pair for the lip-flap overlay. Two images per regen.",
     });
   }
+
+  // Pull the voice library only when the picker flag is on. The library
+  // does a 24h-memoized live ElevenLabs fetch under the hood; pulling it
+  // when the picker is dark wastes a round trip on every story render.
+  const voices = voicePickerEnabled ? await listVoices() : [];
 
   return (
     <div className="space-y-5">
@@ -339,6 +354,15 @@ export default async function EditStory({
               title="Props (per-image)"
               description="Redo a single prop. Label + side stay; only the image changes."
               items={propGranular}
+            />
+          )}
+
+          {voicePickerEnabled && voices.length > 0 && (
+            <VoicePicker
+              storyId={s.id}
+              voices={voices}
+              currentProvider={s.voice_provider}
+              currentVoiceId={s.voice_id}
             />
           )}
 

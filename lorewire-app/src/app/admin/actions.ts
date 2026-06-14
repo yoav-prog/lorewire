@@ -28,6 +28,7 @@ import {
   setArticleStatus,
   setArticleNoindex,
   setStoryNoindex,
+  setStoryVoice,
   getStory as getStoryRow,
   deleteArticle,
   appendRevision,
@@ -952,6 +953,60 @@ export async function setStoryOverrideAction(
   );
   revalidatePath(`/admin/stories/${storyId}`);
   redirect(`/admin/stories/${storyId}`);
+}
+
+// Phase 3 of _plans/2026-06-14-voiceover-picker.md. Persists the
+// per-story voice override the picker selected. Validates the chosen
+// (provider, voice_id) against the live library so a tampered form
+// value can't smuggle a free-text id into the DB (rule 13 — never
+// trust the client). The empty/"reset" path clears both columns so
+// the resolution chain falls back to the admin global setting.
+export async function setStoryVoiceAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  await requireAdmin();
+  const storyId = String(formData.get("story_id") ?? "");
+  const rawProvider = String(formData.get("voice_provider") ?? "");
+  const rawVoiceId = String(formData.get("voice_id") ?? "");
+  if (!storyId) {
+    return { ok: false, error: "missing story_id" };
+  }
+  // Empty or "reset" sentinel -> clear both columns (use global default).
+  // Treating an unset provider as a reset matches the picker's "Use
+  // global default" affordance — the form submits with empty inputs.
+  if (!rawProvider) {
+    await setStoryVoice(storyId, null, null);
+    console.info("[stories action] voice reset", { story_id: storyId });
+    revalidatePath(`/admin/stories/${storyId}`);
+    revalidatePath(`/admin/videos/${storyId}`);
+    return { ok: true };
+  }
+  // Validate against the live library — a free-text provider/voice_id
+  // would let an admin form-edit a value the picker never showed. The
+  // library is cheap (24h memoized after the first call).
+  const { listVoices } = await import("@/lib/voice-library");
+  const voices = await listVoices();
+  const match = voices.find(
+    (v) => v.provider === rawProvider && v.voice_id === rawVoiceId,
+  );
+  if (!match) {
+    console.warn("[stories action] voice rejected", {
+      story_id: storyId,
+      rawProvider,
+      rawVoiceId,
+    });
+    return { ok: false, error: "unknown voice" };
+  }
+  await setStoryVoice(storyId, match.provider, match.voice_id);
+  console.info("[stories action] voice", {
+    story_id: storyId,
+    provider: match.provider,
+    voice_id: match.voice_id,
+  });
+  revalidatePath(`/admin/stories/${storyId}`);
+  revalidatePath(`/admin/videos/${storyId}`);
+  return { ok: true };
 }
 
 // --- articles CMS actions (Phase 1) ----------------------------------------
