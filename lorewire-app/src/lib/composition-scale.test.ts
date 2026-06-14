@@ -44,15 +44,38 @@ describe("computeScale", () => {
     expect(s.scaleH(96)).toBeCloseTo(96 * (1080 / 1920), 4);
   });
 
-  it("scales font sizes and outline widths with the width axis", () => {
+  it("scales horizontal padding and max-width values with the width axis", () => {
+    // scaleW is the multiplier for true horizontal-axis values: the
+    // caption band's outer paddingX, the title chip's maxWidth, the
+    // channel pill's left/right padding. Those should grow with the
+    // wider landscape canvas so the layout breathes the same way.
     const s = computeScale(1920, 1080);
-    // The composition's chunk-base font sizes are 96 / 80 / 64 — at 16:9
-    // they should grow to keep the same visual proportion of the canvas.
-    expect(s.scaleW(96)).toBeCloseTo(96 * (1920 / 1080), 4);
-    expect(s.scaleW(80)).toBeCloseTo(80 * (1920 / 1080), 4);
     expect(s.scaleW(64)).toBeCloseTo(64 * (1920 / 1080), 4);
-    // Outline width 6 stays the same ratio.
-    expect(s.scaleW(6)).toBeCloseTo(6 * (1920 / 1080), 4);
+    expect(s.scaleW(28)).toBeCloseTo(28 * (1920 / 1080), 4);
+  });
+
+  it("sizes captions with scaleMin so landscape doesn't blow them up", () => {
+    // The caption fontSize / outlineWidth / shadowOffset / word-gap
+    // intentionally use scaleMin (not scaleW). On landscape (1920x1080)
+    // scaleW(96) = 171 px, which is 16% of the 1080-tall frame — that's
+    // the bug that caused 4-word chunks like "BY FRIDAY THE OFFICE" to
+    // wrap onto two lines and dominate the frame. scaleMin tracks the
+    // shorter axis so a 96-px portrait caption (5% of the 1920-tall
+    // frame) lands at 54 px on landscape (5% of the 1080-tall frame),
+    // preserving the visual proportion the type was authored against.
+    const landscape = computeScale(1920, 1080);
+    expect(landscape.scaleMin(96)).toBeCloseTo(96 * (1080 / 1920), 4);
+    expect(landscape.scaleMin(80)).toBeCloseTo(80 * (1080 / 1920), 4);
+    expect(landscape.scaleMin(64)).toBeCloseTo(64 * (1080 / 1920), 4);
+    // Outline + shadow + word-gap track the same axis so they stay
+    // proportional to the font instead of growing past the type.
+    expect(landscape.scaleMin(6)).toBeCloseTo(6 * (1080 / 1920), 4);
+    expect(landscape.scaleMin(4)).toBeCloseTo(4 * (1080 / 1920), 4);
+    expect(landscape.scaleMin(16)).toBeCloseTo(16 * (1080 / 1920), 4);
+    // Portrait is identity so existing renders are byte-identical.
+    const portrait = computeScale(BASE_WIDTH, BASE_HEIGHT);
+    expect(portrait.scaleMin(96)).toBe(96);
+    expect(portrait.scaleMin(6)).toBe(6);
   });
 
   it("survives off-baseline canvas sizes gracefully", () => {

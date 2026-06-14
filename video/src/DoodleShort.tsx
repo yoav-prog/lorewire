@@ -55,7 +55,15 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
   // canvas so 16:9 (1920x1080) renders look like the portrait does — wider
   // canvas gets bigger fonts + paddings; shorter canvas gets tighter
   // top/bottom insets. Identity for portrait so back-compat holds.
-  const { scaleW, scaleH } = useCompositionScale();
+  //
+  // Caption text uses `scaleMin` (the smaller of the two ratios). Scaling
+  // the type by canvas width inflates a 96 px portrait font to 171 px on
+  // landscape — far too tall for the 1080-px-high landscape frame, which
+  // is why a 4-word chunk like "BY FRIDAY THE OFFICE" wraps to two lines
+  // and dominates the frame. The captions are a fixed-aspect visual
+  // element (same reason `scaleMin` already governs prop cards + the
+  // talking-head bust), so they should track the smaller axis.
+  const { scaleW, scaleH, scaleMin } = useCompositionScale();
 
   // Trim window. Both bounds are absolute against the unclipped audio /
   // caption timeline; missing means "no trim, render the full thing". The
@@ -189,6 +197,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
           elapsedMs={elapsedMs}
           style={captionTemplate}
           scaleW={scaleW}
+          scaleMin={scaleMin}
         />
       )}
 
@@ -316,7 +325,8 @@ const DoodleCaption: React.FC<{
   elapsedMs: number;
   style: ResolvedTemplate;
   scaleW: (px: number) => number;
-}> = ({ caption, elapsedMs, style, scaleW }) => {
+  scaleMin: (px: number) => number;
+}> = ({ caption, elapsedMs, style, scaleW, scaleMin }) => {
   const sinceStart = elapsedMs - caption.start_ms;
   const untilEnd = caption.end_ms - elapsedMs;
   const fadeIn = Math.min(1, Math.max(0, sinceStart / CHUNK_FADE_MS));
@@ -333,14 +343,17 @@ const DoodleCaption: React.FC<{
   // Auto-size: short chunks get bigger type so a 2-word hook punches at the
   // same legibility budget as a 4-word phrase. The admin's size_scale multiplies
   // the base size so a global tweak shifts every chunk together. The base
-  // tiers (96 / 80 / 64) were calibrated for the 1080-wide portrait canvas;
-  // `scaleW` maps them onto the live canvas so 16:9 captions read at the
-  // same relative size.
+  // tiers (96 / 80 / 64) were calibrated against the 1080x1920 portrait canvas
+  // (96 px = 5 % of frame height); `scaleMin` maps them onto the live canvas so
+  // captions occupy the same vertical share on landscape (96 * 0.56 = 54 px on
+  // a 1080-tall frame = 5 %). The stroke + shadow track the font so the
+  // outline weight stays proportional. Portrait is identity (ratio = 1) so
+  // existing renders are byte-identical.
   const wordCount = words.length;
   const baseFontSize = wordCount <= 4 ? 96 : wordCount <= 6 ? 80 : 64;
-  const fontSize = Math.round(scaleW(baseFontSize) * style.sizeScale);
-  const outlineWidth = scaleW(style.outlineWidth);
-  const shadowOffset = scaleW(4);
+  const fontSize = Math.round(scaleMin(baseFontSize) * style.sizeScale);
+  const outlineWidth = scaleMin(style.outlineWidth);
+  const shadowOffset = scaleMin(4);
 
   // wordHighlight === "none": render the chunk as one block, no per-word
   // styling. Used for "I just want the text, no karaoke pulse".
@@ -481,7 +494,7 @@ const DoodleCaption: React.FC<{
             key={i}
             style={{
               display: "inline-block",
-              marginRight: i < words.length - 1 ? scaleW(16) : 0,
+              marginRight: i < words.length - 1 ? scaleMin(16) : 0,
               ...wordStyle(i),
             }}
           >
