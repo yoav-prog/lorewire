@@ -303,6 +303,35 @@ describe("enqueueRender — retry semantics", () => {
     await run(`DELETE FROM video_renders WHERE story_id = ?`, [RETRY_STORY_ID]);
   });
 
+  it("resets a cancelled row back to queued (cancelled is recoverable like error)", async () => {
+    await run(
+      `INSERT INTO video_renders
+        (id, story_id, config_hash, status, progress, error, output_url,
+         requested_by, requested_at, started_at, finished_at)
+       VALUES (?, ?, ?, 'cancelled', 0, NULL, NULL,
+               'admin-1', '2026-06-14T10:00:00.000Z', NULL,
+               '2026-06-14T10:05:00.000Z')`,
+      ["cancel-1", RETRY_STORY_ID, RETRY_HASH],
+    );
+
+    const result = await enqueueRender(RETRY_STORY_ID, RETRY_HASH, "admin-2");
+
+    expect(result.id).toBe("cancel-1");
+    expect(result.status).toBe("queued");
+    expect(result.requested_by).toBe("admin-2");
+    expect(result.finished_at).toBeNull();
+
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM video_renders WHERE story_id = ?`,
+      [RETRY_STORY_ID],
+    );
+    expect(rows).toHaveLength(1);
+
+    // And the timeline records what we did for the user.
+    const events = await listVideoRenderEvents("cancel-1");
+    expect(events.map((e) => e.event)).toContain("reset_from_cancelled");
+  });
+
   it("resets an errored row back to queued (preserves id)", async () => {
     await run(
       `INSERT INTO video_renders

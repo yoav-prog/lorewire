@@ -1166,9 +1166,19 @@ function RenderControl({
       ? "Queueing…"
       : "Render";
   // The Force re-render path is meaningful when there's a settled
-  // (done/error) row at the current config_hash AND we're not in
-  // flight. Otherwise the regular Render button covers the case.
-  const showForce = !isInFlight && !pending && active && (active.status === "done" || active.status === "error");
+  // (done / error / cancelled) row at the current config_hash AND
+  // we're not in flight. Cancelled is included because rows can land
+  // in that state via direct SQL when an admin manually clears a stuck
+  // queue, and without the Force button the editor has no escape hatch.
+  // Regular Render also resets error + cancelled rows; Force is the
+  // belt-and-suspenders path when the user wants a brand-new attempt.
+  const showForce =
+    !isInFlight &&
+    !pending &&
+    active &&
+    (active.status === "done" ||
+      active.status === "error" ||
+      active.status === "cancelled");
 
   return (
     <div className="flex flex-col items-end gap-1">
@@ -1233,6 +1243,13 @@ function RenderStatusBadge({
         className="rounded-full border border-danger/40 bg-danger/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-danger"
       >
         last render: error
+      </span>
+    );
+  }
+  if (status === "cancelled") {
+    return (
+      <span className="rounded-full border border-muted/40 bg-muted/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted">
+        last render: cancelled
       </span>
     );
   }

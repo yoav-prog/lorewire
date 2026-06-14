@@ -17,7 +17,21 @@ import { createHash, randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import type { ShortVideoConfig } from "@/lib/video-config";
 
-export type RenderStatus = "queued" | "rendering" | "done" | "error";
+export type RenderStatus =
+  | "queued"
+  | "rendering"
+  | "done"
+  | "error"
+  // 2026-06-14: 'cancelled' has always been writable to this table via
+  // direct SQL (the Python sibling queues all define a 'cancelled'
+  // lifecycle), but the TS type pretended it couldn't happen. That
+  // pretense pinned at least one editor session: when a stuck row was
+  // manually cancelled to clear the queue, every subsequent Render
+  // click returned the existing cancelled row idempotently and the UI
+  // had no escape hatch. The type now reflects reality; enqueueRender
+  // treats cancelled the same as error (reset to queued) so a click
+  // means "retry" regardless of how the row got stuck.
+  | "cancelled";
 
 export interface RenderRow {
   id: string;
@@ -96,15 +110,23 @@ export async function enqueueRender(
     [storyId, configHash],
   );
   if (existing) {
-    if (existing.status === "error") {
+    // `error` and `cancelled` are both "settled but unsuccessful" states.
+    // A click on Render after either means "retry" — we reset the row to
+    // queued and emit a `reset_from_error` / `reset_from_cancelled` event
+    // so the timeline tells the user what we did. The conditional UPDATE
+    // (`AND status = ?`) is the race guard: if a concurrent claim raced
+    // ahead of us and the row already moved, the UPDATE matches 0 rows
+    // and the re-SELECT below returns whatever the racer left.
+    if (existing.status === "error" || existing.status === "cancelled") {
+      const fromStatus = existing.status;
       const retryNow = new Date().toISOString();
       await run(
         `UPDATE video_renders
            SET status = 'queued', progress = 0, error = NULL,
                output_url = NULL, requested_by = ?, requested_at = ?,
                started_at = NULL, finished_at = NULL
-         WHERE id = ? AND status = 'error'`,
-        [requestedBy, retryNow, existing.id],
+         WHERE id = ? AND status = ?`,
+        [requestedBy, retryNow, existing.id, fromStatus],
       );
       const reset = await one<RenderRow>(
         `SELECT ${COLS} FROM video_renders WHERE id = ?`,
@@ -115,9 +137,16 @@ export async function enqueueRender(
           "[video render queue] reset succeeded but row missing",
         );
       }
-      await logVideoRenderEvent(reset.id, "reset_from_error", {
-        message: "Previous render errored — reset to queued for retry.",
+      const eventName =
+        fromStatus === "error" ? "reset_from_error" : "reset_from_cancelled";
+      const eventMessage =
+        fromStatus === "error"
+          ? "Previous render errored — reset to queued for retry."
+          : "Previous render was cancelled — reset to queued for retry.";
+      await logVideoRenderEvent(reset.id, eventName, {
+        message: eventMessage,
         payload: {
+          previous_status: fromStatus,
           previous_error: existing.error,
           previous_requested_at: existing.requested_at,
         },
