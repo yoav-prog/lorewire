@@ -2195,3 +2195,103 @@ export async function setCurationSlotAction(
   revalidatePath("/c/[category]", "page");
   redirect(`/admin/curation?saved=${encodeURIComponent(slotKind)}`);
 }
+
+// ─── per-story curation panel (Phase 5) ────────────────────────────────────
+// The story editor sidebar (`/admin/stories/[id]`) lists every slot the
+// story is already in and lets the admin pin/unpin without navigating to
+// the full /admin/curation hub. These actions are deliberately scoped to
+// one story at a time — multi-slot ordering still belongs on the
+// curation page where the admin can see the whole rail at once.
+//
+// Both actions revalidate `/admin/stories/<id>` so the sidebar reflects
+// the new state on reload, plus the public surfaces that consume the
+// affected slot.
+
+function revalidateCurationSurfaces(slotKind: string): void {
+  revalidatePath("/");
+  revalidatePath("/admin/curation");
+  if (slotKind.startsWith("category.")) {
+    // Category pages: revalidate both the dynamic-route placeholder
+    // (covers the static-params build) and the literal URL so an admin
+    // visiting /c/Drama right after a pin sees it without a manual
+    // refresh in the wild.
+    revalidatePath("/c/[category]", "page");
+    revalidatePath(`/c/${slotKind.slice("category.".length)}`);
+  }
+}
+
+export async function addStoryToSlotAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const { addToSlot, isCurationSlotKind } = await import("@/lib/curation");
+  const storyId = String(formData.get("story_id") ?? "").trim();
+  const slotKind = String(formData.get("slot_kind") ?? "").trim();
+  if (!storyId) {
+    redirect(`/admin/stories?error=missing-story`);
+  }
+  if (!isCurationSlotKind(slotKind)) {
+    redirect(
+      `/admin/stories/${encodeURIComponent(storyId)}?curation_error=bad-slot-kind`,
+    );
+  }
+  try {
+    await addToSlot(slotKind, storyId);
+    console.info("[curation story add]", {
+      story_id: storyId,
+      slot_kind: slotKind,
+    });
+  } catch (err) {
+    // UNIQUE(slot_kind, story_id) trips when the story is already pinned —
+    // surface that as a soft message instead of a 500. Any other failure
+    // re-throws so the request logs a real stack.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/UNIQUE|duplicate|constraint/i.test(msg)) {
+      console.info("[curation story add skipped]", {
+        story_id: storyId,
+        slot_kind: slotKind,
+        reason: "already-pinned",
+      });
+      redirect(
+        `/admin/stories/${encodeURIComponent(storyId)}?curation_note=already-pinned`,
+      );
+    }
+    throw err;
+  }
+  revalidateCurationSurfaces(slotKind);
+  revalidatePath(`/admin/stories/${storyId}`);
+  redirect(
+    `/admin/stories/${encodeURIComponent(storyId)}?curation_added=${encodeURIComponent(slotKind)}`,
+  );
+}
+
+export async function removeStoryFromSlotAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const { removeFromSlot } = await import("@/lib/curation");
+  const storyId = String(formData.get("story_id") ?? "").trim();
+  const slotId = String(formData.get("slot_id") ?? "").trim();
+  const slotKind = String(formData.get("slot_kind") ?? "").trim();
+  if (!storyId || !slotId) {
+    redirect(`/admin/stories?error=missing-slot`);
+  }
+  const removed = await removeFromSlot(slotId);
+  console.info("[curation story remove]", {
+    story_id: storyId,
+    slot_id: slotId,
+    slot_kind: slotKind,
+    removed,
+  });
+  if (slotKind) revalidateCurationSurfaces(slotKind);
+  else {
+    // Fallback — caller didn't pass slot_kind. Revalidate the home page
+    // anyway (cheap) so a billboard/rail removal still flushes.
+    revalidatePath("/");
+    revalidatePath("/admin/curation");
+  }
+  revalidatePath(`/admin/stories/${storyId}`);
+  redirect(
+    `/admin/stories/${encodeURIComponent(storyId)}?curation_removed=1`,
+  );
+}

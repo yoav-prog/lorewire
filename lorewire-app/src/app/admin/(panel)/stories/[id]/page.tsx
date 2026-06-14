@@ -24,6 +24,10 @@ import {
   type GranularItem,
 } from "@/app/admin/(panel)/_components/GranularRegenGrid";
 import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel";
+import {
+  StoryCurationPanel,
+  labelForSlot,
+} from "@/app/admin/(panel)/_components/StoryCurationPanel";
 import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StatusStepIndicator } from "./StatusStepIndicator";
 import { StoryAspectControl } from "./StoryAspectControl";
@@ -39,13 +43,49 @@ const LABEL =
 
 export default async function EditStory({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   await requireAdmin();
   const { id } = await params;
   const s = await getStory(id);
   if (!s) notFound();
+
+  // Phase 5 curation panel: surface the soft banner the per-story
+  // action sets via redirect (?curation_added / removed / note / error).
+  // Server-side parsing only — no client state, no toast lib.
+  const qs = await searchParams;
+  const flat = (v: string | string[] | undefined): string | null => {
+    if (Array.isArray(v)) return v[0] ?? null;
+    return v ?? null;
+  };
+  const curationAdded = flat(qs.curation_added);
+  const curationRemoved = flat(qs.curation_removed);
+  const curationNote = flat(qs.curation_note);
+  const curationError = flat(qs.curation_error);
+  const curationBanner = curationError
+    ? {
+        tone: "warn" as const,
+        text:
+          curationError === "bad-slot-kind"
+            ? "Unknown slot. Pick from the dropdown."
+            : `Curation error: ${curationError}`,
+      }
+    : curationNote === "already-pinned"
+      ? {
+          tone: "warn" as const,
+          text: "This story is already pinned to that slot.",
+        }
+      : curationRemoved
+        ? { tone: "ok" as const, text: "Removed from slot." }
+        : curationAdded
+          ? {
+              tone: "ok" as const,
+              text: `Pinned to ${labelForSlot(curationAdded)}.`,
+            }
+          : null;
 
   let gallery: string[] = [];
   try {
@@ -317,6 +357,12 @@ export default async function EditStory({
             <div className={`${LABEL} mb-3`}>Status</div>
             <StatusStepIndicator storyId={s.id} currentStatus={s.status} />
           </div>
+
+          <StoryCurationPanel
+            storyId={s.id}
+            storyTitle={s.title}
+            banner={curationBanner}
+          />
 
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Search visibility</div>
