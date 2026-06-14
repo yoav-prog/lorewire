@@ -246,6 +246,15 @@ export const VIDEO_RENDERS: Table = {
     { name: "requested_at", type: "TEXT" },
     { name: "started_at", type: "TEXT" },
     { name: "finished_at", type: "TEXT" },
+    // 2026-06-14 Phase 2 of _plans/2026-06-14-remotion-lambda-render.md.
+    // Production renders go through Remotion Lambda (AWS). The kick
+    // endpoint stamps these three after renderMediaOnLambda() returns;
+    // the drain reads them back to call getRenderProgress. All NULL =
+    // local-worker render — pipeline/render_worker.py keeps writing
+    // rows with NULL here, byte-identical to today's behavior.
+    { name: "lambda_render_id", type: "TEXT" },
+    { name: "lambda_bucket_name", type: "TEXT" },
+    { name: "lambda_function_name", type: "TEXT" },
   ],
 };
 

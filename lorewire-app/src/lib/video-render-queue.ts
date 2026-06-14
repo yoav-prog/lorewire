@@ -31,10 +31,18 @@ export interface RenderRow {
   requested_at: string;
   started_at: string | null;
   finished_at: string | null;
+  // 2026-06-14 Phase 2 of _plans/2026-06-14-remotion-lambda-render.md.
+  // Lambda-render bookkeeping. NULL = local-worker render (the
+  // pre-Lambda flow); all three populated = a Vercel kick endpoint
+  // called renderMediaOnLambda and the drain will poll
+  // getRenderProgress against them.
+  lambda_render_id: string | null;
+  lambda_bucket_name: string | null;
+  lambda_function_name: string | null;
 }
 
 const COLS =
-  "id, story_id, config_hash, status, progress, error, output_url, requested_by, requested_at, started_at, finished_at";
+  "id, story_id, config_hash, status, progress, error, output_url, requested_by, requested_at, started_at, finished_at, lambda_render_id, lambda_bucket_name, lambda_function_name";
 
 // Hash the config in canonical form. Sort keys, recurse into objects/arrays,
 // skip editor-only metadata. Two configs that produce byte-identical MP4s

@@ -139,6 +139,16 @@ SCHEMA_STATEMENTS = [
     # Speeds up the worker's "claim oldest queued render" query — the
     # natural index on (story_id, config_hash) doesn't help that scan.
     "CREATE INDEX IF NOT EXISTS idx_video_renders_status_requested ON video_renders(status, requested_at)",
+    # 2026-06-14 Phase 2 of _plans/2026-06-14-remotion-lambda-render.md.
+    # Production renders go through Remotion Lambda (AWS) instead of the
+    # local Remotion CLI. These three columns track the AWS-side state
+    # the kick endpoint writes after calling renderMediaOnLambda(), and
+    # the drain endpoint reads back to poll getRenderProgress(). All
+    # three NULL = local-worker render (pipeline/render_worker.py keeps
+    # writing rows with NULLs here, byte-identical to today's behavior).
+    "ALTER TABLE video_renders ADD COLUMN IF NOT EXISTS lambda_render_id TEXT",
+    "ALTER TABLE video_renders ADD COLUMN IF NOT EXISTS lambda_bucket_name TEXT",
+    "ALTER TABLE video_renders ADD COLUMN IF NOT EXISTS lambda_function_name TEXT",
     # 2026-06-12 asset re-render: image regen queue. The admin clicks
     # Regenerate on any of a story's or article's image assets; the Next
     # server action inserts a row here and the local
@@ -781,6 +791,11 @@ def published_stories() -> list[dict]:
 _RENDER_COLUMNS = [
     "id", "story_id", "config_hash", "status", "progress", "error",
     "output_url", "requested_by", "requested_at", "started_at", "finished_at",
+    # 2026-06-14 Remotion Lambda columns. NULL on local-worker renders;
+    # written by the Vercel kick endpoint after renderMediaOnLambda()
+    # returns. The drain reads all three back to call
+    # getRenderProgress({renderId, bucketName, functionName, region}).
+    "lambda_render_id", "lambda_bucket_name", "lambda_function_name",
 ]
 
 
@@ -814,6 +829,12 @@ def enqueue_render(
                         "requested_at": now,
                         "started_at": None,
                         "finished_at": None,
+                        # Lambda columns NULL on enqueue — written when the
+                        # Vercel kick endpoint calls renderMediaOnLambda
+                        # AFTER claim. Local worker leaves them NULL forever.
+                        "lambda_render_id": None,
+                        "lambda_bucket_name": None,
+                        "lambda_function_name": None,
                     },
                 )
                 cur.execute(
@@ -840,6 +861,9 @@ def enqueue_render(
                 "requested_at": now,
                 "started_at": None,
                 "finished_at": None,
+                "lambda_render_id": None,
+                "lambda_bucket_name": None,
+                "lambda_function_name": None,
             },
         )
         row = c.execute(
@@ -891,6 +915,43 @@ def latest_render_for_story(story_id: str) -> dict | None:
             (story_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def set_render_lambda_ids(
+    render_id: str,
+    lambda_render_id: str,
+    lambda_bucket_name: str,
+    lambda_function_name: str,
+) -> None:
+    """Stamp the three AWS-side IDs onto a video_renders row after the
+    kick endpoint calls renderMediaOnLambda(). The drain endpoint reads
+    all three back to poll getRenderProgress(). Conditional on
+    status='rendering' so a row already settled (done/error) isn't
+    overwritten by a late-arriving kick — same guard as finish_render."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE video_renders SET lambda_render_id = %s, "
+                    "lambda_bucket_name = %s, lambda_function_name = %s "
+                    "WHERE id = %s AND status = 'rendering'",
+                    (
+                        lambda_render_id, lambda_bucket_name,
+                        lambda_function_name, render_id,
+                    ),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE video_renders SET lambda_render_id = ?, "
+            "lambda_bucket_name = ?, lambda_function_name = ? "
+            "WHERE id = ? AND status = 'rendering'",
+            (
+                lambda_render_id, lambda_bucket_name,
+                lambda_function_name, render_id,
+            ),
+        )
 
 
 def claim_next_render() -> dict | None:

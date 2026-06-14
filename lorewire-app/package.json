@@ -12,6 +12,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@remotion/lambda": "^4.0.0",
     "@remotion/player": "^4.0.0",
     "@tiptap/html": "^3.26.1",
     "@tiptap/pm": "^3.26.1",

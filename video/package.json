@@ -6,11 +6,19 @@
   "scripts": {
     "preview": "remotion preview src/Root.tsx",
     "render": "remotion render src/Root.tsx",
-    "test:motion": "node --test src/motion/mouth-timing.test.mjs"
+    "test:motion": "node --test src/motion/mouth-timing.test.mjs",
+    "//lambda comment": "Phase 1 of _plans/2026-06-14-remotion-lambda-render.md. The four lambda:* scripts wrap the @remotion/lambda CLI with the LoreWire defaults. Run lambda:policies-user FIRST and paste the JSON into a new IAM user. THEN export the user's keys as REMOTION_AWS_ACCESS_KEY_ID + REMOTION_AWS_SECRET_ACCESS_KEY in your local shell. THEN lambda:deploy-function (creates the Lambda function — capture the printed name into REMOTION_LAMBDA_FUNCTION_NAME). THEN lambda:deploy-site (uploads the composition bundle to S3 — capture the printed serveUrl into REMOTION_LAMBDA_SERVE_URL). After all four envs are set in Vercel, Phase 3's /api/render_video can kick renders.",
+    "lambda:policies-user": "remotion lambda policies user",
+    "lambda:policies-role": "remotion lambda policies role",
+    "lambda:deploy-function": "remotion lambda functions deploy --memory 2048 --timeout 240 --disk 2048",
+    "lambda:deploy-site": "remotion lambda sites create src/Root.tsx --site-name lorewire",
+    "lambda:list-functions": "remotion lambda functions ls",
+    "lambda:list-sites": "remotion lambda sites ls"
   },
   "dependencies": {
     "@remotion/cli": "^4.0.0",
     "@remotion/google-fonts": "^4.0.475",
+    "@remotion/lambda": "^4.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "remotion": "^4.0.0"
