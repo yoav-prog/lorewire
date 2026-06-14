@@ -173,6 +173,84 @@ export async function listSlotsForStory(
   );
 }
 
+// ─── category-page resolver (Phase 3) ───────────────────────────────────────
+//
+// Used by /c/[category]/page.tsx. Returns the pinned curated stories
+// for the category in admin order, then auto-fills with the rest of
+// the category's published stories ordered by published_at DESC. Same
+// story IS NOT duplicated — auto-fill skips ids already pinned.
+
+export interface CategoryStoryRow {
+  id: string;
+  title: string | null;
+  category: string | null;
+  hero_image: string | null;
+  summary: string | null;
+  published_at: string | null;
+  /** Did this row come from curation_slots (admin-pinned) or the
+   *  newest-first auto-fill? Lets the UI mark pinned rows visually
+   *  if it wants to. */
+  pinned: boolean;
+}
+
+export async function resolveCategoryPage(
+  category: string,
+  opts: { limit?: number; now?: Date } = {},
+): Promise<CategoryStoryRow[]> {
+  if (!category) return [];
+  const limit = Math.min(Math.max(opts.limit ?? 60, 1), 200);
+  const slotKind = `category.${category}`;
+  const pinnedIds = await getActivePicks(slotKind, opts.now ?? new Date());
+
+  // Pull every published story in this category once; partition in
+  // memory. At LoreWire's current scale (sub-200 published stories per
+  // category) one SELECT plus an in-memory walk is cheaper than two
+  // SELECTs + a NOT IN clause that breaks past 32k bind params.
+  const allRows = await allPublishedInCategory(category);
+
+  const byId = new Map<string, CategoryStoryRow>();
+  for (const r of allRows) {
+    byId.set(r.id, { ...r, pinned: false });
+  }
+
+  const out: CategoryStoryRow[] = [];
+  const seen = new Set<string>();
+
+  // 1. Pinned rows in admin order. Skip ids whose story is missing
+  //    or unpublished — admin can pin a story before it ships (per
+  //    the Phase 1 plan note about scheduling), but the public page
+  //    only renders rows that are actually viewable.
+  for (const id of pinnedIds) {
+    const row = byId.get(id);
+    if (!row) continue;
+    out.push({ ...row, pinned: true });
+    seen.add(id);
+    if (out.length >= limit) return out;
+  }
+
+  // 2. Auto-fill remainder, newest-first. allPublishedInCategory
+  //    already ORDERed BY published_at DESC.
+  for (const r of allRows) {
+    if (seen.has(r.id)) continue;
+    out.push({ ...r, pinned: false });
+    if (out.length >= limit) break;
+  }
+
+  return out;
+}
+
+async function allPublishedInCategory(
+  category: string,
+): Promise<CategoryStoryRow[]> {
+  return all<CategoryStoryRow>(
+    "SELECT id, title, category, hero_image, summary, published_at, " +
+      "0 AS pinned " +
+      "FROM stories WHERE status = 'published' AND category = ? " +
+      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC",
+    [category],
+  );
+}
+
 // ─── writes ──────────────────────────────────────────────────────────────────
 
 /** Atomic replace: delete every row for `slotKind`, insert the new

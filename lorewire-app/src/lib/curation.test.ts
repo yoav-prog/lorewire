@@ -214,6 +214,110 @@ describe("listPublishedStoriesForCuration", () => {
   });
 });
 
+describe("resolveCategoryPage", () => {
+  async function seedStory(
+    id: string,
+    status: string,
+    title: string,
+    category: string,
+    publishedAt: string,
+  ) {
+    await run(
+      "INSERT INTO stories (id, status, title, category, hero_image, summary, " +
+        "created_at, updated_at, published_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        id,
+        status,
+        title,
+        category,
+        `https://example/${id}.png`,
+        `summary for ${id}`,
+        publishedAt,
+        publishedAt,
+        publishedAt,
+      ],
+    );
+  }
+
+  beforeEach(async () => {
+    await clear();
+    await run("DELETE FROM stories", []);
+  });
+
+  it("returns empty when no published stories", async () => {
+    const { resolveCategoryPage } = await import("./curation");
+    expect(await resolveCategoryPage("Drama")).toEqual([]);
+  });
+
+  it("auto-fills with published stories of the category, newest-first", async () => {
+    const { resolveCategoryPage } = await import("./curation");
+    await seedStory("a", "published", "A", "Drama", "2026-06-01T00:00:00+00:00");
+    await seedStory("b", "published", "B", "Drama", "2026-06-10T00:00:00+00:00");
+    await seedStory("c", "published", "C", "Drama", "2026-06-05T00:00:00+00:00");
+    const rows = await resolveCategoryPage("Drama");
+    expect(rows.map((r) => r.id)).toEqual(["b", "c", "a"]);
+    expect(rows.every((r) => r.pinned === false)).toBe(true);
+  });
+
+  it("filters out other categories", async () => {
+    const { resolveCategoryPage } = await import("./curation");
+    await seedStory("a", "published", "A", "Drama", "2026-06-10T00:00:00+00:00");
+    await seedStory("b", "published", "B", "Humor", "2026-06-10T00:00:00+00:00");
+    const rows = await resolveCategoryPage("Drama");
+    expect(rows.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("filters out unpublished stories", async () => {
+    const { resolveCategoryPage } = await import("./curation");
+    await seedStory("a", "published", "A", "Drama", "2026-06-10T00:00:00+00:00");
+    await seedStory("b", "review", "B", "Drama", "2026-06-10T00:00:00+00:00");
+    await seedStory("c", "archived", "C", "Drama", "2026-06-10T00:00:00+00:00");
+    const rows = await resolveCategoryPage("Drama");
+    expect(rows.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("puts pinned stories first in admin order, then auto-fills", async () => {
+    const { resolveCategoryPage, setSlotStories } = await import("./curation");
+    // Three Drama stories, newest is 'c'.
+    await seedStory("a", "published", "A", "Drama", "2026-06-01T00:00:00+00:00");
+    await seedStory("b", "published", "B", "Drama", "2026-06-05T00:00:00+00:00");
+    await seedStory("c", "published", "C", "Drama", "2026-06-10T00:00:00+00:00");
+    // Admin pins a first, then c.
+    await setSlotStories("category.Drama", ["a", "c"]);
+
+    const rows = await resolveCategoryPage("Drama");
+    expect(rows.map((r) => r.id)).toEqual(["a", "c", "b"]);
+    expect(rows[0].pinned).toBe(true);
+    expect(rows[1].pinned).toBe(true);
+    expect(rows[2].pinned).toBe(false);
+  });
+
+  it("ignores pinned ids whose story is unpublished or missing", async () => {
+    const { resolveCategoryPage, setSlotStories } = await import("./curation");
+    await seedStory("a", "published", "A", "Drama", "2026-06-10T00:00:00+00:00");
+    await seedStory("b", "review", "B", "Drama", "2026-06-10T00:00:00+00:00");
+    await setSlotStories("category.Drama", ["a", "b", "ghost"]);
+    const rows = await resolveCategoryPage("Drama");
+    expect(rows.map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("respects the limit", async () => {
+    const { resolveCategoryPage } = await import("./curation");
+    for (let i = 0; i < 5; i++) {
+      await seedStory(
+        `s${i}`,
+        "published",
+        `S${i}`,
+        "Drama",
+        `2026-06-0${i + 1}T00:00:00+00:00`,
+      );
+    }
+    const rows = await resolveCategoryPage("Drama", { limit: 2 });
+    expect(rows.map((r) => r.id)).toEqual(["s4", "s3"]);
+  });
+});
+
 describe("listAllSlots", () => {
   beforeEach(clear);
 
