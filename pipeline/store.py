@@ -101,6 +101,17 @@ SCHEMA_STATEMENTS = [
     # `lorewire-app/scripts/migrate_pipeline_cache.mjs` — run once
     # against prod after the column lands.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS pipeline_cache TEXT",
+    # 2026-06-14 voiceover picker (Phase 1 of
+    # _plans/2026-06-14-voiceover-picker.md): per-story override columns
+    # for the narrator's voice. Both nullable; NULL = use the global
+    # `voice.elevenlabs_voice_id` / `voice.google_voice_name` setting.
+    # `voice_provider` mirrors `models.get_selected("voice")` shape
+    # (e.g. "elevenlabs", "google/chirp3-hd", "google/gemini-25-flash-tts");
+    # `voice_id` is the provider-native id (ElevenLabs voice_id GUID OR
+    # the full Google voice name like "en-US-Chirp3-HD-Aoede"). Resolution
+    # chain lives in pipeline/voice.py:synthesize.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_provider TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_id TEXT",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -282,6 +293,10 @@ _COLUMNS = [
     # scene_prompts_built_with, scene_entity_ids, character_bible).
     # Editor never reads or writes this column — see schema.ts comment.
     "pipeline_cache",
+    # 2026-06-14 voiceover picker per-story override (see schema comment
+    # above for resolution chain). Both NULL on fresh-pipeline writes —
+    # the picker UI lands them via setStoryVoiceAction in Phase 3.
+    "voice_provider", "voice_id",
     "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.

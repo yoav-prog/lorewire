@@ -61,10 +61,18 @@ export interface StoryRow {
   // fields lived inside video_config. See
   // `_plans/2026-06-14-pipeline-cache-column.md`.
   pipeline_cache: string | null;
+  // 2026-06-14 voiceover picker per-story override (Phase 1 of
+  // _plans/2026-06-14-voiceover-picker.md). Both NULL = use the global
+  // setting. `voice_provider` mirrors models.get_selected("voice") shape
+  // ("elevenlabs" / "google/chirp3-hd" / "google/gemini-25-flash-tts");
+  // `voice_id` is the provider-native id. The Python pipeline reads
+  // both at synthesize time via the resolution chain in voice.py.
+  voice_provider: string | null;
+  voice_id: string | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
