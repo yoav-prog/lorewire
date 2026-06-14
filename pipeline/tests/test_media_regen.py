@@ -1367,6 +1367,16 @@ class ScenePromptPersistTests(unittest.TestCase):
         # which left the editor showing only 3 scene cards even after the
         # scene URLs grew to 27. Now it grows doodle_frames to fit so the
         # editor's storyboard rail matches the new scene count.
+        #
+        # Post-race-stability fix (same day): the helper now grows to
+        # `total_scenes` (the batch's final scene count), not just
+        # `scene_index + 1`. So a single scene:10 regen with
+        # _resolve_scene_count=20 grows the array all the way to 20 —
+        # subsequent jobs in the batch land into the existing slots
+        # without re-deriving target_len each time. Existing frames'
+        # caption_chunk_start_index is re-normalized to the new
+        # distribution so the array stays monotonic across the
+        # existing/new boundary.
         with tempfile.TemporaryDirectory() as tmp:
             existing = ["url-0", "url-1", "url-2"]
             frames = [
@@ -1429,18 +1439,160 @@ class ScenePromptPersistTests(unittest.TestCase):
             self.assertTrue(persist_calls)
             new_config = persist_calls[-1].args[1]
             new_frames = new_config["doodle_frames"]
-            self.assertEqual(len(new_frames), 11)  # grown to index+1
-            # Old frames preserved.
+            # Grew to total_scenes (20), not scene_index+1 (11) — that's
+            # the race-stability fix. Every job in the batch now sees
+            # the same target_len and the same ci distribution.
+            self.assertEqual(len(new_frames), 20)
+            # Old frames' ids preserved (per-frame regen + Revert key
+            # off them, so a grow must NOT mint fresh ids over existing
+            # rows).
             self.assertEqual(new_frames[0]["id"], "f-0")
             self.assertEqual(new_frames[1]["id"], "f-1")
             self.assertEqual(new_frames[2]["id"], "f-2")
-            # Newly minted frames have ids + caption indices spread across captions.
-            for i in range(3, 11):
+            # Newly minted frames have ids + caption indices.
+            for i in range(3, 20):
                 self.assertTrue(new_frames[i]["id"])
                 self.assertIn("caption_chunk_start_index", new_frames[i])
             # Target frame holds the new URL + prompt.
             self.assertEqual(new_frames[10]["url"], url)
             self.assertEqual(new_frames[10]["image_prompt"], "p10")
+            # caption_chunk_start_index is monotonic non-decreasing
+            # across the existing/new boundary — the bug this whole
+            # fix is about.
+            ci = [f["caption_chunk_start_index"] for f in new_frames]
+            for i in range(1, len(ci)):
+                self.assertGreaterEqual(ci[i], ci[i - 1])
+
+    def test_grow_with_total_scenes_is_race_stable(self):
+        """Production bug 2026-06-14: per-scene regen jobs landed in
+        arbitrary order. Each used `target_len = scene_index + 1` to
+        compute its grow-loop ci formula, so the SAME frame position got
+        different `caption_chunk_start_index` values depending on which
+        job grew the array first. The persisted array ended up with
+        duplicates and out-of-order indices (e.g., envelope:
+        [0, 25, 51, 58, 62, 55, 66, ...]), and the editor's window-finder
+        pinned on a single image for most of the video.
+
+        Fix: pass `total_scenes` so every job uses the same target_len
+        and the same formula. This test simulates 24 jobs landing in a
+        scrambled order and asserts the final ci array is monotonic
+        (non-decreasing) and matches the deterministic ci a single
+        all-at-once call would have produced.
+        """
+        import json as _json
+        captions = [
+            {"text": f"c{i}", "start_ms": i * 1000, "end_ms": i * 1000 + 900}
+            for i in range(77)
+        ]
+        initial_frames = [
+            {"id": "f-0", "url": "u0", "image_prompt": "", "caption_chunk_start_index": 0},
+            {"id": "f-1", "url": "u1", "image_prompt": "", "caption_chunk_start_index": 25},
+            {"id": "f-2", "url": "u2", "image_prompt": "", "caption_chunk_start_index": 51},
+        ]
+        story_state: dict = {
+            "video_config": _json.dumps({
+                "doodle_frames": initial_frames,
+                "captions": captions,
+            }),
+        }
+
+        # _persist_frame_prompt persists via store.update_story_video_config.
+        # Intercept that so each call's "write" feeds back into the next
+        # call's "read" — simulates a sequence of bulk regen jobs
+        # landing one-at-a-time against the live DB row.
+        def write_back(_story_id, new_config):
+            story_state["video_config"] = _json.dumps(new_config)
+
+        TOTAL_SCENES = 27
+        # Scrambled order — anything but monotonic. Real cron jobs do
+        # drain FIFO, but parallel pre-fetch + retry windows mean the
+        # arrival order is effectively arbitrary in production.
+        order = [10, 5, 26, 3, 7, 22, 4, 11, 6, 18, 8, 15, 9, 12, 23,
+                 13, 16, 14, 19, 17, 20, 24, 21, 25]
+
+        with mock.patch.object(
+            media.store, "update_story_video_config", side_effect=write_back,
+        ):
+            for scene_index in order:
+                # Each call rebuilds its `story` dict from the latest
+                # persisted state, the same way the cron worker fetches
+                # the story row at the top of every job.
+                media._persist_frame_prompt(
+                    "abc123",
+                    {"video_config": story_state["video_config"]},
+                    scene_index,
+                    prompt=f"prompt-{scene_index}",
+                    stored_url=f"url-{scene_index}",
+                    total_scenes=TOTAL_SCENES,
+                )
+
+        final = _json.loads(story_state["video_config"])
+        final_frames = final["doodle_frames"]
+        ci = [f["caption_chunk_start_index"] for f in final_frames]
+
+        # Invariant 1: array grew to the batch's final length, exactly.
+        self.assertEqual(len(final_frames), TOTAL_SCENES)
+        # Invariant 2: ci is monotonic non-decreasing — the editor's
+        # window finder requires this to pick the right image at every
+        # point in the timeline.
+        for i in range(1, len(ci)):
+            self.assertGreaterEqual(
+                ci[i], ci[i - 1],
+                f"ci regressed at position {i}: {ci[i - 1]} -> {ci[i]} "
+                f"(full array: {ci})",
+            )
+        # Invariant 3: deterministic — running the same batch in any
+        # other order produces the same ci array. We compute the
+        # expected ci with the same formula the helper uses.
+        cap_count = len(captions)
+        expected = [
+            min(cap_count - 1, max(0, round(i * cap_count / TOTAL_SCENES)))
+            for i in range(TOTAL_SCENES)
+        ]
+        self.assertEqual(ci, expected)
+        # Invariant 4: every regenerated url + prompt landed at the
+        # right index. (Frames not in `order` keep their initial url.)
+        regenerated = set(order)
+        for i, frame in enumerate(final_frames):
+            if i in regenerated:
+                self.assertEqual(frame["url"], f"url-{i}")
+                self.assertEqual(frame["image_prompt"], f"prompt-{i}")
+
+    def test_legacy_call_without_total_scenes_still_grows(self):
+        """Backwards-compat: callers that don't pass total_scenes (the
+        legacy signature) keep working — the grow path falls back to the
+        old `target_len = scene_index + 1` formula. New callers always
+        pass total_scenes; this is the safety net for any in-flight
+        custom integration that hasn't been updated."""
+        import json as _json
+        captions = [
+            {"text": f"c{i}", "start_ms": i * 1000, "end_ms": i * 1000 + 900}
+            for i in range(20)
+        ]
+        frames = [
+            {"id": "f-0", "url": "u0", "image_prompt": "", "caption_chunk_start_index": 0},
+        ]
+        story = {
+            "video_config": _json.dumps({
+                "doodle_frames": frames,
+                "captions": captions,
+            }),
+        }
+        captured: dict[str, dict] = {}
+
+        def write(_story_id, new_config):
+            captured["cfg"] = new_config
+
+        with mock.patch.object(
+            media.store, "update_story_video_config", side_effect=write,
+        ):
+            media._persist_frame_prompt(
+                "abc123", story, 4, prompt="p4", stored_url="url-4",
+                # total_scenes omitted on purpose.
+            )
+
+        self.assertEqual(len(captured["cfg"]["doodle_frames"]), 5)
+        self.assertEqual(captured["cfg"]["doodle_frames"][4]["url"], "url-4")
 
     def test_malformed_video_config_skipped_silently(self):
         with tempfile.TemporaryDirectory() as tmp:

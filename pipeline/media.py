@@ -1092,7 +1092,11 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         # + the granular grid lightbox both show the actual prompt sent
         # to kie. Without this, a bulk regen still leaves the per-frame
         # field empty for every scene the user didn't redo individually.
-        _persist_frame_prompt(story["id"], story, i, prompt, stored_url)
+        # Pass scene_count so the grow-path uses a stable distribution.
+        _persist_frame_prompt(
+            story["id"], story, i, prompt, stored_url,
+            total_scenes=scene_count,
+        )
 
     if not scene_urls:
         raise RuntimeError("scenes regen produced 0 images — all kie calls failed")
@@ -1378,7 +1382,12 @@ def _regen_one_scene(
     # frame's textarea was empty. Best-effort: a failure here doesn't
     # roll back the scene URL because the image is already public; the
     # admin can re-run the regen if the prompt didn't land.
-    _persist_frame_prompt(story["id"], story, index, prompt, stored_url)
+    # Pass scene_count so the grow-path uses a stable distribution
+    # regardless of which per-scene job races to land first.
+    _persist_frame_prompt(
+        story["id"], story, index, prompt, stored_url,
+        total_scenes=scene_count,
+    )
 
     return stored_url, _per_image_cost_cents() + bible_extra_cents
 
@@ -1524,6 +1533,7 @@ def _persist_frame_prompt(
     scene_index: int,
     prompt: str,
     stored_url: str,
+    total_scenes: int | None = None,
 ) -> None:
     """Stamp the kie prompt + new URL onto `video_config.doodle_frames[i]`
     after a bulk scene regen so the editor's per-frame textarea fills with
@@ -1532,6 +1542,13 @@ def _persist_frame_prompt(
     Convention: `doodle_frames[i].url` corresponds to `scene_urls[i]` by
     index. The fresh-run pipeline writes them in lockstep; per-scene
     regen preserves the same ordering.
+
+    `total_scenes` is the final scene count for the regen batch
+    (i.e. `_resolve_scene_count`). Required for race-stable
+    caption_chunk_start_index distribution — see the grow block below.
+    Optional for backward compat: when omitted, the function falls back
+    to the legacy `target_len = scene_index + 1` formula. New callers
+    should always pass it.
 
     Best-effort by design:
       - Missing or malformed `video_config` is silently skipped (the row
@@ -1564,20 +1581,54 @@ def _persist_frame_prompt(
     if not isinstance(frames, list):
         return
     new_frames = list(frames)
-    if scene_index >= len(new_frames):
-        # Grow doodle_frames to the target index so the editor's storyboard
-        # rail shows a card for every regenerated scene. Each newly minted
-        # frame gets a stable random id (per-frame regen + Revert routes
-        # key off it), the new image URL, the kie prompt, and a
-        # caption_chunk_start_index that interpolates across the existing
-        # captions so the new frames are roughly time-distributed instead
-        # of all colliding at chunk 0. The frame timing isn't pixel-perfect
-        # — the fresh-run pipeline owns that math — but it's better than
-        # leaving the editor showing only the stale 3 scenes from before
-        # the rebuild.
-        captions = config.get("captions") if isinstance(config.get("captions"), list) else []
+    # Grow doodle_frames to the BATCH's final scene count (not just
+    # scene_index + 1) so the editor's storyboard rail shows a card for
+    # every regenerated scene AND every per-scene regen job — regardless
+    # of arrival order — fills the array to the same length with the
+    # SAME caption_chunk_start_index for the same i. Without that
+    # invariant, two jobs racing produce two different `ci = i * cap /
+    # target_len` values for the same i, leaving the persisted array
+    # full of duplicate + out-of-order indices that pin the editor
+    # preview onto a single image for most of the video.
+    #
+    # When growing past the existing length, ALSO re-normalize the ci
+    # on existing frames so the array stays monotonic across the
+    # existing/new boundary. Without this, an envelope that started with
+    # 3 fresh-pipeline frames at ci=[0, 25, 51] (hero-share math) gets
+    # grown to 27 with new frames at ci=[9, 11, 14, ...] — the join
+    # at position 3 regresses (51 → 9) and the editor's window-finder
+    # still pins on a single frame for the gap. url, id, image_prompt,
+    # prev_image on existing frames are preserved.
+    #
+    # Legacy fallback (total_scenes=None): preserve the old per-job
+    # `target_len = scene_index + 1` formula so older callers that
+    # haven't been updated keep working. New code paths always pass
+    # total_scenes — see line 1095 (all-scenes bulk) and line 1381
+    # (per-scene regen).
+    target_len = max(scene_index + 1, total_scenes or 0)
+    growing = target_len > len(new_frames)
+    if growing:
+        captions = (
+            config.get("captions")
+            if isinstance(config.get("captions"), list)
+            else []
+        )
         cap_count = len(captions)
-        target_len = scene_index + 1
+        # Re-normalize existing frames' ci to the same monotonic
+        # distribution we're about to apply to the grown ones. This
+        # only fires on a true grow (target_len > len) so a no-op
+        # per-scene update (rare: when total_scenes shrinks between
+        # batches) doesn't surprise-rewrite a hand-edited distribution.
+        for i in range(len(new_frames)):
+            existing = new_frames[i]
+            if not isinstance(existing, dict):
+                continue
+            ci = (
+                min(cap_count - 1, max(0, int(round(i * cap_count / target_len))))
+                if cap_count > 0
+                else 0
+            )
+            new_frames[i] = {**existing, "caption_chunk_start_index": ci}
         while len(new_frames) < target_len:
             i = len(new_frames)
             ci = (
