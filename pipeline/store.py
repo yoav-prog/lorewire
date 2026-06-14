@@ -294,6 +294,31 @@ SCHEMA_STATEMENTS = [
     # app-level guard means no current rows violate the constraint.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_jobs_one_active "
     "ON story_jobs(reddit_id) WHERE status IN ('queued', 'processing')",
+    # 2026-06-15 Phase 1 of _plans/2026-06-15-curation-system.md.
+    # Editorial control of which stories occupy which slot on the public
+    # site — Billboard, rails (Top 10 / Continue / New), category pages.
+    # `slot_kind` is a registered string (see CURATION_SLOT_KINDS in
+    # @/lib/curation.ts) — the admin actions validate writes against
+    # the list. `position` is 0-based; lower = first. The UNIQUE
+    # (slot_kind, story_id) constraint prevents the same story from
+    # occupying two positions in the same slot — that would be a
+    # data bug, not an admin choice.
+    """CREATE TABLE IF NOT EXISTS curation_slots (
+        id            TEXT PRIMARY KEY,
+        slot_kind     TEXT NOT NULL,
+        position      INTEGER NOT NULL,
+        story_id      TEXT NOT NULL,
+        publish_at    TEXT,
+        expires_at    TEXT,
+        notes         TEXT,
+        created_at    TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        UNIQUE (slot_kind, story_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_curation_slots_kind_pos "
+    "ON curation_slots(slot_kind, position)",
+    "CREATE INDEX IF NOT EXISTS idx_curation_slots_publish "
+    "ON curation_slots(publish_at, expires_at)",
     # 2026-06-14 Phase 4 of _plans/2026-06-14-voiceover-picker.md.
     # Per-attempt queue for voice regen — admin clicks Regenerate
     # voiceover in the picker UI, server action inserts a row here,
@@ -2951,3 +2976,283 @@ def update_story_voice_render_output(
             "video_config = ?, updated_at = ? WHERE id = ?",
             (audio_url, alignment_json, video_config_json, now, story_id),
         )
+
+
+# --- curation_slots helpers (2026-06-15 Phase 1) -----------------------------
+# Editorial control of the public site's Billboard, rails, and category pages.
+# The slot_kind registry is the contract — admin actions validate against it
+# before writing, and reads can be confident the kind is meaningful (no
+# silent typos parked in the table).
+
+_CURATION_COLUMNS = [
+    "id", "slot_kind", "position", "story_id",
+    "publish_at", "expires_at", "notes",
+    "created_at", "updated_at",
+]
+
+
+def list_curation_slots(
+    slot_kind: str, *, active_at: str | None = None,
+) -> list[dict]:
+    """Return ordered curation_slots rows for a slot_kind.
+
+    `active_at`: when provided (ISO timestamp), filter to rows where
+    publish_at IS NULL OR publish_at <= active_at, AND
+    expires_at IS NULL OR expires_at > active_at. The public page reads
+    pass `now`; the admin curation page reads without it to see every
+    pinned row regardless of scheduling.
+    """
+    if not slot_kind:
+        return []
+    cols = ", ".join(_CURATION_COLUMNS)
+    base = f"SELECT {cols} FROM curation_slots WHERE slot_kind = "
+    where_active = (
+        " AND (publish_at IS NULL OR publish_at <= {p}) "
+        "AND (expires_at IS NULL OR expires_at > {p})"
+    )
+    order = " ORDER BY position ASC"
+
+    if _is_postgres():
+        sql = base + "%s"
+        params: list = [slot_kind]
+        if active_at:
+            sql += where_active.format(p="%s")
+            params.extend([active_at, active_at])
+        sql += order
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+    sql = base + "?"
+    params = [slot_kind]
+    if active_at:
+        sql += where_active.format(p="?")
+        params.extend([active_at, active_at])
+    sql += order
+    with _sqlite_conn() as c:
+        cur = c.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def set_slot_stories(
+    slot_kind: str,
+    story_ids: list[str],
+    *,
+    notes: str | None = None,
+) -> int:
+    """Atomic replace: delete every row for slot_kind, then insert the
+    new ordered list. Returns the count of rows inserted.
+
+    Used by the admin's "save this rail's order" action. The DB
+    transaction guarantees readers never see a partial state — either
+    the old order or the new order, never an empty/mid-update slot.
+    """
+    if not slot_kind:
+        raise ValueError("set_slot_stories requires slot_kind")
+    now = _now_iso()
+    import uuid as _uuid
+    rows = [
+        {
+            "id": str(_uuid.uuid4()),
+            "slot_kind": slot_kind,
+            "position": i,
+            "story_id": sid,
+            "publish_at": None,
+            "expires_at": None,
+            "notes": notes,
+            "created_at": now,
+            "updated_at": now,
+        }
+        for i, sid in enumerate(story_ids)
+    ]
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM curation_slots WHERE slot_kind = %s",
+                    (slot_kind,),
+                )
+                if rows:
+                    cols = ", ".join(_CURATION_COLUMNS)
+                    placeholders = ", ".join(
+                        f"%({c})s" for c in _CURATION_COLUMNS
+                    )
+                    cur.executemany(
+                        f"INSERT INTO curation_slots ({cols}) "
+                        f"VALUES ({placeholders})",
+                        rows,
+                    )
+            conn.commit()
+        return len(rows)
+    with _sqlite_conn() as c:
+        c.execute("BEGIN")
+        try:
+            c.execute(
+                "DELETE FROM curation_slots WHERE slot_kind = ?",
+                (slot_kind,),
+            )
+            if rows:
+                cols = ", ".join(_CURATION_COLUMNS)
+                placeholders = ", ".join(f":{col}" for col in _CURATION_COLUMNS)
+                c.executemany(
+                    f"INSERT INTO curation_slots ({cols}) "
+                    f"VALUES ({placeholders})",
+                    rows,
+                )
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return len(rows)
+
+
+def add_to_slot(
+    slot_kind: str,
+    story_id: str,
+    *,
+    position: int | None = None,
+    publish_at: str | None = None,
+    expires_at: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """Add a single story to a slot at `position` (default: append).
+
+    UNIQUE (slot_kind, story_id) means re-adding the same story is a
+    no-op error — caller catches the constraint violation and surfaces
+    it as a friendly UI message. Returns the new row's id."""
+    if not slot_kind or not story_id:
+        raise ValueError("add_to_slot requires slot_kind and story_id")
+    if position is None:
+        # Append: find the current max position and add one.
+        sql_max = (
+            "SELECT COALESCE(MAX(position), -1) AS m "
+            "FROM curation_slots WHERE slot_kind = "
+        )
+        if _is_postgres():
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql_max + "%s", (slot_kind,))
+                    row = cur.fetchone()
+            position = (int(row["m"]) if row else -1) + 1
+        else:
+            with _sqlite_conn() as c:
+                row = c.execute(sql_max + "?", (slot_kind,)).fetchone()
+            position = (int(row["m"]) if row else -1) + 1
+    import uuid as _uuid
+    now = _now_iso()
+    row_id = str(_uuid.uuid4())
+    record = {
+        "id": row_id,
+        "slot_kind": slot_kind,
+        "position": position,
+        "story_id": story_id,
+        "publish_at": publish_at,
+        "expires_at": expires_at,
+        "notes": notes,
+        "created_at": now,
+        "updated_at": now,
+    }
+    cols = ", ".join(_CURATION_COLUMNS)
+    if _is_postgres():
+        placeholders = ", ".join(f"%({c})s" for c in _CURATION_COLUMNS)
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO curation_slots ({cols}) "
+                    f"VALUES ({placeholders})",
+                    record,
+                )
+            conn.commit()
+        return row_id
+    placeholders = ", ".join(f":{c}" for c in _CURATION_COLUMNS)
+    with _sqlite_conn() as c:
+        c.execute(
+            f"INSERT INTO curation_slots ({cols}) VALUES ({placeholders})",
+            record,
+        )
+    return row_id
+
+
+def remove_from_slot(slot_id: str) -> bool:
+    """Hard-delete one curation_slots row by id. Returns True when a row
+    was actually removed."""
+    if not slot_id:
+        return False
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM curation_slots WHERE id = %s", (slot_id,),
+                )
+                changed = cur.rowcount > 0
+            conn.commit()
+        return changed
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "DELETE FROM curation_slots WHERE id = ?", (slot_id,),
+        )
+        return (cur.rowcount or 0) > 0
+
+
+def reorder_slot(slot_kind: str, ordered_ids: list[str]) -> int:
+    """Reorder ALL rows in a slot_kind by the provided id sequence.
+    Each id keeps its (story_id, publish_at, expires_at, notes); only
+    position is rewritten. Used by the admin drag-and-drop UI.
+
+    Returns the count of rows reordered. Rows in the table but NOT in
+    ordered_ids are left in place — but the admin's UI typically passes
+    the full list so this is a non-issue in practice."""
+    if not slot_kind or not ordered_ids:
+        return 0
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                for i, slot_id in enumerate(ordered_ids):
+                    cur.execute(
+                        "UPDATE curation_slots SET position = %s, "
+                        "updated_at = %s "
+                        "WHERE id = %s AND slot_kind = %s",
+                        (i, now, slot_id, slot_kind),
+                    )
+            conn.commit()
+        return len(ordered_ids)
+    with _sqlite_conn() as c:
+        c.execute("BEGIN")
+        try:
+            for i, slot_id in enumerate(ordered_ids):
+                c.execute(
+                    "UPDATE curation_slots SET position = ?, "
+                    "updated_at = ? "
+                    "WHERE id = ? AND slot_kind = ?",
+                    (i, now, slot_id, slot_kind),
+                )
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return len(ordered_ids)
+
+
+def list_slots_for_story(story_id: str) -> list[dict]:
+    """Return every curation_slots row that places this story somewhere.
+    Powers the per-story 'appears in' admin panel (Phase 5)."""
+    if not story_id:
+        return []
+    cols = ", ".join(_CURATION_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM curation_slots WHERE story_id = %s "
+                    "ORDER BY slot_kind ASC, position ASC",
+                    (story_id,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            f"SELECT {cols} FROM curation_slots WHERE story_id = ? "
+            "ORDER BY slot_kind ASC, position ASC",
+            (story_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]

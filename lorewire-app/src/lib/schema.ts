@@ -371,6 +371,26 @@ export const STORY_JOBS: Table = {
   ],
 };
 
+// 2026-06-15 Phase 1 of _plans/2026-06-15-curation-system.md. Editorial
+// control of which stories appear on the public site (Billboard, rails,
+// category pages). `slot_kind` is a registered string (see
+// CURATION_SLOT_KINDS in @/lib/curation.ts). Mirrors `curation_slots` in
+// pipeline/store.py.
+export const CURATION_SLOTS: Table = {
+  name: "curation_slots",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "slot_kind", type: "TEXT" },
+    { name: "position", type: "INTEGER" },
+    { name: "story_id", type: "TEXT" },
+    { name: "publish_at", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+    { name: "notes", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -385,6 +405,7 @@ export const TABLES: Table[] = [
   REDDIT_SOURCE,
   STORY_JOBS,
   VOICE_RENDERS,
+  CURATION_SLOTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -412,6 +433,21 @@ export const POST_TABLE_DDL: string[] = [
   // syntax on SQLite >= 3.8 and Postgres >= 9.5.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_jobs_one_active " +
     "ON story_jobs(reddit_id) WHERE status IN ('queued', 'processing')",
+  // 2026-06-15 Phase 1 of _plans/2026-06-15-curation-system.md.
+  // Hot paths: (1) the admin curation page reads every slot's rows in
+  // position order, (2) the public page reads one slot at a time. Both
+  // are covered by this composite index — first column nails the slot,
+  // second column orders within it.
+  "CREATE INDEX IF NOT EXISTS idx_curation_slots_kind_pos " +
+    "ON curation_slots(slot_kind, position)",
+  // The TS-side createTableSql only emits column defs, NOT the inline
+  // table-level UNIQUE (slot_kind, story_id) from pipeline/store.py's
+  // CREATE TABLE. Re-state it as a unique index so the constraint is
+  // enforced on whichever engine ensureSchema creates the table on
+  // first. Without this, addToSlot's "re-add throws" contract is
+  // silently broken on the TS-created DB.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_curation_slots_unique " +
+    "ON curation_slots(slot_kind, story_id)",
   // 2026-06-14 video-render observability. Same shape + purpose as the
   // image-render index — every read on the timeline picker filters by
   // render_id and orders by ts, and we expect ~10-30 events per render
