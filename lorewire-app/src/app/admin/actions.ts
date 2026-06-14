@@ -1642,3 +1642,318 @@ export async function deleteArticleAction(formData: FormData): Promise<void> {
   revalidatePath("/admin/articles");
   redirectToArticles({ deleted: id });
 }
+
+// --- Reddit sources (2026-06-14 Reddit DB sync) ------------------------------
+// Three actions back the import / browse flow:
+//
+//   syncRedditSourceCsvAction   — upload a CSV, parse, upsert (or preview).
+//   skipRedditSourcesAction     — flip selected rows to status='skipped'.
+//   reopenRedditSourcesAction   — flip selected rows back to status='imported'.
+//
+// The bulk "process N selected" trigger lands in Phase 3 alongside the
+// pipeline worker entry. Keeping the surface small here means each action
+// has a single auth + single mutation + revalidate shape; the more involved
+// processing path gets its own observability story.
+
+const REDDIT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024; // 50 MB; current sheet is 512 KB
+
+export interface RedditSyncResult {
+  ok: boolean;
+  parsed?: number;
+  new?: number;
+  updated?: number;
+  unchanged?: number;
+  errors?: number;
+  warnings?: string[];
+  sample_new?: string[];
+  apply_ms?: number;
+  error?: string;
+}
+
+export async function syncRedditSourceCsvAction(
+  _prev: RedditSyncResult | null,
+  formData: FormData,
+): Promise<RedditSyncResult> {
+  await requireAdmin();
+
+  const file = formData.get("csv");
+  const dryRun = String(formData.get("dry_run") ?? "") === "1";
+
+  if (!(file instanceof File) || file.size === 0) {
+    return { ok: false, error: "no file uploaded" };
+  }
+  if (file.size > REDDIT_UPLOAD_MAX_BYTES) {
+    return {
+      ok: false,
+      error: `file too large (${Math.round(file.size / 1024)} KB, max ${REDDIT_UPLOAD_MAX_BYTES / 1024 / 1024} MB)`,
+    };
+  }
+  // Cheap content-sniff: header should be the canonical 9 fields. We don't
+  // strictly require text/csv MIME — some browsers send application/vnd.ms-excel
+  // for .csv. The actual parser is the source of truth on header shape.
+
+  const text = await file.text();
+
+  const t0 = performance.now();
+  const { parseCsvText, applyParsed } = await import("@/lib/reddit-source");
+  let parsedResult: ReturnType<typeof parseCsvText>;
+  try {
+    parsedResult = parseCsvText(text);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[reddit-sync parse-failed]", { error: msg });
+    return { ok: false, error: msg };
+  }
+  const parseMs = Math.round(performance.now() - t0);
+
+  console.info("[reddit-sync parse]", {
+    rows: parsedResult.rows.length,
+    warnings: parsedResult.warnings.length,
+    parse_ms: parseMs,
+  });
+
+  const diff = await applyParsed(parsedResult.rows, parsedResult.warnings, {
+    dryRun,
+  });
+
+  console.info("[reddit-sync apply]", {
+    mode: dryRun ? "dry-run" : "live",
+    new: diff.new,
+    updated: diff.updated,
+    unchanged: diff.unchanged,
+    errors: diff.errors,
+    apply_ms: diff.apply_ms,
+  });
+
+  if (!dryRun) {
+    revalidatePath("/admin/reddit-sources");
+  }
+
+  return {
+    ok: diff.errors === 0,
+    parsed: diff.parsed,
+    new: diff.new,
+    updated: diff.updated,
+    unchanged: diff.unchanged,
+    errors: diff.errors,
+    warnings: diff.warnings,
+    sample_new: diff.sample_new,
+    apply_ms: diff.apply_ms,
+  };
+}
+
+export async function skipRedditSourcesAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
+  const notes = String(formData.get("notes") ?? "").trim() || null;
+  if (ids.length === 0) return;
+  const { bulkSetRedditSourceStatus } = await import("@/lib/reddit-source");
+  const count = await bulkSetRedditSourceStatus(ids, "skipped", { notes });
+  console.info("[reddit-sync skip]", { count, ids: ids.slice(0, 10) });
+  revalidatePath("/admin/reddit-sources");
+}
+
+export async function reopenRedditSourcesAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
+  if (ids.length === 0) return;
+  const { bulkSetRedditSourceStatus } = await import("@/lib/reddit-source");
+  const count = await bulkSetRedditSourceStatus(ids, "imported", { notes: null });
+  console.info("[reddit-sync reopen]", { count, ids: ids.slice(0, 10) });
+  revalidatePath("/admin/reddit-sources");
+}
+
+// Phase 6: bulk version of the per-row Re-process action. The per-row
+// affordance on the review page stays permissive (the admin is being
+// deliberate when they open one row's surface); this bulk path is more
+// conservative — it only resets rows in status='used', skipping
+// queued/processing so a worker mid-execution isn't disrupted.
+// See _plans/2026-06-14-story-jobs-followups.md Phase 6.
+export async function bulkReprocessRedditSourcesAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
+  if (ids.length === 0) {
+    redirect("/admin/reddit-sources?error=no-selection");
+  }
+  const { bulkReprocessRedditSources } = await import("@/lib/reddit-source");
+  const result = await bulkReprocessRedditSources(ids);
+  console.info("[reddit-sync bulk-reprocess]", {
+    requested: ids.length,
+    reset: result.reset,
+    skipped_active: result.skipped_active,
+    skipped_other: result.skipped_other,
+    not_found: result.not_found,
+  });
+  revalidatePath("/admin/reddit-sources");
+  // Land back on the imported view so the freshly-reset rows are visible
+  // for the next Process N click.
+  const qs = new URLSearchParams();
+  qs.set("status", "imported");
+  qs.set("reset", String(result.reset));
+  if (result.skipped_active > 0)
+    qs.set("skipped_active", String(result.skipped_active));
+  redirect(`/admin/reddit-sources?${qs.toString()}`);
+}
+
+// Phase 4: publish gate.
+//
+// Three actions back the per-row review page at /admin/reddit-sources/[reddit_id]:
+//
+//   publishReviewedStoryAction       — checks readiness, flips story to 'published'.
+//   rejectReviewedStoryAction        — archives the story (reddit_source stays 'used').
+//   reprocessRedditSourceAction      — discards the generated story and resets the
+//                                      reddit_source row to 'imported' so it can be
+//                                      re-enqueued via Process N. Useful when the
+//                                      LLM came back with a weak rewrite.
+//
+// Each action revalidates the per-row review page, the list, and the home
+// dashboard so the change is visible everywhere immediately.
+
+const REVIEW_ROUTE = (rid: string) => `/admin/reddit-sources/${rid}`;
+
+export async function publishReviewedStoryAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const redditId = String(formData.get("reddit_id") ?? "");
+  if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
+
+  const { getRedditSource, evaluatePublishReadiness } = await import(
+    "@/lib/reddit-source"
+  );
+  const source = await getRedditSource(redditId);
+  if (!source) {
+    redirect(`/admin/reddit-sources?error=source-not-found&id=${redditId}`);
+  }
+  const story = source!.story_id
+    ? await getStoryRow(source!.story_id)
+    : null;
+  const readiness = evaluatePublishReadiness(story, {
+    status: source!.status,
+    story_id: source!.story_id,
+  });
+  if (!readiness.ready) {
+    // Encode the missing-list as a single string so the review page can
+    // surface it without a separate state shape. URL-safe; the page splits
+    // by `|` to render line items.
+    const reason = encodeURIComponent(readiness.missing.join(" | "));
+    console.warn("[reddit-review publish-blocked]", {
+      reddit_id: redditId,
+      missing: readiness.missing,
+    });
+    redirect(`${REVIEW_ROUTE(redditId)}?publish_blocked=${reason}`);
+  }
+
+  await setStatus(story!.id, "published");
+  console.info("[reddit-review published]", {
+    reddit_id: redditId,
+    story_id: story!.id,
+  });
+  revalidatePath(REVIEW_ROUTE(redditId));
+  revalidatePath("/admin/reddit-sources");
+  revalidatePath(`/admin/stories/${story!.id}`);
+  revalidatePath("/admin");
+  redirect(`${REVIEW_ROUTE(redditId)}?published=1`);
+}
+
+export async function rejectReviewedStoryAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const redditId = String(formData.get("reddit_id") ?? "");
+  if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
+
+  const { getRedditSource } = await import("@/lib/reddit-source");
+  const source = await getRedditSource(redditId);
+  if (!source) {
+    redirect(`/admin/reddit-sources?error=source-not-found&id=${redditId}`);
+  }
+  if (!source!.story_id) {
+    redirect(`${REVIEW_ROUTE(redditId)}?error=no-story`);
+  }
+  await setStatus(source!.story_id!, "archived");
+  console.info("[reddit-review rejected]", {
+    reddit_id: redditId,
+    story_id: source!.story_id,
+  });
+  revalidatePath(REVIEW_ROUTE(redditId));
+  revalidatePath("/admin/reddit-sources");
+  revalidatePath(`/admin/stories/${source!.story_id}`);
+  redirect(`${REVIEW_ROUTE(redditId)}?rejected=1`);
+}
+
+export async function reprocessRedditSourceAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const redditId = String(formData.get("reddit_id") ?? "");
+  if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
+
+  const { getRedditSource, setRedditSourceStatus } = await import(
+    "@/lib/reddit-source"
+  );
+  const source = await getRedditSource(redditId);
+  if (!source) {
+    redirect(`/admin/reddit-sources?error=source-not-found&id=${redditId}`);
+  }
+  // Archive the previous story (if any) so the public list doesn't carry
+  // the stale draft; the LIVE story will be re-created by the next worker
+  // run. We deliberately don't delete — the prior body is sometimes useful
+  // to diff against the new one, and undo is one click away from /admin/stories.
+  if (source!.story_id) {
+    await setStatus(source!.story_id, "archived");
+  }
+  await setRedditSourceStatus(redditId, "imported", { story_id: null });
+  console.info("[reddit-review reprocess]", {
+    reddit_id: redditId,
+    archived_story: source!.story_id,
+  });
+  revalidatePath(REVIEW_ROUTE(redditId));
+  revalidatePath("/admin/reddit-sources");
+  redirect(`${REVIEW_ROUTE(redditId)}?reprocess=1`);
+}
+
+// Phase 3: bulk-enqueue selected reddit_source rows into the story_jobs
+// queue. The local pipeline/story_jobs_worker.py drains the queue and runs
+// the existing scrape→idea→research→article→media→video stages against
+// each row's full_text. We deliberately don't shell out to Python here —
+// the action just flips status and inserts queue rows; the worker runs
+// out of band on the user's machine (mirroring image_render_worker /
+// render_worker patterns).
+export async function processRedditSourcesAction(
+  formData: FormData,
+): Promise<void> {
+  const session = await requireAdmin();
+  const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
+  const withMedia = String(formData.get("with_media") ?? "1") === "1";
+  if (ids.length === 0) {
+    redirect("/admin/reddit-sources?error=no-selection");
+  }
+  const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+  const result = await bulkEnqueueStoryJobs(ids, {
+    with_media: withMedia,
+    requested_by: session.email,
+  });
+  console.info("[story-jobs enqueue]", {
+    requested: ids.length,
+    enqueued: result.enqueued,
+    skipped_active: result.skipped_active,
+    skipped_status: result.skipped_status,
+    not_found: result.not_found,
+    with_media: withMedia,
+    requested_by: session.email,
+  });
+  revalidatePath("/admin/reddit-sources");
+  // Land back on the queue view so the admin sees the newly-queued rows
+  // (status filter pre-selected to queued + processing).
+  redirect(
+    `/admin/reddit-sources?status=queued&status=processing&enqueued=${result.enqueued}` +
+      (result.skipped_active ? `&skipped_active=${result.skipped_active}` : ""),
+  );
+}

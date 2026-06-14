@@ -190,6 +190,72 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE video_segments ADD COLUMN IF NOT EXISTS aspect TEXT DEFAULT '9:16'",
     # The worker's hot path is "newest pending row first" — index it.
     "CREATE INDEX IF NOT EXISTS idx_video_segments_status_created ON video_segments(status, created_at)",
+    # 2026-06-14 Reddit DB sync (see _plans/2026-06-14-reddit-db-sync.md).
+    # Candidate pool of Reddit posts imported by the admin from a CSV; the
+    # admin browses, filters, and bulk-promotes rows into the stories pipeline.
+    # `reddit_id` is the strict primary key — the same identifier that the
+    # rest of the system uses as slug/source-of-truth (stories.reddit_id).
+    # `status` lifecycle: imported -> queued -> processing -> used; or
+    # imported -> skipped if the admin rejects. Re-syncs of the same row
+    # refresh content fields but never clobber status/story_id/notes —
+    # those are the admin's state.
+    """CREATE TABLE IF NOT EXISTS reddit_source (
+        reddit_id     TEXT PRIMARY KEY,
+        subreddit     TEXT NOT NULL,
+        date_written  TEXT NOT NULL,
+        title         TEXT NOT NULL,
+        full_text     TEXT NOT NULL,
+        comments      INTEGER,
+        url           TEXT,
+        summary       TEXT,
+        length_chars  INTEGER,
+        status        TEXT NOT NULL DEFAULT 'imported',
+        story_id      TEXT,
+        notes         TEXT,
+        first_synced  TEXT NOT NULL,
+        last_synced   TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_source_status   ON reddit_source(status)",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_source_sub_len  ON reddit_source(subreddit, length_chars)",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_source_comments ON reddit_source(comments)",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_source_date     ON reddit_source(date_written)",
+    # 2026-06-14 Phase 3 of _plans/2026-06-14-reddit-db-sync.md.
+    # Per-attempt queue: each "Process N" click in the admin inserts one row
+    # per selected reddit_source, the local pipeline/story_jobs_worker.py
+    # polls for status='queued', claims the oldest, runs the existing
+    # scrape→idea→research→article→media→video stages against the source
+    # row's full_text, writes the result into `stories`, and flips
+    # reddit_source.status to 'used' on success. Mirrors video_renders /
+    # image_renders in shape and atomic-claim semantics.
+    """CREATE TABLE IF NOT EXISTS story_jobs (
+        id            TEXT PRIMARY KEY,
+        reddit_id     TEXT NOT NULL,
+        status        TEXT NOT NULL,
+        progress      INTEGER DEFAULT 0,
+        error         TEXT,
+        story_id      TEXT,
+        with_media    INTEGER DEFAULT 1,
+        requested_by  TEXT,
+        requested_at  TEXT NOT NULL,
+        started_at    TEXT,
+        finished_at   TEXT
+    )""",
+    # Worker hot path: oldest queued first. Mirrors the index on
+    # image_renders(status, requested_at).
+    "CREATE INDEX IF NOT EXISTS idx_story_jobs_status_requested ON story_jobs(status, requested_at)",
+    # Admin status lookups: "what's the latest job for this reddit_id?"
+    "CREATE INDEX IF NOT EXISTS idx_story_jobs_reddit_id ON story_jobs(reddit_id, requested_at)",
+    # 2026-06-14 Phase 5 (see _plans/2026-06-14-story-jobs-followups.md).
+    # Hard upper bound: at most one active job per reddit_id, enforced by
+    # the DB. The application-level check in has_active_story_job is still
+    # the fast path (avoids the wasted INSERT round trip), but this index
+    # closes the check-then-insert race window so a simultaneous
+    # double-click on Process N can't burn LLM/image credit twice on the
+    # same row. Partial-index syntax is identical on SQLite >= 3.8 and
+    # Postgres >= 9.5. Safe to add on a populated DB — the existing
+    # app-level guard means no current rows violate the constraint.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_jobs_one_active "
+    "ON story_jobs(reddit_id) WHERE status IN ('queued', 'processing')",
 ]
 
 _COLUMNS = [
@@ -1476,3 +1542,719 @@ def update_story_character(
             "character_image_mouth_removed = ?, updated_at = ? WHERE id = ?",
             (character_url, character_mouth_removed_url, now, story_id),
         )
+
+
+# --- reddit_source helpers (2026-06-14 Reddit DB sync) ------------------------
+# Candidate pool for the admin's import-review-publish workflow.
+# See _plans/2026-06-14-reddit-db-sync.md for the full flow.
+#
+# Upsert is intentionally partial: re-syncing the same row from a fresher CSV
+# refreshes content fields (title, summary, comments, etc.) but never clobbers
+# the admin-managed columns (`status`, `story_id`, `notes`, `first_synced`).
+# That separation is what makes the table safe to re-sync as the source sheet
+# grows without losing review/publish state.
+
+_REDDIT_SOURCE_COLUMNS = [
+    "reddit_id", "subreddit", "date_written", "title", "full_text",
+    "comments", "url", "summary", "length_chars", "status", "story_id",
+    "notes", "first_synced", "last_synced",
+]
+# Sync only refreshes content fields. Status/story_id/notes/first_synced
+# belong to the admin and to the row's first appearance — never overwritten.
+_REDDIT_SOURCE_SYNC_REFRESH = [
+    "subreddit", "date_written", "title", "full_text", "comments",
+    "url", "summary", "length_chars", "last_synced",
+]
+# Allow-list for set_reddit_source_status patches. Mirrors the
+# set_segment_status pattern so a typo can't smuggle a write into the wrong
+# column.
+_REDDIT_SOURCE_PATCH_COLUMNS = frozenset({"story_id", "notes"})
+
+
+def upsert_reddit_source(row: dict) -> str:
+    """Insert a new reddit_source row OR refresh content fields on an existing
+    one. Returns 'new' for first insert, 'updated' when an existing row got
+    refreshed (content actually changed), or 'unchanged' when the row was
+    already identical.
+
+    `row` must carry every column in `_REDDIT_SOURCE_COLUMNS`; the parser
+    builds a complete dict so the caller never has to remember which fields
+    are mandatory.
+    """
+    rid = row["reddit_id"]
+    existing = fetch_reddit_source(rid)
+    if existing is None:
+        cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
+        if _is_postgres():
+            placeholders = ", ".join(f"%({c})s" for c in _REDDIT_SOURCE_COLUMNS)
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"INSERT INTO reddit_source ({cols}) VALUES ({placeholders})",
+                        row,
+                    )
+                conn.commit()
+        else:
+            placeholders = ", ".join(f":{c}" for c in _REDDIT_SOURCE_COLUMNS)
+            with _sqlite_conn() as c:
+                c.execute(
+                    f"INSERT INTO reddit_source ({cols}) VALUES ({placeholders})",
+                    row,
+                )
+        return "new"
+
+    # Cheap content-diff: if every refresh-column matches, skip the UPDATE so
+    # `last_synced` doesn't churn (and the diff summary stays meaningful).
+    refresh_cols = [c for c in _REDDIT_SOURCE_SYNC_REFRESH if c != "last_synced"]
+    if all(existing.get(c) == row.get(c) for c in refresh_cols):
+        return "unchanged"
+
+    assigns = ", ".join(
+        f"{c} = " + ("%(" + c + ")s" if _is_postgres() else f":{c}")
+        for c in _REDDIT_SOURCE_SYNC_REFRESH
+    )
+    where_id = "%(reddit_id)s" if _is_postgres() else ":reddit_id"
+    sql = f"UPDATE reddit_source SET {assigns} WHERE reddit_id = {where_id}"
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, row)
+            conn.commit()
+    else:
+        with _sqlite_conn() as c:
+            c.execute(sql, row)
+    return "updated"
+
+
+def fetch_reddit_source(reddit_id: str) -> dict | None:
+    """Read a single reddit_source row. Returns None when no row matches."""
+    if not reddit_id:
+        return None
+    cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM reddit_source WHERE reddit_id = %s",
+                    (reddit_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM reddit_source WHERE reddit_id=?", (reddit_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+# Build a parameterized WHERE clause from a filter dict. Keeping the predicate
+# builder here (not in the route handlers) means the admin TS layer and any
+# future CLI report share the same filter shape and SQL injection guards.
+def _reddit_source_where(filters: dict) -> tuple[str, dict]:
+    """Translate a filter dict into (sql_fragment, params) ready to slot in
+    after `WHERE`. Empty filters → ("1=1", {}). All values bound as named
+    params; no value ever touches string concatenation.
+
+    Supported filters:
+        status            str | list[str]  exact match / IN
+        subreddits        list[str]        IN (...)
+        length_min        int              length_chars >= …
+        length_max        int              length_chars <= …
+        comments_min      int              comments >= …
+        date_from         str (ISO date)   date_written >= …
+        date_to           str (ISO date)   date_written <= …
+        search            str              title LIKE %q% OR summary LIKE %q%
+    """
+    parts: list[str] = []
+    params: dict = {}
+    pg = _is_postgres()
+
+    def ph(name: str) -> str:
+        return f"%({name})s" if pg else f":{name}"
+
+    status = filters.get("status")
+    if status:
+        if isinstance(status, str):
+            parts.append(f"status = {ph('status')}")
+            params["status"] = status
+        else:
+            keys = []
+            for i, s in enumerate(status):
+                k = f"status_{i}"
+                keys.append(ph(k))
+                params[k] = s
+            parts.append(f"status IN ({', '.join(keys)})")
+
+    subs = filters.get("subreddits")
+    if subs:
+        keys = []
+        for i, s in enumerate(subs):
+            k = f"sub_{i}"
+            keys.append(ph(k))
+            params[k] = s
+        parts.append(f"subreddit IN ({', '.join(keys)})")
+
+    if (lmin := filters.get("length_min")) is not None:
+        parts.append(f"length_chars >= {ph('length_min')}")
+        params["length_min"] = int(lmin)
+    if (lmax := filters.get("length_max")) is not None:
+        parts.append(f"length_chars <= {ph('length_max')}")
+        params["length_max"] = int(lmax)
+    if (cmin := filters.get("comments_min")) is not None:
+        parts.append(f"comments >= {ph('comments_min')}")
+        params["comments_min"] = int(cmin)
+    if (dfrom := filters.get("date_from")):
+        parts.append(f"date_written >= {ph('date_from')}")
+        params["date_from"] = dfrom
+    if (dto := filters.get("date_to")):
+        parts.append(f"date_written <= {ph('date_to')}")
+        params["date_to"] = dto
+    if (q := filters.get("search")):
+        # SQLite LIKE is case-insensitive on ASCII by default; Postgres LIKE
+        # is case-sensitive, so we use ILIKE there. Either way the search
+        # value is parameter-bound — no injection surface.
+        op = "ILIKE" if pg else "LIKE"
+        parts.append(
+            f"(title {op} {ph('search')} OR summary {op} {ph('search')})"
+        )
+        params["search"] = f"%{q}%"
+
+    return (" AND ".join(parts) or "1=1", params)
+
+
+def list_reddit_sources(
+    filters: dict | None = None,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    order_by: str = "comments DESC",
+) -> list[dict]:
+    """Return reddit_source rows matching `filters`, paginated.
+
+    `order_by` is a whitelisted column + direction string; defaults to
+    `comments DESC` (highest-engagement first, which is what the admin wants
+    on a candidate list). Caller is responsible for picking from the allowed
+    set; we validate against a small whitelist to keep the surface tight.
+    """
+    allowed = {
+        "comments DESC": "comments DESC NULLS LAST" if _is_postgres() else "comments DESC",
+        "comments ASC": "comments ASC",
+        "length_chars DESC": "length_chars DESC",
+        "length_chars ASC": "length_chars ASC",
+        "date_written DESC": "date_written DESC",
+        "date_written ASC": "date_written ASC",
+        "subreddit ASC": "subreddit ASC, comments DESC",
+    }
+    ob = allowed.get(order_by) or allowed["comments DESC"]
+    where, params = _reddit_source_where(filters or {})
+    cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
+    if _is_postgres():
+        sql = (
+            f"SELECT {cols} FROM reddit_source WHERE {where} "
+            f"ORDER BY {ob} LIMIT %(limit)s OFFSET %(offset)s"
+        )
+        params = {**params, "limit": int(limit), "offset": int(offset)}
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+    sql = (
+        f"SELECT {cols} FROM reddit_source WHERE {where} "
+        f"ORDER BY {ob} LIMIT :limit OFFSET :offset"
+    )
+    params = {**params, "limit": int(limit), "offset": int(offset)}
+    with _sqlite_conn() as c:
+        cur = c.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def count_reddit_sources(filters: dict | None = None) -> int:
+    """Total rows matching `filters`. Used by the admin pagination footer."""
+    where, params = _reddit_source_where(filters or {})
+    sql = f"SELECT count(*) AS n FROM reddit_source WHERE {where}"
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+                return int(row["n"]) if row else 0
+    with _sqlite_conn() as c:
+        row = c.execute(sql, params).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def set_reddit_source_status(
+    reddit_id: str, status: str, **fields: Any,
+) -> None:
+    """Flip a row's status and optionally patch one of the allow-listed
+    admin-managed columns (`story_id`, `notes`). Unknown columns are
+    rejected loudly so a typo in **fields can't smuggle a write into a
+    content column.
+
+    `last_synced` is NOT touched here — that's the sync's job only.
+    """
+    if not reddit_id:
+        raise ValueError("set_reddit_source_status requires reddit_id")
+    bad = set(fields) - _REDDIT_SOURCE_PATCH_COLUMNS
+    if bad:
+        raise ValueError(
+            f"set_reddit_source_status: unknown columns: {sorted(bad)}"
+        )
+    patch = {k: v for k, v in fields.items()}
+    patch["status"] = status
+    if _is_postgres():
+        assigns = ", ".join(f"{c} = %({c})s" for c in patch)
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE reddit_source SET {assigns} WHERE reddit_id = %(reddit_id)s",
+                    {**patch, "reddit_id": reddit_id},
+                )
+            conn.commit()
+        return
+    assigns = ", ".join(f"{c} = :{c}" for c in patch)
+    with _sqlite_conn() as c:
+        c.execute(
+            f"UPDATE reddit_source SET {assigns} WHERE reddit_id = :reddit_id",
+            {**patch, "reddit_id": reddit_id},
+        )
+
+
+def fetch_reddit_source_snapshot(reddit_ids: list[str]) -> dict[str, dict]:
+    """Return a `{reddit_id: row_dict}` map for every id in `reddit_ids` that
+    exists in the table. Only the columns the sync's diff needs are SELECTed
+    so the snapshot stays small even for a 30k-row sync.
+
+    Used by reddit_db_sync.apply() to do the in-memory diff in a single DB
+    round-trip instead of N per-row SELECTs.
+    """
+    if not reddit_ids:
+        return {}
+    snapshot: dict[str, dict] = {}
+    # Chunk the IN clause so SQLite's per-statement parameter limit (default
+    # 999 on older builds, 32766 on modern ones) and Postgres's 32767 bind
+    # limit never bite. 500 is a comfortable floor under both.
+    chunk = 500
+    cols = (
+        "reddit_id, subreddit, date_written, title, full_text, "
+        "comments, url, summary, length_chars"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                for i in range(0, len(reddit_ids), chunk):
+                    batch = reddit_ids[i:i + chunk]
+                    placeholders = ", ".join("%s" for _ in batch)
+                    cur.execute(
+                        f"SELECT {cols} FROM reddit_source "
+                        f"WHERE reddit_id IN ({placeholders})",
+                        batch,
+                    )
+                    for row in cur.fetchall():
+                        snapshot[row["reddit_id"]] = dict(row)
+        return snapshot
+    with _sqlite_conn() as c:
+        for i in range(0, len(reddit_ids), chunk):
+            batch = reddit_ids[i:i + chunk]
+            placeholders = ", ".join("?" for _ in batch)
+            cur = c.execute(
+                f"SELECT {cols} FROM reddit_source "
+                f"WHERE reddit_id IN ({placeholders})",
+                batch,
+            )
+            for row in cur.fetchall():
+                snapshot[row["reddit_id"]] = dict(row)
+    return snapshot
+
+
+def bulk_insert_reddit_sources(rows: list[dict]) -> int:
+    """Insert many reddit_source rows in a single transaction with
+    executemany. Caller already partitioned via fetch_reddit_source_snapshot
+    so every row is genuinely new — hitting a PK conflict here means the
+    partitioning is wrong, and we'd rather see the error than silently
+    swallow with ON CONFLICT DO NOTHING.
+    """
+    if not rows:
+        return 0
+    cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
+    if _is_postgres():
+        placeholders = ", ".join(f"%({c})s" for c in _REDDIT_SOURCE_COLUMNS)
+        sql = f"INSERT INTO reddit_source ({cols}) VALUES ({placeholders})"
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, rows)
+            conn.commit()
+        return len(rows)
+    placeholders = ", ".join(f":{c}" for c in _REDDIT_SOURCE_COLUMNS)
+    sql = f"INSERT INTO reddit_source ({cols}) VALUES ({placeholders})"
+    with _sqlite_conn() as c:
+        # Wrap the executemany in an explicit transaction so the batch commits
+        # as one fsync instead of one per row — a 100x+ speedup on a 30k
+        # insert.
+        c.execute("BEGIN")
+        try:
+            c.executemany(sql, rows)
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return len(rows)
+
+
+def bulk_refresh_reddit_sources(rows: list[dict]) -> int:
+    """Update only the refresh columns on many reddit_source rows in a single
+    transaction. Status, story_id, notes, first_synced are deliberately not
+    in the SET list — sync never touches admin-managed state."""
+    if not rows:
+        return 0
+    if _is_postgres():
+        assigns = ", ".join(
+            f"{c} = %({c})s" for c in _REDDIT_SOURCE_SYNC_REFRESH
+        )
+        sql = (
+            f"UPDATE reddit_source SET {assigns} "
+            "WHERE reddit_id = %(reddit_id)s"
+        )
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, rows)
+            conn.commit()
+        return len(rows)
+    assigns = ", ".join(f"{c} = :{c}" for c in _REDDIT_SOURCE_SYNC_REFRESH)
+    sql = f"UPDATE reddit_source SET {assigns} WHERE reddit_id = :reddit_id"
+    with _sqlite_conn() as c:
+        c.execute("BEGIN")
+        try:
+            c.executemany(sql, rows)
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    return len(rows)
+
+
+def list_reddit_source_subreddits() -> list[str]:
+    """Distinct subreddit names present in the candidate pool. Powers the
+    autocomplete on the admin filter rail (no need to call out to a static
+    list — the data itself defines the option set)."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT subreddit FROM reddit_source "
+                    "ORDER BY subreddit ASC"
+                )
+                return [r["subreddit"] for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "SELECT DISTINCT subreddit FROM reddit_source ORDER BY subreddit ASC"
+        )
+        return [r["subreddit"] for r in cur.fetchall()]
+
+
+# --- story_jobs helpers (2026-06-14 Phase 3: bulk process trigger) -----------
+# Per-attempt queue. Each "Process N selected" click in the admin inserts
+# N rows here (one per reddit_source). pipeline/story_jobs_worker.py polls
+# for status='queued' and claims oldest. Lifecycle: queued -> processing
+# -> done | error. Conditional UPDATEs guard against losing cancelled state
+# the same way finish_image_render does.
+
+_STORY_JOB_COLUMNS = [
+    "id", "reddit_id", "status", "progress", "error", "story_id",
+    "with_media", "requested_by", "requested_at", "started_at", "finished_at",
+]
+
+
+def has_active_story_job(reddit_id: str) -> bool:
+    """True when a queued or processing row exists for this reddit_id.
+    Used by enqueue_story_job to make "click Process twice" idempotent
+    inside one polling window. Not transactional — at very high concurrency
+    a duplicate could slip through, but the worker would just do redundant
+    work on the same row. Production deploy would add a partial unique
+    index `(reddit_id) WHERE status IN ('queued','processing')`."""
+    if not reddit_id:
+        return False
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM story_jobs WHERE reddit_id = %s "
+                    "AND status IN ('queued', 'processing') LIMIT 1",
+                    (reddit_id,),
+                )
+                return cur.fetchone() is not None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT 1 FROM story_jobs WHERE reddit_id = ? "
+            "AND status IN ('queued', 'processing') LIMIT 1",
+            (reddit_id,),
+        ).fetchone()
+        return row is not None
+
+
+def enqueue_story_job(
+    job_id: str,
+    reddit_id: str,
+    *,
+    with_media: bool = True,
+    requested_by: str | None = None,
+) -> dict | None:
+    """Insert a queued story_job. Returns the inserted row, or None when an
+    active job (queued or processing) already exists for this reddit_id —
+    the caller takes that as "no-op, idempotent."
+
+    Two layers of defense against double-enqueueing the same reddit_id:
+      1. `has_active_story_job` is the fast path — skips the INSERT round
+         trip in the common case where the row is plainly idle.
+      2. The partial unique index `idx_story_jobs_one_active` is the safety
+         net for the rare check-then-insert race. The ON CONFLICT clause
+         turns a race-loser into a clean "not inserted" signal instead of
+         a UNIQUE violation that would crash the bulk-enqueue action.
+
+    The conflict target must match the partial-index's WHERE clause exactly
+    — both engines require this for the partial-index dispatch.
+    """
+    if has_active_story_job(reddit_id):
+        return None
+    now = _now_iso()
+    row = {
+        "id": job_id,
+        "reddit_id": reddit_id,
+        "status": "queued",
+        "progress": 0,
+        "error": None,
+        "story_id": None,
+        "with_media": 1 if with_media else 0,
+        "requested_by": requested_by,
+        "requested_at": now,
+        "started_at": None,
+        "finished_at": None,
+    }
+    cols = ", ".join(_STORY_JOB_COLUMNS)
+    conflict_clause = (
+        "ON CONFLICT (reddit_id) WHERE status IN ('queued', 'processing') "
+        "DO NOTHING"
+    )
+    if _is_postgres():
+        placeholders = ", ".join(f"%({c})s" for c in _STORY_JOB_COLUMNS)
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO story_jobs ({cols}) VALUES ({placeholders}) "
+                    f"{conflict_clause}",
+                    row,
+                )
+                inserted = cur.rowcount > 0
+            conn.commit()
+        return row if inserted else None
+    placeholders = ", ".join(f":{c}" for c in _STORY_JOB_COLUMNS)
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            f"INSERT INTO story_jobs ({cols}) VALUES ({placeholders}) "
+            f"{conflict_clause}",
+            row,
+        )
+        # SQLite's executed-cursor exposes rowcount the same way; rely on
+        # total_changes as a backstop for older driver builds that return
+        # -1 from rowcount on INSERT...ON CONFLICT DO NOTHING no-ops.
+        inserted = (cur.rowcount or 0) > 0
+    return row if inserted else None
+
+
+def claim_next_story_job() -> dict | None:
+    """Atomically claim the oldest queued story_job and flip it to
+    'processing'. Returns the claimed row, or None when empty. Mirrors
+    claim_next_render's FOR UPDATE SKIP LOCKED on Postgres and the
+    conditional UPDATE on SQLite."""
+    cols = ", ".join(_STORY_JOB_COLUMNS)
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE story_jobs SET status = 'processing', "
+                    "started_at = %s WHERE id = ("
+                    "SELECT id FROM story_jobs WHERE status = 'queued' "
+                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    f") RETURNING {cols}",
+                    (now,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT id FROM story_jobs WHERE status='queued' "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        c.execute(
+            "UPDATE story_jobs SET status='processing', started_at=? "
+            "WHERE id=? AND status='queued'",
+            (now, row["id"]),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {cols} FROM story_jobs WHERE id=?", (row["id"],)
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def update_story_job_progress(job_id: str, progress: int) -> None:
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET progress = %s WHERE id = %s "
+                    "AND status = 'processing'",
+                    (int(progress), job_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET progress = ? WHERE id = ? "
+            "AND status = 'processing'",
+            (int(progress), job_id),
+        )
+
+
+def finish_story_job(job_id: str, story_id: str) -> None:
+    """Mark a story_job done. Conditional on status='processing' so a job
+    the admin cancelled mid-flight (future) stays cancelled, and an already-
+    settled row isn't overwritten. Worker calls this after the pipeline
+    upserts a `stories` row."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET status='done', progress=100, "
+                    "story_id=%s, finished_at=%s "
+                    "WHERE id=%s AND status='processing'",
+                    (story_id, now, job_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET status='done', progress=100, "
+            "story_id=?, finished_at=? "
+            "WHERE id=? AND status='processing'",
+            (story_id, now, job_id),
+        )
+
+
+def fail_story_job(job_id: str, error_message: str) -> None:
+    """Mark a story_job failed. Cap the message so a 10 MB traceback can't
+    bloat the column. Same conditional guard as finish_story_job."""
+    now = _now_iso()
+    capped = (error_message or "unknown error")[:2000]
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET status='error', error=%s, "
+                    "finished_at=%s WHERE id=%s AND status='processing'",
+                    (capped, now, job_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET status='error', error=?, "
+            "finished_at=? WHERE id=? AND status='processing'",
+            (capped, now, job_id),
+        )
+
+
+def get_story_job(job_id: str) -> dict | None:
+    cols = ", ".join(_STORY_JOB_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM story_jobs WHERE id = %s", (job_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM story_jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def latest_story_job_for_reddit(reddit_id: str) -> dict | None:
+    """Most-recently-requested job for a reddit_id. The admin row detail uses
+    this to surface the last attempt's outcome even after a fresh enqueue."""
+    cols = ", ".join(_STORY_JOB_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM story_jobs WHERE reddit_id = %s "
+                    "ORDER BY requested_at DESC LIMIT 1",
+                    (reddit_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM story_jobs WHERE reddit_id = ? "
+            "ORDER BY requested_at DESC LIMIT 1",
+            (reddit_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def count_pending_story_jobs() -> int:
+    """Queue depth (queued + processing). Powers the admin's "N in flight"
+    counter and lets a future Vercel drain shortcut idle ticks."""
+    sql = (
+        "SELECT count(*) AS n FROM story_jobs "
+        "WHERE status IN ('queued', 'processing')"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+        return int(row["n"]) if row else 0
+    with _sqlite_conn() as c:
+        row = c.execute(sql).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def reap_stale_story_jobs(stale_after_s: int) -> int:
+    """Crash recovery. A worker that died mid-job leaves the row at
+    status='processing' with started_at set. Reset rows whose started_at is
+    older than `stale_after_s` back to queued so the next tick re-claims
+    them. Safe to call on every tick — the WHERE clause is index-friendly."""
+    import datetime
+    cutoff = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(seconds=stale_after_s)
+    ).isoformat()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET status='queued', started_at=NULL "
+                    "WHERE status='processing' AND started_at IS NOT NULL "
+                    "AND started_at < %s",
+                    (cutoff,),
+                )
+                count = cur.rowcount
+            conn.commit()
+        return int(count)
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "UPDATE story_jobs SET status='queued', started_at=NULL "
+            "WHERE status='processing' AND started_at IS NOT NULL "
+            "AND started_at < ?",
+            (cutoff,),
+        )
+        return int(cur.rowcount)

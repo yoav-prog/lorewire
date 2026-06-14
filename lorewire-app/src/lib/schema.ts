@@ -253,6 +253,56 @@ export const IMAGE_RENDER_EVENTS: Table = {
   ],
 };
 
+// 2026-06-14 Reddit DB sync (see _plans/2026-06-14-reddit-db-sync.md).
+// Candidate pool of Reddit posts imported from a CSV in the admin. PK is the
+// Reddit post id — the same identifier stories.reddit_id carries — so the
+// pipeline can promote a row by reddit_id without rewriting upstream code.
+// `status` lifecycle: imported -> queued -> processing -> used; or
+// imported -> skipped if the admin rejects. The sync only ever refreshes
+// content fields; admin-managed columns (status, story_id, notes) are
+// preserved across syncs. Mirrors `reddit_source` in pipeline/store.py.
+export const REDDIT_SOURCE: Table = {
+  name: "reddit_source",
+  columns: [
+    { name: "reddit_id", type: "TEXT", pk: true },
+    { name: "subreddit", type: "TEXT" },
+    { name: "date_written", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "full_text", type: "TEXT" },
+    { name: "comments", type: "INTEGER" },
+    { name: "url", type: "TEXT" },
+    { name: "summary", type: "TEXT" },
+    { name: "length_chars", type: "INTEGER" },
+    { name: "status", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "notes", type: "TEXT" },
+    { name: "first_synced", type: "TEXT" },
+    { name: "last_synced", type: "TEXT" },
+  ],
+};
+
+// 2026-06-14 Phase 3 of _plans/2026-06-14-reddit-db-sync.md. Per-attempt
+// queue for "Process N selected" bulk action in /admin/reddit-sources.
+// pipeline/story_jobs_worker.py polls for status='queued', claims, runs
+// the existing stages, and writes a `stories` row. Mirrors `story_jobs`
+// in pipeline/store.py.
+export const STORY_JOBS: Table = {
+  name: "story_jobs",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "reddit_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "progress", type: "INTEGER" },
+    { name: "error", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "with_media", type: "INTEGER" },
+    { name: "requested_by", type: "TEXT" },
+    { name: "requested_at", type: "TEXT" },
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -263,6 +313,8 @@ export const TABLES: Table[] = [
   IMAGE_RENDER_EVENTS,
   ARTICLES,
   ARTICLE_REVISIONS,
+  REDDIT_SOURCE,
+  STORY_JOBS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -272,3 +324,22 @@ export function createTableSql(t: Table): string {
   );
   return `CREATE TABLE IF NOT EXISTS ${t.name} (${defs.join(", ")})`;
 }
+
+// Post-table DDL: indexes that the TS layer enforces because they're
+// load-bearing for write paths in this codebase (not just performance
+// hints — the ON CONFLICT clauses in src/lib/story-jobs.ts depend on the
+// partial unique index being present). The Python migration in
+// pipeline/store.py mirrors these statements; this list is the TS source
+// of truth for the indexes ensureSchema must create after the per-table
+// loop. Performance-only indexes (the bunch on reddit_source / story_jobs
+// that just speed up filter queries) are owned by Python and are not
+// mirrored here — adding them is a separate, larger refactor.
+export const POST_TABLE_DDL: string[] = [
+  // 2026-06-14 Phase 5: at most one queued or processing story_job per
+  // reddit_id. The bulk-enqueue path's ON CONFLICT (reddit_id) WHERE …
+  // clause requires this partial unique index to exist; without it, the
+  // INSERT throws because there's no matching constraint. Identical
+  // syntax on SQLite >= 3.8 and Postgres >= 9.5.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_jobs_one_active " +
+    "ON story_jobs(reddit_id) WHERE status IN ('queued', 'processing')",
+];

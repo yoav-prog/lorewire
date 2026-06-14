@@ -56,6 +56,13 @@ const STATIC_GROUPS: SidebarGroup[] = [
         ],
       },
       {
+        // Reddit candidate pool — the import / review / publish upstream
+        // for stories. See _plans/2026-06-14-reddit-db-sync.md.
+        href: "/admin/reddit-sources",
+        label: "Reddit Sources",
+        activePrefixes: ["/admin/reddit-sources"],
+      },
+      {
         href: "/admin/settings",
         label: "Settings",
         // All four config URLs land on the Settings hub with the right

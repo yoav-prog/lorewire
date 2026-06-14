@@ -7,7 +7,12 @@
 
 import "server-only";
 import path from "node:path";
-import { TABLES, createTableSql, type Table } from "@/lib/schema";
+import {
+  TABLES,
+  POST_TABLE_DDL,
+  createTableSql,
+  type Table,
+} from "@/lib/schema";
 
 export type Row = Record<string, unknown>;
 
@@ -88,6 +93,9 @@ async function makeDriver(): Promise<Driver> {
 }
 
 // Create each table, then additively add any column missing on an older DB.
+// After all tables exist, run the load-bearing index DDL in POST_TABLE_DDL —
+// these are the indexes the TS write paths actually depend on (e.g. the
+// partial unique index that the story_jobs ON CONFLICT clause targets).
 async function ensureSchema(d: Driver): Promise<Driver> {
   for (const t of TABLES) {
     await d.run(createTableSql(t), []);
@@ -99,6 +107,14 @@ async function ensureSchema(d: Driver): Promise<Driver> {
       } catch {
         // A concurrent migration may have added it; safe to ignore.
       }
+    }
+  }
+  for (const stmt of POST_TABLE_DDL) {
+    try {
+      await d.run(stmt, []);
+    } catch {
+      // CREATE INDEX IF NOT EXISTS is idempotent, but a concurrent
+      // migration may collide; safe to ignore on retry.
     }
   }
   return d;
