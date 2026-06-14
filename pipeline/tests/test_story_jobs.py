@@ -345,6 +345,118 @@ class WorkerTickTests(_IsolatedDB):
         self.assertIn("not found", row["error"])
 
 
+class BudgetGateTests(_IsolatedDB):
+    """Phase 7: daily-budget cap. Worker tick checks projected spend
+    BEFORE claiming a job, blocks when projection + next-job-estimate
+    would breach the cap, and proceeds otherwise."""
+
+    def _set_cap(self, cents: int | None):
+        from pipeline.story_jobs_worker import DAILY_BUDGET_CAP_SETTING_KEY
+        if cents is None:
+            self.store.set_setting(DAILY_BUDGET_CAP_SETTING_KEY, "")
+        else:
+            self.store.set_setting(DAILY_BUDGET_CAP_SETTING_KEY, str(cents))
+
+    def test_no_cap_means_no_block(self):
+        from pipeline import story_jobs_worker
+        _seed_reddit_source(self.store, "abc")
+        self.store.enqueue_story_job("job-1", "abc")
+        # No cap set — gate must let the tick claim.
+        self.assertIsNone(story_jobs_worker._budget_block_reason())
+
+    def test_invalid_cap_treated_as_unset(self):
+        """A corrupt or zero / negative cap value must NOT silently block
+        every tick forever — admin intent of 'off' beats 'broken setting
+        equals total halt.'"""
+        from pipeline import story_jobs_worker
+        for bad in ("", "  ", "0", "-50", "abc"):
+            self._set_cap(None)  # clear
+            self.store.set_setting(
+                story_jobs_worker.DAILY_BUDGET_CAP_SETTING_KEY, bad
+            )
+            self.assertIsNone(
+                story_jobs_worker._budget_block_reason(),
+                f"bad cap {bad!r} should be treated as unset",
+            )
+
+    def test_block_when_next_job_would_exceed_cap(self):
+        """Single queued job + cap of 1¢ = blocked (any positive job
+        cost would breach a 1-cent cap)."""
+        from pipeline import story_jobs_worker
+        _seed_reddit_source(self.store, "abc")
+        self.store.enqueue_story_job("job-1", "abc")
+        # Today's estimate is 1 active job × $0.50 = $0.50 = 50c. Cap of
+        # 1c is way under the projection + next-job-estimate.
+        self._set_cap(1)
+        reason = story_jobs_worker._budget_block_reason()
+        self.assertIsNotNone(reason)
+        self.assertIn("cap=1c", reason)
+        # And run_one_tick returns False (no work claimed).
+        ran = story_jobs_worker.run_one_tick(
+            process_fn=lambda j, r: {"id": "should-not-run"},
+        )
+        self.assertFalse(ran, "worker tick must not claim when blocked")
+        # The queued row is still queued (not claimed).
+        job = self.store.get_story_job("job-1")
+        self.assertEqual(job["status"], "queued")
+
+    def test_proceed_when_under_cap(self):
+        """Generous cap leaves room — tick claims and finishes."""
+        from pipeline import story_jobs_worker
+        _seed_reddit_source(self.store, "abc")
+        self.store.enqueue_story_job("job-1", "abc")
+        self._set_cap(100_00)  # $100 cap — way over the $0.50 estimate
+
+        ran = story_jobs_worker.run_one_tick(
+            process_fn=lambda j, r: {"id": "abc"},
+        )
+        self.assertTrue(ran)
+        job = self.store.get_story_job("job-1")
+        self.assertEqual(job["status"], "done")
+
+    def test_estimate_counts_done_today_plus_active(self):
+        """The projection includes today's finished jobs AND in-flight
+        (queued/processing) jobs. A row queued yesterday but still active
+        today counts toward today's projection."""
+        import datetime as _dt
+        # Seed 3 rows: one done today, one queued, one done long ago.
+        for rid in ("a", "b", "c"):
+            _seed_reddit_source(self.store, rid)
+        self.store.enqueue_story_job("j-done-today", "a")
+        claimed = self.store.claim_next_story_job()
+        self.store.finish_story_job(claimed["id"], "story-a")
+
+        self.store.enqueue_story_job("j-active", "b")  # stays queued
+
+        # An ancient done row outside today's window — must NOT count.
+        import sqlite3
+        with sqlite3.connect(self.store.DB_PATH) as c:
+            c.execute(
+                "INSERT INTO story_jobs (id, reddit_id, status, progress, "
+                "with_media, requested_at, finished_at, story_id) "
+                "VALUES ('j-ancient', 'c', 'done', 100, 1, ?, ?, 'story-c')",
+                ("2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00"),
+            )
+
+        from pipeline.story_jobs_worker import ESTIMATED_JOB_COST_CENTS
+        estimate = self.store.today_story_job_estimate_cents(
+            ESTIMATED_JOB_COST_CENTS,
+        )
+        # 1 done today + 1 active = 2 × 50c = 100c. Ancient row excluded.
+        self.assertEqual(estimate, 2 * ESTIMATED_JOB_COST_CENTS)
+        _ = _dt  # quiet pyflakes; future use
+
+    def test_zero_estimate_when_no_jobs(self):
+        """Empty queue + no done-today rows = $0 projected. Even with
+        a small cap the gate lets the (non-existent) next tick proceed.
+        We verify the helper directly since there's nothing to claim."""
+        from pipeline import story_jobs_worker
+        self._set_cap(50_00)  # $50 cap
+        # No jobs at all → no_active and no done-today → projection 0.
+        # Gate sees 0 + 50c next < 5000c cap = NOT blocked.
+        self.assertIsNone(story_jobs_worker._budget_block_reason())
+
+
 class HelpersTests(_IsolatedDB):
     def test_category_for_known_subreddit(self):
         from pipeline.story_jobs_worker import _category_for

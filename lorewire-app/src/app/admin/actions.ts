@@ -1767,6 +1767,36 @@ export async function reopenRedditSourcesAction(
   revalidatePath("/admin/reddit-sources");
 }
 
+// Phase 7: daily-budget cap for the story_jobs queue.
+// See _plans/2026-06-14-story-jobs-followups.md Phase 7.
+// Stored as integer cents in the settings table so the Python worker and
+// the TS read path share a single, unit-explicit number — no floating-
+// point round-trips, no dollar/cent confusion.
+export async function setDailyBudgetCapAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const raw = String(formData.get("cap_usd") ?? "").trim();
+  // Empty input → unset → unlimited.
+  if (raw === "") {
+    await setSetting("pipeline.story_jobs.daily_cap_cents", "");
+    console.info("[story-jobs budget] cap-cleared");
+    revalidatePath("/admin/reddit-sources");
+    redirect("/admin/reddit-sources?budget_cap=cleared");
+  }
+  const dollars = Number(raw);
+  if (!Number.isFinite(dollars) || dollars < 0) {
+    redirect("/admin/reddit-sources?error=bad-cap-value");
+  }
+  // Round to whole cents and clamp at zero. Admin types "10" or "10.50";
+  // either gets normalized.
+  const cents = Math.max(0, Math.round(dollars * 100));
+  await setSetting("pipeline.story_jobs.daily_cap_cents", String(cents));
+  console.info("[story-jobs budget] cap-set", { cents });
+  revalidatePath("/admin/reddit-sources");
+  redirect(`/admin/reddit-sources?budget_cap=${cents}`);
+}
+
 // Phase 6: bulk version of the per-row Re-process action. The per-row
 // affordance on the review page stays permissive (the admin is being
 // deliberate when they open one row's surface); this bulk path is more

@@ -2228,6 +2228,51 @@ def count_pending_story_jobs() -> int:
         return int(row["n"]) if row else 0
 
 
+def today_story_job_estimate_cents(estimate_per_job_cents: int) -> int:
+    """Project today's story_jobs spend in cents.
+
+    Today's spend = (jobs that finished today UTC) + (currently active jobs)
+    all multiplied by the per-job estimate. Active jobs are included
+    regardless of when they were requested so a queued-since-yesterday row
+    that's about to be picked up still counts toward today's budget — its
+    actual cost will land today.
+
+    We use a count-based estimate instead of summing `stories.cost_cents`
+    because the worker doesn't reliably populate that column yet. Real
+    per-story cost capture is a separate follow-up; using a flat estimate
+    here is the simplest accurate-enough thing that can ship today.
+    See _plans/2026-06-14-story-jobs-followups.md Phase 7.
+    """
+    import datetime as _dt
+    today_utc = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    # date() on an ISO string is a portable string-compare: ISO timestamps
+    # sort lexicographically the same as chronologically, so we just
+    # prefix-match the date portion.
+    sql_pg = (
+        "SELECT count(*) AS n FROM story_jobs "
+        "WHERE (status = 'done' AND finished_at >= %s AND finished_at < %s) "
+        "   OR status IN ('queued', 'processing')"
+    )
+    sql_sqlite = (
+        "SELECT count(*) AS n FROM story_jobs "
+        "WHERE (status = 'done' AND finished_at >= ? AND finished_at < ?) "
+        "   OR status IN ('queued', 'processing')"
+    )
+    day_start = today_utc + "T00:00:00"
+    day_end = today_utc + "T23:59:59.999999"
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_pg, (day_start, day_end))
+                row = cur.fetchone()
+        n = int(row["n"]) if row else 0
+        return n * max(0, int(estimate_per_job_cents))
+    with _sqlite_conn() as c:
+        row = c.execute(sql_sqlite, (day_start, day_end)).fetchone()
+        n = int(row["n"]) if row else 0
+        return n * max(0, int(estimate_per_job_cents))
+
+
 def reap_stale_story_jobs(stale_after_s: int) -> int:
     """Crash recovery. A worker that died mid-job leaves the row at
     status='processing' with started_at set. Reset rows whose started_at is

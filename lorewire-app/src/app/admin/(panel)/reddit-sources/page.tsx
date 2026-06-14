@@ -18,6 +18,12 @@ import {
   type RedditSourceOrderBy,
   type RedditSourceStatus,
 } from "@/lib/reddit-source";
+import {
+  formatCents,
+  getBudgetSummary,
+  type BudgetSummary,
+} from "@/lib/story-jobs-budget";
+import { setDailyBudgetCapAction } from "@/app/admin/actions";
 import RedditSourceTable from "./RedditSourceTable";
 
 export const dynamic = "force-dynamic";
@@ -58,6 +64,8 @@ interface SearchParams {
   skipped_active?: string;
   reset?: string;
   error?: string;
+  // Phase 7 budget-cap flash.
+  budget_cap?: string;
 }
 
 function toArray(v: string | string[] | undefined): string[] {
@@ -120,7 +128,7 @@ export default async function RedditSourcesPage({
     search: sp.q?.trim() || undefined,
   };
 
-  const [rows, total, allSubs] = await Promise.all([
+  const [rows, total, allSubs, budget] = await Promise.all([
     listRedditSources(filters, {
       limit: PAGE_SIZE,
       offset: (page - 1) * PAGE_SIZE,
@@ -128,6 +136,7 @@ export default async function RedditSourcesPage({
     }),
     countRedditSources(filters),
     listRedditSourceSubreddits(),
+    getBudgetSummary(),
   ]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -155,6 +164,8 @@ export default async function RedditSourcesPage({
 
       <FlashBanner sp={sp} />
 
+      <BudgetBar budget={budget} />
+
       <div className="grid gap-4 lg:grid-cols-[260px_1fr]">
         <FilterRail
           searchParams={sp}
@@ -168,6 +179,79 @@ export default async function RedditSourcesPage({
           <Pagination page={page} totalPages={totalPages} total={total} />
         </div>
       </div>
+    </div>
+  );
+}
+
+function BudgetBar({ budget }: { budget: BudgetSummary }) {
+  // Three visual states, in order of "you should pay attention":
+  //   exhausted (red)   — next click would block at the worker
+  //   approaching (amber) — past 75% of cap
+  //   ok (muted)        — well under cap, or no cap set
+  //
+  // The cap form is always present so the admin can edit without
+  // navigating; empty value clears the cap.
+  const hasCap = budget.capCents !== null;
+  const pct = Math.round(budget.fraction * 100);
+  let tone = "border-line bg-surface text-muted";
+  let pillTone = "border-line text-muted";
+  if (budget.exhausted) {
+    tone = "border-danger/40 bg-danger/10 text-danger";
+    pillTone = "border-danger/40 bg-danger/10 text-danger";
+  } else if (hasCap && budget.fraction >= 0.75) {
+    tone = "border-cat-entitled/40 bg-cat-entitled/10 text-cat-entitled";
+    pillTone = "border-cat-entitled/40 text-cat-entitled";
+  }
+  const spentLabel = formatCents(budget.spentCents);
+  const capLabel = hasCap ? formatCents(budget.capCents ?? 0) : "no cap";
+
+  return (
+    <div
+      className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-2.5 ${tone}`}
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="font-mono text-[11px] uppercase tracking-wider opacity-70">
+          Today (UTC)
+        </span>
+        <span className="font-display text-[15px] font-bold">
+          {spentLabel}
+        </span>
+        <span className="opacity-60">/</span>
+        <span className="font-mono text-[12px]">{capLabel}</span>
+        {hasCap && (
+          <span
+            className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${pillTone}`}
+          >
+            {pct}% used
+          </span>
+        )}
+        <span className="font-mono text-[10px] opacity-60">
+          {budget.jobCount.toLocaleString()} job{budget.jobCount === 1 ? "" : "s"}{" "}
+          (done today + active) · est. ~$0.50/job
+        </span>
+      </div>
+      <form action={setDailyBudgetCapAction} className="flex items-center gap-2">
+        <label className="font-mono text-[10px] uppercase tracking-wider opacity-70">
+          Cap $
+        </label>
+        <input
+          name="cap_usd"
+          type="number"
+          min={0}
+          step="0.50"
+          defaultValue={
+            budget.capCents !== null ? (budget.capCents / 100).toFixed(2) : ""
+          }
+          placeholder="unlimited"
+          className="w-24 rounded-md border border-line bg-bg px-2 py-1 font-mono text-[12px] text-ink outline-none focus:border-accent"
+        />
+        <button
+          type="submit"
+          className="rounded-md border border-line px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider text-muted hover:text-ink"
+        >
+          Save
+        </button>
+      </form>
     </div>
   );
 }
@@ -186,6 +270,17 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
     return (
       <div className="rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
         {sp.error.replace(/-/g, " ")}
+      </div>
+    );
+  }
+  if (sp.budget_cap !== undefined) {
+    const label =
+      sp.budget_cap === "cleared"
+        ? "Daily budget cap cleared (unlimited)."
+        : `Daily budget cap set to $${(Number(sp.budget_cap) / 100).toFixed(2)}.`;
+    return (
+      <div className="rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-[12px] text-accent">
+        {label}
       </div>
     );
   }

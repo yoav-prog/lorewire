@@ -43,7 +43,52 @@ DEFAULT_POLL_SECONDS = 5
 # short enough to clean up a crashed worker within a useful window.
 STALE_AFTER_SECONDS = 30 * 60
 
+# Phase 7 daily-budget cap (see _plans/2026-06-14-story-jobs-followups.md).
+# Per-job spend estimate used by the worker's pre-claim budget gate.
+# The real number varies — a tight text-only run can be ~$0.10, a
+# 30-scene + voice + Remotion run can be $0.80. The flat $0.50 is
+# deliberately conservative on small runs and slightly optimistic on
+# big ones; we'd rather block a tick too early than burn the cap on
+# an underestimate. Tune via settings later if it bites.
+ESTIMATED_JOB_COST_CENTS = 50
+# Admin-managed in settings; unset = no cap = unlimited.
+DAILY_BUDGET_CAP_SETTING_KEY = "pipeline.story_jobs.daily_cap_cents"
+
 ProcessFn = Callable[[dict, dict], dict]
+
+
+def _daily_budget_cap_cents() -> int | None:
+    """Read the admin-managed cap. None when unset or invalid — treated as
+    "no cap." Negative or zero is also treated as no cap (admin intent is
+    "off"), which avoids a passive-aggressive permanent block."""
+    raw = store.get_setting(DAILY_BUDGET_CAP_SETTING_KEY)
+    if not raw:
+        return None
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _budget_block_reason() -> str | None:
+    """Return a human-readable block reason when the next job would push
+    today's projected spend past the cap. None when the tick may proceed.
+
+    Pure read — no side effects. The worker calls this BEFORE claim so
+    a blocked tick doesn't waste a claim/finish cycle on a row that would
+    just sit there.
+    """
+    cap = _daily_budget_cap_cents()
+    if cap is None:
+        return None
+    projected = store.today_story_job_estimate_cents(ESTIMATED_JOB_COST_CENTS)
+    if projected + ESTIMATED_JOB_COST_CENTS > cap:
+        return (
+            f"projected={projected}c + next~{ESTIMATED_JOB_COST_CENTS}c "
+            f"> cap={cap}c"
+        )
+    return None
 
 
 # Subreddit -> category mapping is owned by stages.SUBREDDIT_CATEGORY. We
@@ -196,6 +241,16 @@ def run_one_tick(process_fn: ProcessFn | None = None) -> bool:
     reaped = store.reap_stale_story_jobs(STALE_AFTER_SECONDS)
     if reaped:
         print(f"[story-jobs reap] reset_stale={reaped}")
+
+    # Phase 7 budget gate. Check BEFORE claim so a blocked tick doesn't
+    # waste a claim/finish cycle. The gate is intentionally conservative —
+    # it includes already-active jobs in today's projected spend, so a
+    # batch in flight can't squeak under the cap while another row gets
+    # picked up. Returning False here puts the loop into its idle sleep.
+    block_reason = _budget_block_reason()
+    if block_reason is not None:
+        print(f"[story-jobs budget-block] {block_reason}")
+        return False
 
     claimed = store.claim_next_story_job()
     if claimed is None:

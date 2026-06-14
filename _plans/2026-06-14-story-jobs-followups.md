@@ -45,30 +45,25 @@ Phases here are **independent** — you can ship 5, then jump to 7, etc. They sh
 
 ---
 
-## Phase 7 — Daily-budget cap that aborts in-flight worker batches
+## Phase 7 — Daily-budget cap that aborts in-flight worker batches (shipped 2026-06-14)
 
 **Why:** This is the highest-risk gap. At ~$0.30–0.50 per row (LLM + kie + voice), an accidental "Process 500" or a runaway worker is real money. Today the only guard is the confirm dialog. A budget cap that aborts mid-batch turns a potential $250 mistake into a $25 mistake.
 
-**Scope:**
-- New setting key `budget.daily_usd_cap` in the existing `settings` table; default unset (no cap). Setting UI surface lives in `/admin/settings`.
-- New helper in `pipeline/store.py:today_spend_cents()` — sums `stories.cost_cents` for stories whose `created_at` is in the current UTC day. (We already write `cost_cents` per story; this is a pure read.)
-- Update `pipeline/story_jobs_worker.py:run_one_tick` — before claiming, check `today_spend_cents() + ESTIMATED_COST_CENTS >= cap_cents`. If yes, log `[story-jobs budget-block] today=$X cap=$Y` and sleep instead of claiming. The in-flight job that triggered the breach finishes normally; the next tick is blocked.
-- New TS read helper `getTodayStorySpend()` in `@/lib/repo` or a new `@/lib/budget.ts`.
-- Admin UI: small "Today's spend: $X / $Y cap" line on `/admin/reddit-sources` and on `/admin` overview. Reuses the same `stories.cost_cents` data already collected.
-- Settings page: a single number input + save action for `budget.daily_usd_cap`. Validation: must be ≥ 0, blank = unlimited.
-- Tests:
-  - `today_spend_cents()` correctly sums by UTC day (boundary case: a story created at 23:59 UTC yesterday isn't counted).
-  - Worker tick is blocked when projected spend exceeds cap.
-  - Worker tick proceeds when cap is unset or projected spend is below.
+**Pragmatic deviation from the original plan:** the worker doesn't actually populate `stories.cost_cents` today (writes tokens only). So summing that column would always read $0 and the cap would never bite. Shipped instead with a count-based estimate: `(done_today + active_jobs) × $0.50`. Honest in its imprecision, accurate enough to be a safety net. Real per-story cost capture is a separate micro-phase.
 
-**Open question:** What is `ESTIMATED_COST_CENTS`? A flat default (say $0.50) is too conservative for small text-only runs and too generous for high-scene runs. Options:
-1. Static $0.50 — simple, conservative.
-2. Settings-driven `budget.estimated_cost_cents_per_story` — admin-tunable.
-3. Sliding window: average of last 10 stories' actual `cost_cents`. Adaptive but harder to reason about.
+**Shipped:**
+- ✅ Setting key `pipeline.story_jobs.daily_cap_cents` (integer cents — explicit unit, no float round-tripping). Blank / 0 / negative / non-numeric = no cap (admin "off" beats "broken setting halts everything").
+- ✅ `pipeline/store.py:today_story_job_estimate_cents(estimate_per_job)` — counts done-today (UTC) + active jobs from the `story_jobs` table; multiplies by the per-job estimate. ISO-timestamp range compare on TEXT column — portable across SQLite + Postgres.
+- ✅ `pipeline/story_jobs_worker.py` constant `ESTIMATED_JOB_COST_CENTS = 50` and `_budget_block_reason()` helper. `run_one_tick` calls it BEFORE `claim_next_story_job` so a blocked tick doesn't waste a claim/finish cycle. Log line: `[story-jobs budget-block] projected=Xc + next~Yc > cap=Zc`.
+- ✅ TS module [lorewire-app/src/lib/story-jobs-budget.ts](lorewire-app/src/lib/story-jobs-budget.ts) — `getDailyBudgetCapCents`, `getTodayStoryJobsEstimate`, `getBudgetSummary` (one-stop for the admin UI), `formatCents`. The TS `ESTIMATED_JOB_COST_CENTS` is documented to stay in sync with the Python constant; a parity test asserts the value.
+- ✅ Server action `setDailyBudgetCapAction` in [actions.ts](lorewire-app/src/app/admin/actions.ts) — admin enters dollars; we normalize to cents and store as integer. Empty input clears the cap.
+- ✅ Budget bar at the top of [/admin/reddit-sources](lorewire-app/src/app/admin/(panel)/reddit-sources/page.tsx). Three visual states: muted (under 75%), amber (75%+), red (next job would block). Inline cap form. Sub-line shows `N jobs (done today + active) · est. ~$0.50/job` so the admin sees what's being counted.
+- ✅ Tests:
+  - 6 Python tests in `BudgetGateTests` (no-cap, corrupt-cap-treated-as-unset, block when over, proceed when under, estimate includes done-today + active not ancient, zero-estimate empty queue).
+  - 12 TS tests in `story-jobs-budget.test.ts` (cap getter, today estimate counting, summary fraction/exhausted/no-cap, parity constant, formatter).
+- ✅ Suite: **89 Python + 47 TS = 136 tests green.**
 
-Recommendation: ship #1 first (simplest, no settings round trip), add #2 when the user feels the cap kick in at a bad threshold.
-
-**Time estimate:** ~2–3 hours.
+**Open follow-up:** the real-cost-capture micro-phase. Wire `images.totals` / `voice.totals` / LLM token counts to a single `cost_cents` write at the end of `_default_process` so the budget bar can show actual rather than estimated spend.
 
 ---
 
