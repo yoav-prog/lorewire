@@ -219,7 +219,12 @@ IMAGE_POLL_TIMEOUT = 240
 
 
 def _generate_with_retry(
-    prompt: str, label: str, attempts: int = 2, aspect_ratio: str = "3:4"
+    prompt: str,
+    label: str,
+    attempts: int = 2,
+    aspect_ratio: str = "3:4",
+    image_input: list[str] | None = None,
+    model: str | None = None,
 ) -> str | None:
     """Call `images.generate` with one retry on transient failure.
 
@@ -227,18 +232,43 @@ def _generate_with_retry(
     routed through the same namespace as the caller so a human reading the
     log sees the retry + outcome inline. `aspect_ratio` is passed through so
     callers can render a landscape variant of the same prompt.
+
+    `image_input` (2026-06-14 world-bible plan) is an optional list of
+    reference image URLs. Forwarded to `images.generate`, where the kie
+    call shape branches on the active model: nano-banana-{2,pro} include
+    the refs in `input.image_input`, gpt-image-2 ignores them silently
+    (no image_input field on its endpoint). Logging surfaces the ref
+    count so a "wrong face" diagnosis can see whether refs were used.
+
+    `model` (2026-06-14) optionally overrides the registry-active image
+    model just for this call. The scenes path uses it to pin
+    nano-banana-2 (ref-image support) while leaving hero / props on the
+    admin's global selection.
     """
     last: Exception | None = None
+    ref_count = len([u for u in (image_input or []) if u])
     for attempt in range(1, attempts + 1):
         try:
             return images.generate(
-                prompt, aspect_ratio=aspect_ratio, resolution="1K", poll_timeout=IMAGE_POLL_TIMEOUT
+                prompt,
+                aspect_ratio=aspect_ratio,
+                resolution="1K",
+                poll_timeout=IMAGE_POLL_TIMEOUT,
+                image_input=image_input,
+                model=model,
             )
         except Exception as e:
             last = e
             if attempt < attempts:
-                print(f"[media image retry] {label} attempt {attempt} failed ({e}); retrying once")
-    print(f"[media image] {label} FAILED after {attempts} attempts: {last}")
+                print(
+                    f"[media image retry] {label} attempt {attempt} "
+                    f"refs={ref_count} model={model or 'global'} "
+                    f"failed ({e}); retrying once"
+                )
+    print(
+        f"[media image] {label} refs={ref_count} model={model or 'global'} "
+        f"FAILED after {attempts} attempts: {last}"
+    )
     return None
 
 
@@ -920,13 +950,50 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     # button has already cleared the prompts cache cluster before this
     # function fires.
     scene_count = _resolve_scene_count(None, story=story)
-    scene_prompts = _resolve_scene_prompts_cached(
-        story_id=story["id"],
-        story=story,
-        idea=idea,
-        body=body,
-        scene_count=scene_count,
-    )
+    # 2026-06-14 Option C: when the world-bible flow is enabled, the
+    # bulk path also builds the bible + character refs up front so
+    # every scene call passes consistent reference images to kie. On
+    # failure we fall through to the grounded narration path.
+    world_bible_path = _world_bible_enabled()
+    scene_entity_ids: list[list[str]] = []
+    world_bible: dict | None = None
+    bible_cents = 0
+    if world_bible_path:
+        prompts_wb, ids_wb, bible_wb, bible_cents = (
+            _resolve_scene_entries_world_bible(
+                story_id=story["id"],
+                story=story,
+                idea=idea,
+                body=body,
+                scene_count=scene_count,
+                safe_id=safe_id,
+                out_dir=out_dir,
+            )
+        )
+        if prompts_wb:
+            scene_prompts = prompts_wb
+            scene_entity_ids = ids_wb
+            world_bible = bible_wb
+        else:
+            print(
+                f"[image regen scenes] id={safe_id} world_bible path "
+                "produced no prompts — falling back to grounded path"
+            )
+            scene_prompts = _resolve_scene_prompts_cached(
+                story_id=story["id"],
+                story=story,
+                idea=idea,
+                body=body,
+                scene_count=scene_count,
+            )
+    else:
+        scene_prompts = _resolve_scene_prompts_cached(
+            story_id=story["id"],
+            story=story,
+            idea=idea,
+            body=body,
+            scene_count=scene_count,
+        )
     # Phase 2 of _plans/2026-06-12-video-aspect-ratio.md: resolve scene
     # aspect from the story row. Existing portrait stories with no
     # `aspect` field fall through to 3:4 — same kie call shape as before.
@@ -939,8 +1006,16 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
 
     scene_urls: list[str] = []
     per_image_cents = _per_image_cost_cents()
-    total_cents = 0
+    total_cents = bible_cents  # Bible build + ref shots already spent
     total_scenes = len(scene_prompts)
+    # 2026-06-14 Option C: when the world bible is active, every scene
+    # call pins the scene model AND forwards the relevant entity refs.
+    # When the world bible path didn't run (setting off / fallback /
+    # build failure), `world_bible` is None and `model_for_scenes` stays
+    # None, which preserves the pre-Option-C global model selection.
+    model_for_scenes: str | None = (
+        _scene_image_model() if world_bible is not None else None
+    )
     store.log_render_event(
         "scenes_start",
         f"Generating {total_scenes} scenes — kie aspect {scene_kie_aspect}",
@@ -950,13 +1025,26 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         filename = f"scene-{i + 1}.png"
         public_url = f"{url_prefix}/{filename}"
         label = f"scene-{i + 1}"
+        ids_for_scene = (
+            scene_entity_ids[i] if i < len(scene_entity_ids) else []
+        )
+        refs_for_scene = _refs_for_scene(world_bible, ids_for_scene)
         store.log_render_event(
             "kie_request_sent",
-            f"Scene {i + 1}/{total_scenes} submitted to kie",
-            payload={"index": i + 1, "of": total_scenes},
+            f"Scene {i + 1}/{total_scenes} submitted to kie "
+            f"(refs={len(refs_for_scene)})",
+            payload={
+                "index": i + 1,
+                "of": total_scenes,
+                "refs": len(refs_for_scene),
+            },
         )
         kie_url = _generate_with_retry(
-            prompt, f"id={safe_id} {label} regen", aspect_ratio=scene_kie_aspect,
+            prompt,
+            f"id={safe_id} {label} regen",
+            aspect_ratio=scene_kie_aspect,
+            image_input=refs_for_scene or None,
+            model=model_for_scenes,
         )
         if kie_url is None:
             store.log_render_event(
@@ -1152,18 +1240,61 @@ def _regen_one_scene(
     # down to one chance per batch. The TS bulk enqueue clears the cache
     # on each click so a fresh Rebuild-all gets fresh prompts.
     scene_count = _resolve_scene_count(None, story=story)
-    scene_prompts = _resolve_scene_prompts_cached(
-        story_id=story["id"],
-        story=story,
-        idea=idea,
-        body=body,
-        scene_count=scene_count,
-    )
+    # 2026-06-14 Option C: per-image regen takes the same world-bible
+    # path so the regenerated scene stays consistent with its
+    # neighbours. When the world-bible flow is off (or build fails),
+    # falls back to the grounded narration path.
+    world_bible_path = _world_bible_enabled()
+    scene_entity_ids: list[list[str]] = []
+    world_bible: dict | None = None
+    bible_extra_cents = 0
+    if world_bible_path:
+        prompts_wb, ids_wb, bible_wb, bible_extra_cents = (
+            _resolve_scene_entries_world_bible(
+                story_id=story["id"],
+                story=story,
+                idea=idea,
+                body=body,
+                scene_count=scene_count,
+                safe_id=safe_id,
+                out_dir=out_dir,
+            )
+        )
+        if prompts_wb:
+            scene_prompts = prompts_wb
+            scene_entity_ids = ids_wb
+            world_bible = bible_wb
+        else:
+            print(
+                f"[image regen one scene] id={safe_id} world_bible "
+                "produced no prompts — falling back to grounded path"
+            )
+            scene_prompts = _resolve_scene_prompts_cached(
+                story_id=story["id"],
+                story=story,
+                idea=idea,
+                body=body,
+                scene_count=scene_count,
+            )
+    else:
+        scene_prompts = _resolve_scene_prompts_cached(
+            story_id=story["id"],
+            story=story,
+            idea=idea,
+            body=body,
+            scene_count=scene_count,
+        )
     if not scene_prompts:
         raise RuntimeError(
             "scene prompt build returned no prompts — cannot regen"
         )
     prompt = scene_prompts[min(index, len(scene_prompts) - 1)]
+    ids_for_this_scene = (
+        scene_entity_ids[min(index, len(scene_entity_ids) - 1)]
+        if scene_entity_ids
+        else []
+    )
+    refs_for_this_scene = _refs_for_scene(world_bible, ids_for_this_scene)
 
     filename = f"scene-{index + 1}.png"
     public_url = f"{url_prefix}/{filename}"
@@ -1171,9 +1302,15 @@ def _regen_one_scene(
     # Phase 2: resolve the scene aspect from the story so a per-image regen
     # on a 16:9 story asks kie for 16:9, not the 3:4 default.
     scene_kie_aspect = scene_aspect_for(resolve_aspect_for_story(story))
+    model_for_scenes = (
+        _scene_image_model() if world_bible is not None else None
+    )
     kie_url = _generate_with_retry(
-        prompt, f"id={safe_id} {label} per-image regen",
+        prompt,
+        f"id={safe_id} {label} per-image regen",
         aspect_ratio=scene_kie_aspect,
+        image_input=refs_for_this_scene or None,
+        model=model_for_scenes,
     )
     if kie_url is None:
         raise RuntimeError(f"kie returned no URL for {label}")
@@ -1200,7 +1337,7 @@ def _regen_one_scene(
     # admin can re-run the regen if the prompt didn't land.
     _persist_frame_prompt(story["id"], story, index, prompt, stored_url)
 
-    return stored_url, _per_image_cost_cents()
+    return stored_url, _per_image_cost_cents() + bible_extra_cents
 
 
 def _regen_one_prop(
@@ -1442,6 +1579,62 @@ def _new_frame_id() -> str:
 # stale prompts that produced "wrong" images in the first place.
 SCENE_PROMPTS_BUILT_WITH_GROUNDED = "narration_v1"
 SCENE_PROMPTS_BUILT_WITH_LEGACY = "legacy_v0"
+# 2026-06-14 Option C: world-bible scene prompts. Cache entry is the
+# same `scene_prompts: list[str]` shape but with a parallel
+# `scene_entity_ids: list[list[str]]` so the kie scene call can look
+# up references for each scene. Marker change auto-evicts every prior
+# cache shape on first contact.
+SCENE_PROMPTS_BUILT_WITH_WORLD_BIBLE = "world_bible_v1"
+
+
+# ─── world bible toggles ─────────────────────────────────────────────────────
+
+
+def _world_bible_enabled() -> bool:
+    """Master switch for the Option C path (world bible + per-character
+    reference images + nano-banana-2 scene model). Default on. Flipping
+    `video.world_bible_enabled` to "0" reverts to the existing
+    grounded-narration flow (Option A from the previous plan)."""
+    raw = store.get_setting("video.world_bible_enabled")
+    if raw is None:
+        return True
+    return str(raw).strip() not in ("0", "false", "False", "off", "")
+
+
+def _character_reference_images_enabled() -> bool:
+    """When OFF, the world bible is built (schema is still useful for
+    prompt-shaping) but per-character ref images are NOT generated. Saves
+    ~$0.04 per character per story. Default on — refs are the load-bearing
+    piece for visual consistency."""
+    raw = store.get_setting("video.character_reference_images_enabled")
+    if raw is None:
+        return True
+    return str(raw).strip() not in ("0", "false", "False", "off", "")
+
+
+def _location_reference_images_enabled() -> bool:
+    """Opt-in. Off by default per the council's "locations are
+    perceptually marginal in short-form" note — we ship the schema but
+    don't burn $0.04 × N_locations per story unless the admin flips
+    this on after seeing scene results."""
+    raw = store.get_setting("video.location_reference_images")
+    if raw is None:
+        return False
+    return str(raw).strip() not in ("0", "false", "False", "off", "")
+
+
+def _scene_image_model() -> str:
+    """Registry id for the scene generation model. Default
+    "kie/nano-banana-2" because it's the cheapest ref-image-aware
+    option ($0.04 vs $0.05 for gpt-image-2) AND supports the
+    image_input field this whole flow depends on. Admin can flip to
+    "kie/nano-banana-pro" for higher fidelity (~$0.09) or back to
+    "kie/gpt-image-2" to disable reference conditioning entirely.
+    Unknown values fall through to nano-banana-2."""
+    raw = (store.get_setting("video.scene_image_model") or "").strip()
+    if raw in {"kie/gpt-image-2", "kie/nano-banana-2", "kie/nano-banana-pro"}:
+        return raw
+    return "kie/nano-banana-2"
 
 
 def _scene_prompt_grounding_enabled() -> bool:
@@ -1462,6 +1655,381 @@ def _character_bible_cache_enabled() -> bool:
     if raw is None:
         return True
     return str(raw).strip() not in ("0", "false", "False", "off", "")
+
+
+# ─── world bible: build + ref-image gen + scene-entry resolver ───────────────
+# The Option C path. Builds a structured bible of recurring entities
+# (characters, sub-characters, locations, items) per story, optionally
+# generates one canonical reference image per character (and optionally
+# per location), then builds per-scene prompts tagged with the entity ids
+# that appear on-screen. Scene gen passes the matching ref URLs to
+# nano-banana-2 so identity carries across scenes. See
+# `_plans/2026-06-14-world-bible-and-reference-images.md`.
+
+
+def _build_character_ref_prompt(char: dict, style: str) -> str:
+    """Neutral portrait prompt used to mint a character's canonical
+    reference image. Deliberately scene-agnostic — no plot context, no
+    props, no other characters — so the resulting image works as an
+    identity anchor regardless of which scene later references it."""
+    name = char.get("name", "the character")
+    role = char.get("role", "")
+    cues = char.get("visual_cues", "")
+    role_clause = f" ({role})" if role else ""
+    return (
+        f"Neutral head-and-shoulders reference portrait of {name}{role_clause}: "
+        f"{cues}. Plain neutral background, soft front lighting, character "
+        f"looking forward, mouth closed, neutral expression, no props, no "
+        f"other characters in the frame. {style}"
+    )
+
+
+def _build_location_ref_prompt(loc: dict, style: str) -> str:
+    name = loc.get("name", "the location")
+    cues = loc.get("visual_cues", "")
+    return (
+        f"Establishing wide shot of {name} with no people present: {cues}. "
+        f"Empty environment, soft natural lighting, used as a setting "
+        f"reference image. {style}"
+    )
+
+
+def _ensure_entity_reference(
+    entity: dict,
+    *,
+    story_id: str,
+    safe_id: str,
+    out_dir: Path,
+    kind: str,
+    prompt_builder,
+    aspect_ratio: str,
+    style: str,
+) -> tuple[dict, int]:
+    """Generate (and upload) a canonical reference image for one bible
+    entity that doesn't yet have a `reference_image_url`. Returns the
+    updated entity (with the new url stamped in) plus the cents spent
+    (0 if the entity already had a ref, per_image_cents if a new one
+    was generated, 0 again on failure — failure is best-effort, the
+    entity keeps `reference_image_url: null` and scene gen falls back
+    to text-only for that entity).
+
+    Logging surfaces the kind + entity id + outcome so a "this scene
+    looks wrong" debug session can see exactly which refs landed."""
+    if not isinstance(entity, dict):
+        return entity, 0
+    existing_ref = entity.get("reference_image_url")
+    if isinstance(existing_ref, str) and existing_ref.strip():
+        return entity, 0
+    entity_id = entity.get("id") or "unknown"
+    prompt = prompt_builder(entity, style)
+    label = f"ref {kind}={entity_id} story={safe_id}"
+    # The ref shot itself uses the global scenes model — same model the
+    # caller will later feed the ref TO, so the visual language matches.
+    kie_url = _generate_with_retry(
+        prompt,
+        label,
+        aspect_ratio=aspect_ratio,
+        model=_scene_image_model(),
+    )
+    if kie_url is None:
+        print(
+            f"[world bible ref] story={story_id} {kind}={entity_id} "
+            f"FAILED — entity stays without reference; scene gen falls back to text"
+        )
+        return entity, 0
+    filename = f"ref-{kind}-{entity_id}.png"
+    public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/{filename}"
+    local_path = out_dir / filename
+    try:
+        images.download(kie_url, local_path)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[world bible ref] story={story_id} {kind}={entity_id} "
+            f"download FAILED: {e}"
+        )
+        return entity, 0
+    try:
+        stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[world bible ref] story={story_id} {kind}={entity_id} "
+            f"upload FAILED: {e}"
+        )
+        return entity, 0
+    print(
+        f"[world bible ref] story={story_id} {kind}={entity_id} "
+        f"ok url={stored_url}"
+    )
+    return {**entity, "reference_image_url": stored_url}, _per_image_cost_cents()
+
+
+def _ensure_world_bible_with_refs(
+    story_id: str,
+    story: dict,
+    safe_id: str,
+    idea: dict,
+    body: str,
+    out_dir: Path,
+) -> tuple[dict | None, int]:
+    """Resolve the world bible for `story`: build via the LLM when
+    missing (or evict + rebuild when the cached marker is stale),
+    generate reference images for any characters / locations that need
+    them, persist the result, return the bible + cents spent.
+
+    Best-effort: failures along the way log and continue. A bible that
+    came back from the LLM but failed to get refs is still returned
+    (entries with `reference_image_url: null`) so the rest of the
+    pipeline keeps moving — scene gen falls back to text-only on
+    missing refs."""
+    from pipeline import world_bible as wb
+
+    bible = wb.read_world_bible(story)
+    cents_total = 0
+    if bible is None:
+        print(
+            f"[world bible build] story={story_id} cache miss — firing LLM call"
+        )
+        bible = stages.build_world_bible(idea, body, dry_run=False)
+        if bible is None:
+            print(
+                f"[world bible build] story={story_id} FAILED — LLM returned "
+                "unparseable shape; scene gen will fall back to grounded path"
+            )
+            return None, 0
+        print(
+            f"[world bible build] story={story_id} "
+            f"chars={len(bible['characters'])} "
+            f"subs={len(bible['sub_characters'])} "
+            f"locs={len(bible['locations'])} "
+            f"items={len(bible['items'])}"
+        )
+    else:
+        print(f"[world bible build] story={story_id} cache hit")
+
+    # Ref-image generation. We mutate copies into new entity dicts and
+    # rebuild the bible so the persisted shape stays consistent.
+    style = (store.get_setting("video.style") or stages.DEFAULT_IMAGE_STYLE).strip()
+    if _character_reference_images_enabled():
+        new_chars: list[dict] = []
+        for c in bible.get("characters") or []:
+            updated, cents = _ensure_entity_reference(
+                c,
+                story_id=story_id,
+                safe_id=safe_id,
+                out_dir=out_dir,
+                kind="char",
+                prompt_builder=_build_character_ref_prompt,
+                aspect_ratio="3:4",
+                style=style,
+            )
+            new_chars.append(updated)
+            cents_total += cents
+        bible = {**bible, "characters": new_chars}
+        # Sub-characters get refs too — they appear in scenes and a
+        # consistent face matters even for "background" roles.
+        new_subs: list[dict] = []
+        for c in bible.get("sub_characters") or []:
+            updated, cents = _ensure_entity_reference(
+                c,
+                story_id=story_id,
+                safe_id=safe_id,
+                out_dir=out_dir,
+                kind="sub",
+                prompt_builder=_build_character_ref_prompt,
+                aspect_ratio="3:4",
+                style=style,
+            )
+            new_subs.append(updated)
+            cents_total += cents
+        bible = {**bible, "sub_characters": new_subs}
+    else:
+        print(
+            f"[world bible refs] story={story_id} "
+            "character_reference_images_enabled=off — skipping ref gen"
+        )
+
+    if _location_reference_images_enabled():
+        new_locs: list[dict] = []
+        for loc in bible.get("locations") or []:
+            updated, cents = _ensure_entity_reference(
+                loc,
+                story_id=story_id,
+                safe_id=safe_id,
+                out_dir=out_dir,
+                kind="loc",
+                prompt_builder=_build_location_ref_prompt,
+                aspect_ratio="16:9",
+                style=style,
+            )
+            new_locs.append(updated)
+            cents_total += cents
+        bible = {**bible, "locations": new_locs}
+
+    _persist_world_bible(story_id, story, bible)
+    return bible, cents_total
+
+
+def _persist_world_bible(story_id: str, story: dict, bible: dict) -> None:
+    """Stamp the bible (with current ref URLs) onto `video_config.world_bible`.
+    Best-effort — a failure here doesn't kill the regen because the
+    bible is still in memory for THIS run; cache just won't hit on the
+    next regen."""
+    raw = story.get("video_config")
+    config: dict
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            config = parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            config = {}
+    else:
+        config = {}
+    new_config = {**config, "world_bible": bible}
+    try:
+        store.update_story_video_config(story_id, new_config)
+        story["video_config"] = json.dumps(new_config)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"[world bible persist] story={story_id} FAILED: {e} — continuing"
+        )
+
+
+def _resolve_scene_entries_world_bible(
+    story_id: str,
+    story: dict,
+    idea: dict,
+    body: str,
+    scene_count: int,
+    safe_id: str,
+    out_dir: Path,
+) -> tuple[list[str], list[list[str]], dict | None, int]:
+    """Return (prompts, entity_ids_per_scene, bible, cents_spent_on_refs)
+    for the world-bible path. Builds bible + refs + scene entries on
+    cache miss; reads from cache on hit. The entity_ids_per_scene list
+    is parallel to prompts (index N has the ids for scene N).
+
+    Caller (`_regen_one_scene` / `_regen_scenes`) feeds the entity_ids
+    into `world_bible.entities_by_ids` to pull ref URLs for the kie
+    call — see `_refs_for_scene` below.
+    """
+    cached_prompts, cached_marker = _read_cached_scene_prompts_with_marker(story)
+    cached_entity_ids = _read_cached_scene_entity_ids(story)
+    if (
+        cached_prompts
+        and len(cached_prompts) >= scene_count
+        and cached_marker == SCENE_PROMPTS_BUILT_WITH_WORLD_BIBLE
+        and len(cached_entity_ids) >= scene_count
+    ):
+        bible = _read_world_bible_from_story(story)
+        print(
+            f"[scene prompts cache hit] story={story_id} "
+            f"marker={cached_marker} count={len(cached_prompts)}"
+        )
+        return (
+            cached_prompts[:scene_count],
+            cached_entity_ids[:scene_count],
+            bible,
+            0,
+        )
+
+    if cached_prompts and cached_marker != SCENE_PROMPTS_BUILT_WITH_WORLD_BIBLE:
+        print(
+            f"[scene prompts cache evict] story={story_id} "
+            f"cached_marker={cached_marker or 'none'} "
+            f"expected={SCENE_PROMPTS_BUILT_WITH_WORLD_BIBLE} — rebuilding"
+        )
+    else:
+        print(
+            f"[scene prompts cache miss] story={story_id} world_bible path "
+            f"target={scene_count} — firing LLM call"
+        )
+
+    bible, ref_cents = _ensure_world_bible_with_refs(
+        story_id=story_id,
+        story=story,
+        safe_id=safe_id,
+        idea=idea,
+        body=body,
+        out_dir=out_dir,
+    )
+    if bible is None:
+        # Bible build failed entirely; caller falls back to grounded
+        # narration path.
+        return [], [], None, ref_cents
+
+    narrations = _scene_narrations_from_story(story, scene_count)
+    if not narrations or len(narrations) != scene_count:
+        print(
+            f"[scene prompts world_bible] story={story_id} fallback=grounded "
+            "(narrations not aligned with scene_count)"
+        )
+        return [], [], bible, ref_cents
+
+    entries = stages.make_scene_prompts_from_bible(
+        idea, body, narrations, bible, dry_run=False,
+    )
+    prompts = [e.get("prompt", "") for e in entries]
+    entity_ids_per_scene = [
+        list(e.get("entity_ids") or []) for e in entries
+    ]
+    print(
+        f"[scene prompts world_bible] story={story_id} "
+        f"count={len(prompts)} tagged_scenes="
+        f"{sum(1 for ids in entity_ids_per_scene if ids)}"
+    )
+    if prompts:
+        _write_cached_scene_prompts(
+            story_id, story, prompts,
+            marker=SCENE_PROMPTS_BUILT_WITH_WORLD_BIBLE,
+            bible=None,  # bible already persisted separately above
+            entity_ids_per_scene=entity_ids_per_scene,
+        )
+    return prompts, entity_ids_per_scene, bible, ref_cents
+
+
+def _read_cached_scene_entity_ids(story: dict) -> list[list[str]]:
+    """Read `video_config.scene_entity_ids` off a story row. Empty
+    list when missing — caller treats that as a partial cache (caller
+    rebuilds if it conflicts with `scene_prompts` length)."""
+    raw = story.get("video_config")
+    if not raw:
+        return []
+    try:
+        config = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(config, dict):
+        return []
+    cached = config.get("scene_entity_ids")
+    if not isinstance(cached, list):
+        return []
+    out: list[list[str]] = []
+    for entry in cached:
+        if isinstance(entry, list):
+            out.append([str(i) for i in entry if isinstance(i, str)])
+        else:
+            out.append([])
+    return out
+
+
+def _read_world_bible_from_story(story: dict) -> dict | None:
+    """Same lookup used by the inspector UI — returns the marker-validated
+    bible from `video_config.world_bible` or None."""
+    from pipeline import world_bible as wb
+    return wb.read_world_bible(story)
+
+
+def _refs_for_scene(
+    bible: dict | None, entity_ids: list[str],
+) -> list[str]:
+    """Look up the entity ids in the bible and return the list of
+    reference_image_urls that exist (drops None / missing). Used by
+    the per-scene kie call to build its `image_input` array."""
+    from pipeline import world_bible as wb
+    if not bible or not entity_ids:
+        return []
+    entries = wb.entities_by_ids(bible, entity_ids)
+    return wb.reference_urls(entries)
 
 
 def _resolve_scene_prompts_cached(
@@ -1677,12 +2245,13 @@ def _write_cached_scene_prompts(
     *,
     marker: str,
     bible: dict | None,
+    entity_ids_per_scene: list[list[str]] | None = None,
 ) -> None:
-    """Stamp the prompt list + shape marker (+ optional character bible)
-    into `video_config`. Leaves every other field on the config untouched.
-    Best-effort — a failure here doesn't prevent the regen because the
-    prompt is still being used by this caller; cache just won't hit on
-    the next scene.
+    """Stamp the prompt list + shape marker (+ optional character bible
+    + optional per-scene entity ids) into `video_config`. Leaves every
+    other field on the config untouched. Best-effort — a failure here
+    doesn't prevent the regen because the prompt is still being used by
+    this caller; cache just won't hit on the next scene.
 
     Also rewrites `story["video_config"]` in place so the subsequent
     `_persist_frame_prompt` call in the same regen reads the cache-
@@ -1696,6 +2265,11 @@ def _write_cached_scene_prompts(
     The `bible` (when provided) is stored alongside so a sibling regen
     on the same story reuses the same characters instead of paying for
     a second bible call.
+
+    `entity_ids_per_scene` (2026-06-14 Option C) is the parallel list
+    of bible entity ids on-screen in each scene — written under
+    `scene_entity_ids` so the scene call later looks up the matching
+    refs for the kie image_input. Same length as `scene_prompts`.
     """
     raw = story.get("video_config")
     config: dict
@@ -1714,6 +2288,10 @@ def _write_cached_scene_prompts(
     }
     if bible is not None:
         new_config["character_bible"] = bible
+    if entity_ids_per_scene is not None:
+        new_config["scene_entity_ids"] = [
+            list(ids) for ids in entity_ids_per_scene
+        ]
     try:
         store.update_story_video_config(story_id, new_config)
         # Keep the in-memory story dict in sync — _persist_frame_prompt

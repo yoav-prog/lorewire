@@ -62,10 +62,18 @@ def _get(path: str) -> dict:
 
 def _slug() -> str:
     selected = models.get_selected("images")  # e.g. "kie/gpt-image-2"
-    slug = MODEL_SLUG.get(selected)
+    return _slug_for(selected)
+
+
+def _slug_for(registry_id: str) -> str:
+    """Map a registry id (e.g. "kie/nano-banana-2") to the kie API
+    model slug. Raises NotImplementedError on unknown ids so a typo in
+    the override path fails loudly instead of silently falling back
+    to the global selection."""
+    slug = MODEL_SLUG.get(registry_id)
     if not slug:
         raise NotImplementedError(
-            f"image model {selected!r} is not wired; options: {list(MODEL_SLUG)}"
+            f"image model {registry_id!r} is not wired; options: {list(MODEL_SLUG)}"
         )
     return slug
 
@@ -75,14 +83,47 @@ def generate(
     aspect_ratio: str = "3:4",
     resolution: str = "1K",
     poll_timeout: int = 180,
+    image_input: list[str] | None = None,
+    model: str | None = None,
 ) -> str:
-    """Create one image, poll to completion, return its kie-hosted URL."""
+    """Create one image, poll to completion, return its kie-hosted URL.
+
+    `image_input` (added 2026-06-14 for the world-bible plan) is an
+    optional list of reference image URLs. Only `kie/nano-banana-2` and
+    `kie/nano-banana-pro` accept references; passing refs to
+    `kie/gpt-image-2` is silently dropped (gpt-image-2 has no
+    image_input field in its API contract — verified against kie docs).
+    Refs are capped at 4 here even though kie accepts up to 14, because
+    larger ref sets degrade scene coherence in tests and 4 covers the
+    realistic on-screen entity count (lead + 1-2 supporting + 1 item).
+
+    `model` (added 2026-06-14) optionally overrides the registry-active
+    selection from `models.get_selected("images")`. Used by the scene
+    path so the world-bible flow can pin nano-banana-2 for refs while
+    other asset types (hero, props, mouth swap) keep the global
+    selection. Pass a kie/registry id (e.g. "kie/nano-banana-2"); the
+    function maps it through `MODEL_SLUG` like any other selection.
+    """
+    refs: list[str] = []
+    if image_input:
+        # Drop empty / falsy URLs defensively — a bible row with a
+        # missing reference_image_url shouldn't poison the call.
+        refs = [u for u in image_input if isinstance(u, str) and u][:4]
+    inputs: dict = {
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+    }
+    slug = _slug_for(model) if model else _slug()
+    if refs and slug in {"nano-banana-2", "nano-banana-pro"}:
+        # kie's contract: `image_input` is the ref-image array on both
+        # nano-banana models. Output format default png matches our
+        # existing gpt-image-2 path.
+        inputs["image_input"] = refs
+        inputs["output_format"] = "png"
     created = _post(
         "createTask",
-        {
-            "model": _slug(),
-            "input": {"prompt": prompt, "aspect_ratio": aspect_ratio, "resolution": resolution},
-        },
+        {"model": slug, "input": inputs},
     )
     if created.get("code") != 200:
         raise RuntimeError(f"kie createTask failed: {created}")

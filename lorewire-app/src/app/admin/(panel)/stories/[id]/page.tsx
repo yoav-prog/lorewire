@@ -23,6 +23,7 @@ import {
   GranularRegenGrid,
   type GranularItem,
 } from "@/app/admin/(panel)/_components/GranularRegenGrid";
+import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel";
 import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StatusStepIndicator } from "./StatusStepIndicator";
 import { StoryAspectControl } from "./StoryAspectControl";
@@ -311,6 +312,8 @@ export default async function EditStory({
             ownerId={s.id}
             assets={storyAssets}
           />
+
+          <WorldBiblePanel videoConfigJson={s.video_config ?? null} />
 
           {sceneGranular.length > 0 && (
             <GranularRegenGrid

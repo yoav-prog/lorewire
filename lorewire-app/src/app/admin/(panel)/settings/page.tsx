@@ -99,6 +99,10 @@ export default async function SettingsPage() {
     scenePromptGrounding,
     characterBibleCache,
     previewSegmentFit,
+    worldBibleEnabled,
+    characterReferenceImagesEnabled,
+    locationReferenceImages,
+    sceneImageModel,
     googleVoices,
     elevenLabsVoices,
   ] = await Promise.all([
@@ -126,6 +130,10 @@ export default async function SettingsPage() {
     getSetting("video.scene_prompt_grounding"),
     getSetting("video.character_bible_cache"),
     getSetting("video.preview_segment_fit"),
+    getSetting("video.world_bible_enabled"),
+    getSetting("video.character_reference_images_enabled"),
+    getSetting("video.location_reference_images"),
+    getSetting("video.scene_image_model"),
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
@@ -189,6 +197,45 @@ export default async function SettingsPage() {
             label="Cache the character bible per story"
             hint="Diagnostic toggle. When on, the bible (the 2-4 recurring characters with their visual cues) is computed once per story and reused across scene regens — same characters scene to scene. Off forces a fresh bible on every regen, useful when the cached bible turns out wrong. Default on."
             initialOn={readToggle(characterBibleCache, true)}
+          />
+        </Section>
+
+        <Section
+          title="World bible (Option C)"
+          description="2026-06-14: a structured per-story bible of characters, sub-characters, locations, and items, each with a stable id. Characters (and optionally locations) get a canonical reference image so kie.ai's nano-banana-2 endpoint can keep faces consistent scene to scene. Disable the master switch to revert to the previous text-only grounded path."
+        >
+          <SettingToggle
+            settingKey="video.world_bible_enabled"
+            label="Use the world bible for scene gen"
+            hint="Master switch. When on, scene regens build a structured world bible per story and pass relevant reference images to kie. When off, the pipeline uses the previous grounded path (text-only character bible). Default on."
+            initialOn={readToggle(worldBibleEnabled, true)}
+          />
+          <SettingToggle
+            settingKey="video.character_reference_images_enabled"
+            label="Generate character reference images"
+            hint="When on, every character (and sub-character) in the bible gets one canonical headshot generated up front via the scenes model. Scene calls pass the matching ref to kie so faces stay consistent. Off saves ~$0.04 per character but loses identity persistence. Default on."
+            initialOn={readToggle(characterReferenceImagesEnabled, true)}
+          />
+          <SettingToggle
+            settingKey="video.location_reference_images"
+            label="Generate location reference images"
+            hint="Opt-in. Adds ~$0.04 per location for an empty wide-shot reference. Off by default — locations are usually perceptually marginal in short-form video. Turn on after seeing character refs alone aren't holding the world together."
+            initialOn={readToggle(locationReferenceImages, false)}
+          />
+          <SettingChipGroup<"kie/nano-banana-2" | "kie/nano-banana-pro" | "kie/gpt-image-2">
+            settingKey="video.scene_image_model"
+            label="Scene image model"
+            hint="Which kie.ai model fires the scene calls. Nano-banana-2 ($0.04/image) supports reference-image conditioning and is the default. Pro ($0.09) trades cost for higher fidelity. gpt-image-2 ($0.05) has NO reference support — picking it effectively disables character ref images for scenes."
+            initial={
+              sceneImageModel === "kie/nano-banana-pro" || sceneImageModel === "kie/gpt-image-2"
+                ? sceneImageModel
+                : "kie/nano-banana-2"
+            }
+            options={[
+              { id: "kie/nano-banana-2", label: "nano-banana-2 ($0.04)" },
+              { id: "kie/nano-banana-pro", label: "nano-banana-pro ($0.09)" },
+              { id: "kie/gpt-image-2", label: "gpt-image-2 ($0.05, no refs)" },
+            ]}
           />
         </Section>
 

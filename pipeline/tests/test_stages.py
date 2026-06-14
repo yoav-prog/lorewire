@@ -337,5 +337,219 @@ class MakeGroundedScenePromptsDryRunTests(unittest.TestCase):
         self.assertLess(len(prompts[0]), 1500)
 
 
+class BuildWorldBibleDryRunTests(unittest.TestCase):
+    """Dry-run path returns deterministic stubs structured exactly
+    like the parsed shape from `world_bible.parse_world_bible`. This
+    is how the rest of the pipeline can run end-to-end against the
+    new bible without an LLM key — fixtures, smoke tests, and the
+    media_regen integration tests all lean on it."""
+
+    def test_dry_run_returns_parsed_bible_shape(self):
+        bible = stages.build_world_bible(
+            {"headline": "Office gift fund went missing"}, "body", dry_run=True,
+        )
+        self.assertIsNotNone(bible)
+        assert bible is not None
+        self.assertEqual(bible["built_with"], "world_bible_v1")
+        self.assertEqual(len(bible["characters"]), 2)
+        self.assertEqual(bible["characters"][0]["role"], "lead")
+        self.assertEqual(len(bible["locations"]), 1)
+        self.assertEqual(len(bible["items"]), 1)
+        # Every entity has a stable id.
+        for c in bible["characters"]:
+            self.assertTrue(c["id"].startswith("char_"))
+
+    def test_dry_run_embeds_headline_for_grounding(self):
+        # The pipeline's manual-QA mode runs --dry-run end-to-end and
+        # eyeballs whether the bible is tied to the article. Stub
+        # embedding lets that check pass without an LLM key.
+        bible = stages.build_world_bible(
+            {"headline": "Custom Headline 12345"}, "x", dry_run=True,
+        )
+        assert bible is not None
+        joined = " ".join(c["visual_cues"] for c in bible["characters"])
+        self.assertIn("Custom Headline 12345", joined)
+
+
+class ExtractJsonObjectTests(unittest.TestCase):
+    """Shared by `build_world_bible` (and tomorrow's stages) to peel
+    an object out of whatever the LLM wraps it in. Same tolerance
+    rules as `_parse_prompt_list` but for `{}` not `[]`."""
+
+    def test_clean_object_parses(self):
+        out = stages._extract_json_object('{"a": 1, "b": 2}')
+        self.assertEqual(out, {"a": 1, "b": 2})
+
+    def test_strips_leading_prose(self):
+        out = stages._extract_json_object("Here you go:\n\n{\"a\": 1}")
+        self.assertEqual(out, {"a": 1})
+
+    def test_fenced_block_parses(self):
+        out = stages._extract_json_object('```json\n{"a": 1}\n```')
+        self.assertEqual(out, {"a": 1})
+
+    def test_garbage_returns_none(self):
+        self.assertIsNone(stages._extract_json_object("sorry I can't"))
+
+    def test_malformed_json_returns_none(self):
+        self.assertIsNone(stages._extract_json_object('{"a": 1'))
+
+    def test_non_object_returns_none(self):
+        # We're only after objects; a top-level array shouldn't slip
+        # through as the bible (the array parser owns that case).
+        self.assertIsNone(stages._extract_json_object('[1, 2, 3]'))
+
+
+class FormatBibleForSceneTests(unittest.TestCase):
+    """The bible-block embedding is the prompt LLM the per-scene call
+    sees. We need every entity surfaced with its stable id so the LLM
+    can both quote the cues AND tag the scene with the right ids.
+    Empty buckets are omitted to keep the prompt tight."""
+
+    def test_renders_all_entity_buckets(self):
+        bible = {
+            "characters": [{"id": "char_a", "name": "Maya", "role": "lead", "visual_cues": "tall"}],
+            "sub_characters": [{"id": "sub_b", "name": "Guard", "role": "background", "visual_cues": "uniform"}],
+            "locations": [{"id": "loc_c", "name": "office", "visual_cues": "fluorescent"}],
+            "items": [{"id": "item_d", "name": "envelope", "visual_cues": "manila"}],
+        }
+        out = stages._format_bible_for_scene_prompt(bible)
+        for marker in [
+            "CHARACTERS", "char_a", "Maya", "tall",
+            "SUB-CHARACTERS", "sub_b", "Guard", "uniform",
+            "LOCATIONS", "loc_c", "office", "fluorescent",
+            "ITEMS", "item_d", "envelope", "manila",
+        ]:
+            self.assertIn(marker, out, msg=f"missing: {marker}")
+
+    def test_omits_empty_buckets(self):
+        bible = {
+            "characters": [{"id": "char_a", "name": "X", "role": "lead", "visual_cues": "y"}],
+            "sub_characters": [],
+            "locations": [],
+            "items": [],
+        }
+        out = stages._format_bible_for_scene_prompt(bible)
+        self.assertIn("CHARACTERS", out)
+        for marker in ("SUB-CHARACTERS", "LOCATIONS", "ITEMS"):
+            self.assertNotIn(marker, out)
+
+
+class MakeScenePromptsFromBibleDryRunTests(unittest.TestCase):
+    """Dry-run path returns scene_count entries each with a prompt
+    that embeds the narration line AND an entity_ids array tagging
+    the first character. That gives downstream tests something to
+    grip when verifying ref flow without an LLM key."""
+
+    def _bible(self) -> dict:
+        return {
+            "built_with": "world_bible_v1",
+            "characters": [
+                {"id": "char_lead", "name": "Maya", "role": "lead", "visual_cues": "tall"},
+            ],
+            "sub_characters": [],
+            "locations": [],
+            "items": [],
+        }
+
+    def test_dry_run_returns_one_entry_per_scene(self):
+        out = stages.make_scene_prompts_from_bible(
+            {"headline": "Test"},
+            "body",
+            ["opening line", "the reveal", "the kicker"],
+            self._bible(),
+            dry_run=True,
+        )
+        self.assertEqual(len(out), 3)
+        self.assertIn("opening line", out[0]["prompt"])
+        self.assertIn("reveal", out[1]["prompt"])
+        self.assertIn("kicker", out[2]["prompt"])
+
+    def test_dry_run_tags_lead_character_id(self):
+        # Without the lead-id tag the ref flow has nothing to test
+        # against — every scene needs at least one entity id so the
+        # bulk regen path's "pass refs to kie" code branch fires.
+        out = stages.make_scene_prompts_from_bible(
+            {"headline": "T"}, "x", ["one"], self._bible(), dry_run=True,
+        )
+        self.assertEqual(out[0]["entity_ids"], ["char_lead"])
+
+    def test_dry_run_with_no_characters_yields_empty_ids(self):
+        bible = {
+            "built_with": "world_bible_v1",
+            "characters": [],
+            "sub_characters": [],
+            "locations": [],
+            "items": [],
+        }
+        out = stages.make_scene_prompts_from_bible(
+            {"headline": "T"}, "x", ["one"], bible, dry_run=True,
+        )
+        self.assertEqual(out[0]["entity_ids"], [])
+
+
+class ParseScenePromptsWithEntitiesTests(unittest.TestCase):
+    """Parser branches: clean array, partial array (per-scene
+    fallback pads), unknown ids dropped, total failure → all
+    fallbacks. Crucial that unknown ids don't survive: the kie ref
+    lookup would silently drop them anyway, so we strip here to keep
+    the persisted shape honest."""
+
+    def _bible(self) -> dict:
+        return {
+            "built_with": "world_bible_v1",
+            "characters": [{"id": "char_a", "name": "A", "role": "lead", "visual_cues": "x"}],
+            "sub_characters": [],
+            "locations": [{"id": "loc_b", "name": "B", "visual_cues": "y"}],
+            "items": [],
+        }
+
+    def test_clean_array_round_trips(self):
+        raw = (
+            '['
+            '{"prompt": "scene one", "entity_ids": ["char_a"]},'
+            '{"prompt": "scene two", "entity_ids": ["char_a","loc_b"]}'
+            ']'
+        )
+        out = stages._parse_scene_prompts_with_entities(
+            raw, ["narr1", "narr2"], "Headline", "style", self._bible(),
+        )
+        self.assertEqual(out[0]["prompt"], "scene one")
+        self.assertEqual(out[0]["entity_ids"], ["char_a"])
+        self.assertEqual(out[1]["entity_ids"], ["char_a", "loc_b"])
+
+    def test_partial_array_pads_per_scene_fallback(self):
+        raw = '[{"prompt": "first", "entity_ids": ["char_a"]}]'
+        out = stages._parse_scene_prompts_with_entities(
+            raw, ["narr1", "narr2", "narr3"], "H", "S", self._bible(),
+        )
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[0]["prompt"], "first")
+        # Padded entries fall back to narration-grounded prompts with
+        # NO entity ids — better empty than wrong, since the kie call
+        # would then run without refs (still produces an image).
+        self.assertIn("narr2", out[1]["prompt"])
+        self.assertEqual(out[1]["entity_ids"], [])
+        self.assertIn("narr3", out[2]["prompt"])
+        self.assertEqual(out[2]["entity_ids"], [])
+
+    def test_unknown_ids_are_dropped(self):
+        raw = '[{"prompt": "x", "entity_ids": ["char_a", "char_ghost", "loc_b"]}]'
+        out = stages._parse_scene_prompts_with_entities(
+            raw, ["n1"], "H", "S", self._bible(),
+        )
+        self.assertEqual(out[0]["entity_ids"], ["char_a", "loc_b"])
+
+    def test_total_failure_yields_all_fallbacks(self):
+        out = stages._parse_scene_prompts_with_entities(
+            "sorry can't help", ["alpha", "beta"], "H", "doodle", self._bible(),
+        )
+        self.assertEqual(len(out), 2)
+        self.assertIn("alpha", out[0]["prompt"])
+        self.assertIn("beta", out[1]["prompt"])
+        self.assertEqual(out[0]["entity_ids"], [])
+        self.assertEqual(out[1]["entity_ids"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -148,6 +148,12 @@ class ScenesRegenTests(unittest.TestCase):
                     media, "_resolve_scene_count", return_value=3,
                 ),
                 "update_scenes": mock.patch.object(media.store, "update_story_scenes"),
+                # 2026-06-14 Option C: world-bible path runs ahead of
+                # `make_image_prompts` when on. This test pins the
+                # pre-Option-C legacy flow, so the setting is forced off.
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
+                ),
             })
             mocks = _apply(patches, self)
             url, cents = media.regen_one("abc123", "scenes", Path(tmp))
@@ -378,6 +384,11 @@ class PerSceneRegenTests(unittest.TestCase):
                 "update_scenes": mock.patch.object(
                     media.store, "update_story_scenes",
                 ),
+                # World bible off — this test pins the splice logic
+                # below the bible layer.
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
+                ),
             })
             mocks = _apply(patches, self)
             url, cents = media.regen_one("abc123", "scene:2", Path(tmp))
@@ -414,6 +425,11 @@ class PerSceneRegenTests(unittest.TestCase):
                 ),
                 "update_scenes": mock.patch.object(
                     media.store, "update_story_scenes",
+                ),
+                # World bible off — this test pins the grow-on-overflow
+                # behavior below the bible layer.
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
                 ),
             })
             mocks = _apply(patches, self)
@@ -654,6 +670,12 @@ class GroundedScenePromptTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14 Option C: this test exercises the grounded
+                # path that runs UNDER the world-bible layer. Force the
+                # bible off so the grounded resolver is what fires.
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:1", Path(tmp))
@@ -693,6 +715,11 @@ class GroundedScenePromptTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # Force the world-bible layer off so this test still
+                # exercises the grounded cache-hit branch.
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:0", Path(tmp))
@@ -730,6 +757,11 @@ class GroundedScenePromptTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # World bible off — this test pins the grounded layer
+                # below it (marker eviction within the narration_v1 path).
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
                 ),
             })
             mocks = _apply(patches, self)
@@ -769,12 +801,202 @@ class GroundedScenePromptTests(unittest.TestCase):
                 "grounding_enabled": mock.patch.object(
                     media, "_scene_prompt_grounding_enabled", return_value=False,
                 ),
+                # World bible off — the test name says "grounding off
+                # uses legacy", which only makes sense below the world
+                # bible layer.
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:0", Path(tmp))
             # Setting off → legacy path even though narrations are available.
             mocks["make_grounded_scene_prompts"].assert_not_called()
             mocks["make_image_prompts"].assert_called_once()
+
+
+class WorldBiblePathTests(unittest.TestCase):
+    """Option C path: per-image regen runs through the world-bible
+    resolver, fires `build_world_bible` on miss, generates character
+    refs, passes the matching refs to the kie call, persists
+    `scene_entity_ids` on video_config so a sibling regen on the same
+    story finds the bible + refs already cached."""
+
+    def _story_with_frames(self) -> dict:
+        import json as _json
+        config = {
+            "doodle_frames": [
+                {"id": "f-0", "url": "u0", "caption_chunk_start_index": 0},
+                {"id": "f-1", "url": "u1", "caption_chunk_start_index": 1},
+                {"id": "f-2", "url": "u2", "caption_chunk_start_index": 2},
+            ],
+            "captions": [
+                {"start_ms": 0, "end_ms": 1000, "text": "Once upon a time"},
+                {"start_ms": 1000, "end_ms": 2000, "text": "a neighbor woke us"},
+                {"start_ms": 2000, "end_ms": 3000, "text": "with a leaf blower"},
+            ],
+        }
+        return {**STORY, "images": "[]", "video_config": _json.dumps(config)}
+
+    def test_world_bible_path_fires_bible_build_and_scene_prompts(self):
+        # Story without a bible yet — first scene regen builds the
+        # bible, generates one ref per character, then builds scene
+        # prompts via the bible-aware builder.
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story_with_frames()
+            bible = {
+                "built_with": "world_bible_v1",
+                "characters": [{
+                    "id": "char_lead",
+                    "name": "Lead",
+                    "role": "lead",
+                    "visual_cues": "tall, dark coat",
+                    "reference_image_url": None,
+                }],
+                "sub_characters": [],
+                "locations": [],
+                "items": [],
+            }
+            scene_entries = [
+                {"prompt": f"scene {i} text", "entity_ids": ["char_lead"]}
+                for i in range(3)
+            ]
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "build_world_bible": mock.patch.object(
+                    media.stages, "build_world_bible", return_value=bible,
+                ),
+                "make_scene_prompts_from_bible": mock.patch.object(
+                    media.stages, "make_scene_prompts_from_bible",
+                    return_value=scene_entries,
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:1", Path(tmp))
+            mocks["build_world_bible"].assert_called_once()
+            mocks["make_scene_prompts_from_bible"].assert_called_once()
+            # scene_entity_ids persisted parallel to scene_prompts.
+            entity_writes = [
+                call.args[1] for call in mocks["update_video_config"].call_args_list
+                if isinstance(call.args[1], dict)
+                and "scene_entity_ids" in call.args[1]
+            ]
+            self.assertTrue(entity_writes)
+            ids = entity_writes[-1]["scene_entity_ids"]
+            self.assertEqual(ids[0], ["char_lead"])
+
+    def test_kie_call_receives_reference_image_for_tagged_scene(self):
+        # The point of the whole bible is that scene N's kie call
+        # gets the reference image of the character on-screen. Verify
+        # the refs flow all the way through `_generate_with_retry`.
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story_with_frames()
+            bible = {
+                "built_with": "world_bible_v1",
+                "characters": [{
+                    "id": "char_lead",
+                    "name": "Lead",
+                    "role": "lead",
+                    "visual_cues": "tall",
+                    "reference_image_url": "https://ref/lead.png",
+                }],
+                "sub_characters": [],
+                "locations": [],
+                "items": [],
+            }
+            scene_entries = [
+                {"prompt": "scene 0", "entity_ids": ["char_lead"]},
+                {"prompt": "scene 1", "entity_ids": ["char_lead"]},
+                {"prompt": "scene 2", "entity_ids": []},  # no entity → no refs
+            ]
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "build_world_bible": mock.patch.object(
+                    media.stages, "build_world_bible", return_value=bible,
+                ),
+                "make_scene_prompts_from_bible": mock.patch.object(
+                    media.stages, "make_scene_prompts_from_bible",
+                    return_value=scene_entries,
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+                # Disable ref-image generation so the bible's existing
+                # reference_image_url is used as-is (no extra kie calls
+                # for refs in this test — we're focused on the scene
+                # call's image_input).
+                "char_refs_enabled": mock.patch.object(
+                    media, "_character_reference_images_enabled",
+                    return_value=False,
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            # The kie call for scene:0 fired with image_input pointing
+            # at the lead's reference url AND model pinned to the
+            # scenes model (nano-banana-2 by default).
+            generate_kwargs = mocks["generate_with_retry"].call_args.kwargs
+            self.assertEqual(
+                generate_kwargs.get("image_input"),
+                ["https://ref/lead.png"],
+            )
+            self.assertEqual(generate_kwargs.get("model"), "kie/nano-banana-2")
+
+    def test_world_bible_off_falls_back_to_grounded(self):
+        # The escape hatch. When `video.world_bible_enabled=0`, the
+        # bible build is skipped entirely and the regen goes through
+        # the previous grounded narration path. No refs, no bible.
+        with tempfile.TemporaryDirectory() as tmp:
+            story = self._story_with_frames()
+            grounded = mock.MagicMock(
+                return_value=(["g0", "g1", "g2"], None),
+            )
+            patches = _patches({
+                "fetch_story": mock.patch.object(
+                    media.store, "fetch_story", return_value=story,
+                ),
+                "build_world_bible": mock.patch.object(
+                    media.stages, "build_world_bible",
+                ),
+                "make_grounded_scene_prompts": mock.patch.object(
+                    media.stages, "make_grounded_scene_prompts", grounded,
+                ),
+                "resolve_scene_count": mock.patch.object(
+                    media, "_resolve_scene_count", return_value=3,
+                ),
+                "update_scenes": mock.patch.object(
+                    media.store, "update_story_scenes",
+                ),
+                "update_video_config": mock.patch.object(
+                    media.store, "update_story_video_config",
+                ),
+                "world_bible_enabled": mock.patch.object(
+                    media, "_world_bible_enabled", return_value=False,
+                ),
+            })
+            mocks = _apply(patches, self)
+            media.regen_one("abc123", "scene:0", Path(tmp))
+            mocks["build_world_bible"].assert_not_called()
+            mocks["make_grounded_scene_prompts"].assert_called_once()
 
 
 class FallbackPromptTests(unittest.TestCase):

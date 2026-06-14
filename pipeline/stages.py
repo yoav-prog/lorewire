@@ -952,3 +952,314 @@ def derive_scene_narrations(
                     chunk_texts.append(text)
         out.append(" ".join(chunk_texts))
     return out
+
+
+# --- world bible (Phase 2 of 2026-06-14 plan, Option C) ----------------------
+# A structured representation of a story's recurring visual entities —
+# characters, sub-characters, locations, items. Scene generation pulls
+# from it so every prompt restates the same visual cues verbatim, and
+# `pipeline.media` generates a canonical reference image per character
+# (and optionally per location) so kie's nano-banana-2 endpoint can
+# condition on the same face across scenes. The shape itself lives in
+# `pipeline.world_bible`; this section owns the LLM call that BUILDS the
+# bible from the article body.
+
+
+def build_world_bible(idea: dict, body: str, dry_run: bool) -> dict | None:
+    """Single LLM call. Returns a world bible dict matching the shape
+    in `pipeline.world_bible` (parsed + validated through
+    `parse_world_bible` so caps and id-assignment are uniform), or
+    None when the call fails to produce parseable JSON. Caller
+    (`pipeline.media`) treats None as "no bible" and falls back to the
+    pre-Option-C narration-only flow.
+
+    Dry-run returns a deterministic stub with two characters, one
+    location, one item so end-to-end pipeline tests run without an LLM
+    key. The stub embeds the headline so tests can assert grounding
+    survives.
+    """
+    from pipeline import llm, world_bible
+
+    if dry_run:
+        stub = {
+            "characters": [
+                {
+                    "name": "Protagonist",
+                    "role": "lead",
+                    "visual_cues": (
+                        f"[DRY] protagonist of \"{idea['headline'][:60]}\", "
+                        "tall, dark coat"
+                    ),
+                },
+                {
+                    "name": "Antagonist",
+                    "role": "supporting",
+                    "visual_cues": "[DRY] antagonist, short, red scarf",
+                },
+            ],
+            "sub_characters": [],
+            "locations": [
+                {
+                    "name": "primary_setting",
+                    "visual_cues": (
+                        f"[DRY] setting from \"{idea['headline'][:60]}\""
+                    ),
+                },
+            ],
+            "items": [
+                {"name": "object", "visual_cues": "[DRY] central object"},
+            ],
+        }
+        return world_bible.parse_world_bible(stub)
+
+    instruction = (
+        "You design illustrations for LoreWire short-form videos. Read the "
+        "article and return a JSON object listing the recurring visual "
+        "entities a storyboard artist would need to keep consistent scene "
+        "to scene. The exact shape is:\n\n"
+        "{\n"
+        "  \"characters\": [\n"
+        "    {\"name\": \"...\", \"role\": \"lead|supporting|background\", "
+        "\"visual_cues\": \"hair, build, clothing, accessories\"},\n"
+        "    ...\n"
+        "  ],\n"
+        "  \"sub_characters\": [\n"
+        "    {\"name\": \"...\", \"role\": \"background\", \"visual_cues\": \"...\"},\n"
+        "    ...\n"
+        "  ],\n"
+        "  \"locations\": [\n"
+        "    {\"name\": \"snake_case_label\", \"visual_cues\": \"era, place, vibe, lighting\"},\n"
+        "    ...\n"
+        "  ],\n"
+        "  \"items\": [\n"
+        "    {\"name\": \"snake_case_label\", \"visual_cues\": \"shape, material, distinguishing detail\"},\n"
+        "    ...\n"
+        "  ]\n"
+        "}\n\n"
+        "Rules:\n"
+        f"- characters: at most {world_bible.MAX_CHARACTERS} named, recurring people. "
+        "Exactly ONE has role=\"lead\".\n"
+        f"- sub_characters: at most {world_bible.MAX_SUB_CHARACTERS} named background humans "
+        "that appear in more than one scene. Skip nameless extras.\n"
+        f"- locations: at most {world_bible.MAX_LOCATIONS} distinct settings. "
+        "Use snake_case labels (open_office, dim_alley).\n"
+        f"- items: at most {world_bible.MAX_ITEMS} plot-load-bearing props "
+        "(the envelope, the knife). Skip scenery.\n"
+        f"- Every visual_cues field: at most {world_bible.MAX_VISUAL_CUES_CHARS} chars, "
+        "concrete and reusable — what a storyboard artist would draw verbatim "
+        "every time the entity appears.\n"
+        "- No identifiable real people; no logos.\n\n"
+        "Return ONLY the JSON object, no fences, no surrounding prose.\n\n"
+        f"Headline: {idea['headline']}\n\nArticle:\n{body}"
+    )
+    # Same model + token shape as build_character_bible: gpt-5.4-mini
+    # for stability on JSON output. 3000 tokens covers a 4-char + 4-sub +
+    # 3-loc + 5-item bible at ~150 tokens per entry.
+    raw = llm.chat(instruction, 3000, model="openai/gpt-5.4-mini").strip()
+    parsed_json = _extract_json_object(raw)
+    if parsed_json is None:
+        return None
+    return world_bible.parse_world_bible(parsed_json)
+
+
+def _extract_json_object(raw: str) -> dict | None:
+    """Pull a JSON object out of the LLM's response, tolerating fenced
+    code blocks, leading prose, and trailing notes. Same shape as
+    `_parse_character_bible`'s extraction path but split out as a
+    helper because the world-bible parse delegates JSON-to-dict
+    validation to `world_bible.parse_world_bible`. Returns the raw
+    parsed dict (or None) — the caller decides whether the shape is
+    usable."""
+    snippet = raw
+    if "```" in snippet:
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("{"):
+                snippet = stripped
+                break
+    start, end = snippet.find("{"), snippet.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(snippet[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _format_bible_for_scene_prompt(bible: dict) -> str:
+    """Render the bible into the prose block the per-scene call embeds.
+    Each entity gets its id + name + visual_cues so the LLM can both
+    quote the cues verbatim AND tag the scene with the right ids."""
+    parts: list[str] = []
+
+    def section(title: str, key: str) -> None:
+        bucket = bible.get(key) or []
+        if not bucket:
+            return
+        lines = [
+            f"- {e['id']} ({e['name']}, {e.get('role', '?') if 'role' in e else 'entity'}): {e['visual_cues']}"
+            if "role" in e
+            else f"- {e['id']} ({e['name']}): {e['visual_cues']}"
+            for e in bucket
+            if isinstance(e, dict)
+        ]
+        if lines:
+            parts.append(title + "\n" + "\n".join(lines))
+
+    section("CHARACTERS", "characters")
+    section("SUB-CHARACTERS", "sub_characters")
+    section("LOCATIONS", "locations")
+    section("ITEMS", "items")
+    return "\n\n".join(parts)
+
+
+def make_scene_prompts_from_bible(
+    idea: dict,
+    body: str,
+    scene_narrations: list[str],
+    bible: dict,
+    dry_run: bool,
+) -> list[dict]:
+    """Build one image prompt per scene, tagged with the bible entity
+    ids that appear on-screen for that scene. The kie scene call later
+    looks the ids up in the bible to assemble the `image_input` ref
+    list, so identity carries across scenes.
+
+    Return shape: `[{"prompt": str, "entity_ids": [str, ...]}, ...]`,
+    same length as `scene_narrations`. Order matches scene index.
+
+    Dry-run returns deterministic stubs that EMBED each narration line
+    so tests can assert binding survives, AND tag each scene with the
+    first character's id so the refs-flowing-through test has data to
+    grip.
+    """
+    from pipeline import llm, store, world_bible
+
+    style = (store.get_setting("video.style") or DEFAULT_IMAGE_STYLE).strip()
+    narrations = [_truncate_narration(line or "") for line in scene_narrations]
+    n = len(narrations)
+
+    if dry_run:
+        first_char_id = None
+        chars = bible.get("characters") or []
+        if chars and isinstance(chars[0], dict):
+            first_char_id = chars[0].get("id")
+        return [
+            {
+                "prompt": (
+                    f"[DRY] scene {i + 1} grounded in narration: "
+                    f"\"{narrations[i][:80]}\". Style: {style}"
+                ),
+                "entity_ids": [first_char_id] if first_char_id else [],
+            }
+            for i in range(n)
+        ]
+
+    bible_block = _format_bible_for_scene_prompt(bible)
+    numbered = "\n".join(
+        f"Scene {i + 1}: \"{narrations[i]}\"" for i in range(n)
+    )
+
+    instruction = (
+        f"You design illustrations for LoreWire shorts. Below is a world "
+        f"bible of recurring entities (each with a stable id) and a list of "
+        f"{n} scenes from a video. Each scene shows ONE line of narration "
+        f"that plays under the image.\n\n"
+        f"Return a JSON array of EXACTLY {n} objects in scene order. Each "
+        f"object has TWO fields:\n"
+        f"  - \"prompt\": a 1-2 sentence image prompt depicting the moment "
+        f"described by THAT scene's narration line. For every bible entity "
+        f"that appears in the prompt, restate its visual_cues VERBATIM "
+        f"(critical for image-model consistency). Append this style note "
+        f"at the end verbatim: \"{style}\". NO text in the image, no "
+        f"identifiable real people, no logos.\n"
+        f"  - \"entity_ids\": array of bible ids for entities visibly "
+        f"on-screen in this scene. Reuse the ids exactly as listed in the "
+        f"bible. Empty array if no bible entity appears (rare).\n\n"
+        f"WORLD BIBLE:\n{bible_block}\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Scenes:\n{numbered}\n\n"
+        f"Return ONLY the JSON array, no fences, no prose."
+    )
+    raw = llm.chat(instruction, 16000, model="openai/gpt-5.4-mini").strip()
+    return _parse_scene_prompts_with_entities(
+        raw, narrations, idea["headline"], style, bible,
+    )
+
+
+def _parse_scene_prompts_with_entities(
+    raw: str,
+    narrations: list[str],
+    headline: str,
+    style: str,
+    bible: dict,
+) -> list[dict]:
+    """Parse the bible-aware scene-call response. Per-scene fallback
+    pads with `{prompt: <narration-grounded text>, entity_ids: []}` so
+    the binding to scene N survives a truncated LLM response. Unknown
+    ids returned by the LLM get dropped against the bible's id set —
+    the kie ref lookup later would silently skip them anyway, but
+    dropping here keeps the persisted shape clean."""
+    from pipeline import world_bible as wb
+
+    n = len(narrations)
+    known_ids = {e["id"] for e in wb.all_entities(bible)}
+
+    snippet = raw
+    if "```" in snippet:
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("["):
+                snippet = stripped
+                break
+    parsed_arr: list = []
+    start, end = snippet.find("["), snippet.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            candidate = json.loads(snippet[start : end + 1])
+            if isinstance(candidate, list):
+                parsed_arr = candidate
+        except json.JSONDecodeError:
+            parsed_arr = []
+
+    out: list[dict] = []
+    for i in range(n):
+        entry = parsed_arr[i] if i < len(parsed_arr) and isinstance(parsed_arr[i], dict) else None
+        if entry is not None:
+            prompt_text = str(entry.get("prompt", "")).strip()
+            raw_ids = entry.get("entity_ids")
+            if isinstance(raw_ids, list):
+                cleaned_ids = [
+                    str(x) for x in raw_ids
+                    if isinstance(x, str) and x in known_ids
+                ]
+            else:
+                cleaned_ids = []
+            if prompt_text:
+                out.append({"prompt": prompt_text, "entity_ids": cleaned_ids})
+                continue
+        # Per-scene grounded fallback. Same pattern as
+        # `_parse_grounded_prompts` — keeps prompt N bound to narration N.
+        line = narrations[i] or ""
+        if line:
+            out.append({
+                "prompt": (
+                    f"Scene {i + 1}: depict the moment described by the "
+                    f'narration "{line}", from the article "{headline}". {style}'
+                ),
+                "entity_ids": [],
+            })
+        else:
+            out.append({
+                "prompt": (
+                    f"Scene {i + 1}: a story moment from the article "
+                    f'"{headline}". {style}'
+                ),
+                "entity_ids": [],
+            })
+    return out
