@@ -313,7 +313,14 @@ export default async function EditStory({
             assets={storyAssets}
           />
 
-          <WorldBiblePanel videoConfigJson={s.video_config ?? null} />
+          {/* Bible lives in `stories.pipeline_cache` (split off
+              video_config 2026-06-14 — see
+              `_plans/2026-06-14-pipeline-cache-column.md`). Fall back
+              to video_config so stories persisted before the migration
+              still render in the inspector. */}
+          <WorldBiblePanel
+            cacheJson={s.pipeline_cache ?? s.video_config ?? null}
+          />
 
           {sceneGranular.length > 0 && (
             <GranularRegenGrid

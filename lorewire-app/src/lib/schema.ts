@@ -69,6 +69,17 @@ export const STORIES: Table = {
     { name: "props", type: "TEXT" },
     { name: "character_image", type: "TEXT" },
     { name: "character_image_mouth_removed", type: "TEXT" },
+    // 2026-06-14: pipeline-owned cache that previously lived inside
+    // video_config. The editor's parseVideoConfig strictly drops
+    // unknown top-level fields, so the heartbeat write path was
+    // silently wiping `world_bible`, `scene_prompts`,
+    // `scene_prompts_built_with`, `scene_entity_ids`, `character_bible`
+    // every time it fired — burning the world-bible rebuild cost on
+    // every queued scene. Moving these into their own column keeps the
+    // editor and the pipeline from co-tenanting the same JSON blob.
+    // The TS side never reads this column; it exists here so
+    // ensureSchema's additive ALTER picks it up on prod boot.
+    { name: "pipeline_cache", type: "TEXT" },
   ],
 };
 

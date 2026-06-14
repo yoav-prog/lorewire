@@ -1,6 +1,7 @@
 // TS mirror of `pipeline/world_bible.py` — types + a defensive
 // parser/reader for the world bible stored under
-// `stories.video_config.world_bible`.
+// `stories.pipeline_cache.world_bible` (moved off video_config
+// 2026-06-14 — see `_plans/2026-06-14-pipeline-cache-column.md`).
 //
 // MUST stay in sync with the Python side. The admin's bible panel
 // reads through this module; the worker writes through the Python
@@ -179,16 +180,21 @@ export function parseWorldBible(raw: unknown): WorldBible | null {
 }
 
 /**
- * Read the world bible from a story's `video_config` JSON string. The
- * editor/story pages already parse `video_config` once for aspect +
- * scene_prompts; this helper is the same pattern but encapsulated so
- * the bible panel doesn't have to know about the JSON column shape.
+ * Read the world bible from a `stories.pipeline_cache` JSON string.
+ * Callers that want to handle the 2026-06-14 transition can pass
+ * `stories.pipeline_cache ?? stories.video_config` so a story
+ * persisted before the migration still surfaces its bible in the
+ * inspector until the next pipeline write moves the cache to the
+ * new column. The field shape inside both columns is identical
+ * (`{ world_bible: {...} }`), so one reader covers both.
  */
-export function readWorldBible(videoConfigJson: string | null | undefined): WorldBible | null {
-  if (!videoConfigJson) return null;
+export function readWorldBible(
+  cacheJson: string | null | undefined,
+): WorldBible | null {
+  if (!cacheJson) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(videoConfigJson);
+    parsed = JSON.parse(cacheJson);
   } catch {
     return null;
   }

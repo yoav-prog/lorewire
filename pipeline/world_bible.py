@@ -2,10 +2,15 @@
 
 The world bible is a structured representation of a story's recurring
 visual entities — characters, sub-characters, locations, items — that
-gets persisted on `stories.video_config.world_bible`. Scene generation
+gets persisted on `stories.pipeline_cache.world_bible`. Scene generation
 reads it to (a) embed entity descriptions verbatim in each prompt, and
 (b) pass the relevant reference images to kie's nano-banana-2 endpoint
 so faces stay recognizably the same scene to scene.
+
+Lived inside `stories.video_config.world_bible` until 2026-06-14, but
+the video editor's parseVideoConfig drops unknown top-level fields and
+the heartbeat write path was wiping the bible on every fire — see
+`_plans/2026-06-14-pipeline-cache-column.md`.
 
 Pure module — no LLM calls, no kie calls, no DB writes. The LLM-driven
 bible BUILD lives in `pipeline.stages.build_world_bible`; the kie
@@ -281,13 +286,35 @@ def reference_urls(entries: Iterable[dict]) -> list[str]:
 
 
 def read_world_bible(story: dict | None) -> dict | None:
-    """Read `video_config.world_bible` off a story row. Returns None
+    """Read `pipeline_cache.world_bible` off a story row. Returns None
     on missing / malformed / wrong-marker so the caller falls back to
     a fresh build. Marker mismatch is a hard miss — the same eviction
-    pattern as `scene_prompts_built_with`."""
+    pattern as `scene_prompts_built_with`.
+
+    Lived under `video_config.world_bible` until 2026-06-14. The
+    fallback below also peeks at the OLD location so a story that was
+    persisted before the column split but never re-rebuilt still hits
+    cache once on first read (and the next write moves it to
+    `pipeline_cache`). Drop the fallback once the backfill migration
+    has run across all environments.
+    """
     if story is None:
         return None
-    raw = story.get("video_config")
+
+    bible = _decode_cache_field(story.get("pipeline_cache"), "world_bible")
+    if bible is None:
+        bible = _decode_cache_field(story.get("video_config"), "world_bible")
+    if not isinstance(bible, dict):
+        return None
+    if bible.get("built_with") != WORLD_BIBLE_BUILT_WITH:
+        return None
+    return bible
+
+
+def _decode_cache_field(raw: object, key: str) -> object | None:
+    """Pull `key` out of a JSON-encoded blob (or already-decoded dict).
+    Returns None on anything unparseable. Internal helper for
+    `read_world_bible`'s pipeline_cache + legacy-video_config lookup."""
     if not raw:
         return None
     try:
@@ -296,9 +323,4 @@ def read_world_bible(story: dict | None) -> dict | None:
         return None
     if not isinstance(config, dict):
         return None
-    bible = config.get("world_bible")
-    if not isinstance(bible, dict):
-        return None
-    if bible.get("built_with") != WORLD_BIBLE_BUILT_WITH:
-        return None
-    return bible
+    return config.get(key)

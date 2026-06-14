@@ -455,29 +455,40 @@ class ScenePromptCacheTests(unittest.TestCase):
     token ceiling truncated mid-array on roughly 60% of calls, the parser
     fell through to the generic "Scene N from the story above" fallback,
     and kie drew unrelated stock illustrations. Caching the prompt list
-    in video_config.scene_prompts and re-using it across the batch kills
-    both the cost (27x cheaper) AND the truncation rate (one chance per
-    batch, not 27).
+    in `pipeline_cache.scene_prompts` and re-using it across the batch
+    kills both the cost (27x cheaper) AND the truncation rate (one
+    chance per batch, not 27).
 
     Phase 2 (2026-06-14 plan): each cached entry now carries a
     `scene_prompts_built_with` marker so a future prompt-shape change
     self-evicts every previously-cached batch. Stories cached before the
     marker shipped show up here as "no marker" → evicted on first contact.
+
+    2026-06-14 cleavage: the cache lives in `pipeline_cache`, not
+    `video_config`. The editor's parseVideoConfig was silently dropping
+    these fields and forcing a fresh world-bible build on every queued
+    scene — see `_plans/2026-06-14-pipeline-cache-column.md`.
     """
 
     def _story(self, scene_prompts=None, marker=None, extra_config=None):
+        # 2026-06-14 cleavage: scene_prompts + marker live in
+        # pipeline_cache now, not video_config. video_config stays
+        # available for non-cache shape fixtures the test wants to
+        # pass via `extra_config`. See
+        # `_plans/2026-06-14-pipeline-cache-column.md`.
         import json as _json
-        config = {}
+        cache: dict = {}
         if scene_prompts is not None:
-            config["scene_prompts"] = scene_prompts
+            cache["scene_prompts"] = scene_prompts
         if marker is not None:
-            config["scene_prompts_built_with"] = marker
-        if extra_config:
-            config.update(extra_config)
+            cache["scene_prompts_built_with"] = marker
+        editor_config = dict(extra_config or {})
         return {
             **STORY,
             "images": "[]",
-            "video_config": _json.dumps(config) if config else None,
+            "video_config":
+                _json.dumps(editor_config) if editor_config else None,
+            "pipeline_cache": _json.dumps(cache) if cache else None,
         }
 
     def test_legacy_marker_cache_hit_skips_llm_call(self):
@@ -505,6 +516,16 @@ class ScenePromptCacheTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
                 ),
                 "grounding_enabled": mock.patch.object(
                     media, "_scene_prompt_grounding_enabled", return_value=False,
@@ -540,6 +561,16 @@ class ScenePromptCacheTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
                 "grounding_enabled": mock.patch.object(
                     media, "_scene_prompt_grounding_enabled", return_value=False,
                 ),
@@ -568,17 +599,25 @@ class ScenePromptCacheTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:0", Path(tmp))
-            # LLM fired once, prompts stamped into video_config.scene_prompts.
+            # LLM fired once, prompts stamped into
+            # `pipeline_cache.scene_prompts` (moved out of video_config
+            # 2026-06-14 — see _plans/2026-06-14-pipeline-cache-column.md).
             mocks["make_image_prompts"].assert_called_once()
-            # update_story_video_config is called twice in this flow:
-            # 1. cache write inside _resolve_scene_prompts_cached
-            # 2. _persist_frame_prompt at the end
-            # Look for the cache write specifically.
             cache_writes = [
-                call.args[1] for call in mocks["update_video_config"].call_args_list
+                call.args[1] for call in mocks["update_pipeline_cache"].call_args_list
                 if isinstance(call.args[1], dict) and "scene_prompts" in call.args[1]
             ]
             self.assertTrue(cache_writes)
@@ -607,6 +646,16 @@ class ScenePromptCacheTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:5", Path(tmp))
@@ -621,8 +670,12 @@ class GroundedScenePromptTests(unittest.TestCase):
     """
 
     def _story_with_frames(self, marker=None, scene_prompts=None, bible=None):
+        # 2026-06-14 cleavage: doodle_frames + captions are editor data
+        # (stay in video_config); scene_prompts / marker / character_bible
+        # are pipeline-owned (move to pipeline_cache). See
+        # `_plans/2026-06-14-pipeline-cache-column.md`.
         import json as _json
-        config = {
+        editor_config = {
             "doodle_frames": [
                 {"id": "f-0", "url": "u0", "caption_chunk_start_index": 0},
                 {"id": "f-1", "url": "u1", "caption_chunk_start_index": 1},
@@ -634,13 +687,19 @@ class GroundedScenePromptTests(unittest.TestCase):
                 {"start_ms": 2000, "end_ms": 3000, "text": "with a leaf blower"},
             ],
         }
+        cache: dict = {}
         if scene_prompts is not None:
-            config["scene_prompts"] = scene_prompts
+            cache["scene_prompts"] = scene_prompts
         if marker is not None:
-            config["scene_prompts_built_with"] = marker
+            cache["scene_prompts_built_with"] = marker
         if bible is not None:
-            config["character_bible"] = bible
-        return {**STORY, "images": "[]", "video_config": _json.dumps(config)}
+            cache["character_bible"] = bible
+        return {
+            **STORY,
+            "images": "[]",
+            "video_config": _json.dumps(editor_config),
+            "pipeline_cache": _json.dumps(cache) if cache else None,
+        }
 
     def test_grounded_path_uses_narration_when_frames_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -669,6 +728,16 @@ class GroundedScenePromptTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
                 ),
                 # 2026-06-14 Option C: this test exercises the grounded
                 # path that runs UNDER the world-bible layer. Force the
@@ -715,6 +784,16 @@ class GroundedScenePromptTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
                 # Force the world-bible layer off so this test still
                 # exercises the grounded cache-hit branch.
                 "world_bible_enabled": mock.patch.object(
@@ -758,6 +837,16 @@ class GroundedScenePromptTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
                 # World bible off — this test pins the grounded layer
                 # below it (marker eviction within the narration_v1 path).
                 "world_bible_enabled": mock.patch.object(
@@ -767,9 +856,10 @@ class GroundedScenePromptTests(unittest.TestCase):
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:1", Path(tmp))
             mocks["make_grounded_scene_prompts"].assert_called_once()
-            # New cache written with narration_v1 marker.
+            # New cache written to `pipeline_cache` with narration_v1
+            # marker (moved out of video_config 2026-06-14).
             cache_writes = [
-                call.args[1] for call in mocks["update_video_config"].call_args_list
+                call.args[1] for call in mocks["update_pipeline_cache"].call_args_list
                 if isinstance(call.args[1], dict)
                 and call.args[1].get("scene_prompts_built_with") == "narration_v1"
             ]
@@ -798,6 +888,16 @@ class GroundedScenePromptTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
                 "grounding_enabled": mock.patch.object(
                     media, "_scene_prompt_grounding_enabled", return_value=False,
                 ),
@@ -819,8 +919,10 @@ class WorldBiblePathTests(unittest.TestCase):
     """Option C path: per-image regen runs through the world-bible
     resolver, fires `build_world_bible` on miss, generates character
     refs, passes the matching refs to the kie call, persists
-    `scene_entity_ids` on video_config so a sibling regen on the same
-    story finds the bible + refs already cached."""
+    `scene_entity_ids` on `pipeline_cache` so a sibling regen on the
+    same story finds the bible + refs already cached. (2026-06-14:
+    cache moved out of video_config into pipeline_cache — see
+    `_plans/2026-06-14-pipeline-cache-column.md`.)"""
 
     def _story_with_frames(self) -> dict:
         import json as _json
@@ -881,14 +983,26 @@ class WorldBiblePathTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:1", Path(tmp))
             mocks["build_world_bible"].assert_called_once()
             mocks["make_scene_prompts_from_bible"].assert_called_once()
-            # scene_entity_ids persisted parallel to scene_prompts.
+            # scene_entity_ids persisted parallel to scene_prompts
+            # inside pipeline_cache (moved out of video_config
+            # 2026-06-14).
             entity_writes = [
-                call.args[1] for call in mocks["update_video_config"].call_args_list
+                call.args[1] for call in mocks["update_pipeline_cache"].call_args_list
                 if isinstance(call.args[1], dict)
                 and "scene_entity_ids" in call.args[1]
             ]
@@ -940,6 +1054,16 @@ class WorldBiblePathTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
                 # Disable ref-image generation so the bible's existing
                 # reference_image_url is used as-is (no extra kie calls
                 # for refs in this test — we're focused on the scene
@@ -988,6 +1112,16 @@ class WorldBiblePathTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
                 ),
                 "world_bible_enabled": mock.patch.object(
                     media, "_world_bible_enabled", return_value=False,
@@ -1089,6 +1223,16 @@ class ScenePromptPersistTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
             })
             mocks = _apply(patches, self)
             url, _cents = media.regen_one("abc123", "scene:1", Path(tmp))
@@ -1148,6 +1292,16 @@ class ScenePromptPersistTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
             })
             mocks = _apply(patches, self)
             media.regen_one("abc123", "scene:0", Path(tmp))
@@ -1164,9 +1318,10 @@ class ScenePromptPersistTests(unittest.TestCase):
     def test_noop_when_no_video_config(self):
         # Story that's never been opened in the editor has video_config=None.
         # The URL still lands in stories.images; the prompt persist skips
-        # (no doodle_frames to stamp into), but the cache write still
-        # seeds an empty config with scene_prompts so the next regen can
-        # cache-hit.
+        # (no doodle_frames to stamp into). The scene_prompts cache write
+        # still fires but lands on `pipeline_cache` now, not video_config
+        # (split 2026-06-14) — so this test just asserts the editor's
+        # video_config column was never touched.
         with tempfile.TemporaryDirectory() as tmp:
             story = {**STORY, "images": '["https://old/scene-1.png"]', "video_config": None}
             patches = _patches({
@@ -1185,6 +1340,16 @@ class ScenePromptPersistTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
                 ),
             })
             mocks = _apply(patches, self)
@@ -1235,6 +1400,16 @@ class ScenePromptPersistTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
                 ),
             })
             mocks = _apply(patches, self)
@@ -1291,6 +1466,16 @@ class ScenePromptPersistTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
                 ),
             })
             mocks = _apply(patches, self)
@@ -1406,6 +1591,16 @@ class PerFrameRegenTests(unittest.TestCase):
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
                 ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
+                ),
             })
             mocks = _apply(patches, self)
             url, cents = media.regen_one("abc123", "frame:frame-a", Path(tmp))
@@ -1442,6 +1637,16 @@ class PerFrameRegenTests(unittest.TestCase):
                 ),
                 "update_video_config": mock.patch.object(
                     media.store, "update_story_video_config",
+                ),
+                # 2026-06-14: pipeline_cache split. Tests that exercised
+                # _persist_world_bible / _write_cached_scene_prompts /
+                # _read_cached_* used to assert on update_story_video_config
+                # because those helpers wrote there. Post-fix the cache
+                # lives in pipeline_cache; mock both so any path under
+                # test that touches either column doesn't hit the real
+                # DB.
+                "update_pipeline_cache": mock.patch.object(
+                    media.store, "update_story_pipeline_cache",
                 ),
             })
             mocks = _apply(patches, self)

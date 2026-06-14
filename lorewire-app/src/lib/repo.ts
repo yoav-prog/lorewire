@@ -53,10 +53,18 @@ export interface StoryRow {
   props: string | null;
   character_image: string | null;
   character_image_mouth_removed: string | null;
+  // 2026-06-14: pipeline-owned cache (world_bible, scene_prompts,
+  // scene_prompts_built_with, scene_entity_ids, character_bible).
+  // The admin's WorldBiblePanel reads this for inspection; the editor
+  // is intentionally excluded from writing it (see `EDITABLE`) so the
+  // heartbeat path can't wipe the cache the way it used to when these
+  // fields lived inside video_config. See
+  // `_plans/2026-06-14-pipeline-cache-column.md`.
+  pipeline_cache: string | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)

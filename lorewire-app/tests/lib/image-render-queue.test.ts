@@ -495,33 +495,53 @@ describe("enqueueScenesBulk — auto-derived count + pre-resize", () => {
     expect(arr[14]).toBe("url-14");
   });
 
-  it("clears the scene-prompts cache cluster so the next batch starts fresh", async () => {
-    // Cache invariant: per-scene "Redo" via the granular grid keeps the
-    // cache so the redone scene stays consistent with its neighbors; a
-    // Rebuild-all click is the user saying "I want a NEW look" and so
-    // the WHOLE prompt cluster MUST be cleared — prompts, shape marker,
-    // and character bible. Without clearing the marker, the worker
-    // would see a missing-prompts + stale-marker state and treat it
-    // weirdly; without clearing the bible, the same characters get
-    // redrawn into different moments which is not what a Rebuild click
-    // is asking for.
+  it("nulls pipeline_cache so the next batch builds a fresh world bible + prompts, and leaves video_config alone", async () => {
+    // Cache invariant: per-scene "Redo" via the granular grid keeps
+    // the cache so the redone scene stays consistent with its
+    // neighbors; a Rebuild-all click is the user saying "I want a
+    // NEW look" and so the WHOLE pipeline cache (world_bible +
+    // scene_prompts + marker + scene_entity_ids + legacy
+    // character_bible) MUST be cleared together.
+    //
+    // 2026-06-14 cleavage line: the cache lives in
+    // `stories.pipeline_cache`, not `video_config`. The editor's
+    // parseVideoConfig used to drop these fields silently on every
+    // heartbeat and burn the world-bible rebuild ($0.30/cycle) on
+    // every scene worker — see
+    // `_plans/2026-06-14-pipeline-cache-column.md`. This test asserts
+    // both halves of the fix: the cache IS cleared, AND the editor's
+    // video_config is untouched.
     await setSetting("budget.daily_usd", "100");
     await setSetting("media.scene_count", "5");
     await setSetting("media.scene_count_mode", "manual");
     const ownerId = randomUUID();
-    const priorConfig = {
+    const priorEditorConfig = {
       doodle_frames: [{ id: "f-0", url: "x" }],
+      captions: [],
+    };
+    const priorPipelineCache = {
+      world_bible: {
+        built_with: "world_bible_v1",
+        characters: [{ id: "abc", name: "Old Hero", role: "lead", visual_cues: "old hat" }],
+        sub_characters: [],
+        locations: [],
+        items: [],
+      },
       scene_prompts: ["stale prompt A", "stale prompt B", "stale prompt C"],
-      scene_prompts_built_with: "narration_v1",
+      scene_prompts_built_with: "world_bible_v1",
+      scene_entity_ids: [["abc"], ["abc"], []],
       character_bible: {
         characters: [{ name: "Old Hero", visual_cues: "old hat" }],
         summary: "old setting",
       },
-      captions: [],
     };
     await run(
-      "INSERT INTO stories (id, video_config) VALUES (?, ?)",
-      [ownerId, JSON.stringify(priorConfig)],
+      "INSERT INTO stories (id, video_config, pipeline_cache) VALUES (?, ?, ?)",
+      [
+        ownerId,
+        JSON.stringify(priorEditorConfig),
+        JSON.stringify(priorPipelineCache),
+      ],
     );
     await enqueueScenesBulk({
       ownerKind: "story",
@@ -530,16 +550,18 @@ describe("enqueueScenesBulk — auto-derived count + pre-resize", () => {
       storyBody: "x",
       storyDuration: null,
     });
-    const after = await one<{ video_config: string }>(
-      "SELECT video_config FROM stories WHERE id = ?",
+    const after = await one<{
+      video_config: string;
+      pipeline_cache: string | null;
+    }>(
+      "SELECT video_config, pipeline_cache FROM stories WHERE id = ?",
       [ownerId],
     );
-    const parsed = JSON.parse(after!.video_config);
-    expect("scene_prompts" in parsed).toBe(false);
-    expect("scene_prompts_built_with" in parsed).toBe(false);
-    expect("character_bible" in parsed).toBe(false);
-    // Other fields untouched.
-    expect(parsed.doodle_frames).toEqual([{ id: "f-0", url: "x" }]);
+    // Pipeline cache wiped wholesale.
+    expect(after!.pipeline_cache).toBeNull();
+    // Editor's video_config untouched — the cleavage line.
+    const parsedConfig = JSON.parse(after!.video_config);
+    expect(parsedConfig).toEqual(priorEditorConfig);
   });
 
   it("inserts exactly N queue rows with asset slugs scene:0..scene:N-1", async () => {

@@ -88,6 +88,19 @@ SCHEMA_STATEMENTS = [
     # runs leave human-edited fields alone (see merge_with_locks in
     # pipeline/video_config.py — added alongside this column).
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS video_config TEXT",
+    # 2026-06-14: pipeline-owned cache previously co-tenanted inside
+    # video_config. The editor's parseVideoConfig drops unknown
+    # top-level fields, so the heartbeat write path was silently wiping
+    # `world_bible`, `scene_prompts`, `scene_prompts_built_with`,
+    # `scene_entity_ids`, `character_bible` on every fire. The first
+    # scene worker re-built the world bible from scratch every time
+    # (~$0.30, ~260s) and the cron's 270s deadline killed the function
+    # before the second scene completed. Moving the cache into its own
+    # column gives the pipeline a surface the editor can't see.
+    # Backfill of existing rows lives in
+    # `lorewire-app/scripts/migrate_pipeline_cache.mjs` — run once
+    # against prod after the column lands.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS pipeline_cache TEXT",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -265,6 +278,10 @@ _COLUMNS = [
     "alignment", "props", "character_image", "character_image_mouth_removed",
     "intro_segment_id", "outro_segment_id", "skip_intro", "skip_outro",
     "video_config",
+    # 2026-06-14: pipeline-owned cache (world_bible, scene_prompts,
+    # scene_prompts_built_with, scene_entity_ids, character_bible).
+    # Editor never reads or writes this column — see schema.ts comment.
+    "pipeline_cache",
     "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
@@ -1415,6 +1432,90 @@ def update_story_video_config(story_id: str, video_config: dict) -> None:
         )
 
 
+def read_story_pipeline_cache(story: dict) -> dict:
+    """Decode `stories.pipeline_cache` off an already-fetched story row.
+
+    Returns an empty dict when the column is NULL, malformed, or not a
+    JSON object. Pure read helper — never writes. Mirrors the read shape
+    pipeline/media.py used to apply to `video_config` for the five
+    pipeline-owned fields (world_bible, scene_prompts, etc.) before
+    those moved into their own column.
+    """
+    raw = story.get("pipeline_cache")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def update_story_pipeline_cache(story_id: str, cache: dict) -> None:
+    """Replace stories.pipeline_cache with a fresh JSON object.
+
+    Pipeline-owned surface: the world bible, cached scene prompts, the
+    `scene_prompts_built_with` shape marker, the per-scene entity ids
+    list, and the legacy `character_bible` cache all live here. The
+    editor never reads or writes this column — its parseVideoConfig
+    used to silently drop these fields and burn a fresh ~$0.30
+    world-bible rebuild on every scene worker that fired after the
+    heartbeat wiped the cache.
+
+    Caller owns the merge: this helper REPLACES the column wholesale,
+    so a caller updating a single key must first
+    `read_story_pipeline_cache(story)`, splice their change in, and
+    pass the merged dict back. Bumps `updated_at` so existing
+    "latest activity" queries keep working.
+    """
+    now = _now_iso()
+    payload = json.dumps(cache)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET pipeline_cache = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (payload, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET pipeline_cache = ?, updated_at = ? WHERE id = ?",
+            (payload, now, story_id),
+        )
+
+
+def clear_story_pipeline_cache(story_id: str) -> None:
+    """NULL out stories.pipeline_cache. Used by the TS bulk-enqueue path's
+    `clearStoryScenePromptsCache` rewrite — a Rebuild click is the user
+    asking for "a new look", so the world bible + cached prompts both
+    get wiped together (their lifetimes are coupled at the entity-set
+    level; keeping prompts after evicting the bible would produce
+    prompts that reference characters not in the new bible).
+
+    Bumps `updated_at` for consistency with the other writers.
+    """
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET pipeline_cache = NULL, "
+                    "updated_at = %s WHERE id = %s",
+                    (now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET pipeline_cache = NULL, updated_at = ? "
+            "WHERE id = ?",
+            (now, story_id),
+        )
+
+
 def update_story_props(story_id: str, prop_list: list[dict]) -> None:
     """Replace stories.props with a fresh JSON list of {url,label,side} dicts."""
     now = _now_iso()
@@ -2137,10 +2238,17 @@ def update_story_job_progress(job_id: str, progress: int) -> None:
 
 
 def finish_story_job(job_id: str, story_id: str) -> None:
-    """Mark a story_job done. Conditional on status='processing' so a job
-    the admin cancelled mid-flight (future) stays cancelled, and an already-
-    settled row isn't overwritten. Worker calls this after the pipeline
-    upserts a `stories` row."""
+    """Mark a story_job done. Conditional on status IN ('queued','processing')
+    so an already-settled row (done / error / cancelled) isn't overwritten,
+    BUT a row that was reaped back to 'queued' by `reap_stale_story_jobs`
+    can still be finished by the original worker when it eventually returns
+    from a long-running stage. Mirrors finish_image_render's contract.
+
+    Without the 'queued' clause, a reap-during-processing scenario lets the
+    next tick re-claim and re-run the same job — double-spending LLM/kie
+    cost and leaving the original worker's `finish_story_job` to silently
+    no-op (state inconsistency: story exists, source flipped to 'used', but
+    story_jobs.status stays 'queued')."""
     now = _now_iso()
     if _is_postgres():
         with _pg_conn() as conn:
@@ -2148,7 +2256,7 @@ def finish_story_job(job_id: str, story_id: str) -> None:
                 cur.execute(
                     "UPDATE story_jobs SET status='done', progress=100, "
                     "story_id=%s, finished_at=%s "
-                    "WHERE id=%s AND status='processing'",
+                    "WHERE id=%s AND status IN ('queued', 'processing')",
                     (story_id, now, job_id),
                 )
             conn.commit()
@@ -2157,14 +2265,16 @@ def finish_story_job(job_id: str, story_id: str) -> None:
         c.execute(
             "UPDATE story_jobs SET status='done', progress=100, "
             "story_id=?, finished_at=? "
-            "WHERE id=? AND status='processing'",
+            "WHERE id=? AND status IN ('queued', 'processing')",
             (story_id, now, job_id),
         )
 
 
 def fail_story_job(job_id: str, error_message: str) -> None:
     """Mark a story_job failed. Cap the message so a 10 MB traceback can't
-    bloat the column. Same conditional guard as finish_story_job."""
+    bloat the column. Same `status IN ('queued', 'processing')` conditional
+    as finish_story_job — see that helper for why both queued and processing
+    are accepted."""
     now = _now_iso()
     capped = (error_message or "unknown error")[:2000]
     if _is_postgres():
@@ -2172,7 +2282,8 @@ def fail_story_job(job_id: str, error_message: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE story_jobs SET status='error', error=%s, "
-                    "finished_at=%s WHERE id=%s AND status='processing'",
+                    "finished_at=%s WHERE id=%s "
+                    "AND status IN ('queued', 'processing')",
                     (capped, now, job_id),
                 )
             conn.commit()
@@ -2180,7 +2291,8 @@ def fail_story_job(job_id: str, error_message: str) -> None:
     with _sqlite_conn() as c:
         c.execute(
             "UPDATE story_jobs SET status='error', error=?, "
-            "finished_at=? WHERE id=? AND status='processing'",
+            "finished_at=? WHERE id=? "
+            "AND status IN ('queued', 'processing')",
             (capped, now, job_id),
         )
 
@@ -2252,17 +2364,16 @@ def today_story_job_estimate_cents(estimate_per_job_cents: int) -> int:
     that's about to be picked up still counts toward today's budget — its
     actual cost will land today.
 
-    We use a count-based estimate instead of summing `stories.cost_cents`
-    because the worker doesn't reliably populate that column yet. Real
-    per-story cost capture is a separate follow-up; using a flat estimate
-    here is the simplest accurate-enough thing that can ship today.
-    See _plans/2026-06-14-story-jobs-followups.md Phase 7.
+    Half-open range [day_start, next_day_start) so a row stamped at any
+    microsecond up to and including 23:59:59.999999 today still counts.
+    The old upper bound of `T23:59:59.999999` missed timestamps with a
+    timezone suffix (the lex compare `'…999999+00:00' < '…999999'` is
+    False because the longer string sorts higher).
     """
     import datetime as _dt
-    today_utc = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
-    # date() on an ISO string is a portable string-compare: ISO timestamps
-    # sort lexicographically the same as chronologically, so we just
-    # prefix-match the date portion.
+    today_dt = _dt.datetime.now(_dt.timezone.utc).date()
+    today_utc = today_dt.isoformat()
+    next_day_utc = (today_dt + _dt.timedelta(days=1)).isoformat()
     sql_pg = (
         "SELECT count(*) AS n FROM story_jobs "
         "WHERE (status = 'done' AND finished_at >= %s AND finished_at < %s) "
@@ -2274,7 +2385,7 @@ def today_story_job_estimate_cents(estimate_per_job_cents: int) -> int:
         "   OR status IN ('queued', 'processing')"
     )
     day_start = today_utc + "T00:00:00"
-    day_end = today_utc + "T23:59:59.999999"
+    day_end = next_day_utc + "T00:00:00"
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
@@ -2291,16 +2402,20 @@ def today_story_job_estimate_cents(estimate_per_job_cents: int) -> int:
 def today_actual_story_cost_cents() -> int:
     """Sum stories.cost_cents for stories created today (UTC).
 
-    Reads what the worker actually billed (kie images + voice + STT)
-    instead of the count-based projection. Returns 0 when no story has
-    a populated cost_cents — older rows pre-date the cost-capture
+    Reads what the worker actually billed (kie images + voice + STT +
+    LLM) instead of the count-based projection. Returns 0 when no story
+    has a populated cost_cents — older rows pre-date the cost-capture
     micro-phase and stay NULL, so this is a soft "today-and-newer-only"
     counter. Used by the admin budget bar to show actual-vs-estimated.
+
+    Half-open [day_start, next_day_start) range — see
+    today_story_job_estimate_cents for why the upper bound is the next
+    midnight not 23:59:59.999999.
     """
     import datetime as _dt
-    today_utc = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
-    day_start = today_utc + "T00:00:00"
-    day_end = today_utc + "T23:59:59.999999"
+    today_dt = _dt.datetime.now(_dt.timezone.utc).date()
+    day_start = today_dt.isoformat() + "T00:00:00"
+    day_end = (today_dt + _dt.timedelta(days=1)).isoformat() + "T00:00:00"
     sql_pg = (
         "SELECT COALESCE(SUM(cost_cents), 0) AS total FROM stories "
         "WHERE created_at >= %s AND created_at < %s "

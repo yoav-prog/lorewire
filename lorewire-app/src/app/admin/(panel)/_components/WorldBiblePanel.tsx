@@ -19,11 +19,15 @@ const ENTITY_CARD =
   "rounded-lg border border-line bg-bg p-3 flex gap-3 items-start";
 
 export function WorldBiblePanel({
-  videoConfigJson,
+  cacheJson,
 }: {
-  videoConfigJson: string | null;
+  /** Stringified `stories.pipeline_cache` JSON. The caller (the story
+   *  page) usually passes `s.pipeline_cache ?? s.video_config ?? null`
+   *  so legacy stories from before the 2026-06-14 column split still
+   *  show their bible in the inspector until the migration runs. */
+  cacheJson: string | null;
 }) {
-  const bible = readWorldBible(videoConfigJson);
+  const bible = readWorldBible(cacheJson);
   if (!bible) {
     return (
       <div className={PANEL_CONTAINER}>

@@ -458,15 +458,17 @@ export async function enqueueScenesBulk(opts: {
   // existing URLs in slots 0..len-1 and empty strings in the rest until
   // each scene completes. Story-side only; article assets unaffected.
   //
-  // Also clears `video_config.scene_prompts` so the first scene:N worker
-  // re-asks the LLM for a fresh prompt set keyed to the current body. A
-  // Rebuild-all click is the user saying "I want a new look"; reusing
-  // cached prompts from a prior batch defeats that intent. Per-scene
-  // "Redo" clicks (granular grid) leave the cache alone so a single redo
-  // stays consistent with its neighbors.
+  // Also nulls `stories.pipeline_cache` so the first scene:N worker
+  // re-asks the LLM for a fresh prompt set + world bible keyed to the
+  // current body. A Rebuild-all click is the user saying "I want a new
+  // look"; reusing the cached bible would redraw the same characters
+  // into different moments. Per-scene "Redo" clicks (granular grid)
+  // leave the cache alone so a single redo stays consistent with its
+  // neighbors. Lived inside `video_config` until 2026-06-14 — see
+  // `_plans/2026-06-14-pipeline-cache-column.md`.
   if (opts.ownerKind === "story") {
     await preSizeStoryScenes(opts.ownerId, count);
-    await clearStoryScenePromptsCache(opts.ownerId);
+    await clearStoryPipelineCache(opts.ownerId);
   }
 
   const now = new Date().toISOString();
@@ -496,47 +498,27 @@ export async function enqueueScenesBulk(opts: {
   };
 }
 
-// Clear the scene-prompts cache cluster on the story so the first
-// scene:N worker in the upcoming batch builds a fully fresh set:
-//   - `scene_prompts`              — the per-scene prompt list itself
-//   - `scene_prompts_built_with`   — shape marker (otherwise the worker
-//                                    would see "no prompts, old marker"
-//                                    and not know to treat it as fresh)
-//   - `character_bible`            — fresh characters too, because a
-//                                    Rebuild click means "I want a new
-//                                    look"; reusing the bible would
-//                                    redraw the same characters into
-//                                    different moments
-// Noop when video_config has no row at all OR has none of these keys.
-// Best-effort: a failure here doesn't fail the bulk — the worker would
-// just hit stale state, which is still functionally correct, just not
-// "fresh prompts every click".
-async function clearStoryScenePromptsCache(storyId: string): Promise<void> {
-  const row = await one<{ video_config: string | null }>(
-    `SELECT video_config FROM stories WHERE id = ?`,
-    [storyId],
-  );
-  if (!row?.video_config) return;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(row.video_config);
-  } catch {
-    return;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-  const config = parsed as Record<string, unknown>;
-  const hadAny =
-    "scene_prompts" in config
-    || "scene_prompts_built_with" in config
-    || "character_bible" in config;
-  if (!hadAny) return;
-  const next = { ...config };
-  delete next.scene_prompts;
-  delete next.scene_prompts_built_with;
-  delete next.character_bible;
+// NULL out `stories.pipeline_cache` before a Rebuild-all batch so the
+// first scene:N worker rebuilds the world bible + scene prompts fresh.
+// The whole column drops in one statement: world_bible,
+// scene_prompts, scene_prompts_built_with, scene_entity_ids,
+// character_bible — their lifetimes are coupled (prompts reference
+// bible entities; evicting prompts but keeping the bible would
+// produce prompts inconsistent with the next bible's character set).
+//
+// Pre-2026-06-14 this helper stripped the same fields from
+// video_config because the cache used to live there — but
+// parseVideoConfig dropped them on every editor save, so every
+// scene:N>0 worker re-paid for the bible build. See
+// `_plans/2026-06-14-pipeline-cache-column.md` for the diagnosis.
+//
+// Best-effort: a failure here doesn't fail the bulk — the worker
+// would just hit stale state, which is still functionally correct,
+// just not "fresh world bible every click".
+async function clearStoryPipelineCache(storyId: string): Promise<void> {
   await run(
-    `UPDATE stories SET video_config = ?, updated_at = ? WHERE id = ?`,
-    [JSON.stringify(next), new Date().toISOString(), storyId],
+    `UPDATE stories SET pipeline_cache = NULL, updated_at = ? WHERE id = ?`,
+    [new Date().toISOString(), storyId],
   );
 }
 

@@ -1241,19 +1241,53 @@ def _regen_one_scene(
     idea = _idea_from_story(story)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
-    # Scene prompts are cached in `video_config.scene_prompts` so a 27-row
-    # Rebuild-all-scenes batch fires the LLM once instead of 27 times. Same
-    # prompt set across all scenes = consistent characters scene-to-scene;
-    # one call instead of 27 = the LLM's truncation rate goes from ~60%
-    # (the original bug — production diagnosis 2026-06-14 on `envelope`)
-    # down to one chance per batch. The TS bulk enqueue clears the cache
-    # on each click so a fresh Rebuild-all gets fresh prompts.
+    # Scene prompts are cached in `pipeline_cache.scene_prompts` so a
+    # 27-row Rebuild-all-scenes batch fires the LLM once instead of 27
+    # times. Same prompt set across all scenes = consistent characters
+    # scene-to-scene; one call instead of 27 = the LLM's truncation
+    # rate goes from ~60% (the original bug — production diagnosis
+    # 2026-06-14 on `envelope`) down to one chance per batch. The TS
+    # bulk enqueue NULLs pipeline_cache on each Rebuild click so a
+    # fresh batch gets fresh prompts. (Field lived inside video_config
+    # until 2026-06-14 — see
+    # `_plans/2026-06-14-pipeline-cache-column.md`.)
     scene_count = _resolve_scene_count(None, story=story)
     # 2026-06-14 Option C: per-image regen takes the same world-bible
     # path so the regenerated scene stays consistent with its
     # neighbours. When the world-bible flow is off (or build fails),
     # falls back to the grounded narration path.
     world_bible_path = _world_bible_enabled()
+    # 2026-06-14 cache-wiped tripwire: when scene:N>0 lands in this
+    # function but the pipeline_cache has no world_bible, that means
+    # either (a) the migration hasn't backfilled this story yet, or
+    # (b) something wiped the cache mid-batch (the editor heartbeat was
+    # the original culprit before the column split; if it happens now
+    # it points at a new write path stomping on pipeline_cache). Either
+    # way we surface a warn so the regression class doesn't burn
+    # another $1.50 before someone notices. The bible WILL get rebuilt
+    # below — this is observability, not blocking.
+    if (
+        world_bible_path
+        and index > 0
+        and _read_world_bible_from_story(story) is None
+    ):
+        msg = (
+            f"world_bible missing for scene:{index} (>0) — pipeline_cache "
+            "was empty or wiped between scene:0 and this row"
+        )
+        print(f"[scene regen cache-wiped] id={safe_id} {msg}")
+        try:
+            store.log_render_event(
+                "cache_wiped",
+                msg,
+                level="warn",
+                payload={"index": index, "scene_count": scene_count},
+            )
+        except Exception:  # noqa: BLE001
+            # log_render_event is best-effort — a missing render
+            # context (e.g. tests calling regen_one directly without
+            # the cron's use_render_context binding) shouldn't crash.
+            pass
     scene_entity_ids: list[list[str]] = []
     world_bible: dict | None = None
     bible_extra_cents = 0
@@ -1879,24 +1913,28 @@ def _ensure_world_bible_with_refs(
 
 
 def _persist_world_bible(story_id: str, story: dict, bible: dict) -> None:
-    """Stamp the bible (with current ref URLs) onto `video_config.world_bible`.
+    """Stamp the bible (with current ref URLs) onto
+    `stories.pipeline_cache.world_bible`.
+
+    Lived inside `video_config` until 2026-06-14, but the editor's
+    parseVideoConfig drops unknown top-level fields — every editor
+    heartbeat silently wiped the world bible and forced the next scene
+    worker to rebuild it from scratch ($0.30, ~260s, hits the 270s cron
+    deadline, infinite re-claim loop). See
+    `_plans/2026-06-14-pipeline-cache-column.md`.
+
     Best-effort — a failure here doesn't kill the regen because the
     bible is still in memory for THIS run; cache just won't hit on the
-    next regen."""
-    raw = story.get("video_config")
-    config: dict
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            config = parsed if isinstance(parsed, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            config = {}
-    else:
-        config = {}
-    new_config = {**config, "world_bible": bible}
+    next regen.
+    """
+    cache = store.read_story_pipeline_cache(story)
+    new_cache = {**cache, "world_bible": bible}
     try:
-        store.update_story_video_config(story_id, new_config)
-        story["video_config"] = json.dumps(new_config)
+        store.update_story_pipeline_cache(story_id, new_cache)
+        # Keep the in-memory story row in sync so a subsequent read in
+        # the SAME regen sees the freshly-persisted bible. Mirror the
+        # JSON round-trip the DB will do.
+        story["pipeline_cache"] = json.dumps(new_cache)
     except Exception as e:  # noqa: BLE001
         print(
             f"[world bible persist] story={story_id} FAILED: {e} — continuing"
@@ -1997,19 +2035,13 @@ def _resolve_scene_entries_world_bible(
 
 
 def _read_cached_scene_entity_ids(story: dict) -> list[list[str]]:
-    """Read `video_config.scene_entity_ids` off a story row. Empty
+    """Read `pipeline_cache.scene_entity_ids` off a story row. Empty
     list when missing — caller treats that as a partial cache (caller
-    rebuilds if it conflicts with `scene_prompts` length)."""
-    raw = story.get("video_config")
-    if not raw:
-        return []
-    try:
-        config = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    if not isinstance(config, dict):
-        return []
-    cached = config.get("scene_entity_ids")
+    rebuilds if it conflicts with `scene_prompts` length). Lived in
+    `video_config` until 2026-06-14; see
+    `_plans/2026-06-14-pipeline-cache-column.md`."""
+    cache = store.read_story_pipeline_cache(story)
+    cached = cache.get("scene_entity_ids") if cache else None
     if not isinstance(cached, list):
         return []
     out: list[list[str]] = []
@@ -2022,8 +2054,10 @@ def _read_cached_scene_entity_ids(story: dict) -> list[list[str]]:
 
 
 def _read_world_bible_from_story(story: dict) -> dict | None:
-    """Same lookup used by the inspector UI — returns the marker-validated
-    bible from `video_config.world_bible` or None."""
+    """Returns the marker-validated bible off `stories.pipeline_cache`
+    via `pipeline/world_bible.py:read_world_bible`. Lived under
+    `video_config.world_bible` until 2026-06-14; see
+    `_plans/2026-06-14-pipeline-cache-column.md`."""
     from pipeline import world_bible as wb
     return wb.read_world_bible(story)
 
@@ -2049,10 +2083,11 @@ def _resolve_scene_prompts_cached(
     scene_count: int,
 ) -> list[str]:
     """Return the scene prompt list for `story`, building it via the LLM
-    only when `video_config.scene_prompts` is missing, too short, or
+    only when `pipeline_cache.scene_prompts` is missing, too short, or
     built with a previous prompt-shape (marker mismatch). Persists the
-    freshly-built list back into video_config so sibling workers in the
-    same batch read from cache.
+    freshly-built list back into pipeline_cache so sibling workers in
+    the same batch read from cache. Lived inside video_config until
+    2026-06-14; see `_plans/2026-06-14-pipeline-cache-column.md`.
 
     Returns the SCENE prompts only — the hero slot (prompts[0] from the
     legacy hero+scenes builder) is stripped before caching so callers
@@ -2186,19 +2221,12 @@ def _scene_narrations_from_story(
 
 
 def _read_cached_character_bible(story: dict) -> dict | None:
-    """Read `video_config.character_bible` off a story row. Returns None
-    on any malformed shape — caller treats that as a miss and pays for
-    the bible call."""
-    raw = story.get("video_config")
-    if not raw:
-        return None
-    try:
-        config = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(config, dict):
-        return None
-    bible = config.get("character_bible")
+    """Read `pipeline_cache.character_bible` off a story row. Returns
+    None on any malformed shape — caller treats that as a miss and pays
+    for the bible call. Lived in `video_config` until 2026-06-14; see
+    `_plans/2026-06-14-pipeline-cache-column.md`."""
+    cache = store.read_story_pipeline_cache(story)
+    bible = cache.get("character_bible") if cache else None
     if not isinstance(bible, dict):
         return None
     chars = bible.get("characters")
@@ -2225,20 +2253,16 @@ def _read_cached_character_bible(story: dict) -> dict | None:
 def _read_cached_scene_prompts_with_marker(
     story: dict,
 ) -> tuple[list[str] | None, str | None]:
-    """Same as `_read_cached_scene_prompts` but also returns the
-    `scene_prompts_built_with` marker so the resolver can decide whether
-    to trust the cache or evict it on shape mismatch."""
-    raw = story.get("video_config")
-    if not raw:
+    """Returns (scene_prompts, scene_prompts_built_with) off the story's
+    `pipeline_cache` so the resolver can decide whether to trust the
+    cache or evict on shape mismatch. Lived inside `video_config` until
+    2026-06-14; see
+    `_plans/2026-06-14-pipeline-cache-column.md`."""
+    cache = store.read_story_pipeline_cache(story)
+    if not cache:
         return None, None
-    try:
-        config = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None, None
-    if not isinstance(config, dict):
-        return None, None
-    cached = config.get("scene_prompts")
-    marker = config.get("scene_prompts_built_with")
+    cached = cache.get("scene_prompts")
+    marker = cache.get("scene_prompts_built_with")
     if not isinstance(cached, list):
         return None, None
     cleaned = [str(p) for p in cached if isinstance(p, str) and p.strip()]
@@ -2257,16 +2281,15 @@ def _write_cached_scene_prompts(
     entity_ids_per_scene: list[list[str]] | None = None,
 ) -> None:
     """Stamp the prompt list + shape marker (+ optional character bible
-    + optional per-scene entity ids) into `video_config`. Leaves every
-    other field on the config untouched. Best-effort — a failure here
-    doesn't prevent the regen because the prompt is still being used by
-    this caller; cache just won't hit on the next scene.
+    + optional per-scene entity ids) into `stories.pipeline_cache`.
+    Best-effort — a failure here doesn't prevent the regen because the
+    prompt is still being used by this caller; cache just won't hit on
+    the next scene.
 
-    Also rewrites `story["video_config"]` in place so the subsequent
-    `_persist_frame_prompt` call in the same regen reads the cache-
-    augmented config when it spreads `**config` to build the new value.
-    Without this, the prompt persist would silently wipe the cache by
-    overwriting video_config with the pre-cache value.
+    Pre-2026-06-14: lived in `video_config`. The editor's
+    parseVideoConfig drops unknown top-level fields and the heartbeat
+    write path wiped the cache silently — see
+    `_plans/2026-06-14-pipeline-cache-column.md` for the diagnosis.
 
     The `marker` keys the cache to its prompt-build shape so a future
     code change that bumps the marker (or flips between grounded and
@@ -2280,33 +2303,24 @@ def _write_cached_scene_prompts(
     `scene_entity_ids` so the scene call later looks up the matching
     refs for the kie image_input. Same length as `scene_prompts`.
     """
-    raw = story.get("video_config")
-    config: dict
-    if raw:
-        try:
-            parsed = json.loads(raw)
-            config = parsed if isinstance(parsed, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            config = {}
-    else:
-        config = {}
-    new_config: dict = {
-        **config,
+    cache = store.read_story_pipeline_cache(story)
+    new_cache: dict = {
+        **cache,
         "scene_prompts": list(scene_prompts),
         "scene_prompts_built_with": marker,
     }
     if bible is not None:
-        new_config["character_bible"] = bible
+        new_cache["character_bible"] = bible
     if entity_ids_per_scene is not None:
-        new_config["scene_entity_ids"] = [
+        new_cache["scene_entity_ids"] = [
             list(ids) for ids in entity_ids_per_scene
         ]
     try:
-        store.update_story_video_config(story_id, new_config)
-        # Keep the in-memory story dict in sync — _persist_frame_prompt
-        # reads `story["video_config"]` later in the same regen and
-        # would otherwise clobber the cache it just wrote.
-        story["video_config"] = json.dumps(new_config)
+        store.update_story_pipeline_cache(story_id, new_cache)
+        # Keep the in-memory story row in sync so the next reader in
+        # this regen run hits the cache. JSON-encode to match what the
+        # DB round-trip would return.
+        story["pipeline_cache"] = json.dumps(new_cache)
     except Exception as e:  # noqa: BLE001
         print(
             f"[scene prompts cache write] story={story_id} FAILED: {e} — "

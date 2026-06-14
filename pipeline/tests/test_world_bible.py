@@ -295,16 +295,27 @@ class ReferenceUrlsTests(unittest.TestCase):
 
 
 class ReadWorldBibleTests(unittest.TestCase):
-    """Reading the bible off `video_config` is what gates "cache hit
+    """Reading the bible off `pipeline_cache` is what gates "cache hit
     vs rebuild" in the regen path. Marker mismatch must produce None
     so the bulk path rebuilds — that's the migration story from the
-    previous narration_v1 cache shape."""
+    previous narration_v1 cache shape.
 
-    def _story_with_config(self, config: dict) -> dict:
+    2026-06-14: moved off `video_config` into the new `pipeline_cache`
+    column. `read_world_bible` keeps a fallback peek into `video_config`
+    so stories persisted before the column split still hit cache once on
+    first read; that fallback is the transition net and goes away after
+    the migration has run across all environments. See
+    `_plans/2026-06-14-pipeline-cache-column.md`.
+    """
+
+    def _story_with_cache(self, cache: dict) -> dict:
+        return {"pipeline_cache": json.dumps(cache)}
+
+    def _story_with_legacy_video_config(self, config: dict) -> dict:
         return {"video_config": json.dumps(config)}
 
     def test_matching_marker_returns_bible(self):
-        story = self._story_with_config({
+        story = self._story_with_cache({
             "world_bible": {
                 "built_with": wb.WORLD_BIBLE_BUILT_WITH,
                 "characters": [],
@@ -320,7 +331,7 @@ class ReadWorldBibleTests(unittest.TestCase):
         # Pre-Option-C cache shape — caller treats this as a miss and
         # rebuilds. That's the migration path from narration_v1 onto
         # world_bible_v1.
-        story = self._story_with_config({
+        story = self._story_with_cache({
             "world_bible": {
                 "built_with": "narration_v1",
                 "characters": [],
@@ -329,15 +340,61 @@ class ReadWorldBibleTests(unittest.TestCase):
         self.assertIsNone(wb.read_world_bible(story))
 
     def test_missing_bible_returns_none(self):
-        story = self._story_with_config({"scene_prompts": ["..."]})
+        story = self._story_with_cache({"scene_prompts": ["..."]})
         self.assertIsNone(wb.read_world_bible(story))
 
     def test_malformed_json_returns_none(self):
-        self.assertIsNone(wb.read_world_bible({"video_config": "{not json"}))
+        self.assertIsNone(wb.read_world_bible({"pipeline_cache": "{not json"}))
 
     def test_none_story_returns_none(self):
         self.assertIsNone(wb.read_world_bible(None))
-        self.assertIsNone(wb.read_world_bible({"video_config": None}))
+        self.assertIsNone(wb.read_world_bible({"pipeline_cache": None}))
+
+    def test_legacy_video_config_fallback_still_hits(self):
+        # Backward-compat: a story persisted before 2026-06-14 still has
+        # its bible inside video_config. The read path falls back so the
+        # first post-deploy regen hits cache; the next persist writes to
+        # pipeline_cache and the fallback becomes dormant for that row.
+        story = self._story_with_legacy_video_config({
+            "world_bible": {
+                "built_with": wb.WORLD_BIBLE_BUILT_WITH,
+                "characters": [],
+                "sub_characters": [],
+                "locations": [],
+                "items": [],
+            },
+        })
+        out = wb.read_world_bible(story)
+        self.assertIsNotNone(out)
+
+    def test_pipeline_cache_wins_when_both_columns_have_bible(self):
+        # During the dual-write transition, the canonical source is
+        # pipeline_cache. A mismatched bible in video_config (e.g. left
+        # behind by an incomplete migration run) MUST be ignored so the
+        # editor's residual stomping can never resurface.
+        story = {
+            "pipeline_cache": json.dumps({
+                "world_bible": {
+                    "built_with": wb.WORLD_BIBLE_BUILT_WITH,
+                    "characters": [{"id": "ab", "name": "Alice"}],
+                    "sub_characters": [],
+                    "locations": [],
+                    "items": [],
+                },
+            }),
+            "video_config": json.dumps({
+                "world_bible": {
+                    "built_with": wb.WORLD_BIBLE_BUILT_WITH,
+                    "characters": [{"id": "zz", "name": "Stale"}],
+                    "sub_characters": [],
+                    "locations": [],
+                    "items": [],
+                },
+            }),
+        }
+        out = wb.read_world_bible(story)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["characters"][0]["name"], "Alice")
 
 
 if __name__ == "__main__":

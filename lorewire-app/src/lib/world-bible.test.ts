@@ -134,14 +134,27 @@ describe("parseWorldBible", () => {
 });
 
 describe("readWorldBible", () => {
-  it("parses out of a video_config JSON string", () => {
+  // 2026-06-14: bible moved out of video_config into pipeline_cache.
+  // The reader is shape-only, so the same JSON works from either
+  // column — these tests exercise both the new shape (just a
+  // pipeline_cache with world_bible) and the legacy shape (a
+  // video_config with the bible alongside editor data) that a story
+  // persisted before the migration would have.
+  it("parses out of a pipeline_cache JSON string", () => {
+    const cache = JSON.stringify({ world_bible: SAMPLE });
+    const bible = readWorldBible(cache);
+    expect(bible).not.toBeNull();
+    expect(bible!.characters[0].name).toBe("Maya");
+  });
+
+  it("parses out of a legacy video_config JSON string (transition shape)", () => {
     const config = JSON.stringify({ world_bible: SAMPLE, scene_prompts: [] });
     const bible = readWorldBible(config);
     expect(bible).not.toBeNull();
     expect(bible!.characters[0].name).toBe("Maya");
   });
 
-  it("returns null when video_config is missing or empty", () => {
+  it("returns null when the source JSON is missing or empty", () => {
     expect(readWorldBible(null)).toBeNull();
     expect(readWorldBible(undefined)).toBeNull();
     expect(readWorldBible("")).toBeNull();
