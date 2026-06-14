@@ -34,6 +34,34 @@ from pipeline.aspect import (
 PUBLIC_DIR_RELATIVE = Path("lorewire-app") / "public" / "generated"
 PUBLIC_URL_PREFIX = "/generated"
 
+
+def _staging_dir(safe_id: str, repo_root: Path) -> Path:
+    """Where intermediate PNG/MP3/etc. files land before GCS upload.
+
+    On Vercel (and any environment with VERCEL=1 in the env), the
+    function code dir `repo_root` resolves to `/var/task/api/_lib/`
+    which is READ-ONLY at runtime. `lorewire-app/public/generated/`
+    doesn't even exist there. We route to /tmp/lorewire/ instead —
+    Vercel's only writable mount, ~500 MB capacity, plenty for one
+    story's worth of frames + audio.
+
+    In local dev the legacy `lorewire-app/public/generated/<id>/` path
+    stays so Next.js can serve files at `/generated/<id>/...` without a
+    GCS round trip — useful when GCS_BUCKET isn't configured locally.
+
+    GCS_BUCKET being unset on Vercel would be a config error; we still
+    return /tmp so the in-pipeline writes don't crash, but the
+    fallback URL would be a `/generated/...` path that nothing
+    actually serves. gcs.publish raises in that case which the worker
+    surfaces as story_jobs.error — the admin sees the missing GCS
+    env var, not an opaque "ReadOnly filesystem" trace.
+    """
+    import os
+    if os.environ.get("VERCEL"):
+        from tempfile import gettempdir
+        return Path(gettempdir()) / "lorewire" / "generated" / safe_id
+    return repo_root / PUBLIC_DIR_RELATIVE / safe_id
+
 # Reddit ids are short alphanumerics with the occasional underscore. Anything
 # outside this set should never form a filesystem path: it would be either a
 # bug or a hostile input.
@@ -461,7 +489,7 @@ def generate_media(
     print(f"[media id={safe_id}] start")
     _budget_log()
 
-    out_dir = repo_root / PUBLIC_DIR_RELATIVE / safe_id
+    out_dir = _staging_dir(safe_id, repo_root)
     if not dry_run:
         out_dir.mkdir(parents=True, exist_ok=True)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"

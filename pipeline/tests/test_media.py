@@ -6,6 +6,7 @@ and the parts that touch the filesystem path machinery.
 """
 from __future__ import annotations
 
+import os
 import unittest
 from unittest import mock
 
@@ -246,6 +247,49 @@ class ResolveSceneCountTests(unittest.TestCase):
             gs.return_value = None
             body = " ".join(["word"] * 250)
             self.assertEqual(media._resolve_scene_count(None, body=body), 20)
+
+
+class StagingDirTests(unittest.TestCase):
+    """Regression for the read-only-filesystem crash that hit production
+    on 2026-06-14: the Vercel cron drain claimed a media job, called
+    generate_media, which tried to mkdir under repo_root —
+    `/var/task/api/_lib/lorewire-app/public/generated/...` — which is
+    read-only on Vercel's runtime. The helper now routes intermediate
+    files to /tmp/lorewire/ when VERCEL=1 is set."""
+
+    def test_vercel_env_routes_to_tmp(self):
+        from pathlib import Path
+        import tempfile
+        with mock.patch.dict(os.environ, {"VERCEL": "1"}, clear=False):
+            path = media._staging_dir("abc", Path("/var/task/api/_lib"))
+        expected_parent = Path(tempfile.gettempdir()) / "lorewire" / "generated"
+        self.assertEqual(path, expected_parent / "abc")
+        # Path must actually be mkdir-able — this is the assertion that
+        # would have caught the prod crash if it had existed earlier.
+        path.mkdir(parents=True, exist_ok=True)
+        self.assertTrue(path.exists())
+
+    def test_no_vercel_env_uses_repo_root(self):
+        from pathlib import Path
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VERCEL", None)
+            path = media._staging_dir("abc", Path("/repo"))
+        self.assertEqual(
+            path,
+            Path("/repo") / "lorewire-app" / "public" / "generated" / "abc",
+        )
+
+    def test_blank_vercel_env_treated_as_unset(self):
+        """Defensive: VERCEL='' falls through to the local-dev path —
+        bool('') is False, the helper's os.environ.get() returns '' which
+        is falsy."""
+        from pathlib import Path
+        with mock.patch.dict(os.environ, {"VERCEL": ""}, clear=False):
+            path = media._staging_dir("abc", Path("/repo"))
+        self.assertEqual(
+            path,
+            Path("/repo") / "lorewire-app" / "public" / "generated" / "abc",
+        )
 
 
 if __name__ == "__main__":
