@@ -2157,3 +2157,41 @@ export async function processRedditSourcesAction(
       (result.skipped_active ? `&skipped_active=${result.skipped_active}` : ""),
   );
 }
+
+// ─── curation (Phase 2 of _plans/2026-06-15-curation-system.md) ─────────────
+// Admin reorders / replaces the pinned stories for one slot. Atomic
+// replace: the action takes the new ordered story_ids and the helper
+// wipes the slot then inserts. Each action revalidates `/` (home),
+// `/c/*` (category pages, Phase 3+), and `/admin/curation` so a reload
+// reflects the change immediately.
+
+export async function setCurationSlotAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const { isCurationSlotKind, setSlotStories } = await import(
+    "@/lib/curation"
+  );
+  const slotKind = String(formData.get("slot_kind") ?? "").trim();
+  if (!isCurationSlotKind(slotKind)) {
+    redirect("/admin/curation?error=bad-slot-kind");
+  }
+  // story_ids arrives as a comma-separated string in the hidden input the
+  // client component maintains as it reorders. Empty = clear the slot.
+  const raw = String(formData.get("story_ids") ?? "").trim();
+  const ids = raw
+    ? raw.split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+  const count = await setSlotStories(slotKind, ids);
+  console.info("[curation set]", {
+    slot_kind: slotKind,
+    count,
+    ids_sample: ids.slice(0, 5),
+  });
+  revalidatePath("/");
+  revalidatePath("/admin/curation");
+  // Category page paths revalidate too — Phase 3 wires them. Safe to
+  // call now; Next ignores paths that don't exist yet.
+  revalidatePath("/c/[category]", "page");
+  redirect(`/admin/curation?saved=${encodeURIComponent(slotKind)}`);
+}

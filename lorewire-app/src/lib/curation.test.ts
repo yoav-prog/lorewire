@@ -180,6 +180,40 @@ describe("listSlotsForStory", () => {
   });
 });
 
+describe("listPublishedStoriesForCuration", () => {
+  beforeEach(clear);
+
+  async function seedStory(
+    id: string,
+    status: string,
+    title: string,
+    category: string,
+  ) {
+    await run(
+      "INSERT INTO stories (id, status, title, category, created_at, updated_at, published_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [id, status, title, category, "2026-06-15T00:00:00+00:00",
+       "2026-06-15T00:00:00+00:00", "2026-06-15T00:00:00+00:00"],
+    );
+  }
+
+  it("returns only published stories", async () => {
+    await run("DELETE FROM stories", []);
+    await seedStory("a", "published", "A", "Drama");
+    await seedStory("b", "review", "B", "Drama");
+    await seedStory("c", "archived", "C", "Drama");
+    const { listPublishedStoriesForCuration } = await import("./curation");
+    const rows = await listPublishedStoriesForCuration();
+    expect(rows.map((r) => r.id).sort()).toEqual(["a"]);
+  });
+
+  it("returns empty array when no stories at all", async () => {
+    await run("DELETE FROM stories", []);
+    const { listPublishedStoriesForCuration } = await import("./curation");
+    expect(await listPublishedStoriesForCuration()).toEqual([]);
+  });
+});
+
 describe("listAllSlots", () => {
   beforeEach(clear);
 

@@ -79,6 +79,32 @@ export interface CurationSlotRow {
 const COLS =
   "id, slot_kind, position, story_id, publish_at, expires_at, notes, created_at, updated_at";
 
+// ─── reads from the stories table (for the admin picker) ────────────────────
+
+export interface CurationStoryOption {
+  id: string;
+  title: string | null;
+  category: string | null;
+  hero_image: string | null;
+  status: string | null;
+  published_at: string | null;
+}
+
+/** Every published story, newest-first. The admin curation page uses
+ *  this to populate the "add story" search input — small dataset
+ *  (hundreds of rows at most), so we hydrate the whole list once and
+ *  let the client component filter locally. No paging. */
+export async function listPublishedStoriesForCuration(): Promise<
+  CurationStoryOption[]
+> {
+  return all<CurationStoryOption>(
+    "SELECT id, title, category, hero_image, status, published_at " +
+      "FROM stories WHERE status = 'published' " +
+      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC",
+    [],
+  );
+}
+
 // ─── reads ───────────────────────────────────────────────────────────────────
 
 /** List the pinned stories for one slot, in admin order.

@@ -63,6 +63,13 @@ const STATIC_GROUPS: SidebarGroup[] = [
         activePrefixes: ["/admin/reddit-sources"],
       },
       {
+        // Public-site curation — Billboard, rails, category pages.
+        // See _plans/2026-06-15-curation-system.md.
+        href: "/admin/curation",
+        label: "Curation",
+        activePrefixes: ["/admin/curation"],
+      },
+      {
         href: "/admin/settings",
         label: "Settings",
         // All four config URLs land on the Settings hub with the right
