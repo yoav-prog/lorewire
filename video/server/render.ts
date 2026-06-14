@@ -129,11 +129,11 @@ export async function renderAndUploadStory(
     throw new Error("GCS_BUCKET not configured");
   }
 
-  // Build the Storage client once and reuse it for BOTH the segment
-  // downloads (splice path) and the final body upload. Same credentials,
-  // same env shape — see the long comment in the upload section below
-  // for why we reuse Vercel's GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY pair
-  // instead of falling through to Cloud Run's metadata-server auth.
+  // Storage client for the final body upload only. Segment downloads
+  // moved to plain fetch() against the public GCS URL — see the comment
+  // on downloadSegment for why. The upload still needs the
+  // authenticated SDK path because the destination object has to land
+  // with predefinedAcl=publicRead and that's an authenticated write.
   const storage = makeStorageClient();
 
   const serveUrl = await getOrCreateBundle();
@@ -206,7 +206,6 @@ export async function renderAndUploadStory(
     storyId,
     bodyPath: tmpPath,
     segments,
-    storage,
     gcsBucket,
   });
 
@@ -301,19 +300,34 @@ export function parseGcsSegmentUrl(
 }
 
 async function downloadSegment(
-  storage: Storage,
   bucket: string,
   key: string,
   destination: string,
   storyId: string,
   kind: "intro" | "outro",
 ): Promise<void> {
-  const file = storage.bucket(bucket).file(key);
-  const [meta] = await file.getMetadata();
-  const sizeRaw = meta.size;
-  const sizeBytes =
-    typeof sizeRaw === "string" ? parseInt(sizeRaw, 10) : sizeRaw ?? 0;
-  if (sizeBytes > MAX_SEGMENT_BYTES) {
+  // 2026-06-15: dropped the GCS Storage client for segment downloads
+  // in favour of plain fetch() against the public URL. The bucket is
+  // configured with `allUsers: objectViewer` (see pipeline/gcs.py
+  // header comment) — every uploaded segment is publicly readable
+  // through the canonical URL without auth. Using the SDK here meant
+  // every download had to run the JWT signing flow, and that flow
+  // tripped over OpenSSL 3's stricter DECODER provider in Node 22 on
+  // the new 8 vCPU image — Cloud Run requests started failing with
+  // `error:1E08010C:DECODER routines::unsupported` even though the
+  // upload-back path with the same credentials had worked. Mirrors
+  // pipeline/segments_worker.py which also reads public segments via
+  // urllib.request, not the SDK.
+  const url = `https://storage.googleapis.com/${bucket}/${encodeGcsKey(key)}`;
+  const head = await fetch(url, { method: "HEAD" });
+  if (!head.ok) {
+    throw new Error(
+      `segment HEAD ${url} → HTTP ${head.status}`,
+    );
+  }
+  const lenHeader = head.headers.get("content-length");
+  const sizeBytes = lenHeader ? parseInt(lenHeader, 10) : 0;
+  if (Number.isFinite(sizeBytes) && sizeBytes > MAX_SEGMENT_BYTES) {
     throw new Error(
       `segment ${key} is ${sizeBytes} bytes, exceeds ${MAX_SEGMENT_BYTES} cap`,
     );
@@ -325,7 +339,30 @@ async function downloadSegment(
     key,
     bytes: sizeBytes,
   });
-  await file.download({ destination });
+  const resp = await fetch(url);
+  if (!resp.ok || !resp.body) {
+    throw new Error(`segment GET ${url} → HTTP ${resp.status}`);
+  }
+  // Stream the body to disk. Buffering a 5 MB segment in memory would
+  // be fine but streaming matches the GCS SDK's old behaviour and
+  // protects against the misconfigured-row case where a row points at
+  // a much larger upload than the size cap allows (the HEAD check is
+  // the first line of defence; this is the second).
+  const buf = Buffer.from(await resp.arrayBuffer());
+  if (buf.length > MAX_SEGMENT_BYTES) {
+    throw new Error(
+      `segment ${key} body was ${buf.length} bytes, exceeds ${MAX_SEGMENT_BYTES} cap`,
+    );
+  }
+  await fs.writeFile(destination, buf);
+}
+
+/** URL-encode each path segment of a GCS object key without touching the
+ *  forward slashes that separate them. The Storage SDK did this for us;
+ *  doing it explicitly here keeps the fetch path safe for keys with
+ *  spaces or other special chars. */
+function encodeGcsKey(key: string): string {
+  return key.split("/").map(encodeURIComponent).join("/");
 }
 
 function runFfmpeg(argv: string[], storyId: string): Promise<void> {
@@ -364,10 +401,9 @@ async function spliceWithSegments(opts: {
   storyId: string;
   bodyPath: string;
   segments: SpliceSegments;
-  storage: Storage;
   gcsBucket: string;
 }): Promise<void> {
-  const { storyId, bodyPath, segments, storage, gcsBucket } = opts;
+  const { storyId, bodyPath, segments, gcsBucket } = opts;
   const hasIntro = typeof segments.intro === "string" && segments.intro.length > 0;
   const hasOutro = typeof segments.outro === "string" && segments.outro.length > 0;
 
@@ -420,14 +456,14 @@ async function spliceWithSegments(opts: {
     : null;
   const splicedPath = path.join("/tmp", `${sanitized}-spliced-${stamp}.mp4`);
 
-  // Parallel downloads — both segments are small (~5 MB) and the GCS
-  // client multiplexes well.
+  // Parallel downloads. Both segments are small (~5 MB) and fetch()
+  // multiplexes over the same TCP connection thanks to undici keep-alive.
   await Promise.all([
     introKey && introPath
-      ? downloadSegment(storage, gcsBucket, introKey, introPath, storyId, "intro")
+      ? downloadSegment(gcsBucket, introKey, introPath, storyId, "intro")
       : Promise.resolve(),
     outroKey && outroPath
-      ? downloadSegment(storage, gcsBucket, outroKey, outroPath, storyId, "outro")
+      ? downloadSegment(gcsBucket, outroKey, outroPath, storyId, "outro")
       : Promise.resolve(),
   ]);
 
