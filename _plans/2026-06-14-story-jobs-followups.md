@@ -77,7 +77,7 @@ Phases here are **independent** — you can ship 5, then jump to 7, etc. They sh
 - ✅ [vercel.json](lorewire-app/vercel.json): cron `*/2 * * * *` for drain_story_jobs (every 2 min — story_jobs are heavier per-row than image_renders so we halve the cadence), maxDuration 300s. Image_renders drain unchanged.
 - ✅ 13 tests in [pipeline/tests/test_drain_story_jobs.py](pipeline/tests/test_drain_story_jobs.py): auth (4), max-rows env (4), drain happy/fail/cap/budget-block/idle (5). Suite: **85 Python tests green**, including the image_renders drain tests confirming no regression from the new lock key.
 
-**Known limitation (documented in the drain's docstring):** `story_jobs_worker._default_process` calls `video.generate_video` for `with_media=True` jobs, which shells out to Remotion via `npx`. That doesn't work on Vercel's runtime. The drain happily picks up `with_media=True` jobs and the LLM + image spend happens; the video step then fails and the row is marked errored. For the hosted drain, enqueue with `with_media=False` (text-only stories). For full media + video, keep using the local worker. A future enhancement: pre-skip `with_media=True` jobs at the drain layer with a clear error message — recorded as a follow-up below.
+**Runtime limitation (closed 2026-06-14 by the drain pre-skip follow-up below):** `story_jobs_worker._default_process` calls `video.generate_video` for `with_media=True` jobs, which shells out to Remotion via `npx`. That doesn't work on Vercel's runtime. As of the drain pre-skip ship, the drain passes `skip_with_media=True` to `run_one_tick`, so any claimed video job is failed at claim time with `DRAIN_UNSUPPORTED_MEDIA_REASON` (no LLM/image spend) and its source row resets to 'imported' so the admin can re-Process with `with_media=False`. For full media + video, keep using the local worker.
 
 **Production cost:** Vercel cron is free at this cadence (one tick / 2 min = ~720/day still under the free Hobby allowance). Cron + advisory lock + the early-exit short-circuit in `count_pending_story_jobs()` means an idle tick bills near zero on Active CPU.
 
@@ -109,3 +109,24 @@ Each phase passes the same gates as the parent plan: tests, namespaced logs, lin
 **Pricing source:** `pipeline/media.py` already had `IMAGE_COST_USD`, `TTS_COST_PER_CHAR`, `STT_COST_PER_SECOND` tables sourced from each provider's public pricing as of 2026-06. Per CLAUDE.md rule 8 + 1, these should be re-verified every few months — the constants are clearly grouped at the top of [pipeline/media.py](pipeline/media.py) for that purpose.
 
 **Not in scope:** LLM token cost (not in `_running_cost_usd`'s current model). It's a rounding error vs images + voice (~$0.05 per story vs $0.30+ for images), but adding it is a clean follow-up if precision matters more than the writeup says.
+
+> **Update 2026-06-14:** LLM cost capture _was_ added in commit `427b219` ("Story jobs: harden cost capture, race handling, and CSV parser"). New constant `LLM_USD_PER_TOKEN = 1e-6` in [pipeline/story_jobs_worker.py](pipeline/story_jobs_worker.py), pure helper `compute_job_cost_cents(media_delta_usd, llm_token_delta)` so the math has unit tests. `_default_process` now snapshots `llm.totals["total_tokens"]` before/after the run alongside `media.running_cost_usd()` and writes the combined delta into `stories.cost_cents`. Text-only jobs no longer report cost_cents=0.
+
+---
+
+## Micro-phase — Drain pre-skip for `with_media=True` jobs (shipped 2026-06-14)
+
+**Why:** Phase 8 shipped the Vercel drain with a documented gap — `with_media=True` jobs claimed by the hosted drain still ran the LLM + image stages, then crashed at `npx remotion` (Vercel's Python runtime has no Node or Remotion). The job ended errored with ~$0.30+ already spent on a row that was never going to finish. The drain's docstring called this out as a future enhancement; this micro-phase closes it.
+
+**Shipped:**
+- ✅ Module-level constant `DRAIN_UNSUPPORTED_MEDIA_REASON` in [pipeline/story_jobs_worker.py](pipeline/story_jobs_worker.py) — the exact `story_jobs.error` message recorded on a pre-skipped row. Stable string so the admin UI and future test fixtures can match against it.
+- ✅ `run_one_tick(process_fn=None, skip_with_media=False)` — new opt-in flag. When True, a claimed job whose `with_media=True` is failed immediately (no `fetch_reddit_source`, no `process_fn` call) with `DRAIN_UNSUPPORTED_MEDIA_REASON`. Default False so the local CLI worker keeps processing video jobs unchanged.
+- ✅ Source row resets to `imported` (not `queued` like the regular error path) so `bulkEnqueueStoryJobs`'s `status='imported'` guard lets the admin re-Process the row with `with_media=False` and the drain handles it next tick. Documented in-line because the choice diverges from the existing error path on purpose.
+- ✅ Drain handler [lorewire-app/api/drain_story_jobs.py](lorewire-app/api/drain_story_jobs.py) passes `skip_with_media=True` to `run_one_tick`. Docstring rewritten — the "future enhancement" caveat is now the implemented behaviour.
+- ✅ Tests:
+  - 3 worker-tick tests in [test_story_jobs.py](pipeline/tests/test_story_jobs.py) `WorkerTickTests`: pre-skip path (errored + source→imported + process_fn never called), text-only opt-in still processes normally, default flag preserves local-worker semantics for video jobs.
+  - 2 drain integration tests in [test_drain_story_jobs.py](pipeline/tests/test_drain_story_jobs.py) `RunDrainTests`: all-video batch (both rows errored, zero process calls — the money-saving invariant), mixed batch (video skipped + text processed, loop doesn't abort early).
+  - Helper `_enqueue` default changed to `with_media=False` because the drain only processes text-only jobs end-to-end now; that's the right default for the drain test file. Existing drain tests (auth, idle, failure-continue, cap, budget-block) carried over unchanged.
+- ✅ Suite: **61 Python tests in the story_jobs + drain files green** (full suite has 7 pre-existing unrelated failures in `test_segments.py` / `test_media_regen.py` that are present on HEAD without these changes).
+
+**What this prevents:** a single accidental `with_media=True` enqueue against the production drain used to burn ~$0.30 LLM + image spend before erroring out at video. Now the same row errors within milliseconds at near-zero cost, and the admin sees a precise reason on the row's latest story_job. The pre-skip path is also tagged in the logs (`[story-jobs drain-skip]`) for grep friendliness.

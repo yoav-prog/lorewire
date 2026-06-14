@@ -387,6 +387,94 @@ class WorkerTickTests(_IsolatedDB):
         self.assertEqual(row["status"], "error")
         self.assertIn("not found", row["error"])
 
+    def test_skip_with_media_fails_video_job_before_processing(self):
+        """skip_with_media=True is the drain's opt-in to fail any claimed
+        with_media=True job before the process_fn is called. Verifies the
+        process_fn isn't invoked, the job is errored with the documented
+        reason, and the source row resets to 'imported' so a re-Process
+        with with_media=False can pick it up."""
+        from pipeline import story_jobs_worker
+        _seed_reddit_source(self.store, "abc")
+        # Simulate the bulkEnqueue flow that flips source 'imported' →
+        # 'queued' on the TS side. The pre-skip path should put it back.
+        self.store.set_reddit_source_status("abc", "queued")
+        self.store.enqueue_story_job("job-1", "abc", with_media=True)
+
+        process_calls: list[dict] = []
+
+        def stub_process(job, row):
+            process_calls.append(job)
+            return {"id": "abc"}
+
+        ran = story_jobs_worker.run_one_tick(
+            process_fn=stub_process, skip_with_media=True,
+        )
+        self.assertTrue(ran)
+        self.assertEqual(
+            process_calls, [],
+            "process_fn must NOT run for a pre-skipped video job — that's "
+            "the whole point of the pre-skip (no LLM/image spend).",
+        )
+        row = self.store.get_story_job("job-1")
+        self.assertEqual(row["status"], "error")
+        self.assertEqual(
+            row["error"], story_jobs_worker.DRAIN_UNSUPPORTED_MEDIA_REASON,
+        )
+        src = self.store.fetch_reddit_source("abc")
+        self.assertEqual(
+            src["status"], "imported",
+            "Source must reset to 'imported' so bulkEnqueueStoryJobs can "
+            "re-enqueue it with with_media=False on next Process N.",
+        )
+
+    def test_skip_with_media_lets_text_only_job_process_normally(self):
+        """When the claimed job is with_media=False, skip_with_media=True
+        must NOT pre-skip it — the drain can run text-only jobs to
+        completion. Guards against an over-broad skip flag that would
+        block every drained row."""
+        from pipeline import story_jobs_worker
+        _seed_reddit_source(self.store, "abc")
+        self.store.set_reddit_source_status("abc", "queued")
+        self.store.enqueue_story_job("job-1", "abc", with_media=False)
+
+        def stub_process(job, row):
+            return {"id": "abc"}
+
+        ran = story_jobs_worker.run_one_tick(
+            process_fn=stub_process, skip_with_media=True,
+        )
+        self.assertTrue(ran)
+        row = self.store.get_story_job("job-1")
+        self.assertEqual(row["status"], "done")
+        src = self.store.fetch_reddit_source("abc")
+        self.assertEqual(src["status"], "used")
+
+    def test_skip_with_media_default_off_preserves_local_worker_path(self):
+        """The default skip_with_media=False must keep the local worker's
+        behaviour identical — video jobs run, no pre-skip. Backwards
+        compatibility guard: if a future refactor flips the default to
+        True this test catches it before video jobs get silently dropped
+        on every local CLI run."""
+        from pipeline import story_jobs_worker
+        _seed_reddit_source(self.store, "abc")
+        self.store.set_reddit_source_status("abc", "queued")
+        self.store.enqueue_story_job("job-1", "abc", with_media=True)
+
+        process_calls: list[dict] = []
+
+        def stub_process(job, row):
+            process_calls.append(job)
+            return {"id": "abc"}
+
+        ran = story_jobs_worker.run_one_tick(process_fn=stub_process)
+        self.assertTrue(ran)
+        self.assertEqual(
+            len(process_calls), 1,
+            "Default tick must run the process_fn even for video jobs.",
+        )
+        row = self.store.get_story_job("job-1")
+        self.assertEqual(row["status"], "done")
+
 
 class BudgetGateTests(_IsolatedDB):
     """Phase 7: daily-budget cap. Worker tick checks projected spend

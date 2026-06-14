@@ -70,9 +70,14 @@ class _DrainTestCase(unittest.TestCase):
             "last_synced": "2026-06-14T00:00:00+00:00",
         })
 
-    def _enqueue(self, job_id: str, reddit_id: str) -> None:
+    def _enqueue(
+        self, job_id: str, reddit_id: str, with_media: bool = False,
+    ) -> None:
+        """Default with_media=False because the Vercel drain pre-skips
+        video jobs (it can't run Remotion). Tests that exercise the
+        pre-skip path opt in with with_media=True."""
         self._seed_source(reddit_id)
-        self.store.enqueue_story_job(job_id, reddit_id)
+        self.store.enqueue_story_job(job_id, reddit_id, with_media=with_media)
 
 
 class AuthTests(_DrainTestCase):
@@ -196,6 +201,91 @@ class RunDrainTests(_DrainTestCase):
 
         self.assertEqual(body["drained"], 2)
         self.assertEqual(body["remaining"], 3)
+
+    def test_skips_with_media_jobs_without_calling_process(self):
+        """The hosted drain can't render video. A `with_media=True` row
+        in the queue must be failed at claim time (no LLM/image spend)
+        and the source row reset to 'imported' so the admin can re-Process
+        with with_media=False. This is the production-grade follow-up to
+        the original drain's deferred-skip caveat."""
+        from pipeline import story_jobs_worker
+        self._seed_source("vid-1")
+        self._seed_source("vid-2")
+        self.store.set_reddit_source_status("vid-1", "queued")
+        self.store.set_reddit_source_status("vid-2", "queued")
+        self.store.enqueue_story_job("j-vid-1", "vid-1", with_media=True)
+        self.store.enqueue_story_job("j-vid-2", "vid-2", with_media=True)
+
+        process_calls: list[str] = []
+
+        def stub_process(job, row):
+            process_calls.append(job["id"])
+            return {"id": row["reddit_id"]}
+
+        with mock.patch.object(
+            story_jobs_worker, "_default_process", side_effect=stub_process,
+        ):
+            body = drain.run_drain()
+
+        self.assertEqual(
+            process_calls, [],
+            "No process_fn calls — pre-skip happens before any pipeline "
+            "work. This is the money-saving invariant.",
+        )
+        # Both video jobs errored fast within the per-tick cap.
+        self.assertEqual(body["drained"], 2)
+        for jid, rid in (("j-vid-1", "vid-1"), ("j-vid-2", "vid-2")):
+            j = self.store.get_story_job(jid)
+            self.assertEqual(j["status"], "error")
+            self.assertEqual(
+                j["error"], story_jobs_worker.DRAIN_UNSUPPORTED_MEDIA_REASON,
+            )
+            src = self.store.fetch_reddit_source(rid)
+            self.assertEqual(src["status"], "imported")
+
+    def test_mixed_batch_skips_video_processes_text(self):
+        """Mixed queue: one with_media=True (skip) + one with_media=False
+        (process). Verifies the skip path doesn't poison the loop and the
+        drain continues to the next claimable row."""
+        from pipeline import story_jobs_worker
+        self._seed_source("vid")
+        self._seed_source("text")
+        self.store.set_reddit_source_status("vid", "queued")
+        self.store.set_reddit_source_status("text", "queued")
+        # Order matters for the FIFO claim — enqueue video first so the
+        # skip happens BEFORE the text-only job runs. Catches a loop bug
+        # where one pre-skipped row breaks out of the drain prematurely.
+        self.store.enqueue_story_job("j-vid", "vid", with_media=True)
+        self.store.enqueue_story_job("j-text", "text", with_media=False)
+
+        process_calls: list[str] = []
+
+        def stub_process(job, row):
+            process_calls.append(job["id"])
+            return {"id": row["reddit_id"]}
+
+        os.environ["DRAIN_STORY_JOBS_MAX_ROWS_PER_TICK"] = "5"
+        try:
+            with mock.patch.object(
+                story_jobs_worker, "_default_process", side_effect=stub_process,
+            ):
+                body = drain.run_drain()
+        finally:
+            os.environ.pop("DRAIN_STORY_JOBS_MAX_ROWS_PER_TICK", None)
+
+        self.assertEqual(
+            process_calls, ["j-text"],
+            "Only the text-only job should reach the process_fn.",
+        )
+        self.assertEqual(body["drained"], 2)
+        vid = self.store.get_story_job("j-vid")
+        text = self.store.get_story_job("j-text")
+        self.assertEqual(vid["status"], "error")
+        self.assertEqual(
+            vid["error"], story_jobs_worker.DRAIN_UNSUPPORTED_MEDIA_REASON,
+        )
+        self.assertEqual(text["status"], "done")
+        self.assertEqual(text["story_id"], "text")
 
     def test_budget_block_stops_the_tick_early(self):
         """A blocked budget gate makes run_one_tick return False on

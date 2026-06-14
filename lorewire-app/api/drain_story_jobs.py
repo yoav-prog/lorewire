@@ -18,21 +18,25 @@ Hardening matches the image_renders drain:
   4. Structured logger.info at every meaningful step (claim, done, err,
      idle, tick summary, lock_busy, budget_block).
 
-Caveat — this is the load-bearing limitation of running story_jobs on
-Vercel: `story_jobs_worker._default_process` calls `video.generate_video`
-when `with_media=True`, which shells out to Remotion via `npx`. That will
-NOT work on Vercel's runtime (no Node + Remotion env). For now, the safe
-pattern is:
+Runtime limitation — `story_jobs_worker._default_process` calls
+`video.generate_video` when `with_media=True`, which shells out to
+Remotion via `npx`. Vercel's Python runtime has no Node or Remotion env,
+so we can't run that step here. To stop the drain from burning LLM + image
+credit on a job that will then crash at video, we pass `skip_with_media=True`
+to `run_one_tick`. That makes the worker fail any claimed `with_media=True`
+job immediately with `DRAIN_UNSUPPORTED_MEDIA_REASON` and flip its
+reddit_source row back to `imported` — so an admin can re-Process it with
+`with_media=False` and the drain will pick it up next tick.
+
+Pattern:
 
   - Enqueue jobs with `with_media=False` when you want the hosted drain
-    to handle them — you'll get the story + summary but no video.
+    to handle them — story + summary, no video.
   - Enqueue with `with_media=True` only when the local
     `pipeline/story_jobs_worker.py` is the drain you're relying on.
-
-If a `with_media=True` job lands in the hosted drain, the LLM + image
-spend happens, the video step fails, and the row is marked errored. A
-future enhancement could pre-skip `with_media=True` jobs at the drain
-layer — recorded as a follow-up.
+  - If a `with_media=True` job sneaks into the hosted drain, it'll be
+    skipped within milliseconds and the admin will see the error message
+    on the row's latest story_job.
 
 The pipeline package is vendored into `_lib/pipeline/` by the npm
 prebuild step (`scripts/vendor_pipeline.mjs`). The handler injects
@@ -132,7 +136,10 @@ def run_drain() -> dict:
         drained = 0
         while drained < cap and (time.monotonic() - start) < DEADLINE_S:
             row_started = time.monotonic()
-            did_work = story_jobs_worker.run_one_tick()
+            # skip_with_media=True: the Vercel runtime can't render
+            # video, so video jobs are pre-failed at claim time instead
+            # of burning LLM + image spend. See module docstring.
+            did_work = story_jobs_worker.run_one_tick(skip_with_media=True)
             if not did_work:
                 # Queue empty OR budget-blocked OR all rows in flight.
                 # run_one_tick already logged the reason ([story-jobs
