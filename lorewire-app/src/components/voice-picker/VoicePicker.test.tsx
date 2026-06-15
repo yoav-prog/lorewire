@@ -221,6 +221,37 @@ describe("VoicePicker", () => {
     expect(buttonTag).not.toBeNull();
     expect(hasDisabledAttr(buttonTag!)).toBe(false);
   });
+
+  // ─── Dropdown redesign (2026-06-15) ──────────────────────────────────
+  // The grid became a searchable combobox. These lock the closed-state
+  // contract that the static render can see; the open/search/select
+  // interaction runs in the browser and is out of scope for renderToString.
+
+  it("renders a collapsed trigger that shows the global default by default", () => {
+    const html = render();
+    expect(extractTag(html, "voice-picker-trigger")).not.toBeNull();
+    expect(html).toContain("Global default voice");
+  });
+
+  it("trigger shows the selected voice name + provider when an override is set", () => {
+    const html = render({
+      currentProvider: "elevenlabs",
+      currentVoiceId: "vid-rachel",
+    });
+    // "Rachel · ElevenLabs" reads in the trigger so the current pick is
+    // visible without opening the panel.
+    expect(html).toMatch(/Rachel[^<]*ElevenLabs/);
+  });
+
+  it("renders the search box, and the options listbox ships collapsed (hidden)", () => {
+    const html = render();
+    expect(html).toContain('data-testid="voice-picker-search"');
+    const listbox = html.match(/<[a-zA-Z]+[^>]*role="listbox"[^>]*>/);
+    expect(listbox).not.toBeNull();
+    // Closed by default: the panel carries the `hidden` attribute and only
+    // opens on a trigger click.
+    expect(/\shidden(?:=""|=|\s|>)/.test(listbox![0])).toBe(true);
+  });
 });
 
 // Pull the opening tag of the element whose data-testid matches. Useful
