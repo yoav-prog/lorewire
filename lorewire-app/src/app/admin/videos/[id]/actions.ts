@@ -278,7 +278,13 @@ async function resolveShortDailyCap(): Promise<number> {
 
 export async function queueShortRender(
   storyId: string,
-  opts: { narrationStyle?: string | null; lengthPreset?: string | null } = {},
+  opts: {
+    narrationStyle?: string | null;
+    lengthPreset?: string | null;
+    /** Regenerate: discard a finished short for this vibe + length and run a
+     *  fresh full generation. Ignored when no short exists yet. */
+    force?: boolean;
+  } = {},
 ): Promise<QueueShortRenderResult> {
   const session = await requireAdmin();
 
@@ -306,6 +312,7 @@ export async function queueShortRender(
     narrationStyle,
     lengthPreset,
     session.userId,
+    { force: opts.force ?? false },
   );
 
   // eslint-disable-next-line no-console -- rule 14
@@ -314,6 +321,7 @@ export async function queueShortRender(
     user_id: session.userId,
     narration_style: narrationStyle,
     length_preset: lengthPreset,
+    force: opts.force ?? false,
     render_id: render.id,
     existing_status: render.status,
     recent_count: recentCount,

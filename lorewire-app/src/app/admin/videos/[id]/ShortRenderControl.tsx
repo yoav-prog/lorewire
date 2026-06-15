@@ -114,9 +114,14 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
   const handleGenerate = () => {
     setError(null);
     startTransition(async () => {
+      // force: a click always (re)generates. Without it, clicking with the same
+      // vibe + length as an existing finished short was an idempotent no-op, so
+      // the button looked dead. force discards the old short and runs a fresh
+      // generation; it's ignored when no short exists yet.
       const result = await queueShortRender(storyId, {
         narrationStyle: vibe,
         lengthPreset: length,
+        force: true,
       });
       if (!result.ok) {
         setError(
@@ -196,7 +201,11 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
           disabled={busy}
           className="rounded-md bg-accent px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
         >
-          {busy ? statusText(active) || "Queueing…" : "Generate short"}
+          {busy
+            ? statusText(active) || "Queueing…"
+            : active?.status === "done"
+              ? "Regenerate short"
+              : "Generate short"}
         </button>
       </div>
 

@@ -64,25 +64,39 @@ export function hashShortConfig(
 
 // Insert a queued row OR return/reset the existing one for (story_id,
 // config_hash). error/cancelled rows reset to queued so a click means "retry".
+// `force` (the Regenerate button) also resets a DONE row and clears its props
+// so it re-runs the FULL generation (new images + voice), not just a re-render
+// of the old props — that's how the admin makes a genuinely new short for the
+// same vibe + length. An in-flight row (queued/generating/rendering) is never
+// reset, even with force, so a click can't interrupt a running generation.
 export async function enqueueShortRender(
   storyId: string,
   narrationStyle: string | null,
   lengthPreset: string | null,
   requestedBy: string | null,
+  opts: { force?: boolean } = {},
 ): Promise<ShortRenderRow> {
+  const force = opts.force ?? false;
   const configHash = hashShortConfig(narrationStyle, lengthPreset);
   const existing = await one<ShortRenderRow>(
     `SELECT ${COLS} FROM short_renders WHERE story_id = ? AND config_hash = ?`,
     [storyId, configHash],
   );
   if (existing) {
-    if (existing.status === "error" || existing.status === "cancelled") {
+    const isFailed =
+      existing.status === "error" || existing.status === "cancelled";
+    const isDone = existing.status === "done";
+    if (isFailed || (force && isDone)) {
       const retryNow = new Date().toISOString();
+      // force = "make a brand new one": clear props so the row goes back
+      // through the generation drain. A plain failed-row retry keeps props so a
+      // render-stage failure re-renders without paying to re-generate.
+      const propsClause = force ? ", props = NULL" : "";
       await run(
         `UPDATE short_renders
            SET status = 'queued', phase = NULL, progress = 0, error = NULL,
                output_url = NULL, requested_by = ?, requested_at = ?,
-               started_at = NULL, finished_at = NULL, attempts = 0
+               started_at = NULL, finished_at = NULL, attempts = 0${propsClause}
          WHERE id = ? AND status = ?`,
         [requestedBy, retryNow, existing.id, existing.status],
       );
@@ -93,7 +107,7 @@ export async function enqueueShortRender(
       if (!reset) throw new Error("[short render queue] reset row missing");
       return reset;
     }
-    return existing; // idempotent hit on queued/rendering/done
+    return existing; // idempotent hit on in-flight, or done without force
   }
 
   const id = randomUUID();
