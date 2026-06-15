@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import json
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -175,6 +176,23 @@ SCHEMA_STATEMENTS = [
     # SQLite in _sqlite_rewrite; the duplicate-column error is caught in init().
     "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS props TEXT",
     "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0",
+    # 2026-06-15 short-render observability (mirror of video_render_events).
+    # One row per phase transition — the worker emits an event at every
+    # step (script_built, scene_generated, voice_synth_done, render_started,
+    # render_done, cancelled, failed) and the TS ShortRenderEventTimeline
+    # reads them via listShortRenderEvents for a timelapse-style log under
+    # the ShortRenderControl progress bar. Plan:
+    # _plans/2026-06-15-short-render-events-and-cancel.md.
+    """CREATE TABLE IF NOT EXISTS short_render_events (
+        id          TEXT PRIMARY KEY,
+        render_id   TEXT NOT NULL,
+        ts          TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        event       TEXT NOT NULL,
+        message     TEXT,
+        payload     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_short_render_events_render_id ON short_render_events(render_id, ts)",
     # 2026-06-12 asset re-render: image regen queue. The admin clicks
     # Regenerate on any of a story's or article's image assets; the Next
     # server action inserts a row here and the local
@@ -1482,6 +1500,52 @@ def fail_short_render(render_id: str, error_message: str) -> None:
         )
 
 
+def log_short_render_event(
+    render_id: str,
+    event: str,
+    *,
+    message: str | None = None,
+    level: str = "info",
+    payload: dict | None = None,
+) -> None:
+    """Insert one row into short_render_events. Fire-and-swallow: any error
+    is caught and dropped on the floor (observability MUST NEVER break the
+    render). Mirrors logShortRenderEvent in lib/short-render-queue.ts. The
+    Python worker is the primary writer because most phase work happens
+    there; the TS server actions also write the click-side events (queued,
+    idempotent_hit, cancelled). Plan:
+    _plans/2026-06-15-short-render-events-and-cancel.md.
+    """
+    try:
+        ev_id = uuid.uuid4().hex
+        ts = _now_iso()
+        payload_str = json.dumps(payload) if payload is not None else None
+        message_capped = (message or None) and message[:2000]
+        if _is_postgres():
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO short_render_events "
+                        "(id, render_id, ts, level, event, message, payload) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (ev_id, render_id, ts, level, event, message_capped, payload_str),
+                    )
+                conn.commit()
+            return
+        with _sqlite_conn() as c:
+            c.execute(
+                "INSERT INTO short_render_events "
+                "(id, render_id, ts, level, event, message, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ev_id, render_id, ts, level, event, message_capped, payload_str),
+            )
+    except Exception:
+        # Never propagate. A failing observability sink that crashed the
+        # render would be the worst possible regression on the very feature
+        # we're shipping. Mirror the TS helper's swallow.
+        pass
+
+
 # --- image_renders helpers (2026-06-12 asset re-render queue) -----------------
 # The Next admin enqueues an image regen via enqueueImageRegenAction; this
 # module's `claim_next_image_render` is what pipeline/image_render_worker.py
@@ -1848,7 +1912,6 @@ def voice_renders_drain_lock() -> _AdvisoryLock:
 # runs (no queue context set) call the same helper as a silent no-op.
 
 import contextvars as _ctxvars
-import uuid as _uuid
 
 _current_render_id: _ctxvars.ContextVar[str | None] = _ctxvars.ContextVar(
     "current_render_id", default=None,
@@ -1903,7 +1966,7 @@ def log_render_event(
     target = render_id if render_id is not None else _current_render_id.get()
     if target is None:
         return
-    row_id = str(_uuid.uuid4())
+    row_id = str(uuid.uuid4())
     ts = _now_iso()
     payload_json = json.dumps(payload) if payload is not None else None
     if _is_postgres():

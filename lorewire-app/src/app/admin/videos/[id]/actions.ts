@@ -377,6 +377,73 @@ export async function useShortAsStoryVideo(
   return { ok: true };
 }
 
+// ─── short_render events + Stop / Restart (2026-06-15) ───────────────────────
+// Plan: _plans/2026-06-15-short-render-events-and-cancel.md.
+// These are the click-side surfaces for the ShortRenderEventTimeline + Stop +
+// Restart buttons in ShortRenderControl. The bulk of event writes happen
+// Python-side from the worker; the actions write only the click-driven events.
+
+export async function listShortRenderEventsAction(
+  renderId: string,
+): Promise<import("@/lib/short-render-queue").ShortRenderEventRow[]> {
+  await requireAdmin();
+  if (!renderId) return [];
+  const { listShortRenderEvents } = await import("@/lib/short-render-queue");
+  const events = await listShortRenderEvents(renderId);
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short-events list]", {
+    render_id: renderId,
+    count: events.length,
+  });
+  return events;
+}
+
+export async function cancelShortRenderAction(
+  renderId: string,
+): Promise<{ ok: boolean; error?: string; status?: string }> {
+  const session = await requireAdmin();
+  if (!renderId) return { ok: false, error: "missing render_id" };
+  const { cancelShortRender } = await import("@/lib/short-render-queue");
+  const after = await cancelShortRender(renderId);
+  if (!after) return { ok: false, error: "render not found" };
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short-events cancel]", {
+    render_id: renderId,
+    user_id: session.userId,
+    status: after.status,
+    phase: after.phase,
+  });
+  revalidatePath(`/admin/videos/${after.story_id}`);
+  return { ok: true, status: after.status };
+}
+
+// Re-queue a settled short with the same config. Thin wrapper around
+// queueShortRender(force=true) so the UI's "Restart" button has a dedicated
+// surface separate from the in-flight Regenerate semantics. force=true clears
+// props so the generation drain re-runs; previous costs are not re-charged.
+export async function restartShortRenderAction(
+  storyId: string,
+  opts: {
+    narrationStyle?: string | null;
+    lengthPreset?: string | null;
+  } = {},
+): Promise<QueueShortRenderResult> {
+  // Delegate to queueShortRender — same auth + daily cap + idempotency story,
+  // just force=true. Cleaner than duplicating the logic; the click-side
+  // log distinguishes the surface via the action name above the queue call.
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short-events restart] entering queue", {
+    story_id: storyId,
+    narration_style: opts.narrationStyle ?? null,
+    length_preset: opts.lengthPreset ?? null,
+  });
+  return queueShortRender(storyId, {
+    narrationStyle: opts.narrationStyle ?? null,
+    lengthPreset: opts.lengthPreset ?? null,
+    force: true,
+  });
+}
+
 // ─── editSession actions (concurrency banner / heartbeat) ─────────────────────
 // Lightweight presence: write { user_id, started_at, heartbeat_at } onto the
 // config's _edit_session field on mount and re-stamp heartbeat_at every
