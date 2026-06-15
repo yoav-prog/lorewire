@@ -8,8 +8,15 @@
 //      strong — wins even when the row is soft-disabled; only the aspect
 //      filter at the bottom can still drop it)
 //   3. `video.intro_outro_enabled` explicitly off    -> null
-//   4. `video.active_<kind>_id` row + row is enabled -> that row
+//   4. `video.active_<kind>_id_<aspect>` row + enabled -> that row
 //   5. otherwise                                     -> null
+//
+// Per-aspect active (Phase of 2026-06-15-intro-outro-per-aspect-active.md): the
+// global active pointer is keyed by the STORY's aspect, so a 9:16 and a 16:9
+// segment can both be live and each render reads its own slot. The aspect
+// filter below still runs — it's redundant for this global path (the slot is
+// keyed by aspect) but load-bearing for the pinned path (an admin can pin a
+// wrong-aspect segment) and for a slot left stale by a worker re-probe.
 //
 // Aspect filter (Phase 3 of 2026-06-12-video-aspect-ratio.md): the picked
 // segment's `aspect` must match the story's resolved aspect, or it's dropped
@@ -21,6 +28,7 @@
 import "server-only";
 import {
   LEGACY_DEFAULT_ASPECT,
+  activeSegmentSettingKey,
   isVideoAspect,
   resolveAspect,
   type VideoAspect,
@@ -93,8 +101,11 @@ export async function pickSegmentPure(
   if (isExplicitlyOff(masterRaw))
     return { segment: null, reason: "master-disabled" };
 
-  // 4. Global active id.
-  const activeId = ((await getSetting(`video.active_${kind}_id`)) ?? "").trim();
+  // 4. Global active id for this story's aspect. Each aspect has its own
+  //    pointer (2026-06-15) so a wide and a tall segment can both be live.
+  const activeId = (
+    (await getSetting(activeSegmentSettingKey(kind, storyAspect))) ?? ""
+  ).trim();
   if (!activeId) return { segment: null, reason: "no-default" };
   const seg = await fetchSegment(activeId);
   if (!seg || !seg.enabled)

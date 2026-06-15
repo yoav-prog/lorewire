@@ -94,3 +94,36 @@ export function resolveAspect(
   if (globalDefault && isVideoAspect(globalDefault)) return globalDefault;
   return LEGACY_DEFAULT_ASPECT;
 }
+
+// ─── Per-aspect intro/outro active pointer keys ──────────────────────────────
+// 2026-06-15 (_plans/2026-06-15-intro-outro-per-aspect-active.md): the segment
+// library used a single global active pointer per kind
+// (`video.active_intro_id` / `video.active_outro_id`), so only one intro and
+// one outro could be live and the aspect filter then dropped it on every
+// mismatched render. "Active" is now per-aspect: each kind has one active
+// pointer per canvas shape. These helpers are the single source of truth for
+// the key strings; the admin actions, the resolver, and the seed migration all
+// route through them. MIRRORED in pipeline/aspect.py — the two MUST emit
+// identical strings (pinned in aspect.test.ts) or the TS reader and Python
+// writer would point at different settings rows.
+//
+// Suffix uses "x" not ":" — the colon is valid in a settings value but reads
+// poorly in a key, and "16x9" / "9x16" are unambiguous.
+const ASPECT_KEY_SUFFIX: Record<VideoAspect, string> = {
+  "16:9": "16x9",
+  "9:16": "9x16",
+};
+
+/** Settings key for the active intro/outro pointer of a kind + aspect. */
+export function activeSegmentSettingKey(
+  kind: "intro" | "outro",
+  aspect: VideoAspect,
+): string {
+  return `video.active_${kind}_id_${ASPECT_KEY_SUFFIX[aspect]}`;
+}
+
+/** The pre-2026-06-15 single global active pointer. Read once by the seed
+ *  migration to populate the per-aspect slots, then vestigial. */
+export function legacyActiveSegmentSettingKey(kind: "intro" | "outro"): string {
+  return `video.active_${kind}_id`;
+}

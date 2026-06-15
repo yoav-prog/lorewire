@@ -82,6 +82,13 @@ import {
 } from "@/lib/image-render-queue";
 import { sanitizeLabel } from "@/lib/segments-upload";
 import {
+  LEGACY_DEFAULT_ASPECT,
+  VIDEO_ASPECTS,
+  activeSegmentSettingKey,
+  isVideoAspect,
+  legacyActiveSegmentSettingKey,
+} from "@/lib/aspect";
+import {
   USER_CAPTION_PRESETS_SETTING_KEY,
   findBuiltInCaptionPreset,
   type CaptionPreset,
@@ -872,10 +879,6 @@ function parseKind(raw: unknown): SegmentKind | null {
   return raw === "intro" || raw === "outro" ? raw : null;
 }
 
-function activeKey(kind: SegmentKind): string {
-  return `video.active_${kind}_id`;
-}
-
 function redirectToSegments(params?: Record<string, string>): never {
   const search = new URLSearchParams(params);
   const qs = search.toString();
@@ -898,8 +901,12 @@ export async function setActiveSegmentAction(formData: FormData): Promise<void> 
   if (!seg || seg.kind !== kind) {
     redirectToSegments({ error: "segment-not-found" });
   }
-  await setSetting(activeKey(kind), id);
-  console.info(`[admin segments] set-active kind=${kind} id=${id}`);
+  // Write the slot matching the segment's OWN aspect (coalescing a NULL column
+  // to the 9:16 floor), never a requested one — so a 9:16 and a 16:9 segment
+  // each fill their own slot and can both be live.
+  const aspect = isVideoAspect(seg!.aspect) ? seg!.aspect : LEGACY_DEFAULT_ASPECT;
+  await setSetting(activeSegmentSettingKey(kind, aspect), id);
+  console.info(`[admin segments] set-active kind=${kind} aspect=${aspect} id=${id}`);
   revalidatePath("/admin/segments");
   revalidatePath("/admin/settings");
   redirectToSegments({ active: id });
@@ -937,14 +944,25 @@ export async function deleteSegmentAction(formData: FormData): Promise<void> {
   if (!seg) {
     redirectToSegments({ error: "segment-not-found" });
   }
-  // Clear the global active pointer if it pointed here, otherwise the next
-  // render would try to use a deleted id and fall back to no intro/outro
-  // silently. Also clear any per-story override that pinned this id so
-  // those stories revert to "use global active".
+  // Clear any active pointer that names this id, otherwise the next render
+  // would try a deleted id and fall back to no intro/outro silently. Check
+  // both per-aspect slots (a worker re-probe could have moved the segment's
+  // aspect after it was set active) plus the vestigial legacy key. Also clear
+  // any per-story override that pinned this id so those stories revert to "use
+  // the active segment for their aspect".
   const kind = seg!.kind as SegmentKind;
-  const currentActive = await getSetting(activeKey(kind));
-  if (currentActive === id) {
-    await setSetting(activeKey(kind), "");
+  let clearedActive = false;
+  for (const aspect of VIDEO_ASPECTS) {
+    const key = activeSegmentSettingKey(kind, aspect);
+    if ((await getSetting(key)) === id) {
+      await setSetting(key, "");
+      clearedActive = true;
+    }
+  }
+  const legacyKey = legacyActiveSegmentSettingKey(kind);
+  if ((await getSetting(legacyKey)) === id) {
+    await setSetting(legacyKey, "");
+    clearedActive = true;
   }
   const overrideCol =
     kind === "intro" ? "intro_segment_id" : "outro_segment_id";
@@ -954,7 +972,7 @@ export async function deleteSegmentAction(formData: FormData): Promise<void> {
   );
   await deleteSegment(id);
   console.info(
-    `[admin segments] delete kind=${kind} id=${id} cleared_active=${currentActive === id}`,
+    `[admin segments] delete kind=${kind} id=${id} cleared_active=${clearedActive}`,
   );
   revalidatePath("/admin/segments");
   revalidatePath("/admin/settings");
@@ -1068,13 +1086,30 @@ export async function regenerateVoiceoverAction(formData: FormData): Promise<{
   // asked for is the regen the worker performs. Mid-flight override
   // swap would be a confusing race.
   const { enqueueVoiceRender } = await import("@/lib/voice-render-queue");
-  const result = await enqueueVoiceRender({
-    storyId,
-    body,
-    voiceProvider: story.voice_provider,
-    voiceId: story.voice_id,
-    requestedBy: session.userId,
-  });
+  let result: Awaited<ReturnType<typeof enqueueVoiceRender>>;
+  try {
+    result = await enqueueVoiceRender({
+      storyId,
+      body,
+      voiceProvider: story.voice_provider,
+      voiceId: story.voice_id,
+      requestedBy: session.userId,
+    });
+  } catch (e) {
+    // A DB error here (e.g. the ON CONFLICT partial unique index missing in
+    // an under-migrated environment) must NOT throw out of the server
+    // action — an uncaught throw drops the whole editor into Next's error
+    // boundary ("This page couldn't load"). Return a friendly inline message
+    // the picker surfaces instead, and log the real cause for the operator.
+    console.error("[voice regen action] enqueue threw", {
+      story_id: storyId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return {
+      ok: false,
+      error: "Could not queue the voiceover. Please try again in a moment.",
+    };
+  }
   if (!result.ok) {
     console.warn("[voice regen action] enqueue failed", {
       story_id: storyId,

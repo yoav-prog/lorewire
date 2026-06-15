@@ -232,19 +232,21 @@ class ProcessSegmentTests(_SegmentsTestCase):
         self.assertEqual(after["enabled"], 1)
         self.assertIsNone(after["error"])
 
-        # First segment of its kind auto-activates so the admin doesn't have
-        # to click "Set as active" on a fresh install (matches the old
-        # uploadSegmentAction's behavior).
-        self.assertEqual(store.get_setting("video.active_intro_id"), "seg1")
+        # First segment of its kind+aspect auto-activates so the admin doesn't
+        # have to click "Set as active" on a fresh install (matches the old
+        # uploadSegmentAction's behavior). seg1 has no aspect column -> 9:16
+        # slot. The 16:9 slot stays empty — they're independent (2026-06-15).
+        self.assertEqual(store.get_setting("video.active_intro_id_9x16"), "seg1")
+        self.assertIsNone(store.get_setting("video.active_intro_id_16x9"))
 
         # Tmp workdir is cleaned up.
         self.assertFalse((self._tmp_root / "seg1").exists())
 
     def test_auto_activate_does_not_override_existing_pick(self):
-        # If an admin has already picked an active intro, a later upload
-        # MUST NOT clobber that choice — the user already made an explicit
-        # decision.
-        store.set_setting("video.active_intro_id", "older-pick")
+        # If an admin has already picked an active intro for this aspect, a
+        # later upload of the same aspect MUST NOT clobber that choice — the
+        # user already made an explicit decision. seg2 has no aspect -> 9:16.
+        store.set_setting("video.active_intro_id_9x16", "older-pick")
         row = self._row("seg2")
         def fake_download(url: str, dest: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -274,7 +276,9 @@ class ProcessSegmentTests(_SegmentsTestCase):
         )
 
         # Active id is the admin's earlier pick, not the just-uploaded seg2.
-        self.assertEqual(store.get_setting("video.active_intro_id"), "older-pick")
+        self.assertEqual(
+            store.get_setting("video.active_intro_id_9x16"), "older-pick"
+        )
         # Row itself still went ready.
         self.assertEqual(store.fetch_segment("seg2")["status"], "ready")
 
@@ -488,6 +492,14 @@ class ProbeAspectOverrideTests(_SegmentsTestCase):
         after = store.fetch_segment("seg-land")
         self.assertEqual(after["aspect"], "16:9")
         self.assertEqual(after["status"], "ready")
+        # Auto-activate keyed by the CORRECTED aspect (2026-06-15): the segment
+        # landed in the 16:9 slot, not the declared-9:16 slot. Writing the slot
+        # from the declared aspect instead of the probed one is the cheapest
+        # silent bug here, so pin it.
+        self.assertEqual(
+            store.get_setting("video.active_intro_id_16x9"), "seg-land"
+        )
+        self.assertIsNone(store.get_setting("video.active_intro_id_9x16"))
 
     def test_matching_aspect_leaves_column_untouched(self):
         # Declared and actual agree — no override, row aspect stays as-is.
@@ -558,6 +570,73 @@ class ProbeAspectOverrideTests(_SegmentsTestCase):
         self.assertEqual(normalize_calls, [("seg-port", "9:16")])
         after = store.fetch_segment("seg-port")
         self.assertEqual(after["aspect"], "9:16")
+
+
+class SeedActiveSegmentAspectTests(_SegmentsTestCase):
+    """2026-06-15: store.init() seeds the per-aspect active slots from the
+    pre-existing single active pointer so existing renders keep their branding
+    without a manual migration. Idempotent and fill-if-empty; mirror of
+    seedActiveSegmentAspect in lorewire-app/src/lib/db.ts."""
+
+    def _insert_ready(self, seg_id: str, aspect) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        row = {
+            "id": seg_id,
+            "kind": "intro",
+            "label": seg_id,
+            "source_url": "https://example.test/s.mp4",
+            "normalized_url": "https://example.test/s.norm.mp4",
+            "duration_ms": 4000,
+            "enabled": 1,
+            "status": "ready",
+            "error": None,
+            "uploaded_at": None,
+            "aspect": aspect,
+            "created_at": now,
+            "updated_at": now,
+        }
+        store.upsert_segment(row)
+
+    def test_seeds_legacy_pointer_into_matching_aspect_slot(self):
+        self._insert_ready("landscape", "16:9")
+        store.set_setting("video.active_intro_id", "landscape")
+        store._seed_active_segment_aspect()
+        self.assertEqual(
+            store.get_setting("video.active_intro_id_16x9"), "landscape"
+        )
+        # The other aspect's slot is untouched — they're independent.
+        self.assertIsNone(store.get_setting("video.active_intro_id_9x16"))
+
+    def test_null_aspect_legacy_row_seeds_the_9x16_slot(self):
+        # A row predating the aspect column stores NULL; the seed coalesces it
+        # to the legacy 9:16 floor, same as the resolver.
+        self._insert_ready("legacy", None)
+        store.set_setting("video.active_intro_id", "legacy")
+        store._seed_active_segment_aspect()
+        self.assertEqual(store.get_setting("video.active_intro_id_9x16"), "legacy")
+
+    def test_does_not_overwrite_a_slot_the_admin_already_filled(self):
+        self._insert_ready("old", "9:16")
+        self._insert_ready("new", "9:16")
+        store.set_setting("video.active_intro_id", "old")
+        store.set_setting("video.active_intro_id_9x16", "new")  # explicit pick
+        store._seed_active_segment_aspect()
+        self.assertEqual(store.get_setting("video.active_intro_id_9x16"), "new")
+
+    def test_dangling_legacy_pointer_is_skipped(self):
+        # The legacy key names a deleted segment — seeding it would just point a
+        # slot at a missing row, so the seed leaves the slots empty.
+        store.set_setting("video.active_intro_id", "ghost")
+        store._seed_active_segment_aspect()
+        self.assertIsNone(store.get_setting("video.active_intro_id_9x16"))
+        self.assertIsNone(store.get_setting("video.active_intro_id_16x9"))
+
+    def test_is_idempotent(self):
+        self._insert_ready("seg", "9:16")
+        store.set_setting("video.active_intro_id", "seg")
+        store._seed_active_segment_aspect()
+        store._seed_active_segment_aspect()
+        self.assertEqual(store.get_setting("video.active_intro_id_9x16"), "seg")
 
 
 class SweepAbandonedTests(_SegmentsTestCase):
