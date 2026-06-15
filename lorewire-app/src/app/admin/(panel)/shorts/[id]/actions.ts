@@ -26,6 +26,7 @@ import {
 } from "@/lib/repo";
 import {
   applyShortToStory,
+  latestDoneShortRenderForStory,
   latestShortRenderForStory,
   logShortRenderEvent,
   type ShortRenderRow,
@@ -86,7 +87,7 @@ async function loadCurrentConfig(
     return { ok: true, config: result.config };
   }
   // Cold start — seed from the most recent successful short_render.
-  const latest = await latestShortRenderForStory(storyId);
+  const latest = await latestDoneShortRenderForStory(storyId);
   if (!latest || latest.status !== "done") {
     return { ok: false, error: "no-short-yet" };
   }
@@ -340,7 +341,7 @@ export async function previewRenderPlan(storyId: string): Promise<{
   if (!cfg.ok) return { ok: false, error: cfg.error };
   // previewRenderPlan is read-only — no session gate so the banner can show
   // the current lane even while another admin is editing.
-  const baseline = await latestShortRenderForStory(storyId);
+  const baseline = await latestDoneShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return {
       ok: false,
@@ -374,7 +375,7 @@ export async function renderShortLaneA(
   if (!cfg.ok) return { ok: false, error: cfg.error };
   const sessionGate = assertSessionMine(cfg.config, session.userId);
   if (sessionGate) return sessionGate;
-  const baseline = await latestShortRenderForStory(storyId);
+  const baseline = await latestDoneShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
@@ -513,7 +514,7 @@ export async function renderShortLaneB(
   if (!cfg.ok) return { ok: false, error: cfg.error };
   const sessionGate = assertSessionMine(cfg.config, session.userId);
   if (sessionGate) return sessionGate;
-  const baseline = await latestShortRenderForStory(storyId);
+  const baseline = await latestDoneShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
@@ -655,7 +656,7 @@ export async function renderShortLaneC(
   if (!cfg.ok) return { ok: false, error: cfg.error };
   const sessionGate = assertSessionMine(cfg.config, session.userId);
   if (sessionGate) return sessionGate;
-  const baseline = await latestShortRenderForStory(storyId);
+  const baseline = await latestDoneShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
@@ -874,7 +875,7 @@ export async function applyLatestShortToStoryAction(
 ): Promise<{ ok: boolean; error?: string; url?: string }> {
   const session = await requireAdmin();
   if (!storyId) return { ok: false, error: "missing story_id" };
-  const latest = await latestShortRenderForStory(storyId);
+  const latest = await latestDoneShortRenderForStory(storyId);
   if (!latest) return { ok: false, error: "no short generated yet" };
   if (latest.status !== "done" || !latest.output_url) {
     return { ok: false, error: "latest short is not done" };
