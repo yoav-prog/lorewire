@@ -139,6 +139,32 @@ SCHEMA_STATEMENTS = [
     # Speeds up the worker's "claim oldest queued render" query — the
     # natural index on (story_id, config_hash) doesn't help that scan.
     "CREATE INDEX IF NOT EXISTS idx_video_renders_status_requested ON video_renders(status, requested_at)",
+    # 2026-06-15 article shorts: render queue for the 40-60s vertical doodle
+    # shorts (separate path from long-form video_renders so nothing existing
+    # breaks). The admin clicks "Generate short"; the Next action inserts a row
+    # here; pipeline/short_render_worker.py (and the Vercel cron) drains it.
+    # narration_style + length_preset capture the creation options; `phase`
+    # tracks the multi-step generation (script/plan/base/scene/render) so the
+    # worker resumes and the UI shows progress. Idempotent on
+    # (story_id, config_hash) like video_renders.
+    """CREATE TABLE IF NOT EXISTS short_renders (
+        id              TEXT PRIMARY KEY,
+        story_id        TEXT NOT NULL,
+        config_hash     TEXT NOT NULL,
+        narration_style TEXT,
+        length_preset   TEXT,
+        status          TEXT NOT NULL,
+        phase           TEXT,
+        progress        REAL DEFAULT 0,
+        error           TEXT,
+        output_url      TEXT,
+        requested_by    TEXT,
+        requested_at    TEXT NOT NULL,
+        started_at      TEXT,
+        finished_at     TEXT,
+        UNIQUE (story_id, config_hash)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_short_renders_status_requested ON short_renders(status, requested_at)",
     # 2026-06-12 asset re-render: image regen queue. The admin clicks
     # Regenerate on any of a story's or article's image assets; the Next
     # server action inserts a row here and the local
@@ -1094,6 +1120,228 @@ def fail_render(render_id: str, error_message: str) -> None:
 def _now_iso() -> str:
     import datetime
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+# --- short_renders helpers (2026-06-15 article shorts render queue) -----------
+# Mirrors the video_renders helpers above. The Next "Generate short" action
+# enqueues; pipeline/short_render_worker.py (and the Vercel cron) drain via
+# claim_next_short_render. Status: queued -> rendering -> done | error, with a
+# `phase` field (script/plan/base/scene/render) for the multi-step progress UI.
+# Idempotent on (story_id, config_hash).
+
+_SHORT_RENDER_COLUMNS = [
+    "id", "story_id", "config_hash", "narration_style", "length_preset",
+    "status", "phase", "progress", "error", "output_url",
+    "requested_by", "requested_at", "started_at", "finished_at",
+]
+
+
+def enqueue_short_render(
+    render_id: str,
+    story_id: str,
+    config_hash: str,
+    narration_style: str | None = None,
+    length_preset: str | None = None,
+    requested_by: str | None = None,
+) -> dict:
+    """Insert a queued short-render row OR return the existing one for the same
+    (story_id, config_hash). Idempotent so repeat clicks coalesce."""
+    now = _now_iso()
+    cols = ", ".join(_SHORT_RENDER_COLUMNS)
+    values = {
+        "id": render_id,
+        "story_id": story_id,
+        "config_hash": config_hash,
+        "narration_style": narration_style,
+        "length_preset": length_preset,
+        "status": "queued",
+        "phase": None,
+        "progress": 0,
+        "error": None,
+        "output_url": None,
+        "requested_by": requested_by,
+        "requested_at": now,
+        "started_at": None,
+        "finished_at": None,
+    }
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                placeholders = ", ".join(f"%({c})s" for c in _SHORT_RENDER_COLUMNS)
+                cur.execute(
+                    f"INSERT INTO short_renders ({cols}) VALUES ({placeholders}) "
+                    "ON CONFLICT (story_id, config_hash) DO NOTHING",
+                    values,
+                )
+                cur.execute(
+                    f"SELECT {cols} FROM short_renders "
+                    "WHERE story_id = %s AND config_hash = %s",
+                    (story_id, config_hash),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else {}
+    with _sqlite_conn() as c:
+        placeholders = ", ".join(f":{col}" for col in _SHORT_RENDER_COLUMNS)
+        c.execute(
+            f"INSERT OR IGNORE INTO short_renders ({cols}) VALUES ({placeholders})",
+            values,
+        )
+        row = c.execute(
+            f"SELECT {cols} FROM short_renders WHERE story_id=? AND config_hash=?",
+            (story_id, config_hash),
+        ).fetchone()
+        return dict(row) if row else {}
+
+
+def get_short_render(render_id: str) -> dict | None:
+    """Read one short-render row by id. The Next status endpoint polls this."""
+    cols = ", ".join(_SHORT_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {cols} FROM short_renders WHERE id = %s", (render_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(f"SELECT {cols} FROM short_renders WHERE id=?", (render_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def latest_short_render_for_story(story_id: str) -> dict | None:
+    """Most recently requested short render for a story (for the editor header)."""
+    cols = ", ".join(_SHORT_RENDER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM short_renders WHERE story_id = %s "
+                    "ORDER BY requested_at DESC LIMIT 1",
+                    (story_id,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM short_renders WHERE story_id=? "
+            "ORDER BY requested_at DESC LIMIT 1",
+            (story_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def claim_next_short_render() -> dict | None:
+    """Atomically claim the oldest queued short render and flip it to
+    'rendering'. Returns the claimed row, or None when the queue is empty."""
+    cols = ", ".join(_SHORT_RENDER_COLUMNS)
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE short_renders SET status = 'rendering', "
+                    "started_at = %s WHERE id = ("
+                    "SELECT id FROM short_renders WHERE status = 'queued' "
+                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    f") RETURNING {cols}",
+                    (now,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT id FROM short_renders WHERE status='queued' "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        c.execute(
+            "UPDATE short_renders SET status='rendering', started_at=? "
+            "WHERE id=? AND status='queued'",
+            (now, row["id"]),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {cols} FROM short_renders WHERE id=?", (row["id"],)
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def update_short_render_progress(
+    render_id: str, progress: float, phase: str | None = None
+) -> None:
+    """Update progress (0..1) and optionally the current phase label."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                if phase is not None:
+                    cur.execute(
+                        "UPDATE short_renders SET progress = %s, phase = %s WHERE id = %s",
+                        (progress, phase, render_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE short_renders SET progress = %s WHERE id = %s",
+                        (progress, render_id),
+                    )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        if phase is not None:
+            c.execute(
+                "UPDATE short_renders SET progress=?, phase=? WHERE id=?",
+                (progress, phase, render_id),
+            )
+        else:
+            c.execute(
+                "UPDATE short_renders SET progress=? WHERE id=?",
+                (progress, render_id),
+            )
+
+
+def finish_short_render(render_id: str, output_url: str) -> None:
+    """Mark a short render done."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE short_renders SET status='done', progress=1.0, phase='done', "
+                    "output_url=%s, finished_at=%s WHERE id=%s",
+                    (output_url, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE short_renders SET status='done', progress=1.0, phase='done', "
+            "output_url=?, finished_at=? WHERE id=?",
+            (output_url, now, render_id),
+        )
+
+
+def fail_short_render(render_id: str, error_message: str) -> None:
+    """Mark a short render failed."""
+    now = _now_iso()
+    capped = (error_message or "unknown error")[:2000]
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE short_renders SET status='error', error=%s, "
+                    "finished_at=%s WHERE id=%s",
+                    (capped, now, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE short_renders SET status='error', error=?, "
+            "finished_at=? WHERE id=?",
+            (capped, now, render_id),
+        )
 
 
 # --- image_renders helpers (2026-06-12 asset re-render queue) -----------------

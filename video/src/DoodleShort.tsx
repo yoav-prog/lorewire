@@ -320,6 +320,28 @@ const DoodleFrameImg: React.FC<{
   );
 };
 
+// Clean comic outline via a layered text-shadow ring. -webkit-text-stroke at
+// 5-6 px on a 900-weight font produced spiky miter overshoots at sharp letter
+// corners (R / A / B / N) and ate into the yellow fill (no paint-order set) —
+// that read as "weird shapes" on the glyphs. A ring of solid zero-blur shadows
+// is painted OUTSIDE the glyph, so the fill stays full and there are no spikes.
+// Two rings (full + half radius) keep the edge gap-free at any width.
+function outlineRing(width: number, color: string): string {
+  const layers: string[] = [];
+  for (const { r, steps } of [
+    { r: width, steps: 16 },
+    { r: width * 0.55, steps: 12 },
+  ]) {
+    for (let k = 0; k < steps; k++) {
+      const a = (k / steps) * Math.PI * 2;
+      layers.push(`${(Math.cos(a) * r).toFixed(2)}px ${(Math.sin(a) * r).toFixed(2)}px 0 ${color}`);
+    }
+  }
+  // Soft drop for a touch of lift against busy frames.
+  layers.push(`0 ${(width * 0.7).toFixed(1)}px ${width.toFixed(1)}px rgba(15,23,42,0.35)`);
+  return layers.join(", ");
+}
+
 const DoodleCaption: React.FC<{
   caption: ShortCaptionChunk;
   elapsedMs: number;
@@ -386,17 +408,10 @@ const DoodleCaption: React.FC<{
             lineHeight: style.lineHeight,
             textAlign: "center",
             color: style.color,
-            WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
-            // Single soft drop-shadow for depth, replacing the four
-            // directional offset shadows the original yt-studio look used.
-            // Each of those offsets painted a duplicate of the stroked
-            // glyph at +/-2.24 px on landscape — at small font sizes the
-            // offsets read as ghost outlines instead of fusing into the
-            // stroke. A single non-offset blur preserves the lifted feel
-            // without ever stepping outside the stroke. Portrait renders
-            // are functionally unchanged: the same blur reads as a hair
-            // of feathering inside the 6 px stroke.
-            textShadow: `0 0 2px ${style.outlineColor}`,
+            // Clean comic outline via the text-shadow ring (see outlineRing) —
+            // replaces -webkit-text-stroke, which spiked at sharp corners and
+            // ate the fill (the "weird shapes" on the glyphs).
+            textShadow: outlineRing(outlineWidth, style.outlineColor),
             maxWidth: "100%",
           }}
         >
@@ -486,12 +501,9 @@ const DoodleCaption: React.FC<{
           lineHeight: style.lineHeight,
           textAlign: "center",
           color: style.color,
-          WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
-          // Single soft drop-shadow — see the matching comment in the
-          // wordHighlight === "none" branch above for why the four
-          // directional offsets the original yt-studio look used got
-          // dropped.
-          textShadow: `0 0 2px ${style.outlineColor}`,
+          // Clean comic outline via the text-shadow ring (see outlineRing) —
+          // replaces the spiky -webkit-text-stroke.
+          textShadow: outlineRing(outlineWidth, style.outlineColor),
           maxWidth: "100%",
         }}
       >

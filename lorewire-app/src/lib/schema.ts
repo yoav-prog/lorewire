@@ -371,6 +371,31 @@ export const STORY_JOBS: Table = {
   ],
 };
 
+// 2026-06-15 article shorts render queue. Mirrors VIDEO_RENDERS; a separate
+// path for the 40-60s doodle shorts so nothing existing breaks. narration_style
+// + length_preset are the creation options; `phase` tracks the multi-step
+// generation (script/plan/base/scene/render). The UNIQUE (story_id, config_hash)
+// constraint + indexes live in pipeline/store.py (the schema authority).
+export const SHORT_RENDERS: Table = {
+  name: "short_renders",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "config_hash", type: "TEXT" },
+    { name: "narration_style", type: "TEXT" },
+    { name: "length_preset", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "phase", type: "TEXT" },
+    { name: "progress", type: "REAL" },
+    { name: "error", type: "TEXT" },
+    { name: "output_url", type: "TEXT" },
+    { name: "requested_by", type: "TEXT" },
+    { name: "requested_at", type: "TEXT" },
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -378,6 +403,7 @@ export const TABLES: Table[] = [
   VIDEO_SEGMENTS,
   VIDEO_RENDERS,
   VIDEO_RENDER_EVENTS,
+  SHORT_RENDERS,
   IMAGE_RENDERS,
   IMAGE_RENDER_EVENTS,
   ARTICLES,
