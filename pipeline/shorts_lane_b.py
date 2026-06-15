@@ -78,6 +78,15 @@ def build_short_props_lane_b(
     script = inputs["script"].strip()
     if not script:
         raise ValueError("Lane B inputs missing 'script' (or it is blank)")
+    # Min-length floor (defense in depth — TS action also checks). A
+    # 1-character script burns a TTS call for nothing useful; 10 chars
+    # is roughly two words, the smallest size where alignment chunking
+    # yields a usable caption.
+    if len(script) < 10:
+        raise ValueError(
+            f"Lane B script is too short for synthesis "
+            f"({len(script)}/10 chars minimum)"
+        )
 
     source_render_id = inputs["source_render_id"]
     baseline = store.get_short_render(source_render_id)
