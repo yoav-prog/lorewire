@@ -81,12 +81,25 @@ export function ShortPreviewPlayer({ config }: { config: ShortConfig }) {
     Math.ceil((videoConfig.duration_ms / 1000) * FPS),
   );
 
+  // PreviewComposition requires bodyDurationFrames + audioUrl as SEPARATE
+  // props (not derived from config.duration_ms / config.voiceover_url).
+  // Shorts carry no intro/outro and never trim, so bodyDurationFrames is
+  // just the full duration and there's no offset. Without
+  // bodyDurationFrames the body Series.Sequence renders with 0 frames →
+  // blank canvas. Without audioUrl the <Audio> inside the body never
+  // mounts → silent playback. Caught in prod after the initial preview
+  // ship.
+  const audioUrl = config.voiceover_url ?? null;
   const playerInputProps = useMemo(
     () => ({
       config: videoConfig,
       frameUrls,
+      audioUrl,
+      bodyDurationFrames: durationFrames,
+      intro: null,
+      outro: null,
     }),
-    [videoConfig, frameUrls],
+    [videoConfig, frameUrls, audioUrl, durationFrames],
   );
 
   return (
