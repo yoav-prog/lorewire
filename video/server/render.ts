@@ -130,11 +130,11 @@ export async function renderAndUploadStory(
   }
 
   // Build the Storage client once and reuse it for BOTH the segment
-  // downloads (splice path) and the final body upload. Same credentials,
-  // same env shape — see the long comment in the upload section below
-  // for why we reuse Vercel's GCS_CLIENT_EMAIL + GCS_PRIVATE_KEY pair
-  // instead of falling through to Cloud Run's metadata-server auth.
-  const storage = makeStorageClient();
+  // downloads (splice path) and the final body upload. ADC: the
+  // attached Cloud Run runtime service account (set via
+  // --service-account on deploy) carries the bucket IAM; the GCS
+  // client resolves credentials through the metadata server.
+  const storage = new Storage();
 
   const serveUrl = await getOrCreateBundle();
 
@@ -260,25 +260,6 @@ function sanitizeForFs(storyId: string): string {
 // `bodyPath` with the spliced output. The caller then uploads `bodyPath`
 // unchanged, so every existing path (URL shape, GCS key, cleanup) carries
 // over without modification.
-
-function makeStorageClient(): Storage {
-  // The .env shape stores GCS_PRIVATE_KEY with literal `\n` sequences
-  // (matches Vercel + pipeline/gcs.py + lib/gcs.ts); normalize to real
-  // newlines so the PEM parser accepts it.
-  const clientEmail = process.env.GCS_CLIENT_EMAIL;
-  const rawKey = process.env.GCS_PRIVATE_KEY;
-  if (!clientEmail || !rawKey) {
-    throw new Error(
-      "GCS_CLIENT_EMAIL and GCS_PRIVATE_KEY must be set (use the same values Vercel does)",
-    );
-  }
-  const privateKey = rawKey.includes("\\n")
-    ? rawKey.replace(/\\n/g, "\n")
-    : rawKey;
-  return new Storage({
-    credentials: { client_email: clientEmail, private_key: privateKey },
-  });
-}
 
 function spliceLog(event: string, fields: Record<string, unknown>): void {
   console.info(`[cloud-run splice ${event}]`, JSON.stringify(fields));

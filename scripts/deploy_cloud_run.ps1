@@ -107,14 +107,13 @@ try {
     & $gcloud run deploy lorewire-render `
         --source . `
         --region $region `
-        --memory 4Gi `
-        --cpu 2 `
+        --memory 16Gi `
+        --cpu 8 `
         --timeout 3600 `
         --no-allow-unauthenticated `
+        --service-account $saEmail `
         --update-env-vars CRON_SECRET=$cronSecret `
-        --update-env-vars GCS_BUCKET=$bucket `
-        --update-env-vars GCS_CLIENT_EMAIL=$saEmail `
-        --update-env-vars "GCS_PRIVATE_KEY=$privateKey"
+        --update-env-vars GCS_BUCKET=$bucket
     if ($LASTEXITCODE -ne 0) { throw "deploy failed" }
 } finally {
     Pop-Location
