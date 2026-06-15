@@ -1,9 +1,8 @@
 "use client";
 
 // Sticky banner above the tabs showing the current render lane + estimated
-// cost + "Render after edits" button. Phase 2 ships Lane A as executable;
-// Lanes B / C surface with a "needs Phase X" disabled button so the admin
-// sees the cost story but isn't blocked into a partial render.
+// cost + "Render after edits" button. Phase 4 ships all three lanes
+// executable (A captions-only, B voice+assembly, C per-scene+assembly).
 //
 // Polls previewRenderPlan after every saved patch (via the parent's
 // configKey prop) so the banner reflects the latest diff against the
@@ -19,6 +18,7 @@ import {
   previewRenderPlan,
   renderShortLaneA,
   renderShortLaneB,
+  renderShortLaneC,
 } from "./actions";
 
 const LANE_LABEL: Record<ShortRenderPlan["lane"], string> = {
@@ -28,13 +28,27 @@ const LANE_LABEL: Record<ShortRenderPlan["lane"], string> = {
   C: "Lane C · per-scene",
 };
 
-const LANE_PHASE_HINT: Record<Exclude<ShortRenderPlan["lane"], "A" | "B" | "noop">, string> = {
-  C: "Phase 4 will execute this",
-};
-
 function formatCents(cents: number): string {
   if (cents === 0) return "free";
   return `~$${(cents / 100).toFixed(2)}`;
+}
+
+function renderTooltip(
+  lane: ShortRenderPlan["lane"],
+  plan: ShortRenderPlan,
+): string {
+  const cost = `~$${(plan.estimated_cost_cents / 100).toFixed(2)}`;
+  if (lane === "A") {
+    return `Re-render the assembly with the new captions (${cost})`;
+  }
+  if (lane === "B") {
+    return `Resynthesize voice + re-render (${cost})`;
+  }
+  if (lane === "C") {
+    const n = plan.touched_scene_ids.length;
+    return `Regenerate ${n} scene${n === 1 ? "" : "s"} + re-render assembly (${cost})`;
+  }
+  return cost;
 }
 
 export function RenderAfterEditsBanner({
@@ -81,7 +95,7 @@ export function RenderAfterEditsBanner({
   // The banner intentionally renders ALWAYS — even on noop — so the user
   // sees the (idle) cost story. It just disables the button.
   const lane = plan?.lane ?? "noop";
-  const ready = lane === "A" || lane === "B";
+  const ready = lane === "A" || lane === "B" || lane === "C";
 
   function onRender() {
     if (!ready) return;
@@ -89,9 +103,11 @@ export function RenderAfterEditsBanner({
     setPendingRender(true);
     startTransition(async () => {
       const r =
-        lane === "B"
-          ? await renderShortLaneB(storyId)
-          : await renderShortLaneA(storyId);
+        lane === "C"
+          ? await renderShortLaneC(storyId)
+          : lane === "B"
+            ? await renderShortLaneB(storyId)
+            : await renderShortLaneA(storyId);
       setPendingRender(false);
       if (!r.ok) {
         setActionError(r.error ?? "render failed to queue");
@@ -126,30 +142,15 @@ export function RenderAfterEditsBanner({
         )}
       </div>
 
-      {(lane === "A" || lane === "B") && (
+      {ready && plan && (
         <button
           type="button"
           onClick={onRender}
           disabled={pendingRender}
           className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
-          title={
-            lane === "A"
-              ? `Re-render the assembly with the new captions (~$${(plan!.estimated_cost_cents / 100).toFixed(2)})`
-              : `Resynthesize voice + re-render (~$${(plan!.estimated_cost_cents / 100).toFixed(2)})`
-          }
+          title={renderTooltip(lane, plan)}
         >
           {pendingRender ? "Queueing…" : "Render after edits"}
-        </button>
-      )}
-
-      {lane === "C" && (
-        <button
-          type="button"
-          disabled
-          title={LANE_PHASE_HINT.C}
-          className="rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-muted opacity-60"
-        >
-          Needs Phase 4
         </button>
       )}
 

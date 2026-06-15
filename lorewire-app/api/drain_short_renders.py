@@ -31,7 +31,7 @@ _LIB = _HERE / "_lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from pipeline import shorts_lane_b, shorts_render, store  # noqa: E402
+from pipeline import shorts_lane_b, shorts_lane_c, shorts_render, store  # noqa: E402
 
 LOG = logging.getLogger("drain_short")
 LOG.setLevel(logging.INFO)
@@ -116,6 +116,29 @@ def run_drain() -> dict:
             elapsed = round(time.monotonic() - start, 2)
             _log("ready", id=render_id, elapsed_s=elapsed, lane="B")
             return {"generated": 1, "render_id": render_id, "elapsed_s": elapsed, "lane": "B"}
+
+        if lane == "C":
+            # Lane C (Phase 4): per-scene partial re-render. Regenerates each
+            # touched_frame_ids[i] via kie i2i (preserving identity via the
+            # character_base_url stored on short_config), then assembles props
+            # by merging the freshly-regen'd urls into the baseline frame
+            # order. Voice + captions + character + duration come from the
+            # baseline untouched.
+            laneC = shorts_lane_c.build_short_props_lane_c(
+                claimed, REPO_ROOT, remote=True, on_progress=on_progress,
+            )
+            store.store_short_props(render_id, json.dumps(laneC.props))
+            shorts_lane_c.clear_lane(render_id)
+            elapsed = round(time.monotonic() - start, 2)
+            _log("ready", id=render_id, elapsed_s=elapsed, lane="C",
+                 regen_count=laneC.regen_count)
+            return {
+                "generated": 1,
+                "render_id": render_id,
+                "elapsed_s": elapsed,
+                "lane": "C",
+                "regen_count": laneC.regen_count,
+            }
 
         built = shorts_render.build_short_props(
             claimed["story_id"], REPO_ROOT,
