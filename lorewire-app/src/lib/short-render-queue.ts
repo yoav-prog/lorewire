@@ -92,20 +92,43 @@ export async function enqueueShortRender(
       // through the generation drain. A plain failed-row retry keeps props so a
       // render-stage failure re-renders without paying to re-generate.
       const propsClause = force ? ", props = NULL" : "";
+      const previousStatus = existing.status;
       await run(
         `UPDATE short_renders
            SET status = 'queued', phase = NULL, progress = 0, error = NULL,
                output_url = NULL, requested_by = ?, requested_at = ?,
                started_at = NULL, finished_at = NULL, attempts = 0${propsClause}
          WHERE id = ? AND status = ?`,
-        [requestedBy, retryNow, existing.id, existing.status],
+        [requestedBy, retryNow, existing.id, previousStatus],
       );
       const reset = await one<ShortRenderRow>(
         `SELECT ${COLS} FROM short_renders WHERE id = ?`,
         [existing.id],
       );
       if (!reset) throw new Error("[short render queue] reset row missing");
+      // Emit the right reset event so the timeline shows what just happened.
+      // `forced_done_reset` is its own event because "the user wanted a brand
+      // new short" is a different signal from "retry a failure"; both bypass
+      // idempotency but the cost story is different (force reruns generation).
+      const event = force && isDone
+        ? "forced_done_reset"
+        : existing.status === "error"
+          ? "reset_from_error"
+          : "reset_from_cancelled";
+      await logShortRenderEvent(reset.id, event, {
+        message: `Reset from ${previousStatus} to queued`,
+        payload: { previous_status: previousStatus, force, cleared_props: force },
+      });
       return reset;
+    }
+    if (force && (existing.status === "queued" || existing.status === "generating" || existing.status === "rendering")) {
+      // Force on an in-flight row is the surface the Restart button hits when
+      // the user clicks twice. Don't reset, but log the no-op so the timeline
+      // surfaces "I tried to restart while already running."
+      await logShortRenderEvent(existing.id, "idempotent_hit", {
+        message: "Restart click ignored (already in flight)",
+        payload: { current_status: existing.status, current_phase: existing.phase },
+      });
     }
     return existing; // idempotent hit on in-flight, or done without force
   }
@@ -124,6 +147,14 @@ export async function enqueueShortRender(
     [id],
   );
   if (!fresh) throw new Error("[short render queue] insert row missing");
+  await logShortRenderEvent(id, "queued", {
+    message: "Short render request received",
+    payload: {
+      narration_style: narrationStyle,
+      length_preset: lengthPreset,
+      config_hash_prefix: configHash.slice(0, 8),
+    },
+  });
   return fresh;
 }
 
@@ -150,6 +181,10 @@ export async function claimNextShortRender(): Promise<ShortRenderRow | null> {
   );
   if (!fresh) return null;
   if (fresh.status !== "rendering" || fresh.started_at !== now) return null;
+  await logShortRenderEvent(fresh.id, "claimed", {
+    message: "Render claimed by cron",
+    payload: { started_at: now },
+  });
   return fresh;
 }
 
@@ -214,6 +249,10 @@ export async function finishShortRender(
      WHERE id = ? AND status = 'rendering'`,
     [outputUrl, now, renderId],
   );
+  await logShortRenderEvent(renderId, "finished", {
+    message: "Short render done",
+    payload: { url: outputUrl },
+  });
 }
 
 export async function failShortRender(
@@ -227,6 +266,11 @@ export async function failShortRender(
      WHERE id = ? AND status = 'rendering'`,
     [capped, now, renderId],
   );
+  await logShortRenderEvent(renderId, "failed", {
+    level: "error",
+    message: "Short render failed",
+    payload: { error: capped },
+  });
 }
 
 // Point the story's published video at a finished short, so the article serves
@@ -242,4 +286,137 @@ export async function applyShortToStory(
     new Date().toISOString(),
     storyId,
   ]);
+}
+
+// ─── per-row event timeline (2026-06-15 progress log + Stop / Restart) ───────
+// Direct port of the video-render-events helpers (lib/video-render-queue.ts:
+// 395-486). One row per phase transition along the short's lifecycle —
+// queued, script_built, character_built, scene_generated, voice_synth_done,
+// render_started, render_done, cancelled, failed. The TS UI reads via
+// listShortRenderEvents and renders a timelapse log under the
+// ShortRenderControl progress bar.
+//
+// Writers live on both sides of the orchestrator: TS server actions write
+// click-side events (queued, idempotent_hit, reset_from_error, cancelled,
+// restart) and the Python worker (pipeline/short_render_worker.py) writes
+// every phase transition during generation + render.
+//
+// Why a separate events table vs piling everything onto the short_renders
+// row: the row reflects LATEST state (one error string, one progress
+// fraction), not history. The events table is append-only and ordered, so
+// the user sees the sequence: "click → reset → claim → script_built →
+// scene 5/12 → render_started → finish". When something goes wrong the
+// failing step's payload (HTTP status, error text) is preserved.
+
+export type ShortRenderEventLevel = "info" | "warn" | "error";
+
+export interface ShortRenderEventRow {
+  id: string;
+  render_id: string;
+  ts: string;
+  level: ShortRenderEventLevel;
+  event: string;
+  message: string | null;
+  /** JSON-encoded structured payload; UI parses + displays inline. */
+  payload: string | null;
+}
+
+const EVENT_COLS = "id, render_id, ts, level, event, message, payload";
+
+/**
+ * Append one event to the timeline for a short_render row. Cheap (~1 ms on
+ * SQLite, ~5 ms on Postgres). Swallows write errors because event logging
+ * must never break the orchestrator's main path. Mirrors
+ * `logVideoRenderEvent` exactly.
+ */
+export async function logShortRenderEvent(
+  renderId: string,
+  event: string,
+  opts: {
+    message?: string;
+    level?: ShortRenderEventLevel;
+    payload?: Record<string, unknown>;
+  } = {},
+): Promise<void> {
+  const id = randomUUID();
+  const ts = new Date().toISOString();
+  const level = opts.level ?? "info";
+  const message = opts.message ?? null;
+  const payload =
+    opts.payload === undefined ? null : JSON.stringify(opts.payload);
+  try {
+    await run(
+      `INSERT INTO short_render_events
+         (id, render_id, ts, level, event, message, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, renderId, ts, level, event, message, payload],
+    );
+  } catch (e) {
+    // Don't let logging take down the render path. The bracketed console
+    // log on the call site still fires elsewhere so the data isn't lost —
+    // only the user-facing timeline misses a row.
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short render queue] event log failed", {
+      render_id: renderId,
+      event,
+      err: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+/**
+ * Read the event timeline for one short_render row in chronological order
+ * (oldest first). 200 is more than enough for a short's lifecycle (typical:
+ * 15-25 events; failed-and-retried: ~35).
+ */
+export async function listShortRenderEvents(
+  renderId: string,
+  limit = 200,
+): Promise<ShortRenderEventRow[]> {
+  return all<ShortRenderEventRow>(
+    `SELECT ${EVENT_COLS} FROM short_render_events
+     WHERE render_id = ?
+     ORDER BY ts ASC LIMIT ?`,
+    [renderId, limit],
+  );
+}
+
+/**
+ * Cancel a queued or in-flight short_render. Status-gated: only flips
+ * `queued` and `generating` rows to `cancelled`; `rendering` (Cloud Run
+ * has the MP4 in flight, no clean abort), `done`, `error`, and already
+ * `cancelled` are no-ops that return their existing status. Idempotent.
+ *
+ * Returns the row's status AFTER the call so the caller (server action /
+ * Python worker) can decide whether to log an event or refuse a button
+ * press. Logs a `cancelled` event on the transition.
+ *
+ * Mirrors the image-render cancel pattern (lib/image-render-queue.ts:
+ * cancelImageRender) — same idiom, scoped to shorts.
+ */
+export async function cancelShortRender(
+  renderId: string,
+): Promise<ShortRenderRow | null> {
+  const row = await getShortRender(renderId);
+  if (!row) return null;
+  if (row.status !== "queued" && row.status !== "generating") {
+    // Outside the cancel window. Caller decides how to render the button
+    // state from the returned row (hide / disable / show "already done").
+    return row;
+  }
+  const now = new Date().toISOString();
+  await run(
+    `UPDATE short_renders
+       SET status = 'cancelled', finished_at = ?
+     WHERE id = ? AND status IN ('queued', 'generating')`,
+    [now, renderId],
+  );
+  const after = await getShortRender(renderId);
+  if (after && after.status === "cancelled") {
+    await logShortRenderEvent(renderId, "cancelled", {
+      message: "Cancelled by admin",
+      payload: { previous_status: row.status, previous_phase: row.phase },
+    });
+  }
+  return after;
 }

@@ -12,9 +12,11 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
+  cancelShortRenderAction,
   getShortRenderStatusAction,
   latestShortRenderAction,
   queueShortRender,
+  restartShortRenderAction,
   useShortAsStoryVideo,
 } from "./actions";
 import {
@@ -24,6 +26,7 @@ import {
   NARRATION_VIBES,
 } from "@/lib/shorts-options";
 import type { ShortRenderRow } from "@/lib/short-render-queue";
+import { ShortRenderEventTimeline } from "@/app/admin/(panel)/_components/ShortRenderEventTimeline";
 
 const POLL_MS = 2500;
 
@@ -135,6 +138,64 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
     });
   };
 
+  // Stop: cancel the in-flight short. Status-gated server-side (only queued /
+  // generating rows get flipped; rendering is past the cancel window). The
+  // worker checks status before each phase and aborts cleanly — see
+  // _plans/2026-06-15-short-render-events-and-cancel.md.
+  const handleStop = () => {
+    if (!active?.id) return;
+    setError(null);
+    const renderId = active.id;
+    startTransition(async () => {
+      const result = await cancelShortRenderAction(renderId);
+      if (!result.ok) {
+        setError(result.error ?? "Cancel failed");
+        return;
+      }
+      // Refresh status so the button set updates without waiting for the
+      // next poll tick (cancel is fast; users expect an instant response).
+      const next = await getShortRenderStatusAction(renderId);
+      if (next) setActive(next);
+    });
+  };
+
+  // Restart: re-queue a settled (done / error / cancelled) row. Same config
+  // (vibe + length), force=true so generation runs fresh.
+  const handleRestart = () => {
+    setError(null);
+    startTransition(async () => {
+      const result = await restartShortRenderAction(storyId, {
+        narrationStyle: vibe,
+        lengthPreset: length,
+      });
+      if (!result.ok) {
+        setError(
+          result.error === "daily-cap-exceeded"
+            ? `Daily short cap (${result.capLimit}) reached: ${result.capCount} in the last 24h. Bump shorts.daily_renders_per_story to lift it.`
+            : (result.error ?? "Restart failed"),
+        );
+        return;
+      }
+      if (result.render) setActive(result.render);
+    });
+  };
+
+  // True when the row is in the cancel window — queued or generating. We hide
+  // Stop during `rendering` because Cloud Run has the MP4 in flight and there
+  // is no clean abort seam there (matches image-render cancel scope).
+  const canStop =
+    active !== null &&
+    (active.status === "queued" || active.status === "generating");
+
+  // True when the row is settled and Restart applies. `done` shows Restart
+  // alongside the rendered video; `error` and `cancelled` show Restart
+  // instead of the disabled-status text.
+  const isSettled =
+    active !== null &&
+    (active.status === "done" ||
+      active.status === "error" ||
+      active.status === "cancelled");
+
   const handleApply = () => {
     if (!active?.id) return;
     setApplyMsg(null);
@@ -195,18 +256,45 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
           </select>
         </label>
 
-        <button
-          type="button"
-          onClick={handleGenerate}
-          disabled={busy}
-          className="rounded-md bg-accent px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
-        >
-          {busy
-            ? statusText(active) || "Queueing…"
-            : active?.status === "done"
-              ? "Regenerate short"
-              : "Generate short"}
-        </button>
+        {inFlight ? (
+          <button
+            type="button"
+            disabled
+            className="rounded-md bg-accent/60 px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg disabled:cursor-wait"
+          >
+            {statusText(active) || "Queueing…"}
+          </button>
+        ) : isSettled ? (
+          <button
+            type="button"
+            onClick={handleRestart}
+            disabled={pending}
+            className="rounded-md bg-accent px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+          >
+            Restart
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={pending}
+            className="rounded-md bg-accent px-4 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+          >
+            Generate short
+          </button>
+        )}
+
+        {canStop && (
+          <button
+            type="button"
+            onClick={handleStop}
+            disabled={pending}
+            className="rounded-md border border-red-500/40 bg-bg px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-red-500 transition-colors hover:border-red-500 hover:bg-red-500/10 disabled:cursor-wait disabled:opacity-60"
+            title="Cancel the in-flight short. Anything already uploaded to GCS is kept for a future Restart."
+          >
+            Stop
+          </button>
+        )}
       </div>
 
       {inFlight && (
@@ -216,6 +304,17 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
             style={{ width: `${Math.max(4, Math.round((active?.progress ?? 0) * 100))}%` }}
           />
         </div>
+      )}
+
+      {/* Live event timeline with timelapse-elapsed column. Active while the
+          row is queued / generating / rendering; on settled rows it loads once
+          and stops polling. */}
+      {active?.id && (
+        <ShortRenderEventTimeline
+          renderId={active.id}
+          isActive={inFlight}
+          defaultOpen={inFlight}
+        />
       )}
 
       {error && <p className="font-mono text-[11px] text-red-500">{error}</p>}

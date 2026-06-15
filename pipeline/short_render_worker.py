@@ -11,6 +11,12 @@ the editor shows a live bar across the multi-step generation.
 
 run_one_tick(render_fn=...) takes an injected render callable so tests can drive
 the claim -> finish / claim -> fail paths without shelling out to Remotion.
+
+Cancellation: the admin Stop button flips short_renders.status to 'cancelled'.
+The on_progress callback re-reads the row before each phase and raises
+ShortRenderCancelled when it sees the cancel; the worker translates that into a
+clean abort (no finish, no fail event, status stays 'cancelled'). Plan:
+_plans/2026-06-15-short-render-events-and-cancel.md.
 """
 from __future__ import annotations
 
@@ -27,6 +33,16 @@ DEFAULT_POLL_SECONDS = 3
 
 RenderFn = Callable[[dict], dict]
 
+
+class ShortRenderCancelled(Exception):
+    """Raised inside the on_progress callback when the row has been moved to
+    'cancelled' status by the admin Stop button. The worker catches this
+    specifically (separate from generic exceptions) so a cancel never gets
+    recorded as a failure — the row stays in 'cancelled' status, a single
+    'cancelled' event lands on the timeline, and any partially-uploaded GCS
+    objects are kept (they're idempotent inputs to a future restart)."""
+
+
 # Coarse phase -> progress fraction for the UI bar. The `scene` phase reports
 # cur/total and animates across 0.15..0.75 (image generation is the bulk of the
 # work); the rest are single checkpoints.
@@ -40,15 +56,63 @@ _PHASE_FRACTION = {
     "done": 1.0,
 }
 
+# Human-readable lines emitted to the timeline on a phase transition. Indexed by
+# the same phase slug the callback receives; missing keys fall back to the slug.
+_PHASE_MESSAGE = {
+    "script": "Wrote narration script",
+    "plan": "Planned scene breakdown",
+    "base": "Generated base character",
+    "scene": "Generating scene",
+    "voice": "Synthesizing voiceover",
+    "stage": "Staging assets to GCS",
+    "render": "Sending to Cloud Run for render",
+    "done": "Render complete",
+}
+
 
 def _progress_for(render_id: str) -> Callable[[str, int, int], None]:
-    """Build an on_progress callback that persists progress for one render row."""
+    """Build an on_progress callback that:
+      1) persists progress (existing behavior, the UI bar)
+      2) emits a short_render_events row on each PHASE TRANSITION so the
+         timeline gets a timelapse entry rather than 20 identical "scene"
+         rows during image generation
+      3) checks short_renders.status and raises ShortRenderCancelled when the
+         admin has hit Stop — the cancellation seam.
+    """
+    last_phase = {"name": None}
+
     def cb(phase: str, cur: int = 0, total: int = 0) -> None:
+        # Cancellation check FIRST so even an aborted phase transition doesn't
+        # write a misleading event after the user already clicked Stop.
+        row = store.get_short_render(render_id)
+        if row and row.get("status") == "cancelled":
+            raise ShortRenderCancelled(
+                f"render {render_id} cancelled by admin at phase {phase}"
+            )
+
         if phase == "scene" and total > 0:
             frac = 0.15 + 0.60 * (cur / total)
         else:
             frac = _PHASE_FRACTION.get(phase, 0.0)
         store.update_short_render_progress(render_id, round(frac, 3), phase)
+
+        # Only emit on transition. Scene is the exception — we emit per-scene
+        # because the timelapse value is "scene 3/12 done" not "scene".
+        if phase == "scene" and total > 0:
+            store.log_short_render_event(
+                render_id,
+                "scene_generated",
+                message=f"Scene {cur}/{total} generated",
+                payload={"scene_index": cur, "scene_total": total},
+            )
+        elif phase != last_phase["name"]:
+            store.log_short_render_event(
+                render_id,
+                f"phase_{phase}",
+                message=_PHASE_MESSAGE.get(phase, phase),
+                payload={"phase": phase, "progress": round(frac, 3)},
+            )
+        last_phase["name"] = phase
     return cb
 
 
@@ -78,22 +142,51 @@ def run_one_tick(render_fn: RenderFn | None = None) -> bool:
         f"[short queue claim] story={claimed['story_id']} render={render_id} "
         f"narration={claimed.get('narration_style')} length={claimed.get('length_preset')}"
     )
+    store.log_short_render_event(
+        render_id,
+        "render_started",
+        message="Worker claimed the row",
+        payload={
+            "story_id": claimed["story_id"],
+            "narration_style": claimed.get("narration_style"),
+            "length_preset": claimed.get("length_preset"),
+        },
+    )
 
     try:
         result = rfn(claimed)
+    except ShortRenderCancelled as e:
+        # Clean abort: the row is already in 'cancelled' status (the TS Stop
+        # action flipped it). Don't fail-mark it; just log + return so the
+        # admin's intent stands.
+        print(f"[short queue cancelled] render={render_id} {e}")
+        return True
     except Exception as e:  # noqa: BLE001 — worker catches everything per-row
         traceback.print_exc()
-        store.fail_short_render(render_id, f"{type(e).__name__}: {e}")
-        print(f"[short queue error] render={render_id} {type(e).__name__}: {e}")
+        msg = f"{type(e).__name__}: {e}"
+        store.fail_short_render(render_id, msg)
+        store.log_short_render_event(
+            render_id, "failed", level="error",
+            message="Short render failed", payload={"error": msg[:500]},
+        )
+        print(f"[short queue error] render={render_id} {msg}")
         return True
 
     output_url = result.get("video_url") if isinstance(result, dict) else None
     if not output_url:
         store.fail_short_render(render_id, "render returned no video_url")
+        store.log_short_render_event(
+            render_id, "failed", level="error",
+            message="Render returned no video_url",
+        )
         print(f"[short queue error] render={render_id} no video_url returned")
         return True
 
     store.finish_short_render(render_id, output_url)
+    store.log_short_render_event(
+        render_id, "finished",
+        message="Short render done", payload={"url": output_url},
+    )
     print(f"[short queue done] render={render_id} url={output_url}")
     return True
 

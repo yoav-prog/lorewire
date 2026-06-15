@@ -412,6 +412,28 @@ export const SHORT_RENDERS: Table = {
   ],
 };
 
+// 2026-06-15 article shorts observability. Same shape + purpose as
+// VIDEO_RENDER_EVENTS — one row per phase transition (script_built,
+// scene_generated, voice_synth_done, render_started, render_done,
+// cancelled, failed). The TS UI reads via listShortRenderEvents and
+// renders a timelapse-style log under the ShortRenderControl progress
+// bar. Writers live on both sides: TS server actions (queued, cancelled,
+// idempotent_hit) and the Python worker + Cloud Run callback for every
+// generation + render phase. Plan:
+// _plans/2026-06-15-short-render-events-and-cancel.md.
+export const SHORT_RENDER_EVENTS: Table = {
+  name: "short_render_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "render_id", type: "TEXT" },
+    { name: "ts", type: "TEXT" },
+    { name: "level", type: "TEXT" },
+    { name: "event", type: "TEXT" },
+    { name: "message", type: "TEXT" },
+    { name: "payload", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -420,6 +442,7 @@ export const TABLES: Table[] = [
   VIDEO_RENDERS,
   VIDEO_RENDER_EVENTS,
   SHORT_RENDERS,
+  SHORT_RENDER_EVENTS,
   IMAGE_RENDERS,
   IMAGE_RENDER_EVENTS,
   ARTICLES,
@@ -479,4 +502,9 @@ export const POST_TABLE_DDL: string[] = [
   // constraint matching the ON CONFLICT specification"). Mirrors store.py.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_short_renders_story_config " +
     "ON short_renders(story_id, config_hash)",
+  // 2026-06-15 short-render observability. Mirrors idx_video_render_events_render_id
+  // — every read from the ShortRenderEventTimeline filters by render_id + orders by
+  // ts, and we expect ~15-25 events per short so the lookup is hot-pathed.
+  "CREATE INDEX IF NOT EXISTS idx_short_render_events_render_id " +
+    "ON short_render_events(render_id, ts)",
 ];
