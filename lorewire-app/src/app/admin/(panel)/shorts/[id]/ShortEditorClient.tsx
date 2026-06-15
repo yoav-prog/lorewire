@@ -1,20 +1,27 @@
 "use client";
 
 // Client-side shell for the short editor. Owns the tab bar + the active tab
-// content + the always-on Render After Edits banner. Phase 1 lit up Scenes;
-// Phase 2 adds Captions + the Lane A render path.
+// content + the always-on Render After Edits banner + (Phase 5) the
+// concurrency banner and the heartbeat hook.
 //
 // Plan: _plans/2026-06-16-short-editor-full-parity.md.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { ShortConfig } from "@/lib/short-config";
 import type { ShortRenderRow } from "@/lib/short-render-queue";
 import type { VoiceEntry } from "@/lib/voice-library";
+import { SHORT_EDIT_HEARTBEAT_INTERVAL_MS } from "@/lib/short-edit-session";
 import { CaptionsTab } from "./CaptionsTab";
+import { EditSessionBanner } from "./EditSessionBanner";
 import { RenderAfterEditsBanner } from "./RenderAfterEditsBanner";
 import { ScenesTab } from "./ScenesTab";
 import { ScriptTab } from "./ScriptTab";
 import { VoiceTab } from "./VoiceTab";
+import {
+  claimShortEditSession,
+  heartbeatShortEditSession,
+} from "./actions";
 
 type TabId = "scenes" | "script" | "captions" | "voice" | "render";
 
@@ -50,18 +57,74 @@ export function ShortEditorClient({
   initialConfig,
   initialRender,
   voices,
+  foreignOwnerEmail,
 }: {
   storyId: string;
   initialConfig: ShortConfig;
   initialRender: ShortRenderRow | null;
   voices: VoiceEntry[];
+  /** Set when the server render detected a foreign live session. The banner
+   *  renders only when this is non-null; the heartbeat hook stays dormant
+   *  until the take-over button is clicked (which calls router.refresh()
+   *  and we land cold again with foreignOwnerEmail=null). Phase 5. */
+  foreignOwnerEmail: string | null;
 }) {
+  const router = useRouter();
   const [tab, setTab] = useState<TabId>("scenes");
   const [config, setConfig] = useState<ShortConfig>(initialConfig);
   const configKey = useMemo(() => buildConfigKey(config), [config]);
 
+  // Heartbeat hook. We hold the session only while the banner is NOT up;
+  // a foreign session means the take-over UI is the explicit gate to
+  // start claiming.
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if (foreignOwnerEmail) return; // banner is up; don't claim
+
+    let cancelled = false;
+    const stamp = async () => {
+      try {
+        const result = await heartbeatShortEditSession(storyId);
+        if (!cancelled && !result.ok && result.error === "session-stolen") {
+          // Someone took over between heartbeats. Refresh so the page
+          // re-classifies + the banner pops up. Don't keep firing
+          // heartbeats over the new owner.
+          // eslint-disable-next-line no-console -- rule 14
+          console.info("[short editor session lost]", { storyId });
+          router.refresh();
+        }
+      } catch {
+        /* transient — try again next tick */
+      }
+    };
+
+    // Initial claim. Best-effort; the periodic heartbeat retries if this
+    // misses.
+    claimShortEditSession(storyId).catch(() => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor session claim failed]", { storyId });
+    });
+    heartbeatRef.current = setInterval(
+      stamp,
+      SHORT_EDIT_HEARTBEAT_INTERVAL_MS,
+    );
+
+    return () => {
+      cancelled = true;
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
+    };
+  }, [storyId, foreignOwnerEmail, router]);
+
   return (
     <div className="space-y-3">
+      <EditSessionBanner
+        storyId={storyId}
+        foreignOwnerEmail={foreignOwnerEmail}
+      />
+
       <RenderAfterEditsBanner storyId={storyId} configKey={configKey} />
 
       <nav
