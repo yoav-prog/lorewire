@@ -1,19 +1,19 @@
 """Article shorts — render assembly.
 
-Turns a story into a finished vertical short MP4:
-  read story text  -> pipeline.shorts.generate_short_assets (script + frames)
-  voiceover        -> pipeline.voice.synthesize
-  caption timing   -> pipeline.video._chunk_alignment (shared chunker)
-  stage frames     -> download the kie-hosted frames into video/public/<id>-short/
-  props + render   -> the DoodleShort composition (bottom captions, no in-frame
-                      motion) via `npx remotion render`
-  publish          -> pipeline.gcs.publish
+Two consumers, one generation core:
+  - LOCAL: render_short_from_db() builds props with staticFile-relative asset
+    paths (staged into video/public/<id>-short/) and runs `npx remotion render`.
+  - PROD:  build_short_props(remote=True) generates the assets, uploads the
+    frames + audio to GCS (the existing pipeline.gcs module), and returns props
+    with https:// URLs. The Vercel Python drain calls this, persists the props,
+    and the /api/render_short cron POSTs them to the SAME Cloud Run /render
+    endpoint the long-form video uses (DoodleShort renders any inputProps; its
+    resolveSrc accepts remote URLs).
 
-Mirrors pipeline.video.generate_video but sourced from the shorts generator and
-written under a separate `<id>-short` asset namespace so it never clobbers the
-long-form video. The queue worker (pipeline.short_render_worker) calls
-render_short_from_db; on_progress lets it persist per-phase progress between
-Vercel cron ticks.
+Generation: pipeline.shorts.generate_short_assets (script -> recurring character
+-> gpt-image-2-i2i scenes). Voice + caption timing reuse pipeline.voice +
+pipeline.video helpers. Asset id is `<story>-short` so it never clobbers the
+long-form video.
 """
 from __future__ import annotations
 
@@ -21,44 +21,60 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from pipeline import gcs, images, media, shorts, store, video, voice
 
-# Separate asset id from the long-form video so a story can have both.
+# Separate asset namespace from the long-form video so a story can have both.
 SHORT_ID_SUFFIX = "-short"
+# Captions sit low (~bottom third) for shorts, matching the channel reference.
+SHORT_CAPTION_POSITION_Y = 0.72
 
 ProgressFn = Callable[[str, int, int], None]
 
 
 def _story_body(row: dict) -> str:
-    """The text the script is written from. Prefer the full body; fall back to
-    the summary so a story without a body can still produce a short."""
+    """Text the script is written from. Prefer the body; fall back to summary."""
     return (row.get("body") or row.get("summary") or "").strip()
 
 
-def render_short_from_db(
+@dataclass
+class ShortProps:
+    """The DoodleShort props plus the staged asset id. `props` is the dict the
+    Remotion composition consumes (local staticFile paths or remote GCS URLs)."""
+    safe_id: str
+    props: dict
+
+
+def build_short_props(
     story_id: str,
     repo_root: Path,
     *,
     narration_style: str | None = None,
     length_preset: str | None = None,
+    remote: bool = False,
     on_progress: ProgressFn | None = None,
-) -> dict:
-    """Generate + render a short for an existing story. Returns
-    `{"video_url": ...}` on success, `{}` on a clean failure (logged)."""
+) -> ShortProps | None:
+    """Generate a short's assets and build its DoodleShort props.
+
+    remote=False stages assets into video/public/<id>-short/ as staticFile paths
+    (for a local `npx remotion render`). remote=True uploads the frames + audio
+    to GCS and emits https:// URLs (for the Cloud Run /render endpoint).
+    Returns None on a clean failure (logged)."""
     safe_story = media._sanitize_id(story_id)
     row = store.fetch_story(safe_story)
     if not row:
         print(f"[short id={safe_story}] no story with that id")
-        return {}
+        return None
     title = (row.get("title") or "").strip()
     body = _story_body(row)
     if not body:
         print(f"[short id={safe_story}] story has no body/summary text; skipping")
-        return {}
+        return None
 
     def progress(phase: str, cur: int = 0, total: int = 0) -> None:
         if on_progress:
@@ -73,53 +89,68 @@ def render_short_from_db(
     )
     if not assets.scenes:
         print(f"[short id={safe_story}] generator returned no scenes; skipping")
-        return {}
+        return None
 
     safe_id = safe_story + SHORT_ID_SUFFIX
-    video_project = repo_root / video.VIDEO_PROJECT_RELATIVE
-    static_dir = video_project / video.STATIC_DIR_RELATIVE / safe_id
-    if static_dir.exists():
-        shutil.rmtree(static_dir)
-    static_dir.mkdir(parents=True, exist_ok=True)
+    if remote:
+        # Vercel / Cloud Run filesystems are read-only except /tmp. In remote
+        # mode assets are staged to a tmp dir then uploaded to GCS, so the
+        # read-only video/public tree is never touched.
+        work_dir = Path(tempfile.mkdtemp(prefix=f"{safe_id}-"))
+    else:
+        work_dir = repo_root / video.VIDEO_PROJECT_RELATIVE / video.STATIC_DIR_RELATIVE / safe_id
+        if work_dir.exists():
+            shutil.rmtree(work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
 
     # 2) Voiceover over the spoken script + caption timing.
     progress("voice")
     spoken = re.sub(r"\s+", " ", assets.script.get("short_script", "")).strip()
-    audio_dest = static_dir / "voice.mp3"
-    vres = voice.synthesize(spoken, audio_dest)
-    alignment = vres.get("words") or []
-    captions = video._chunk_alignment(alignment)
+    audio_path = work_dir / "voice.mp3"
+    vres = voice.synthesize(spoken, audio_path)
+    captions = video._chunk_alignment(vres.get("words") or [])
     if not captions:
         print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
-        return {}
+        return None
     duration_ms = max(int(captions[-1]["end_ms"]), 1)
 
-    # 3) Stage frames: the scene URLs are remote (kie) so download them into the
-    #    static dir as staticFile-friendly relative paths. Base frame first.
+    # 3) Stage frames. Scene URLs are remote (kie) so download them first. For
+    #    remote mode, upload each frame + the audio to GCS and use those URLs;
+    #    for local mode, use staticFile-relative paths.
     progress("stage")
     frame_sources = [assets.base_url] + [s["url"] for s in assets.scenes]
-    static_images: list[str] = []
+    image_urls: list[str] = []
+    total = len(frame_sources)
     for i, url in enumerate(frame_sources):
         fname = f"frame-{i:02d}.png"
+        local = work_dir / fname
         try:
-            images.download(url, static_dir / fname)
+            images.download(url, local)
         except Exception as e:
             print(f"[short id={safe_id} stage] frame {i} download FAILED: {e}")
             continue
-        static_images.append(f"{safe_id}/{fname}")
-    if not static_images:
+        if remote:
+            image_urls.append(gcs.publish(local, f"{safe_id}/{fname}", url))
+        else:
+            image_urls.append(f"{safe_id}/{fname}")
+        progress("stage", i + 1, total)
+    if not image_urls:
         print(f"[short id={safe_id}] no frames staged; skipping")
-        return {}
-    static_audio = f"{safe_id}/{audio_dest.name}"
-    doodle_frames = video._distribute_frames(static_images, captions, duration_ms)
+        return None
 
-    # 4) Bottom-positioned karaoke captions (the shorts default), built on the
-    #    same resolved template as the long-form path so admin tuning still
-    #    applies. No in-frame motion: the variety is the varied scenes.
-    caption_template = {**video.resolve_caption_template(store.get_setting), "position_y": 0.72}
-    config = {
+    if remote:
+        audio_ref = gcs.publish(audio_path, f"{safe_id}/voice.mp3", str(audio_path))
+    else:
+        audio_ref = f"{safe_id}/voice.mp3"
+
+    doodle_frames = video._distribute_frames(image_urls, captions, duration_ms)
+    caption_template = {
+        **video.resolve_caption_template(store.get_setting),
+        "position_y": SHORT_CAPTION_POSITION_Y,
+    }
+    props = {
         "config_version": 2,
-        "voiceover_url": static_audio,
+        "voiceover_url": audio_ref,
         "title": video._truncate_title(title),
         "channel_name": "lorewire",
         "aspect": "9:16",
@@ -133,16 +164,44 @@ def render_short_from_db(
         "props_list": [],
         "character_image_mouth_removed": None,
     }
+    print(
+        f"[short id={safe_id} props] {len(captions)} caption chunks, "
+        f"{len(doodle_frames)} frames, {duration_ms/1000:.1f}s, remote={remote}"
+    )
+    return ShortProps(safe_id=safe_id, props=props)
+
+
+def render_short_from_db(
+    story_id: str,
+    repo_root: Path,
+    *,
+    narration_style: str | None = None,
+    length_preset: str | None = None,
+    on_progress: ProgressFn | None = None,
+) -> dict:
+    """LOCAL path: build props (staticFile assets) + `npx remotion render` +
+    publish the MP4. Returns {"video_url": ...} on success, {} on failure."""
+    built = build_short_props(
+        story_id, repo_root,
+        narration_style=narration_style,
+        length_preset=length_preset,
+        remote=False,
+        on_progress=on_progress,
+    )
+    if not built:
+        return {}
+
+    def progress(phase: str, cur: int = 0, total: int = 0) -> None:
+        if on_progress:
+            on_progress(phase, cur, total)
+
+    safe_id = built.safe_id
+    video_project = repo_root / video.VIDEO_PROJECT_RELATIVE
     props_dir = video_project / ".props"
     props_dir.mkdir(parents=True, exist_ok=True)
     props_path = props_dir / f"{safe_id}.json"
-    props_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    print(
-        f"[short id={safe_id} props] wrote {props_path.name} "
-        f"({len(captions)} caption chunks, {len(doodle_frames)} frames, {duration_ms/1000:.1f}s)"
-    )
+    props_path.write_text(json.dumps(built.props, indent=2), encoding="utf-8")
 
-    # 5) Render via the same Remotion composition + entry point as long-form.
     progress("render")
     out_dir = repo_root / media.PUBLIC_DIR_RELATIVE / safe_id
     out_dir.mkdir(parents=True, exist_ok=True)

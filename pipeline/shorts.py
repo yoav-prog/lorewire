@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable
 
@@ -31,6 +32,11 @@ from pipeline import images, llm, models, shorts_image_style as sis, shorts_narr
 # the character holds. Kept here (not hard-coded below) so the build can swap it.
 BASE_MODEL = "kie/gpt-image-2"
 SCENE_MODEL = "kie/gpt-image-2-i2i"
+
+# Concurrent scene (i2i) generations. Variants only depend on the base, so they
+# parallelize cleanly; ~8 keeps a ~14-scene short inside the Vercel drain's
+# ~300s budget (sequential would not fit).
+SCENE_CONCURRENCY = 8
 
 # Words/second the narration is sized against (shared with shorts_narration).
 WORDS_PER_SECOND = shorts_narration.WORDS_PER_SECOND
@@ -201,26 +207,41 @@ def generate_short_assets(
         model=BASE_MODEL,
     )
 
+    # Variants are independent edits of the base, so generate them concurrently
+    # to fit the Vercel drain's ~300s budget (sequential 14x i2i would blow it).
+    # Order is restored by the planned index after collection. Partial success:
+    # a failed scene is dropped, not fatal.
     char_ref = character[:200]
-    scenes: list[dict] = []
     total = len(planned)
-    for i, s in enumerate(planned):
-        progress("scene", i + 1, total)
-        try:
-            url = images.generate(
-                _scene_prompt(char_ref, s["scene"].strip()),
-                aspect_ratio="9:16",
-                resolution="1K",
-                image_input=[base_url],
-                model=SCENE_MODEL,
-            )
-        except Exception:
-            continue  # partial success — one bad scene shouldn't sink the short
-        scenes.append({
-            "caption_chunk_start_index": int(s.get("caption_chunk_start_index", i) or 0),
-            "scene": s["scene"].strip(),
-            "url": url,
-        })
+    done = 0
+    results: dict[int, dict] = {}
+
+    def _gen_one(i: int, s: dict) -> tuple[int, dict, str]:
+        url = images.generate(
+            _scene_prompt(char_ref, s["scene"].strip()),
+            aspect_ratio="9:16",
+            resolution="1K",
+            image_input=[base_url],
+            model=SCENE_MODEL,
+        )
+        return i, s, url
+
+    with ThreadPoolExecutor(max_workers=SCENE_CONCURRENCY) as ex:
+        futures = [ex.submit(_gen_one, i, s) for i, s in enumerate(planned)]
+        for fut in as_completed(futures):
+            done += 1
+            progress("scene", done, total)
+            try:
+                i, s, url = fut.result()
+            except Exception:
+                continue  # one bad scene shouldn't sink the short
+            results[i] = {
+                "caption_chunk_start_index": int(s.get("caption_chunk_start_index", i) or 0),
+                "scene": s["scene"].strip(),
+                "url": url,
+            }
+
+    scenes = [results[i] for i in sorted(results)]
 
     progress("done", total, total)
     return ShortAssets(
