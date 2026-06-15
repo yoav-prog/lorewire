@@ -39,8 +39,25 @@ import {
   planShortRender,
   type ShortRenderPlan,
 } from "@/lib/short-render-plan";
+import {
+  nextSessionFor,
+  readForeignSession,
+} from "@/lib/short-edit-session";
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
+
+// Phase 5 session check used by every mutating action. Returns null on
+// success (caller proceeds); a {ok:false, error} when a different admin
+// owns a still-fresh session. Stale sessions don't block — the next claim
+// will overwrite them.
+function assertSessionMine(
+  config: ShortConfig,
+  userId: string,
+): { ok: false; error: "session-stolen" } | null {
+  const read = readForeignSession(config, userId);
+  if (read.isForeign) return { ok: false, error: "session-stolen" };
+  return null;
+}
 
 async function loadCurrentConfig(
   storyId: string,
@@ -109,13 +126,15 @@ export async function saveShortConfigPatch(
   storyId: string,
   patch: Record<string, unknown>,
 ): Promise<{ ok: boolean; error?: string; config?: ShortConfig }> {
-  await requireAdmin();
+  const session = await requireAdmin();
   if (!storyId) return { ok: false, error: "missing story_id" };
   if (!patch || typeof patch !== "object") {
     return { ok: false, error: "patch must be an object" };
   }
   const current = await loadCurrentConfig(storyId);
   if (!current.ok) return { ok: false, error: current.error };
+  const sessionGate = assertSessionMine(current.config, session.userId);
+  if (sessionGate) return sessionGate;
   const patched = applyShortConfigPatch(current.config, patch);
   const validated = parseShortConfig(patched);
   if (!validated.ok) {
@@ -158,6 +177,8 @@ export async function regenShortScene(
 
   const current = await loadCurrentConfig(storyId);
   if (!current.ok) return { ok: false, error: current.error };
+  const sessionGate = assertSessionMine(current.config, session.userId);
+  if (sessionGate) return sessionGate;
   const frame = current.config.doodle_frames.find((f) => f.id === frameId);
   if (!frame) return { ok: false, error: "frame_id not found in short_config" };
   if (!current.config.character_base_url) {
@@ -232,6 +253,70 @@ export async function setFrameIsPinned(
   return { ok: true };
 }
 
+// ─── editSession actions (Phase 5 — concurrency banner / heartbeat) ────────
+// Direct port of the video editor's primitive (admin/videos/[id]/actions.ts:
+// claimEditSession / heartbeatEditSession). The session lives on
+// short_config._edit_session and is consulted by every mutating action — a
+// foreign live session causes saves to refuse with 'session-stolen' so the
+// banner can surface the conflict instead of silent clobbers.
+//
+// `claim` writes a new session (started_at = heartbeat_at = now); used on
+// editor mount and when the take-over button is clicked.
+// `heartbeat` only bumps heartbeat_at, keeping started_at stable.
+
+export interface ShortEditSessionResult {
+  ok: boolean;
+  error?: "story-not-found" | "no-short-yet" | "session-stolen" | string;
+}
+
+export async function claimShortEditSession(
+  storyId: string,
+): Promise<ShortEditSessionResult> {
+  const session = await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const cfg = await loadCurrentConfig(storyId);
+  if (!cfg.ok) return { ok: false, error: cfg.error };
+  const next = nextSessionFor(
+    cfg.config,
+    session.userId,
+    "claim",
+    new Date().toISOString(),
+  );
+  await setStoryShortConfigJson(storyId, JSON.stringify(next));
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor session claim]", {
+    story_id: storyId,
+    user_id: session.userId,
+  });
+  return { ok: true };
+}
+
+export async function heartbeatShortEditSession(
+  storyId: string,
+): Promise<ShortEditSessionResult> {
+  const session = await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const cfg = await loadCurrentConfig(storyId);
+  if (!cfg.ok) return { ok: false, error: cfg.error };
+
+  // Only bump heartbeat if this user owns the session — refusing on a
+  // foreign-owned session means the banner surfaces the conflict on next
+  // page render instead of the heartbeat silently stealing the session
+  // back from whoever just took over.
+  const current = cfg.config._edit_session;
+  if (current && current.user_id !== session.userId) {
+    return { ok: false, error: "session-stolen" };
+  }
+  const next = nextSessionFor(
+    cfg.config,
+    session.userId,
+    "heartbeat",
+    new Date().toISOString(),
+  );
+  await setStoryShortConfigJson(storyId, JSON.stringify(next));
+  return { ok: true };
+}
+
 // ─── Lane A render (Phase 2 — captions-only assembly re-render) ─────────────
 
 export async function previewRenderPlan(storyId: string): Promise<{
@@ -244,6 +329,8 @@ export async function previewRenderPlan(storyId: string): Promise<{
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
+  // previewRenderPlan is read-only — no session gate so the banner can show
+  // the current lane even while another admin is editing.
   const baseline = await latestShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return {
@@ -276,6 +363,8 @@ export async function renderShortLaneA(
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
+  const sessionGate = assertSessionMine(cfg.config, session.userId);
+  if (sessionGate) return sessionGate;
   const baseline = await latestShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
@@ -401,6 +490,8 @@ export async function renderShortLaneB(
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
+  const sessionGate = assertSessionMine(cfg.config, session.userId);
+  if (sessionGate) return sessionGate;
   const baseline = await latestShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
@@ -532,6 +623,8 @@ export async function renderShortLaneC(
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
+  const sessionGate = assertSessionMine(cfg.config, session.userId);
+  if (sessionGate) return sessionGate;
   const baseline = await latestShortRenderForStory(storyId);
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
@@ -677,9 +770,11 @@ export async function revertShortScene(
   storyId: string,
   frameId: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireAdmin();
+  const session = await requireAdmin();
   const current = await loadCurrentConfig(storyId);
   if (!current.ok) return { ok: false, error: current.error };
+  const sessionGate = assertSessionMine(current.config, session.userId);
+  if (sessionGate) return sessionGate;
   const frame = current.config.doodle_frames.find((f) => f.id === frameId);
   if (!frame) return { ok: false, error: "frame_id not found" };
   if (!frame.prev_image) {

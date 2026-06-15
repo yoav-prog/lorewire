@@ -8,8 +8,9 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/dal";
-import { getStory } from "@/lib/repo";
+import { getStory, getUserById } from "@/lib/repo";
 import { listVoices } from "@/lib/voice-library";
+import { readForeignSession } from "@/lib/short-edit-session";
 import { loadShortEditorState } from "./actions";
 import { ShortEditorClient } from "./ShortEditorClient";
 
@@ -18,7 +19,7 @@ export default async function ShortEditorPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  const session = await requireAdmin();
   const { id } = await params;
   const story = await getStory(id);
   if (!story) notFound();
@@ -65,10 +66,28 @@ export default async function ShortEditorPage({
           initialConfig={state.config!}
           initialRender={state.latestRender ?? null}
           voices={voices}
+          foreignOwnerEmail={await resolveForeignOwnerEmail(
+            state.config!,
+            session.userId,
+          )}
         />
       )}
     </div>
   );
+}
+
+// Phase 5: read the persisted edit-session and look up the foreign owner's
+// email when it's still fresh. Returns null when the current user owns the
+// session OR the session is stale OR no session was ever claimed — all of
+// which mean "no banner."
+async function resolveForeignOwnerEmail(
+  config: import("@/lib/short-config").ShortConfig,
+  currentUserId: string,
+): Promise<string | null> {
+  const read = readForeignSession(config, currentUserId);
+  if (!read.isForeign || !read.foreignUserId) return null;
+  const otherUser = await getUserById(read.foreignUserId);
+  return otherUser?.email ?? read.foreignUserId;
 }
 
 function NoShortYet({ error, storyId }: { error: string; storyId: string }) {
