@@ -38,6 +38,11 @@ export interface StoryRow {
   // pipeline writes it on first render OR the editor lands cold and derives
   // a default via defaultVideoConfig() in lib/video-config.ts.
   video_config: string | null;
+  // 2026-06-16 short editor: full ShortConfig v1 JSON (lib/short-config.ts).
+  // NULL until the short editor lands cold and seeds it from
+  // short_renders.props via defaultShortConfig(). Plan:
+  // _plans/2026-06-16-short-editor-full-parity.md.
+  short_config: string | null;
   tokens: number | null;
   cost_cents: number | null;
   created_at: string | null;
@@ -72,7 +77,7 @@ export interface StoryRow {
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
@@ -192,6 +197,44 @@ export async function setStoryConfigJson(
   );
   // eslint-disable-next-line no-console -- rule 14: observability from day one
   console.info("[video editor config persist]", {
+    story_id: storyId,
+    bytes: json.length,
+  });
+}
+
+// 2026-06-16 short editor: typed read/write helpers for stories.short_config.
+// The column stores a stringified ShortConfig v1 (see lib/short-config.ts).
+// Callers MUST parseShortConfig() the result before trusting the shape — a
+// row written by an older build or one the editor hasn't touched may not
+// match the current schema. Plan:
+// _plans/2026-06-16-short-editor-full-parity.md.
+
+export async function getStoryShortConfigJson(
+  storyId: string,
+): Promise<string | null> {
+  const r = await one<{ short_config: string | null }>(
+    "SELECT short_config FROM stories WHERE id = ?",
+    [storyId],
+  );
+  return r?.short_config ?? null;
+}
+
+// Persists a canonical JSON string into the short_config column and bumps
+// updated_at so dashboard ORDER BY updated_at picks up freshly-edited
+// shorts. Caller is responsible for validating through parseShortConfig()
+// first; passing raw JSON skips validation by design (the action layer is
+// the gate).
+export async function setStoryShortConfigJson(
+  storyId: string,
+  json: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE stories SET short_config = ?, updated_at = ? WHERE id = ?",
+    [json, now, storyId],
+  );
+  // eslint-disable-next-line no-console -- rule 14: observability from day one
+  console.info("[short editor config persist]", {
     story_id: storyId,
     bytes: json.length,
   });
