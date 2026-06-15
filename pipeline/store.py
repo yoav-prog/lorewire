@@ -1262,6 +1262,44 @@ def latest_short_render_for_story(story_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def count_short_renders_since(
+    since_iso: str, requested_by: str | None = None
+) -> int:
+    """Count short renders requested at/after `since_iso`, GLOBALLY (all stories).
+    Pass requested_by to scope the count (e.g. 'auto') so the auto-generate path
+    can cap only its own spend without counting manual admin clicks. Backs the
+    global daily cap in shorts_auto.maybe_enqueue_short_for_story."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                if requested_by is None:
+                    cur.execute(
+                        "SELECT COUNT(*) AS c FROM short_renders WHERE requested_at >= %s",
+                        (since_iso,),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT COUNT(*) AS c FROM short_renders "
+                        "WHERE requested_at >= %s AND requested_by = %s",
+                        (since_iso, requested_by),
+                    )
+                row = cur.fetchone()
+                return int(row["c"]) if row else 0
+    with _sqlite_conn() as c:
+        if requested_by is None:
+            row = c.execute(
+                "SELECT COUNT(*) AS c FROM short_renders WHERE requested_at >= ?",
+                (since_iso,),
+            ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT COUNT(*) AS c FROM short_renders "
+                "WHERE requested_at >= ? AND requested_by = ?",
+                (since_iso, requested_by),
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
+
 def claim_next_short_render() -> dict | None:
     """Atomically claim the oldest queued short render and flip it to
     'rendering'. Returns the claimed row, or None when the queue is empty.
@@ -1356,7 +1394,7 @@ def store_short_props(render_id: str, props_json: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE short_renders SET props = %s, status = 'queued', "
-                    "phase = 'ready', progress = 0.5 WHERE id = %s",
+                    "phase = 'ready', progress = 0.5, started_at = NULL WHERE id = %s",
                     (props_json, render_id),
                 )
             conn.commit()
@@ -1364,7 +1402,7 @@ def store_short_props(render_id: str, props_json: str) -> None:
     with _sqlite_conn() as c:
         c.execute(
             "UPDATE short_renders SET props=?, status='queued', phase='ready', "
-            "progress=0.5 WHERE id=?",
+            "progress=0.5, started_at=NULL WHERE id=?",
             (props_json, render_id),
         )
 

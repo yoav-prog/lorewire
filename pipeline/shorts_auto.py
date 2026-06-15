@@ -9,13 +9,22 @@ Settings keys (read via store.get_setting):
   shorts.auto.length          length preset id    (default standard)
   shorts.auto.category.<cat>  "on" | "off" | ""   per-category override
                                                   ("" / missing = inherit global)
+  shorts.auto.daily_cap       integer             global 24h cap on AUTO shorts
+                                                  (default 50; 0/blank = default)
 
 Default OFF so turning the feature on is an explicit, cost-aware choice (rule 8).
 Idempotent: enqueue is on (story_id, config_hash) and the hash matches the TS
 button's hashShortConfig, so the auto path and a manual click coalesce.
+
+Cost guard: the per-story cap on the manual button can't protect the auto path,
+which fires at most one short per story but across EVERY story a busy category
+produces. So the auto path enforces a GLOBAL rolling-24h cap on rows it requested
+(requested_by='auto') before enqueuing — a backfill of 200 stories can't quietly
+fire 200 paid generations (~$0.70 each).
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import uuid
@@ -29,6 +38,22 @@ GetSetting = Callable[[str], "str | None"]
 
 _ON = {"on", "1", "true", "yes"}
 _OFF = {"off", "0", "false", "no"}
+
+# Global rolling-24h ceiling on auto-generated shorts. Overridable via the
+# shorts.auto.daily_cap setting; a non-positive / unparseable override falls
+# back to this default.
+DEFAULT_AUTO_DAILY_CAP = 50
+
+
+def _resolve_auto_daily_cap(get_setting: GetSetting) -> int:
+    raw = (get_setting("shorts.auto.daily_cap") or "").strip()
+    if not raw:
+        return DEFAULT_AUTO_DAILY_CAP
+    try:
+        val = int(float(raw))
+    except ValueError:
+        return DEFAULT_AUTO_DAILY_CAP
+    return val if val > 0 else DEFAULT_AUTO_DAILY_CAP
 
 
 def hash_short_config(narration_style: str | None, length_preset: str | None) -> str:
@@ -76,6 +101,24 @@ def maybe_enqueue_short_for_story(
     cfg = resolve_short_auto_config(category, get_setting)
     if not cfg["enabled"]:
         return False
+
+    # Global cost guard: cap auto-requested shorts over a rolling 24h window.
+    # Counts only requested_by='auto' rows so manual admin clicks never eat into
+    # (or block) the auto budget. Once the cap is hit we skip entirely; a story
+    # whose auto short was already enqueued in-window is unaffected because its
+    # row already exists and will render regardless.
+    cap = _resolve_auto_daily_cap(get_setting)
+    since = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
+    ).isoformat()
+    recent = store.count_short_renders_since(since, requested_by=requested_by)
+    if recent >= cap:
+        print(
+            f"[shorts_auto cap] story={story_id} skipped: {recent} auto shorts in "
+            f"last 24h >= cap {cap} (raise shorts.auto.daily_cap to lift)"
+        )
+        return False
+
     config_hash = hash_short_config(cfg["narration"], cfg["length"])
     store.enqueue_short_render(
         str(uuid.uuid4()),
