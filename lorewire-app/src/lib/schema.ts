@@ -176,7 +176,10 @@ export const VIDEO_SEGMENTS: Table = {
 // `payload` as JSON validated by per-type Zod schemas at the repo boundary.
 // `language` is "he" or "en"; slug uniqueness is enforced per-language at the
 // query layer. `source_sheet_row_id` is reserved for Phase 3 Sheets import
-// idempotency; null for hand-authored articles.
+// idempotency; null for hand-authored articles. `story_id` is the optional
+// link to the Reddit-pipeline story whose short_render the article borrows
+// scene images from (hero/og/gallery promotion in the article editor); no FK
+// constraint, set explicitly by the admin via the LinkedStoryWidget.
 export const ARTICLES: Table = {
   name: "articles",
   columns: [
@@ -194,6 +197,7 @@ export const ARTICLES: Table = {
     { name: "meta_title", type: "TEXT" },
     { name: "meta_description", type: "TEXT" },
     { name: "og_image", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
     { name: "payload", type: "TEXT" },
     { name: "source_sheet_row_id", type: "TEXT" },
     { name: "created_at", type: "TEXT" },

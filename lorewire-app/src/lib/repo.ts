@@ -570,6 +570,10 @@ export interface ArticleRow {
   meta_title: string | null;
   meta_description: string | null;
   og_image: string | null;
+  // Optional link to the Reddit-pipeline story whose short_render scenes the
+  // article borrows for hero/og/gallery promotion. Set via setArticleStoryId
+  // (its own dedicated action), not via the generic ARTICLE_EDITABLE writer.
+  story_id: string | null;
   payload: string | null;
   source_sheet_row_id: string | null;
   created_at: string | null;
@@ -580,7 +584,7 @@ export interface ArticleRow {
 }
 
 const ARTICLE_COLS =
-  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, payload, source_sheet_row_id, created_at, updated_at, published_at, noindex";
+  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, story_id, payload, source_sheet_row_id, created_at, updated_at, published_at, noindex";
 
 // Slim projection for /admin/articles list. Drops the heavy text fields
 // (document, payload, summary, meta_*, og_image) the list does not render.
