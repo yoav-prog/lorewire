@@ -518,6 +518,161 @@ export async function renderShortLaneB(
   return { ok: true, renderId, plan };
 }
 
+// ─── Lane C render (Phase 4 — per-scene + assembly partial re-render) ──────
+
+export async function renderShortLaneC(
+  storyId: string,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  renderId?: string;
+  plan?: ShortRenderPlan;
+}> {
+  const session = await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const cfg = await loadCurrentConfig(storyId);
+  if (!cfg.ok) return { ok: false, error: cfg.error };
+  const baseline = await latestShortRenderForStory(storyId);
+  if (!baseline || baseline.status !== "done" || !baseline.props) {
+    return { ok: false, error: "no baseline render — generate a short first" };
+  }
+  const plan = planShortRender(cfg.config, baseline.props);
+  if (plan.lane === "noop") {
+    return { ok: false, error: "no edits since the last render", plan };
+  }
+  if (plan.lane === "A") {
+    return {
+      ok: false,
+      error: "only captions changed — call renderShortLaneA instead",
+      plan,
+    };
+  }
+  if (plan.lane === "B") {
+    return {
+      ok: false,
+      error: "only script/voice changed — call renderShortLaneB instead",
+      plan,
+    };
+  }
+  // plan.lane === 'C' — we're cleared to enqueue.
+
+  if (plan.touched_scene_ids.length === 0) {
+    // Defensive: planShortRender shouldn't return Lane C with zero touched
+    // ids, but if a config update lands between plan + enqueue we'd rather
+    // refuse cleanly than queue a no-op kie spend.
+    return { ok: false, error: "no touched scenes to regen", plan };
+  }
+
+  // Per-frame validation: image_prompt must be set on every touched frame.
+  // The Scenes tab autosaves prompts on change, but a freshly-seeded short
+  // may have frames with no image_prompt yet — better to surface that here
+  // than fail the drain with a per-frame error string.
+  if (!cfg.config.character_base_url) {
+    return {
+      ok: false,
+      error:
+        "short has no character_base_url — needs a full Restart before per-scene regen",
+      plan,
+    };
+  }
+  for (const frameId of plan.touched_scene_ids) {
+    const frame = cfg.config.doodle_frames.find((f) => f.id === frameId);
+    if (!frame) {
+      return {
+        ok: false,
+        error: `touched frame ${frameId} not found in short_config`,
+        plan,
+      };
+    }
+    if (!(frame.image_prompt ?? "").trim()) {
+      return {
+        ok: false,
+        error: `frame ${frameId} has no image_prompt — set one in the Scenes tab first`,
+        plan,
+      };
+    }
+  }
+
+  // Distinct config_hash so a row coexists with the baseline + any
+  // Lane A/B run. Including the sorted list of touched ids + their
+  // current prompts makes the click idempotent (re-clicking without
+  // editing is a no-op).
+  const sortedIds = [...plan.touched_scene_ids].sort();
+  const promptDigest = createHash("sha256")
+    .update(
+      JSON.stringify(
+        sortedIds.map((id) => {
+          const f = cfg.config.doodle_frames.find((x) => x.id === id);
+          return { id, prompt: f?.image_prompt ?? "" };
+        }),
+      ),
+    )
+    .digest("hex")
+    .slice(0, 16);
+  const configHash = `${baseline.config_hash}:laneC:${promptDigest}`;
+
+  const existing = await one<{ id: string; status: string }>(
+    "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
+    [storyId, configHash],
+  );
+  if (existing) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor laneC dupe]", {
+      story_id: storyId,
+      existing_render_id: existing.id,
+      existing_status: existing.status,
+    });
+    await logShortRenderEvent(existing.id, "idempotent_hit", {
+      message: "Lane C render click coalesced with existing row",
+      payload: { lane: "C", current_status: existing.status },
+    });
+    return { ok: true, renderId: existing.id, plan };
+  }
+
+  const renderId = randomUUID();
+  const now = new Date().toISOString();
+  const laneInputs = JSON.stringify({
+    source_render_id: baseline.id,
+    touched_frame_ids: plan.touched_scene_ids,
+  });
+  await run(
+    `INSERT INTO short_renders
+       (id, story_id, config_hash, narration_style, length_preset, status,
+        phase, progress, error, output_url, props, requested_by,
+        requested_at, started_at, finished_at, lane, lane_inputs)
+     VALUES (?, ?, ?, ?, ?, 'queued', NULL, 0, NULL, NULL, NULL, ?, ?, NULL, NULL, 'C', ?)`,
+    [
+      renderId,
+      storyId,
+      configHash,
+      baseline.narration_style,
+      baseline.length_preset,
+      session.userId,
+      now,
+      laneInputs,
+    ],
+  );
+  await logShortRenderEvent(renderId, "queued", {
+    message: "Lane C per-scene + assembly re-render queued",
+    payload: {
+      lane: "C",
+      baseline_render_id: baseline.id,
+      touched_scene_ids: plan.touched_scene_ids,
+      estimated_cost_cents: plan.estimated_cost_cents,
+    },
+  });
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor laneC queued]", {
+    story_id: storyId,
+    user_id: session.userId,
+    render_id: renderId,
+    baseline_render_id: baseline.id,
+    touched_scene_count: plan.touched_scene_ids.length,
+  });
+  revalidatePath(`/admin/shorts/${storyId}`);
+  return { ok: true, renderId, plan };
+}
+
 export async function revertShortScene(
   storyId: string,
   frameId: string,
