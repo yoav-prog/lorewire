@@ -482,26 +482,29 @@ export function VoicePicker({
       </div>
 
       <div className="mt-4 space-y-2 border-t border-line pt-3">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-[11px] text-muted">
-            {regenInFlight || regenPending
-              ? "Synthesizing voiceover..."
-              : usingGlobal
-                ? "Story uses the global default voice."
-                : `Selected: ${effectiveProvider} · ${effectiveVoiceId}`}
-          </p>
-          <button
-            type="button"
-            onClick={regenerate}
-            disabled={regenInFlight || regenPending}
-            className="shrink-0 rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            data-testid="voice-picker-regen"
-          >
-            {regenInFlight || regenPending
-              ? "Synthesizing…"
-              : "Regenerate voiceover"}
-          </button>
-        </div>
+        {/* Stacked, not side-by-side: in the narrow story sidebar a
+            justify-between row pushed the long "Regenerate voiceover" label
+            past the panel edge and clipped it. The status line truncates on
+            its own row and the button goes full-width as the clear primary
+            action, so it never clips in either container. */}
+        <p className="truncate text-[11px] text-muted">
+          {regenInFlight || regenPending
+            ? "Synthesizing voiceover..."
+            : usingGlobal
+              ? "Story uses the global default voice."
+              : `Selected: ${effectiveProvider} · ${effectiveVoiceId}`}
+        </p>
+        <button
+          type="button"
+          onClick={regenerate}
+          disabled={regenInFlight || regenPending}
+          className="w-full rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          data-testid="voice-picker-regen"
+        >
+          {regenInFlight || regenPending
+            ? "Synthesizing…"
+            : "Regenerate voiceover"}
+        </button>
         {(regenError || lastRegenError) && (
           <p
             role="alert"
