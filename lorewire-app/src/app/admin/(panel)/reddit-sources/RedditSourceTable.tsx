@@ -350,10 +350,27 @@ function BulkFooter({
                 : outputChoice === "long"
                   ? "Output: LONG-FORM video (skips the short pipeline)."
                   : "Output: use the global default (Settings → Reddit imports → Default output).";
+            // Cap-warning: the shorts pipeline has a per-bucket rolling 24h
+            // cap (default 50, set by shorts.auto.daily_cap). When the
+            // batch is large AND any of these rows will end up making a
+            // short (the per-batch picker says 'short' OR 'Default' which
+            // most often resolves to short), warn the admin so they don't
+            // silently lose the tail of the batch to the cap.
+            const SHORTS_CAP_DEFAULT = 50;
+            const willMakeShorts =
+              outputChoice === "short" || outputChoice === "";
+            const capWarn =
+              willMakeShorts && ids.length > SHORTS_CAP_DEFAULT
+                ? `\n\nHeads up: the shorts pipeline caps Reddit-import shorts at ~${SHORTS_CAP_DEFAULT}/24h. ` +
+                  `Roughly the first ${SHORTS_CAP_DEFAULT} of these ${ids.length} rows will get a short; ` +
+                  `the rest of the stories will be created but no short rendered until the cap rolls off. ` +
+                  `Raise Settings → Article shorts → daily cap if you need a bigger wave.`
+                : "";
             if (
               !window.confirm(
                 `Enqueue ${ids.length} row${ids.length === 1 ? "" : "s"} for full pipeline processing (article + images + video)?\n\n` +
-                  `${formatLine}\n\n` +
+                  `${formatLine}` +
+                  `${capWarn}\n\n` +
                   "Each row spends real LLM + image + voice credits. The local pipeline worker must be running:\n\n" +
                   "    python -m pipeline.story_jobs_worker",
               )

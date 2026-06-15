@@ -207,5 +207,127 @@ class SetStoryVideoUrlIfNullTests(unittest.TestCase):
         self.assertNotEqual(before, after)
 
 
+class ShortRenderWorkerAutoApplyTests(unittest.TestCase):
+    """End-to-end integration of the auto-apply hook in run_one_tick.
+
+    The unit tests above lock the helper; these lock the worker hook
+    that calls it. The render_fn is stubbed so no Remotion / Cloud Run
+    spend, but everything else (claim, finish, log_short_render_event,
+    set_story_video_url_if_null) is the real path.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db_path = Path(self.tmpdir.name) / "test.db"
+        self._patch = mock.patch.dict(os.environ, {
+            "PIPELINE_DB": str(self.db_path),
+            "DATABASE_URL": "",
+        }, clear=False)
+        self._patch.start()
+        from pipeline import config, store, short_render_worker
+        reload(config)
+        reload(store)
+        reload(short_render_worker)
+        store.init()
+        self.store = store
+        self.worker = short_render_worker
+
+    def tearDown(self):
+        self._patch.stop()
+        self.tmpdir.cleanup()
+        from pipeline import config, store, short_render_worker
+        reload(config)
+        reload(store)
+        reload(short_render_worker)
+
+    def _seed_story(self, story_id: str, video_url: "str | None" = None):
+        self.store.upsert_story({
+            "id": story_id,
+            "reddit_id": story_id,
+            "slug": story_id,
+            "category": "Drama",
+            "title": "t",
+            "summary": "s",
+            "body": "b",
+            "status": "review",
+            "source_url": "",
+            "video_url": video_url,
+            "created_at": "2026-06-16T00:00:00+00:00",
+            "updated_at": "2026-06-16T00:00:00+00:00",
+        })
+
+    def _enqueue_short(self, story_id: str, requested_by: str):
+        self.store.enqueue_short_render(
+            "render-1",
+            story_id,
+            "config-hash-1",
+            "suspense",
+            "standard",
+            requested_by,
+        )
+
+    @staticmethod
+    def _fake_render_fn(url: str):
+        return lambda claimed: {"video_url": url}
+
+    def test_reddit_import_short_auto_applies_to_story_video_url(self):
+        # The publish-gate-unlock path: a Reddit-import short-only row
+        # finishes, the worker calls set_story_video_url_if_null, and
+        # stories.video_url is now the rendered short.
+        self._seed_story("s-1", video_url=None)
+        self._enqueue_short("s-1", requested_by="reddit-import")
+
+        handled = self.worker.run_one_tick(
+            render_fn=self._fake_render_fn("https://gcs/short.mp4"),
+        )
+        self.assertTrue(handled)
+
+        story = self.store.fetch_story("s-1")
+        self.assertEqual(story["video_url"], "https://gcs/short.mp4")
+        # short_renders row also done with the same url.
+        render = self.store.get_short_render("render-1")
+        self.assertEqual(render["status"], "done")
+        self.assertEqual(render["output_url"], "https://gcs/short.mp4")
+
+    def test_auto_requested_short_does_not_touch_story_video_url(self):
+        # The existing auto-short pipeline (shorts.auto.enabled=on) sits
+        # alongside long-form. Long-form is what should land as
+        # stories.video_url; the auto short is a separate asset. The
+        # worker's requested_by gate makes sure we do not overwrite the
+        # long-form url with the (likely later-finishing) short.
+        self._seed_story("s-1", video_url=None)
+        self._enqueue_short("s-1", requested_by="auto")
+
+        self.worker.run_one_tick(
+            render_fn=self._fake_render_fn("https://gcs/short.mp4"),
+        )
+
+        story = self.store.fetch_story("s-1")
+        self.assertIsNone(story["video_url"])
+        # short_renders row still landed.
+        render = self.store.get_short_render("render-1")
+        self.assertEqual(render["status"], "done")
+
+    def test_reddit_import_short_does_not_clobber_existing_video_url(self):
+        # Race scenario: a concurrent long-form render lands first and
+        # writes stories.video_url. When the Reddit-import short
+        # subsequently finishes, the auto-apply must not overwrite the
+        # long-form url with the short.
+        self._seed_story("s-1", video_url="https://gcs/longform.mp4")
+        self._enqueue_short("s-1", requested_by="reddit-import")
+
+        self.worker.run_one_tick(
+            render_fn=self._fake_render_fn("https://gcs/short.mp4"),
+        )
+
+        story = self.store.fetch_story("s-1")
+        self.assertEqual(story["video_url"], "https://gcs/longform.mp4")
+        # The short still landed in its own queue; the long-form just wins
+        # the publish-gate slot.
+        render = self.store.get_short_render("render-1")
+        self.assertEqual(render["status"], "done")
+        self.assertEqual(render["output_url"], "https://gcs/short.mp4")
+
+
 if __name__ == "__main__":
     unittest.main()
