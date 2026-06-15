@@ -325,6 +325,124 @@ class HappyPathTests(_LaneBTestCase):
         )
 
 
+class CaptionStyleOverrideTests(_LaneBTestCase):
+    """Lane B merges short_config.caption_style onto baseline.caption_template
+    so the Style tab's picks roll into a voice-track re-render."""
+
+    def _seed_story_with_style(
+        self, story_id: str, caption_style: dict | None,
+    ) -> None:
+        short_config = {
+            "config_version": 1,
+            "doodle_frames": [],
+            "captions": [],
+        }
+        if caption_style is not None:
+            short_config["caption_style"] = caption_style
+        with sqlite3.connect(store.DB_PATH) as c:
+            c.execute(
+                "INSERT INTO stories (id, slug, title, status, short_config) "
+                "VALUES (?, ?, ?, 'ready', ?)",
+                (story_id, f"slug-{story_id}", f"Title {story_id}",
+                 json.dumps(short_config)),
+            )
+
+    def _build_with_style(self, story_id: str, baseline_template: dict | None):
+        props = {
+            "config_version": 2,
+            "voiceover_url": "https://gcs/old-voice.mp3",
+            "duration_ms": 30000,
+            "doodle_frames": [],
+            "captions": [],
+        }
+        if baseline_template is not None:
+            props["caption_template"] = baseline_template
+        self._seed_baseline("base-style", story_id, props)
+        claimed = {
+            "id": "lane-b-style",
+            "story_id": story_id,
+            "lane_inputs": json.dumps({
+                "source_render_id": "base-style",
+                "script": "Some script that is plenty long enough",
+                "voice": None,
+            }),
+        }
+        with (
+            mock.patch.object(
+                shorts_lane_b.voice, "synthesize",
+                return_value={
+                    "words": [{"word": "a", "start": 0, "end": 0.5}],
+                    "audio": "x", "provider": "g",
+                },
+            ),
+            mock.patch.object(
+                shorts_lane_b.gcs, "publish",
+                side_effect=lambda local, key, fallback: f"https://gcs/{key}",
+            ),
+        ):
+            return shorts_lane_b.build_short_props_lane_b(
+                claimed, Path(self._tmpdir.name), remote=True,
+            )
+
+    def test_no_style_override_leaves_caption_template_alone(self):
+        self._seed_story_with_style("story-no-style", None)
+        built = self._build_with_style(
+            "story-no-style",
+            baseline_template={"color": "#facc15"},
+        )
+        # caption_template stays untouched when no editor override exists.
+        self.assertEqual(built.props["caption_template"], {"color": "#facc15"})
+
+    def test_style_override_merges_onto_baseline_template(self):
+        self._seed_story_with_style(
+            "story-with-style",
+            {"color": "#ff0000", "word_highlight": "scale"},
+        )
+        built = self._build_with_style(
+            "story-with-style",
+            baseline_template={"color": "#facc15", "position_y": "0.6"},
+        )
+        # Editor's color wins; baseline's position_y is preserved (sparse
+        # override).
+        self.assertEqual(built.props["caption_template"]["color"], "#ff0000")
+        self.assertEqual(
+            built.props["caption_template"]["word_highlight"], "scale",
+        )
+        self.assertEqual(
+            built.props["caption_template"]["position_y"], "0.6",
+        )
+
+    def test_style_override_with_no_baseline_template(self):
+        # Baseline rendered before the caption_template field existed.
+        # The override should still land as the entire template.
+        self._seed_story_with_style(
+            "story-fresh-style",
+            {"color": "#00ff00"},
+        )
+        built = self._build_with_style(
+            "story-fresh-style",
+            baseline_template=None,
+        )
+        self.assertEqual(
+            built.props["caption_template"], {"color": "#00ff00"},
+        )
+
+    def test_non_string_caption_style_values_are_dropped(self):
+        # read_short_caption_style filters non-strings, so a malformed
+        # override doesn't end up in the render's caption_template.
+        self._seed_story_with_style(
+            "story-mixed",
+            {"color": "#abcdef", "size_scale": 1.4},
+        )
+        built = self._build_with_style(
+            "story-mixed",
+            baseline_template={"color": "#facc15"},
+        )
+        self.assertEqual(built.props["caption_template"]["color"], "#abcdef")
+        # size_scale was a number, not a string — should be dropped.
+        self.assertNotIn("size_scale", built.props["caption_template"])
+
+
 class ClearLaneTests(_LaneBTestCase):
     def test_clear_lane_nulls_the_column(self):
         with sqlite3.connect(store.DB_PATH) as c:

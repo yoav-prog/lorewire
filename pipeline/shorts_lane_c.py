@@ -163,7 +163,18 @@ def build_short_props_lane_c(
         else:
             new_frames.append(bf)
 
+    # Caption style: read the editor's short_config.caption_style override
+    # and merge it onto the baseline's caption_template so a style edit
+    # bundled with a per-scene regen rolls into the same Lane C MP4.
+    # Same merge contract as Lane A (TS) and Lane B (Python).
+    style_override = store.read_short_caption_style(story) if story else {}
+    baseline_template = baseline_props.get("caption_template") or {}
+    if not isinstance(baseline_template, dict):
+        baseline_template = {}
+
     new_props = {**baseline_props, "doodle_frames": new_frames}
+    if style_override:
+        new_props["caption_template"] = {**baseline_template, **style_override}
     return LaneCBuilt(props=new_props, regen_count=total)
 
 
