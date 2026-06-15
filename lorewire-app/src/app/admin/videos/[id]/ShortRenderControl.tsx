@@ -15,6 +15,7 @@ import {
   getShortRenderStatusAction,
   latestShortRenderAction,
   queueShortRender,
+  useShortAsStoryVideo,
 } from "./actions";
 import {
   DEFAULT_LENGTH_PRESET,
@@ -40,7 +41,7 @@ const PHASE_LABEL: Record<string, string> = {
 function statusText(row: ShortRenderRow | null): string {
   if (!row) return "";
   if (row.status === "queued") return "Queued…";
-  if (row.status === "rendering") {
+  if (row.status === "generating" || row.status === "rendering") {
     const label = PHASE_LABEL[row.phase ?? ""] ?? "Working…";
     return `${label} ${Math.round((row.progress ?? 0) * 100)}%`;
   }
@@ -56,6 +57,7 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
   const [length, setLength] = useState(DEFAULT_LENGTH_PRESET);
   const [active, setActive] = useState<ShortRenderRow | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [applyMsg, setApplyMsg] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -78,7 +80,9 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
 
   const inFlight =
     active !== null &&
-    (active.status === "queued" || active.status === "rendering");
+    (active.status === "queued" ||
+      active.status === "generating" ||
+      active.status === "rendering");
 
   // Poll while a render is in flight; stop on settle/unmount.
   useEffect(() => {
@@ -123,6 +127,20 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
         return;
       }
       if (result.render) setActive(result.render);
+    });
+  };
+
+  const handleApply = () => {
+    if (!active?.id) return;
+    setApplyMsg(null);
+    startTransition(async () => {
+      const r = await useShortAsStoryVideo(storyId, active.id);
+      if (r.ok) {
+        setApplyMsg("Applied — the article now uses this short.");
+        router.refresh();
+      } else {
+        setApplyMsg(r.error ?? "Failed to apply.");
+      }
     });
   };
 
@@ -201,13 +219,25 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
             playsInline
             className="aspect-[9/16] w-40 self-start rounded-md border border-fg/10 bg-black"
           />
-          <a
-            href={active.output_url}
-            download
-            className="font-mono text-[11px] text-accent underline"
-          >
-            Download short
-          </a>
+          <div className="flex items-center gap-3">
+            <a
+              href={active.output_url}
+              download
+              className="font-mono text-[11px] text-accent underline"
+            >
+              Download short
+            </a>
+            <button
+              type="button"
+              onClick={handleApply}
+              disabled={busy}
+              className="rounded-md border border-fg/20 px-3 py-1 font-mono text-[11px] font-semibold uppercase tracking-wider text-fg transition-colors hover:border-accent hover:text-accent disabled:opacity-60"
+              title="Replace the article's video with this short (reversible)"
+            >
+              Use as article video
+            </button>
+          </div>
+          {applyMsg && <p className="font-mono text-[11px] text-fg/70">{applyMsg}</p>}
         </div>
       )}
     </div>

@@ -6,7 +6,7 @@
 // portable across both engines: TEXT ids and slugs, ISO-8601 timestamps as
 // TEXT, booleans as INTEGER 0/1, and JSON blobs as TEXT.
 
-export type ColType = "TEXT" | "INTEGER";
+export type ColType = "TEXT" | "INTEGER" | "REAL";
 
 export interface Column {
   name: string;
@@ -386,10 +386,10 @@ export const SHORT_RENDERS: Table = {
     { name: "length_preset", type: "TEXT" },
     { name: "status", type: "TEXT" },
     { name: "phase", type: "TEXT" },
-    // progress matches VIDEO_RENDERS (the ColType union has no REAL); the Python
-    // store.py holds the 0..1 value as REAL and owns the prod schema, SQLite is
-    // dynamically typed, so the TS column type here is only the local-dev mirror.
-    { name: "progress", type: "INTEGER" },
+    // REAL to match pipeline/store.py (progress is a 0..1 fraction). If this were
+    // INTEGER and the TS app created the table first, Postgres would round 0.5 to
+    // 0 and the progress bar would sit at the floor until done.
+    { name: "progress", type: "REAL" },
     { name: "error", type: "TEXT" },
     { name: "output_url", type: "TEXT" },
     // The generated DoodleShort props JSON (set by the generation drain); the
@@ -399,6 +399,12 @@ export const SHORT_RENDERS: Table = {
     { name: "requested_at", type: "TEXT" },
     { name: "started_at", type: "TEXT" },
     { name: "finished_at", type: "TEXT" },
+    // How many times the Python reaper has revived a stalled row. The reaper
+    // gives up (status -> 'error') past MAX_SHORT_RENDER_ATTEMPTS so a
+    // perpetually-failing render can't loop paid retries. createTableSql emits
+    // no DEFAULT, so a TS-created column starts NULL; the reaper reads it with
+    // COALESCE(attempts, 0). Mirrors pipeline/store.py.
+    { name: "attempts", type: "INTEGER" },
   ],
 };
 
@@ -462,4 +468,11 @@ export const POST_TABLE_DDL: string[] = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_renders_one_active " +
     "ON voice_renders(story_id, text_hash, voice_provider, voice_id) " +
     "WHERE status IN ('queued', 'processing')",
+  // 2026-06-15 article shorts: pipeline/store.py enqueue_short_render does
+  // INSERT ... ON CONFLICT (story_id, config_hash). createTableSql emits no
+  // UNIQUE, so when the TS app creates short_renders first on a fresh prod DB
+  // the constraint is missing and every enqueue 500s ("no unique or exclusion
+  // constraint matching the ON CONFLICT specification"). Mirrors store.py.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_short_renders_story_config " +
+    "ON short_renders(story_id, config_hash)",
 ];

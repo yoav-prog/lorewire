@@ -163,9 +163,18 @@ SCHEMA_STATEMENTS = [
         requested_at    TEXT NOT NULL,
         started_at      TEXT,
         finished_at     TEXT,
+        attempts        INTEGER DEFAULT 0,
         UNIQUE (story_id, config_hash)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_short_renders_status_requested ON short_renders(status, requested_at)",
+    # Additive migrations for a short_renders table that pre-dates these columns
+    # (the queue shipped before the two-stage drain and the render-attempts
+    # ceiling). props holds the generated DoodleShort JSON; attempts counts how
+    # many times the reaper has reset a stalled row so a perpetually-failing
+    # render can't loop paid retries forever. IF NOT EXISTS is stripped for
+    # SQLite in _sqlite_rewrite; the duplicate-column error is caught in init().
+    "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS props TEXT",
+    "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0",
     # 2026-06-12 asset re-render: image regen queue. The admin clicks
     # Regenerate on any of a story's or article's image assets; the Next
     # server action inserts a row here and the local
@@ -1166,6 +1175,19 @@ def enqueue_short_render(
         "started_at": None,
         "finished_at": None,
     }
+    # Retry semantics (mirrors lib/short-render-queue.ts enqueueShortRender):
+    # after the insert-or-ignore, reset a settled-but-FAILED row (error /
+    # cancelled) back to queued so a repeat request — including the auto path in
+    # shorts_auto — actually re-runs instead of returning the stale error row.
+    # props is intentionally kept: a render-stage failure re-renders without
+    # re-generating; a generation-stage failure has props=NULL anyway, so it
+    # routes back to the generation drain.
+    reset_sql = (
+        "UPDATE short_renders SET status='queued', phase=NULL, progress=0, "
+        "error=NULL, output_url=NULL, requested_by={p}, requested_at={p}, "
+        "started_at=NULL, finished_at=NULL, attempts=0 "
+        "WHERE story_id={p} AND config_hash={p} AND status IN ('error','cancelled')"
+    )
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
@@ -1174,6 +1196,10 @@ def enqueue_short_render(
                     f"INSERT INTO short_renders ({cols}) VALUES ({placeholders}) "
                     "ON CONFLICT (story_id, config_hash) DO NOTHING",
                     values,
+                )
+                cur.execute(
+                    reset_sql.format(p="%s"),
+                    (requested_by, now, story_id, config_hash),
                 )
                 cur.execute(
                     f"SELECT {cols} FROM short_renders "
@@ -1188,6 +1214,10 @@ def enqueue_short_render(
         c.execute(
             f"INSERT OR IGNORE INTO short_renders ({cols}) VALUES ({placeholders})",
             values,
+        )
+        c.execute(
+            reset_sql.format(p="?"),
+            (requested_by, now, story_id, config_hash),
         )
         row = c.execute(
             f"SELECT {cols} FROM short_renders WHERE story_id=? AND config_hash=?",
@@ -1234,7 +1264,14 @@ def latest_short_render_for_story(story_id: str) -> dict | None:
 
 def claim_next_short_render() -> dict | None:
     """Atomically claim the oldest queued short render and flip it to
-    'rendering'. Returns the claimed row, or None when the queue is empty."""
+    'rendering'. Returns the claimed row, or None when the queue is empty.
+
+    The local worker (short_render_worker) is the only caller; it does a FULL
+    local gen+render (render_short_from_db ignores stored props). So it claims
+    only rows that still need generation (props IS NULL). This leaves
+    generation-complete rows (props set) for the prod render cron — a local
+    worker pointed at a shared/prod DB can't steal a render-ready row and
+    wastefully re-generate it from scratch."""
     cols = ", ".join(_SHORT_RENDER_COLUMNS)
     now = _now_iso()
     if _is_postgres():
@@ -1243,7 +1280,7 @@ def claim_next_short_render() -> dict | None:
                 cur.execute(
                     f"UPDATE short_renders SET status = 'rendering', "
                     "started_at = %s WHERE id = ("
-                    "SELECT id FROM short_renders WHERE status = 'queued' "
+                    "SELECT id FROM short_renders WHERE status = 'queued' AND props IS NULL "
                     "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
                     f") RETURNING {cols}",
                     (now,),
@@ -1253,7 +1290,7 @@ def claim_next_short_render() -> dict | None:
         return dict(row) if row else None
     with _sqlite_conn() as c:
         row = c.execute(
-            "SELECT id FROM short_renders WHERE status='queued' "
+            "SELECT id FROM short_renders WHERE status='queued' AND props IS NULL "
             "ORDER BY requested_at ASC LIMIT 1"
         ).fetchone()
         if not row:
@@ -1372,7 +1409,7 @@ def finish_short_render(render_id: str, output_url: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE short_renders SET status='done', progress=1.0, phase='done', "
-                    "output_url=%s, finished_at=%s WHERE id=%s",
+                    "output_url=%s, finished_at=%s WHERE id=%s AND status='rendering'",
                     (output_url, now, render_id),
                 )
             conn.commit()
@@ -1380,7 +1417,7 @@ def finish_short_render(render_id: str, output_url: str) -> None:
     with _sqlite_conn() as c:
         c.execute(
             "UPDATE short_renders SET status='done', progress=1.0, phase='done', "
-            "output_url=?, finished_at=? WHERE id=?",
+            "output_url=?, finished_at=? WHERE id=? AND status='rendering'",
             (output_url, now, render_id),
         )
 
@@ -1394,7 +1431,7 @@ def fail_short_render(render_id: str, error_message: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE short_renders SET status='error', error=%s, "
-                    "finished_at=%s WHERE id=%s",
+                    "finished_at=%s WHERE id=%s AND status IN ('generating','rendering')",
                     (capped, now, render_id),
                 )
             conn.commit()
@@ -1402,7 +1439,7 @@ def fail_short_render(render_id: str, error_message: str) -> None:
     with _sqlite_conn() as c:
         c.execute(
             "UPDATE short_renders SET status='error', error=?, "
-            "finished_at=? WHERE id=?",
+            "finished_at=? WHERE id=? AND status IN ('generating','rendering')",
             (capped, now, render_id),
         )
 
@@ -1605,16 +1642,26 @@ def reap_stale_image_render_claims(stale_after_s: int) -> int:
         return int(cur.rowcount)
 
 
+# Hard ceiling on how many times the reaper will revive a stalled short render
+# before giving up and marking it 'error'. Each generation drain run costs paid
+# image generations and each render costs Cloud Run minutes, so a row that keeps
+# stalling must not loop paid retries forever. attempts is incremented on every
+# reap; COALESCE handles the TS-created column that has no DEFAULT (NULL).
+MAX_SHORT_RENDER_ATTEMPTS = 3
+
+
 def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) -> int:
     """Crash-recovery for the short_renders queue. A row stuck at 'generating'
     (the generation drain died mid-run) or 'rendering' (the render cron / Cloud
-    Run died) is reset to 'queued' so the next tick re-claims it. props is left
-    untouched, so a reset 'generating' row (props NULL) goes back to the
-    generation drain and a reset 'rendering' row (props set) goes back to the
-    render cron. Separate thresholds because a real Cloud Run render runs minutes
-    while generation is bounded by the drain budget; rendering_after_s must stay
-    above the cron's 800s cap so a slow-but-live render is never reset out from
-    under itself. Returns the number of rows reset; safe on every tick."""
+    Run died) is reset to 'queued' so the next tick re-claims it, UNLESS it has
+    already been revived MAX_SHORT_RENDER_ATTEMPTS times — then it is marked
+    'error' so it stops costing paid retries. props is left untouched on a reset,
+    so a reset 'generating' row (props NULL) goes back to the generation drain and
+    a reset 'rendering' row (props set) goes back to the render cron. Separate
+    thresholds because a real Cloud Run render runs minutes while generation is
+    bounded by the drain budget; rendering_after_s must stay above the cron's 800s
+    cap so a slow-but-live render is never reset out from under itself. Returns the
+    number of rows acted on (revived + given up); safe on every tick."""
     import datetime
 
     def _cutoff(seconds: int) -> str:
@@ -1625,37 +1672,51 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
 
     gen_cutoff = _cutoff(generating_after_s)
     ren_cutoff = _cutoff(rendering_after_s)
+    now = _now_iso()
+    cap = MAX_SHORT_RENDER_ATTEMPTS
+    give_up_msg = f"exceeded max attempts ({cap}); giving up"
     total = 0
+    # Per stalled status: give up rows that have exhausted their attempts, then
+    # revive (and increment) the rest. The two WHERE clauses are disjoint
+    # (COALESCE(attempts,0) >= cap vs < cap), so a row is handled by exactly one.
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
-                    "WHERE status='generating' AND started_at IS NOT NULL AND started_at < %s",
-                    (gen_cutoff,),
-                )
-                total += cur.rowcount
-                cur.execute(
-                    "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
-                    "WHERE status='rendering' AND started_at IS NOT NULL AND started_at < %s",
-                    (ren_cutoff,),
-                )
-                total += cur.rowcount
+                for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
+                    cur.execute(
+                        "UPDATE short_renders SET status='error', error=%s, finished_at=%s "
+                        f"WHERE status='{status}' AND started_at IS NOT NULL "
+                        "AND started_at < %s AND COALESCE(attempts, 0) >= %s",
+                        (give_up_msg, now, cutoff, cap),
+                    )
+                    total += cur.rowcount
+                    cur.execute(
+                        "UPDATE short_renders SET status='queued', started_at=NULL, "
+                        "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
+                        f"WHERE status='{status}' AND started_at IS NOT NULL "
+                        "AND started_at < %s AND COALESCE(attempts, 0) < %s",
+                        (cutoff, cap),
+                    )
+                    total += cur.rowcount
             conn.commit()
         return int(total)
     with _sqlite_conn() as c:
-        cur = c.execute(
-            "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
-            "WHERE status='generating' AND started_at IS NOT NULL AND started_at < ?",
-            (gen_cutoff,),
-        )
-        total += cur.rowcount
-        cur = c.execute(
-            "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
-            "WHERE status='rendering' AND started_at IS NOT NULL AND started_at < ?",
-            (ren_cutoff,),
-        )
-        total += cur.rowcount
+        for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
+            cur = c.execute(
+                "UPDATE short_renders SET status='error', error=?, finished_at=? "
+                f"WHERE status='{status}' AND started_at IS NOT NULL "
+                "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
+                (give_up_msg, now, cutoff, cap),
+            )
+            total += cur.rowcount
+            cur = c.execute(
+                "UPDATE short_renders SET status='queued', started_at=NULL, "
+                "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
+                f"WHERE status='{status}' AND started_at IS NOT NULL "
+                "AND started_at < ? AND COALESCE(attempts, 0) < ?",
+                (cutoff, cap),
+            )
+            total += cur.rowcount
         return int(total)
 
 

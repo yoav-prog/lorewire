@@ -18,6 +18,7 @@ import { all, one, run } from "@/lib/db";
 
 export type ShortRenderStatus =
   | "queued"
+  | "generating" // generation drain is building script + frames + voice
   | "rendering"
   | "done"
   | "error"
@@ -81,7 +82,7 @@ export async function enqueueShortRender(
         `UPDATE short_renders
            SET status = 'queued', phase = NULL, progress = 0, error = NULL,
                output_url = NULL, requested_by = ?, requested_at = ?,
-               started_at = NULL, finished_at = NULL
+               started_at = NULL, finished_at = NULL, attempts = 0
          WHERE id = ? AND status = ?`,
         [requestedBy, retryNow, existing.id, existing.status],
       );
@@ -212,4 +213,19 @@ export async function failShortRender(
      WHERE id = ? AND status = 'rendering'`,
     [capped, now, renderId],
   );
+}
+
+// Point the story's published video at a finished short, so the article serves
+// the 9:16 short instead of the long-form video. The long-form MP4 still exists
+// at its own GCS key (<story>/video.mp4 vs <story>-short/video.mp4), so this is
+// just a pointer swap and is reversible by re-rendering the long-form video.
+export async function applyShortToStory(
+  storyId: string,
+  outputUrl: string,
+): Promise<void> {
+  await run(`UPDATE stories SET video_url = ?, updated_at = ? WHERE id = ?`, [
+    outputUrl,
+    new Date().toISOString(),
+    storyId,
+  ]);
 }

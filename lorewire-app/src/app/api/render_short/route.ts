@@ -25,6 +25,8 @@ import {
   failShortRender,
   finishShortRender,
 } from "@/lib/short-render-queue";
+import { getStory } from "@/lib/repo";
+import { resolveSegmentsForStory } from "@/lib/segment-resolver";
 
 // A short runs kie image generation + Remotion render, the longest job in the
 // app, so override undici's 300s default timeouts. Vercel Pro's 800s cron cap is
@@ -94,6 +96,24 @@ async function postToCloudRun(
   }
 }
 
+/** Resolve the 9:16 intro/outro for a short, defensively (null on any error so a
+ *  missing/misconfigured segment degrades to a body-only short instead of
+ *  failing the row). Shorts are always 9:16, so the aspect is fixed. */
+async function resolveShortSegmentsSafe(
+  story: Awaited<ReturnType<typeof getStory>>,
+): Promise<{ intro: string | null; outro: string | null }> {
+  if (!story) return { intro: null, outro: null };
+  try {
+    const resolved = await resolveSegmentsForStory(story, "9:16");
+    return {
+      intro: resolved.intro.segment?.normalized_url ?? null,
+      outro: resolved.outro.segment?.normalized_url ?? null,
+    };
+  } catch {
+    return { intro: null, outro: null };
+  }
+}
+
 async function serve(req: NextRequest): Promise<NextResponse> {
   if (!isAuthorized(req)) {
     namespacedLog("auth_fail", {
@@ -146,13 +166,23 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     });
   }
 
+  // Resolve the 9:16 intro/outro so Cloud Run splices them around the short,
+  // same as the long-form render (shorts are always 9:16). Body-only if none.
+  const story = await getStory(claimed.story_id);
+  const segments = await resolveShortSegmentsSafe(story);
+
+  // Cloud Run writes the MP4 to GCS key `<storyId>/video.mp4`. We must NOT pass
+  // the bare story_id or the short would overwrite the long-form video at the
+  // same key (and stories.video_url would then serve the short). Suffix it so
+  // the short lands at `<story>-short/video.mp4`, matching the local path's
+  // `<story>-short` namespace (pipeline/shorts_render.SHORT_ID_SUFFIX).
   const result = await postToCloudRun(
     `${cloudRunUrl.replace(/\/$/, "")}/render`,
     {
-      storyId: claimed.story_id,
+      storyId: `${claimed.story_id}-short`,
       configHash: claimed.config_hash,
       inputProps,
-      segments: { intro: null, outro: null },
+      segments,
     },
     cronSecret,
   );

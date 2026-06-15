@@ -50,6 +50,30 @@ class ShortProps:
     props: dict
 
 
+def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> list[dict]:
+    """Turn staged frames into DoodleFrame dicts. Each frame carries the caption
+    index its scene was PLANNED against (in the planner's chunk space); map that
+    proportionally onto the actual alignment-caption space so a scene lands near
+    the beat it illustrates, then dedup-shift so no two frames share a start
+    index (a shared start renders as a 1-frame flash in DoodleShort). Each frame
+    gets a stable `id` (the TS DoodleFrame type requires it)."""
+    span = max(1, caption_count - 1)
+    pspan = max(1, planning_count - 1)
+    mapped = []
+    for f in staged:
+        idx = max(0, min(caption_count - 1, round(f["planned"] * span / pspan)))
+        mapped.append({"id": f["id"], "url": f["url"], "idx": idx})
+    mapped.sort(key=lambda x: x["idx"])
+    frames: list[dict] = []
+    used = -1
+    for it in mapped:
+        idx = it["idx"] if it["idx"] > used else used + 1
+        idx = min(idx, caption_count - 1)
+        used = idx
+        frames.append({"id": it["id"], "url": it["url"], "caption_chunk_start_index": idx})
+    return frames
+
+
 def build_short_props(
     story_id: str,
     repo_root: Path,
@@ -103,72 +127,88 @@ def build_short_props(
             shutil.rmtree(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2) Voiceover over the spoken script + caption timing.
-    progress("voice")
-    spoken = re.sub(r"\s+", " ", assets.script.get("short_script", "")).strip()
-    audio_path = work_dir / "voice.mp3"
-    vres = voice.synthesize(spoken, audio_path)
-    captions = video._chunk_alignment(vres.get("words") or [])
-    if not captions:
-        print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
-        return None
-    duration_ms = max(int(captions[-1]["end_ms"]), 1)
+    try:
+        # 2) Voiceover over the spoken script + caption timing.
+        progress("voice")
+        spoken = re.sub(r"\s+", " ", assets.script.get("short_script", "")).strip()
+        audio_path = work_dir / "voice.mp3"
+        vres = voice.synthesize(spoken, audio_path)
+        captions = video._chunk_alignment(vres.get("words") or [])
+        if not captions:
+            print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
+            return None
+        duration_ms = max(int(captions[-1]["end_ms"]), 1)
 
-    # 3) Stage frames. Scene URLs are remote (kie) so download them first. For
-    #    remote mode, upload each frame + the audio to GCS and use those URLs;
-    #    for local mode, use staticFile-relative paths.
-    progress("stage")
-    frame_sources = [assets.base_url] + [s["url"] for s in assets.scenes]
-    image_urls: list[str] = []
-    total = len(frame_sources)
-    for i, url in enumerate(frame_sources):
-        fname = f"frame-{i:02d}.png"
-        local = work_dir / fname
-        try:
-            images.download(url, local)
-        except Exception as e:
-            print(f"[short id={safe_id} stage] frame {i} download FAILED: {e}")
-            continue
+        # 3) Stage frames. Scene URLs are remote (kie) so download first. Track
+        #    each frame's PLANNED caption index so a partial-download skip can't
+        #    misalign the rest; the base frame is the opening (planned index 0).
+        #    remote -> upload to GCS (https URLs); local -> staticFile paths.
+        progress("stage")
+        sources = [{"url": assets.base_url, "planned": 0}] + [
+            {"url": s["url"], "planned": int(s.get("caption_chunk_start_index", 0) or 0)}
+            for s in assets.scenes
+        ]
+        staged: list[dict] = []
+        for i, src in enumerate(sources):
+            fname = f"frame-{i:02d}.png"
+            local = work_dir / fname
+            try:
+                images.download(src["url"], local)
+            except Exception as e:
+                print(f"[short id={safe_id} stage] frame {i} download FAILED: {e}")
+                continue
+            url = (
+                gcs.publish(local, f"{safe_id}/{fname}", src["url"])
+                if remote else f"{safe_id}/{fname}"
+            )
+            staged.append({"id": f"frame-{i:02d}", "url": url, "planned": src["planned"]})
+            progress("stage", i + 1, len(sources))
+        if not staged:
+            print(f"[short id={safe_id}] no frames staged; skipping")
+            return None
+
+        audio_ref = (
+            gcs.publish(audio_path, f"{safe_id}/voice.mp3", str(audio_path))
+            if remote else f"{safe_id}/voice.mp3"
+        )
+
+        # 4) Map planned indices onto the actual caption space + dedup + add ids.
+        planning_count = max(
+            1, len(shorts.chunk_for_planning(assets.script.get("short_script", "")))
+        )
+        doodle_frames = _map_frames(staged, len(captions), planning_count)
+
+        caption_template = {
+            **video.resolve_caption_template(store.get_setting),
+            "position_y": SHORT_CAPTION_POSITION_Y,
+        }
+        props = {
+            "config_version": 2,
+            "voiceover_url": audio_ref,
+            "title": video._truncate_title(title),
+            "channel_name": "lorewire",
+            "aspect": "9:16",
+            "duration_ms": duration_ms,
+            "doodle_frames": doodle_frames,
+            "captions": captions,
+            "ken_burns": False,
+            "caption_template": caption_template,
+            "motion": {"micro_wiggle": False, "label_pop": False, "scribble_draw": False,
+                       "prop_slide": False, "mouth_swap": False},
+            "props_list": [],
+            "character_image_mouth_removed": None,
+        }
+        print(
+            f"[short id={safe_id} props] {len(captions)} caption chunks, "
+            f"{len(doodle_frames)} frames, {duration_ms/1000:.1f}s, remote={remote}"
+        )
+        return ShortProps(safe_id=safe_id, props=props)
+    finally:
+        # Remote staging is in /tmp and disposable once uploaded to GCS; remove it
+        # so the Vercel drain's /tmp doesn't fill across ticks. Local mode keeps
+        # work_dir (video/public/<id>) because the local render reads from it.
         if remote:
-            image_urls.append(gcs.publish(local, f"{safe_id}/{fname}", url))
-        else:
-            image_urls.append(f"{safe_id}/{fname}")
-        progress("stage", i + 1, total)
-    if not image_urls:
-        print(f"[short id={safe_id}] no frames staged; skipping")
-        return None
-
-    if remote:
-        audio_ref = gcs.publish(audio_path, f"{safe_id}/voice.mp3", str(audio_path))
-    else:
-        audio_ref = f"{safe_id}/voice.mp3"
-
-    doodle_frames = video._distribute_frames(image_urls, captions, duration_ms)
-    caption_template = {
-        **video.resolve_caption_template(store.get_setting),
-        "position_y": SHORT_CAPTION_POSITION_Y,
-    }
-    props = {
-        "config_version": 2,
-        "voiceover_url": audio_ref,
-        "title": video._truncate_title(title),
-        "channel_name": "lorewire",
-        "aspect": "9:16",
-        "duration_ms": duration_ms,
-        "doodle_frames": doodle_frames,
-        "captions": captions,
-        "ken_burns": False,
-        "caption_template": caption_template,
-        "motion": {"micro_wiggle": False, "label_pop": False, "scribble_draw": False,
-                   "prop_slide": False, "mouth_swap": False},
-        "props_list": [],
-        "character_image_mouth_removed": None,
-    }
-    print(
-        f"[short id={safe_id} props] {len(captions)} caption chunks, "
-        f"{len(doodle_frames)} frames, {duration_ms/1000:.1f}s, remote={remote}"
-    )
-    return ShortProps(safe_id=safe_id, props=props)
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def render_short_from_db(

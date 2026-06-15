@@ -38,6 +38,7 @@ import {
   type VideoRenderEventRow,
 } from "@/lib/video-render-queue";
 import {
+  applyShortToStory,
   countShortRendersSince,
   enqueueShortRender,
   getShortRender,
@@ -339,6 +340,33 @@ export async function latestShortRenderAction(
   await requireAdmin();
   if (!storyId) return null;
   return latestShortRenderForStory(storyId);
+}
+
+// Apply a finished short as the story's published video (the article then serves
+// the 9:16 short instead of the long-form). Reversible: the long-form MP4 stays
+// at its own GCS key, so re-rendering the long-form video restores it.
+export async function useShortAsStoryVideo(
+  storyId: string,
+  renderId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireAdmin();
+  const render = await getShortRender(renderId);
+  if (!render || render.story_id !== storyId) {
+    return { ok: false, error: "render-not-found" };
+  }
+  if (render.status !== "done" || !render.output_url) {
+    return { ok: false, error: "short-not-ready" };
+  }
+  await applyShortToStory(storyId, render.output_url);
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short apply-to-story]", {
+    story_id: storyId,
+    render_id: renderId,
+    user_id: session.userId,
+    url: render.output_url,
+  });
+  revalidatePath(`/admin/videos/${storyId}`);
+  return { ok: true };
 }
 
 // ─── editSession actions (concurrency banner / heartbeat) ─────────────────────

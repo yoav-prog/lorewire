@@ -48,10 +48,12 @@ REPO_ROOT = _HERE
 
 # Crash-recovery thresholds for the reaper. A 'generating' row past ~15 min means
 # the drain died (generation is bounded by the drain budget). A 'rendering' row
-# past ~20 min means the render cron / Cloud Run died; kept above the cron's 800s
-# cap so a slow-but-live render is never reset out from under itself.
+# past ~30 min means the render cron / Cloud Run died; kept well above the cron's
+# 800s cap so a slow-but-live render is never reset (and re-rendered for nothing)
+# out from under itself. The reaper's attempts ceiling stops a genuinely stuck
+# row from looping paid retries once it does cross the threshold.
 GENERATING_STALE_S = 900
-RENDERING_STALE_S = 1200
+RENDERING_STALE_S = 1800
 
 # Phase -> progress fraction across the generation half (0..0.5; store_short_props
 # stamps 0.5 when props land). The render cron drives 0.5..1.0.
