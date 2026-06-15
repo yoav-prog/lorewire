@@ -33,14 +33,15 @@ import {
   newSegmentId,
   sanitizeLabel,
 } from "@/lib/segments-upload";
-import { isVideoAspect, LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
+import {
+  activeSegmentSettingKey,
+  isVideoAspect,
+  LEGACY_DEFAULT_ASPECT,
+  type VideoAspect,
+} from "@/lib/aspect";
 
 function badRequest(error: string): NextResponse {
   return NextResponse.json({ error }, { status: 400 });
-}
-
-function activeKey(kind: "intro" | "outro"): string {
-  return `video.active_${kind}_id`;
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
@@ -123,14 +124,16 @@ export async function POST(req: Request): Promise<NextResponse> {
       aspect,
     });
 
-    // Auto-activate the first segment of its kind so the admin doesn't
-    // have to click "Set as active" on a fresh install. Mirrors the
-    // pipeline worker's behavior on the prod path.
-    const currentActive = (await getSetting(activeKey(kind))) ?? "";
+    // Auto-activate the first segment of its kind AND aspect so the admin
+    // doesn't have to click "Set as active" on a fresh install. Keyed per
+    // aspect (2026-06-15) so a 9:16 upload doesn't claim the 16:9 slot.
+    // Mirrors the pipeline worker's behavior on the prod path.
+    const slotKey = activeSegmentSettingKey(kind, aspect);
+    const currentActive = (await getSetting(slotKey)) ?? "";
     if (!currentActive) {
-      await setSetting(activeKey(kind), segId);
+      await setSetting(slotKey, segId);
       console.info(
-        `[admin segments upload-local] auto-activate kind=${kind} segId=${segId}`,
+        `[admin segments upload-local] auto-activate kind=${kind} aspect=${aspect} segId=${segId}`,
       );
     }
 

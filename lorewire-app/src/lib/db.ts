@@ -13,6 +13,13 @@ import {
   createTableSql,
   type Table,
 } from "@/lib/schema";
+import {
+  LEGACY_DEFAULT_ASPECT,
+  activeSegmentSettingKey,
+  isVideoAspect,
+  legacyActiveSegmentSettingKey,
+  type VideoAspect,
+} from "@/lib/aspect";
 
 export type Row = Record<string, unknown>;
 
@@ -131,7 +138,57 @@ async function ensureSchema(d: Driver): Promise<Driver> {
       // migration may collide; safe to ignore on retry.
     }
   }
+  try {
+    await seedActiveSegmentAspect(d);
+  } catch {
+    // Best-effort data seed (see below). A failure must never block schema
+    // readiness — the slot stays empty and the render falls to body-only
+    // until the admin sets an active segment by hand.
+  }
   return d;
+}
+
+// One-shot, idempotent seed for the per-aspect active intro/outro pointers
+// (_plans/2026-06-15-intro-outro-per-aspect-active.md). Before this change the
+// active segment lived under a single key per kind; now each aspect has its own
+// slot. Copy the legacy pointer into the slot matching its segment's aspect so
+// existing renders keep their branding the instant the code ships, with no
+// manual migration step. It runs inside the schema chain (awaited before any
+// query resolves), but only fills an EMPTY slot — so it's a no-op once seeded
+// and never overrides an admin's pick. Mirror of `_seed_active_segment_aspect`
+// in pipeline/store.py; whichever runtime boots first against the shared DB
+// wins and the other no-ops. Uses the raw driver (not the module-level all/run)
+// to avoid re-entering db() while the schema promise is still resolving.
+async function seedActiveSegmentAspect(d: Driver): Promise<void> {
+  for (const kind of ["intro", "outro"] as const) {
+    const legacyRows = await d.all("SELECT value FROM settings WHERE key = ?", [
+      legacyActiveSegmentSettingKey(kind),
+    ]);
+    const legacyId = String((legacyRows[0]?.value as string) ?? "").trim();
+    if (!legacyId) continue;
+
+    // Skip a dangling legacy pointer — seeding it would just point a new slot
+    // at a deleted row, which the resolver drops anyway.
+    const segRows = await d.all("SELECT aspect FROM video_segments WHERE id = ?", [
+      legacyId,
+    ]);
+    if (!segRows.length) continue;
+    const rawAspect = segRows[0].aspect;
+    const aspect: VideoAspect = isVideoAspect(rawAspect)
+      ? rawAspect
+      : LEGACY_DEFAULT_ASPECT;
+
+    const slotKey = activeSegmentSettingKey(kind, aspect);
+    const slotRows = await d.all("SELECT value FROM settings WHERE key = ?", [
+      slotKey,
+    ]);
+    if (String((slotRows[0]?.value as string) ?? "").trim()) continue;
+
+    await d.run(
+      "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      [slotKey, legacyId],
+    );
+  }
 }
 
 export function db(): Promise<Driver> {

@@ -16,10 +16,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
+  activeSegmentSettingKey,
   aspectDims,
   inferAspectFromDims,
   isVideoAspect,
   LEGACY_DEFAULT_ASPECT,
+  legacyActiveSegmentSettingKey,
   resolveAspect,
   VIDEO_ASPECTS,
   type VideoAspect,
@@ -133,6 +135,33 @@ describe("inferAspectFromDims", () => {
     expect(inferAspectFromDims(1920, Number.POSITIVE_INFINITY)).toBe(
       LEGACY_DEFAULT_ASPECT,
     );
+  });
+});
+
+// ─── Per-aspect active pointer keys ──────────────────────────────────────────
+// 2026-06-15: "active" intro/outro is per-aspect. These exact strings are the
+// cross-language contract — pipeline/aspect.py's matching test asserts the same
+// literals, so if either side drifts, one of the two suites fails loudly.
+
+describe("activeSegmentSettingKey", () => {
+  it("builds the four per-aspect slot keys", () => {
+    expect(activeSegmentSettingKey("intro", "16:9")).toBe(
+      "video.active_intro_id_16x9",
+    );
+    expect(activeSegmentSettingKey("intro", "9:16")).toBe(
+      "video.active_intro_id_9x16",
+    );
+    expect(activeSegmentSettingKey("outro", "16:9")).toBe(
+      "video.active_outro_id_16x9",
+    );
+    expect(activeSegmentSettingKey("outro", "9:16")).toBe(
+      "video.active_outro_id_9x16",
+    );
+  });
+
+  it("keeps the legacy single-pointer keys for the seed migration", () => {
+    expect(legacyActiveSegmentSettingKey("intro")).toBe("video.active_intro_id");
+    expect(legacyActiveSegmentSettingKey("outro")).toBe("video.active_outro_id");
   });
 });
 

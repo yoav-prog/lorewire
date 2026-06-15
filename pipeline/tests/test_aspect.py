@@ -130,6 +130,53 @@ class PerAssetMappingTests(unittest.TestCase):
         self.assertEqual(aspect.mouth_swap_aspect_for("16:9"), "3:4")
 
 
+class ActiveSegmentSettingKeyTests(unittest.TestCase):
+    """2026-06-15: per-aspect intro/outro active pointers. These exact strings
+    are the cross-language contract with lorewire-app/src/lib/aspect.ts — its
+    matching test asserts the same literals, so a drift on either side fails one
+    of the two suites loudly."""
+
+    def test_builds_the_four_slot_keys(self):
+        self.assertEqual(
+            aspect.active_segment_setting_key("intro", "16:9"),
+            "video.active_intro_id_16x9",
+        )
+        self.assertEqual(
+            aspect.active_segment_setting_key("intro", "9:16"),
+            "video.active_intro_id_9x16",
+        )
+        self.assertEqual(
+            aspect.active_segment_setting_key("outro", "16:9"),
+            "video.active_outro_id_16x9",
+        )
+        self.assertEqual(
+            aspect.active_segment_setting_key("outro", "9:16"),
+            "video.active_outro_id_9x16",
+        )
+
+    def test_coalesces_unrecognized_aspect_to_legacy_floor(self):
+        # A NULL aspect column / typo routes to the 9:16 slot — same floor the
+        # resolver applies, so a writer and reader never disagree on the slot.
+        self.assertEqual(
+            aspect.active_segment_setting_key("intro", None),
+            "video.active_intro_id_9x16",
+        )
+        self.assertEqual(
+            aspect.active_segment_setting_key("outro", "4:3"),
+            "video.active_outro_id_9x16",
+        )
+
+    def test_keeps_legacy_single_pointer_keys(self):
+        self.assertEqual(
+            aspect.legacy_active_segment_setting_key("intro"),
+            "video.active_intro_id",
+        )
+        self.assertEqual(
+            aspect.legacy_active_segment_setting_key("outro"),
+            "video.active_outro_id",
+        )
+
+
 class ResolveAspectForStoryTests(unittest.TestCase):
     def test_per_story_video_config_aspect_wins(self):
         # Story row with a video_config carrying an explicit 16:9 aspect.

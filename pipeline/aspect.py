@@ -146,6 +146,43 @@ def _global_default_aspect() -> object:
         return None
 
 
+# ─── Per-aspect intro/outro active pointer keys ──────────────────────────────
+# 2026-06-15 (_plans/2026-06-15-intro-outro-per-aspect-active.md): the segment
+# library used a single global active pointer per kind
+# (`video.active_intro_id` / `video.active_outro_id`), so only one intro and one
+# outro could be live and the aspect filter then dropped it on every mismatched
+# render. "Active" is now per-aspect: each kind has one active pointer per canvas
+# shape. These helpers are the single source of truth for the key strings;
+# pick_segment, the segments worker auto-activate, and the seed migration all
+# route through them. MIRROR of lorewire-app/src/lib/aspect.ts:
+# activeSegmentSettingKey — the two MUST emit identical strings or the Python
+# writer and the TS reader would point at different settings rows.
+#
+# Suffix uses "x" not ":" — the colon is valid in a settings value but reads
+# poorly in a key, and "16x9" / "9x16" are unambiguous.
+_ASPECT_KEY_SUFFIX: dict[str, str] = {
+    "16:9": "16x9",
+    "9:16": "9x16",
+}
+
+
+def active_segment_setting_key(kind: str, aspect: object) -> str:
+    """Settings key for the active intro/outro pointer of a kind + aspect.
+
+    The aspect is coalesced to the legacy 9:16 floor when unrecognized (NULL
+    column / typo) so it routes to the same slot the resolver reads — same
+    fallback `_resolve_segment_aspect` uses in segments.py.
+    """
+    safe_aspect = aspect if is_video_aspect(aspect) else LEGACY_DEFAULT_ASPECT
+    return f"video.active_{kind}_id_{_ASPECT_KEY_SUFFIX[safe_aspect]}"
+
+
+def legacy_active_segment_setting_key(kind: str) -> str:
+    """The pre-2026-06-15 single global active pointer. Read once by the seed
+    migration to populate the per-aspect slots, then vestigial."""
+    return f"video.active_{kind}_id"
+
+
 # ─── Per-asset aspect mapping ────────────────────────────────────────────────
 # Each asset can have its own aspect strategy. Kept in one place so the
 # pipeline never inlines a magic string and so admin-facing cost estimates

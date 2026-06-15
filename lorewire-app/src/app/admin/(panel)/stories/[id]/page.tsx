@@ -27,7 +27,12 @@ import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel
 import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StatusStepIndicator } from "./StatusStepIndicator";
 import { StoryAspectControl } from "./StoryAspectControl";
-import { isVideoAspect, LEGACY_DEFAULT_ASPECT, type VideoAspect } from "@/lib/aspect";
+import {
+  activeSegmentSettingKey,
+  isVideoAspect,
+  LEGACY_DEFAULT_ASPECT,
+  type VideoAspect,
+} from "@/lib/aspect";
 import { resolveSceneCount, readSceneCountMode } from "@/lib/scene-count";
 import { VoicePicker } from "@/components/voice-picker/VoicePicker";
 import { listVoices } from "@/lib/voice-library";
@@ -66,12 +71,10 @@ export default async function EditStory({
   // ("0") so the picker is dark until the admin flips it on AND the
   // Phase 2.b bake script has populated preview MP3s — that's the
   // contract: don't ship UI that plays broken audio.
-  const [intros, outros, activeIntroId, activeOutroId, defaultAspectRaw, voicePickerEnabledRaw] =
+  const [intros, outros, defaultAspectRaw, voicePickerEnabledRaw] =
     await Promise.all([
       listSegments("intro"),
       listSegments("outro"),
-      getSetting("video.active_intro_id"),
-      getSetting("video.active_outro_id"),
       getSetting("video.default_aspect"),
       getSetting("voice.picker_enabled"),
     ]);
@@ -111,6 +114,15 @@ export default async function EditStory({
     : LEGACY_DEFAULT_ASPECT;
   const initialAspect: VideoAspect = storyConfigAspect ?? globalDefaultAspect;
   const aspectIsOverride = storyConfigAspect !== null;
+
+  // The intro/outro that would splice for THIS story's aspect — "active" is
+  // per-aspect (2026-06-15), so the override card's "(active)" hint reflects the
+  // slot the resolver would actually read for this shape, not a single global
+  // pointer.
+  const [activeIntroId, activeOutroId] = await Promise.all([
+    getSetting(activeSegmentSettingKey("intro", initialAspect)),
+    getSetting(activeSegmentSettingKey("outro", initialAspect)),
+  ]);
 
   // Resolve the scene count the pipeline WILL ask for so the rebuild
   // estimate + the asset label both reflect reality — not just the
