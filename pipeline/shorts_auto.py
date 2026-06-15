@@ -94,12 +94,24 @@ def maybe_enqueue_short_for_story(
     *,
     requested_by: str = "auto",
     get_setting: GetSetting = store.get_setting,
+    force: bool = False,
 ) -> bool:
     """Enqueue a short for the story if auto-generate is on for its category.
     Returns True if a row was enqueued (or already existed idempotently), False
-    when auto-generate is off. Safe to call on every story completion."""
+    when auto-generate is off. Safe to call on every story completion.
+
+    `force=True` is the Reddit-import "output: short" path
+    (see _plans/2026-06-16-reddit-default-to-shorts.md): the admin
+    explicitly picked short-as-the-video for this row, so the
+    shorts.auto.enabled / per-category gate is bypassed. The rolling-24h
+    cap is still enforced — the cap is a cost safety net, not an opt-in
+    toggle, and the admin can raise it via shorts.auto.daily_cap when
+    they want a bigger import wave. Narration vibe + length still come
+    from the shorts.auto.narration / shorts.auto.length settings so the
+    forced short matches the admin's preferred style.
+    """
     cfg = resolve_short_auto_config(category, get_setting)
-    if not cfg["enabled"]:
+    if not cfg["enabled"] and not force:
         return False
 
     # Global cost guard: cap auto-requested shorts over a rolling 24h window.
@@ -114,8 +126,9 @@ def maybe_enqueue_short_for_story(
     recent = store.count_short_renders_since(since, requested_by=requested_by)
     if recent >= cap:
         print(
-            f"[shorts_auto cap] story={story_id} skipped: {recent} auto shorts in "
-            f"last 24h >= cap {cap} (raise shorts.auto.daily_cap to lift)"
+            f"[shorts_auto cap] story={story_id} forced={force} skipped: "
+            f"{recent} auto shorts in last 24h >= cap {cap} "
+            f"(raise shorts.auto.daily_cap to lift)"
         )
         return False
 

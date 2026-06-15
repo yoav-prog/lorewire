@@ -380,6 +380,11 @@ export const STORY_JOBS: Table = {
     { name: "requested_at", type: "TEXT" },
     { name: "started_at", type: "TEXT" },
     { name: "finished_at", type: "TEXT" },
+    // 2026-06-16 per-batch output override for Reddit imports. NULL =
+    // resolve at worker claim time against `reddit.default_output`
+    // (default 'short'); 'short' / 'long' pin the row's output format.
+    // See _plans/2026-06-16-reddit-default-to-shorts.md.
+    { name: "output_format", type: "TEXT" },
   ],
 };
 

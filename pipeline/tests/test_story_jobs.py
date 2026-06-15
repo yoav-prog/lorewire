@@ -93,6 +93,91 @@ class EnqueueTests(_IsolatedDB):
         claimed = self.store.claim_next_story_job()
         self.assertEqual(claimed["with_media"], 0)
 
+    # 2026-06-16 Reddit-import per-batch output override. The TS side
+    # (lib/story-jobs.ts) writes this column from
+    # processRedditSourcesAction; the worker reads it via
+    # resolve_output_format. See _plans/2026-06-16-reddit-default-to-shorts.md.
+    def test_output_format_short_round_trips(self):
+        _seed_reddit_source(self.store)
+        row = self.store.enqueue_story_job("job-1", "abc", output_format="short")
+        self.assertEqual(row["output_format"], "short")
+        claimed = self.store.claim_next_story_job()
+        self.assertEqual(claimed["output_format"], "short")
+
+    def test_output_format_long_round_trips(self):
+        _seed_reddit_source(self.store)
+        row = self.store.enqueue_story_job("job-1", "abc", output_format="long")
+        self.assertEqual(row["output_format"], "long")
+        claimed = self.store.claim_next_story_job()
+        self.assertEqual(claimed["output_format"], "long")
+
+    def test_output_format_omitted_is_null(self):
+        _seed_reddit_source(self.store)
+        row = self.store.enqueue_story_job("job-1", "abc")
+        self.assertIsNone(row["output_format"])
+        claimed = self.store.claim_next_story_job()
+        self.assertIsNone(claimed["output_format"])
+
+    def test_output_format_bad_value_normalised_to_null(self):
+        """Closed-enum defence: a stale caller (or a hand-crafted POST that
+        squeaked past the TS action's validation) must not be able to
+        smuggle a typo through the storage layer, because the worker's
+        resolver would then see something it doesn't recognise and fall
+        through to the global setting — silently overriding the admin's
+        explicit per-batch pick."""
+        _seed_reddit_source(self.store)
+        row = self.store.enqueue_story_job("job-1", "abc", output_format="shrt")
+        self.assertIsNone(row["output_format"])
+
+
+class ResolveOutputFormatTests(unittest.TestCase):
+    """Pure-function tests for the worker's per-row format resolution.
+    No DB needed — the resolver takes a `get_setting` callable, so the
+    tests can synthesise rows + settings without isolating the store."""
+
+    def _resolve(self, row_format, setting_value):
+        from pipeline.story_jobs_worker import resolve_output_format
+
+        def fake_setting(key):
+            if key == "reddit.default_output":
+                return setting_value
+            return None
+
+        return resolve_output_format(
+            {"id": "job-1", "output_format": row_format},
+            get_setting=fake_setting,
+        )
+
+    def test_row_override_short_wins_over_setting(self):
+        self.assertEqual(self._resolve("short", "long"), ("short", "row"))
+
+    def test_row_override_long_wins_over_setting(self):
+        self.assertEqual(self._resolve("long", "short"), ("long", "row"))
+
+    def test_setting_used_when_row_null(self):
+        self.assertEqual(self._resolve(None, "long"), ("long", "setting"))
+
+    def test_setting_used_when_row_empty_string(self):
+        self.assertEqual(self._resolve("", "long"), ("long", "setting"))
+
+    def test_default_short_when_both_unset(self):
+        self.assertEqual(self._resolve(None, None), ("short", "default"))
+
+    def test_default_short_when_setting_malformed(self):
+        # A typo in the setting falls through to the hardcoded default
+        # rather than crashing the worker — the admin can fix the
+        # setting next time they visit the page without a queue drain.
+        self.assertEqual(self._resolve(None, "vertical"), ("short", "default"))
+
+    def test_row_override_falls_through_when_malformed(self):
+        # Defence-in-depth: if a stale row somehow has a bad value, fall
+        # through to the setting layer instead of crashing.
+        self.assertEqual(self._resolve("shrt", "long"), ("long", "setting"))
+
+    def test_case_insensitive(self):
+        self.assertEqual(self._resolve("SHORT", None), ("short", "row"))
+        self.assertEqual(self._resolve(None, "Long"), ("long", "setting"))
+
 
 class ClaimAndTransitionTests(_IsolatedDB):
     def test_claim_returns_none_on_empty(self):

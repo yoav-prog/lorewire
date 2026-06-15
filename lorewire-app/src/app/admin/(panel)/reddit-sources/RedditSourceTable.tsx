@@ -207,6 +207,13 @@ function StatusChip({ status }: { status: string }) {
   );
 }
 
+// Per-batch output choice for the Process N action. '' = "use the
+// reddit.default_output setting" (the worker resolves at claim time);
+// 'short' / 'long' pin every row in this batch to that format and
+// survive a later setting change. Kept narrow so the confirm dialog
+// copy below stays exhaustive.
+type OutputChoice = "" | "short" | "long";
+
 function BulkFooter({
   ids,
   activeIds,
@@ -221,6 +228,10 @@ function BulkFooter({
   onClear: () => void;
   budgetExhausted: boolean;
 }) {
+  // Default '' so a click that doesn't touch the picker honours the
+  // admin's global default. Stored locally so the confirm dialog can
+  // spell out which format will run before the credit-spend.
+  const [outputChoice, setOutputChoice] = useState<OutputChoice>("");
   return (
     <div className="sticky bottom-3 z-10 mx-auto flex max-w-[760px] flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-bg/95 px-4 py-2.5 shadow-lg backdrop-blur">
       <span className="font-mono text-[12px] text-ink">
@@ -333,9 +344,16 @@ function BulkFooter({
             // Lazy guard against accidental bulk-spend. The real cost is the
             // sum of LLM + kie images + voice + render across N rows; a
             // dozen rows can easily run $5+. Confirm before submit.
+            const formatLine =
+              outputChoice === "short"
+                ? "Output: SHORT only (no long-form video render this batch)."
+                : outputChoice === "long"
+                  ? "Output: LONG-FORM video (skips the short pipeline)."
+                  : "Output: use the global default (Settings → Reddit imports → Default output).";
             if (
               !window.confirm(
                 `Enqueue ${ids.length} row${ids.length === 1 ? "" : "s"} for full pipeline processing (article + images + video)?\n\n` +
+                  `${formatLine}\n\n` +
                   "Each row spends real LLM + image + voice credits. The local pipeline worker must be running:\n\n" +
                   "    python -m pipeline.story_jobs_worker",
               )
@@ -348,6 +366,25 @@ function BulkFooter({
             <input key={id} type="hidden" name="reddit_id" value={id} />
           ))}
           <input type="hidden" name="with_media" value="1" />
+          {/* Closed enum: '' = "use the reddit.default_output setting".
+              The server action validates the same enum, so a stale
+              browser tab can't smuggle a typo through. */}
+          <label className="mr-2 inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted">
+            Output
+            <select
+              name="output_format"
+              value={outputChoice}
+              onChange={(e) =>
+                setOutputChoice(e.currentTarget.value as OutputChoice)
+              }
+              className="rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] normal-case tracking-normal text-ink outline-none focus:border-accent"
+              aria-label="Output format for this batch"
+            >
+              <option value="">Default</option>
+              <option value="short">Short only</option>
+              <option value="long">Long-form</option>
+            </select>
+          </label>
           <button
             type="submit"
             disabled={budgetExhausted}

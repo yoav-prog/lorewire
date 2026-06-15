@@ -10,6 +10,11 @@ import { all, one, run } from "@/lib/db";
 
 export type StoryJobStatus = "queued" | "processing" | "done" | "error";
 
+// Closed enum mirrored in pipeline/store.py:enqueue_story_job. NULL = the
+// worker resolves at claim time against the `reddit.default_output`
+// setting. Any other value is a bug; the storage layer normalizes to NULL.
+export type StoryJobOutputFormat = "short" | "long";
+
 export interface StoryJobRow {
   id: string;
   reddit_id: string;
@@ -22,10 +27,11 @@ export interface StoryJobRow {
   requested_at: string;
   started_at: string | null;
   finished_at: string | null;
+  output_format: StoryJobOutputFormat | null;
 }
 
 const COLS =
-  "id, reddit_id, status, progress, error, story_id, with_media, requested_by, requested_at, started_at, finished_at";
+  "id, reddit_id, status, progress, error, story_id, with_media, requested_by, requested_at, started_at, finished_at, output_format";
 
 export interface BulkEnqueueResult {
   enqueued: number;
@@ -47,7 +53,16 @@ const ALLOWED_SOURCE_STATUSES: ReadonlySet<string> = new Set([
 
 export async function bulkEnqueueStoryJobs(
   redditIds: string[],
-  opts: { with_media?: boolean; requested_by?: string | null } = {},
+  opts: {
+    with_media?: boolean;
+    requested_by?: string | null;
+    /** Per-batch override for the row's output format. Pass NULL or omit
+     *  to defer to `reddit.default_output` at worker claim time. The
+     *  storage layer (pipeline/store.py and the storage helper below)
+     *  normalises any other value to NULL so a stale caller can't smuggle
+     *  a typo past the worker. */
+    output_format?: StoryJobOutputFormat | null;
+  } = {},
 ): Promise<BulkEnqueueResult> {
   const result: BulkEnqueueResult = {
     enqueued: 0,
@@ -60,6 +75,10 @@ export async function bulkEnqueueStoryJobs(
 
   const withMedia = opts.with_media === false ? 0 : 1;
   const requestedBy = opts.requested_by ?? null;
+  const outputFormat: StoryJobOutputFormat | null =
+    opts.output_format === "short" || opts.output_format === "long"
+      ? opts.output_format
+      : null;
   const now = new Date().toISOString();
 
   // One snapshot read for the candidate rows + one for in-flight jobs, both
@@ -99,6 +118,7 @@ export async function bulkEnqueueStoryJobs(
       requested_at: now,
       started_at: null,
       finished_at: null,
+      output_format: outputFormat,
     });
     // Only flip reddit_source.status when the row was 'imported'; a row
     // already 'queued' (from a previous attempt the worker reset) stays as
@@ -203,6 +223,7 @@ const INSERT_COLS = [
   "requested_at",
   "started_at",
   "finished_at",
+  "output_format",
 ] as const;
 
 async function bulkInsertJobs(rows: StoryJobRow[]): Promise<void> {

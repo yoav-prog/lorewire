@@ -139,6 +139,13 @@ export default async function SettingsPage() {
     listElevenLabsVoices(),
   ]);
 
+  // Reddit-imports default output (short vs long-form video). Lives upstream
+  // of the shorts.auto.* block — it picks WHICH video to make for an
+  // imported story, not whether to also make a companion short alongside
+  // the long-form. NULL = the implicit default 'short' (cheaper render
+  // + matches the new short-editor flow we ship).
+  const redditDefaultOutput = await getSetting("reddit.default_output");
+
   // Article-shorts auto-generate settings (global default + per-category).
   const [shortsAutoEnabled, shortsAutoNarration, shortsAutoLength] =
     await Promise.all([
@@ -168,6 +175,14 @@ export default async function SettingsPage() {
     { id: "on", label: "Always make a short" },
     { id: "off", label: "Never" },
   ];
+  // Closed enum mirrored in lib/story-jobs.ts:StoryJobOutputFormat and
+  // pipeline/story_jobs_worker.py:resolve_output_format. Default 'short'
+  // because Phase 1 + 2 of the short editor make shorts the lighter,
+  // cheaper, more-finished path for Reddit-origin stories.
+  const redditOutputOptions: SelectOption[] = [
+    { id: "short", label: "Short (vertical 40-60s doodle)" },
+    { id: "long", label: "Long-form video" },
+  ];
 
   // Map voice catalogs to the SettingSelect option shape. Group Google by
   // locale (the API returns the locale on each voice); group ElevenLabs by
@@ -191,6 +206,19 @@ export default async function SettingsPage() {
       description="Pipeline defaults, voice, video look, and the intro/outro splice switch. Read by the pipeline at run time."
     >
       <div className="space-y-8">
+        <Section
+          title="Reddit imports"
+          description="What video to produce when an imported Reddit row is processed. Short is the new default — it runs the 40-60s doodle pipeline you can finish in the short editor (Scenes + Captions tabs). Long-form runs the original Cloud Run remotion render. Either way, the per-batch picker on the Process N button can override this for one batch without changing the default."
+        >
+          <SettingSelect
+            settingKey="reddit.default_output"
+            label="Default output for Reddit imports"
+            hint="Short is cheaper per row (no Cloud Run render) and lands directly in the short editor for review. Long-form keeps the original 16:9 / 9:16 pipeline and is still worth picking for stories you plan to publish as full-length."
+            initial={redditDefaultOutput ?? "short"}
+            options={redditOutputOptions}
+          />
+        </Section>
+
         <Section
           title="Article shorts"
           description="Auto-generate a 40-60s vertical doodle short when a story finishes. Off by default. The per-category overrides win over the global default; narration vibe + length apply to every auto-generated short (each short can still be (re)generated manually with its own picks in the video editor)."

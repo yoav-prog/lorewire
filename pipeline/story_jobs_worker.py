@@ -74,7 +74,40 @@ DRAIN_UNSUPPORTED_MEDIA_REASON = (
     "re-enqueue with with_media=False or run the local worker"
 )
 
+# 2026-06-16 Reddit-import output format. Per-batch override on the
+# `story_jobs.output_format` column wins; otherwise the
+# `reddit.default_output` setting decides; otherwise REDDIT_DEFAULT_OUTPUT.
+# Plan: _plans/2026-06-16-reddit-default-to-shorts.md.
+REDDIT_DEFAULT_OUTPUT_SETTING_KEY = "reddit.default_output"
+REDDIT_DEFAULT_OUTPUT = "short"
+_VALID_OUTPUT_FORMATS = ("short", "long")
+
 ProcessFn = Callable[[dict, dict], dict]
+
+
+def resolve_output_format(
+    claimed_job: dict,
+    get_setting: Callable[[str], "str | None"] = store.get_setting,
+) -> tuple[str, str]:
+    """Decide the output format for a claimed story_jobs row.
+
+    Returns `(format, source)` where `format` is 'short' or 'long' and
+    `source` is one of 'row' (per-batch override on the row),
+    'setting' (the global `reddit.default_output` setting) or
+    'default' (the hardcoded REDDIT_DEFAULT_OUTPUT fallback).
+
+    Closed enum on both ends — a malformed row column or setting falls
+    through to the next layer rather than crashing the worker. The
+    storage layer (pipeline/store.py:enqueue_story_job) normalises bad
+    inputs to NULL on write; this resolver is the read-side defence.
+    """
+    row_raw = (claimed_job.get("output_format") or "").strip().lower()
+    if row_raw in _VALID_OUTPUT_FORMATS:
+        return row_raw, "row"
+    setting_raw = (get_setting(REDDIT_DEFAULT_OUTPUT_SETTING_KEY) or "").strip().lower()
+    if setting_raw in _VALID_OUTPUT_FORMATS:
+        return setting_raw, "setting"
+    return REDDIT_DEFAULT_OUTPUT, "default"
 
 
 def _daily_budget_cap_cents() -> int | None:
@@ -254,26 +287,71 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     )
     store.upsert_story(row)
 
-    # Hand off to the video pipeline. The video_renders queue is what
-    # the editor's existing "Render" button uses; auto-enqueueing here
-    # means the admin doesn't have to remember to click it. The Cloud
-    # Run cron picks the row up within ~1 min and writes back
-    # stories.video_url. The publish gate already requires video_url
-    # IS NOT NULL, so the story stays at status='review' until then —
-    # admin doesn't need to know about the two-queue split.
-    if with_media:
-        _enqueue_video_render_for_story(row)
+    # Resolve the per-row output format BEFORE handing off so the two
+    # branches stay symmetric (one enqueues a long-form render, the other
+    # force-enqueues a short — never both, never neither).
+    output_format, output_source = resolve_output_format(claimed_job)
+    print(
+        f"[reddit output] resolved reddit_id={post['id']} "
+        f"job_id={claimed_job['id']} format={output_format} "
+        f"source={output_source}"
+    )
 
-    # Auto-enqueue a short if the admin turned it on (global or per-category).
-    # Shorts generate their own frames + voice from the story text, so this is
-    # NOT gated on with_media. Off by default; a failure here never blocks story
-    # completion.
-    try:
-        from pipeline import shorts_auto
-        if shorts_auto.maybe_enqueue_short_for_story(row["id"], row.get("category")):
-            print(f"[story-jobs handoff] short auto-enqueued story_id={row['id']}")
-    except Exception as e:  # noqa: BLE001 — auto-short must not break the job
-        print(f"[story-jobs handoff] auto-short skipped: {e}")
+    if output_format == "short":
+        # Short-only branch (the new default for Reddit imports). Skip the
+        # long-form video_renders enqueue entirely — the short pipeline
+        # generates its own frames + voice from the story body, lands in
+        # the short editor (Scenes + Captions tabs), and is materially
+        # cheaper than a Cloud Run remotion render. The shorts.auto.*
+        # gate is bypassed because the admin's per-batch / per-setting
+        # pick is "make a short" — but the rolling-24h cap still applies
+        # as a cost safety net.
+        print(
+            f"[reddit output] short-only skip-long-form story_id={row['id']}"
+        )
+        try:
+            from pipeline import shorts_auto
+            forced = shorts_auto.maybe_enqueue_short_for_story(
+                row["id"],
+                row.get("category"),
+                requested_by="reddit-import",
+                force=True,
+            )
+            if forced:
+                print(
+                    f"[reddit output] forced-short story_id={row['id']} "
+                    f"requested_by=reddit-import"
+                )
+            else:
+                # Cap hit (logged inside shorts_auto). Surface here too so
+                # the worker's per-row log tells the whole story without
+                # having to grep across two namespaces.
+                print(
+                    f"[reddit output] forced-short-skipped story_id={row['id']} "
+                    f"reason=cap-or-error"
+                )
+        except Exception as e:  # noqa: BLE001 — handoff must not break the job
+            print(f"[reddit output] forced-short error story_id={row['id']}: {e}")
+    else:
+        # Long-form branch: existing behaviour. Hand off to the video
+        # pipeline, then optionally an auto-short alongside if the global
+        # setting / per-category override says so. The Cloud Run cron picks
+        # the row up within ~1 min and writes back stories.video_url. The
+        # publish gate already requires video_url IS NOT NULL, so the story
+        # stays at status='review' until then.
+        if with_media:
+            _enqueue_video_render_for_story(row)
+
+        # Auto-enqueue a short if the admin turned it on (global or per-category).
+        # Shorts generate their own frames + voice from the story text, so this is
+        # NOT gated on with_media. Off by default; a failure here never blocks story
+        # completion.
+        try:
+            from pipeline import shorts_auto
+            if shorts_auto.maybe_enqueue_short_for_story(row["id"], row.get("category")):
+                print(f"[story-jobs handoff] short auto-enqueued story_id={row['id']}")
+        except Exception as e:  # noqa: BLE001 — auto-short must not break the job
+            print(f"[story-jobs handoff] auto-short skipped: {e}")
 
     return row
 

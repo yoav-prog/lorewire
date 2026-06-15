@@ -2381,6 +2381,17 @@ export async function processRedditSourcesAction(
   const session = await requireAdmin();
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   const withMedia = String(formData.get("with_media") ?? "1") === "1";
+  // Per-batch output override: 'short' / 'long' pin every row in this
+  // batch to that format; '' (the default option) leaves the row's
+  // output_format NULL so the worker resolves against the
+  // `reddit.default_output` setting at claim time. Any other value is
+  // silently dropped to NULL — the storage helper enforces the same
+  // closed enum, so a hand-crafted POST can't smuggle a typo through.
+  const outputFormatRaw = String(formData.get("output_format") ?? "");
+  const outputFormat: "short" | "long" | null =
+    outputFormatRaw === "short" || outputFormatRaw === "long"
+      ? outputFormatRaw
+      : null;
   if (ids.length === 0) {
     redirect("/admin/reddit-sources?error=no-selection");
   }
@@ -2405,6 +2416,7 @@ export async function processRedditSourcesAction(
   const result = await bulkEnqueueStoryJobs(ids, {
     with_media: withMedia,
     requested_by: session.email,
+    output_format: outputFormat,
   });
   console.info("[story-jobs enqueue]", {
     requested: ids.length,
@@ -2413,6 +2425,10 @@ export async function processRedditSourcesAction(
     skipped_status: result.skipped_status,
     not_found: result.not_found,
     with_media: withMedia,
+    // null = "use default" (worker reads reddit.default_output at claim
+    // time); the audit trail captures the admin's per-batch intent so
+    // a later setting change doesn't muddy what was requested.
+    output_format: outputFormat,
     requested_by: session.email,
   });
   revalidatePath("/admin/reddit-sources");

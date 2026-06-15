@@ -343,8 +343,15 @@ SCHEMA_STATEMENTS = [
         requested_by  TEXT,
         requested_at  TEXT NOT NULL,
         started_at    TEXT,
-        finished_at   TEXT
+        finished_at   TEXT,
+        output_format TEXT
     )""",
+    # 2026-06-16 per-batch output override for Reddit imports. NULL = the
+    # worker resolves at claim time against the `reddit.default_output`
+    # setting (default 'short'); 'short' / 'long' pin the row's output
+    # format and survive a later setting change. See
+    # _plans/2026-06-16-reddit-default-to-shorts.md.
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS output_format TEXT",
     # Worker hot path: oldest queued first. Mirrors the index on
     # image_renders(status, requested_at).
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_status_requested ON story_jobs(status, requested_at)",
@@ -2841,6 +2848,7 @@ def list_reddit_source_subreddits() -> list[str]:
 _STORY_JOB_COLUMNS = [
     "id", "reddit_id", "status", "progress", "error", "story_id",
     "with_media", "requested_by", "requested_at", "started_at", "finished_at",
+    "output_format",
 ]
 
 
@@ -2877,6 +2885,7 @@ def enqueue_story_job(
     *,
     with_media: bool = True,
     requested_by: str | None = None,
+    output_format: str | None = None,
 ) -> dict | None:
     """Insert a queued story_job. Returns the inserted row, or None when an
     active job (queued or processing) already exists for this reddit_id —
@@ -2895,6 +2904,13 @@ def enqueue_story_job(
     """
     if has_active_story_job(reddit_id):
         return None
+    # Closed enum at the storage boundary: anything other than 'short' /
+    # 'long' lands as NULL so a stale caller can't sneak a typo past the
+    # worker's resolver (which would then fall through to the default
+    # and bypass the per-row override the admin actually picked).
+    normalized_output: str | None = (
+        output_format if output_format in ("short", "long") else None
+    )
     now = _now_iso()
     row = {
         "id": job_id,
@@ -2908,6 +2924,7 @@ def enqueue_story_job(
         "requested_at": now,
         "started_at": None,
         "finished_at": None,
+        "output_format": normalized_output,
     }
     cols = ", ".join(_STORY_JOB_COLUMNS)
     conflict_clause = (
