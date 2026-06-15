@@ -397,11 +397,11 @@ export function createTableSql(t: Table): string {
 
 // Post-table DDL: indexes that the TS layer enforces because they're
 // load-bearing for write paths in this codebase (not just performance
-// hints — the ON CONFLICT clauses in src/lib/story-jobs.ts depend on the
-// partial unique index being present). The Python migration in
-// pipeline/store.py mirrors these statements; this list is the TS source
-// of truth for the indexes ensureSchema must create after the per-table
-// loop. Performance-only indexes (the bunch on reddit_source / story_jobs
+// hints — the ON CONFLICT clauses in src/lib/story-jobs.ts and
+// src/lib/voice-render-queue.ts depend on their partial unique indexes
+// being present). The Python migration in pipeline/store.py mirrors these
+// statements; this list is the TS source of truth for the indexes
+// ensureSchema must create after the per-table loop. Performance-only indexes (the bunch on reddit_source / story_jobs
 // that just speed up filter queries) are owned by Python and are not
 // mirrored here — adding them is a separate, larger refactor.
 export const POST_TABLE_DDL: string[] = [
@@ -418,4 +418,16 @@ export const POST_TABLE_DDL: string[] = [
   // so the lookup is hot-pathed.
   "CREATE INDEX IF NOT EXISTS idx_video_render_events_render_id " +
     "ON video_render_events(render_id, ts)",
+  // 2026-06-15: at most one active voice_render per (story, text, voice).
+  // lib/voice-render-queue.ts:enqueueVoiceRender does an INSERT ... ON
+  // CONFLICT (story_id, text_hash, voice_provider, voice_id) WHERE status IN
+  // (...), which on Postgres REQUIRES this exact partial unique index to
+  // exist or the insert throws "no unique or exclusion constraint matching
+  // the ON CONFLICT specification" — which 500'd the Regenerate voiceover
+  // action in prod. It previously lived ONLY in pipeline/store.py, so prod
+  // (where the TS app creates the table but the Python init had not created
+  // the index) crashed on click. Mirrors pipeline/store.py exactly.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_renders_one_active " +
+    "ON voice_renders(story_id, text_hash, voice_provider, voice_id) " +
+    "WHERE status IN ('queued', 'processing')",
 ];

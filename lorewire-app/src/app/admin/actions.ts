@@ -1044,13 +1044,30 @@ export async function regenerateVoiceoverAction(formData: FormData): Promise<{
   // asked for is the regen the worker performs. Mid-flight override
   // swap would be a confusing race.
   const { enqueueVoiceRender } = await import("@/lib/voice-render-queue");
-  const result = await enqueueVoiceRender({
-    storyId,
-    body,
-    voiceProvider: story.voice_provider,
-    voiceId: story.voice_id,
-    requestedBy: session.userId,
-  });
+  let result: Awaited<ReturnType<typeof enqueueVoiceRender>>;
+  try {
+    result = await enqueueVoiceRender({
+      storyId,
+      body,
+      voiceProvider: story.voice_provider,
+      voiceId: story.voice_id,
+      requestedBy: session.userId,
+    });
+  } catch (e) {
+    // A DB error here (e.g. the ON CONFLICT partial unique index missing in
+    // an under-migrated environment) must NOT throw out of the server
+    // action — an uncaught throw drops the whole editor into Next's error
+    // boundary ("This page couldn't load"). Return a friendly inline message
+    // the picker surfaces instead, and log the real cause for the operator.
+    console.error("[voice regen action] enqueue threw", {
+      story_id: storyId,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return {
+      ok: false,
+      error: "Could not queue the voiceover. Please try again in a moment.",
+    };
+  }
   if (!result.ok) {
     console.warn("[voice regen action] enqueue failed", {
       story_id: storyId,
