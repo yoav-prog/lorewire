@@ -31,7 +31,7 @@ _LIB = _HERE / "_lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from pipeline import shorts_render, store  # noqa: E402
+from pipeline import shorts_lane_b, shorts_render, store  # noqa: E402
 
 LOG = logging.getLogger("drain_short")
 LOG.setLevel(logging.INFO)
@@ -98,7 +98,25 @@ def run_drain() -> dict:
         except Exception:
             pass  # progress is observability, never fail the run on it
 
+    lane = claimed.get("lane")
     try:
+        if lane == "B":
+            # Lane B (Phase 3 of the short editor plan): reuse the baseline
+            # frames + character; resynthesize voice + captions only. The
+            # baseline render id, the new script, and the optional voice
+            # override come from lane_inputs.
+            laneB = shorts_lane_b.build_short_props_lane_b(
+                claimed, REPO_ROOT, remote=True, on_progress=on_progress,
+            )
+            store.store_short_props(render_id, json.dumps(laneB.props))
+            # Clear the lane so the render drain claims this row (filter
+            # `props IS NOT NULL`); we deliberately keep lane_inputs around
+            # for audit even after the build succeeds.
+            shorts_lane_b.clear_lane(render_id)
+            elapsed = round(time.monotonic() - start, 2)
+            _log("ready", id=render_id, elapsed_s=elapsed, lane="B")
+            return {"generated": 1, "render_id": render_id, "elapsed_s": elapsed, "lane": "B"}
+
         built = shorts_render.build_short_props(
             claimed["story_id"], REPO_ROOT,
             narration_style=claimed.get("narration_style"),
@@ -108,7 +126,7 @@ def run_drain() -> dict:
         )
     except Exception as exc:  # noqa: BLE001 — surface to the row
         store.fail_short_render(render_id, f"{type(exc).__name__}: {exc}")
-        _log("err", id=render_id, error=str(exc))
+        _log("err", id=render_id, error=str(exc), lane=lane)
         return {"generated": 0, "error": str(exc)}
 
     if not built:

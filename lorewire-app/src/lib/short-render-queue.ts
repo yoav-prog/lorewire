@@ -43,10 +43,15 @@ export interface ShortRenderRow {
   requested_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** Phase-3 partial-re-render dispatch marker (lib/schema.ts comment).
+   *  NULL = full generation; 'A' = assembly-only; 'B' = voice + assembly. */
+  lane: string | null;
+  /** Lane B initialization payload (JSON). */
+  lane_inputs: string | null;
 }
 
 const COLS =
-  "id, story_id, config_hash, narration_style, length_preset, status, phase, progress, error, output_url, props, requested_by, requested_at, started_at, finished_at";
+  "id, story_id, config_hash, narration_style, length_preset, status, phase, progress, error, output_url, props, requested_by, requested_at, started_at, finished_at, lane, lane_inputs";
 
 // Hash the creation options into the idempotency key. Same narration vibe +
 // length preset means "the same short", so repeat clicks coalesce; a different
