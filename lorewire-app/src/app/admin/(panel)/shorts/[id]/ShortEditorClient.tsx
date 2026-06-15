@@ -17,7 +17,10 @@ import { EditSessionBanner } from "./EditSessionBanner";
 import { RenderAfterEditsBanner } from "./RenderAfterEditsBanner";
 import { ScenesTab } from "./ScenesTab";
 import { ScriptTab } from "./ScriptTab";
+import { UseShortAsVideoButton } from "./UseShortAsVideoButton";
+import { ShortPreviewPlayer } from "./ShortPreviewPlayer";
 import { VoiceTab } from "./VoiceTab";
+import type { LinkedArticleSummary } from "./actions";
 import {
   claimShortEditSession,
   heartbeatShortEditSession,
@@ -58,6 +61,7 @@ export function ShortEditorClient({
   initialRender,
   voices,
   foreignOwnerEmail,
+  linkedArticles,
 }: {
   storyId: string;
   initialConfig: ShortConfig;
@@ -68,6 +72,10 @@ export function ShortEditorClient({
    *  until the take-over button is clicked (which calls router.refresh()
    *  and we land cold again with foreignOwnerEmail=null). Phase 5. */
   foreignOwnerEmail: string | null;
+  /** Articles whose `articles.story_id` matches this short's story. Drives
+   *  the per-scene "Use in article" picker in ScenesTab. Empty list when
+   *  no article is linked yet — Scenes tab surfaces a friendly hint. */
+  linkedArticles: LinkedArticleSummary[];
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabId>("scenes");
@@ -127,6 +135,8 @@ export function ShortEditorClient({
 
       <RenderAfterEditsBanner storyId={storyId} configKey={configKey} />
 
+      <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
+        <div className="min-w-0 space-y-3">
       <nav
         role="tablist"
         aria-label="Short editor tabs"
@@ -170,6 +180,7 @@ export function ShortEditorClient({
           config={config}
           onConfigChange={setConfig}
           initialRender={initialRender}
+          linkedArticles={linkedArticles}
         />
       )}
       {tab === "captions" && (
@@ -194,6 +205,21 @@ export function ShortEditorClient({
           onConfigChange={setConfig}
         />
       )}
+
+          <UseShortAsVideoButton
+            storyId={storyId}
+            disabled={
+              initialRender === null ||
+              initialRender.status !== "done" ||
+              !initialRender.output_url
+            }
+          />
+        </div>
+
+        <aside className="min-w-0">
+          <ShortPreviewPlayer config={config} />
+        </aside>
+      </div>
     </div>
   );
 }

@@ -19,6 +19,8 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { ShortConfig, ShortFrame } from "@/lib/short-config";
 import type { ShortRenderRow } from "@/lib/short-render-queue";
+import { SceneArticleActions } from "./SceneArticleActions";
+import type { LinkedArticleSummary } from "./actions";
 import {
   regenShortScene,
   revertShortScene,
@@ -38,11 +40,15 @@ export function ScenesTab({
   config,
   onConfigChange,
   initialRender,
+  linkedArticles,
 }: {
   storyId: string;
   config: ShortConfig;
   onConfigChange: (next: ShortConfig) => void;
   initialRender: ShortRenderRow | null;
+  /** Articles whose articles.story_id matches this story. Drives the
+   *  per-scene "Use in article" action panel. */
+  linkedArticles: LinkedArticleSummary[];
 }) {
   const router = useRouter();
   const frames = config.doodle_frames;
@@ -289,6 +295,24 @@ export function ScenesTab({
                   </button>
                 )}
               </div>
+
+              {linkedArticles.length > 0 ? (
+                <div className="border-t border-line/60 pt-2">
+                  <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-muted">
+                    Use in article
+                  </div>
+                  <SceneArticleActions
+                    storyId={storyId}
+                    frameId={frame.id}
+                    frameAlt={d.alt}
+                    linkedArticles={linkedArticles}
+                  />
+                </div>
+              ) : (
+                <p className="border-t border-line/60 pt-2 font-mono text-[9px] uppercase tracking-wider text-muted">
+                  Link an article to this story to promote scenes
+                </p>
+              )}
             </div>
           );
         })}
