@@ -49,6 +49,7 @@ import {
   planShortRender,
   type ShortRenderPlan,
 } from "@/lib/short-render-plan";
+import { nudgeDrain } from "@/lib/drain-nudge";
 import {
   nextSessionFor,
   readForeignSession,
@@ -494,6 +495,9 @@ export async function renderShortLaneA(
     baseline_render_id: baseline.id,
     caption_count: cfg.config.captions.length,
   });
+  // Lane A row has props pre-baked → goes straight to the render drain.
+  // Nudge so the user doesn't wait up to a minute for the cron tick.
+  await nudgeDrain("/api/render_short");
   revalidatePath(`/admin/shorts/${storyId}`);
   return { ok: true, renderId, plan };
 }
@@ -636,6 +640,9 @@ export async function renderShortLaneB(
     script_chars: script.length,
     voice_override: cfg.config.voice ?? null,
   });
+  // Lane B: props=NULL initially → generation drain builds + render drain
+  // takes over. Nudge generation.
+  await nudgeDrain("/api/drain_short_renders");
   revalidatePath(`/admin/shorts/${storyId}`);
   return { ok: true, renderId, plan };
 }
@@ -822,6 +829,9 @@ export async function renderShortLaneC(
     baseline_render_id: baseline.id,
     touched_scene_count: plan.touched_scene_ids.length,
   });
+  // Lane C: props=NULL → generation drain regens scenes inline + builds
+  // props → render drain ships. Nudge generation.
+  await nudgeDrain("/api/drain_short_renders");
   revalidatePath(`/admin/shorts/${storyId}`);
   return { ok: true, renderId, plan };
 }

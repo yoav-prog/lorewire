@@ -16,6 +16,7 @@ import { CaptionsTab } from "./CaptionsTab";
 import { CaptionStyleTab } from "./CaptionStyleTab";
 import { EditSessionBanner } from "./EditSessionBanner";
 import { RenderAfterEditsBanner } from "./RenderAfterEditsBanner";
+import { RenderStatusPanel } from "./RenderStatusPanel";
 import { ScenesTab } from "./ScenesTab";
 import { ScriptTab } from "./ScriptTab";
 import { UseShortAsVideoButton } from "./UseShortAsVideoButton";
@@ -213,6 +214,8 @@ export function ShortEditorClient({
           onConfigChange={setConfig}
         />
       )}
+
+          <RenderStatusPanel initialRender={initialRender} />
 
           <UseShortAsVideoButton
             storyId={storyId}
