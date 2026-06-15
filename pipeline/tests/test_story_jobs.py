@@ -123,7 +123,7 @@ class EnqueueTests(_IsolatedDB):
         squeaked past the TS action's validation) must not be able to
         smuggle a typo through the storage layer, because the worker's
         resolver would then see something it doesn't recognise and fall
-        through to the global setting — silently overriding the admin's
+        through to the global setting, silently overriding the admin's
         explicit per-batch pick."""
         _seed_reddit_source(self.store)
         row = self.store.enqueue_story_job("job-1", "abc", output_format="shrt")
@@ -132,7 +132,7 @@ class EnqueueTests(_IsolatedDB):
 
 class ResolveOutputFormatTests(unittest.TestCase):
     """Pure-function tests for the worker's per-row format resolution.
-    No DB needed — the resolver takes a `get_setting` callable, so the
+    No DB needed: the resolver takes a `get_setting` callable, so the
     tests can synthesise rows + settings without isolating the store."""
 
     def _resolve(self, row_format, setting_value):
@@ -165,7 +165,7 @@ class ResolveOutputFormatTests(unittest.TestCase):
 
     def test_default_short_when_setting_malformed(self):
         # A typo in the setting falls through to the hardcoded default
-        # rather than crashing the worker — the admin can fix the
+        # rather than crashing the worker: the admin can fix the
         # setting next time they visit the page without a queue drain.
         self.assertEqual(self._resolve(None, "vertical"), ("short", "default"))
 

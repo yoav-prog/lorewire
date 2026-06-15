@@ -96,7 +96,7 @@ def resolve_output_format(
     'setting' (the global `reddit.default_output` setting) or
     'default' (the hardcoded REDDIT_DEFAULT_OUTPUT fallback).
 
-    Closed enum on both ends — a malformed row column or setting falls
+    Closed enum on both ends: a malformed row column or setting falls
     through to the next layer rather than crashing the worker. The
     storage layer (pipeline/store.py:enqueue_story_job) normalises bad
     inputs to NULL on write; this resolver is the read-side defence.
@@ -289,7 +289,7 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
 
     # Resolve the per-row output format BEFORE handing off so the two
     # branches stay symmetric (one enqueues a long-form render, the other
-    # force-enqueues a short — never both, never neither).
+    # force-enqueues a short; never both, never neither).
     output_format, output_source = resolve_output_format(claimed_job)
     print(
         f"[reddit output] resolved reddit_id={post['id']} "
@@ -299,12 +299,12 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
 
     if output_format == "short":
         # Short-only branch (the new default for Reddit imports). Skip the
-        # long-form video_renders enqueue entirely — the short pipeline
+        # long-form video_renders enqueue entirely: the short pipeline
         # generates its own frames + voice from the story body, lands in
         # the short editor (Scenes + Captions tabs), and is materially
         # cheaper than a Cloud Run remotion render. The shorts.auto.*
         # gate is bypassed because the admin's per-batch / per-setting
-        # pick is "make a short" — but the rolling-24h cap still applies
+        # pick is "make a short", but the rolling-24h cap still applies
         # as a cost safety net.
         print(
             f"[reddit output] short-only skip-long-form story_id={row['id']}"
@@ -330,7 +330,7 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
                     f"[reddit output] forced-short-skipped story_id={row['id']} "
                     f"reason=cap-or-error"
                 )
-        except Exception as e:  # noqa: BLE001 — handoff must not break the job
+        except Exception as e:  # noqa: BLE001 - handoff must not break the job
             print(f"[reddit output] forced-short error story_id={row['id']}: {e}")
     else:
         # Long-form branch: existing behaviour. Hand off to the video
@@ -350,7 +350,7 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             from pipeline import shorts_auto
             if shorts_auto.maybe_enqueue_short_for_story(row["id"], row.get("category")):
                 print(f"[story-jobs handoff] short auto-enqueued story_id={row['id']}")
-        except Exception as e:  # noqa: BLE001 — auto-short must not break the job
+        except Exception as e:  # noqa: BLE001 - auto-short must not break the job
             print(f"[story-jobs handoff] auto-short skipped: {e}")
 
     return row

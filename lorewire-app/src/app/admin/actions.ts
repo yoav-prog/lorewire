@@ -2385,7 +2385,7 @@ export async function processRedditSourcesAction(
   // batch to that format; '' (the default option) leaves the row's
   // output_format NULL so the worker resolves against the
   // `reddit.default_output` setting at claim time. Any other value is
-  // silently dropped to NULL — the storage helper enforces the same
+  // silently dropped to NULL: the storage helper enforces the same
   // closed enum, so a hand-crafted POST can't smuggle a typo through.
   const outputFormatRaw = String(formData.get("output_format") ?? "");
   const outputFormat: "short" | "long" | null =

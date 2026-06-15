@@ -140,7 +140,7 @@ export default async function SettingsPage() {
   ]);
 
   // Reddit-imports default output (short vs long-form video). Lives upstream
-  // of the shorts.auto.* block — it picks WHICH video to make for an
+  // of the shorts.auto.* block: it picks WHICH video to make for an
   // imported story, not whether to also make a companion short alongside
   // the long-form. NULL = the implicit default 'short' (cheaper render
   // + matches the new short-editor flow we ship).
@@ -208,7 +208,7 @@ export default async function SettingsPage() {
       <div className="space-y-8">
         <Section
           title="Reddit imports"
-          description="What video to produce when an imported Reddit row is processed. Short is the new default — it runs the 40-60s doodle pipeline you can finish in the short editor (Scenes + Captions tabs). Long-form runs the original Cloud Run remotion render. Either way, the per-batch picker on the Process N button can override this for one batch without changing the default."
+          description="What video to produce when an imported Reddit row is processed. Short is the new default: it runs the 40-60s doodle pipeline you can finish in the short editor (Scenes + Captions tabs). Long-form runs the original Cloud Run remotion render. Either way, the per-batch picker on the Process N button can override this for one batch without changing the default."
         >
           <SettingSelect
             settingKey="reddit.default_output"

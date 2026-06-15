@@ -2201,6 +2201,46 @@ def read_short_caption_style(story: dict) -> dict:
     return {k: v for k, v in style.items() if isinstance(v, str) and v}
 
 
+def set_story_video_url_if_null(story_id: str, video_url: str) -> bool:
+    """Point stories.video_url at a freshly-rendered short, but only when
+    the story doesn't already have one.
+
+    The Reddit-import short-only flow
+    (_plans/2026-06-16-reddit-default-to-shorts.md) skips the long-form
+    video render entirely. Without this call, stories.video_url stays NULL
+    and evaluatePublishReadiness blocks Publish with "video has not been
+    rendered yet", defeating the set-and-forget promise of Process N.
+
+    The WHERE video_url IS NULL clause is the race guard: if a concurrent
+    long-form render lands first (it shouldn't for short-only rows, but
+    the auto-short pipeline can still call us when shorts.auto.enabled is
+    on), the long-form wins and this UPDATE no-ops.
+
+    Returns True when the row was actually flipped, False on a no-op
+    (already had a video_url, or row missing). The caller logs the
+    distinction so the worker output spells out which branch ran.
+    """
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET video_url = %s, updated_at = %s "
+                    "WHERE id = %s AND video_url IS NULL",
+                    (video_url, now, story_id),
+                )
+                flipped = cur.rowcount > 0
+            conn.commit()
+        return flipped
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "UPDATE stories SET video_url = ?, updated_at = ? "
+            "WHERE id = ? AND video_url IS NULL",
+            (video_url, now, story_id),
+        )
+        return (cur.rowcount or 0) > 0
+
+
 def read_story_pipeline_cache(story: dict) -> dict:
     """Decode `stories.pipeline_cache` off an already-fetched story row.
 
