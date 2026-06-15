@@ -10,8 +10,16 @@
 // Stale window: 2 min (4 missed heartbeats at 30 s). Wide enough to
 // survive a brief tab switch / wifi blip; tight enough that a closed tab
 // frees the session before the user gets back from coffee.
+//
+// NOTE: this module deliberately does NOT carry `import "server-only"`.
+// SHORT_EDIT_HEARTBEAT_INTERVAL_MS is consumed by ShortEditorClient (a
+// client component) and the two pure functions below have no server
+// side-effects (no DB, no auth) — they are safe to bundle into the
+// client even if a caller happens to reach them there. The 2026-06-15
+// Phase 5 PR shipped with server-only and broke Vercel's prod build
+// because Turbopack honours that directive across client component
+// import graphs even when the caller only takes a constant.
 
-import "server-only";
 import type { ShortConfig, ShortEditSession } from "@/lib/short-config";
 
 /** A session whose heartbeat_at is older than this is stale — another
