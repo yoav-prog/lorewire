@@ -325,9 +325,9 @@ export function defaultShortConfig(
 
 // Apply a partial patch to a config, returning a new config (immutable).
 // Mirrors lib/video-config.ts:applyConfigPatch — same shape, narrower set
-// of editable paths. Phase 1 supports dotted paths into doodle_frames
-// (so the Scenes tab can patch one frame at a time) plus the top-level
-// scalars the future tabs will edit.
+// of editable paths. Supports dotted paths into doodle_frames (Phase 1
+// Scenes tab) and into captions (Phase 2 Captions tab), plus the
+// top-level scalars later tabs will edit.
 //
 // Unsupported paths are silently dropped so a client editing on an older
 // build can't corrupt the column with junk; the action that calls this
@@ -336,7 +336,11 @@ export function applyShortConfigPatch(
   base: ShortConfig,
   patch: Record<string, unknown>,
 ): ShortConfig {
-  let next: ShortConfig = { ...base, doodle_frames: [...base.doodle_frames] };
+  let next: ShortConfig = {
+    ...base,
+    doodle_frames: [...base.doodle_frames],
+    captions: [...base.captions],
+  };
   for (const [path, value] of Object.entries(patch)) {
     next = applyOnePath(next, path, value);
   }
@@ -391,5 +395,45 @@ function applyOnePath(
     });
     return { ...cfg, doodle_frames: frames };
   }
+
+  // Caption patches: `captions.<idx>.<field>`. Captions don't have stable
+  // ids — they're indexed by position so the editor's chunk inputs can
+  // address each one. Out-of-range indices and invalid timing pairs are
+  // silently dropped; the final parseShortConfig in the action layer
+  // catches anything that would produce an unparseable config.
+  const captionMatch = /^captions\.(\d+)\.([^.]+)$/.exec(path);
+  if (captionMatch) {
+    const idx = Number(captionMatch[1]);
+    const field = captionMatch[2];
+    if (!Number.isInteger(idx) || idx < 0 || idx >= cfg.captions.length) {
+      return cfg;
+    }
+    const captions = cfg.captions.map((c, i) => {
+      if (i !== idx) return c;
+      if (field === "text" && typeof value === "string") {
+        return { ...c, text: value };
+      }
+      if (
+        field === "start_ms" &&
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= c.end_ms
+      ) {
+        return { ...c, start_ms: value };
+      }
+      if (
+        field === "end_ms" &&
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= c.start_ms
+      ) {
+        return { ...c, end_ms: value };
+      }
+      return c;
+    });
+    return { ...cfg, captions };
+  }
+
   return cfg;
 }

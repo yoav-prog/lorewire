@@ -1,15 +1,16 @@
 "use client";
 
 // Client-side shell for the short editor. Owns the tab bar + the active tab
-// content. Phase 1 ships ONE tab (Scenes); the others are placeholders so
-// the user can see where the surface is going and we can wire them up in
-// follow-up PRs without restructuring this file.
+// content + the always-on Render After Edits banner. Phase 1 lit up Scenes;
+// Phase 2 adds Captions + the Lane A render path.
 //
 // Plan: _plans/2026-06-16-short-editor-full-parity.md.
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ShortConfig } from "@/lib/short-config";
 import type { ShortRenderRow } from "@/lib/short-render-queue";
+import { CaptionsTab } from "./CaptionsTab";
+import { RenderAfterEditsBanner } from "./RenderAfterEditsBanner";
 import { ScenesTab } from "./ScenesTab";
 
 type TabId = "scenes" | "script" | "captions" | "voice" | "render";
@@ -21,11 +22,25 @@ const TABS: Array<{
   hint?: string;
 }> = [
   { id: "scenes", label: "Scenes", available: true },
+  { id: "captions", label: "Captions", available: true },
   { id: "script", label: "Script", available: false, hint: "Phase 3" },
-  { id: "captions", label: "Captions", available: false, hint: "Phase 2" },
   { id: "voice", label: "Voice", available: false, hint: "Phase 3" },
   { id: "render", label: "Render", available: false, hint: "Phase 4" },
 ];
+
+// A stable digest the banner can re-poll on. We deliberately include all the
+// fields the render plan diffs against (captions + frame urls + prompts +
+// script + voice + voiceover_url) so any edit triggers a fresh plan fetch.
+function buildConfigKey(c: ShortConfig): string {
+  const frames = c.doodle_frames
+    .map((f) => `${f.id}:${f.url}:${f.image_prompt ?? ""}`)
+    .join("|");
+  const caps = c.captions
+    .map((cap) => `${cap.start_ms}-${cap.end_ms}-${cap.text}`)
+    .join("|");
+  const voice = c.voice ? `${c.voice.provider}:${c.voice.voice_id}` : "";
+  return `${frames}#${caps}#${c.script ?? ""}#${voice}#${c.voiceover_url ?? ""}`;
+}
 
 export function ShortEditorClient({
   storyId,
@@ -38,9 +53,12 @@ export function ShortEditorClient({
 }) {
   const [tab, setTab] = useState<TabId>("scenes");
   const [config, setConfig] = useState<ShortConfig>(initialConfig);
+  const configKey = useMemo(() => buildConfigKey(config), [config]);
 
   return (
     <div className="space-y-3">
+      <RenderAfterEditsBanner storyId={storyId} configKey={configKey} />
+
       <nav
         role="tablist"
         aria-label="Short editor tabs"
@@ -59,7 +77,7 @@ export function ShortEditorClient({
               title={
                 t.available
                   ? undefined
-                  : `Not in Phase 1 — ${t.hint ?? "later"}`
+                  : `Not available yet — ${t.hint ?? "later"}`
               }
               className={
                 isActive
@@ -84,6 +102,13 @@ export function ShortEditorClient({
           config={config}
           onConfigChange={setConfig}
           initialRender={initialRender}
+        />
+      )}
+      {tab === "captions" && (
+        <CaptionsTab
+          storyId={storyId}
+          config={config}
+          onConfigChange={setConfig}
         />
       )}
     </div>
