@@ -570,6 +570,10 @@ export interface ArticleRow {
   meta_title: string | null;
   meta_description: string | null;
   og_image: string | null;
+  // Optional link to the Reddit-pipeline story whose short_render scenes the
+  // article borrows for hero/og/gallery promotion. Set via setArticleStoryId
+  // (its own dedicated action), not via the generic ARTICLE_EDITABLE writer.
+  story_id: string | null;
   payload: string | null;
   source_sheet_row_id: string | null;
   created_at: string | null;
@@ -580,7 +584,7 @@ export interface ArticleRow {
 }
 
 const ARTICLE_COLS =
-  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, payload, source_sheet_row_id, created_at, updated_at, published_at, noindex";
+  "id, type, language, slug, title, subtitle, summary, document, hero_image, status, author_id, meta_title, meta_description, og_image, story_id, payload, source_sheet_row_id, created_at, updated_at, published_at, noindex";
 
 // Slim projection for /admin/articles list. Drops the heavy text fields
 // (document, payload, summary, meta_*, og_image) the list does not render.
@@ -817,6 +821,22 @@ export async function setArticleNoindex(
     [noindex ? 1 : 0, now, id],
   );
   console.info("[articles repo] noindex", { id, noindex });
+}
+
+// story_id has its own writer because it is intentionally not in
+// ARTICLE_EDITABLE — the generic updateArticle path is for editor field
+// writes (title/body/etc.); story_id is set by a dedicated action that
+// validates the target story exists. Passing null unlinks.
+export async function setArticleStoryId(
+  id: string,
+  storyId: string | null,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE articles SET story_id = ?, updated_at = ? WHERE id = ?",
+    [storyId, now, id],
+  );
+  console.info("[articles repo] story-id", { id, storyId });
 }
 
 export async function deleteArticle(id: string): Promise<void> {

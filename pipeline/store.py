@@ -2164,8 +2164,9 @@ def update_story_props(story_id: str, prop_list: list[dict]) -> None:
 _ARTICLE_COLUMNS = [
     "id", "type", "language", "slug", "title", "subtitle", "summary",
     "document", "hero_image", "status", "author_id", "meta_title",
-    "meta_description", "og_image", "payload", "source_sheet_row_id",
-    "created_at", "updated_at", "published_at", "noindex",
+    "meta_description", "og_image", "story_id", "payload",
+    "source_sheet_row_id", "created_at", "updated_at", "published_at",
+    "noindex",
 ]
 
 

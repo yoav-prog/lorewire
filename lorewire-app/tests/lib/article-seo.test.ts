@@ -30,11 +30,13 @@ function row(overrides: Partial<ArticleRow> = {}): ArticleRow {
     meta_title: null,
     meta_description: null,
     og_image: null,
+    story_id: null,
     payload: null,
     source_sheet_row_id: null,
     created_at: "2026-06-11T10:00:00.000Z",
     updated_at: "2026-06-11T10:00:00.000Z",
     published_at: null,
+    noindex: null,
     ...overrides,
   };
 }

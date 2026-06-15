@@ -32,6 +32,14 @@ import { GalleryView } from "./GalleryView";
 import { EmbedView } from "./EmbedView";
 import { ComparisonView } from "./ComparisonView";
 import { SheetsRefView } from "./SheetsRefView";
+import {
+  LinkedStoryWidget,
+  type StoryOption,
+} from "./LinkedStoryWidget";
+import {
+  ShortScenesPanel,
+  type ShortSceneFrame,
+} from "./ShortScenesPanel";
 
 // Debounce window for autosave. Matches the default the plan calls out;
 // settings.articles.autosave_debounce_ms can override (Phase 3 wires it).
@@ -72,6 +80,21 @@ interface Props {
   heroImage: string;
   document: string;
   direction: "ltr" | "rtl";
+  /** Articles can opt into borrowing scene images from a linked story's
+   *  short_render — the widget + panel above the form handles the link
+   *  and the per-frame promotion actions. Plan:
+   *  _plans/2026-06-15-shorts-to-article-media.md */
+  currentStoryId: string | null;
+  currentStoryTitle: string | null;
+  storyOptions: StoryOption[];
+  /** Resolved by getLinkedShortFrames; null when no successful short_render
+   *  exists for the linked story (or no story is linked). */
+  linkedShort: {
+    storyId: string;
+    storyTitle: string | null;
+    shortRenderId: string;
+    frames: ShortSceneFrame[];
+  } | null;
 }
 
 interface UploadResponse {
@@ -118,6 +141,10 @@ export function ArticleEditor({
   heroImage,
   document,
   direction,
+  currentStoryId,
+  currentStoryTitle,
+  storyOptions,
+  linkedShort,
 }: Props) {
   const docHidden = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -329,6 +356,27 @@ export function ArticleEditor({
     >
       <input type="hidden" name="id" value={id} />
       <input ref={docHidden} type="hidden" name="document" defaultValue="" />
+
+      {/* Article -> short_render media bridge. The widget sets the link
+          (articles.story_id); the panel surfaces the linked short's scenes
+          for one-click hero/og/gallery promotion. These call their own
+          server actions directly; they live INSIDE the form for visual
+          grouping only, not to participate in the form submission. */}
+      <LinkedStoryWidget
+        articleId={id}
+        currentStoryId={currentStoryId}
+        currentStoryTitle={currentStoryTitle}
+        stories={storyOptions}
+      />
+      {linkedShort && (
+        <ShortScenesPanel
+          articleId={id}
+          storyId={linkedShort.storyId}
+          storyTitle={linkedShort.storyTitle}
+          shortRenderId={linkedShort.shortRenderId}
+          frames={linkedShort.frames}
+        />
+      )}
 
       <div>
         <label className={LABEL}>Title</label>
