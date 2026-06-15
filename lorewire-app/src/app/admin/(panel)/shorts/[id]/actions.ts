@@ -17,22 +17,27 @@
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/dal";
 import {
+  getArticle,
   getStory,
   getStoryShortConfigJson,
   setStoryShortConfigJson,
+  updateArticle,
+  type ArticleRow,
 } from "@/lib/repo";
 import {
+  applyShortToStory,
   latestShortRenderForStory,
   logShortRenderEvent,
   type ShortRenderRow,
 } from "@/lib/short-render-queue";
+import { appendArticleGalleryItem } from "@/lib/tiptap-gallery";
 import {
   canEnqueueImageRegen,
   enqueueImageRegen,
   type ImageRenderRow,
 } from "@/lib/image-render-queue";
 import { createHash, randomUUID } from "node:crypto";
-import { run, one } from "@/lib/db";
+import { all, run, one } from "@/lib/db";
 import {
   applyShortConfigPatch,
   defaultShortConfig,
@@ -842,5 +847,190 @@ export async function revertShortScene(
     frame_id: frameId,
   });
   revalidatePath(`/admin/shorts/${storyId}`);
+  return { ok: true };
+}
+
+// ─── Apply this short as the story's video (Phase 5+ surfacing) ─────────────
+// Mirrors useShortAsStoryVideo in admin/videos/[id]/actions.ts, but takes
+// just storyId — the short editor knows its own latest done render via
+// loadShortEditorState, so we find it server-side and point the story's
+// video_url at its output_url. Reversible: the long-form MP4 stays at
+// its own GCS key, so re-rendering the long-form video restores it.
+
+export async function applyLatestShortToStoryAction(
+  storyId: string,
+): Promise<{ ok: boolean; error?: string; url?: string }> {
+  const session = await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const latest = await latestShortRenderForStory(storyId);
+  if (!latest) return { ok: false, error: "no short generated yet" };
+  if (latest.status !== "done" || !latest.output_url) {
+    return { ok: false, error: "latest short is not done" };
+  }
+  await applyShortToStory(storyId, latest.output_url);
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor apply-to-story]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    url: latest.output_url,
+  });
+  revalidatePath(`/admin/videos/${storyId}`);
+  revalidatePath(`/admin/shorts/${storyId}`);
+  return { ok: true, url: latest.output_url };
+}
+
+// ─── Articles linked to this story (for scene-to-article promote) ─────────
+// Returns the slim list of articles whose articles.story_id matches the
+// short's story_id, so the editor's per-scene "Use in article" actions
+// can populate a picker. Empty list when no article is linked yet; the
+// UI then explains how to link an article via the article editor.
+
+export interface LinkedArticleSummary {
+  id: string;
+  title: string | null;
+  slug: string | null;
+  language: string | null;
+}
+
+export async function listArticlesLinkedToStoryAction(
+  storyId: string,
+): Promise<{ ok: boolean; error?: string; articles?: LinkedArticleSummary[] }> {
+  await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const rows = await all<LinkedArticleSummary>(
+    "SELECT id, title, slug, language FROM articles WHERE story_id = ? " +
+      "ORDER BY COALESCE(updated_at, created_at) DESC",
+    [storyId],
+  );
+  return { ok: true, articles: rows };
+}
+
+// ─── Per-scene -> article hero / OG / gallery (Phase 5+ surfacing) ─────────
+// Promote one of THIS short's scenes into a linked article's media slot.
+// The article editor (admin/(panel)/articles/[id]) already exposes the
+// same promote actions via setArticleHeroFromFrameAction / setArticleOgFromFrameAction
+// / addArticleGalleryImageFromFrameAction — those go through
+// getLinkedShortFrame which keys on the article's story_id link, so
+// they're already a fit. We add these three thin short-editor entry
+// points so the admin doesn't need to navigate away to promote.
+//
+// Security: the action validates article.story_id === storyId so an
+// admin can't promote a scene from short X into an article linked to
+// story Y. The frame URL is resolved server-side from short_config —
+// the client only supplies a frameId.
+
+async function resolveLinkedArticle(
+  storyId: string,
+  articleId: string,
+): Promise<{ ok: true; article: ArticleRow } | { ok: false; error: string }> {
+  const article = await getArticle(articleId);
+  if (!article) return { ok: false, error: "article-not-found" };
+  if (article.story_id !== storyId) {
+    return {
+      ok: false,
+      error: "article is not linked to this story",
+    };
+  }
+  return { ok: true, article };
+}
+
+async function resolveFrameUrl(
+  storyId: string,
+  frameId: string,
+): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  const cfg = await loadCurrentConfig(storyId);
+  if (!cfg.ok) return { ok: false, error: cfg.error };
+  const frame = cfg.config.doodle_frames.find((f) => f.id === frameId);
+  if (!frame) return { ok: false, error: "frame_id not found in short_config" };
+  return { ok: true, url: frame.url };
+}
+
+export async function promoteSceneToArticleHero(
+  storyId: string,
+  frameId: string,
+  articleId: string,
+): Promise<{ ok: boolean; error?: string; previousUrl?: string | null }> {
+  await requireAdmin();
+  const articleRes = await resolveLinkedArticle(storyId, articleId);
+  if (!articleRes.ok) return articleRes;
+  const frameRes = await resolveFrameUrl(storyId, frameId);
+  if (!frameRes.ok) return frameRes;
+  const previousUrl = articleRes.article.hero_image ?? null;
+  await updateArticle(articleId, { hero_image: frameRes.url });
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor scene->article-hero]", {
+    story_id: storyId,
+    article_id: articleId,
+    frame_id: frameId,
+    previousUrl,
+  });
+  revalidatePath(`/admin/articles/${articleId}`);
+  return { ok: true, previousUrl };
+}
+
+export async function promoteSceneToArticleOg(
+  storyId: string,
+  frameId: string,
+  articleId: string,
+): Promise<{ ok: boolean; error?: string; previousUrl?: string | null }> {
+  await requireAdmin();
+  const articleRes = await resolveLinkedArticle(storyId, articleId);
+  if (!articleRes.ok) return articleRes;
+  const frameRes = await resolveFrameUrl(storyId, frameId);
+  if (!frameRes.ok) return frameRes;
+  const previousUrl = articleRes.article.og_image ?? null;
+  await updateArticle(articleId, { og_image: frameRes.url });
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor scene->article-og]", {
+    story_id: storyId,
+    article_id: articleId,
+    frame_id: frameId,
+    previousUrl,
+  });
+  revalidatePath(`/admin/articles/${articleId}`);
+  return { ok: true, previousUrl };
+}
+
+export async function addSceneToArticleGallery(
+  storyId: string,
+  frameId: string,
+  articleId: string,
+  alt: string = "",
+): Promise<{ ok: boolean; error?: string }> {
+  await requireAdmin();
+  const articleRes = await resolveLinkedArticle(storyId, articleId);
+  if (!articleRes.ok) return articleRes;
+  const frameRes = await resolveFrameUrl(storyId, frameId);
+  if (!frameRes.ok) return frameRes;
+  const docRaw = articleRes.article.document;
+  if (!docRaw) {
+    return {
+      ok: false,
+      error: "article has no document to append to — open the article editor first",
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(docRaw);
+  } catch {
+    return { ok: false, error: "article document is unparseable" };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { ok: false, error: "article document is not a JSON object" };
+  }
+  const next = appendArticleGalleryItem(parsed, {
+    src: frameRes.url,
+    alt: alt.trim(),
+    caption: "",
+  });
+  await updateArticle(articleId, { document: JSON.stringify(next) });
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor scene->article-gallery]", {
+    story_id: storyId,
+    article_id: articleId,
+    frame_id: frameId,
+  });
+  revalidatePath(`/admin/articles/${articleId}`);
   return { ok: true };
 }

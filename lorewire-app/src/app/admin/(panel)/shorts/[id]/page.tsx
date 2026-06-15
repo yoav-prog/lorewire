@@ -11,7 +11,10 @@ import { requireAdmin } from "@/lib/dal";
 import { getStory, getUserById } from "@/lib/repo";
 import { listVoices } from "@/lib/voice-library";
 import { readForeignSession } from "@/lib/short-edit-session";
-import { loadShortEditorState } from "./actions";
+import {
+  listArticlesLinkedToStoryAction,
+  loadShortEditorState,
+} from "./actions";
 import { ShortEditorClient } from "./ShortEditorClient";
 
 export default async function ShortEditorPage({
@@ -26,14 +29,26 @@ export default async function ShortEditorPage({
 
   // Voices: the catalog is per-process-memoized in listVoices() so this
   // costs ~1 ms after the first page load of the admin shell.
-  const [state, voices] = await Promise.all([
+  // Linked articles: feed the per-scene "Use in article" promote actions
+  // in ScenesTab. Empty list when no article points at this story.
+  const [state, voices, articlesResult] = await Promise.all([
     loadShortEditorState(id),
     listVoices().catch((err) => {
       // eslint-disable-next-line no-console -- rule 14
       console.warn("[short editor page] listVoices failed", { err: String(err) });
       return [];
     }),
+    listArticlesLinkedToStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] linked articles failed", {
+        err: String(err),
+      });
+      return { ok: false, articles: [] } as const;
+    }),
   ]);
+  const linkedArticles = articlesResult.ok
+    ? (articlesResult.articles ?? [])
+    : [];
 
   return (
     <div className="space-y-4">
@@ -70,6 +85,7 @@ export default async function ShortEditorPage({
             state.config!,
             session.userId,
           )}
+          linkedArticles={linkedArticles}
         />
       )}
     </div>
