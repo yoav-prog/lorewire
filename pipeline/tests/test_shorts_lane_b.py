@@ -114,13 +114,48 @@ class ValidationTests(_LaneBTestCase):
             )
         self.assertIn("script", str(cm.exception))
 
+    def test_too_short_script_raises_below_floor(self):
+        # 2026-06-16 QA fix: a 1-char script burns a TTS call for nothing
+        # useful. Floor is 10 chars; below that the builder raises.
+        with self.assertRaises(ValueError) as cm:
+            shorts_lane_b.build_short_props_lane_b(
+                {
+                    "story_id": "s",
+                    "lane_inputs": json.dumps(
+                        {"source_render_id": "r", "script": "hi"},
+                    ),
+                },
+                Path("."),
+            )
+        self.assertIn("too short", str(cm.exception))
+
+    def test_at_min_length_proceeds_past_validation(self):
+        # 10 chars exactly should pass the floor (the rest of the path
+        # then fails on the unknown baseline, which is the next gate;
+        # we only assert the script-floor doesn't fire).
+        with self.assertRaises(ValueError) as cm:
+            shorts_lane_b.build_short_props_lane_b(
+                {
+                    "story_id": "s",
+                    "lane_inputs": json.dumps(
+                        {
+                            "source_render_id": "ghost",
+                            "script": "ten chars!",  # 10 chars
+                        },
+                    ),
+                },
+                Path("."),
+            )
+        # Whatever the error is, it should NOT be "too short".
+        self.assertNotIn("too short", str(cm.exception))
+
     def test_unknown_source_render_raises(self):
         with self.assertRaises(ValueError) as cm:
             shorts_lane_b.build_short_props_lane_b(
                 {
                     "story_id": "s",
                     "lane_inputs": json.dumps(
-                        {"source_render_id": "ghost", "script": "hi there"},
+                        {"source_render_id": "ghost", "script": "hi there, this is plenty long"},
                     ),
                 },
                 Path("."),
@@ -140,7 +175,7 @@ class ValidationTests(_LaneBTestCase):
                 {
                     "story_id": "s",
                     "lane_inputs": json.dumps(
-                        {"source_render_id": "no-props", "script": "hi there"},
+                        {"source_render_id": "no-props", "script": "hi there, this is plenty long"},
                     ),
                 },
                 Path("."),
@@ -155,7 +190,7 @@ class ValidationTests(_LaneBTestCase):
                     "lane_inputs": json.dumps(
                         {
                             "source_render_id": "r",
-                            "script": "hi there",
+                            "script": "hi there, this is plenty long",
                             "voice": {"provider": "google"},  # voice_id missing
                         },
                     ),
@@ -259,7 +294,7 @@ class HappyPathTests(_LaneBTestCase):
             "lane_inputs": json.dumps(
                 {
                     "source_render_id": "baseline-v",
-                    "script": "Whatever",
+                    "script": "Whatever long enough",
                     "voice": {"provider": "elevenlabs", "voice_id": "abc-123"},
                 },
             ),

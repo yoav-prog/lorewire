@@ -26,7 +26,11 @@ import {
   logShortRenderEvent,
   type ShortRenderRow,
 } from "@/lib/short-render-queue";
-import { enqueueImageRegen, type ImageRenderRow } from "@/lib/image-render-queue";
+import {
+  canEnqueueImageRegen,
+  enqueueImageRegen,
+  type ImageRenderRow,
+} from "@/lib/image-render-queue";
 import { createHash, randomUUID } from "node:crypto";
 import { run, one } from "@/lib/db";
 import {
@@ -525,6 +529,15 @@ export async function renderShortLaneB(
         "Lane B needs a script on the short_config — open the Script tab and write one first",
     };
   }
+  // Min-length floor: a 1-char script burns a TTS call (~5¢) for nothing
+  // useful. 10 chars is roughly two words — the smallest text where the
+  // alignment yields a usable caption chunk.
+  if (script.length < 10) {
+    return {
+      ok: false,
+      error: `script is too short for synthesis (${script.length}/10 chars min)`,
+    };
+  }
 
   // Lane B distinct config_hash so a row coexists with the baseline + any
   // Lane A row. Including the script + voice digest makes the click
@@ -684,6 +697,35 @@ export async function renderShortLaneC(
         plan,
       };
     }
+  }
+
+  // Daily image-budget pre-flight. The Python Lane C builder calls
+  // shorts_scene_regen.regen_short_scene directly in a loop, bypassing
+  // the image_renders queue's per-row canEnqueueImageRegen gate. Without
+  // this check an admin clicking Lane C with N touched scenes can blow
+  // past the daily cap by N × per-image cost in a single drain tick.
+  // We check up front so the row is never queued when it can't pay.
+  // Plan: _plans/2026-06-16-short-editor-full-parity.md QA pass.
+  const probeFrameId = plan.touched_scene_ids[0];
+  const probe = await canEnqueueImageRegen(`frame:${probeFrameId}`);
+  const sceneCount = plan.touched_scene_ids.length;
+  const projectedSpentCents =
+    probe.budget.spentCents + sceneCount * probe.estimateCents;
+  if (projectedSpentCents > probe.budget.capCents) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor laneC budget reject]", {
+      story_id: storyId,
+      scene_count: sceneCount,
+      estimate_cents_per_scene: probe.estimateCents,
+      spent_cents: probe.budget.spentCents,
+      cap_cents: probe.budget.capCents,
+      projected_spent_cents: projectedSpentCents,
+    });
+    return {
+      ok: false,
+      error: `lane C would spend ${sceneCount} × ${probe.estimateCents}¢ on top of ${probe.budget.spentCents}¢ already spent today; daily image cap is ${probe.budget.capCents}¢. Wait for the cap to reset or bump it in settings.`,
+      plan,
+    };
   }
 
   // Distinct config_hash so a row coexists with the baseline + any
