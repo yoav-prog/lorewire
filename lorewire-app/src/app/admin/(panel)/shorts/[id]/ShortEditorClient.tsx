@@ -9,9 +9,12 @@
 import { useMemo, useState } from "react";
 import type { ShortConfig } from "@/lib/short-config";
 import type { ShortRenderRow } from "@/lib/short-render-queue";
+import type { VoiceEntry } from "@/lib/voice-library";
 import { CaptionsTab } from "./CaptionsTab";
 import { RenderAfterEditsBanner } from "./RenderAfterEditsBanner";
 import { ScenesTab } from "./ScenesTab";
+import { ScriptTab } from "./ScriptTab";
+import { VoiceTab } from "./VoiceTab";
 
 type TabId = "scenes" | "script" | "captions" | "voice" | "render";
 
@@ -23,8 +26,8 @@ const TABS: Array<{
 }> = [
   { id: "scenes", label: "Scenes", available: true },
   { id: "captions", label: "Captions", available: true },
-  { id: "script", label: "Script", available: false, hint: "Phase 3" },
-  { id: "voice", label: "Voice", available: false, hint: "Phase 3" },
+  { id: "script", label: "Script", available: true },
+  { id: "voice", label: "Voice", available: true },
   { id: "render", label: "Render", available: false, hint: "Phase 4" },
 ];
 
@@ -46,10 +49,12 @@ export function ShortEditorClient({
   storyId,
   initialConfig,
   initialRender,
+  voices,
 }: {
   storyId: string;
   initialConfig: ShortConfig;
   initialRender: ShortRenderRow | null;
+  voices: VoiceEntry[];
 }) {
   const [tab, setTab] = useState<TabId>("scenes");
   const [config, setConfig] = useState<ShortConfig>(initialConfig);
@@ -108,6 +113,21 @@ export function ShortEditorClient({
         <CaptionsTab
           storyId={storyId}
           config={config}
+          onConfigChange={setConfig}
+        />
+      )}
+      {tab === "script" && (
+        <ScriptTab
+          storyId={storyId}
+          config={config}
+          onConfigChange={setConfig}
+        />
+      )}
+      {tab === "voice" && (
+        <VoiceTab
+          storyId={storyId}
+          config={config}
+          voices={voices}
           onConfigChange={setConfig}
         />
       )}

@@ -417,6 +417,20 @@ export const SHORT_RENDERS: Table = {
     // no DEFAULT, so a TS-created column starts NULL; the reaper reads it with
     // COALESCE(attempts, 0). Mirrors pipeline/store.py.
     { name: "attempts", type: "INTEGER" },
+    // 2026-06-16 short editor Phase 3: partial-re-render lane marker.
+    // NULL = full generation (the default), 'A' = assembly-only (props
+    // baked by the action, render drain picks up directly), 'B' = voice
+    // + assembly (generation drain picks up via lane_inputs and rewrites
+    // props). The render-drain claim filter is unchanged (props IS NOT
+    // NULL); Lane B rows transition lane: 'B' -> NULL once their props
+    // are built so the render drain only ever sees finished work. Plan:
+    // _plans/2026-06-16-short-editor-full-parity.md.
+    { name: "lane", type: "TEXT" },
+    // Lane B initialization payload (JSON): {script, voice,
+    // source_render_id}. Populated by the renderShortLaneB action;
+    // consumed by build_short_props_lane_b in the generation drain.
+    // NULL on every other lane.
+    { name: "lane_inputs", type: "TEXT" },
   ],
 };
 

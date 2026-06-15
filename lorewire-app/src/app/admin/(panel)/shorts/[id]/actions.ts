@@ -387,6 +387,137 @@ export async function renderShortLaneA(
   return { ok: true, renderId, plan };
 }
 
+// ─── Lane B render (Phase 3 — voice + assembly partial re-render) ───────────
+
+export async function renderShortLaneB(
+  storyId: string,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  renderId?: string;
+  plan?: ShortRenderPlan;
+}> {
+  const session = await requireAdmin();
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const cfg = await loadCurrentConfig(storyId);
+  if (!cfg.ok) return { ok: false, error: cfg.error };
+  const baseline = await latestShortRenderForStory(storyId);
+  if (!baseline || baseline.status !== "done" || !baseline.props) {
+    return { ok: false, error: "no baseline render — generate a short first" };
+  }
+  const plan = planShortRender(cfg.config, baseline.props);
+  if (plan.lane === "noop") {
+    return { ok: false, error: "no edits since the last render", plan };
+  }
+  if (plan.lane === "C") {
+    return {
+      ok: false,
+      error:
+        "current edits include scene changes — Lane C runs in Phase 4. Revert the per-scene edits or use Restart for a full regenerate.",
+      plan,
+    };
+  }
+  if (plan.lane === "A") {
+    return {
+      ok: false,
+      error: "only captions changed — call renderShortLaneA instead",
+      plan,
+    };
+  }
+  // plan.lane === 'B' — we're cleared to enqueue.
+
+  const script = (cfg.config.script ?? "").trim();
+  if (!script) {
+    return {
+      ok: false,
+      error:
+        "Lane B needs a script on the short_config — open the Script tab and write one first",
+    };
+  }
+
+  // Lane B distinct config_hash so a row coexists with the baseline + any
+  // Lane A row. Including the script + voice digest makes the click
+  // idempotent (re-clicking without edits is a no-op).
+  const scriptVoiceDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        script,
+        voice: cfg.config.voice ?? null,
+      }),
+    )
+    .digest("hex")
+    .slice(0, 16);
+  const configHash = `${baseline.config_hash}:laneB:${scriptVoiceDigest}`;
+
+  const existing = await one<{ id: string; status: string }>(
+    "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
+    [storyId, configHash],
+  );
+  if (existing) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor laneB dupe]", {
+      story_id: storyId,
+      existing_render_id: existing.id,
+      existing_status: existing.status,
+    });
+    await logShortRenderEvent(existing.id, "idempotent_hit", {
+      message: "Lane B render click coalesced with existing row",
+      payload: { lane: "B", current_status: existing.status },
+    });
+    return { ok: true, renderId: existing.id, plan };
+  }
+
+  // Insert with props=NULL and lane='B' so the GENERATION drain
+  // (filter: status='queued' AND props IS NULL) claims it and dispatches
+  // to shorts_lane_b.build_short_props_lane_b. lane_inputs carries the
+  // builder's payload: script + voice override + source baseline id.
+  const renderId = randomUUID();
+  const now = new Date().toISOString();
+  const laneInputs = JSON.stringify({
+    source_render_id: baseline.id,
+    script,
+    voice: cfg.config.voice ?? null,
+  });
+  await run(
+    `INSERT INTO short_renders
+       (id, story_id, config_hash, narration_style, length_preset, status,
+        phase, progress, error, output_url, props, requested_by,
+        requested_at, started_at, finished_at, lane, lane_inputs)
+     VALUES (?, ?, ?, ?, ?, 'queued', NULL, 0, NULL, NULL, NULL, ?, ?, NULL, NULL, 'B', ?)`,
+    [
+      renderId,
+      storyId,
+      configHash,
+      baseline.narration_style,
+      baseline.length_preset,
+      session.userId,
+      now,
+      laneInputs,
+    ],
+  );
+  await logShortRenderEvent(renderId, "queued", {
+    message: "Lane B voice + assembly re-render queued",
+    payload: {
+      lane: "B",
+      baseline_render_id: baseline.id,
+      script_chars: script.length,
+      voice_override: cfg.config.voice ?? null,
+      estimated_cost_cents: plan.estimated_cost_cents,
+    },
+  });
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor laneB queued]", {
+    story_id: storyId,
+    user_id: session.userId,
+    render_id: renderId,
+    baseline_render_id: baseline.id,
+    script_chars: script.length,
+    voice_override: cfg.config.voice ?? null,
+  });
+  revalidatePath(`/admin/shorts/${storyId}`);
+  return { ok: true, renderId, plan };
+}
+
 export async function revertShortScene(
   storyId: string,
   frameId: string,

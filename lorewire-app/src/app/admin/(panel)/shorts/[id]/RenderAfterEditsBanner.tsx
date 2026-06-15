@@ -15,7 +15,11 @@
 import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { ShortRenderPlan } from "@/lib/short-render-plan";
-import { previewRenderPlan, renderShortLaneA } from "./actions";
+import {
+  previewRenderPlan,
+  renderShortLaneA,
+  renderShortLaneB,
+} from "./actions";
 
 const LANE_LABEL: Record<ShortRenderPlan["lane"], string> = {
   noop: "No changes",
@@ -24,8 +28,7 @@ const LANE_LABEL: Record<ShortRenderPlan["lane"], string> = {
   C: "Lane C · per-scene",
 };
 
-const LANE_PHASE_HINT: Record<Exclude<ShortRenderPlan["lane"], "A" | "noop">, string> = {
-  B: "Phase 3 will execute this",
+const LANE_PHASE_HINT: Record<Exclude<ShortRenderPlan["lane"], "A" | "B" | "noop">, string> = {
   C: "Phase 4 will execute this",
 };
 
@@ -78,22 +81,26 @@ export function RenderAfterEditsBanner({
   // The banner intentionally renders ALWAYS — even on noop — so the user
   // sees the (idle) cost story. It just disables the button.
   const lane = plan?.lane ?? "noop";
-  const ready = lane === "A";
+  const ready = lane === "A" || lane === "B";
 
   function onRender() {
     if (!ready) return;
     setActionError(null);
     setPendingRender(true);
     startTransition(async () => {
-      const r = await renderShortLaneA(storyId);
+      const r =
+        lane === "B"
+          ? await renderShortLaneB(storyId)
+          : await renderShortLaneA(storyId);
       setPendingRender(false);
       if (!r.ok) {
         setActionError(r.error ?? "render failed to queue");
         return;
       }
       // eslint-disable-next-line no-console -- rule 14
-      console.info("[short editor banner laneA]", {
+      console.info("[short editor banner lane]", {
         storyId,
+        lane,
         render_id: r.renderId,
       });
       router.refresh();
@@ -119,26 +126,30 @@ export function RenderAfterEditsBanner({
         )}
       </div>
 
-      {lane === "A" && (
+      {(lane === "A" || lane === "B") && (
         <button
           type="button"
           onClick={onRender}
           disabled={pendingRender}
           className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
-          title={`Re-render the assembly with the new captions (~$${(plan!.estimated_cost_cents / 100).toFixed(2)})`}
+          title={
+            lane === "A"
+              ? `Re-render the assembly with the new captions (~$${(plan!.estimated_cost_cents / 100).toFixed(2)})`
+              : `Resynthesize voice + re-render (~$${(plan!.estimated_cost_cents / 100).toFixed(2)})`
+          }
         >
           {pendingRender ? "Queueing…" : "Render after edits"}
         </button>
       )}
 
-      {(lane === "B" || lane === "C") && (
+      {lane === "C" && (
         <button
           type="button"
           disabled
-          title={LANE_PHASE_HINT[lane]}
+          title={LANE_PHASE_HINT.C}
           className="rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-muted opacity-60"
         >
-          Needs {LANE_PHASE_HINT[lane]}
+          Needs Phase 4
         </button>
       )}
 

@@ -182,6 +182,13 @@ SCHEMA_STATEMENTS = [
     # SQLite in _sqlite_rewrite; the duplicate-column error is caught in init().
     "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS props TEXT",
     "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0",
+    # 2026-06-16 short editor Phase 3: partial-re-render lane dispatch.
+    # NULL = full generation (default); 'A' = assembly-only (props pre-baked);
+    # 'B' = voice + assembly (lane_inputs carries {script, voice,
+    # source_render_id}; generation drain reads it, builds new full props,
+    # nulls the lane column so the render drain picks up).
+    "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS lane TEXT",
+    "ALTER TABLE short_renders ADD COLUMN IF NOT EXISTS lane_inputs TEXT",
     # 2026-06-15 short-render observability (mirror of video_render_events).
     # One row per phase transition — the worker emits an event at every
     # step (script_built, scene_generated, voice_synth_done, render_started,
@@ -1167,6 +1174,7 @@ _SHORT_RENDER_COLUMNS = [
     "id", "story_id", "config_hash", "narration_style", "length_preset",
     "status", "phase", "progress", "error", "output_url", "props",
     "requested_by", "requested_at", "started_at", "finished_at",
+    "lane", "lane_inputs",
 ]
 
 
@@ -1198,6 +1206,12 @@ def enqueue_short_render(
         "requested_at": now,
         "started_at": None,
         "finished_at": None,
+        # Phase-3 partial-re-render columns. Always NULL on the full-generation
+        # path; the TS Lane B action populates them via a direct INSERT in
+        # admin/(panel)/shorts/[id]/actions.ts (this helper isn't used for
+        # Lane B because the column-set differs).
+        "lane": None,
+        "lane_inputs": None,
     }
     # Retry semantics (mirrors lib/short-render-queue.ts enqueueShortRender):
     # after the insert-or-ignore, reset a settled-but-FAILED row (error /

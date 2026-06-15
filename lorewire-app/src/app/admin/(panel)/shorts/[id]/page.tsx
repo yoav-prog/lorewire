@@ -1,14 +1,15 @@
-// Short editor — Phase 1 (Scenes tab).
+// Short editor.
 //
 // Server Component shell: auth, story lookup, short_config seed (via the
-// action's loadShortEditorState), then hand off to the client component
-// that owns the tabs + interactivity. Plan:
-// _plans/2026-06-16-short-editor-full-parity.md.
+// action's loadShortEditorState), voice catalog load for the Voice tab,
+// then hand off to the client component that owns the tabs + interactivity.
+// Plan: _plans/2026-06-16-short-editor-full-parity.md.
 
 import Link from "next/link";
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/dal";
 import { getStory } from "@/lib/repo";
+import { listVoices } from "@/lib/voice-library";
 import { loadShortEditorState } from "./actions";
 import { ShortEditorClient } from "./ShortEditorClient";
 
@@ -22,7 +23,16 @@ export default async function ShortEditorPage({
   const story = await getStory(id);
   if (!story) notFound();
 
-  const state = await loadShortEditorState(id);
+  // Voices: the catalog is per-process-memoized in listVoices() so this
+  // costs ~1 ms after the first page load of the admin shell.
+  const [state, voices] = await Promise.all([
+    loadShortEditorState(id),
+    listVoices().catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] listVoices failed", { err: String(err) });
+      return [];
+    }),
+  ]);
 
   return (
     <div className="space-y-4">
@@ -43,7 +53,7 @@ export default async function ShortEditorPage({
           </h1>
         </div>
         <div className="font-mono text-[10px] uppercase tracking-wider text-muted">
-          Phase 1 · Scenes
+          Scenes · Captions · Script · Voice
         </div>
       </header>
 
@@ -54,6 +64,7 @@ export default async function ShortEditorPage({
           storyId={id}
           initialConfig={state.config!}
           initialRender={state.latestRender ?? null}
+          voices={voices}
         />
       )}
     </div>
