@@ -38,6 +38,13 @@ import {
   type VideoRenderEventRow,
 } from "@/lib/video-render-queue";
 import {
+  countShortRendersSince,
+  enqueueShortRender,
+  getShortRender,
+  latestShortRenderForStory,
+  type ShortRenderRow,
+} from "@/lib/short-render-queue";
+import {
   canEnqueueImageRegen,
   enqueueImageRegen,
   type ImageRenderRow,
@@ -242,6 +249,96 @@ export async function logVideoRenderEventAction(
   await requireAdmin();
   if (!renderId || !event) return;
   await logVideoRenderEvent(renderId, event, { message });
+}
+
+// ─── shorts (article shorts render queue) ─────────────────────────────────────
+// "Generate short" enqueues into short_renders; the Python worker
+// (pipeline/short_render_worker.py) and the Vercel cron drain it. Idempotency is
+// on (story_id, narration vibe + length preset) so repeat clicks at the same
+// options coalesce, while a different vibe/length is its own short. Admin-only
+// (rule 13); the same rolling 24h daily cap pattern as video renders.
+
+export interface QueueShortRenderResult {
+  ok: boolean;
+  error?: string;
+  render?: ShortRenderRow;
+  capCount?: number;
+  capLimit?: number;
+}
+
+const DEFAULT_SHORT_DAILY_CAP = 20;
+
+async function resolveShortDailyCap(): Promise<number> {
+  const raw = await getSetting("shorts.daily_renders_per_story");
+  if (!raw) return DEFAULT_SHORT_DAILY_CAP;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SHORT_DAILY_CAP;
+}
+
+export async function queueShortRender(
+  storyId: string,
+  opts: { narrationStyle?: string | null; lengthPreset?: string | null } = {},
+): Promise<QueueShortRenderResult> {
+  const session = await requireAdmin();
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const cap = await resolveShortDailyCap();
+  const sinceIso = new Date(Date.now() - DAY_MS).toISOString();
+  const recentCount = await countShortRendersSince(storyId, sinceIso);
+  if (recentCount >= cap) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short render queue cap reject]", {
+      story_id: storyId,
+      user_id: session.userId,
+      recent_count: recentCount,
+      cap,
+    });
+    return { ok: false, error: "daily-cap-exceeded", capCount: recentCount, capLimit: cap };
+  }
+
+  const narrationStyle = opts.narrationStyle ?? null;
+  const lengthPreset = opts.lengthPreset ?? null;
+  const render = await enqueueShortRender(
+    storyId,
+    narrationStyle,
+    lengthPreset,
+    session.userId,
+  );
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short render queue enqueue]", {
+    story_id: storyId,
+    user_id: session.userId,
+    narration_style: narrationStyle,
+    length_preset: lengthPreset,
+    render_id: render.id,
+    existing_status: render.status,
+    recent_count: recentCount,
+    cap,
+  });
+
+  revalidatePath(`/admin/videos/${storyId}`);
+  return { ok: true, render };
+}
+
+// Poll one short render's status (the editor's progress bar calls this).
+export async function getShortRenderStatusAction(
+  renderId: string,
+): Promise<ShortRenderRow | null> {
+  await requireAdmin();
+  if (!renderId) return null;
+  return getShortRender(renderId);
+}
+
+// The latest short render for a story (editor header shows it on page load).
+export async function latestShortRenderAction(
+  storyId: string,
+): Promise<ShortRenderRow | null> {
+  await requireAdmin();
+  if (!storyId) return null;
+  return latestShortRenderForStory(storyId);
 }
 
 // ─── editSession actions (concurrency banner / heartbeat) ─────────────────────

@@ -386,7 +386,10 @@ export const SHORT_RENDERS: Table = {
     { name: "length_preset", type: "TEXT" },
     { name: "status", type: "TEXT" },
     { name: "phase", type: "TEXT" },
-    { name: "progress", type: "REAL" },
+    // progress matches VIDEO_RENDERS (the ColType union has no REAL); the Python
+    // store.py holds the 0..1 value as REAL and owns the prod schema, SQLite is
+    // dynamically typed, so the TS column type here is only the local-dev mirror.
+    { name: "progress", type: "INTEGER" },
     { name: "error", type: "TEXT" },
     { name: "output_url", type: "TEXT" },
     { name: "requested_by", type: "TEXT" },
