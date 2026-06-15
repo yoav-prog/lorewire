@@ -240,11 +240,64 @@ describe("applyShortConfigPatch", () => {
     expect(baseFrameRef.alt).toBeUndefined();
   });
 
-  it("silently drops unsupported paths", () => {
+  it("silently drops paths that aren't recognized at all", () => {
     const next = applyShortConfigPatch(baseConfig(), {
-      "captions.0.text": "ignored in phase 1",
       arbitrary_path: 123,
+      "doodle_frames.unknown.image_prompt": "unknown id is no-op",
+    });
+    expect(next.doodle_frames).toEqual(baseConfig().doodle_frames);
+    expect(next.captions).toEqual(baseConfig().captions);
+  });
+});
+
+describe("applyShortConfigPatch — captions (Phase 2)", () => {
+  it("patches a caption text by index", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "captions.0.text": "new opener",
+    });
+    expect(next.captions[0].text).toBe("new opener");
+    // Other captions untouched.
+    expect(next.captions[1].text).toBe(baseConfig().captions[1].text);
+  });
+
+  it("patches start_ms and end_ms when they keep end >= start", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "captions.0.start_ms": 100,
+      "captions.0.end_ms": 1900,
+    });
+    expect(next.captions[0].start_ms).toBe(100);
+    expect(next.captions[0].end_ms).toBe(1900);
+  });
+
+  it("drops start_ms patches that would invert the chunk", () => {
+    // baseConfig captions[0] = {start_ms: 0, end_ms: 2000}
+    // Setting start_ms = 5000 would put start > end → drop.
+    const next = applyShortConfigPatch(baseConfig(), {
+      "captions.0.start_ms": 5000,
+    });
+    expect(next.captions[0].start_ms).toBe(0);
+  });
+
+  it("drops end_ms patches that would invert the chunk", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "captions.0.end_ms": -1,
+    });
+    expect(next.captions[0].end_ms).toBe(2000);
+  });
+
+  it("ignores out-of-range indices", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "captions.99.text": "no chunk 99",
     });
     expect(next.captions).toEqual(baseConfig().captions);
+  });
+
+  it("ignores patches with wrong value types", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "captions.0.text": 12345, // number, not string
+      "captions.1.start_ms": "abc", // string, not number
+    });
+    expect(next.captions[0].text).toBe(baseConfig().captions[0].text);
+    expect(next.captions[1].start_ms).toBe(baseConfig().captions[1].start_ms);
   });
 });
