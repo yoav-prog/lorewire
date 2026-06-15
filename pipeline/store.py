@@ -2162,6 +2162,38 @@ def update_story_short_config(story_id: str, short_config: dict) -> None:
         )
 
 
+def read_short_caption_style(story: dict) -> dict:
+    """Decode `stories.short_config.caption_style` off an already-fetched
+    story row, returning a sparse dict of {field: string} overrides.
+
+    Returns an empty dict when the column is NULL, malformed, missing the
+    caption_style field, or it's not an object. The short editor's Style
+    tab patches into this; Lane B / Lane C builders merge it onto the
+    settings-resolver caption_template so the rendered MP4 reflects the
+    picked colors / highlight / animation / position.
+
+    Pure read helper — never writes. Mirrors the editor-side
+    parseShortConfig contract: every field is stored as a string; unknown
+    fields are silently dropped.
+    """
+    raw = story.get("short_config")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    style = parsed.get("caption_style")
+    if not isinstance(style, dict):
+        return {}
+    # Strip non-string values so the merge always produces a flat
+    # string-typed override map. Unknown keys pass through — the renderer
+    # ignores anything it doesn't recognise.
+    return {k: v for k, v in style.items() if isinstance(v, str) and v}
+
+
 def read_story_pipeline_cache(story: dict) -> dict:
     """Decode `stories.pipeline_cache` off an already-fetched story row.
 

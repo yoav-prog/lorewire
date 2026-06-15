@@ -314,6 +314,110 @@ class HappyPathTests(_LaneCTestCase):
         self.assertIn(("stage", 0, 0), progress_calls)
 
 
+class CaptionStyleOverrideTests(_LaneCTestCase):
+    """Lane C merges short_config.caption_style onto baseline.caption_template
+    so a bundled Style + per-scene edit lands in the same Lane C MP4."""
+
+    def _baseline_with_template(self, template: dict | None) -> dict:
+        props = {
+            "config_version": 2,
+            "voiceover_url": "https://gcs/voice.mp3",
+            "duration_ms": 30000,
+            "doodle_frames": [
+                {
+                    "id": "frame-00",
+                    "url": "https://gcs/00-old.png",
+                    "caption_chunk_start_index": 0,
+                },
+            ],
+            "captions": [],
+        }
+        if template is not None:
+            props["caption_template"] = template
+        return props
+
+    def _short_config_with_style(
+        self, caption_style: dict | None,
+    ) -> dict:
+        cfg = {
+            "config_version": 1,
+            "character_base_url": "https://gcs/base.png",
+            "doodle_frames": [
+                {
+                    "id": "frame-00",
+                    "url": "https://gcs/00-old.png",
+                    "image_prompt": "a forest",
+                },
+            ],
+            "captions": [],
+        }
+        if caption_style is not None:
+            cfg["caption_style"] = caption_style
+        return cfg
+
+    def _run(self, story_id: str, baseline_id: str):
+        with mock.patch.object(
+            shorts_lane_c.shorts_scene_regen,
+            "regen_short_scene",
+            return_value=("https://gcs/new.png", 5),
+        ):
+            return shorts_lane_c.build_short_props_lane_c(
+                {
+                    "story_id": story_id,
+                    "lane_inputs": json.dumps({
+                        "source_render_id": baseline_id,
+                        "touched_frame_ids": ["frame-00"],
+                    }),
+                },
+                Path(self._tmpdir.name),
+            )
+
+    def test_no_style_override_leaves_caption_template_alone(self):
+        self._seed_baseline(
+            "base-no-style", "story-no-style",
+            self._baseline_with_template({"color": "#facc15"}),
+        )
+        self._seed_story_with_config(
+            "story-no-style", self._short_config_with_style(None),
+        )
+        built = self._run("story-no-style", "base-no-style")
+        self.assertEqual(built.props["caption_template"], {"color": "#facc15"})
+
+    def test_style_override_merges_onto_baseline_template(self):
+        self._seed_baseline(
+            "base-with-style", "story-with-style",
+            self._baseline_with_template({"color": "#facc15", "position_y": "0.6"}),
+        )
+        self._seed_story_with_config(
+            "story-with-style",
+            self._short_config_with_style(
+                {"color": "#ff0000", "word_highlight": "scale"},
+            ),
+        )
+        built = self._run("story-with-style", "base-with-style")
+        self.assertEqual(built.props["caption_template"]["color"], "#ff0000")
+        self.assertEqual(
+            built.props["caption_template"]["word_highlight"], "scale",
+        )
+        self.assertEqual(
+            built.props["caption_template"]["position_y"], "0.6",
+        )
+
+    def test_style_override_with_no_baseline_template(self):
+        self._seed_baseline(
+            "base-fresh-style", "story-fresh-style",
+            self._baseline_with_template(None),
+        )
+        self._seed_story_with_config(
+            "story-fresh-style",
+            self._short_config_with_style({"color": "#00ff00"}),
+        )
+        built = self._run("story-fresh-style", "base-fresh-style")
+        self.assertEqual(
+            built.props["caption_template"], {"color": "#00ff00"},
+        )
+
+
 class ClearLaneTests(_LaneCTestCase):
     def test_clear_lane_nulls_the_column(self):
         with sqlite3.connect(store.DB_PATH) as c:

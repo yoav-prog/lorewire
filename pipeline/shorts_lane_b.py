@@ -160,13 +160,24 @@ def build_short_props_lane_b(
     # Merge: keep everything from the baseline EXCEPT voiceover_url +
     # captions + duration_ms (the three fields the new audio drives). The
     # caller (drain handler) flips lane -> NULL so the render drain claims
-    # the row immediately after this returns.
+    # the row immediately after this returns. Caption style: if the editor
+    # has any short_config.caption_style override, merge it onto the
+    # baseline's caption_template so the render reflects the picked
+    # colors / highlight / animation / position. Editor-side wires the same
+    # merge into Lane A; Lane C does it from a single helper too.
+    story = store.fetch_story(story_id)
+    style_override = store.read_short_caption_style(story) if story else {}
+    baseline_template = baseline_props.get("caption_template") or {}
+    if not isinstance(baseline_template, dict):
+        baseline_template = {}
     new_props = {
         **baseline_props,
         "voiceover_url": audio_ref,
         "captions": captions,
         "duration_ms": duration_ms,
     }
+    if style_override:
+        new_props["caption_template"] = {**baseline_template, **style_override}
 
     if on_progress is not None:
         try:
