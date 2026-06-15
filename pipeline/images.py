@@ -20,6 +20,7 @@ KIE_BASE = "https://api.kie.ai/api/v1/jobs"
 # Registry id -> kie market model slug.
 MODEL_SLUG = {
     "kie/gpt-image-2": "gpt-image-2-text-to-image",
+    "kie/gpt-image-2-i2i": "gpt-image-2-image-to-image",
     "kie/nano-banana-2": "nano-banana-2",
     "kie/nano-banana-pro": "nano-banana-pro",
 }
@@ -43,11 +44,26 @@ def _post(path: str, body: dict) -> dict:
         headers={"Authorization": f"Bearer {_key()}", "Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"kie HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}") from e
+    # Retry transient timeouts / rate limits / 5xx with backoff; fail fast on
+    # other 4xx. kie's endpoints occasionally drop a read mid-request.
+    delay = 2.0
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise RuntimeError(f"kie HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}") from e
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < 3:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise RuntimeError(f"kie request failed after 4 attempts: {e}") from e
+    raise RuntimeError("kie request: unreachable")
 
 
 def _get(path: str) -> dict:
@@ -115,7 +131,15 @@ def generate(
         "resolution": resolution,
     }
     slug = _slug_for(model) if model else _slug()
-    if refs and slug in {"nano-banana-2", "nano-banana-pro"}:
+    if refs and slug == "gpt-image-2-image-to-image":
+        # kie's gpt-image-2 i2i takes the source image(s) as `input_urls`
+        # (NOT `image_input`). It is the strongest at keeping a character
+        # identical across new poses / places / moods — the model yt-studio
+        # uses for variant edits. See
+        # _reference/youtubestudio/src/lib/gpt-image-2-edit.ts.
+        inputs["input_urls"] = refs
+        inputs["output_format"] = "png"
+    elif refs and slug in {"nano-banana-2", "nano-banana-pro"}:
         # kie's contract: `image_input` is the ref-image array on both
         # nano-banana models. Output format default png matches our
         # existing gpt-image-2 path.
@@ -131,7 +155,11 @@ def generate(
 
     deadline = time.time() + poll_timeout
     while time.time() < deadline:
-        data = _get(f"recordInfo?taskId={task_id}").get("data", {})
+        try:
+            data = _get(f"recordInfo?taskId={task_id}").get("data", {})
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(3)
+            continue
         state = data.get("state")
         if state == "success":
             urls = json.loads(data.get("resultJson") or "{}").get("resultUrls", [])
@@ -174,7 +202,11 @@ def edit_image(image_url: str, prompt: str, aspect_ratio: str = "3:4", poll_time
 
     deadline = time.time() + poll_timeout
     while time.time() < deadline:
-        data = _get(f"recordInfo?taskId={task_id}").get("data", {})
+        try:
+            data = _get(f"recordInfo?taskId={task_id}").get("data", {})
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(3)
+            continue
         state = data.get("state")
         if state == "success":
             urls = json.loads(data.get("resultJson") or "{}").get("resultUrls", [])

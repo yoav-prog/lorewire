@@ -13,6 +13,7 @@ import {
   type SelectOption,
 } from "./_components/SettingControls";
 import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
+import { NARRATION_VIBES, LENGTH_PRESETS } from "@/lib/shorts-options";
 import { ASPECT_CHIP_OPTIONS, type ChipOption } from "@/components/ui";
 import {
   isVideoAspect,
@@ -138,6 +139,36 @@ export default async function SettingsPage() {
     listElevenLabsVoices(),
   ]);
 
+  // Article-shorts auto-generate settings (global default + per-category).
+  const [shortsAutoEnabled, shortsAutoNarration, shortsAutoLength] =
+    await Promise.all([
+      getSetting("shorts.auto.enabled"),
+      getSetting("shorts.auto.narration"),
+      getSetting("shorts.auto.length"),
+    ]);
+  const SHORT_CATEGORIES = [
+    "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
+  ];
+  const shortsAutoByCat: Record<string, string> = {};
+  await Promise.all(
+    SHORT_CATEGORIES.map(async (c) => {
+      shortsAutoByCat[c] = (await getSetting(`shorts.auto.category.${c}`)) ?? "";
+    }),
+  );
+  const narrationOptions: SelectOption[] = NARRATION_VIBES.map((v) => ({
+    id: v.id,
+    label: v.label,
+  }));
+  const lengthOptions: SelectOption[] = LENGTH_PRESETS.map((v) => ({
+    id: v.id,
+    label: v.label,
+  }));
+  const catOverrideOptions: SelectOption[] = [
+    { id: "", label: "Inherit global" },
+    { id: "on", label: "Always make a short" },
+    { id: "off", label: "Never" },
+  ];
+
   // Map voice catalogs to the SettingSelect option shape. Group Google by
   // locale (the API returns the locale on each voice); group ElevenLabs by
   // accent label. When the catalog is empty (creds missing or API down) the
@@ -160,6 +191,42 @@ export default async function SettingsPage() {
       description="Pipeline defaults, voice, video look, and the intro/outro splice switch. Read by the pipeline at run time."
     >
       <div className="space-y-8">
+        <Section
+          title="Article shorts"
+          description="Auto-generate a 40-60s vertical doodle short when a story finishes. Off by default. The per-category overrides win over the global default; narration vibe + length apply to every auto-generated short (each short can still be (re)generated manually with its own picks in the video editor)."
+        >
+          <SettingToggle
+            settingKey="shorts.auto.enabled"
+            label="Auto-generate a short for every new article"
+            hint="When on, each finished story is also queued as a short (unless a category override below says otherwise). Each short costs ~$0.70."
+            initialOn={readToggle(shortsAutoEnabled, false)}
+          />
+          <SettingSelect
+            settingKey="shorts.auto.narration"
+            label="Default narration vibe"
+            hint="The storytelling tone used for auto-generated shorts."
+            initial={shortsAutoNarration ?? "suspense"}
+            options={narrationOptions}
+          />
+          <SettingSelect
+            settingKey="shorts.auto.length"
+            label="Default length"
+            hint="Standard is a punchy ~45s; Extended is a ~1 min cut that develops the story more."
+            initial={shortsAutoLength ?? "standard"}
+            options={lengthOptions}
+          />
+          {SHORT_CATEGORIES.map((c) => (
+            <SettingSelect
+              key={c}
+              settingKey={`shorts.auto.category.${c}`}
+              label={`Category override: ${c}`}
+              hint="Inherit follows the global toggle above; Always / Never force it for this category."
+              initial={shortsAutoByCat[c] ?? ""}
+              options={catOverrideOptions}
+            />
+          ))}
+        </Section>
+
         <Section
           title="Style presets"
           description="Creative direction for everything the pipeline generates — narrator delivery, scene images, and prop cutouts. Pick a preset to fill the field, then tweak."

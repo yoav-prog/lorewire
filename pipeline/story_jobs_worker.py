@@ -264,6 +264,17 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     if with_media:
         _enqueue_video_render_for_story(row)
 
+    # Auto-enqueue a short if the admin turned it on (global or per-category).
+    # Shorts generate their own frames + voice from the story text, so this is
+    # NOT gated on with_media. Off by default; a failure here never blocks story
+    # completion.
+    try:
+        from pipeline import shorts_auto
+        if shorts_auto.maybe_enqueue_short_for_story(row["id"], row.get("category")):
+            print(f"[story-jobs handoff] short auto-enqueued story_id={row['id']}")
+    except Exception as e:  # noqa: BLE001 — auto-short must not break the job
+        print(f"[story-jobs handoff] auto-short skipped: {e}")
+
     return row
 
 

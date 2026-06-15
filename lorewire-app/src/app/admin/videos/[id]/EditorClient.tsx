@@ -64,6 +64,7 @@ import {
 } from "./actions";
 import { enqueueImageRegenAction } from "@/app/admin/actions";
 import { VideoRenderEventTimeline } from "@/app/admin/(panel)/_components/VideoRenderEventTimeline";
+import ShortRenderControl from "./ShortRenderControl";
 
 // Player is client-only (Remotion's runtime is not SSR-safe). next/dynamic
 // with ssr:false gives us code-splitting + no hydration mismatch.
@@ -809,6 +810,7 @@ function Header({
 }) {
   const trimmed = trimmedDurationMs !== durationMs;
   return (
+    <>
     <header className="flex shrink-0 items-center justify-between gap-4 border-b border-line bg-bg/85 px-5 py-3 backdrop-blur">
       <div className="flex min-w-0 items-center gap-4">
         <Link
@@ -894,6 +896,12 @@ function Header({
         )}
       </div>
     </header>
+    {!renderDisabled && (
+      <div className="shrink-0 border-b border-line bg-bg/60 px-5 py-2">
+        <ShortRenderControl storyId={storyId} />
+      </div>
+    )}
+    </>
   );
 }
 

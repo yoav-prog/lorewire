@@ -7,6 +7,7 @@ working calls in /from-amir.
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -52,12 +53,28 @@ def chat(prompt: str, max_tokens: int = 2000, model: str | None = None) -> str:
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "ignore")[:300]
-        raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
+    # Retry transient network timeouts / rate limits / 5xx with exponential
+    # backoff; fail fast on other 4xx. The hosted endpoints occasionally drop a
+    # read mid-request, and one drop should not sink a multi-call generation.
+    delay = 2.0
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503, 504) and attempt < 3:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            detail = e.read().decode("utf-8", "ignore")[:300]
+            raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt < 3:
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise RuntimeError(f"LLM request failed after 4 attempts: {e}") from e
     usage = data.get("usage", {}) or {}
     totals["calls"] += 1
     totals["prompt_tokens"] += usage.get("prompt_tokens", 0)

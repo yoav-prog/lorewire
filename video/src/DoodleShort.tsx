@@ -386,17 +386,14 @@ const DoodleCaption: React.FC<{
             lineHeight: style.lineHeight,
             textAlign: "center",
             color: style.color,
+            // Comic outline matching the yt-studio doodle reference exactly
+            // (ShortVideo.tsx:581): a single -webkit-text-stroke with
+            // paintOrder "stroke fill" so the stroke paints UNDER the fill —
+            // the yellow fill is never eroded and there are no spikes. The
+            // earlier text-shadow ring deviated from the reference and rendered
+            // as lumpy "weird shapes" around the glyphs.
             WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
-            // Single soft drop-shadow for depth, replacing the four
-            // directional offset shadows the original yt-studio look used.
-            // Each of those offsets painted a duplicate of the stroked
-            // glyph at +/-2.24 px on landscape — at small font sizes the
-            // offsets read as ghost outlines instead of fusing into the
-            // stroke. A single non-offset blur preserves the lifted feel
-            // without ever stepping outside the stroke. Portrait renders
-            // are functionally unchanged: the same blur reads as a hair
-            // of feathering inside the 6 px stroke.
-            textShadow: `0 0 2px ${style.outlineColor}`,
+            paintOrder: "stroke fill",
             maxWidth: "100%",
           }}
         >
@@ -486,12 +483,12 @@ const DoodleCaption: React.FC<{
           lineHeight: style.lineHeight,
           textAlign: "center",
           color: style.color,
+          // Comic outline matching the yt-studio doodle reference
+          // (ShortVideo.tsx:581): -webkit-text-stroke with paintOrder
+          // "stroke fill" (stroke painted under the fill — clean edge, no
+          // eroded fill, no "weird shapes").
           WebkitTextStroke: `${outlineWidth}px ${style.outlineColor}`,
-          // Single soft drop-shadow — see the matching comment in the
-          // wordHighlight === "none" branch above for why the four
-          // directional offsets the original yt-studio look used got
-          // dropped.
-          textShadow: `0 0 2px ${style.outlineColor}`,
+          paintOrder: "stroke fill",
           maxWidth: "100%",
         }}
       >
