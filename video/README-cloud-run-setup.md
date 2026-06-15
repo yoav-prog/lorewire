@@ -1,9 +1,14 @@
 # Cloud Run render service — deploy
 
-The render service reuses the **same GCS credentials your Vercel
-deployment already has** (`GCS_BUCKET`, `GCS_CLIENT_EMAIL`,
-`GCS_PRIVATE_KEY`, `CRON_SECRET`). No separate IAM role, no service
-account juggling.
+The render service uses ADC: the GCS service account is attached as the
+Cloud Run runtime identity (`--service-account`) and the GCS client
+resolves credentials through the metadata server. **No PEM env vars on
+the container.** Runtime env vars are `CRON_SECRET` + `GCS_BUCKET` only.
+
+The deploy script still needs `GCS_CLIENT_EMAIL` + `GCS_PRIVATE_KEY` in
+your local `.env.local` — that's how it authenticates the *gcloud
+session running the deploy* (and identifies which SA to attach as the
+runtime identity). The runtime container never sees the key.
 
 ## One-time per environment
 
