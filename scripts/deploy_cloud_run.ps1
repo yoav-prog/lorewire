@@ -107,8 +107,8 @@ try {
     & $gcloud run deploy lorewire-render `
         --source . `
         --region $region `
-        --memory 4Gi `
-        --cpu 2 `
+        --memory 16Gi `
+        --cpu 8 `
         --timeout 3600 `
         --no-allow-unauthenticated `
         --service-account $saEmail `
