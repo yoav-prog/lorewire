@@ -26,6 +26,7 @@
 import dynamic from "next/dynamic";
 import { useMemo } from "react";
 import type { ShortConfig } from "@/lib/short-config";
+import { shortCaptionStyleToProps } from "@/lib/short-caption-style-to-props";
 import { shortConfigToVideoConfig } from "@/lib/short-config-to-video-config";
 
 const FPS = 30;
@@ -90,6 +91,13 @@ export function ShortPreviewPlayer({ config }: { config: ShortConfig }) {
   // mounts → silent playback. Caught in prod after the initial preview
   // ship.
   const audioUrl = config.voiceover_url ?? null;
+  // Caption style: pass undefined when no overrides exist so the composition
+  // falls back to its hardcoded defaults (cheaper re-renders + matches what
+  // the renderer does in the same state).
+  const captionStyle = useMemo(
+    () => shortCaptionStyleToProps(config) ?? undefined,
+    [config],
+  );
   const playerInputProps = useMemo(
     () => ({
       config: videoConfig,
@@ -98,8 +106,9 @@ export function ShortPreviewPlayer({ config }: { config: ShortConfig }) {
       bodyDurationFrames: durationFrames,
       intro: null,
       outro: null,
+      captionStyle,
     }),
-    [videoConfig, frameUrls, audioUrl, durationFrames],
+    [videoConfig, frameUrls, audioUrl, durationFrames, captionStyle],
   );
 
   return (

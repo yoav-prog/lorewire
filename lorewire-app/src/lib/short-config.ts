@@ -68,6 +68,29 @@ export interface ShortEditSession {
   heartbeat_at: string;
 }
 
+/** Per-field caption style overrides. Mirrors caption-style.ts's
+ *  CAPTION_STYLE_FIELDS at the value level (always stored as strings;
+ *  the renderer parses them into the typed CaptionStyleProps shape).
+ *  Sparse — only the fields the admin actually changed live here; the
+ *  rest fall back through the global resolver chain. Editor tab:
+ *  CaptionStyleTab. */
+export interface ShortCaptionStyleOverride {
+  position_y?: string;
+  size_scale?: string;
+  padding_x?: string;
+  text_transform?: string;
+  font_weight?: string;
+  letter_spacing?: string;
+  line_height?: string;
+  color?: string;
+  active_word_color?: string;
+  spoken_word_color?: string;
+  outline_color?: string;
+  outline_width?: string;
+  entry_effect?: string;
+  word_highlight?: string;
+}
+
 export interface ShortConfig {
   config_version?: number;
   /** Which short_renders row this config was seeded from. The render plan
@@ -96,6 +119,11 @@ export interface ShortConfig {
   /** Voiceover MP3 URL. Persisted so a captions-only edit (Lane A) can
    *  re-render the assembly without re-synthesizing audio. */
   voiceover_url?: string;
+  /** Per-story caption style overrides. The Caption style tab patches into
+   *  this with `caption_style.<field>` paths. The preview composition reads
+   *  it (parsed into CaptionStyleProps) so edits show live; the render path
+   *  picks it up on the next Lane A/B/C run. */
+  caption_style?: ShortCaptionStyleOverride;
   _locks?: ShortLockMap;
   _edit_session?: ShortEditSession;
 }
@@ -254,8 +282,48 @@ export function parseShortConfig(raw: unknown): ShortParseResult {
     };
   }
 
+  const captionStyle = raw.caption_style;
+  if (isObject(captionStyle)) {
+    const override: ShortCaptionStyleOverride = {};
+    for (const field of CAPTION_STYLE_FIELDS) {
+      const v = captionStyle[field];
+      if (typeof v === "string") {
+        (override as Record<string, string>)[field] = v;
+      }
+    }
+    // Only attach when at least one field is set so a stray empty
+    // {} doesn't survive a round-trip and clutter the column.
+    if (Object.keys(override).length > 0) {
+      config.caption_style = override;
+    }
+  }
+
   return { ok: true, config };
 }
+
+// Mirror of CAPTION_STYLE_FIELDS in lib/caption-style.ts. Hardcoded here so
+// this module stays importable from client components — the source-of-truth
+// list lives in caption-style.ts behind a `server-only` boundary. Keep the
+// two lists in sync (a unit test below pins this).
+const CAPTION_STYLE_FIELDS = [
+  "position_y",
+  "size_scale",
+  "padding_x",
+  "text_transform",
+  "font_weight",
+  "letter_spacing",
+  "line_height",
+  "color",
+  "active_word_color",
+  "spoken_word_color",
+  "outline_color",
+  "outline_width",
+  "entry_effect",
+  "word_highlight",
+] as const;
+export type ShortCaptionStyleField = (typeof CAPTION_STYLE_FIELDS)[number];
+export const SHORT_CAPTION_STYLE_FIELDS: ReadonlyArray<ShortCaptionStyleField> =
+  CAPTION_STYLE_FIELDS;
 
 // Seed a fresh ShortConfig from a successful short_renders row's props blob.
 // The props column carries the DoodleShort composition props the renderer
@@ -394,6 +462,31 @@ function applyOnePath(
       return f;
     });
     return { ...cfg, doodle_frames: frames };
+  }
+
+  // Caption style overrides: `caption_style.<field>`. Values are stored as
+  // strings (mirrors the resolver's string-in/typed-out flow). Patching
+  // with null (or empty string) drops the override so the field falls back
+  // through the global resolver chain.
+  const styleMatch = /^caption_style\.([^.]+)$/.exec(path);
+  if (styleMatch) {
+    const field = styleMatch[1] as ShortCaptionStyleField;
+    if (!CAPTION_STYLE_FIELDS.includes(field)) return cfg;
+    const current = { ...(cfg.caption_style ?? {}) };
+    if (value === null || value === "") {
+      delete (current as Record<string, string>)[field];
+    } else if (typeof value === "string") {
+      (current as Record<string, string>)[field] = value;
+    } else {
+      return cfg;
+    }
+    const next = { ...cfg };
+    if (Object.keys(current).length === 0) {
+      delete next.caption_style;
+    } else {
+      next.caption_style = current;
+    }
+    return next;
   }
 
   // Caption patches: `captions.<idx>.<field>`. Captions don't have stable

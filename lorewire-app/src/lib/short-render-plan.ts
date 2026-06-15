@@ -71,6 +71,11 @@ export function planShortRender(
     baseline.voiceover_url,
   );
   const touchedFrames = diffFrames(current.doodle_frames, baseline.doodle_frames);
+  // Caption style: if the editor has any caption_style override, it's a
+  // Lane A trigger (assembly-only — frames/voice unchanged). Folded into
+  // `captionsChanged` so the existing Lane A reason copy stays accurate.
+  const styleChanged = hasCaptionStyleOverride(current.caption_style);
+  const captionsOrStyleChanged = captionsChanged || styleChanged;
 
   // Lane C wins when any frame diverges from the baseline (the editor's
   // per-scene regen has happened OR the user edited a prompt without a
@@ -116,19 +121,21 @@ export function planShortRender(
     };
   }
 
-  if (captionsChanged) {
+  if (captionsOrStyleChanged) {
     return {
       lane: "A",
       touched_scene_ids: [],
       estimated_cost_cents: LANE_A_CENTS,
       diffs: {
-        captions: true,
+        captions: captionsChanged,
         script: false,
         voice: false,
         voiceover_url: false,
         frames: [],
       },
-      reason: "Captions changed — assembly-only re-render",
+      reason: captionsChanged
+        ? "Captions changed — assembly-only re-render"
+        : "Caption style changed — assembly-only re-render",
     };
   }
 
@@ -209,6 +216,15 @@ function sameCaptions(
 // the current config and the baseline. New frame ids in current (not in
 // baseline) count as changed; missing-from-current frames don't (we only
 // re-render what the editor has).
+function hasCaptionStyleOverride(
+  override: ShortConfig["caption_style"],
+): boolean {
+  if (!override) return false;
+  return Object.values(override).some(
+    (v) => typeof v === "string" && v.length > 0,
+  );
+}
+
 function diffFrames(current: ShortFrame[], baseline: unknown): string[] {
   const baselineMap = new Map<string, { url: unknown; image_prompt: unknown }>();
   if (Array.isArray(baseline)) {
