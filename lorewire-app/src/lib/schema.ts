@@ -392,6 +392,9 @@ export const SHORT_RENDERS: Table = {
     { name: "progress", type: "INTEGER" },
     { name: "error", type: "TEXT" },
     { name: "output_url", type: "TEXT" },
+    // The generated DoodleShort props JSON (set by the generation drain); the
+    // render cron claims rows where this is set and POSTs it to Cloud Run.
+    { name: "props", type: "TEXT" },
     { name: "requested_by", type: "TEXT" },
     { name: "requested_at", type: "TEXT" },
     { name: "started_at", type: "TEXT" },

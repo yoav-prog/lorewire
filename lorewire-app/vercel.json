@@ -18,6 +18,10 @@
       "schedule": "*/1 * * * *"
     },
     {
+      "path": "/api/drain_short_renders",
+      "schedule": "*/1 * * * *"
+    },
+    {
       "path": "/api/render_short",
       "schedule": "*/1 * * * *"
     }
@@ -30,6 +34,9 @@
       "maxDuration": 300
     },
     "api/drain_voice_renders.py": {
+      "maxDuration": 300
+    },
+    "api/drain_short_renders.py": {
       "maxDuration": 300
     },
     "src/app/api/render_video/route.ts": {

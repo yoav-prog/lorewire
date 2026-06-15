@@ -13,9 +13,10 @@
 // cannot grab the same row; the conditional finish/fail writes prevent a settled
 // row being overwritten by a late retry.
 //
-// Cloud Run side (the /render-short endpoint) is the remaining half of Phase 3;
-// CLOUD_RUN_SHORT_RENDER_URL points at whichever service hosts it (reuse the
-// long-form render service with a shorts route, or a sibling service).
+// The render runs on the SAME Cloud Run /render endpoint the long-form video
+// uses (DoodleShort renders any inputProps), so CLOUD_RUN_RENDER_URL is reused.
+// The generation drain (api/drain_short_renders.py) builds + stores the props
+// first; this route only claims rows that already have props.
 
 import { NextResponse, type NextRequest } from "next/server";
 import { Agent, fetch as undiciFetch } from "undici";
@@ -101,7 +102,7 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const cloudRunUrl = process.env.CLOUD_RUN_SHORT_RENDER_URL;
+  const cloudRunUrl = process.env.CLOUD_RUN_RENDER_URL;
   const cronSecret = process.env.CRON_SECRET;
   if (!cloudRunUrl || !cronSecret) {
     namespacedLog("config_missing", {
@@ -109,7 +110,7 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       cron_secret_set: Boolean(cronSecret),
     });
     return NextResponse.json(
-      { error: "CLOUD_RUN_SHORT_RENDER_URL or CRON_SECRET not configured" },
+      { error: "CLOUD_RUN_RENDER_URL or CRON_SECRET not configured" },
       { status: 500 },
     );
   }
@@ -127,13 +128,31 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     length_preset: claimed.length_preset,
   });
 
+  // The generation drain stored the built DoodleShort props on the row. Parse
+  // them and hand them to the SAME Cloud Run /render endpoint long-form uses
+  // (DoodleShort renders any inputProps; its resolveSrc accepts remote URLs).
+  let inputProps: unknown;
+  try {
+    inputProps = JSON.parse(claimed.props ?? "");
+  } catch {
+    const err = "short_renders.props missing or not valid JSON";
+    namespacedLog("props_malformed", { render_id: claimed.id });
+    await failShortRender(claimed.id, err);
+    return NextResponse.json({
+      drained: 1,
+      render_id: claimed.id,
+      status: "error",
+      error: err,
+    });
+  }
+
   const result = await postToCloudRun(
-    `${cloudRunUrl.replace(/\/$/, "")}/render-short`,
+    `${cloudRunUrl.replace(/\/$/, "")}/render`,
     {
       storyId: claimed.story_id,
       configHash: claimed.config_hash,
-      narrationStyle: claimed.narration_style,
-      lengthPreset: claimed.length_preset,
+      inputProps,
+      segments: { intro: null, outro: null },
     },
     cronSecret,
   );

@@ -158,6 +158,7 @@ SCHEMA_STATEMENTS = [
         progress        REAL DEFAULT 0,
         error           TEXT,
         output_url      TEXT,
+        props           TEXT,
         requested_by    TEXT,
         requested_at    TEXT NOT NULL,
         started_at      TEXT,
@@ -1131,7 +1132,7 @@ def _now_iso() -> str:
 
 _SHORT_RENDER_COLUMNS = [
     "id", "story_id", "config_hash", "narration_style", "length_preset",
-    "status", "phase", "progress", "error", "output_url",
+    "status", "phase", "progress", "error", "output_url", "props",
     "requested_by", "requested_at", "started_at", "finished_at",
 ]
 
@@ -1159,6 +1160,7 @@ def enqueue_short_render(
         "progress": 0,
         "error": None,
         "output_url": None,
+        "props": None,
         "requested_by": requested_by,
         "requested_at": now,
         "started_at": None,
@@ -1267,6 +1269,67 @@ def claim_next_short_render() -> dict | None:
             f"SELECT {cols} FROM short_renders WHERE id=?", (row["id"],)
         ).fetchone()
         return dict(claimed) if claimed else None
+
+
+def claim_next_short_for_generation() -> dict | None:
+    """Atomically claim the oldest queued short that has NO props yet (needs
+    generation) and flip it to 'generating'. The Vercel generation drain calls
+    this; the render cron claims rows that already HAVE props."""
+    cols = ", ".join(_SHORT_RENDER_COLUMNS)
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE short_renders SET status = 'generating', "
+                    "started_at = %s WHERE id = ("
+                    "SELECT id FROM short_renders WHERE status = 'queued' AND props IS NULL "
+                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    f") RETURNING {cols}",
+                    (now,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT id FROM short_renders WHERE status='queued' AND props IS NULL "
+            "ORDER BY requested_at ASC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        c.execute(
+            "UPDATE short_renders SET status='generating', started_at=? "
+            "WHERE id=? AND status='queued'",
+            (now, row["id"]),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {cols} FROM short_renders WHERE id=?", (row["id"],)
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def store_short_props(render_id: str, props_json: str) -> None:
+    """After generation: persist the built props and flip back to 'queued' so the
+    render cron (which claims queued rows that HAVE props) picks it up."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE short_renders SET props = %s, status = 'queued', "
+                    "phase = 'ready', progress = 0.5 WHERE id = %s",
+                    (props_json, render_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE short_renders SET props=?, status='queued', phase='ready', "
+            "progress=0.5 WHERE id=?",
+            (props_json, render_id),
+        )
 
 
 def update_short_render_progress(

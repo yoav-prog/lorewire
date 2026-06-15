@@ -34,6 +34,10 @@ export interface ShortRenderRow {
   progress: number;
   error: string | null;
   output_url: string | null;
+  /** The generated DoodleShort props JSON (set by the generation drain). Null
+   *  until generation completes; the render cron only claims rows where this is
+   *  set, then POSTs it to Cloud Run /render as inputProps. */
+  props: string | null;
   requested_by: string | null;
   requested_at: string;
   started_at: string | null;
@@ -41,7 +45,7 @@ export interface ShortRenderRow {
 }
 
 const COLS =
-  "id, story_id, config_hash, narration_style, length_preset, status, phase, progress, error, output_url, requested_by, requested_at, started_at, finished_at";
+  "id, story_id, config_hash, narration_style, length_preset, status, phase, progress, error, output_url, props, requested_by, requested_at, started_at, finished_at";
 
 // Hash the creation options into the idempotency key. Same narration vibe +
 // length preset means "the same short", so repeat clicks coalesce; a different
@@ -113,8 +117,10 @@ export async function enqueueShortRender(
 // works identically on SQLite and Postgres; a losing racer gets 0 rows.
 export async function claimNextShortRender(): Promise<ShortRenderRow | null> {
   const now = new Date().toISOString();
+  // Only claim rows the generation drain has finished (props set). Queued rows
+  // without props are still waiting on the generation drain.
   const peek = await one<{ id: string }>(
-    `SELECT id FROM short_renders WHERE status = 'queued'
+    `SELECT id FROM short_renders WHERE status = 'queued' AND props IS NOT NULL
      ORDER BY requested_at ASC LIMIT 1`,
   );
   if (!peek) return null;
