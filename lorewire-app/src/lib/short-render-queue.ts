@@ -212,6 +212,24 @@ export async function latestShortRenderForStory(
   );
 }
 
+// Latest SUCCESSFUL render — the row Lane A / B / C use as the baseline to
+// diff edits against and to seed their new props from. Lane A's first
+// click queues a new short_renders row whose status is initially `queued`;
+// without this filter `latestShortRenderForStory` would return THAT row on
+// the second click and the lane actions would reject with "no baseline
+// render". Defense-in-depth filter on `props IS NOT NULL` because the
+// builders read props as the merge floor.
+export async function latestDoneShortRenderForStory(
+  storyId: string,
+): Promise<ShortRenderRow | null> {
+  return one<ShortRenderRow>(
+    `SELECT ${COLS} FROM short_renders
+     WHERE story_id = ? AND status = 'done' AND props IS NOT NULL
+     ORDER BY requested_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
 // Counts short renders requested for a story since `sinceIso`, for the daily cap.
 export async function countShortRendersSince(
   storyId: string,
