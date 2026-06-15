@@ -13,6 +13,7 @@ import type { ShortRenderRow } from "@/lib/short-render-queue";
 import type { VoiceEntry } from "@/lib/voice-library";
 import { SHORT_EDIT_HEARTBEAT_INTERVAL_MS } from "@/lib/short-edit-session";
 import { CaptionsTab } from "./CaptionsTab";
+import { CaptionStyleTab } from "./CaptionStyleTab";
 import { EditSessionBanner } from "./EditSessionBanner";
 import { RenderAfterEditsBanner } from "./RenderAfterEditsBanner";
 import { ScenesTab } from "./ScenesTab";
@@ -26,7 +27,7 @@ import {
   heartbeatShortEditSession,
 } from "./actions";
 
-type TabId = "scenes" | "script" | "captions" | "voice" | "render";
+type TabId = "scenes" | "script" | "captions" | "style" | "voice";
 
 const TABS: Array<{
   id: TabId;
@@ -36,9 +37,9 @@ const TABS: Array<{
 }> = [
   { id: "scenes", label: "Scenes", available: true },
   { id: "captions", label: "Captions", available: true },
+  { id: "style", label: "Style", available: true },
   { id: "script", label: "Script", available: true },
   { id: "voice", label: "Voice", available: true },
-  { id: "render", label: "Render", available: false, hint: "Phase 4" },
 ];
 
 // A stable digest the banner can re-poll on. We deliberately include all the
@@ -185,6 +186,13 @@ export function ShortEditorClient({
       )}
       {tab === "captions" && (
         <CaptionsTab
+          storyId={storyId}
+          config={config}
+          onConfigChange={setConfig}
+        />
+      )}
+      {tab === "style" && (
+        <CaptionStyleTab
           storyId={storyId}
           config={config}
           onConfigChange={setConfig}

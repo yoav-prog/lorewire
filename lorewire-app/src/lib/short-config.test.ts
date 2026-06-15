@@ -301,3 +301,96 @@ describe("applyShortConfigPatch — captions (Phase 2)", () => {
     expect(next.captions[1].start_ms).toBe(baseConfig().captions[1].start_ms);
   });
 });
+
+describe("applyShortConfigPatch — caption_style", () => {
+  it("sets a single caption_style field", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "caption_style.color": "#ff0000",
+    });
+    expect(next.caption_style).toEqual({ color: "#ff0000" });
+  });
+
+  it("merges multiple caption_style patches without losing prior fields", () => {
+    let next = applyShortConfigPatch(baseConfig(), {
+      "caption_style.color": "#ff0000",
+    });
+    next = applyShortConfigPatch(next, {
+      "caption_style.word_highlight": "scale",
+    });
+    expect(next.caption_style).toEqual({
+      color: "#ff0000",
+      word_highlight: "scale",
+    });
+  });
+
+  it("clears a single field via null and drops caption_style when empty", () => {
+    const base = applyShortConfigPatch(baseConfig(), {
+      "caption_style.color": "#ff0000",
+    });
+    const next = applyShortConfigPatch(base, {
+      "caption_style.color": null,
+    });
+    expect(next.caption_style).toBeUndefined();
+  });
+
+  it("ignores patches for unknown caption_style fields", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "caption_style.totally_made_up": "nope",
+    });
+    expect(next.caption_style).toBeUndefined();
+  });
+
+  it("ignores patches with non-string values", () => {
+    const next = applyShortConfigPatch(baseConfig(), {
+      "caption_style.color": 12345,
+    });
+    expect(next.caption_style).toBeUndefined();
+  });
+});
+
+describe("parseShortConfig — caption_style", () => {
+  it("round-trips a sparse caption_style override", () => {
+    const r = parseShortConfig({
+      doodle_frames: [],
+      captions: [],
+      caption_style: {
+        color: "#facc15",
+        word_highlight: "karaoke",
+      },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.config.caption_style).toEqual({
+        color: "#facc15",
+        word_highlight: "karaoke",
+      });
+    }
+  });
+
+  it("drops unknown fields silently", () => {
+    const r = parseShortConfig({
+      doodle_frames: [],
+      captions: [],
+      caption_style: {
+        color: "#facc15",
+        nonsense_field: "drop me",
+      },
+    });
+    if (r.ok) {
+      expect(r.config.caption_style).toEqual({ color: "#facc15" });
+    }
+  });
+
+  it("drops caption_style entirely when no recognised fields survive", () => {
+    const r = parseShortConfig({
+      doodle_frames: [],
+      captions: [],
+      caption_style: {
+        nonsense_field: "drop me",
+      },
+    });
+    if (r.ok) {
+      expect(r.config.caption_style).toBeUndefined();
+    }
+  });
+});

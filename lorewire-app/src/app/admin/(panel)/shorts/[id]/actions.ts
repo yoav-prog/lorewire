@@ -402,11 +402,23 @@ export async function renderShortLaneA(
   }
 
   // Lane A swap: the renderer needs the new captions; everything else (frames,
-  // voiceover_url, character, duration_ms, style) stays exactly as the baseline
+  // voiceover_url, character, duration_ms) stays exactly as the baseline
   // shipped, because Lane A is "edit captions and re-render the same MP4."
+  // Caption style: if the editor has any caption_style override, merge it
+  // into caption_template so the next render reflects the picked colors /
+  // highlight / position. The baseline's caption_template (set by the
+  // Python pipeline from settings) is the floor; per-field overrides win.
+  const styleOverride = cfg.config.caption_style ?? {};
+  const baselineTemplate =
+    (baselineProps as { caption_template?: Record<string, unknown> })
+      .caption_template ?? {};
   const newProps = {
     ...baselineProps,
     captions: cfg.config.captions,
+    caption_template: {
+      ...baselineTemplate,
+      ...styleOverride,
+    },
   };
 
   // Distinct config_hash so this row coexists with the baseline (the same
