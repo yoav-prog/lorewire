@@ -89,6 +89,12 @@ SCHEMA_STATEMENTS = [
     # runs leave human-edited fields alone (see merge_with_locks in
     # pipeline/video_config.py — added alongside this column).
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS video_config TEXT",
+    # 2026-06-16 short editor: stories.short_config holds the full ShortConfig
+    # v1 JSON (lorewire-app/src/lib/short-config.ts). Parallel to video_config
+    # but for the 9:16 article-shorts pipeline. The short editor at
+    # /admin/(panel)/shorts/[id] patches it; the next render reads it.
+    # Plan: _plans/2026-06-16-short-editor-full-parity.md.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS short_config TEXT",
     # 2026-06-14: pipeline-owned cache previously co-tenanted inside
     # video_config. The editor's parseVideoConfig drops unknown
     # top-level fields, so the heartbeat write path was silently wiping
@@ -393,7 +399,7 @@ _COLUMNS = [
     "hero_has_baked_title", "images", "audio_url", "video_url", "duration",
     "alignment", "props", "character_image", "character_image_mouth_removed",
     "intro_segment_id", "outro_segment_id", "skip_intro", "skip_outro",
-    "video_config",
+    "video_config", "short_config",
     # 2026-06-14: pipeline-owned cache (world_bible, scene_prompts,
     # scene_prompts_built_with, scene_entity_ids, character_bible).
     # Editor never reads or writes this column — see schema.ts comment.
@@ -2107,6 +2113,37 @@ def update_story_video_config(story_id: str, video_config: dict) -> None:
     with _sqlite_conn() as c:
         c.execute(
             "UPDATE stories SET video_config = ?, updated_at = ? WHERE id = ?",
+            (payload, now, story_id),
+        )
+
+
+def update_story_short_config(story_id: str, short_config: dict) -> None:
+    """Replace stories.short_config with a fresh JSON object.
+
+    Used by shorts_scene_regen.regen_short_scene() for `short_scene` owner
+    rows on image_renders: the per-scene regen reads image_prompt +
+    character_base_url off the persisted config, runs kie i2i, then writes
+    the updated config back through this helper.
+
+    Caller is responsible for shaping the dict; the TS-side
+    parseShortConfig() in lib/short-config.ts is the canonical validator.
+    Plan: _plans/2026-06-16-short-editor-full-parity.md.
+    """
+    now = _now_iso()
+    payload = json.dumps(short_config)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET short_config = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (payload, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET short_config = ?, updated_at = ? WHERE id = ?",
             (payload, now, story_id),
         )
 

@@ -218,9 +218,24 @@ export default function ShortRenderControl({ storyId }: { storyId: string }) {
         <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-fg/70">
           Generate short
         </span>
-        {active && (
-          <span className="font-mono text-[11px] text-fg/60">{statusText(active)}</span>
-        )}
+        <div className="flex items-center gap-3">
+          {/* Open the short editor (Phase 1 of
+              _plans/2026-06-16-short-editor-full-parity.md). Visible once a
+              short exists; goes to a dedicated surface for per-scene tweaks
+              instead of cramming everything into this panel. */}
+          {isSettled && (
+            <a
+              href={`/admin/shorts/${storyId}`}
+              className="font-mono text-[10px] uppercase tracking-wider text-accent hover:underline"
+              title="Edit individual scenes, prompts, alt, pinning"
+            >
+              Open editor →
+            </a>
+          )}
+          {active && (
+            <span className="font-mono text-[11px] text-fg/60">{statusText(active)}</span>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-wrap items-end gap-2">

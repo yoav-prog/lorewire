@@ -56,6 +56,7 @@ function emptyStoryRow(overrides: Partial<StoryRow> = {}): StoryRow {
     skip_intro: null,
     skip_outro: null,
     video_config: null,
+    short_config: null,
     tokens: null,
     cost_cents: null,
     created_at: null,

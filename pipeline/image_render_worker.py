@@ -46,16 +46,27 @@ RegenFn = Callable[[dict], tuple[str, int]]
 def _default_regen(claimed: dict) -> tuple[str, int]:
     """Dispatch on (owner_kind, asset). Story assets route to
     pipeline.media.regen_one; article assets route to
-    pipeline.article_media.regen_article_one. Both share the same return
-    shape: (output_url, cost_cents) on success, raise on any failure.
+    pipeline.article_media.regen_article_one. short_scene rows (the
+    article-shorts per-scene regen — Phase 1 of
+    _plans/2026-06-16-short-editor-full-parity.md) route to
+    pipeline.shorts_scene_regen. All three return (output_url,
+    cost_cents) on success and raise on any failure.
     """
-    from pipeline import article_media, media
+    from pipeline import article_media, media, shorts_scene_regen
     owner_kind = claimed["owner_kind"]
     asset = claimed["asset"]
     if owner_kind == "story":
         return media.regen_one(claimed["owner_id"], asset, REPO_ROOT)
     if owner_kind == "article":
         return article_media.regen_article_one(
+            claimed["owner_id"], asset, REPO_ROOT,
+        )
+    if owner_kind == "short_scene":
+        # owner_id is the story_id (NOT the short_render id); the regen
+        # writes back into stories.short_config which is the editor's
+        # source of truth. asset is "frame:<id>" — same convention the
+        # video-pipeline frame regen uses.
+        return shorts_scene_regen.regen_short_scene(
             claimed["owner_id"], asset, REPO_ROOT,
         )
     raise NotImplementedError(f"unknown owner_kind {owner_kind!r}")

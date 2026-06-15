@@ -50,6 +50,14 @@ export const STORIES: Table = {
     // /admin/videos/[id] editor patches it. Mirrors stories.video_config
     // in pipeline/store.py.
     { name: "video_config", type: "TEXT" },
+    // 2026-06-16 short editor: serialised ShortConfig v1 (see
+    // lib/short-config.ts). Parallel to video_config but for the 9:16
+    // article-shorts pipeline. Phase 1 of
+    // _plans/2026-06-16-short-editor-full-parity.md. The Generate Short
+    // action seeds this from a successful short_renders.props; the editor
+    // at /admin/(panel)/shorts/[id] patches it through
+    // saveShortConfigPatch. Mirrors stories.short_config in store.py.
+    { name: "short_config", type: "TEXT" },
     { name: "tokens", type: "INTEGER" },
     { name: "cost_cents", type: "INTEGER" },
     { name: "created_at", type: "TEXT" },

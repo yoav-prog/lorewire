@@ -35,7 +35,18 @@ export type ImageRenderStatus =
   | "done"
   | "error"
   | "cancelled";
+// Asset owners visible to the admin's media-regen UI panels (Story page and
+// Article page). Keep narrow so the panel components don't have to defend
+// against a per-scene short owner_kind that has no UI representation here.
 export type AssetOwnerKind = "story" | "article";
+
+// What enqueueImageRegen accepts. The shorts editor's per-scene regen
+// (Phase 1 of _plans/2026-06-16-short-editor-full-parity.md) widens this
+// to include 'short_scene' so the existing image_renders queue can serve
+// both surfaces without duplicating helpers. The Python worker's owner_kind
+// dispatcher handles all three. The narrower AssetOwnerKind stays the
+// type the UI panels see.
+export type ImageRenderOwnerKind = AssetOwnerKind | "short_scene";
 
 // Active = the row is doing work or about to. Terminal = the row is settled
 // and a Stop button shouldn't appear. Both UI and cancel helpers reuse this.
@@ -154,7 +165,7 @@ export async function estimateImageRegenCostCents(
 // ─── enqueue ─────────────────────────────────────────────────────────────────
 
 export async function enqueueImageRegen(opts: {
-  ownerKind: AssetOwnerKind;
+  ownerKind: ImageRenderOwnerKind;
   ownerId: string;
   asset: string;
   promptHash: string | null;
