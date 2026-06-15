@@ -173,6 +173,61 @@ export function listGalleryItems(
   return out;
 }
 
+// Append a new image to the document's gallery. If the document already has
+// at least one `articleGallery` node, the item is appended to the LAST one
+// so repeated "Add to gallery" clicks collect into a single block rather than
+// scattering single-item galleries. Otherwise a fresh gallery node is
+// appended to the top-level `content` array. Pure: returns a new document
+// shape; never mutates the input. Returns the input unchanged when it is
+// not a valid Tiptap doc (null, non-object, missing top-level array).
+//
+// Used by the article editor's "Add to gallery" action when promoting a
+// short scene frame into the article body.
+export function appendArticleGalleryItem(
+  document: unknown,
+  item: GalleryItem,
+): unknown {
+  if (!document || typeof document !== "object") return document;
+  const doc = document as { type?: unknown; content?: unknown };
+  if (!Array.isArray(doc.content)) return document;
+  // Walk top-level content for the LAST articleGallery node — the editor
+  // mounts gallery nodes at the top level (atomic block group=block), so a
+  // shallow scan is sufficient. Deeper nested galleries would need a
+  // recursive walk; we deliberately do not insert into nested contexts
+  // because the schema does not allow it.
+  let lastGalleryIdx = -1;
+  for (let i = doc.content.length - 1; i >= 0; i--) {
+    const child = doc.content[i] as { type?: unknown } | null;
+    if (child && (child as { type?: unknown }).type === "articleGallery") {
+      lastGalleryIdx = i;
+      break;
+    }
+  }
+  const sanitized: GalleryItem = {
+    src: item.src,
+    alt: item.alt ?? "",
+    caption: item.caption ?? "",
+  };
+  const nextContent = [...doc.content];
+  if (lastGalleryIdx >= 0) {
+    const target = nextContent[lastGalleryIdx] as {
+      type: string;
+      attrs?: { items?: unknown };
+    };
+    const items = safeItems(target.attrs?.items);
+    nextContent[lastGalleryIdx] = {
+      ...target,
+      attrs: { ...(target.attrs ?? {}), items: [...items, sanitized] },
+    };
+  } else {
+    nextContent.push({
+      type: "articleGallery",
+      attrs: { items: [sanitized] },
+    });
+  }
+  return { ...doc, content: nextContent };
+}
+
 // Like countGalleryImagesMissingAlt but counts ALL items across every
 // gallery node. Used by the asset re-render UI to estimate the cost of
 // regenerating every gallery image. Returns 0 when document is null or

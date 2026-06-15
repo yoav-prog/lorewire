@@ -7,8 +7,9 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/dal";
-import { getArticle } from "@/lib/repo";
+import { getArticle, getStory, listStoriesSlim } from "@/lib/repo";
 import type { ArticleType } from "@/lib/repo";
+import { getLinkedShortFrames } from "@/lib/article-shorts";
 import {
   setArticleStatusAction,
   setArticleNoindexAction,
@@ -153,6 +154,26 @@ export default async function EditArticlePage({
   const lang = (article.language ?? "en") as keyof typeof ARTICLE_LANGUAGE_LABELS;
   const type = (article.type ?? "feature") as keyof typeof ARTICLE_TYPE_LABELS;
 
+  // Article -> short_render media bridge (plan:
+  // _plans/2026-06-15-shorts-to-article-media.md). The widget needs the
+  // slim story list to drive its search-as-you-type picker; the panel
+  // needs the resolved frames from the linked story's most recent
+  // successful short_render. Both reads tolerate the absence of a link
+  // (storyOptions still loads so the user can pick one for the first
+  // time; linkedShort is null when unlinked or no done render exists).
+  // The current-story title is fetched separately so a dangling link
+  // (story deleted after linking) renders "(deleted)" without an extra
+  // round-trip from the client widget.
+  const storyOptions = (
+    await listStoriesSlim({ limit: 1000 })
+  ).map((s) => ({ id: s.id, title: s.title }));
+  const linkedShort = await getLinkedShortFrames(article.id);
+  let currentStoryTitle: string | null = null;
+  if (article.story_id) {
+    const linkedStory = await getStory(article.story_id);
+    currentStoryTitle = linkedStory?.title ?? null;
+  }
+
   return (
     <div className="space-y-5">
       <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
@@ -217,6 +238,10 @@ export default async function EditArticlePage({
           heroImage={article.hero_image ?? ""}
           document={article.document ?? ""}
           direction={dir}
+          currentStoryId={article.story_id ?? null}
+          currentStoryTitle={currentStoryTitle}
+          storyOptions={storyOptions}
+          linkedShort={linkedShort}
         />
 
         <aside className="space-y-4">

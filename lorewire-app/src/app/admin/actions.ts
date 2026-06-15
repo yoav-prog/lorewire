@@ -27,6 +27,7 @@ import {
   updateArticle,
   setArticleStatus,
   setArticleNoindex,
+  setArticleStoryId,
   setStoryNoindex,
   setStoryVoice,
   getStory as getStoryRow,
@@ -76,7 +77,11 @@ import {
   slugifyTitle,
 } from "@/lib/articles";
 import { countImagesMissingAlt } from "@/lib/tiptap-article-image";
-import { countGalleryImagesMissingAlt } from "@/lib/tiptap-gallery";
+import {
+  appendArticleGalleryItem,
+  countGalleryImagesMissingAlt,
+} from "@/lib/tiptap-gallery";
+import { getLinkedShortFrame } from "@/lib/article-shorts";
 import {
   NewsPayloadSchema,
   FeaturePayloadSchema,
@@ -1792,6 +1797,232 @@ export async function deleteArticleAction(formData: FormData): Promise<void> {
   console.info("[articles action] delete", { id });
   revalidatePath("/admin/articles");
   redirectToArticles({ deleted: id });
+}
+
+// --- Article scenes from short_render (2026-06-15) ---------------------------
+// Plan: _plans/2026-06-15-shorts-to-article-media.md
+//
+// Seven actions back the "borrow scene images from the linked story's short"
+// feature: one link/unlink, three promote-frame (hero / og / gallery), three
+// revert (the 10 s undo affordance the panel surfaces after each promote).
+//
+// Security pattern: promote-frame actions take a frame_id (not a URL) and
+// resolve the URL server-side via getLinkedShortFrame. The action refuses any
+// frame_id that is not in the linked render's current props, so a client
+// cannot inject an arbitrary URL into hero_image / og_image / gallery through
+// this surface. The revert actions accept the previous value as-is — they are
+// admin-only and the equivalent field is already writable via saveArticleAction,
+// so no new attack surface is opened.
+
+export async function setArticleStoryIdAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+  previousStoryId?: string | null;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const rawStoryId = String(formData.get("story_id") ?? "");
+  const storyId = rawStoryId.trim() === "" ? null : rawStoryId.trim();
+  if (!id) return { ok: false, error: "missing id" };
+  const article = await getArticle(id);
+  if (!article) return { ok: false, error: "article not found" };
+  if (storyId !== null) {
+    const story = await getStoryRow(storyId);
+    if (!story) return { ok: false, error: "story not found" };
+  }
+  const previousStoryId = article.story_id ?? null;
+  await setArticleStoryId(id, storyId);
+  console.info("[article-media link-story]", {
+    articleId: id,
+    storyId,
+    previousStoryId,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  return { ok: true, previousStoryId };
+}
+
+export async function setArticleHeroFromFrameAction(
+  formData: FormData,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  frameUrl?: string;
+  previousUrl?: string | null;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const frameId = String(formData.get("frame_id") ?? "");
+  if (!id) return { ok: false, error: "missing id" };
+  if (!frameId) return { ok: false, error: "missing frame_id" };
+  const article = await getArticle(id);
+  if (!article) return { ok: false, error: "article not found" };
+  const frame = await getLinkedShortFrame(id, frameId);
+  if (!frame) return { ok: false, error: "frame not found in linked short" };
+  const previousUrl = article.hero_image ?? null;
+  await updateArticle(id, { hero_image: frame.url });
+  console.info("[article-media set-hero]", {
+    articleId: id,
+    frameId: frame.id,
+    frameUrl: frame.url,
+    previousUrl,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  return { ok: true, frameUrl: frame.url, previousUrl };
+}
+
+export async function setArticleOgFromFrameAction(
+  formData: FormData,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  frameUrl?: string;
+  previousUrl?: string | null;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const frameId = String(formData.get("frame_id") ?? "");
+  if (!id) return { ok: false, error: "missing id" };
+  if (!frameId) return { ok: false, error: "missing frame_id" };
+  const article = await getArticle(id);
+  if (!article) return { ok: false, error: "article not found" };
+  const frame = await getLinkedShortFrame(id, frameId);
+  if (!frame) return { ok: false, error: "frame not found in linked short" };
+  const previousUrl = article.og_image ?? null;
+  await updateArticle(id, { og_image: frame.url });
+  console.info("[article-media set-og]", {
+    articleId: id,
+    frameId: frame.id,
+    frameUrl: frame.url,
+    previousUrl,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  return { ok: true, frameUrl: frame.url, previousUrl };
+}
+
+export async function addArticleGalleryImageFromFrameAction(
+  formData: FormData,
+): Promise<{
+  ok: boolean;
+  error?: string;
+  frameUrl?: string;
+  previousDocument?: string | null;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const frameId = String(formData.get("frame_id") ?? "");
+  const rawAlt = String(formData.get("alt") ?? "").trim();
+  if (!id) return { ok: false, error: "missing id" };
+  if (!frameId) return { ok: false, error: "missing frame_id" };
+  const article = await getArticle(id);
+  if (!article) return { ok: false, error: "article not found" };
+  const frame = await getLinkedShortFrame(id, frameId);
+  if (!frame) return { ok: false, error: "frame not found in linked short" };
+  const previousDocument = article.document ?? null;
+  let parsed: unknown = null;
+  if (previousDocument) {
+    try {
+      parsed = JSON.parse(previousDocument);
+    } catch {
+      // A malformed document can't be safely appended to without losing data.
+      // The admin should fix it via the editor first.
+      console.warn("[article-media add-gallery] doc-unparseable", {
+        articleId: id,
+      });
+      return { ok: false, error: "article document is unparseable" };
+    }
+  }
+  if (!parsed || typeof parsed !== "object") {
+    // No document yet — refuse rather than seed a brand-new doc; the editor's
+    // own first-save flow owns initial document creation.
+    return { ok: false, error: "article has no document to append to" };
+  }
+  const next = appendArticleGalleryItem(parsed, {
+    src: frame.url,
+    alt: rawAlt,
+    caption: "",
+  });
+  await updateArticle(id, { document: JSON.stringify(next) });
+  console.info("[article-media add-gallery]", {
+    articleId: id,
+    frameId: frame.id,
+    frameUrl: frame.url,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  return { ok: true, frameUrl: frame.url, previousDocument };
+}
+
+export async function revertArticleHeroAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const raw = formData.get("previous_url");
+  if (!id) return { ok: false, error: "missing id" };
+  const previousUrl =
+    raw === null || raw === "" ? null : String(raw);
+  const article = await getArticle(id);
+  if (!article) return { ok: false, error: "article not found" };
+  await updateArticle(id, { hero_image: previousUrl });
+  console.info("[article-media revert-hero]", {
+    articleId: id,
+    restoredTo: previousUrl,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  return { ok: true };
+}
+
+export async function revertArticleOgAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const raw = formData.get("previous_url");
+  if (!id) return { ok: false, error: "missing id" };
+  const previousUrl =
+    raw === null || raw === "" ? null : String(raw);
+  const article = await getArticle(id);
+  if (!article) return { ok: false, error: "article not found" };
+  await updateArticle(id, { og_image: previousUrl });
+  console.info("[article-media revert-og]", {
+    articleId: id,
+    restoredTo: previousUrl,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  return { ok: true };
+}
+
+export async function revertArticleDocumentAction(
+  formData: FormData,
+): Promise<{
+  ok: boolean;
+  error?: string;
+}> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "");
+  const previousDocument = formData.get("previous_document");
+  if (!id) return { ok: false, error: "missing id" };
+  if (typeof previousDocument !== "string") {
+    return { ok: false, error: "missing previous_document" };
+  }
+  // Parse to confirm the supplied document is at least valid JSON — defense
+  // in depth even though this surface is admin-only. A malformed revert would
+  // brick the editor.
+  try {
+    JSON.parse(previousDocument);
+  } catch {
+    return { ok: false, error: "previous_document is not valid JSON" };
+  }
+  const article = await getArticle(id);
+  if (!article) return { ok: false, error: "article not found" };
+  await updateArticle(id, { document: previousDocument });
+  console.info("[article-media revert-gallery]", {
+    articleId: id,
+    docLength: previousDocument.length,
+  });
+  revalidatePath(`/admin/articles/${id}`);
+  return { ok: true };
 }
 
 // --- Reddit sources (2026-06-14 Reddit DB sync) ------------------------------

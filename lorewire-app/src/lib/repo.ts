@@ -823,6 +823,22 @@ export async function setArticleNoindex(
   console.info("[articles repo] noindex", { id, noindex });
 }
 
+// story_id has its own writer because it is intentionally not in
+// ARTICLE_EDITABLE — the generic updateArticle path is for editor field
+// writes (title/body/etc.); story_id is set by a dedicated action that
+// validates the target story exists. Passing null unlinks.
+export async function setArticleStoryId(
+  id: string,
+  storyId: string | null,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE articles SET story_id = ?, updated_at = ? WHERE id = ?",
+    [storyId, now, id],
+  );
+  console.info("[articles repo] story-id", { id, storyId });
+}
+
 export async function deleteArticle(id: string): Promise<void> {
   // Hard delete cascades to revisions so the table doesn't keep orphans. The
   // admin UI gates this behind an archived-status confirmation; soft-delete
