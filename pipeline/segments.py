@@ -215,8 +215,12 @@ def pick_segment(
          admin's intent is respected and never silently overridden by the
          global active pick).
       3. `video.intro_outro_enabled` is explicitly 0/false/off -> None.
-      4. `video.active_<kind>_id` points at an enabled row     -> that row.
+      4. `video.active_<kind>_id_<aspect>` points at an enabled row -> that row.
       5. Otherwise -> None.
+
+    2026-06-15 (_plans/2026-06-15-intro-outro-per-aspect-active.md): the global
+    active pointer is keyed by the story's aspect, so a 9:16 and a 16:9 segment
+    can both be live and each render reads its own slot.
 
     Phase 3 of _plans/2026-06-12-video-aspect-ratio.md adds an aspect
     filter: each candidate's `aspect` must match the story's resolved
@@ -224,7 +228,9 @@ def pick_segment(
     refuses to glue clips of different resolutions, so an aspect mismatch
     would either fail the render or silently letterbox; better to skip
     here and emit a body-only render until the admin uploads a matching-
-    aspect segment.
+    aspect segment. The filter is redundant for the per-aspect global path
+    (the slot is keyed by aspect) but load-bearing for the pinned path and
+    for a slot left stale by a worker re-probe.
 
     Pure: callers inject `get_setting` and `fetch_segment` so tests can stub
     a fake store.
@@ -238,29 +244,42 @@ def pick_segment(
     if row.get(f"skip_{kind}"):
         return None
 
+    # Resolve the story's aspect once — both the pinned path and the global
+    # active path filter against it, and the global active pointer is keyed by
+    # it. Late import to avoid circular imports: pipeline.aspect imports
+    # pipeline.store inside `_global_default_aspect`, so importing it at module
+    # top from segments.py would touch the lazy store initialiser before tests
+    # get a chance to stub it.
+    from pipeline.aspect import (
+        active_segment_setting_key,
+        resolve_aspect_for_story,
+    )
+
+    story_aspect = resolve_aspect_for_story(story_row)
+
     # Step 2: per-story pinned id.
     pinned_id = row.get(f"{kind}_segment_id")
     if pinned_id:
         seg = fetch_segment(pinned_id)
-        return _accept_if_aspect_matches(seg, story_row, kind, "pinned")
+        return _accept_if_aspect_matches(seg, story_aspect, kind, "pinned")
 
     # Step 3: global master switch (defaults to ON when unset).
     if _explicitly_off(get_setting("video.intro_outro_enabled")):
         return None
 
-    # Step 4: global active id.
-    active_id = (get_setting(f"video.active_{kind}_id") or "").strip()
+    # Step 4: global active id for this story's aspect.
+    active_id = (get_setting(active_segment_setting_key(kind, story_aspect)) or "").strip()
     if not active_id:
         return None
     seg = fetch_segment(active_id)
     if not seg or not seg.get("enabled"):
         return None
-    return _accept_if_aspect_matches(seg, story_row, kind, "global-active")
+    return _accept_if_aspect_matches(seg, story_aspect, kind, "global-active")
 
 
 def _accept_if_aspect_matches(
     seg: dict | None,
-    story_row: dict | None,
+    story_aspect: str,
     kind: str,
     source: str,
 ) -> dict | None:
@@ -269,17 +288,11 @@ def _accept_if_aspect_matches(
     Logs a single-line warning naming the segment + the mismatch source so
     the admin can grep the render log. Returns None on a mismatch; returns
     `seg` unchanged otherwise. A segment row without an aspect column is
-    treated as 9:16 (the legacy default the column defaults to).
+    treated as 9:16 (the legacy default the column defaults to). `story_aspect`
+    is the already-resolved story aspect (the caller resolves it once).
     """
     if not seg:
         return None
-    # Late import to avoid circular imports — pipeline.aspect imports
-    # pipeline.store inside `_global_default_aspect`, which is fine, but
-    # importing it at module top from segments.py would touch the lazy
-    # store initialiser before tests get a chance to stub it.
-    from pipeline.aspect import resolve_aspect_for_story
-
-    story_aspect = resolve_aspect_for_story(story_row)
     seg_aspect = _resolve_segment_aspect(seg.get("aspect"))
     if seg_aspect == story_aspect:
         return seg

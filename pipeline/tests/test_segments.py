@@ -33,7 +33,7 @@ class PickSegmentChainTests(unittest.TestCase):
         get_setting, fetch_segment = self._store(
             settings={
                 "video.intro_outro_enabled": "1",
-                "video.active_intro_id": "global",
+                "video.active_intro_id_9x16": "global",
             },
             rows={
                 "pinned": {"id": "pinned", "kind": "intro", "enabled": 1},
@@ -47,7 +47,7 @@ class PickSegmentChainTests(unittest.TestCase):
 
     def test_pinned_id_beats_global_active(self):
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "global"},
+            settings={"video.active_intro_id_9x16": "global"},
             rows={
                 "pinned": {"id": "pinned", "kind": "intro", "enabled": 1},
                 "global": {"id": "global", "kind": "intro", "enabled": 1},
@@ -63,7 +63,7 @@ class PickSegmentChainTests(unittest.TestCase):
         # they later disabled the row globally. Disable = "skip in rotation,"
         # not "never use."
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "global"},
+            settings={"video.active_intro_id_9x16": "global"},
             rows={
                 "pinned": {"id": "pinned", "kind": "intro", "enabled": 0},
                 "global": {"id": "global", "kind": "intro", "enabled": 1},
@@ -78,7 +78,7 @@ class PickSegmentChainTests(unittest.TestCase):
         # falling through to the global active. Surprising behavior is worse
         # than no behavior.
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "global"},
+            settings={"video.active_intro_id_9x16": "global"},
             rows={
                 "global": {"id": "global", "kind": "intro", "enabled": 1},
             },
@@ -92,7 +92,7 @@ class PickSegmentChainTests(unittest.TestCase):
         get_setting, fetch_segment = self._store(
             settings={
                 "video.intro_outro_enabled": "0",
-                "video.active_intro_id": "global",
+                "video.active_intro_id_9x16": "global",
             },
             rows={
                 "global": {"id": "global", "kind": "intro", "enabled": 1},
@@ -107,7 +107,7 @@ class PickSegmentChainTests(unittest.TestCase):
         # is the "fresh install — admin just uploaded an intro, expect it to
         # run" path.
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "global"},
+            settings={"video.active_intro_id_9x16": "global"},
             rows={
                 "global": {"id": "global", "kind": "intro", "enabled": 1},
             },
@@ -117,7 +117,7 @@ class PickSegmentChainTests(unittest.TestCase):
 
     def test_global_active_disabled_returns_none(self):
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "global"},
+            settings={"video.active_intro_id_9x16": "global"},
             rows={
                 "global": {"id": "global", "kind": "intro", "enabled": 0},
             },
@@ -136,7 +136,7 @@ class PickSegmentChainTests(unittest.TestCase):
         # The same chain walks outro_* columns when kind="outro" — i.e. a
         # story's skip_intro shouldn't affect the outro pick.
         get_setting, fetch_segment = self._store(
-            settings={"video.active_outro_id": "out"},
+            settings={"video.active_outro_id_9x16": "out"},
             rows={"out": {"id": "out", "kind": "outro", "enabled": 1}},
         )
         story = {"skip_intro": 1, "skip_outro": 0}
@@ -284,7 +284,7 @@ class PickSegmentAspectMatchTests(unittest.TestCase):
         # Both default to 9:16 implicitly — exact back-compat for legacy
         # rows that pre-date the aspect column.
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "active"},
+            settings={"video.active_intro_id_9x16": "active"},
             rows={
                 "active": {
                     "id": "active",
@@ -302,7 +302,7 @@ class PickSegmentAspectMatchTests(unittest.TestCase):
 
     def test_landscape_segment_matches_landscape_story(self):
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "landscape-intro"},
+            settings={"video.active_intro_id_16x9": "landscape-intro"},
             rows={
                 "landscape-intro": {
                     "id": "landscape-intro",
@@ -331,8 +331,12 @@ class PickSegmentAspectMatchTests(unittest.TestCase):
         # The splice's concat filter would either fail or letterbox a
         # 1080x1920 intro onto a 1920x1080 body; safer to skip and emit
         # a body-only render until the admin uploads a matching intro.
+        # Per-aspect (2026-06-15) makes this a stale-slot guard: a portrait
+        # segment normally can't sit in the 16:9 slot (set-active keys by the
+        # segment's own aspect), but a worker re-probe could leave it there,
+        # and the aspect filter still catches it.
         get_setting, fetch_segment = self._store(
-            settings={"video.active_intro_id": "portrait-intro"},
+            settings={"video.active_intro_id_16x9": "portrait-intro"},
             rows={
                 "portrait-intro": {
                     "id": "portrait-intro",
@@ -383,6 +387,70 @@ class PickSegmentAspectMatchTests(unittest.TestCase):
         self.assertIsNone(
             segments.pick_segment("intro", story, get_setting, fetch_segment)
         )
+
+
+class PickSegmentPerAspectActiveTests(unittest.TestCase):
+    """2026-06-15: each aspect has its own active pointer, so a 16:9 and a 9:16
+    segment can both be live. A render reads the slot for its own aspect. These
+    stories carry an explicit video_config aspect so the resolution is
+    deterministic without touching the real settings store."""
+
+    @staticmethod
+    def _store(settings: dict, rows: dict):
+        get_setting = lambda k: settings.get(k)  # noqa: E731
+        fetch_segment = lambda i: rows.get(i)  # noqa: E731
+        return get_setting, fetch_segment
+
+    def _story(self, aspect: str) -> dict:
+        return {
+            "video_config": json.dumps({
+                "voiceover_url": "/v.mp3",
+                "duration_ms": 10000,
+                "doodle_frames": [],
+                "captions": [],
+                "aspect": aspect,
+            }),
+        }
+
+    def test_both_aspects_live_each_picks_its_own_slot(self):
+        get_setting, fetch_segment = self._store(
+            settings={
+                "video.active_intro_id_16x9": "wide",
+                "video.active_intro_id_9x16": "tall",
+            },
+            rows={
+                "wide": {"id": "wide", "kind": "intro", "enabled": 1, "aspect": "16:9"},
+                "tall": {"id": "tall", "kind": "intro", "enabled": 1, "aspect": "9:16"},
+            },
+        )
+        wide = segments.pick_segment(
+            "intro", self._story("16:9"), get_setting, fetch_segment
+        )
+        tall = segments.pick_segment(
+            "intro", self._story("9:16"), get_setting, fetch_segment
+        )
+        self.assertEqual(wide["id"], "wide")
+        self.assertEqual(tall["id"], "tall")
+
+    def test_aspect_with_no_active_slot_returns_none_independently(self):
+        # Only the tall slot is filled: a wide render gets body-only while the
+        # tall render still gets its intro. This is the exact bug the feature
+        # fixes — before, activating the tall intro starved every wide render.
+        get_setting, fetch_segment = self._store(
+            settings={"video.active_intro_id_9x16": "tall"},
+            rows={
+                "tall": {"id": "tall", "kind": "intro", "enabled": 1, "aspect": "9:16"},
+            },
+        )
+        self.assertIsNone(
+            segments.pick_segment(
+                "intro", self._story("16:9"), get_setting, fetch_segment
+            )
+        )
+        tall = segments.pick_segment(
+            "intro", self._story("9:16"), get_setting, fetch_segment
+        )
+        self.assertEqual(tall["id"], "tall")
 
 
 class ProbeVideoDimsTests(unittest.TestCase):

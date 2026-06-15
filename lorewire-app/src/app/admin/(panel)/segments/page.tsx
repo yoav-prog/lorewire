@@ -1,9 +1,12 @@
-// Intro/outro library (Wave 3 Phase 4). Two stacked sections — Intros and
-// Outros — each with an upload form (browser -> GCS resumable, never through
-// Vercel), a master "Active" badge, and a row of controls per uploaded
-// segment (preview, rename, set active, enable/disable, delete). The master
-// switch `video.intro_outro_enabled` lives on the Settings page; we link to
-// it so the admin can see it without leaving here.
+// Intro/outro library (Wave 3 Phase 4; per-aspect 2026-06-15). Two stacked
+// sections — Intros and Outros — each split into a wide (16:9) and a tall
+// (9:16) group because "active" is now per-aspect: a wide and a tall segment
+// can both be live, and each render uses the one matching its shape. Each group
+// has its own ACTIVE badge, "Set as active" control, and a loud empty/gap
+// state so the admin never ships a render with a missing clip by accident. The
+// shared upload form per kind auto-detects the file's aspect and the card lands
+// in the matching group. The master switch `video.intro_outro_enabled` lives on
+// the Settings page; we mirror it here so the admin sees it without leaving.
 //
 // Uploads land as `status='pending'`; once the browser confirms the PUT,
 // finalize flips to `uploading`; pipeline/segments_worker.py picks it up,
@@ -19,6 +22,13 @@ import {
   type SegmentRow,
 } from "@/lib/repo";
 import {
+  LEGACY_DEFAULT_ASPECT,
+  VIDEO_ASPECTS,
+  activeSegmentSettingKey,
+  isVideoAspect,
+  type VideoAspect,
+} from "@/lib/aspect";
+import {
   setActiveSegmentAction,
   setSegmentEnabledAction,
   renameSegmentAction,
@@ -28,6 +38,27 @@ import {
 import SettingsShell from "@/app/admin/SettingsShell";
 import { SegmentUploadForm } from "./SegmentUploadForm";
 import { SegmentsAutoRefresh } from "./SegmentsAutoRefresh";
+
+// Plain-language labels per aspect so a non-technical admin isn't left parsing
+// "16:9" — the council's Outsider lens. `tag`/`platforms` head the group, `noun`
+// fills the warning copy ("…will render with no intro").
+const ASPECT_GROUP: Record<
+  VideoAspect,
+  { tag: string; ratio: string; platforms: string; noun: string }
+> = {
+  "16:9": {
+    tag: "Wide",
+    ratio: "16:9",
+    platforms: "YouTube, X, LinkedIn",
+    noun: "wide videos",
+  },
+  "9:16": {
+    tag: "Tall",
+    ratio: "9:16",
+    platforms: "Shorts, TikTok, Reels",
+    noun: "tall videos",
+  },
+};
 
 function formatDuration(ms: number | null): string {
   if (!ms || ms <= 0) return "—";
@@ -44,6 +75,16 @@ function isTransitional(row: SegmentRow): boolean {
   return TRANSITIONAL_STATUSES.has(row.status ?? "");
 }
 
+// A NULL aspect column predates the per-aspect work; treat it as the legacy
+// 9:16 default, same as the resolver and the worker.
+function segmentAspect(row: SegmentRow): VideoAspect {
+  return isVideoAspect(row.aspect) ? row.aspect : LEGACY_DEFAULT_ASPECT;
+}
+
+function isLiveActive(row: SegmentRow | undefined): boolean {
+  return Boolean(row && row.enabled !== 0 && (row.status ?? "ready") === "ready");
+}
+
 export default async function SegmentsPage({
   searchParams,
 }: {
@@ -52,11 +93,27 @@ export default async function SegmentsPage({
   await requireAdmin();
   const sp = await searchParams;
   const errorKey = typeof sp.error === "string" ? sp.error : "";
-  const activeIntroId = (await getSetting("video.active_intro_id")) ?? "";
-  const activeOutroId = (await getSetting("video.active_outro_id")) ?? "";
-  const masterRaw = (await getSetting("video.intro_outro_enabled")) ?? "";
+
+  const [
+    activeIntro16x9,
+    activeIntro9x16,
+    activeOutro16x9,
+    activeOutro9x16,
+    masterRaw,
+  ] = await Promise.all([
+    getSetting(activeSegmentSettingKey("intro", "16:9")),
+    getSetting(activeSegmentSettingKey("intro", "9:16")),
+    getSetting(activeSegmentSettingKey("outro", "16:9")),
+    getSetting(activeSegmentSettingKey("outro", "9:16")),
+    getSetting("video.intro_outro_enabled"),
+  ]);
+  // Active id per (kind, aspect) — the four independent slots.
+  const activeByKindAspect: Record<SegmentKind, Record<VideoAspect, string>> = {
+    intro: { "16:9": activeIntro16x9 ?? "", "9:16": activeIntro9x16 ?? "" },
+    outro: { "16:9": activeOutro16x9 ?? "", "9:16": activeOutro9x16 ?? "" },
+  };
   const masterExplicitlyOff = ["0", "false", "off", "no"].includes(
-    masterRaw.trim().toLowerCase(),
+    (masterRaw ?? "").trim().toLowerCase(),
   );
   // Choose which upload path the form should use:
   //   - Prod (Vercel): always GCS resumable. Fail loud if creds are missing
@@ -71,15 +128,36 @@ export default async function SegmentsPage({
     listSegments("intro"),
     listSegments("outro"),
   ]);
+  const rowsByKind: Record<SegmentKind, SegmentRow[]> = {
+    intro: intros,
+    outro: outros,
+  };
 
   const transitionalCount =
     intros.filter(isTransitional).length + outros.filter(isTransitional).length;
+
+  // Gap detection: a (kind, aspect) slot is "covered" when its active id names
+  // a ready, enabled row of the matching aspect. Anything uncovered ships
+  // body-only, so surface it loudly at the top. Moot when the master switch is
+  // off (nothing splices at all), so skip the banner in that case.
+  const gaps: { kind: SegmentKind; aspect: VideoAspect }[] = [];
+  if (!masterExplicitlyOff) {
+    for (const kind of ["intro", "outro"] as const) {
+      for (const aspect of VIDEO_ASPECTS) {
+        const activeId = activeByKindAspect[kind][aspect];
+        const activeRow = rowsByKind[kind].find(
+          (r) => r.id === activeId && segmentAspect(r) === aspect,
+        );
+        if (!isLiveActive(activeRow)) gaps.push({ kind, aspect });
+      }
+    }
+  }
 
   return (
     <SettingsShell
       active="intros"
       title="Intros & outros"
-      description="Upload short branded clips that the pipeline splices onto every rendered video. Exactly one intro and one outro is active globally; a story can override the pick or skip the segment entirely from its edit page."
+      description="Upload short branded clips that the pipeline splices onto every rendered video. Wide (16:9) and tall (9:16) videos each get their own active intro and outro; a story can override the pick or skip the segment from its edit page."
     >
       <div className="space-y-6">
         <SegmentsAutoRefresh activeRows={transitionalCount} />
@@ -87,6 +165,17 @@ export default async function SegmentsPage({
         {errorKey && (
           <div className="rounded-xl border border-danger/40 bg-danger/10 p-3 text-[13px] text-danger">
             {errorKey}
+          </div>
+        )}
+
+        {gaps.length > 0 && (
+          <div className="rounded-xl border border-warn/40 bg-warn/10 p-3 text-[13px] text-warn">
+            <span className="font-semibold">Heads up.</span> No active segment
+            for:{" "}
+            {gaps
+              .map((g) => `${ASPECT_GROUP[g.aspect].tag.toLowerCase()} ${g.kind}`)
+              .join(", ")}
+            . Those renders ship without that clip until you set one below.
           </div>
         )}
 
@@ -103,7 +192,7 @@ export default async function SegmentsPage({
               <p className="mt-0.5 text-[12px] text-muted">
                 {masterExplicitlyOff
                   ? "Currently off. No intro or outro is spliced onto any render."
-                  : "Currently on. Active intro and outro are spliced onto every render. Per-story overrides still apply."}
+                  : "Currently on. The active intro and outro for each shape are spliced onto every render. Per-story overrides still apply."}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -122,19 +211,19 @@ export default async function SegmentsPage({
           </div>
         </form>
 
-        <SegmentSection
+        <SegmentKindSection
           kind="intro"
           title="Intros"
           rows={intros}
-          activeId={activeIntroId}
+          activeByAspect={activeByKindAspect.intro}
           uploadMode={uploadMode}
         />
 
-        <SegmentSection
+        <SegmentKindSection
           kind="outro"
           title="Outros"
           rows={outros}
-          activeId={activeOutroId}
+          activeByAspect={activeByKindAspect.outro}
           uploadMode={uploadMode}
         />
       </div>
@@ -142,17 +231,17 @@ export default async function SegmentsPage({
   );
 }
 
-function SegmentSection({
+function SegmentKindSection({
   kind,
   title,
   rows,
-  activeId,
+  activeByAspect,
   uploadMode,
 }: {
   kind: SegmentKind;
   title: string;
   rows: SegmentRow[];
-  activeId: string;
+  activeByAspect: Record<VideoAspect, string>;
   uploadMode: "gcs" | "local";
 }) {
   const singular = title.endsWith("s") ? title.slice(0, -1) : title;
@@ -173,23 +262,76 @@ function SegmentSection({
         uploadMode={uploadMode}
       />
 
+      {VIDEO_ASPECTS.map((aspect) => (
+        <SegmentAspectGroup
+          key={aspect}
+          kind={kind}
+          aspect={aspect}
+          singular={singular}
+          rows={rows.filter((r) => segmentAspect(r) === aspect)}
+          activeId={activeByAspect[aspect]}
+        />
+      ))}
+    </section>
+  );
+}
+
+function SegmentAspectGroup({
+  kind,
+  aspect,
+  singular,
+  rows,
+  activeId,
+}: {
+  kind: SegmentKind;
+  aspect: VideoAspect;
+  singular: string;
+  rows: SegmentRow[];
+  activeId: string;
+}) {
+  const meta = ASPECT_GROUP[aspect];
+  const lower = singular.toLowerCase();
+  const activeRow = rows.find((r) => r.id === activeId);
+  const covered = isLiveActive(activeRow);
+
+  return (
+    <div className="space-y-2 rounded-xl border border-line bg-surface/40 p-3">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="font-mono text-[12px] font-semibold uppercase tracking-wider text-ink">
+          {meta.tag}
+        </span>
+        <span className="font-mono text-[11px] text-muted">
+          {meta.ratio} · {meta.platforms}
+        </span>
+      </div>
+
       {rows.length === 0 ? (
-        <p className="rounded-xl border border-line bg-surface p-4 text-[13px] text-muted">
-          Nothing here yet. Upload an {kind} above.
+        <p className="rounded-lg border border-warn/40 bg-warn/10 p-3 text-[12px] text-warn">
+          No {meta.ratio} {lower} uploaded yet. {meta.tag} videos render with no{" "}
+          {lower}.
         </p>
-      ) : (
+      ) : !covered ? (
+        <p className="rounded-lg border border-warn/40 bg-warn/10 p-3 text-[12px] text-warn">
+          No active {lower} for {meta.noun}. Set one below or {meta.tag.toLowerCase()}{" "}
+          renders play without it.
+        </p>
+      ) : null}
+
+      {rows.length > 0 && (
         <div className="space-y-2">
           {rows.map((row) => (
             <SegmentRowCard
               key={row.id}
               row={row}
               kind={kind}
+              singular={singular}
+              aspectNoun={meta.noun}
               isActive={row.id === activeId}
             />
           ))}
         </div>
       )}
-    </section>
+    </div>
   );
 }
 
@@ -234,15 +376,23 @@ function StatusChip({ status }: { status: string }) {
 function SegmentRowCard({
   row,
   kind,
+  singular,
+  aspectNoun,
   isActive,
 }: {
   row: SegmentRow;
   kind: SegmentKind;
+  singular: string;
+  aspectNoun: string;
   isActive: boolean;
 }) {
   const enabled = row.enabled !== 0;
   const status = row.status ?? "ready";
   const isReady = status === "ready";
+  // Active-but-disabled is a silent trap: the slot still points here so the
+  // resolver finds the active id, sees it disabled, and renders body-only.
+  // Surface it on the card the admin would look at to fix it.
+  const activeButDark = isActive && (!enabled || !isReady);
   // Only show the preview when we have a normalized output to play. Source
   // bytes are stored in GCS too but they're the un-cropped original — the
   // admin's expectation is "what will the splice render look like."
@@ -299,6 +449,14 @@ function SegmentRowCard({
 
           {row.label && (
             <p className="text-[13px] text-ink">{row.label}</p>
+          )}
+
+          {activeButDark && (
+            <p className="rounded-md border border-warn/40 bg-warn/10 p-2 text-[11px] text-warn">
+              Active but {enabled ? "still processing" : "disabled"} — {aspectNoun}{" "}
+              render with no {singular.toLowerCase()} until this is{" "}
+              {enabled ? "ready" : "re-enabled"} or another is set active.
+            </p>
           )}
 
           {status === "error" && row.error && (

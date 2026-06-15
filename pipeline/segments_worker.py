@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from pipeline import gcs, segments, store
-from pipeline.aspect import infer_aspect_from_dims
+from pipeline.aspect import active_segment_setting_key, infer_aspect_from_dims
 
 # Defaults are tuned for the small-team upload cadence (rule 15: surface in
 # settings later if these ever become the wrong knobs). The poll interval and
@@ -64,12 +64,13 @@ SetSettingFn = Callable[[str, str], None]
 ProbeDimsFn = Callable[[Path], Optional[tuple[int, int]]]
 
 
-def _active_setting_key(kind: str) -> str:
-    """Settings key for the global-active pointer of an intro/outro kind. Has
-    to match the key the admin's `setActiveSegmentAction` writes (see
-    lorewire-app/src/app/admin/actions.ts) and the picker `pick_segment`
-    in pipeline/segments.py reads."""
-    return f"video.active_{kind}_id"
+def _active_setting_key(kind: str, aspect: str) -> str:
+    """Settings key for the per-aspect active pointer of an intro/outro kind.
+    Has to match the key the admin's `setActiveSegmentAction` writes (see
+    lorewire-app/src/app/admin/actions.ts) and the picker `pick_segment` in
+    pipeline/segments.py reads — all three route through
+    pipeline.aspect.active_segment_setting_key so the string can't drift."""
+    return active_segment_setting_key(kind, aspect)
 
 
 def _now_utc() -> datetime.datetime:
@@ -215,20 +216,23 @@ def process_segment(
             aspect=corrected_aspect,
         )
 
-        # Auto-activate the first segment of its kind, mirroring the UX the
-        # old (deleted) uploadSegmentAction provided: an admin who uploads
-        # their first intro shouldn't have to click "Set as active" too.
-        # Only fires when no active id is set — never overrides an explicit
-        # admin pick. Bracket this in a try so a transient settings hiccup
-        # cannot reverse the "ready" flip we just made above.
+        # Auto-activate the first segment of its kind AND aspect, mirroring the
+        # UX the old (deleted) uploadSegmentAction provided: an admin who uploads
+        # their first 9:16 intro shouldn't have to click "Set as active" too.
+        # Keyed per aspect (2026-06-15) so a 9:16 upload never claims the 16:9
+        # slot, and uses the probe-corrected `seg_aspect` so the slot matches
+        # what the normalized output actually is. Only fires when that slot is
+        # empty — never overrides an explicit admin pick. Bracket this in a try
+        # so a transient settings hiccup cannot reverse the "ready" flip above.
         if kind in ("intro", "outro"):
             try:
-                key = _active_setting_key(kind)
+                key = _active_setting_key(kind, seg_aspect)
                 current_active = (get_setting(key) or "").strip()
                 if not current_active:
                     set_setting(key, seg_id)
                     print(
-                        f"[segments worker] auto-activate kind={kind} id={seg_id}"
+                        f"[segments worker] auto-activate kind={kind} "
+                        f"aspect={seg_aspect} id={seg_id}"
                     )
             except Exception as inner:
                 print(

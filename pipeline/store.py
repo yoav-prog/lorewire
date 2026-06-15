@@ -74,8 +74,8 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS character_image_mouth_removed TEXT",
     # Wave 3 Phase 4 intro/outro override layer: each story can pin a specific
     # intro/outro from the library, or opt out entirely. NULL/0 = inherit the
-    # global active pick (see settings keys `video.active_intro_id` /
-    # `video.active_outro_id` and the master switch `video.intro_outro_enabled`).
+    # per-aspect active pick (see settings keys `video.active_<kind>_id_<aspect>`
+    # and the master switch `video.intro_outro_enabled`).
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS intro_segment_id TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS outro_segment_id TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS skip_intro INTEGER DEFAULT 0",
@@ -402,6 +402,7 @@ def init() -> None:
                 for stmt in SCHEMA_STATEMENTS:
                     cur.execute(stmt)
             conn.commit()
+        _seed_active_segment_aspect()
         return
     with _sqlite_conn() as c:
         for stmt in SCHEMA_STATEMENTS:
@@ -413,6 +414,77 @@ def init() -> None:
                     # Column already present from a prior init() — fine.
                     continue
                 raise
+    _seed_active_segment_aspect()
+
+
+# Sentinel distinguishing "segment row absent" from "row present, aspect NULL"
+# in the per-aspect seed below — a missing row must not be seeded (it would
+# point a slot at a deleted id), but a present row with a NULL aspect is the
+# legacy 9:16 case and should seed the 9:16 slot.
+_SEGMENT_MISSING = object()
+
+
+def _segment_aspect_or_missing(seg_id: str) -> object:
+    """Return the `aspect` column for a segment id, or `_SEGMENT_MISSING` when
+    there is no such row. A present row with a NULL aspect returns None and the
+    caller coalesces it to the legacy 9:16 floor."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT aspect FROM video_segments WHERE id = %s", (seg_id,)
+                )
+                row = cur.fetchone()
+                return row["aspect"] if row else _SEGMENT_MISSING
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT aspect FROM video_segments WHERE id=?", (seg_id,)
+        ).fetchone()
+        return row["aspect"] if row else _SEGMENT_MISSING
+
+
+def _seed_active_segment_aspect() -> None:
+    """Idempotent one-shot: copy the legacy single active intro/outro pointer
+    into the per-aspect slot matching its segment's aspect
+    (_plans/2026-06-15-intro-outro-per-aspect-active.md). Before this change the
+    active segment lived under a single key per kind; now each aspect has its own
+    slot. Only fills an EMPTY slot, so it's a no-op once seeded and never
+    overrides an admin's pick. Runs at the end of init() in both runtimes;
+    whichever boots first against the shared Postgres wins and the other no-ops.
+    Mirror of `seedActiveSegmentAspect` in lorewire-app/src/lib/db.ts.
+
+    Best-effort: a failure here must not crash startup — the slot stays empty and
+    the render falls to body-only until the admin sets an active segment by hand.
+    """
+    from pipeline.aspect import (
+        LEGACY_DEFAULT_ASPECT,
+        active_segment_setting_key,
+        is_video_aspect,
+        legacy_active_segment_setting_key,
+    )
+
+    for kind in ("intro", "outro"):
+        try:
+            legacy_id = (
+                get_setting(legacy_active_segment_setting_key(kind)) or ""
+            ).strip()
+            if not legacy_id:
+                continue
+            raw_aspect = _segment_aspect_or_missing(legacy_id)
+            if raw_aspect is _SEGMENT_MISSING:
+                continue
+            aspect = (
+                raw_aspect if is_video_aspect(raw_aspect) else LEGACY_DEFAULT_ASPECT
+            )
+            slot_key = active_segment_setting_key(kind, aspect)
+            if (get_setting(slot_key) or "").strip():
+                continue
+            set_setting(slot_key, legacy_id)
+            print(
+                f"[store] seeded per-aspect active {kind} -> {slot_key} = {legacy_id}"
+            )
+        except Exception as e:
+            print(f"[store] seed per-aspect active {kind} failed: {e!r}")
 
 
 # Pulls `IF NOT EXISTS` out of ADD COLUMN clauses because SQLite doesn't

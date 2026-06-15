@@ -117,7 +117,7 @@ describe("pickSegmentPure", () => {
       story,
       PORTRAIT,
       makeGetSetting({
-        "video.active_intro_id": "global-1",
+        "video.active_intro_id_9x16": "global-1",
       }),
       makeFetchSegment({
         "global-1": makeSegment({ id: "global-1" }),
@@ -136,7 +136,7 @@ describe("pickSegmentPure", () => {
       PORTRAIT,
       makeGetSetting({
         "video.intro_outro_enabled": "0",
-        "video.active_intro_id": "global-1",
+        "video.active_intro_id_9x16": "global-1",
       }),
       makeFetchSegment({ "global-1": seg }),
     );
@@ -151,7 +151,7 @@ describe("pickSegmentPure", () => {
       "intro",
       story,
       PORTRAIT,
-      makeGetSetting({ "video.active_intro_id": "global-1" }),
+      makeGetSetting({ "video.active_intro_id_9x16": "global-1" }),
       makeFetchSegment({ "global-1": seg }),
     );
     expect(pick.segment?.id).toBe("global-1");
@@ -178,7 +178,7 @@ describe("pickSegmentPure", () => {
       "intro",
       story,
       PORTRAIT,
-      makeGetSetting({ "video.active_intro_id": "global-1" }),
+      makeGetSetting({ "video.active_intro_id_9x16": "global-1" }),
       makeFetchSegment({ "global-1": seg }),
     );
     expect(pick.segment).toBeNull();
@@ -210,7 +210,7 @@ describe("pickSegmentPure", () => {
       "intro",
       story,
       LANDSCAPE,
-      makeGetSetting({ "video.active_intro_id": "global-1" }),
+      makeGetSetting({ "video.active_intro_id_16x9": "global-1" }),
       makeFetchSegment({ "global-1": seg }),
     );
     expect(pick.segment).toBeNull();
@@ -224,7 +224,7 @@ describe("pickSegmentPure", () => {
       "intro",
       story,
       LANDSCAPE,
-      makeGetSetting({ "video.active_intro_id": "global-1" }),
+      makeGetSetting({ "video.active_intro_id_16x9": "global-1" }),
       makeFetchSegment({ "global-1": seg }),
     );
     expect(pick.segment?.id).toBe("global-1");
@@ -238,7 +238,7 @@ describe("pickSegmentPure", () => {
       "intro",
       story,
       PORTRAIT,
-      makeGetSetting({ "video.active_intro_id": "legacy-1" }),
+      makeGetSetting({ "video.active_intro_id_9x16": "legacy-1" }),
       makeFetchSegment({ "legacy-1": seg }),
     );
     expect(pick.segment?.id).toBe("legacy-1");
@@ -265,7 +265,7 @@ describe("pickSegmentPure", () => {
         PORTRAIT,
         makeGetSetting({
           "video.intro_outro_enabled": rawValue,
-          "video.active_intro_id": "global-1",
+          "video.active_intro_id_9x16": "global-1",
         }),
         makeFetchSegment({ "global-1": seg }),
       );
@@ -286,12 +286,48 @@ describe("pickSegmentPure", () => {
       story,
       PORTRAIT,
       makeGetSetting({
-        "video.active_intro_id": "outro-1", // wrong namespace
-        "video.active_outro_id": "outro-1",
+        "video.active_intro_id_9x16": "outro-1", // wrong namespace
+        "video.active_outro_id_9x16": "outro-1",
       }),
       makeFetchSegment({ "outro-1": seg }),
     );
     expect(pick.segment?.id).toBe("outro-1");
     expect(pick.reason).toBe("global-active");
+  });
+
+  it("reads the per-aspect slot so a wide and a tall intro can both be live", async () => {
+    // The core of 2026-06-15: a 16:9 render reads the _16x9 slot, a 9:16
+    // render reads the _9x16 slot, so both can be active at once.
+    const wide = makeSegment({ id: "wide", aspect: "16:9" });
+    const tall = makeSegment({ id: "tall", aspect: "9:16" });
+    const getSetting = makeGetSetting({
+      "video.active_intro_id_16x9": "wide",
+      "video.active_intro_id_9x16": "tall",
+    });
+    const fetch = makeFetchSegment({ wide, tall });
+    const story = makeStory();
+
+    const widePick = await pickSegmentPure("intro", story, LANDSCAPE, getSetting, fetch);
+    const tallPick = await pickSegmentPure("intro", story, PORTRAIT, getSetting, fetch);
+
+    expect(widePick.segment?.id).toBe("wide");
+    expect(tallPick.segment?.id).toBe("tall");
+  });
+
+  it("starves only the unfilled aspect when one slot is empty", async () => {
+    // The exact bug the feature fixes: filling only the tall slot must not
+    // strip the intro from tall renders, and wide renders fall to body-only
+    // independently rather than the old all-or-nothing single pointer.
+    const tall = makeSegment({ id: "tall", aspect: "9:16" });
+    const getSetting = makeGetSetting({ "video.active_intro_id_9x16": "tall" });
+    const fetch = makeFetchSegment({ tall });
+    const story = makeStory();
+
+    const widePick = await pickSegmentPure("intro", story, LANDSCAPE, getSetting, fetch);
+    const tallPick = await pickSegmentPure("intro", story, PORTRAIT, getSetting, fetch);
+
+    expect(widePick.segment).toBeNull();
+    expect(widePick.reason).toBe("no-default");
+    expect(tallPick.segment?.id).toBe("tall");
   });
 });
