@@ -46,6 +46,13 @@ if not LOG.handlers:
 # but build_short_props takes it for the local path, so pass the api dir.
 REPO_ROOT = _HERE
 
+# Crash-recovery thresholds for the reaper. A 'generating' row past ~15 min means
+# the drain died (generation is bounded by the drain budget). A 'rendering' row
+# past ~20 min means the render cron / Cloud Run died; kept above the cron's 800s
+# cap so a slow-but-live render is never reset out from under itself.
+GENERATING_STALE_S = 900
+RENDERING_STALE_S = 1200
+
 # Phase -> progress fraction across the generation half (0..0.5; store_short_props
 # stamps 0.5 when props land). The render cron drives 0.5..1.0.
 _PHASE_FRACTION = {"script": 0.03, "plan": 0.06, "base": 0.10, "voice": 0.42, "stage": 0.46}
@@ -71,6 +78,9 @@ def _is_authorized(authorization_header: str | None) -> bool:
 def run_drain() -> dict:
     """Claim and generate one short. Returns a JSON-serializable result body."""
     start = time.monotonic()
+    reaped = store.reap_stale_short_renders(GENERATING_STALE_S, RENDERING_STALE_S)
+    if reaped:
+        _log("reaped", count=reaped)
     claimed = store.claim_next_short_for_generation()
     if claimed is None:
         _log("idle")

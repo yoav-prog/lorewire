@@ -1605,6 +1605,60 @@ def reap_stale_image_render_claims(stale_after_s: int) -> int:
         return int(cur.rowcount)
 
 
+def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) -> int:
+    """Crash-recovery for the short_renders queue. A row stuck at 'generating'
+    (the generation drain died mid-run) or 'rendering' (the render cron / Cloud
+    Run died) is reset to 'queued' so the next tick re-claims it. props is left
+    untouched, so a reset 'generating' row (props NULL) goes back to the
+    generation drain and a reset 'rendering' row (props set) goes back to the
+    render cron. Separate thresholds because a real Cloud Run render runs minutes
+    while generation is bounded by the drain budget; rendering_after_s must stay
+    above the cron's 800s cap so a slow-but-live render is never reset out from
+    under itself. Returns the number of rows reset; safe on every tick."""
+    import datetime
+
+    def _cutoff(seconds: int) -> str:
+        return (
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(seconds=seconds)
+        ).isoformat()
+
+    gen_cutoff = _cutoff(generating_after_s)
+    ren_cutoff = _cutoff(rendering_after_s)
+    total = 0
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
+                    "WHERE status='generating' AND started_at IS NOT NULL AND started_at < %s",
+                    (gen_cutoff,),
+                )
+                total += cur.rowcount
+                cur.execute(
+                    "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
+                    "WHERE status='rendering' AND started_at IS NOT NULL AND started_at < %s",
+                    (ren_cutoff,),
+                )
+                total += cur.rowcount
+            conn.commit()
+        return int(total)
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
+            "WHERE status='generating' AND started_at IS NOT NULL AND started_at < ?",
+            (gen_cutoff,),
+        )
+        total += cur.rowcount
+        cur = c.execute(
+            "UPDATE short_renders SET status='queued', started_at=NULL, error=NULL "
+            "WHERE status='rendering' AND started_at IS NOT NULL AND started_at < ?",
+            (ren_cutoff,),
+        )
+        total += cur.rowcount
+        return int(total)
+
+
 class _AdvisoryLock:
     """Postgres advisory lock context manager. Phase 1 of the drain
     rollout uses this so two Vercel cron ticks landing within the same
