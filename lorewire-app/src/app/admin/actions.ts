@@ -508,6 +508,13 @@ const SETTING_VALUE_VALIDATORS: Record<
     if (n < 1 || n > 60) return null;
     return String(n);
   },
+  // Homepage curation behaviour (phase 4 of
+  // _plans/2026-06-16-homepage-curation.md). Closed enum + bool flag
+  // so a tampered client can't wedge HomePage into an unknown branch.
+  "curation.empty_rail_behavior": (raw) =>
+    raw === "fallback" || raw === "hide" ? raw : null,
+  "curation.hero_required": (raw) =>
+    raw === "true" || raw === "false" ? raw : null,
 };
 
 export async function saveSettingAction(formData: FormData): Promise<void> {

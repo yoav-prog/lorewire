@@ -242,9 +242,9 @@ export function ScenesTab({
                 <textarea
                   value={d.imagePrompt}
                   onChange={(e) => onPromptChange(frame.id, e.target.value)}
-                  rows={3}
-                  className="mt-1 w-full rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink outline-none focus:border-accent"
-                  placeholder="Describe this scene (used by the per-scene regenerate)"
+                  rows={5}
+                  className="mt-1 w-full rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] leading-snug text-ink outline-none focus:border-accent"
+                  placeholder="The full i2i prompt that generated this image. Empty here means this short was generated before prompts were persisted — type a description (character + scene) to enable Regenerate."
                 />
               </label>
 

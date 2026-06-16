@@ -97,6 +97,17 @@ export interface ShortConfig {
    *  helper (Phase 4) diffs the current config against this baseline to
    *  pick lane A / B / C. */
   source_render_id?: string;
+  /** Per-short intro/outro override. Resolution chain (consumed by
+   *  lib/short-segments.ts) is:
+   *    1. short_config.skip_intro / skip_outro truthy -> hard skip
+   *    2. short_config.intro_segment_id / outro_segment_id set -> pin
+   *    3. story.skip_intro / skip_outro / pin / global active (existing)
+   *  Lets the admin pick a different 9:16 intro for THIS short without
+   *  touching the per-story columns the long-form video also uses. */
+  intro_segment_id?: string;
+  outro_segment_id?: string;
+  skip_intro?: boolean;
+  skip_outro?: boolean;
   /** Provenance — the original creation options. Preserved so a Restart
    *  with the same vibe + length can use them as the default. */
   narration_style?: string;
@@ -126,6 +137,17 @@ export interface ShortConfig {
   caption_style?: ShortCaptionStyleOverride;
   _locks?: ShortLockMap;
   _edit_session?: ShortEditSession;
+  /** Resolved intro/outro segment ids the LAST successful render spliced.
+   *  Used by lib/short-render-plan to detect "intro or outro override
+   *  changed since last render" → Lane A trigger. Stamped by
+   *  api/render_short after finishShortRender returns; null entries
+   *  mean "no segment spliced" (skip flag or missing). The leading
+   *  underscore mirrors _locks / _edit_session — internal bookkeeping
+   *  the editor doesn't write directly. */
+  _last_rendered_segments?: {
+    intro_segment_id: string | null;
+    outro_segment_id: string | null;
+  };
 }
 
 // ─── Parse + validate ─────────────────────────────────────────────────────────
@@ -259,6 +281,17 @@ export function parseShortConfig(raw: unknown): ShortParseResult {
     config.voice = { provider: voice.provider, voice_id: voice.voice_id };
   }
 
+  // Per-short segment overrides. Mirror parseShortConfig's contract: any
+  // unknown shape is silently dropped so a malformed override can't
+  // corrupt the config column. The patch layer below validates input
+  // before write; this is the load-side guard.
+  const introId = readOptString(raw, "intro_segment_id");
+  if (introId) config.intro_segment_id = introId;
+  const outroId = readOptString(raw, "outro_segment_id");
+  if (outroId) config.outro_segment_id = outroId;
+  if (raw.skip_intro === true) config.skip_intro = true;
+  if (raw.skip_outro === true) config.skip_outro = true;
+
   const locks = raw._locks;
   if (isObject(locks)) {
     const lockMap: ShortLockMap = {};
@@ -279,6 +312,22 @@ export function parseShortConfig(raw: unknown): ShortParseResult {
       user_id: editSession.user_id,
       started_at: editSession.started_at,
       heartbeat_at: editSession.heartbeat_at,
+    };
+  }
+
+  const lastSegments = raw._last_rendered_segments;
+  if (isObject(lastSegments)) {
+    const intro =
+      typeof lastSegments.intro_segment_id === "string"
+        ? lastSegments.intro_segment_id
+        : null;
+    const outro =
+      typeof lastSegments.outro_segment_id === "string"
+        ? lastSegments.outro_segment_id
+        : null;
+    config._last_rendered_segments = {
+      intro_segment_id: intro,
+      outro_segment_id: outro,
     };
   }
 
@@ -423,6 +472,39 @@ function applyOnePath(
   // Top-level scalars the editor writes.
   if (path === "script" && (typeof value === "string" || value === null)) {
     return { ...cfg, script: typeof value === "string" ? value : undefined };
+  }
+  // Per-short segment override: null clears the override (falls through
+  // to the per-story / global chain), a non-empty string pins a segment
+  // id. Empty string is treated as a clear so the picker can wire a
+  // single setter for both "inherit" and "pin specific".
+  if (path === "intro_segment_id") {
+    const next = { ...cfg };
+    if (value === null || value === "") delete next.intro_segment_id;
+    else if (typeof value === "string") next.intro_segment_id = value;
+    else return cfg;
+    return next;
+  }
+  if (path === "outro_segment_id") {
+    const next = { ...cfg };
+    if (value === null || value === "") delete next.outro_segment_id;
+    else if (typeof value === "string") next.outro_segment_id = value;
+    else return cfg;
+    return next;
+  }
+  // Boolean flags: true sets the hard skip, false (or null) clears it.
+  if (path === "skip_intro") {
+    const next = { ...cfg };
+    if (value === true) next.skip_intro = true;
+    else if (value === false || value === null) delete next.skip_intro;
+    else return cfg;
+    return next;
+  }
+  if (path === "skip_outro") {
+    const next = { ...cfg };
+    if (value === true) next.skip_outro = true;
+    else if (value === false || value === null) delete next.skip_outro;
+    else return cfg;
+    return next;
   }
   if (path === "voice") {
     if (value === null) {

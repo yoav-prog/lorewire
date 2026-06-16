@@ -146,7 +146,15 @@ class ShortAssets:
     script: dict                      # {title, hook, short_script, payoff, word_count}
     character: str
     base_url: str
-    scenes: list[dict]                # [{caption_chunk_start_index, scene, url}]
+    # Full prompt that generated base_url. Persisted onto the base doodle frame
+    # (frame-00) so the short editor's textarea shows what the model actually
+    # saw, and a per-scene regen replays the same wrapped prompt instead of a
+    # naked scene description.
+    base_prompt: str
+    # Each scene now carries `image_prompt` (the FULL wrapped prompt sent to
+    # the model) alongside the raw `scene` text so the editor can surface the
+    # exact bytes the model received without rebuilding them on the fly.
+    scenes: list[dict]                # [{caption_chunk_start_index, scene, url, image_prompt}]
     cost_credits: float
 
 
@@ -199,9 +207,12 @@ def generate_short_assets(
     planned = [s for s in plan.get("scenes", []) if (s.get("scene") or "").strip()]
 
     progress("base")
+    base_prompt = (
+        f"{sis.COMPOSITION_PREFIX} {character} Full body, neutral standing pose, "
+        f"plain white background. {sis.DOODLE_SUFFIX}"
+    )
     base_url = images.generate(
-        f"{sis.COMPOSITION_PREFIX} {character} Full body, neutral standing pose, plain white background. "
-        f"{sis.DOODLE_SUFFIX}",
+        base_prompt,
         aspect_ratio="9:16",
         resolution="1K",
         model=BASE_MODEL,
@@ -216,15 +227,22 @@ def generate_short_assets(
     done = 0
     results: dict[int, dict] = {}
 
-    def _gen_one(i: int, s: dict) -> tuple[int, dict, str]:
+    # Returns the FULL prompt sent to the model so build_short_props can
+    # persist it on the doodle frame. The editor's Scenes tab uses it as
+    # the textarea default + the per-scene regen action sends it back as-is
+    # — that's why we want the wrapped version, not the raw s["scene"]:
+    # editing scene text alone would lose the doodle styling + char ref the
+    # original generation used.
+    def _gen_one(i: int, s: dict) -> tuple[int, dict, str, str]:
+        prompt = _scene_prompt(char_ref, s["scene"].strip())
         url = images.generate(
-            _scene_prompt(char_ref, s["scene"].strip()),
+            prompt,
             aspect_ratio="9:16",
             resolution="1K",
             image_input=[base_url],
             model=SCENE_MODEL,
         )
-        return i, s, url
+        return i, s, url, prompt
 
     with ThreadPoolExecutor(max_workers=SCENE_CONCURRENCY) as ex:
         futures = [ex.submit(_gen_one, i, s) for i, s in enumerate(planned)]
@@ -232,13 +250,14 @@ def generate_short_assets(
             done += 1
             progress("scene", done, total)
             try:
-                i, s, url = fut.result()
+                i, s, url, prompt = fut.result()
             except Exception:
                 continue  # one bad scene shouldn't sink the short
             results[i] = {
                 "caption_chunk_start_index": int(s.get("caption_chunk_start_index", i) or 0),
                 "scene": s["scene"].strip(),
                 "url": url,
+                "image_prompt": prompt,
             }
 
     scenes = [results[i] for i in sorted(results)]
@@ -250,6 +269,7 @@ def generate_short_assets(
         script=script,
         character=character,
         base_url=base_url,
+        base_prompt=base_prompt,
         scenes=scenes,
         cost_credits=float(images.totals.get("credits", 0) or 0),
     )

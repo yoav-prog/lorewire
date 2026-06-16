@@ -5,13 +5,30 @@ import {
   CAT,
   STORIES,
   byId,
-  CONTINUE,
-  TOP10,
-  ENTITLED_ROW,
-  NEW_ROW,
+  tryById,
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import {
+  getLiveStoryMedia,
+  type LiveStoryMediaResult,
+} from "@/app/actions";
+import {
+  CATEGORY_RAILS,
+  resolveRailIds,
+  useHomepageCuration,
+} from "@/lib/homepage-rails";
+
+// Centralised default when no live media has loaded yet — the modal
+// shows the baked story shape. Derived helpers below add the is_short
+// flag + scene images once getLiveStoryMedia resolves.
+const NO_LIVE_MEDIA: LiveStoryMediaResult = {
+  ok: true,
+  video_url: null,
+  images: [],
+  is_short: false,
+  found: false,
+};
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -228,33 +245,51 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape }: { 
   );
 }
 
-function Top10Row({ onOpen }: { onOpen: OpenFn }) {
+function Top10Row({ onOpen, ids }: { onOpen: OpenFn; ids: string[] }) {
+  // tryById skips curated ids that aren't in the static catalog (story
+  // published in DB but not yet exported into published.ts). Without
+  // this filter byId() would throw and crash the whole homepage.
   return (
     <>
-      {TOP10.slice(0, 10).map((id, i) => (
-        <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
-          <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
-          <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}><PosterArt story={byId(id)} /></div>
-        </button>
-      ))}
+      {ids.slice(0, 10).map((id, i) => {
+        const s = tryById(id);
+        if (!s) return null;
+        return (
+          <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
+            <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
+            <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}><PosterArt story={s} /></div>
+          </button>
+        );
+      })}
     </>
   );
 }
 
 /* ----------------------------- WATCH (real video or doodle) ----------------------------- */
-function WatchDoodle({ story }: { story: Story }) {
-  if (story.videoUrl) {
+function WatchDoodle({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
+  // liveMedia is lifted to DetailModal so the WATCH / READ / GALLERY
+  // surfaces all share the same single fetch. Falls back to the baked
+  // story.videoUrl when the live read missed (legacy sample-only entries
+  // or before the fetch settled).
+  const videoUrl = liveMedia.video_url ?? story.videoUrl;
+  if (videoUrl) {
     return (
       <div>
         <div className="relative rounded-[14px] overflow-hidden w-full bg-black" style={{ height: 540 }}>
           <video
-            src={story.videoUrl}
+            src={videoUrl}
             poster={story.heroImage}
             controls
             preload="metadata"
             playsInline
             className="absolute inset-0 w-full h-full object-contain"
-            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: story.videoUrl })}
+            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
         </div>
         <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-4">LoreWire Original &middot; doodle short</p>
@@ -337,8 +372,16 @@ function GalleryScroller({ children, count }: { children: React.ReactNode; count
   );
 }
 
-function _galleryFromStory(story: Story): { src: string; caption: string }[] | null {
-  const imgs = story.images || [];
+function _galleryFromStory(
+  story: Story,
+  liveMedia: LiveStoryMediaResult,
+): { src: string; caption: string }[] | null {
+  // Prefer live images when the applied video is a short — those are the
+  // doodle scene frames generated for the 9:16 short. Fall back to the
+  // baked long-form story.images otherwise (or when the live read missed).
+  const imgs = liveMedia.is_short && liveMedia.images.length > 0
+    ? liveMedia.images
+    : story.images || [];
   if (imgs.length === 0) return null;
   const words = story.alignment || [];
   if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
@@ -361,15 +404,42 @@ function _articleImagePositions(paraCount: number, imageCount: number): Set<numb
   return positions;
 }
 
-function GenArticle({ story }: { story: Story }) {
+function GenArticle({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
   const paras = (story.body || "").split(/\n{2,}/);
-  const scenes = story.images || [];
+  // When the applied video is a short, the article reads alongside the
+  // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
+  // the long-form 16:9 illustrations are still the right fit.
+  const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
+  const scenes = useShortScenes ? liveMedia.images : (story.images || []);
   const positions = _articleImagePositions(paras.length, scenes.length);
   const posList = Array.from(positions).sort((a, b) => a - b);
   const imgAt = new Map<number, string>();
   posList.forEach((p, i) => {
     if (scenes[i]) imgAt.set(p, scenes[i]);
   });
+
+  // Aspect ratio + crop behaviour switches with the source. Long-form
+  // illustrations are 16:9 and benefit from the upper-third crop to put
+  // faces in frame. Doodle scenes are authored 9:16 and centre-crop the
+  // best on phones; bound the width so the column doesn't blow out the
+  // article measure on desktop.
+  const sceneAspect = useShortScenes ? "9/16" : "16/9";
+  const sceneObjectPos = useShortScenes ? "50% 50%" : "50% 30%";
+  const sceneWrapStyle: React.CSSProperties = useShortScenes
+    ? {
+        background: "#15141A",
+        aspectRatio: sceneAspect,
+        maxWidth: 360,
+        marginLeft: "auto",
+        marginRight: "auto",
+      }
+    : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
     <article className="fade-in max-w-[660px]">
@@ -384,10 +454,10 @@ function GenArticle({ story }: { story: Story }) {
           )}
           {imgAt.has(i) && (
             <figure className="my-7">
-              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "16/9" }}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: "50% 30%" }} />
+              <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
+                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
               </div>
-              <figcaption className="font-mono text-[11px] text-muted mt-2">Illustration &middot; LoreWire Studio</figcaption>
+              <figcaption className="font-mono text-[11px] text-muted mt-2 text-center">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
           )}
         </React.Fragment>
@@ -412,7 +482,13 @@ function GenArticle({ story }: { story: Story }) {
   );
 }
 
-function Read({ story }: { story: Story }) {
+function Read({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
   const [mode, setMode] = useState("Article");
   return (
     <div>
@@ -422,7 +498,7 @@ function Read({ story }: { story: Story }) {
         ))}
       </div>
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} /> : (
+        story.body ? <GenArticle story={story} liveMedia={liveMedia} /> : (
         <article className="fade-in max-w-[660px]">
           <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
           <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>The $800 Envelope</h1>
@@ -454,14 +530,20 @@ function Read({ story }: { story: Story }) {
         )
       ) : (
         (() => {
-          const items = _galleryFromStory(story);
+          const items = _galleryFromStory(story, liveMedia);
           if (items && items.length > 0) {
+            // 9:16 cards when the source is the short's doodle frames so
+            // the gallery feels like a vertical scene strip; 3:4 stays for
+            // the long-form 16:9 stills so they fit cleanly cropped.
+            const useShort = liveMedia.is_short && liveMedia.images.length > 0;
+            const cardWidth = useShort ? 260 : 380;
+            const cardAspect = useShort ? "9/16" : "3/4";
             return (
               <div className="fade-in">
                 <GalleryScroller count={items.length}>
                   {items.map((g, i) => (
-                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 380, background: "#15141A" }}>
-                      <div className="relative" style={{ aspectRatio: "3/4" }}>
+                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: cardWidth, background: "#15141A" }}>
+                      <div className="relative" style={{ aspectRatio: cardAspect }}>
                         <img src={g.src} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         <span className="absolute top-4 left-5 font-mono text-[11px] uppercase tracking-[.2em] px-2 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${i + 1}`}</span>
                       </div>
@@ -651,6 +733,50 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // One live fetch per modal open. Shared by WATCH, READ → Article, READ →
+  // Gallery so opening the modal hits the DB once instead of three times
+  // and every subview sees a consistent "is this the short?" answer.
+  // Falls back to NO_LIVE_MEDIA on miss/error so subviews behave as if
+  // the baked story was canonical (legacy sample-only entries).
+  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
+  useEffect(() => {
+    let cancelled = false;
+    setLiveMedia(NO_LIVE_MEDIA);
+    getLiveStoryMedia(story.id)
+      .then((r) => {
+        if (cancelled) return;
+        if (!r.found) {
+          // eslint-disable-next-line no-console -- rule 14
+          console.info("[lorewire media live]", {
+            storyId: story.id,
+            found: false,
+            baked: story.videoUrl ?? null,
+          });
+          return;
+        }
+        // eslint-disable-next-line no-console -- rule 14
+        console.info("[lorewire media live]", {
+          storyId: story.id,
+          is_short: r.is_short,
+          live_video_url: r.video_url,
+          live_image_count: r.images.length,
+          baked_video_url: story.videoUrl ?? null,
+          baked_image_count: story.images?.length ?? 0,
+        });
+        setLiveMedia(r);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console -- rule 14
+        console.warn("[lorewire media live error]", {
+          storyId: story.id,
+          err: String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [story.id, story.videoUrl, story.images]);
   const c = CAT[story.cat];
   let more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id);
   if (more.length < 6) more = more.concat(STORIES.filter((s) => s.id !== story.id && !more.includes(s)));
@@ -696,8 +822,8 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               ))}
             </div>
             <div className="pt-7">
-              {tab === "Watch" && <WatchDoodle story={story} />}
-              {tab === "Read" && <Read story={story} />}
+              {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
+              {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} />}
             </div>
             <section className="mt-12">
@@ -726,15 +852,81 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 }
 
 /* ----------------------------- PAGES ----------------------------- */
+
 function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
+  // Fetch the live admin curation once on mount. Each rail prefers the
+  // curated list; empty curation falls through to the settings-driven
+  // behaviour (auto-derive a default from STORIES, or hide). Failure
+  // also falls back silently so a DB blip can't take the homepage down.
+  const { curation, behavior } = useHomepageCuration();
+
+  // Hero behaviour: curation.hero_required forces "no hero curation -> no
+  // hero", which HomePage honours by rendering null in the hero slot.
+  // Default (false) lets the empty-rail resolver auto-derive a hero so
+  // a fresh install doesn't show a blank top of the home page.
+  const heroIds = behavior.heroRequired
+    ? curation?.hero ?? []
+    : resolveRailIds("hero", curation, behavior) ?? [];
+  const heroStory =
+    heroIds[0]
+      ? tryById(heroIds[0])
+      : behavior.heroRequired
+        ? null
+        : tryById("envelope") ?? null;
+
+  const continueIds = resolveRailIds("continue", curation, behavior);
+  // Continue Watching had per-user-style progress bars in the legacy
+  // hardcoded demo. Live curation has no per-user state, so curated +
+  // derived entries render without a bar — the rail now reads as a
+  // "currently featured" strip. We could re-introduce real progress
+  // once user sessions land.
+  const continueItems = continueIds
+    ? continueIds.map((id) => ({ id, p: undefined as number | undefined }))
+    : null;
+  const top10Ids = resolveRailIds("top10", curation, behavior);
+  const newRowIds = resolveRailIds("new_row", curation, behavior);
+
   return (
     <div className="pb-20">
-      <Hero story={byId("envelope")} onOpen={onOpen} onShuffle={onShuffle} />
-      <div className="relative -mt-20 z-10">
-        <Rail title="Continue Watching">{CONTINUE.map(({ id, p }) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={300} h={170} progress={p} landscape />)}</Rail>
-        <Rail title="Top 10 Today"><Top10Row onOpen={onOpen} /></Rail>
-        <Rail title="Audacity: Entitled People">{ENTITLED_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}</Rail>
-        <Rail title="New on LoreWire">{NEW_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}</Rail>
+      {heroStory && <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />}
+      <div className={heroStory ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
+        {continueItems && continueItems.length > 0 && (
+          <Rail title="Continue Watching">
+            {continueItems.map(({ id, p }) => {
+              const s = tryById(id);
+              if (!s) return null;
+              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} progress={p} landscape />;
+            })}
+          </Rail>
+        )}
+        {top10Ids && top10Ids.length > 0 && (
+          <Rail title="Top 10 Today">
+            <Top10Row onOpen={onOpen} ids={top10Ids} />
+          </Rail>
+        )}
+        {CATEGORY_RAILS.map((rail) => {
+          const ids = resolveRailIds(rail.surface, curation, behavior);
+          if (!ids) return null;
+          // Skip rails that resolve to no displayable stories at all (no
+          // curation + no fallback hits) so the homepage doesn't render
+          // an empty section header.
+          const items = ids.map((id) => tryById(id)).filter((s): s is Story => s !== null);
+          if (items.length === 0) return null;
+          return (
+            <Rail key={rail.surface} title={rail.title}>
+              {items.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} />)}
+            </Rail>
+          );
+        })}
+        {newRowIds && newRowIds.length > 0 && (
+          <Rail title="New on LoreWire">
+            {newRowIds.map((id) => {
+              const s = tryById(id);
+              if (!s) return null;
+              return <PosterCard key={id} story={s} onOpen={onOpen} />;
+            })}
+          </Rail>
+        )}
       </div>
     </div>
   );

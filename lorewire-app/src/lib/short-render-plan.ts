@@ -36,9 +36,22 @@ export interface ShortRenderPlan {
     voice: boolean;
     voiceover_url: boolean;
     frames: string[]; // touched frame ids
+    /** True when the resolved intro or outro for THIS short differs from
+     *  what the last successful render spliced. Drives a Lane A trigger
+     *  on intro/outro override changes — the assembly re-renders with the
+     *  new segment without touching the body of the short. */
+    segments: boolean;
   };
   /** Human-readable rationale the UI surfaces next to the lane choice. */
   reason: string;
+}
+
+/** Currently-resolved 9:16 intro / outro for the short. Passed by the
+ *  caller so the planner stays pure (no DB access). Null entries mean
+ *  "no segment will splice" — either skip flag or resolver miss. */
+export interface CurrentResolvedSegments {
+  intro_segment_id: string | null;
+  outro_segment_id: string | null;
 }
 
 interface BaselineProps {
@@ -60,6 +73,7 @@ const LANE_C_ASSEMBLY_CENTS = 5; // render assembly after regen
 export function planShortRender(
   current: ShortConfig,
   baselinePropsJson: string | null,
+  currentSegments?: CurrentResolvedSegments,
 ): ShortRenderPlan {
   const baseline = parseBaseline(baselinePropsJson);
 
@@ -76,6 +90,17 @@ export function planShortRender(
   // `captionsChanged` so the existing Lane A reason copy stays accurate.
   const styleChanged = hasCaptionStyleOverride(current.caption_style);
   const captionsOrStyleChanged = captionsChanged || styleChanged;
+  // Segments: compare the resolved current pick against what the last
+  // successful render spliced (stamped on short_config by the render
+  // route). Drives Lane A on intro/outro override changes even when
+  // captions/voice/frames are untouched. Skipped when caller didn't
+  // supply currentSegments (back-compat for callers that haven't been
+  // updated yet — they just lose the segment-change detection).
+  const segmentsChanged = currentSegments
+    ? !sameSegments(currentSegments, current._last_rendered_segments, current)
+    : false;
+  const captionsOrStyleOrSegmentsChanged =
+    captionsOrStyleChanged || segmentsChanged;
 
   // Lane C wins when any frame diverges from the baseline (the editor's
   // per-scene regen has happened OR the user edited a prompt without a
@@ -93,6 +118,7 @@ export function planShortRender(
         voice: voiceChanged,
         voiceover_url: voiceoverUrlChanged,
         frames: touchedFrames,
+        segments: segmentsChanged,
       },
       reason: `${touchedFrames.length} scene${
         touchedFrames.length === 1 ? "" : "s"
@@ -112,6 +138,7 @@ export function planShortRender(
         voice: voiceChanged,
         voiceover_url: voiceoverUrlChanged,
         frames: [],
+        segments: segmentsChanged,
       },
       reason: scriptChanged
         ? "Script changed — needs voice resynthesis + assembly"
@@ -121,7 +148,7 @@ export function planShortRender(
     };
   }
 
-  if (captionsOrStyleChanged) {
+  if (captionsOrStyleOrSegmentsChanged) {
     return {
       lane: "A",
       touched_scene_ids: [],
@@ -132,10 +159,13 @@ export function planShortRender(
         voice: false,
         voiceover_url: false,
         frames: [],
+        segments: segmentsChanged,
       },
       reason: captionsChanged
         ? "Captions changed — assembly-only re-render"
-        : "Caption style changed — assembly-only re-render",
+        : styleChanged
+          ? "Caption style changed — assembly-only re-render"
+          : "Intro/outro changed — assembly-only re-render",
     };
   }
 
@@ -149,9 +179,36 @@ export function planShortRender(
       voice: false,
       voiceover_url: false,
       frames: [],
+      segments: false,
     },
     reason: "No edits since the last successful render",
   };
+}
+
+function sameSegments(
+  current: CurrentResolvedSegments,
+  baseline: ShortConfig["_last_rendered_segments"],
+  config: ShortConfig,
+): boolean {
+  if (baseline) {
+    return (
+      current.intro_segment_id === baseline.intro_segment_id &&
+      current.outro_segment_id === baseline.outro_segment_id
+    );
+  }
+  // No baseline stamped yet — either the short was rendered before the
+  // stamping code shipped, or this is a brand-new short. We can't tell
+  // for sure if the rendered MP4 already has the current segments. If
+  // the admin set ANY per-short override (intro/outro pin or skip), they
+  // clearly want it applied — surface Lane A so they can render. With
+  // no override set we stay conservative (return "same") so a fresh
+  // short doesn't false-positive into Lane A on every page load.
+  const hasOverride =
+    !!config.intro_segment_id ||
+    !!config.outro_segment_id ||
+    !!config.skip_intro ||
+    !!config.skip_outro;
+  return !hasOverride;
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

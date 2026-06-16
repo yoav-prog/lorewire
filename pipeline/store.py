@@ -2164,7 +2164,8 @@ def update_story_short_config(story_id: str, short_config: dict) -> None:
 
 def read_short_caption_style(story: dict) -> dict:
     """Decode `stories.short_config.caption_style` off an already-fetched
-    story row, returning a sparse dict of {field: string} overrides.
+    story row, returning a sparse dict of {field: number|string} overrides
+    ready to merge onto the baseline caption_template.
 
     Returns an empty dict when the column is NULL, malformed, missing the
     caption_style field, or it's not an object. The short editor's Style
@@ -2173,8 +2174,11 @@ def read_short_caption_style(story: dict) -> dict:
     picked colors / highlight / animation / position.
 
     Pure read helper — never writes. Mirrors the editor-side
-    parseShortConfig contract: every field is stored as a string; unknown
-    fields are silently dropped.
+    parseShortConfig contract: every field is stored as a string; numeric
+    fields are coerced to numbers BEFORE the merge so the Remotion
+    renderer's resolveCaptionTemplate `_isNumber` guard accepts them.
+    Unknown keys are silently dropped — the renderer ignores anything it
+    doesn't recognise, and dropping them keeps the merged template clean.
     """
     raw = story.get("short_config")
     if not raw:
@@ -2188,10 +2192,38 @@ def read_short_caption_style(story: dict) -> dict:
     style = parsed.get("caption_style")
     if not isinstance(style, dict):
         return {}
-    # Strip non-string values so the merge always produces a flat
-    # string-typed override map. Unknown keys pass through — the renderer
-    # ignores anything it doesn't recognise.
-    return {k: v for k, v in style.items() if isinstance(v, str) and v}
+
+    numeric_fields = {
+        "position_y",
+        "size_scale",
+        "padding_x",
+        "font_weight",
+        "letter_spacing",
+        "line_height",
+        "outline_width",
+    }
+    string_fields = {
+        "text_transform",
+        "color",
+        "active_word_color",
+        "spoken_word_color",
+        "outline_color",
+        "entry_effect",
+        "word_highlight",
+    }
+    out: dict = {}
+    for k, v in style.items():
+        if not isinstance(v, str) or not v:
+            continue
+        if k in numeric_fields:
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                continue
+        elif k in string_fields:
+            out[k] = v
+        # Unknown keys are silently dropped.
+    return out
 
 
 def read_story_pipeline_cache(story: dict) -> dict:

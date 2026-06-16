@@ -45,10 +45,13 @@ import {
   parseShortConfig,
   type ShortConfig,
 } from "@/lib/short-config";
+import { shortCaptionStyleToRenderTemplate } from "@/lib/short-caption-style-to-props";
 import {
   planShortRender,
+  type CurrentResolvedSegments,
   type ShortRenderPlan,
 } from "@/lib/short-render-plan";
+import { resolveShortSegments } from "@/lib/short-segments";
 import { nudgeDrain } from "@/lib/drain-nudge";
 import {
   nextSessionFor,
@@ -245,6 +248,53 @@ export async function regenShortScene(
   return { ok: true, render };
 }
 
+// Per-short intro/outro override. The picker writes one of:
+//   - { pick: "inherit" }   -> clear override (fall through to story / global)
+//   - { pick: "skip" }      -> hard skip for THIS short
+//   - { pick: "<segmentId>" } -> pin a specific 9:16 segment for THIS short
+// Stored under short_config.{intro,outro}_segment_id / skip_{intro,outro}
+// so it never touches the per-story columns the long-form video uses.
+export type ShortSegmentPick = "inherit" | "skip" | (string & { __pick?: never });
+
+export async function setShortSegmentOverrideAction(
+  storyId: string,
+  kind: "intro" | "outro",
+  pick: ShortSegmentPick,
+): Promise<{ ok: boolean; error?: string }> {
+  await requireAdmin();
+  if (kind !== "intro" && kind !== "outro") {
+    return { ok: false, error: `invalid kind: ${kind}` };
+  }
+  const skipPath = kind === "intro" ? "skip_intro" : "skip_outro";
+  const idPath =
+    kind === "intro" ? "intro_segment_id" : "outro_segment_id";
+
+  // saveShortConfigPatch handles auth + session gate + revalidate, so we
+  // delegate to it instead of re-implementing the gate. Each branch sends
+  // a two-key patch so the column ends up in a coherent state — clearing
+  // a pin AND a skip in one round trip.
+  let patch: Record<string, unknown>;
+  if (pick === "inherit") {
+    patch = { [skipPath]: false, [idPath]: null };
+  } else if (pick === "skip") {
+    patch = { [skipPath]: true, [idPath]: null };
+  } else if (typeof pick === "string" && pick.length > 0) {
+    patch = { [skipPath]: false, [idPath]: pick };
+  } else {
+    return { ok: false, error: `invalid pick: ${String(pick)}` };
+  }
+
+  const result = await saveShortConfigPatch(storyId, patch);
+  if (!result.ok) return { ok: false, error: result.error };
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor segment override]", {
+    story_id: storyId,
+    kind,
+    pick,
+  });
+  return { ok: true };
+}
+
 export async function setFrameIsPinned(
   storyId: string,
   frameId: string,
@@ -330,6 +380,25 @@ export async function heartbeatShortEditSession(
 
 // ─── Lane A render (Phase 2 — captions-only assembly re-render) ─────────────
 
+// Helper: resolve the current 9:16 intro/outro for THIS short so the plan
+// can diff against the segments stamped on short_config from the last
+// successful render. Pulled out so previewRenderPlan + every lane action
+// share the same resolution.
+async function currentSegmentsFor(
+  storyId: string,
+  config: ShortConfig,
+): Promise<CurrentResolvedSegments> {
+  const story = await getStory(storyId);
+  if (!story) {
+    return { intro_segment_id: null, outro_segment_id: null };
+  }
+  const resolved = await resolveShortSegments(config, story);
+  return {
+    intro_segment_id: resolved.intro.segment?.id ?? null,
+    outro_segment_id: resolved.outro.segment?.id ?? null,
+  };
+}
+
 export async function previewRenderPlan(storyId: string): Promise<{
   ok: boolean;
   error?: string;
@@ -349,7 +418,8 @@ export async function previewRenderPlan(storyId: string): Promise<{
       error: "no baseline render to diff against — generate a short first",
     };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   return { ok: true, plan, baselineRenderId: baseline.id };
 }
 
@@ -380,7 +450,8 @@ export async function renderShortLaneA(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -410,7 +481,14 @@ export async function renderShortLaneA(
   // into caption_template so the next render reflects the picked colors /
   // highlight / position. The baseline's caption_template (set by the
   // Python pipeline from settings) is the floor; per-field overrides win.
-  const styleOverride = cfg.config.caption_style ?? {};
+  //
+  // CRITICAL: caption_style fields are stored as STRINGS but the Remotion
+  // renderer's resolveCaptionTemplate rejects string-typed numerics (position_y,
+  // font_weight, etc.) and silently falls back to defaults. Coerce numerics
+  // through the sparse adapter so the renderer accepts every override.
+  const styleOverride = shortCaptionStyleToRenderTemplate(
+    cfg.config.caption_style as Record<string, string | undefined> | undefined,
+  );
   const baselineTemplate =
     (baselineProps as { caption_template?: Record<string, unknown> })
       .caption_template ?? {};
@@ -425,14 +503,19 @@ export async function renderShortLaneA(
 
   // Distinct config_hash so this row coexists with the baseline (the same
   // story may have multiple "edit and re-render" runs from the same vibe +
-  // length pair). Including the lane + a digest of captions keeps it stable
-  // across identical re-clicks (idempotent if the user clicks twice without
-  // editing in between).
+  // length pair). Including the lane + a digest of captions + the resolved
+  // segments keeps it stable across identical re-clicks (idempotent if the
+  // user clicks twice without editing in between) AND triggers a fresh row
+  // when only the intro/outro override changed.
   const captionsDigest = createHash("sha256")
     .update(JSON.stringify(cfg.config.captions))
     .digest("hex")
     .slice(0, 16);
-  const configHash = `${baseline.config_hash}:laneA:${captionsDigest}`;
+  const segmentsDigest = createHash("sha256")
+    .update(JSON.stringify(segments))
+    .digest("hex")
+    .slice(0, 12);
+  const configHash = `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}`;
 
   // Idempotency: if a row with this exact captions-digest already exists in
   // queued / rendering / done status, we surface it instead of inserting a
@@ -522,7 +605,8 @@ export async function renderShortLaneB(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -562,8 +646,9 @@ export async function renderShortLaneB(
   }
 
   // Lane B distinct config_hash so a row coexists with the baseline + any
-  // Lane A row. Including the script + voice digest makes the click
-  // idempotent (re-clicking without edits is a no-op).
+  // Lane A row. Including the script + voice digest + resolved segments
+  // makes the click idempotent (re-clicking without edits is a no-op) AND
+  // re-renders when only the intro/outro override changed.
   const scriptVoiceDigest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -573,7 +658,11 @@ export async function renderShortLaneB(
     )
     .digest("hex")
     .slice(0, 16);
-  const configHash = `${baseline.config_hash}:laneB:${scriptVoiceDigest}`;
+  const segmentsDigest = createHash("sha256")
+    .update(JSON.stringify(segments))
+    .digest("hex")
+    .slice(0, 12);
+  const configHash = `${baseline.config_hash}:laneB:${scriptVoiceDigest}:${segmentsDigest}`;
 
   const existing = await one<{ id: string; status: string }>(
     "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
@@ -667,7 +756,8 @@ export async function renderShortLaneC(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -769,7 +859,11 @@ export async function renderShortLaneC(
     )
     .digest("hex")
     .slice(0, 16);
-  const configHash = `${baseline.config_hash}:laneC:${promptDigest}`;
+  const segmentsDigest = createHash("sha256")
+    .update(JSON.stringify(segments))
+    .digest("hex")
+    .slice(0, 12);
+  const configHash = `${baseline.config_hash}:laneC:${promptDigest}:${segmentsDigest}`;
 
   const existing = await one<{ id: string; status: string }>(
     "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
@@ -880,27 +974,57 @@ export async function revertShortScene(
 // video_url at its output_url. Reversible: the long-form MP4 stays at
 // its own GCS key, so re-rendering the long-form video restores it.
 
-export async function applyLatestShortToStoryAction(
-  storyId: string,
-): Promise<{ ok: boolean; error?: string; url?: string }> {
+export async function applyLatestShortToStoryAction(storyId: string): Promise<{
+  ok: boolean;
+  error?: string;
+  url?: string;
+  slug?: string | null;
+}> {
   const session = await requireAdmin();
   if (!storyId) return { ok: false, error: "missing story_id" };
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
   const latest = await latestDoneShortRenderForStory(storyId);
   if (!latest) return { ok: false, error: "no short generated yet" };
   if (latest.status !== "done" || !latest.output_url) {
     return { ok: false, error: "latest short is not done" };
   }
+  const previousUrl = story.video_url ?? null;
   await applyShortToStory(storyId, latest.output_url);
+  // Defense-in-depth: re-read the row and confirm video_url actually
+  // landed. If a constraint or trigger silently dropped the write the
+  // user would otherwise see "Applied ✓" forever on a no-op — surface
+  // it loudly instead.
+  const verify = await getStory(storyId);
+  const verifiedUrl = verify?.video_url ?? null;
+  const verified = verifiedUrl === latest.output_url;
   // eslint-disable-next-line no-console -- rule 14
   console.info("[short editor apply-to-story]", {
     story_id: storyId,
     render_id: latest.id,
     user_id: session.userId,
-    url: latest.output_url,
+    previous_url: previousUrl,
+    applied_url: latest.output_url,
+    verified_url: verifiedUrl,
+    verified,
+    slug: story.slug,
   });
+  if (!verified) {
+    return {
+      ok: false,
+      error:
+        "the database write reported success but the story's video_url did not change — check the server logs",
+    };
+  }
   revalidatePath(`/admin/videos/${storyId}`);
   revalidatePath(`/admin/shorts/${storyId}`);
-  return { ok: true, url: latest.output_url };
+  // Public reader paths so the change is visible to the live site on
+  // the next request, not after the next ISR tick.
+  revalidatePath(`/admin/stories/${storyId}`);
+  if (story.slug) {
+    revalidatePath(`/v/${story.slug}`);
+  }
+  return { ok: true, url: latest.output_url, slug: story.slug };
 }
 
 // ─── Articles linked to this story (for scene-to-article promote) ─────────
