@@ -207,6 +207,13 @@ function StatusChip({ status }: { status: string }) {
   );
 }
 
+// Per-batch output choice for the Process N action. '' = "use the
+// reddit.default_output setting" (the worker resolves at claim time);
+// 'short' / 'long' pin every row in this batch to that format and
+// survive a later setting change. Kept narrow so the confirm dialog
+// copy below stays exhaustive.
+type OutputChoice = "" | "short" | "long";
+
 function BulkFooter({
   ids,
   activeIds,
@@ -221,6 +228,10 @@ function BulkFooter({
   onClear: () => void;
   budgetExhausted: boolean;
 }) {
+  // Default '' so a click that doesn't touch the picker honours the
+  // admin's global default. Stored locally so the confirm dialog can
+  // spell out which format will run before the credit-spend.
+  const [outputChoice, setOutputChoice] = useState<OutputChoice>("");
   return (
     <div className="sticky bottom-3 z-10 mx-auto flex max-w-[760px] flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-bg/95 px-4 py-2.5 shadow-lg backdrop-blur">
       <span className="font-mono text-[12px] text-ink">
@@ -333,9 +344,33 @@ function BulkFooter({
             // Lazy guard against accidental bulk-spend. The real cost is the
             // sum of LLM + kie images + voice + render across N rows; a
             // dozen rows can easily run $5+. Confirm before submit.
+            const formatLine =
+              outputChoice === "short"
+                ? "Output: SHORT only (no long-form video render this batch)."
+                : outputChoice === "long"
+                  ? "Output: LONG-FORM video (skips the short pipeline)."
+                  : "Output: use the global default (Settings → Reddit imports → Default output).";
+            // Cap-warning: the shorts pipeline has a per-bucket rolling 24h
+            // cap (default 50, set by shorts.auto.daily_cap). When the
+            // batch is large AND any of these rows will end up making a
+            // short (the per-batch picker says 'short' OR 'Default' which
+            // most often resolves to short), warn the admin so they don't
+            // silently lose the tail of the batch to the cap.
+            const SHORTS_CAP_DEFAULT = 50;
+            const willMakeShorts =
+              outputChoice === "short" || outputChoice === "";
+            const capWarn =
+              willMakeShorts && ids.length > SHORTS_CAP_DEFAULT
+                ? `\n\nHeads up: the shorts pipeline caps Reddit-import shorts at ~${SHORTS_CAP_DEFAULT}/24h. ` +
+                  `Roughly the first ${SHORTS_CAP_DEFAULT} of these ${ids.length} rows will get a short; ` +
+                  `the rest of the stories will be created but no short rendered until the cap rolls off. ` +
+                  `Raise Settings → Article shorts → daily cap if you need a bigger wave.`
+                : "";
             if (
               !window.confirm(
                 `Enqueue ${ids.length} row${ids.length === 1 ? "" : "s"} for full pipeline processing (article + images + video)?\n\n` +
+                  `${formatLine}` +
+                  `${capWarn}\n\n` +
                   "Each row spends real LLM + image + voice credits. The local pipeline worker must be running:\n\n" +
                   "    python -m pipeline.story_jobs_worker",
               )
@@ -348,6 +383,25 @@ function BulkFooter({
             <input key={id} type="hidden" name="reddit_id" value={id} />
           ))}
           <input type="hidden" name="with_media" value="1" />
+          {/* Closed enum: '' = "use the reddit.default_output setting".
+              The server action validates the same enum, so a stale
+              browser tab can't smuggle a typo through. */}
+          <label className="mr-2 inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted">
+            Output
+            <select
+              name="output_format"
+              value={outputChoice}
+              onChange={(e) =>
+                setOutputChoice(e.currentTarget.value as OutputChoice)
+              }
+              className="rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] normal-case tracking-normal text-ink outline-none focus:border-accent"
+              aria-label="Output format for this batch"
+            >
+              <option value="">Default</option>
+              <option value="short">Short only</option>
+              <option value="long">Long-form</option>
+            </select>
+          </label>
           <button
             type="submit"
             disabled={budgetExhausted}

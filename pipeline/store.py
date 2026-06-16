@@ -343,8 +343,15 @@ SCHEMA_STATEMENTS = [
         requested_by  TEXT,
         requested_at  TEXT NOT NULL,
         started_at    TEXT,
-        finished_at   TEXT
+        finished_at   TEXT,
+        output_format TEXT
     )""",
+    # 2026-06-16 per-batch output override for Reddit imports. NULL = the
+    # worker resolves at claim time against the `reddit.default_output`
+    # setting (default 'short'); 'short' / 'long' pin the row's output
+    # format and survive a later setting change. See
+    # _plans/2026-06-16-reddit-default-to-shorts.md.
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS output_format TEXT",
     # Worker hot path: oldest queued first. Mirrors the index on
     # image_renders(status, requested_at).
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_status_requested ON story_jobs(status, requested_at)",
@@ -2226,6 +2233,46 @@ def read_short_caption_style(story: dict) -> dict:
     return out
 
 
+def set_story_video_url_if_null(story_id: str, video_url: str) -> bool:
+    """Point stories.video_url at a freshly-rendered short, but only when
+    the story doesn't already have one.
+
+    The Reddit-import short-only flow
+    (_plans/2026-06-16-reddit-default-to-shorts.md) skips the long-form
+    video render entirely. Without this call, stories.video_url stays NULL
+    and evaluatePublishReadiness blocks Publish with "video has not been
+    rendered yet", defeating the set-and-forget promise of Process N.
+
+    The WHERE video_url IS NULL clause is the race guard: if a concurrent
+    long-form render lands first (it shouldn't for short-only rows, but
+    the auto-short pipeline can still call us when shorts.auto.enabled is
+    on), the long-form wins and this UPDATE no-ops.
+
+    Returns True when the row was actually flipped, False on a no-op
+    (already had a video_url, or row missing). The caller logs the
+    distinction so the worker output spells out which branch ran.
+    """
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET video_url = %s, updated_at = %s "
+                    "WHERE id = %s AND video_url IS NULL",
+                    (video_url, now, story_id),
+                )
+                flipped = cur.rowcount > 0
+            conn.commit()
+        return flipped
+    with _sqlite_conn() as c:
+        cur = c.execute(
+            "UPDATE stories SET video_url = ?, updated_at = ? "
+            "WHERE id = ? AND video_url IS NULL",
+            (video_url, now, story_id),
+        )
+        return (cur.rowcount or 0) > 0
+
+
 def read_story_pipeline_cache(story: dict) -> dict:
     """Decode `stories.pipeline_cache` off an already-fetched story row.
 
@@ -2873,6 +2920,7 @@ def list_reddit_source_subreddits() -> list[str]:
 _STORY_JOB_COLUMNS = [
     "id", "reddit_id", "status", "progress", "error", "story_id",
     "with_media", "requested_by", "requested_at", "started_at", "finished_at",
+    "output_format",
 ]
 
 
@@ -2909,6 +2957,7 @@ def enqueue_story_job(
     *,
     with_media: bool = True,
     requested_by: str | None = None,
+    output_format: str | None = None,
 ) -> dict | None:
     """Insert a queued story_job. Returns the inserted row, or None when an
     active job (queued or processing) already exists for this reddit_id —
@@ -2927,6 +2976,13 @@ def enqueue_story_job(
     """
     if has_active_story_job(reddit_id):
         return None
+    # Closed enum at the storage boundary: anything other than 'short' /
+    # 'long' lands as NULL so a stale caller can't sneak a typo past the
+    # worker's resolver (which would then fall through to the default
+    # and bypass the per-row override the admin actually picked).
+    normalized_output: str | None = (
+        output_format if output_format in ("short", "long") else None
+    )
     now = _now_iso()
     row = {
         "id": job_id,
@@ -2940,6 +2996,7 @@ def enqueue_story_job(
         "requested_at": now,
         "started_at": None,
         "finished_at": None,
+        "output_format": normalized_output,
     }
     cols = ", ".join(_STORY_JOB_COLUMNS)
     conflict_clause = (

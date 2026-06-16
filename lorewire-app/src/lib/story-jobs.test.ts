@@ -131,6 +131,41 @@ describe("bulkEnqueueStoryJobs", () => {
     expect(jobs.get("a")?.with_media).toBe(0);
   });
 
+  it("persists output_format='short' when explicitly set", async () => {
+    await seedSource("a", "imported");
+    await bulkEnqueueStoryJobs(["a"], { output_format: "short" });
+    const jobs = await listLatestStoryJobsForReddit(["a"]);
+    expect(jobs.get("a")?.output_format).toBe("short");
+  });
+
+  it("persists output_format='long' when explicitly set", async () => {
+    await seedSource("a", "imported");
+    await bulkEnqueueStoryJobs(["a"], { output_format: "long" });
+    const jobs = await listLatestStoryJobsForReddit(["a"]);
+    expect(jobs.get("a")?.output_format).toBe("long");
+  });
+
+  it("leaves output_format NULL when omitted (worker resolves at claim time)", async () => {
+    await seedSource("a", "imported");
+    await bulkEnqueueStoryJobs(["a"]);
+    const jobs = await listLatestStoryJobsForReddit(["a"]);
+    expect(jobs.get("a")?.output_format).toBeNull();
+  });
+
+  it("normalises a bad output_format value to NULL (closed-enum defence)", async () => {
+    await seedSource("a", "imported");
+    // The runtime TypeScript signature is closed-enum, but a stale browser
+    // tab or a hand-crafted POST can still smuggle a typo through the
+    // action layer. The storage call must drop it to NULL so the worker's
+    // resolver doesn't see a malformed format and bypass the admin's
+    // intended default.
+    await bulkEnqueueStoryJobs(["a"], {
+      output_format: "shrt" as unknown as "short",
+    });
+    const jobs = await listLatestStoryJobsForReddit(["a"]);
+    expect(jobs.get("a")?.output_format).toBeNull();
+  });
+
   it("returns zero-result on empty input without touching the DB", async () => {
     await seedSource("a", "imported");
     const result = await bulkEnqueueStoryJobs([]);
