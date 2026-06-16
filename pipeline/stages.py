@@ -242,7 +242,13 @@ CATEGORY_THUMBNAIL_STYLES = {
 
 
 def make_thumbnail_prompt(
-    title: str, category: str, body: str, aspect_ratio: str, dry_run: bool
+    title: str,
+    category: str,
+    body: str,
+    aspect_ratio: str,
+    dry_run: bool,
+    *,
+    character_base_url: str | None = None,
 ) -> str:
     """Build a cinematic title-baked thumbnail prompt for hero / poster art.
 
@@ -252,6 +258,15 @@ def make_thumbnail_prompt(
     short bold text well; longer titles wrap or get abbreviated). Two aspect
     ratios are supported: '3:4' for portrait posters / mobile billboards, and
     '16:9' for desktop hero strips.
+
+    When `character_base_url` is supplied the prompt switches to a
+    character-faithful redraw: the caller MUST also pass
+    `image_input=[character_base_url]` to `images.generate` so the model
+    sees the short's base character as an i2i reference. Without that
+    handshake, the prompt change does nothing and the model still
+    invents a fresh face every call. The style band stays shared across
+    both aspects so portrait and landscape look like the same poster
+    series — only the composition / scene cue varies.
     """
     style = CATEGORY_THUMBNAIL_STYLES.get(category, CATEGORY_THUMBNAIL_STYLES["Drama"])
     orientation = (
@@ -262,11 +277,31 @@ def make_thumbnail_prompt(
         "to leave room for the title, title baked into the lower-third band"
     )
     if dry_run:
-        return f"[DRY] {title} cinematic {category} thumbnail at {aspect_ratio}"
+        suffix = " (i2i)" if character_base_url else ""
+        return f"[DRY] {title} cinematic {category} thumbnail at {aspect_ratio}{suffix}"
 
     # Take just the first couple of sentences of the article as the scene cue
     # so the model gets context without re-rendering the whole body each call.
     opening = " ".join(body.split()[:60])
+
+    if character_base_url:
+        # i2i variant: the reference image carries the protagonist's identity
+        # (the short's base character), so the prompt's job is (a) preserve
+        # that identity verbatim and (b) restyle the composition into the
+        # category's poster look. This is what keeps hero / poster
+        # characters consistent with the short.
+        return (
+            f"Redraw the EXACT same character from the reference image — same "
+            f"face, gender, build, hair, clothing, age — but reimagined as a "
+            f"cinematic editorial poster for a short documentary titled "
+            f"\"{title}\". {style} "
+            f"Composition focused on this scene from the story: {opening} "
+            f"Render the title \"{title}\" prominently in bold confident "
+            f"typography, integrated into the composition (not floating on a "
+            f"separate layer). {orientation}. High-resolution magazine-cover "
+            f"finish. No watermarks, no signatures, no extra text beyond the title."
+        )
+
     return (
         f"Cinematic editorial poster for a short documentary titled \"{title}\". "
         f"{style} "

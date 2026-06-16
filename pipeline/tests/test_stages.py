@@ -551,5 +551,61 @@ class ParseScenePromptsWithEntitiesTests(unittest.TestCase):
         self.assertEqual(out[1]["entity_ids"], [])
 
 
+class ThumbnailPromptCharacterRefTests(unittest.TestCase):
+    """Locks down the i2i variant of `make_thumbnail_prompt`.
+
+    The hero / poster gen used to invent a fresh face on every call
+    because the prompt carried no character reference. Phase 1 of the
+    hero-consistency work made `make_thumbnail_prompt` accept a
+    character_base_url; passing it has to (a) switch the prompt to a
+    "redraw THIS person" instruction and (b) leave the existing
+    text-only output untouched when no ref is supplied so older callers
+    (the fresh-run pipeline) stay byte-compatible.
+    """
+
+    TITLE = "THE COLD SHOWER REVENGE"
+    CATEGORY = "Entitled"
+    BODY = "After two decades of a forgotten diverter, a wife snaps."
+
+    def test_no_character_base_url_falls_back_to_text_only(self):
+        # Back-compat: every existing caller passes 5 positional args and
+        # gets the same prompt shape it always did. The output must NOT
+        # contain the i2i redraw instruction.
+        out = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", False,
+        )
+        self.assertIn("Cinematic editorial poster", out)
+        self.assertNotIn("Redraw the EXACT same character", out)
+        # Title still baked in.
+        self.assertIn(self.TITLE, out)
+
+    def test_character_base_url_switches_to_i2i_redraw_instruction(self):
+        out = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", False,
+            character_base_url="https://gcs/base.png",
+        )
+        # The i2i instruction is unambiguous so the model knows to keep
+        # the reference image's identity instead of inventing a new one.
+        self.assertIn("Redraw the EXACT same character", out)
+        # Identity-locked fields (gender, build, hair, clothing, age) are
+        # spelled out so the model holds them even if the style band
+        # nudges in another direction.
+        for must_preserve in ("gender", "build", "hair", "clothing", "age"):
+            self.assertIn(must_preserve, out)
+
+    def test_dry_run_marks_i2i_variant_explicitly(self):
+        # Dry-run output is a marker string; the suffix lets a human
+        # reading a dry-run log distinguish text-only gen from i2i gen.
+        text_only = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", True,
+        )
+        i2i = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", True,
+            character_base_url="https://gcs/base.png",
+        )
+        self.assertNotIn("(i2i)", text_only)
+        self.assertIn("(i2i)", i2i)
+
+
 if __name__ == "__main__":
     unittest.main()
