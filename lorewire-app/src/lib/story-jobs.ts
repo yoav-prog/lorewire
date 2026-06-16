@@ -154,6 +154,24 @@ export async function bulkEnqueueStoryJobs(
     if (survivors.length > 0) {
       await bulkFlipSourceStatus(survivors, "queued");
     }
+    // Per-row timeline kickoff: write a 'queued' event for every row that
+    // actually landed. The detail page renders these immediately, so the
+    // admin sees motion the moment Process N fires (even before the worker
+    // has claimed). Failure here is swallowed by logStoryJobEvent itself
+    // so a transient DB hiccup never blocks the enqueue.
+    await Promise.all(
+      toInsert
+        .filter((r) => insertedRedditIds.has(r.reddit_id))
+        .map((r) =>
+          logStoryJobEvent(r.id, r.reddit_id, "queued", {
+            message: "Enqueued for processing",
+            payload: {
+              with_media: r.with_media,
+              requested_by: r.requested_by,
+            },
+          }),
+        ),
+    );
   }
 
   return result;
@@ -399,4 +417,104 @@ export async function countPendingStoryJobs(): Promise<number> {
     [],
   );
   return Number(row?.n ?? 0);
+}
+
+// ---------- per-row event timeline (2026-06-16) ----------
+// Mirrors lib/short-render-queue.ts:logShortRenderEvent + listShortRenderEvents.
+// The Python worker is the primary writer (one event per phase in
+// _default_process); TS server actions write the click-side "queued" event
+// at enqueue time so the timeline starts the moment Process N fires.
+// Plan: _plans/2026-06-16-story-job-event-timeline.md.
+
+export type StoryJobEventLevel = "info" | "warn" | "error";
+
+export interface StoryJobEventRow {
+  id: string;
+  job_id: string;
+  reddit_id: string;
+  ts: string;
+  level: StoryJobEventLevel;
+  event: string;
+  message: string | null;
+  /** JSON-encoded structured payload; UI parses + displays inline. */
+  payload: string | null;
+}
+
+const EVENT_COLS =
+  "id, job_id, reddit_id, ts, level, event, message, payload";
+
+/**
+ * Append one event to the timeline for a story_jobs row. Cheap. Swallows
+ * write errors because event logging must never break the enqueue path.
+ * Mirrors logShortRenderEvent.
+ */
+export async function logStoryJobEvent(
+  jobId: string,
+  redditId: string,
+  event: string,
+  opts: {
+    message?: string;
+    level?: StoryJobEventLevel;
+    payload?: Record<string, unknown>;
+  } = {},
+): Promise<void> {
+  const id = randomUUID();
+  const ts = new Date().toISOString();
+  const level = opts.level ?? "info";
+  const message = opts.message ?? null;
+  const payload =
+    opts.payload === undefined ? null : JSON.stringify(opts.payload);
+  try {
+    await run(
+      `INSERT INTO story_job_events
+         (id, job_id, reddit_id, ts, level, event, message, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, jobId, redditId, ts, level, event, message, payload],
+    );
+  } catch (e) {
+    // Don't let logging take down the enqueue path. The terminal print()
+    // calls on the Python side are independent so the data isn't lost,
+    // only the user-facing timeline misses a row.
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[story-jobs] event log failed", {
+      job_id: jobId,
+      reddit_id: redditId,
+      event,
+      err: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+/**
+ * Read the event timeline for one story_jobs row in chronological order
+ * (oldest first). 200 is much more than enough for a job's lifecycle
+ * (typical ~10-15 events; failure path adds 1-3).
+ */
+export async function listStoryJobEvents(
+  jobId: string,
+  limit = 200,
+): Promise<StoryJobEventRow[]> {
+  if (!jobId) return [];
+  return all<StoryJobEventRow>(
+    `SELECT ${EVENT_COLS} FROM story_job_events
+       WHERE job_id = ? ORDER BY ts ASC, id ASC LIMIT ?`,
+    [jobId, limit],
+  );
+}
+
+/**
+ * Read every event for the latest job on a reddit_id. The detail page
+ * route is /admin/reddit-sources/[reddit_id], so this is the
+ * page-friendly reader.
+ */
+export async function listStoryJobEventsForReddit(
+  redditId: string,
+  limit = 200,
+): Promise<StoryJobEventRow[]> {
+  if (!redditId) return [];
+  return all<StoryJobEventRow>(
+    `SELECT ${EVENT_COLS} FROM story_job_events
+       WHERE reddit_id = ? ORDER BY ts ASC, id ASC LIMIT ?`,
+    [redditId, limit],
+  );
 }

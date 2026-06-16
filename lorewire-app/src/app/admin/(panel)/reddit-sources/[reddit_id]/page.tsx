@@ -30,6 +30,7 @@ import {
   reopenRedditSourcesAction,
 } from "@/app/admin/actions";
 import StoryVideoPreview from "./StoryVideoPreview";
+import StoryJobEventTimeline from "./StoryJobEventTimeline";
 
 export const dynamic = "force-dynamic";
 
@@ -90,6 +91,22 @@ export default async function RedditSourceReviewPage({
       <FlashBanner sp={sp} blockedReasons={blockedReasons} />
 
       <SummaryHeader source={source} story={story} />
+
+      {/*
+        Per-row activity log lives above the panes so it's the first thing
+        the admin sees on a queued / processing row. For settled rows
+        (used / skipped / imported) the timeline still renders if any
+        events exist (so historical runs are auditable) but starts collapsed
+        because the panes below are usually what the admin wants. The
+        `isActive` flag drives polling so a settled row doesn't hit the
+        server every 2s for no reason.
+      */}
+      <StoryJobEventTimeline
+        redditId={source.reddit_id}
+        isActive={
+          source.status === "queued" || source.status === "processing"
+        }
+      />
 
       <div className="grid gap-5 lg:grid-cols-2">
         <SourcePane source={source} />

@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:drain": "node scripts/dev_drain.mjs",
     "prebuild": "node scripts/vendor_pipeline.mjs",
     "build": "next build",
     "start": "next start",
