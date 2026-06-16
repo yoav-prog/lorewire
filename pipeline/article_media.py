@@ -69,6 +69,24 @@ def _safe_id(article_id: str) -> str:
     return article_id
 
 
+def _resolve_out_dir(repo_root: Path, safe_id: str) -> Path:
+    """Pick the writable scratch directory for the synthesized asset.
+
+    On Vercel the function root (`/var/task/...`) is mounted read-only,
+    so the legacy `lorewire-app/public/generated/<id>` path crashes with
+    OSError: Read-only file system. The asset gets uploaded to GCS
+    immediately after generation, so the local file is just a buffer.
+
+    Mirrors media.py:_staging_dir and voice_renders_worker._resolve_output_dir.
+    Centralised here so a future caller can't forget the check.
+    """
+    import os
+    import tempfile
+    if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+        return Path(tempfile.gettempdir()) / "lorewire-article-regen" / safe_id
+    return repo_root / PUBLIC_DIR_RELATIVE / safe_id
+
+
 def regen_article_one(
     article_id: str, asset: str, repo_root: Path,
 ) -> tuple[str, int]:
@@ -79,7 +97,7 @@ def regen_article_one(
     if article is None:
         raise ValueError(f"article {article_id!r} not found")
 
-    out_dir = repo_root / PUBLIC_DIR_RELATIVE / safe_id
+    out_dir = _resolve_out_dir(repo_root, safe_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if asset == "hero":
