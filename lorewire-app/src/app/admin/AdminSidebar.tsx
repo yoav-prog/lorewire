@@ -63,6 +63,14 @@ const STATIC_GROUPS: SidebarGroup[] = [
         activePrefixes: ["/admin/reddit-sources"],
       },
       {
+        // Homepage curation: which stories appear on each rail. Live
+        // edits land on the next homepage load. Plan:
+        // _plans/2026-06-16-homepage-curation.md.
+        href: "/admin/curation",
+        label: "Homepage",
+        activePrefixes: ["/admin/curation"],
+      },
+      {
         href: "/admin/settings",
         label: "Settings",
         // All four config URLs land on the Settings hub with the right

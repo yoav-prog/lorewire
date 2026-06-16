@@ -9,52 +9,23 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
+import {
+  HOMEPAGE_SURFACES,
+  isHomepageSurface,
+  SURFACE_CAPACITY,
+  type HomepageSurface,
+} from "@/lib/homepage-curation-shared";
 
-// Every rail the homepage can render. Adding one here is the only ceremony
-// needed — `DesktopShell` reads from the rail entries via getHomepageCuration
-// and adapts at runtime. Order doesn't matter for storage; the admin page +
-// homepage component each render in their own preferred order.
-//
-// Category surfaces are derived from the live `CAT` set on the client; we
-// list them here too because the admin actions need a closed enum to
-// validate against and the categories rarely change. Keep in sync with
-// `CAT` in src/lib/stories.ts when adding a new category.
-export const HOMEPAGE_SURFACES = [
-  "hero",
-  "top10",
-  "continue",
-  "new_row",
-  "entitled_row",
-  "humor_row",
-  "wholesome_row",
-  "dating_row",
-  "roommate_row",
-  "drama_row",
-] as const;
-export type HomepageSurface = (typeof HOMEPAGE_SURFACES)[number];
-
-// Per-surface fixed capacity. Hero is a single pick. TOP 10 is exactly 10.
-// All other rails are unbounded; the admin page caps the picker at a
-// reasonable rail size (12) so a rail can't grow past what fits.
-export const SURFACE_CAPACITY: Record<HomepageSurface, number | null> = {
-  hero: 1,
-  top10: 10,
-  continue: null,
-  new_row: null,
-  entitled_row: null,
-  humor_row: null,
-  wholesome_row: null,
-  dating_row: null,
-  roommate_row: null,
-  drama_row: null,
+// Re-export so historical call sites (TS + tests) can keep importing
+// surface metadata from here without caring about the split. The split
+// lives in -shared because client components can't transitively
+// import server-only modules without Turbopack pulling node-only deps
+// (postgres, node:crypto) into the browser bundle.
+export {
+  HOMEPAGE_SURFACES,
+  SURFACE_CAPACITY,
+  type HomepageSurface,
 };
-
-function isHomepageSurface(v: unknown): v is HomepageSurface {
-  return (
-    typeof v === "string" &&
-    (HOMEPAGE_SURFACES as readonly string[]).includes(v)
-  );
-}
 
 export interface CurationRow {
   id: string;
