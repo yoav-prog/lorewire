@@ -190,3 +190,85 @@ describe("planShortRender — unparseable baseline", () => {
     expect(plan.lane).toBe("C");
   });
 });
+
+describe("planShortRender — intro/outro segment changes", () => {
+  const baselineJson = JSON.stringify(baseProps());
+
+  it("intro change since last render triggers Lane A", () => {
+    const cfg = configFromProps({
+      _last_rendered_segments: {
+        intro_segment_id: "old-intro",
+        outro_segment_id: null,
+      },
+    });
+    const plan = planShortRender(cfg, baselineJson, {
+      intro_segment_id: "new-intro",
+      outro_segment_id: null,
+    });
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.segments).toBe(true);
+    expect(plan.reason).toMatch(/intro\/outro changed/i);
+  });
+
+  it("outro change since last render triggers Lane A", () => {
+    const cfg = configFromProps({
+      _last_rendered_segments: {
+        intro_segment_id: "same",
+        outro_segment_id: null,
+      },
+    });
+    const plan = planShortRender(cfg, baselineJson, {
+      intro_segment_id: "same",
+      outro_segment_id: "new-outro",
+    });
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.segments).toBe(true);
+  });
+
+  it("identical segments stay noop", () => {
+    const cfg = configFromProps({
+      _last_rendered_segments: {
+        intro_segment_id: "x",
+        outro_segment_id: "y",
+      },
+    });
+    const plan = planShortRender(cfg, baselineJson, {
+      intro_segment_id: "x",
+      outro_segment_id: "y",
+    });
+    expect(plan.lane).toBe("noop");
+    expect(plan.diffs.segments).toBe(false);
+  });
+
+  it("no _last_rendered_segments stamp keeps noop (first-render insurance)", () => {
+    // Brand-new short with nothing stamped: planner can't tell if segments
+    // changed, so it sticks with noop instead of false-positiving Lane A.
+    const cfg = configFromProps();
+    const plan = planShortRender(cfg, baselineJson, {
+      intro_segment_id: "anything",
+      outro_segment_id: null,
+    });
+    expect(plan.lane).toBe("noop");
+    expect(plan.diffs.segments).toBe(false);
+  });
+
+  it("segments change combined with captions still surfaces both flags", () => {
+    const cfg = configFromProps({
+      captions: [
+        { start_ms: 0, end_ms: 2000, text: "Once upon EDITED" },
+        { start_ms: 2000, end_ms: 4500, text: "in an office" },
+      ],
+      _last_rendered_segments: {
+        intro_segment_id: "old",
+        outro_segment_id: null,
+      },
+    });
+    const plan = planShortRender(cfg, baselineJson, {
+      intro_segment_id: "new",
+      outro_segment_id: null,
+    });
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.captions).toBe(true);
+    expect(plan.diffs.segments).toBe(true);
+  });
+});

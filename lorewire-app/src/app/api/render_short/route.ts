@@ -25,7 +25,7 @@ import {
   failShortRender,
   finishShortRender,
 } from "@/lib/short-render-queue";
-import { getStory } from "@/lib/repo";
+import { getStory, setStoryShortConfigJson } from "@/lib/repo";
 import { resolveShortSegments } from "@/lib/short-segments";
 import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
 
@@ -97,15 +97,33 @@ async function postToCloudRun(
   }
 }
 
-/** Resolve the 9:16 intro/outro for a short, defensively (null on any error so a
- *  missing/misconfigured segment degrades to a body-only short instead of
- *  failing the row). Walks the short-specific chain in lib/short-segments:
- *  short_config override -> per-story columns -> global 9:16 active. Shorts
- *  are always 9:16, so the aspect is fixed. */
+interface ResolvedSpliceSegments {
+  /** Normalized GCS urls Cloud Run actually splices. */
+  intro: string | null;
+  outro: string | null;
+  /** Segment row ids the planner stamps onto short_config so the next
+   *  preview can detect "intro/outro override changed since last
+   *  render" and surface Lane A. Null when no segment spliced (skip
+   *  flag or resolver miss). */
+  intro_segment_id: string | null;
+  outro_segment_id: string | null;
+}
+
+/** Resolve the 9:16 intro/outro for a short, defensively (everything-null on any
+ *  error so a missing/misconfigured segment degrades to a body-only short
+ *  instead of failing the row). Walks the short-specific chain in
+ *  lib/short-segments: short_config override -> per-story columns -> global
+ *  9:16 active. Shorts are always 9:16, so the aspect is fixed. */
 async function resolveShortSegmentsSafe(
   story: Awaited<ReturnType<typeof getStory>>,
-): Promise<{ intro: string | null; outro: string | null }> {
-  if (!story) return { intro: null, outro: null };
+): Promise<ResolvedSpliceSegments> {
+  const empty: ResolvedSpliceSegments = {
+    intro: null,
+    outro: null,
+    intro_segment_id: null,
+    outro_segment_id: null,
+  };
+  if (!story) return empty;
   try {
     let config: ShortConfig | null = null;
     if (story.short_config) {
@@ -116,9 +134,11 @@ async function resolveShortSegmentsSafe(
     return {
       intro: resolved.intro.segment?.normalized_url ?? null,
       outro: resolved.outro.segment?.normalized_url ?? null,
+      intro_segment_id: resolved.intro.segment?.id ?? null,
+      outro_segment_id: resolved.outro.segment?.id ?? null,
     };
   } catch {
-    return { intro: null, outro: null };
+    return empty;
   }
 }
 
@@ -215,14 +235,51 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     render_id: claimed.id,
     story_id: claimed.story_id,
     url_bytes: result.url.length,
+    intro_segment_id: segments.intro_segment_id,
+    outro_segment_id: segments.outro_segment_id,
   });
   await finishShortRender(claimed.id, result.url);
+  // Stamp the spliced segment ids onto short_config so the editor's render
+  // plan can detect "intro/outro override changed since last render" and
+  // surface Lane A on the override picker. Best-effort: a stamp failure
+  // logs + continues; the worst case is the planner shows "no changes"
+  // until something else triggers a render plan refresh.
+  await stampLastRenderedSegments(claimed.story_id, {
+    intro_segment_id: segments.intro_segment_id,
+    outro_segment_id: segments.outro_segment_id,
+  }).catch((err) => {
+    namespacedLog("stamp_segments_failed", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      err: String(err),
+    });
+  });
   return NextResponse.json({
     drained: 1,
     render_id: claimed.id,
     status: "done",
     url: result.url,
   });
+}
+
+async function stampLastRenderedSegments(
+  storyId: string,
+  segments: { intro_segment_id: string | null; outro_segment_id: string | null },
+): Promise<void> {
+  const story = await getStory(storyId);
+  if (!story || !story.short_config) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(story.short_config);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const next = {
+    ...(parsed as Record<string, unknown>),
+    _last_rendered_segments: segments,
+  };
+  await setStoryShortConfigJson(storyId, JSON.stringify(next));
 }
 
 // Vercel cron calls GET; POST is a manual kick. Both wire to serve().

@@ -137,6 +137,17 @@ export interface ShortConfig {
   caption_style?: ShortCaptionStyleOverride;
   _locks?: ShortLockMap;
   _edit_session?: ShortEditSession;
+  /** Resolved intro/outro segment ids the LAST successful render spliced.
+   *  Used by lib/short-render-plan to detect "intro or outro override
+   *  changed since last render" → Lane A trigger. Stamped by
+   *  api/render_short after finishShortRender returns; null entries
+   *  mean "no segment spliced" (skip flag or missing). The leading
+   *  underscore mirrors _locks / _edit_session — internal bookkeeping
+   *  the editor doesn't write directly. */
+  _last_rendered_segments?: {
+    intro_segment_id: string | null;
+    outro_segment_id: string | null;
+  };
 }
 
 // ─── Parse + validate ─────────────────────────────────────────────────────────
@@ -301,6 +312,22 @@ export function parseShortConfig(raw: unknown): ShortParseResult {
       user_id: editSession.user_id,
       started_at: editSession.started_at,
       heartbeat_at: editSession.heartbeat_at,
+    };
+  }
+
+  const lastSegments = raw._last_rendered_segments;
+  if (isObject(lastSegments)) {
+    const intro =
+      typeof lastSegments.intro_segment_id === "string"
+        ? lastSegments.intro_segment_id
+        : null;
+    const outro =
+      typeof lastSegments.outro_segment_id === "string"
+        ? lastSegments.outro_segment_id
+        : null;
+    config._last_rendered_segments = {
+      intro_segment_id: intro,
+      outro_segment_id: outro,
     };
   }
 

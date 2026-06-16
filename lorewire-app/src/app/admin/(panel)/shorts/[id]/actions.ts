@@ -48,8 +48,10 @@ import {
 import { shortCaptionStyleToRenderTemplate } from "@/lib/short-caption-style-to-props";
 import {
   planShortRender,
+  type CurrentResolvedSegments,
   type ShortRenderPlan,
 } from "@/lib/short-render-plan";
+import { resolveShortSegments } from "@/lib/short-segments";
 import { nudgeDrain } from "@/lib/drain-nudge";
 import {
   nextSessionFor,
@@ -378,6 +380,25 @@ export async function heartbeatShortEditSession(
 
 // ─── Lane A render (Phase 2 — captions-only assembly re-render) ─────────────
 
+// Helper: resolve the current 9:16 intro/outro for THIS short so the plan
+// can diff against the segments stamped on short_config from the last
+// successful render. Pulled out so previewRenderPlan + every lane action
+// share the same resolution.
+async function currentSegmentsFor(
+  storyId: string,
+  config: ShortConfig,
+): Promise<CurrentResolvedSegments> {
+  const story = await getStory(storyId);
+  if (!story) {
+    return { intro_segment_id: null, outro_segment_id: null };
+  }
+  const resolved = await resolveShortSegments(config, story);
+  return {
+    intro_segment_id: resolved.intro.segment?.id ?? null,
+    outro_segment_id: resolved.outro.segment?.id ?? null,
+  };
+}
+
 export async function previewRenderPlan(storyId: string): Promise<{
   ok: boolean;
   error?: string;
@@ -397,7 +418,8 @@ export async function previewRenderPlan(storyId: string): Promise<{
       error: "no baseline render to diff against — generate a short first",
     };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   return { ok: true, plan, baselineRenderId: baseline.id };
 }
 
@@ -428,7 +450,8 @@ export async function renderShortLaneA(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -480,14 +503,19 @@ export async function renderShortLaneA(
 
   // Distinct config_hash so this row coexists with the baseline (the same
   // story may have multiple "edit and re-render" runs from the same vibe +
-  // length pair). Including the lane + a digest of captions keeps it stable
-  // across identical re-clicks (idempotent if the user clicks twice without
-  // editing in between).
+  // length pair). Including the lane + a digest of captions + the resolved
+  // segments keeps it stable across identical re-clicks (idempotent if the
+  // user clicks twice without editing in between) AND triggers a fresh row
+  // when only the intro/outro override changed.
   const captionsDigest = createHash("sha256")
     .update(JSON.stringify(cfg.config.captions))
     .digest("hex")
     .slice(0, 16);
-  const configHash = `${baseline.config_hash}:laneA:${captionsDigest}`;
+  const segmentsDigest = createHash("sha256")
+    .update(JSON.stringify(segments))
+    .digest("hex")
+    .slice(0, 12);
+  const configHash = `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}`;
 
   // Idempotency: if a row with this exact captions-digest already exists in
   // queued / rendering / done status, we surface it instead of inserting a
@@ -577,7 +605,8 @@ export async function renderShortLaneB(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -617,8 +646,9 @@ export async function renderShortLaneB(
   }
 
   // Lane B distinct config_hash so a row coexists with the baseline + any
-  // Lane A row. Including the script + voice digest makes the click
-  // idempotent (re-clicking without edits is a no-op).
+  // Lane A row. Including the script + voice digest + resolved segments
+  // makes the click idempotent (re-clicking without edits is a no-op) AND
+  // re-renders when only the intro/outro override changed.
   const scriptVoiceDigest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -628,7 +658,11 @@ export async function renderShortLaneB(
     )
     .digest("hex")
     .slice(0, 16);
-  const configHash = `${baseline.config_hash}:laneB:${scriptVoiceDigest}`;
+  const segmentsDigest = createHash("sha256")
+    .update(JSON.stringify(segments))
+    .digest("hex")
+    .slice(0, 12);
+  const configHash = `${baseline.config_hash}:laneB:${scriptVoiceDigest}:${segmentsDigest}`;
 
   const existing = await one<{ id: string; status: string }>(
     "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
@@ -722,7 +756,8 @@ export async function renderShortLaneC(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const plan = planShortRender(cfg.config, baseline.props);
+  const segments = await currentSegmentsFor(storyId, cfg.config);
+  const plan = planShortRender(cfg.config, baseline.props, segments);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -824,7 +859,11 @@ export async function renderShortLaneC(
     )
     .digest("hex")
     .slice(0, 16);
-  const configHash = `${baseline.config_hash}:laneC:${promptDigest}`;
+  const segmentsDigest = createHash("sha256")
+    .update(JSON.stringify(segments))
+    .digest("hex")
+    .slice(0, 12);
+  const configHash = `${baseline.config_hash}:laneC:${promptDigest}:${segmentsDigest}`;
 
   const existing = await one<{ id: string; status: string }>(
     "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
