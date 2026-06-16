@@ -246,6 +246,53 @@ export async function regenShortScene(
   return { ok: true, render };
 }
 
+// Per-short intro/outro override. The picker writes one of:
+//   - { pick: "inherit" }   -> clear override (fall through to story / global)
+//   - { pick: "skip" }      -> hard skip for THIS short
+//   - { pick: "<segmentId>" } -> pin a specific 9:16 segment for THIS short
+// Stored under short_config.{intro,outro}_segment_id / skip_{intro,outro}
+// so it never touches the per-story columns the long-form video uses.
+export type ShortSegmentPick = "inherit" | "skip" | (string & { __pick?: never });
+
+export async function setShortSegmentOverrideAction(
+  storyId: string,
+  kind: "intro" | "outro",
+  pick: ShortSegmentPick,
+): Promise<{ ok: boolean; error?: string }> {
+  await requireAdmin();
+  if (kind !== "intro" && kind !== "outro") {
+    return { ok: false, error: `invalid kind: ${kind}` };
+  }
+  const skipPath = kind === "intro" ? "skip_intro" : "skip_outro";
+  const idPath =
+    kind === "intro" ? "intro_segment_id" : "outro_segment_id";
+
+  // saveShortConfigPatch handles auth + session gate + revalidate, so we
+  // delegate to it instead of re-implementing the gate. Each branch sends
+  // a two-key patch so the column ends up in a coherent state — clearing
+  // a pin AND a skip in one round trip.
+  let patch: Record<string, unknown>;
+  if (pick === "inherit") {
+    patch = { [skipPath]: false, [idPath]: null };
+  } else if (pick === "skip") {
+    patch = { [skipPath]: true, [idPath]: null };
+  } else if (typeof pick === "string" && pick.length > 0) {
+    patch = { [skipPath]: false, [idPath]: pick };
+  } else {
+    return { ok: false, error: `invalid pick: ${String(pick)}` };
+  }
+
+  const result = await saveShortConfigPatch(storyId, patch);
+  if (!result.ok) return { ok: false, error: result.error };
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor segment override]", {
+    story_id: storyId,
+    kind,
+    pick,
+  });
+  return { ok: true };
+}
+
 export async function setFrameIsPinned(
   storyId: string,
   frameId: string,

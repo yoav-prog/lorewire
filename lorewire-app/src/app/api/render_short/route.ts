@@ -26,7 +26,8 @@ import {
   finishShortRender,
 } from "@/lib/short-render-queue";
 import { getStory } from "@/lib/repo";
-import { resolveSegmentsForStory } from "@/lib/segment-resolver";
+import { resolveShortSegments } from "@/lib/short-segments";
+import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
 
 // A short runs kie image generation + Remotion render, the longest job in the
 // app, so override undici's 300s default timeouts. Vercel Pro's 800s cron cap is
@@ -98,13 +99,20 @@ async function postToCloudRun(
 
 /** Resolve the 9:16 intro/outro for a short, defensively (null on any error so a
  *  missing/misconfigured segment degrades to a body-only short instead of
- *  failing the row). Shorts are always 9:16, so the aspect is fixed. */
+ *  failing the row). Walks the short-specific chain in lib/short-segments:
+ *  short_config override -> per-story columns -> global 9:16 active. Shorts
+ *  are always 9:16, so the aspect is fixed. */
 async function resolveShortSegmentsSafe(
   story: Awaited<ReturnType<typeof getStory>>,
 ): Promise<{ intro: string | null; outro: string | null }> {
   if (!story) return { intro: null, outro: null };
   try {
-    const resolved = await resolveSegmentsForStory(story, "9:16");
+    let config: ShortConfig | null = null;
+    if (story.short_config) {
+      const parsed = parseShortConfig(JSON.parse(story.short_config));
+      if (parsed.ok) config = parsed.config;
+    }
+    const resolved = await resolveShortSegments(config, story);
     return {
       intro: resolved.intro.segment?.normalized_url ?? null,
       outro: resolved.outro.segment?.normalized_url ?? null,

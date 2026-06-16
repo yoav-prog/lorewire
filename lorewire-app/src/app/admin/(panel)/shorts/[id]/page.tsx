@@ -8,10 +8,15 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireAdmin } from "@/lib/dal";
-import { getStory, getUserById } from "@/lib/repo";
+import { getStory, getUserById, listSegments } from "@/lib/repo";
 import { listVoices } from "@/lib/voice-library";
 import { readForeignSession } from "@/lib/short-edit-session";
-import { resolveSegmentsForStory } from "@/lib/segment-resolver";
+import { resolveShortSegments } from "@/lib/short-segments";
+import {
+  LEGACY_DEFAULT_ASPECT,
+  isVideoAspect,
+  type VideoAspect,
+} from "@/lib/aspect";
 import {
   listArticlesLinkedToStoryAction,
   loadShortEditorState,
@@ -54,15 +59,45 @@ export default async function ShortEditorPage({
 
   // Mirror the render path's segment resolution so the editor surfaces
   // exactly which 9:16 intro/outro will splice on the next Cloud Run
-  // render (and why if either is being skipped). Same chain
-  // api/render_short uses, so the editor reflects ground truth.
-  const segments = await resolveSegmentsForStory(story, "9:16").catch((err) => {
-    // eslint-disable-next-line no-console -- rule 14
-    console.warn("[short editor page] resolveSegments failed", {
-      err: String(err),
-    });
-    return null;
-  });
+  // render (and why if either is being skipped). Walks the short
+  // resolver chain (short_config override -> story columns -> global
+  // active) so the card reflects ground truth.
+  const segmentsResolved = state.ok
+    ? await resolveShortSegments(state.config ?? null, story).catch((err) => {
+        // eslint-disable-next-line no-console -- rule 14
+        console.warn("[short editor page] resolveShortSegments failed", {
+          err: String(err),
+        });
+        return null;
+      })
+    : null;
+
+  // 9:16 segment library for the override picker. Filter to enabled +
+  // ready 9:16 rows so a disabled or non-9:16 segment can't be picked
+  // (the resolver would just drop it anyway). Slim projection so the
+  // client bundle doesn't ship the source_url + uploaded_at noise.
+  const [introLibrary, outroLibrary] = await Promise.all([
+    state.ok ? listSegments("intro") : Promise.resolve([]),
+    state.ok ? listSegments("outro") : Promise.resolve([]),
+  ]);
+  function only916Enabled(rows: typeof introLibrary) {
+    return rows
+      .filter((r) => {
+        const aspect: VideoAspect = isVideoAspect(r.aspect)
+          ? r.aspect
+          : LEGACY_DEFAULT_ASPECT;
+        return (
+          aspect === "9:16" && r.enabled !== 0 && r.status === "ready"
+        );
+      })
+      .map((r) => ({ id: r.id, label: r.label ?? r.id.slice(0, 8) }));
+  }
+  const segmentPickerOptions = state.ok
+    ? {
+        intro: only916Enabled(introLibrary),
+        outro: only916Enabled(outroLibrary),
+      }
+    : { intro: [], outro: [] };
 
   return (
     <div className="space-y-4">
@@ -87,17 +122,26 @@ export default async function ShortEditorPage({
         </div>
       </header>
 
-      {state.ok && segments && (
+      {state.ok && segmentsResolved && (
         <ShortSegmentsStatusCard
           storyId={id}
           intro={{
-            label: segments.intro.segment?.label ?? null,
-            reason: segments.intro.reason,
+            label: segmentsResolved.intro.segment?.label ?? null,
+            reason: segmentsResolved.intro.reason,
+            source: segmentsResolved.intro.source,
           }}
           outro={{
-            label: segments.outro.segment?.label ?? null,
-            reason: segments.outro.reason,
+            label: segmentsResolved.outro.segment?.label ?? null,
+            reason: segmentsResolved.outro.reason,
+            source: segmentsResolved.outro.source,
           }}
+          override={{
+            intro_segment_id: state.config?.intro_segment_id ?? null,
+            outro_segment_id: state.config?.outro_segment_id ?? null,
+            skip_intro: state.config?.skip_intro ?? false,
+            skip_outro: state.config?.skip_outro ?? false,
+          }}
+          pickerOptions={segmentPickerOptions}
         />
       )}
 
