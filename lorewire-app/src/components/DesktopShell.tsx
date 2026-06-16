@@ -12,6 +12,7 @@ import {
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import { getLiveStoryVideoUrl } from "@/app/actions";
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -243,18 +244,65 @@ function Top10Row({ onOpen }: { onOpen: OpenFn }) {
 
 /* ----------------------------- WATCH (real video or doodle) ----------------------------- */
 function WatchDoodle({ story }: { story: Story }) {
-  if (story.videoUrl) {
+  // The baked catalog (src/data/published.ts) ships a video_url frozen
+  // at the last `python -m pipeline.export_app` run. Admin's "Use this
+  // short as the story's video" updates stories.video_url live in the
+  // DB, but the static catalog wouldn't reflect it until a re-export +
+  // redeploy. We fetch the current value once on mount and prefer it
+  // over the baked one so an apply is visible on the next modal open
+  // without any rebuild. Falls back to story.videoUrl on miss so this
+  // is purely additive — nothing breaks when the action isn't reachable
+  // or the story isn't in the DB (legacy sample-only entries).
+  const [liveUrl, setLiveUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getLiveStoryVideoUrl(story.id)
+      .then((r) => {
+        if (cancelled) return;
+        if (!r.found) {
+          // eslint-disable-next-line no-console -- rule 14
+          console.info("[lorewire video live]", {
+            storyId: story.id,
+            found: false,
+            baked: story.videoUrl ?? null,
+          });
+          return;
+        }
+        if (r.video_url && r.video_url !== story.videoUrl) {
+          // eslint-disable-next-line no-console -- rule 14
+          console.info("[lorewire video live override]", {
+            storyId: story.id,
+            baked: story.videoUrl ?? null,
+            live: r.video_url,
+          });
+        }
+        setLiveUrl(r.video_url ?? null);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console -- rule 14
+        console.warn("[lorewire video live error]", {
+          storyId: story.id,
+          err: String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [story.id, story.videoUrl]);
+
+  const videoUrl = liveUrl ?? story.videoUrl;
+  if (videoUrl) {
     return (
       <div>
         <div className="relative rounded-[14px] overflow-hidden w-full bg-black" style={{ height: 540 }}>
           <video
-            src={story.videoUrl}
+            src={videoUrl}
             poster={story.heroImage}
             controls
             preload="metadata"
             playsInline
             className="absolute inset-0 w-full h-full object-contain"
-            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: story.videoUrl })}
+            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
         </div>
         <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-4">LoreWire Original &middot; doodle short</p>
