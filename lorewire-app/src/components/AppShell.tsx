@@ -16,6 +16,20 @@ import {
 } from "@/lib/homepage-rails";
 import DesktopShell from "@/components/DesktopShell";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import {
+  getLiveStoryMedia,
+  type LiveStoryMediaResult,
+} from "@/app/actions";
+
+// Mirror DesktopShell's NO_LIVE_MEDIA seed: until the live fetch resolves
+// (or on miss/error) every subview falls back to the baked story shape.
+const NO_LIVE_MEDIA: LiveStoryMediaResult = {
+  ok: true,
+  video_url: null,
+  images: [],
+  is_short: false,
+  found: false,
+};
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -281,22 +295,30 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
 }
 
 /* ----------------------------- WATCH (real video or doodle frame) ----------------------------- */
-function WatchDoodle({ story }: { story: Story }) {
+function WatchDoodle({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
   // Real generated video gets a native player with the hero as poster; the
   // hand-drawn doodle stays as the fallback so older stories without media
-  // keep their illustrated look.
-  if (story.videoUrl) {
+  // keep their illustrated look. Prefer the live URL so a freshly re-rendered
+  // short shows up here instead of the stale baked `story.videoUrl`.
+  const videoUrl = liveMedia.video_url ?? story.videoUrl;
+  if (videoUrl) {
     return (
       <div className="px-4 pt-4 pb-2">
         <div className="relative rounded-[14px] overflow-hidden mx-auto bg-black" style={{ height: 430, width: "100%" }}>
           <video
-            src={story.videoUrl}
+            src={videoUrl}
             poster={story.heroImage}
             controls
             preload="metadata"
             playsInline
             className="absolute inset-0 w-full h-full object-contain"
-            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: story.videoUrl })}
+            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
         </div>
         <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted text-center mt-3">LoreWire Original &middot; doodle short</p>
@@ -761,6 +783,46 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
   }
+
+  // One live media fetch per sheet open, mirroring DesktopShell.DetailModal so
+  // mobile WATCH stays in sync with desktop. Without this, mobile keeps showing
+  // the baked `story.videoUrl` and misses freshly rendered shorts.
+  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
+  useEffect(() => {
+    let cancelled = false;
+    setLiveMedia(NO_LIVE_MEDIA);
+    getLiveStoryMedia(story.id)
+      .then((r) => {
+        if (cancelled) return;
+        if (!r.found) {
+          console.info("[lorewire media live]", {
+            storyId: story.id,
+            found: false,
+            baked: story.videoUrl ?? null,
+          });
+          return;
+        }
+        console.info("[lorewire media live]", {
+          storyId: story.id,
+          is_short: r.is_short,
+          live_video_url: r.video_url,
+          live_image_count: r.images.length,
+          baked_video_url: story.videoUrl ?? null,
+          baked_image_count: story.images?.length ?? 0,
+        });
+        setLiveMedia(r);
+      })
+      .catch((err) => {
+        console.warn("[lorewire media live error]", {
+          storyId: story.id,
+          err: String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [story.id, story.videoUrl, story.images]);
+
   const c = CAT[story.cat];
   const more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
   if (more.length < 3) more.push(...STORIES.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
@@ -841,7 +903,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         </div>
 
         <div className="-mx-4 mt-2">
-          {tab === "Watch" && <WatchDoodle story={story} />}
+          {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
           {tab === "Read" && <Read story={story} />}
           {tab === "Read-along" && <ReadAlong story={story} />}
         </div>
