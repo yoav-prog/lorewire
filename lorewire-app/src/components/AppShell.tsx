@@ -22,14 +22,17 @@ import {
 } from "@/app/actions";
 
 // Mirror DesktopShell's NO_LIVE_MEDIA seed: until the live fetch resolves
-// (or on miss/error) Watch + Read fall back to the baked story shape.
-// Read-along intentionally does NOT consult liveMedia — the read-along
-// surface always plays the FULL long-form story narration (the article
-// text), never the short's condensed voiceover.
+// (or on miss/error) Watch / Read / Read-along fall back to the baked
+// story shape. Read-along's `audio_url` + `alignment` come from
+// stories.audio_url / stories.alignment — the LONG-FORM narration the
+// voice_renders_worker writes when the admin regenerates the voiceover.
+// Pointedly NOT the short's voiceover_url.
 const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
   video_url: null,
   images: [],
+  audio_url: null,
+  alignment: [],
   is_short: false,
   found: false,
 };
@@ -643,19 +646,46 @@ const SCRIPT = (
   "She said she moved it somewhere safe. It was not, in any sense, safe."
 ).split(" ");
 
-function ReadAlong({ story }: { story: Story }) {
-  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
-  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+function ReadAlong({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
+  // Prefer the live LONG-FORM audio + alignment from the stories row so
+  // a fresh "Regenerate voiceover" in the admin VoicePicker reaches this
+  // surface without a re-export of published.ts. liveMedia.audio_url is
+  // explicitly NOT the short's voiceover_url — see actions.ts: it sources
+  // stories.audio_url, which the voice_renders_worker writes whenever
+  // the admin regenerates the long-form narration.
+  const audioUrl = liveMedia.audio_url ?? story.audioUrl;
+  const alignment =
+    liveMedia.alignment.length > 0 ? liveMedia.alignment : story.alignment;
+  const hasReal = !!audioUrl && !!alignment && alignment.length > 0;
+  return hasReal ? (
+    <RealReadAlong story={story} audioUrl={audioUrl} alignment={alignment} />
+  ) : (
+    <FakeReadAlong />
+  );
 }
 
 // Real read-along: drives the karaoke from an <audio> element's timeupdate,
 // using the alignment word timings the pipeline writes (3.1 STT step).
-function RealReadAlong({ story }: { story: Story }) {
+function RealReadAlong({
+  story,
+  audioUrl,
+  alignment,
+}: {
+  story: Story;
+  audioUrl: string;
+  alignment: Array<{ word: string; start: number; end: number }>;
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
-  const words = story.alignment || [];
+  const words = alignment;
 
   // Find the active word index by linear scan — same rule the Remotion
   // composition uses (the chunk has at most ~4 words; binary search would
@@ -689,14 +719,14 @@ function RealReadAlong({ story }: { story: Story }) {
     <div className="px-4 pt-4 pb-2">
       <audio
         ref={audioRef}
-        src={story.audioUrl}
+        src={audioUrl}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
         onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
-        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: audioUrl })}
       />
       <div className="flex items-center gap-3.5">
         <button onClick={toggle} className="w-14 h-14 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 active:scale-95 transition">
@@ -952,7 +982,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         <div className="-mx-4 mt-2">
           {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
           {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
-          {tab === "Read-along" && <ReadAlong story={story} />}
+          {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
         </div>
 
         <section className="mt-8 -mx-4">
