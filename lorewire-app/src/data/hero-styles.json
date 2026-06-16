@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "styles": [
+    {
+      "id": "magazine_editorial",
+      "label": "Magazine editorial",
+      "thumbnail_url": null
+    },
+    {
+      "id": "neo_noir",
+      "label": "Cinematic neo-noir",
+      "thumbnail_url": null
+    },
+    {
+      "id": "retro_pulp",
+      "label": "Retro pulp paperback",
+      "thumbnail_url": null
+    },
+    {
+      "id": "comic_book",
+      "label": "Comic book cover",
+      "thumbnail_url": null
+    },
+    {
+      "id": "painted_realism",
+      "label": "Painted realism",
+      "thumbnail_url": null
+    },
+    {
+      "id": "vintage_hollywood",
+      "label": "Vintage Hollywood",
+      "thumbnail_url": null
+    }
+  ],
+  "category_whitelist": {
+    "Entitled": [
+      "magazine_editorial",
+      "retro_pulp",
+      "comic_book"
+    ],
+    "Drama": [
+      "neo_noir",
+      "painted_realism",
+      "magazine_editorial"
+    ],
+    "Humor": [
+      "comic_book",
+      "vintage_hollywood",
+      "magazine_editorial"
+    ],
+    "Wholesome": [
+      "vintage_hollywood",
+      "painted_realism",
+      "magazine_editorial"
+    ],
+    "Dating": [
+      "magazine_editorial",
+      "vintage_hollywood",
+      "painted_realism"
+    ],
+    "Roommate": [
+      "comic_book",
+      "magazine_editorial",
+      "painted_realism"
+    ]
+  }
+}
