@@ -382,6 +382,14 @@ def _google_align(audio_bytes: bytes, language_code: str) -> list[dict]:
             "sampleRateHertz": 24000,
             "languageCode": language_code,
             "enableWordTimeOffsets": True,
+            # Attach inferred sentence punctuation to each word token (the
+            # `word` field returns "story?" instead of bare "story"). The
+            # caption chunker downstream breaks on trailing `.!?,;:`, so
+            # without this every sentence boundary in the audio collapses
+            # into the previous chunk — questions lose their `?`, and a
+            # short next sentence ("Not sure.") gets glued onto the line
+            # before it instead of standing on its own.
+            "enableAutomaticPunctuation": True,
             # latest_long is tuned for narration-length audio; better word-time
             # accuracy than the default for content over a few seconds.
             "model": "latest_long",
