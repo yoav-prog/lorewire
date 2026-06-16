@@ -53,6 +53,12 @@ export interface LiveStoryMediaResult {
    *  stories.alignment. Empty array means no live alignment yet → caller
    *  falls back to the baked story.alignment. */
   alignment: Array<{ word: string; start: number; end: number }>;
+  /** The story's source thread URL (typically a Reddit post), sourced
+   *  from stories.source_url. Admin edits to the source URL on the
+   *  /admin/stories/[id] page need to reach the public site without
+   *  a re-export of published.ts. Null means no row / unset → caller
+   *  falls back to the baked story.source_url. */
+  source_url: string | null;
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -161,6 +167,7 @@ export async function getLiveStoryMedia(
     images: [],
     audio_url: null,
     alignment: [],
+    source_url: null,
     is_short: false,
     found: false,
   };
@@ -173,8 +180,9 @@ export async function getLiveStoryMedia(
     images: string | null;
     audio_url: string | null;
     alignment: string | null;
+    source_url: string | null;
   }>(
-    "SELECT id, video_url, images, audio_url, alignment FROM stories " +
+    "SELECT id, video_url, images, audio_url, alignment, source_url FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -189,6 +197,7 @@ export async function getLiveStoryMedia(
         images: bySlug.images,
         audio_url: bySlug.audio_url,
         alignment: bySlug.alignment,
+        source_url: bySlug.source_url,
       };
     }
   }
@@ -218,6 +227,7 @@ export async function getLiveStoryMedia(
     images,
     audio_url: row.audio_url,
     alignment: parseStoryAlignment(row.alignment),
+    source_url: row.source_url,
     is_short: isShort,
     found: true,
   };

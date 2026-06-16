@@ -28,6 +28,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   images: [],
   audio_url: null,
   alignment: [],
+  source_url: null,
   is_short: false,
   found: false,
 };
@@ -464,22 +465,27 @@ function GenArticle({
           )}
         </React.Fragment>
       ))}
-      {isRealRedditUrl(story.source_url) ? (
-        <div className="mt-8 max-w-[660px]">
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
-          <RedditEmbed url={story.source_url!} title={story.title} />
-        </div>
-      ) : (
-        <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
-          <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
-            <span className="text-ink/80">r/AmItheAsshole</span>
-            <span>&middot;</span>
-            <span>retold by LoreWire</span>
-            <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
+      {(() => {
+        // Prefer the live source_url so admin edits to the Reddit link
+        // reach the public Article without a re-export of published.ts.
+        const liveSourceUrl = liveMedia.source_url ?? story.source_url;
+        return isRealRedditUrl(liveSourceUrl) ? (
+          <div className="mt-8 max-w-[660px]">
+            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
+            <RedditEmbed url={liveSourceUrl!} title={story.title} />
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
+            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
+            <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
+              <span className="text-ink/80">r/AmItheAsshole</span>
+              <span>&middot;</span>
+              <span>retold by LoreWire</span>
+              <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
+            </div>
+          </div>
+        );
+      })()}
     </article>
   );
 }

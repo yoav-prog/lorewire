@@ -33,6 +33,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   images: [],
   audio_url: null,
   alignment: [],
+  source_url: null,
   is_short: false,
   found: false,
 };
@@ -482,23 +483,43 @@ function GenArticle({
           )}
         </React.Fragment>
       ))}
-      {isRealRedditUrl(story.source_url) ? (
-        <div className="mt-6">
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
-          <RedditEmbed url={story.source_url!} title={story.title} />
-        </div>
-      ) : (
-        <div className="mt-6 rounded-[10px] p-4" style={{ background: "#15141A", borderLeft: "3px solid #E8462B" }}>
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2">From the original thread</p>
-          <div className="flex items-center gap-2 font-mono text-[11px] text-muted flex-wrap">
-            <span className="text-ink/80">r/AmItheAsshole</span>
-            <span>&middot;</span>
-            <span>retold by LoreWire</span>
-            <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
-          </div>
-        </div>
-      )}
+      <SourceThreadFooter
+        sourceUrl={liveMedia.source_url ?? story.source_url}
+        title={story.title}
+      />
     </article>
+  );
+}
+
+// Reddit embed when the source URL looks like a real post; styled
+// fallback card otherwise. Shared between `GenArticle` and the
+// `Read` fallback layout so both surfaces honor the live source_url
+// (with admin edits propagating without a published.ts re-export).
+function SourceThreadFooter({
+  sourceUrl,
+  title,
+}: {
+  sourceUrl: string | null | undefined;
+  title?: string;
+}) {
+  if (isRealRedditUrl(sourceUrl)) {
+    return (
+      <div className="mt-6">
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
+        <RedditEmbed url={sourceUrl!} title={title} />
+      </div>
+    );
+  }
+  return (
+    <div className="mt-6 rounded-[10px] p-4" style={{ background: "#15141A", borderLeft: "3px solid #E8462B" }}>
+      <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2">From the original thread</p>
+      <div className="flex items-center gap-2 font-mono text-[11px] text-muted flex-wrap">
+        <span className="text-ink/80">r/AmItheAsshole</span>
+        <span>&middot;</span>
+        <span>retold by LoreWire</span>
+        <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
+      </div>
+    </div>
   );
 }
 
