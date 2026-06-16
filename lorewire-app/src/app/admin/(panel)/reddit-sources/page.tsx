@@ -25,6 +25,7 @@ import {
 } from "@/lib/story-jobs-budget";
 import { setDailyBudgetCapAction } from "@/app/admin/actions";
 import RedditSourceTable from "./RedditSourceTable";
+import FilterRail from "./FilterRail";
 
 export const dynamic = "force-dynamic";
 
@@ -174,6 +175,9 @@ export default async function RedditSourcesPage({
           activeSubreddits={subreddits}
           allSubreddits={allSubs}
           sort={sort}
+          validStatuses={VALID_STATUSES}
+          statusLabel={STATUS_LABEL}
+          sortLabel={SORT_LABEL}
         />
         <div className="space-y-3">
           <RedditSourceTable
@@ -369,181 +373,6 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
     );
   }
   return null;
-}
-
-function FilterRail({
-  searchParams,
-  activeStatuses,
-  activeSubreddits,
-  allSubreddits,
-  sort,
-}: {
-  searchParams: SearchParams;
-  activeStatuses: RedditSourceStatus[];
-  activeSubreddits: string[];
-  allSubreddits: string[];
-  sort: RedditSourceOrderBy;
-}) {
-  // The rail submits as a plain GET form so every filter combination is in
-  // the URL — bookmarkable, shareable, browser-back-friendly, and trivial
-  // to debug. No client-side state and no JS required for the filter logic.
-  return (
-    <form
-      method="get"
-      className="space-y-4 rounded-xl border border-line bg-surface p-4"
-    >
-      <div>
-        <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
-          Search
-        </label>
-        <input
-          type="search"
-          name="q"
-          defaultValue={searchParams.q ?? ""}
-          placeholder="title or summary…"
-          className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
-        />
-      </div>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Status
-        </legend>
-        <div className="grid grid-cols-2 gap-1">
-          {VALID_STATUSES.map((s) => {
-            const checked = activeStatuses.includes(s);
-            return (
-              <label
-                key={s}
-                className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors has-[input:checked]:border-accent has-[input:checked]:bg-surface2"
-              >
-                <input
-                  type="checkbox"
-                  name="status"
-                  value={s}
-                  defaultChecked={checked}
-                  className="accent-accent"
-                />
-                {STATUS_LABEL[s]}
-              </label>
-            );
-          })}
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Subreddit
-        </legend>
-        <select
-          name="subreddits"
-          multiple
-          defaultValue={activeSubreddits}
-          size={8}
-          className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink outline-none focus:border-accent"
-        >
-          {allSubreddits.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <p className="mt-1 font-mono text-[9px] text-muted">
-          Ctrl/⌘-click to multi-select
-        </p>
-      </fieldset>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Length (chars)
-        </legend>
-        <div className="flex gap-2">
-          <input
-            type="number"
-            name="length_min"
-            min={0}
-            defaultValue={searchParams.length_min ?? ""}
-            placeholder="min"
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-          <input
-            type="number"
-            name="length_max"
-            min={0}
-            defaultValue={searchParams.length_max ?? ""}
-            placeholder="max"
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-        </div>
-      </fieldset>
-
-      <div>
-        <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
-          Min comments
-        </label>
-        <input
-          type="number"
-          name="comments_min"
-          min={0}
-          defaultValue={searchParams.comments_min ?? ""}
-          placeholder="e.g. 100"
-          className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-        />
-      </div>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Date range
-        </legend>
-        <div className="space-y-1">
-          <input
-            type="date"
-            name="date_from"
-            defaultValue={searchParams.date_from ?? ""}
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-          <input
-            type="date"
-            name="date_to"
-            defaultValue={searchParams.date_to ?? ""}
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-        </div>
-      </fieldset>
-
-      <div>
-        <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
-          Sort
-        </label>
-        <select
-          name="sort"
-          defaultValue={sort}
-          className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-        >
-          {Object.entries(SORT_LABEL).map(([v, l]) => (
-            <option key={v} value={v}>
-              {l}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="flex items-center justify-between gap-2">
-        <Link
-          href="/admin/reddit-sources"
-          className="font-mono text-[10px] uppercase tracking-wider text-muted hover:text-ink"
-        >
-          Reset
-        </Link>
-        <button
-          type="submit"
-          className="rounded-md bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg transition-opacity hover:opacity-90"
-        >
-          Apply
-        </button>
-      </div>
-    </form>
-  );
 }
 
 function Pagination({
