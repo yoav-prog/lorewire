@@ -12,7 +12,18 @@ import {
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
-import { getLiveStoryVideoUrl } from "@/app/actions";
+import { getLiveStoryMedia, type LiveStoryMediaResult } from "@/app/actions";
+
+// Centralised default when no live media has loaded yet — the modal
+// shows the baked story shape. Derived helpers below add the is_short
+// flag + scene images once getLiveStoryMedia resolves.
+const NO_LIVE_MEDIA: LiveStoryMediaResult = {
+  ok: true,
+  video_url: null,
+  images: [],
+  is_short: false,
+  found: false,
+};
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -243,54 +254,18 @@ function Top10Row({ onOpen }: { onOpen: OpenFn }) {
 }
 
 /* ----------------------------- WATCH (real video or doodle) ----------------------------- */
-function WatchDoodle({ story }: { story: Story }) {
-  // The baked catalog (src/data/published.ts) ships a video_url frozen
-  // at the last `python -m pipeline.export_app` run. Admin's "Use this
-  // short as the story's video" updates stories.video_url live in the
-  // DB, but the static catalog wouldn't reflect it until a re-export +
-  // redeploy. We fetch the current value once on mount and prefer it
-  // over the baked one so an apply is visible on the next modal open
-  // without any rebuild. Falls back to story.videoUrl on miss so this
-  // is purely additive — nothing breaks when the action isn't reachable
-  // or the story isn't in the DB (legacy sample-only entries).
-  const [liveUrl, setLiveUrl] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    getLiveStoryVideoUrl(story.id)
-      .then((r) => {
-        if (cancelled) return;
-        if (!r.found) {
-          // eslint-disable-next-line no-console -- rule 14
-          console.info("[lorewire video live]", {
-            storyId: story.id,
-            found: false,
-            baked: story.videoUrl ?? null,
-          });
-          return;
-        }
-        if (r.video_url && r.video_url !== story.videoUrl) {
-          // eslint-disable-next-line no-console -- rule 14
-          console.info("[lorewire video live override]", {
-            storyId: story.id,
-            baked: story.videoUrl ?? null,
-            live: r.video_url,
-          });
-        }
-        setLiveUrl(r.video_url ?? null);
-      })
-      .catch((err) => {
-        // eslint-disable-next-line no-console -- rule 14
-        console.warn("[lorewire video live error]", {
-          storyId: story.id,
-          err: String(err),
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [story.id, story.videoUrl]);
-
-  const videoUrl = liveUrl ?? story.videoUrl;
+function WatchDoodle({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
+  // liveMedia is lifted to DetailModal so the WATCH / READ / GALLERY
+  // surfaces all share the same single fetch. Falls back to the baked
+  // story.videoUrl when the live read missed (legacy sample-only entries
+  // or before the fetch settled).
+  const videoUrl = liveMedia.video_url ?? story.videoUrl;
   if (videoUrl) {
     return (
       <div>
@@ -385,8 +360,16 @@ function GalleryScroller({ children, count }: { children: React.ReactNode; count
   );
 }
 
-function _galleryFromStory(story: Story): { src: string; caption: string }[] | null {
-  const imgs = story.images || [];
+function _galleryFromStory(
+  story: Story,
+  liveMedia: LiveStoryMediaResult,
+): { src: string; caption: string }[] | null {
+  // Prefer live images when the applied video is a short — those are the
+  // doodle scene frames generated for the 9:16 short. Fall back to the
+  // baked long-form story.images otherwise (or when the live read missed).
+  const imgs = liveMedia.is_short && liveMedia.images.length > 0
+    ? liveMedia.images
+    : story.images || [];
   if (imgs.length === 0) return null;
   const words = story.alignment || [];
   if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
@@ -409,15 +392,42 @@ function _articleImagePositions(paraCount: number, imageCount: number): Set<numb
   return positions;
 }
 
-function GenArticle({ story }: { story: Story }) {
+function GenArticle({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
   const paras = (story.body || "").split(/\n{2,}/);
-  const scenes = story.images || [];
+  // When the applied video is a short, the article reads alongside the
+  // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
+  // the long-form 16:9 illustrations are still the right fit.
+  const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
+  const scenes = useShortScenes ? liveMedia.images : (story.images || []);
   const positions = _articleImagePositions(paras.length, scenes.length);
   const posList = Array.from(positions).sort((a, b) => a - b);
   const imgAt = new Map<number, string>();
   posList.forEach((p, i) => {
     if (scenes[i]) imgAt.set(p, scenes[i]);
   });
+
+  // Aspect ratio + crop behaviour switches with the source. Long-form
+  // illustrations are 16:9 and benefit from the upper-third crop to put
+  // faces in frame. Doodle scenes are authored 9:16 and centre-crop the
+  // best on phones; bound the width so the column doesn't blow out the
+  // article measure on desktop.
+  const sceneAspect = useShortScenes ? "9/16" : "16/9";
+  const sceneObjectPos = useShortScenes ? "50% 50%" : "50% 30%";
+  const sceneWrapStyle: React.CSSProperties = useShortScenes
+    ? {
+        background: "#15141A",
+        aspectRatio: sceneAspect,
+        maxWidth: 360,
+        marginLeft: "auto",
+        marginRight: "auto",
+      }
+    : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
     <article className="fade-in max-w-[660px]">
@@ -432,10 +442,10 @@ function GenArticle({ story }: { story: Story }) {
           )}
           {imgAt.has(i) && (
             <figure className="my-7">
-              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "16/9" }}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: "50% 30%" }} />
+              <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
+                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
               </div>
-              <figcaption className="font-mono text-[11px] text-muted mt-2">Illustration &middot; LoreWire Studio</figcaption>
+              <figcaption className="font-mono text-[11px] text-muted mt-2 text-center">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
           )}
         </React.Fragment>
@@ -460,7 +470,13 @@ function GenArticle({ story }: { story: Story }) {
   );
 }
 
-function Read({ story }: { story: Story }) {
+function Read({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
   const [mode, setMode] = useState("Article");
   return (
     <div>
@@ -470,7 +486,7 @@ function Read({ story }: { story: Story }) {
         ))}
       </div>
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} /> : (
+        story.body ? <GenArticle story={story} liveMedia={liveMedia} /> : (
         <article className="fade-in max-w-[660px]">
           <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
           <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>The $800 Envelope</h1>
@@ -502,14 +518,20 @@ function Read({ story }: { story: Story }) {
         )
       ) : (
         (() => {
-          const items = _galleryFromStory(story);
+          const items = _galleryFromStory(story, liveMedia);
           if (items && items.length > 0) {
+            // 9:16 cards when the source is the short's doodle frames so
+            // the gallery feels like a vertical scene strip; 3:4 stays for
+            // the long-form 16:9 stills so they fit cleanly cropped.
+            const useShort = liveMedia.is_short && liveMedia.images.length > 0;
+            const cardWidth = useShort ? 260 : 380;
+            const cardAspect = useShort ? "9/16" : "3/4";
             return (
               <div className="fade-in">
                 <GalleryScroller count={items.length}>
                   {items.map((g, i) => (
-                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 380, background: "#15141A" }}>
-                      <div className="relative" style={{ aspectRatio: "3/4" }}>
+                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: cardWidth, background: "#15141A" }}>
+                      <div className="relative" style={{ aspectRatio: cardAspect }}>
                         <img src={g.src} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         <span className="absolute top-4 left-5 font-mono text-[11px] uppercase tracking-[.2em] px-2 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${i + 1}`}</span>
                       </div>
@@ -699,6 +721,50 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // One live fetch per modal open. Shared by WATCH, READ → Article, READ →
+  // Gallery so opening the modal hits the DB once instead of three times
+  // and every subview sees a consistent "is this the short?" answer.
+  // Falls back to NO_LIVE_MEDIA on miss/error so subviews behave as if
+  // the baked story was canonical (legacy sample-only entries).
+  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
+  useEffect(() => {
+    let cancelled = false;
+    setLiveMedia(NO_LIVE_MEDIA);
+    getLiveStoryMedia(story.id)
+      .then((r) => {
+        if (cancelled) return;
+        if (!r.found) {
+          // eslint-disable-next-line no-console -- rule 14
+          console.info("[lorewire media live]", {
+            storyId: story.id,
+            found: false,
+            baked: story.videoUrl ?? null,
+          });
+          return;
+        }
+        // eslint-disable-next-line no-console -- rule 14
+        console.info("[lorewire media live]", {
+          storyId: story.id,
+          is_short: r.is_short,
+          live_video_url: r.video_url,
+          live_image_count: r.images.length,
+          baked_video_url: story.videoUrl ?? null,
+          baked_image_count: story.images?.length ?? 0,
+        });
+        setLiveMedia(r);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console -- rule 14
+        console.warn("[lorewire media live error]", {
+          storyId: story.id,
+          err: String(err),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [story.id, story.videoUrl, story.images]);
   const c = CAT[story.cat];
   let more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id);
   if (more.length < 6) more = more.concat(STORIES.filter((s) => s.id !== story.id && !more.includes(s)));
@@ -744,8 +810,8 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               ))}
             </div>
             <div className="pt-7">
-              {tab === "Watch" && <WatchDoodle story={story} />}
-              {tab === "Read" && <Read story={story} />}
+              {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
+              {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} />}
             </div>
             <section className="mt-12">
