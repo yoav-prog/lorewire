@@ -34,6 +34,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   audio_url: null,
   alignment: [],
   source_url: null,
+  body: null,
   is_short: false,
   found: false,
 };
@@ -455,7 +456,11 @@ function GenArticle({
   story: Story;
   liveMedia: LiveStoryMediaResult;
 }) {
-  const paras = (story.body || "").split(/\n{2,}/);
+  // Prefer live body so a story that's published in the DB but not yet
+  // re-exported into published.ts still renders its real article text
+  // instead of the hardcoded envelope sample fallback.
+  const articleBody = liveMedia.body ?? story.body ?? "";
+  const paras = articleBody.split(/\n{2,}/);
   // Article text stays long-form. Only the inline illustrations swap to
   // the short's doodle scenes when one is applied — same story, same
   // visuals, different text. Aspect + crop track the source: 9:16 for
@@ -563,7 +568,7 @@ function Read({
       </div>
 
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        (liveMedia.body || story.body) ? <GenArticle story={story} liveMedia={liveMedia} /> : (
         <article className="fade-in">
           <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
           <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>The $800 Envelope</h1>

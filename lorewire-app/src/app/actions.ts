@@ -59,6 +59,13 @@ export interface LiveStoryMediaResult {
    *  a re-export of published.ts. Null means no row / unset → caller
    *  falls back to the baked story.source_url. */
   source_url: string | null;
+  /** The story's article body, sourced from stories.body. The
+   *  LiveCatalogStory projection deliberately drops body to keep the
+   *  homepage rails payload small, so without surfacing it here the
+   *  Read tab's `story.body` check stays false for every live-only
+   *  story and the article falls into the hardcoded envelope sample.
+   *  Null means no row / empty body → caller falls back to story.body. */
+  body: string | null;
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -168,6 +175,7 @@ export async function getLiveStoryMedia(
     audio_url: null,
     alignment: [],
     source_url: null,
+    body: null,
     is_short: false,
     found: false,
   };
@@ -181,8 +189,9 @@ export async function getLiveStoryMedia(
     audio_url: string | null;
     alignment: string | null;
     source_url: string | null;
+    body: string | null;
   }>(
-    "SELECT id, video_url, images, audio_url, alignment, source_url FROM stories " +
+    "SELECT id, video_url, images, audio_url, alignment, source_url, body FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -198,6 +207,7 @@ export async function getLiveStoryMedia(
         audio_url: bySlug.audio_url,
         alignment: bySlug.alignment,
         source_url: bySlug.source_url,
+        body: bySlug.body,
       };
     }
   }
@@ -228,6 +238,7 @@ export async function getLiveStoryMedia(
     audio_url: row.audio_url,
     alignment: parseStoryAlignment(row.alignment),
     source_url: row.source_url,
+    body: row.body,
     is_short: isShort,
     found: true,
   };
