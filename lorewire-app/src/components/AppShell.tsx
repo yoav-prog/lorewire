@@ -181,22 +181,23 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
 
 /* ----------------------------- HOME ----------------------------- */
 function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle: () => void; pill: string; setPill: (p: string) => void }) {
-  // Live admin curation drives every rail. Empty curation falls back to
-  // the auto-derived defaults in lib/homepage-rails (sliced from STORIES
-  // by category / year) so the page never goes blank during the rollout.
-  // Hero pick comes from curation.hero when set; otherwise the legacy
-  // envelope default keeps the visual stable until the admin curates it.
-  const { curation, behavior } = useHomepageCuration();
+  // Live admin curation + live published catalog drive every rail. Empty
+  // curation falls back to auto-derived defaults from the MERGED catalog
+  // (live DB + sample STORIES) so newly published stories appear without
+  // a re-export. Hero pick comes from curation.hero when set; otherwise
+  // the legacy envelope default keeps the visual stable until curation
+  // lands.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior) ?? [];
+    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const featured =
-    (heroIds[0] && tryById(heroIds[0])) ??
-    (behavior.heroRequired ? null : tryById("envelope") ?? null);
+    (heroIds[0] && resolveStory(heroIds[0])) ??
+    (behavior.heroRequired ? null : resolveStory("envelope"));
 
-  const continueIds = resolveRailIds("continue", curation, behavior);
-  const top10Ids = resolveRailIds("top10", curation, behavior);
-  const newRowIds = resolveRailIds("new_row", curation, behavior);
+  const continueIds = resolveRailIds("continue", curation, behavior, catalog);
+  const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
+  const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
 
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
@@ -219,7 +220,7 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
           <RailHead>Continue Watching</RailHead>
           <div className={railClass}>
             {continueIds.map((id) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return <PosterCard key={id} story={s} onOpen={onOpen} w={150} h={96} />;
             })}
@@ -232,7 +233,7 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
           <RailHead>Top 10 Today</RailHead>
           <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
             {top10Ids.slice(0, 10).map((id, i) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return (
                 <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
@@ -246,10 +247,10 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
       )}
 
       {CATEGORY_RAILS.map((rail) => {
-        const ids = resolveRailIds(rail.surface, curation, behavior);
+        const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
         if (!ids) return null;
         const items = ids
-          .map((id) => tryById(id))
+          .map((id) => resolveStory(id))
           .filter((s): s is Story => s !== null);
         if (items.length === 0) return null;
         return (
@@ -269,7 +270,7 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
           <RailHead>New on LoreWire</RailHead>
           <div className={railClass}>
             {newRowIds.map((id) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return <PosterCard key={id} story={s} onOpen={onOpen} />;
             })}

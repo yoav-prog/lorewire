@@ -245,14 +245,23 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape }: { 
   );
 }
 
-function Top10Row({ onOpen, ids }: { onOpen: OpenFn; ids: string[] }) {
-  // tryById skips curated ids that aren't in the static catalog (story
-  // published in DB but not yet exported into published.ts). Without
-  // this filter byId() would throw and crash the whole homepage.
+function Top10Row({
+  onOpen,
+  ids,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  ids: string[];
+  resolveStory: (id: string) => Story | null;
+}) {
+  // resolveStory checks the live catalog + static STORIES so a freshly-
+  // published id (in the DB but not yet baked into published.ts) still
+  // renders. Returning null on a miss filters the entry out so a stale
+  // curation row can't crash the rail.
   return (
     <>
       {ids.slice(0, 10).map((id, i) => {
-        const s = tryById(id);
+        const s = resolveStory(id);
         if (!s) return null;
         return (
           <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
@@ -854,11 +863,12 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 /* ----------------------------- PAGES ----------------------------- */
 
 function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
-  // Fetch the live admin curation once on mount. Each rail prefers the
-  // curated list; empty curation falls through to the settings-driven
-  // behaviour (auto-derive a default from STORIES, or hide). Failure
-  // also falls back silently so a DB blip can't take the homepage down.
-  const { curation, behavior } = useHomepageCuration();
+  // Fetch the live admin curation + live published catalog once on
+  // mount. Each rail prefers the curated list; empty curation falls
+  // through to the settings-driven behaviour (auto-derive from the
+  // merged live+sample catalog, or hide). Failure also falls back
+  // silently so a DB blip can't take the homepage down.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
 
   // Hero behaviour: curation.hero_required forces "no hero curation -> no
   // hero", which HomePage honours by rendering null in the hero slot.
@@ -866,51 +876,44 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
   // a fresh install doesn't show a blank top of the home page.
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior) ?? [];
+    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const heroStory =
-    heroIds[0]
-      ? tryById(heroIds[0])
-      : behavior.heroRequired
-        ? null
-        : tryById("envelope") ?? null;
+    (heroIds[0] && resolveStory(heroIds[0])) ??
+    (behavior.heroRequired ? null : resolveStory("envelope"));
 
-  const continueIds = resolveRailIds("continue", curation, behavior);
+  const continueIds = resolveRailIds("continue", curation, behavior, catalog);
   // Continue Watching had per-user-style progress bars in the legacy
-  // hardcoded demo. Live curation has no per-user state, so curated +
-  // derived entries render without a bar — the rail now reads as a
-  // "currently featured" strip. We could re-introduce real progress
-  // once user sessions land.
-  const continueItems = continueIds
-    ? continueIds.map((id) => ({ id, p: undefined as number | undefined }))
-    : null;
-  const top10Ids = resolveRailIds("top10", curation, behavior);
-  const newRowIds = resolveRailIds("new_row", curation, behavior);
+  // hardcoded demo. Live curation has no per-user state, so entries
+  // render without a bar — the rail now reads as a "currently featured"
+  // strip. We could re-introduce real progress once user sessions land.
+  const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
+  const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
 
   return (
     <div className="pb-20">
       {heroStory && <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />}
       <div className={heroStory ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
-        {continueItems && continueItems.length > 0 && (
+        {continueIds && continueIds.length > 0 && (
           <Rail title="Continue Watching">
-            {continueItems.map(({ id, p }) => {
-              const s = tryById(id);
+            {continueIds.map((id) => {
+              const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} progress={p} landscape />;
+              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} landscape />;
             })}
           </Rail>
         )}
         {top10Ids && top10Ids.length > 0 && (
           <Rail title="Top 10 Today">
-            <Top10Row onOpen={onOpen} ids={top10Ids} />
+            <Top10Row onOpen={onOpen} ids={top10Ids} resolveStory={resolveStory} />
           </Rail>
         )}
         {CATEGORY_RAILS.map((rail) => {
-          const ids = resolveRailIds(rail.surface, curation, behavior);
+          const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
           if (!ids) return null;
-          // Skip rails that resolve to no displayable stories at all (no
-          // curation + no fallback hits) so the homepage doesn't render
-          // an empty section header.
-          const items = ids.map((id) => tryById(id)).filter((s): s is Story => s !== null);
+          // Skip rails that resolve to no displayable stories at all
+          // (no curation + no fallback hits) so the homepage doesn't
+          // render an empty section header.
+          const items = ids.map((id) => resolveStory(id)).filter((s): s is Story => s !== null);
           if (items.length === 0) return null;
           return (
             <Rail key={rail.surface} title={rail.title}>
@@ -921,7 +924,7 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
         {newRowIds && newRowIds.length > 0 && (
           <Rail title="New on LoreWire">
             {newRowIds.map((id) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return <PosterCard key={id} story={s} onOpen={onOpen} />;
             })}
