@@ -117,7 +117,7 @@ Group both under a new **Settings → Homepage** section.
 2. **Public read action + DesktopShell wiring** — `getHomepageCuration()`, hook into the rails, fallback path, observability.
 3. **Admin UI** — `/admin/curation` page, server actions, picker.
 4. **Settings hooks** — `curation.empty_rail_behavior`, `curation.hero_required`. Settings → Homepage section.
-5. **Cleanup** — once the admin has populated each surface in prod, delete the hardcoded constants in stories.ts.
+5. **Cleanup** *(landed)* — TOP10 / ENTITLED_ROW / NEW_ROW / CONTINUE constants deleted from `lib/stories.ts`. Rail resolution moved into a shared `lib/homepage-rails` module (hook + pure `resolveRailIds` + `CATEGORY_RAILS`) consumed by both DesktopShell and MobileShell. Fallback now auto-derives a sensible default from STORIES (slice 10 for TOP10, sort by year for "New", filter by category for category rails) so the rollout safety net still works without a manual constant list.
 
 Each phase ships behind a single PR, no flag — fallback path keeps things safe.
 

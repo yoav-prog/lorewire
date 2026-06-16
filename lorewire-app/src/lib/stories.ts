@@ -85,15 +85,14 @@ export const tryById = (id: string): Story | null => {
   return STORIES.find((x) => x.id === id) ?? null;
 };
 
-export const CONTINUE: { id: string; p: number }[] = [
-  { id: "wedding", p: 67 },
-  { id: "rules", p: 30 },
-  { id: "bill", p: 88 },
-  { id: "fence", p: 52 },
-];
-export const TOP10 = ["envelope", "replyall", "fence", "wrongnumber", "groupghost", "fridge", "wifi", "seat", "wrongmom", "stranger"];
-export const ENTITLED_ROW = ["seat", "parking", "birthday", "landlord", "envelope", "bill"];
-export const NEW_ROW = ["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost"];
+// CONTINUE / TOP10 / ENTITLED_ROW / NEW_ROW used to live here as
+// hardcoded ordered lists of story ids. Phase 5 of
+// _plans/2026-06-16-homepage-curation.md moved the source of truth onto
+// the homepage_curation table — the admin curates each rail at
+// /admin/curation, and lib/homepage-rails resolveRailIds derives a
+// fallback from STORIES (sort by year for "New", filter by category,
+// etc.) when a rail isn't curated yet. Both DesktopShell + MobileShell
+// (AppShell) read through that resolver now.
 export const PILLS = ["All", "Drama", "Entitled", "Humor", "Wholesome", "Dating", "Roommate"];
 
 // --- CMS overlay -----------------------------------------------------------
@@ -147,6 +146,9 @@ for (const p of PUBLISHED) {
       videoUrl: p.videoUrl,
       alignment: p.alignment,
     });
-    if (!NEW_ROW.includes(p.id)) NEW_ROW.unshift(p.id);
+    // Older code prepended new published stories onto NEW_ROW so they
+    // showed up in the "New on LoreWire" rail. That list is gone; the
+    // rail's fallback now sorts STORIES by year and the homepage_curation
+    // table is the real source of truth.
   }
 }

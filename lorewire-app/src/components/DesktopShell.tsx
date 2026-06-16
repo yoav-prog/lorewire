@@ -6,26 +6,18 @@ import {
   STORIES,
   byId,
   tryById,
-  CONTINUE,
-  TOP10,
-  ENTITLED_ROW,
-  NEW_ROW,
-  type Cat,
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
 import {
-  getHomepageCuration,
   getLiveStoryMedia,
-  type HomepageCuration,
-  type HomepageCurationBehavior,
   type LiveStoryMediaResult,
 } from "@/app/actions";
-
-const DEFAULT_CURATION_BEHAVIOR: HomepageCurationBehavior = {
-  emptyRailBehavior: "fallback",
-  heroRequired: false,
-};
+import {
+  CATEGORY_RAILS,
+  resolveRailIds,
+  useHomepageCuration,
+} from "@/lib/homepage-rails";
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -861,141 +853,59 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 
 /* ----------------------------- PAGES ----------------------------- */
 
-// Category rows the homepage knows how to render. Each entry pairs the
-// curation surface key with the on-screen label + the fallback id list
-// used when the admin hasn't curated this rail yet. Keep in sync with
-// HOMEPAGE_SURFACES in lib/homepage-curation.ts.
-interface CategoryRail {
-  surface: keyof HomepageCuration;
-  title: string;
-  cat: Cat | null;
-  /** Hardcoded fallback ids when the curation rail is empty. Pulls from
-   *  STORIES filtered by category for category rows; new_row keeps the
-   *  manual NEW_ROW list. */
-  fallback: string[];
-}
-
-function _fallbackForCategory(cat: Cat): string[] {
-  return STORIES.filter((s) => s.cat === cat).map((s) => s.id).slice(0, 6);
-}
-
-const CATEGORY_RAILS: CategoryRail[] = [
-  { surface: "entitled_row", title: "Audacity: Entitled People", cat: "Entitled", fallback: ENTITLED_ROW },
-  { surface: "humor_row", title: "Humor & Awkward Moments", cat: "Humor", fallback: _fallbackForCategory("Humor") },
-  { surface: "wholesome_row", title: "Wholesome Wins", cat: "Wholesome", fallback: _fallbackForCategory("Wholesome") },
-  { surface: "dating_row", title: "Dating Disasters", cat: "Dating", fallback: _fallbackForCategory("Dating") },
-  { surface: "roommate_row", title: "Roommate Files", cat: "Roommate", fallback: _fallbackForCategory("Roommate") },
-  { surface: "drama_row", title: "Pure Drama", cat: "Drama", fallback: _fallbackForCategory("Drama") },
-];
-
 function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
   // Fetch the live admin curation once on mount. Each rail prefers the
-  // curated list; empty curation honours the settings.curation
-  // .empty_rail_behavior toggle ("fallback" -> hardcoded ids, "hide" ->
-  // skip the rail entirely). Failure also falls back silently so a DB
-  // blip can't take the homepage down.
-  const [curation, setCuration] = useState<HomepageCuration | null>(null);
-  const [behavior, setBehavior] = useState<HomepageCurationBehavior>(
-    DEFAULT_CURATION_BEHAVIOR,
-  );
-  useEffect(() => {
-    let cancelled = false;
-    getHomepageCuration()
-      .then((r) => {
-        if (cancelled) return;
-        // eslint-disable-next-line no-console -- rule 14
-        console.info("[lorewire curation load]", {
-          raw_count: r.raw_curation_count,
-          per_surface: Object.fromEntries(
-            Object.entries(r.curation).map(([k, v]) => [k, v.length]),
-          ),
-          behavior: r.behavior,
-        });
-        setCuration(r.curation);
-        setBehavior(r.behavior);
-      })
-      .catch((err) => {
-        // eslint-disable-next-line no-console -- rule 14
-        console.warn("[lorewire curation load error]", { err: String(err) });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // _resolveRail returns the array to render OR null when the settings
-  // say "hide an empty rail" and there's nothing curated. Caller must
-  // skip a null result. The "use fallback" branch logs so we can see
-  // when a rail is leaning on hardcoded ids.
-  function _resolveRail(
-    curated: string[] | undefined,
-    fallback: string[],
-    surface: string,
-  ): string[] | null {
-    if (curated && curated.length > 0) return curated;
-    if (curation && behavior.emptyRailBehavior === "hide") {
-      // eslint-disable-next-line no-console -- rule 14
-      console.info("[lorewire curation hide]", { surface, reason: "empty" });
-      return null;
-    }
-    if (curated && curation) {
-      // eslint-disable-next-line no-console -- rule 14
-      console.info("[lorewire curation fallback]", { surface, reason: "empty" });
-    }
-    return fallback;
-  }
+  // curated list; empty curation falls through to the settings-driven
+  // behaviour (auto-derive a default from STORIES, or hide). Failure
+  // also falls back silently so a DB blip can't take the homepage down.
+  const { curation, behavior } = useHomepageCuration();
 
   // Hero behaviour: curation.hero_required forces "no hero curation -> no
-  // hero", which `HomePage` honours by rendering null in the hero slot.
-  // Default (false) preserves today's envelope hero so a fresh install
-  // doesn't show a blank top of the home page.
-  const heroIds = _resolveRail(
-    curation?.hero,
-    behavior.heroRequired ? [] : ["envelope"],
-    "hero",
-  );
-  const heroStory = heroIds && heroIds[0]
-    ? tryById(heroIds[0])
-    : (!behavior.heroRequired ? byId("envelope") : null);
-  const continueIds = _resolveRail(
-    curation?.continue,
-    CONTINUE.map((c) => c.id),
-    "continue",
-  );
-  // Continue Watching shows a progress bar in the hardcoded demo. Live
-  // curation has no per-user state, so curated entries render without a
-  // bar — admin-curated rail acts as a "currently featured" strip. When
-  // we fall back to the hardcoded list, restore the demo progress so
-  // the existing visual stays intact.
-  const continueWithProgress = continueIds
-    ? continueIds.map((id) => {
-        const demo = CONTINUE.find((c) => c.id === id);
-        return { id, p: demo?.p };
-      })
+  // hero", which HomePage honours by rendering null in the hero slot.
+  // Default (false) lets the empty-rail resolver auto-derive a hero so
+  // a fresh install doesn't show a blank top of the home page.
+  const heroIds = behavior.heroRequired
+    ? curation?.hero ?? []
+    : resolveRailIds("hero", curation, behavior) ?? [];
+  const heroStory =
+    heroIds[0]
+      ? tryById(heroIds[0])
+      : behavior.heroRequired
+        ? null
+        : tryById("envelope") ?? null;
+
+  const continueIds = resolveRailIds("continue", curation, behavior);
+  // Continue Watching had per-user-style progress bars in the legacy
+  // hardcoded demo. Live curation has no per-user state, so curated +
+  // derived entries render without a bar — the rail now reads as a
+  // "currently featured" strip. We could re-introduce real progress
+  // once user sessions land.
+  const continueItems = continueIds
+    ? continueIds.map((id) => ({ id, p: undefined as number | undefined }))
     : null;
-  const top10Ids = _resolveRail(curation?.top10, TOP10, "top10");
-  const newRowIds = _resolveRail(curation?.new_row, NEW_ROW, "new_row");
+  const top10Ids = resolveRailIds("top10", curation, behavior);
+  const newRowIds = resolveRailIds("new_row", curation, behavior);
 
   return (
     <div className="pb-20">
       {heroStory && <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />}
       <div className={heroStory ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
-        {continueWithProgress && (
+        {continueItems && continueItems.length > 0 && (
           <Rail title="Continue Watching">
-            {continueWithProgress.map(({ id, p }) => {
+            {continueItems.map(({ id, p }) => {
               const s = tryById(id);
               if (!s) return null;
               return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} progress={p} landscape />;
             })}
           </Rail>
         )}
-        {top10Ids && (
+        {top10Ids && top10Ids.length > 0 && (
           <Rail title="Top 10 Today">
             <Top10Row onOpen={onOpen} ids={top10Ids} />
           </Rail>
         )}
         {CATEGORY_RAILS.map((rail) => {
-          const ids = _resolveRail(curation?.[rail.surface], rail.fallback, rail.surface);
+          const ids = resolveRailIds(rail.surface, curation, behavior);
           if (!ids) return null;
           // Skip rails that resolve to no displayable stories at all (no
           // curation + no fallback hits) so the homepage doesn't render
@@ -1008,7 +918,7 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
             </Rail>
           );
         })}
-        {newRowIds && (
+        {newRowIds && newRowIds.length > 0 && (
           <Rail title="New on LoreWire">
             {newRowIds.map((id) => {
               const s = tryById(id);

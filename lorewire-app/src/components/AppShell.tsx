@@ -5,13 +5,15 @@ import {
   CAT,
   STORIES,
   byId,
-  CONTINUE,
-  TOP10,
-  ENTITLED_ROW,
-  NEW_ROW,
+  tryById,
   PILLS,
   type Story,
 } from "@/lib/stories";
+import {
+  CATEGORY_RAILS,
+  resolveRailIds,
+  useHomepageCuration,
+} from "@/lib/homepage-rails";
 import DesktopShell from "@/components/DesktopShell";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
 
@@ -179,11 +181,29 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
 
 /* ----------------------------- HOME ----------------------------- */
 function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle: () => void; pill: string; setPill: (p: string) => void }) {
-  const featured = byId("envelope");
+  // Live admin curation drives every rail. Empty curation falls back to
+  // the auto-derived defaults in lib/homepage-rails (sliced from STORIES
+  // by category / year) so the page never goes blank during the rollout.
+  // Hero pick comes from curation.hero when set; otherwise the legacy
+  // envelope default keeps the visual stable until the admin curates it.
+  const { curation, behavior } = useHomepageCuration();
+  const heroIds = behavior.heroRequired
+    ? curation?.hero ?? []
+    : resolveRailIds("hero", curation, behavior) ?? [];
+  const featured =
+    (heroIds[0] && tryById(heroIds[0])) ??
+    (behavior.heroRequired ? null : tryById("envelope") ?? null);
+
+  const continueIds = resolveRailIds("continue", curation, behavior);
+  const top10Ids = resolveRailIds("top10", curation, behavior);
+  const newRowIds = resolveRailIds("new_row", curation, behavior);
+
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
     <div className="pb-28">
-      <Billboard story={featured} onOpen={onOpen} onShuffle={onShuffle} />
+      {featured && (
+        <Billboard story={featured} onOpen={onOpen} onShuffle={onShuffle} />
+      )}
 
       <div className="flex gap-2 px-4 py-4 overflow-x-auto noscroll">
         {PILLS.map((p) => (
@@ -194,38 +214,68 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
         ))}
       </div>
 
-      <section className="mt-1">
-        <RailHead>Continue Watching</RailHead>
-        <div className={railClass}>
-          {CONTINUE.map(({ id, p }) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={150} h={96} progress={p} />)}
-        </div>
-      </section>
+      {continueIds && continueIds.length > 0 && (
+        <section className="mt-1">
+          <RailHead>Continue Watching</RailHead>
+          <div className={railClass}>
+            {continueIds.map((id) => {
+              const s = tryById(id);
+              if (!s) return null;
+              return <PosterCard key={id} story={s} onOpen={onOpen} w={150} h={96} />;
+            })}
+          </div>
+        </section>
+      )}
 
-      <section className="mt-7">
-        <RailHead>Top 10 Today</RailHead>
-        <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
-          {TOP10.map((id, i) => (
-            <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
-              <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "2px rgba(255,255,255,.32)" }}>{i + 1}</span>
-              <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={byId(id)} /></div>
-            </button>
-          ))}
-        </div>
-      </section>
+      {top10Ids && top10Ids.length > 0 && (
+        <section className="mt-7">
+          <RailHead>Top 10 Today</RailHead>
+          <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
+            {top10Ids.slice(0, 10).map((id, i) => {
+              const s = tryById(id);
+              if (!s) return null;
+              return (
+                <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
+                  <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "2px rgba(255,255,255,.32)" }}>{i + 1}</span>
+                  <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={s} /></div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
-      <section className="mt-7">
-        <RailHead>Audacity: Entitled People</RailHead>
-        <div className={railClass}>
-          {ENTITLED_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}
-        </div>
-      </section>
+      {CATEGORY_RAILS.map((rail) => {
+        const ids = resolveRailIds(rail.surface, curation, behavior);
+        if (!ids) return null;
+        const items = ids
+          .map((id) => tryById(id))
+          .filter((s): s is Story => s !== null);
+        if (items.length === 0) return null;
+        return (
+          <section key={rail.surface} className="mt-7">
+            <RailHead>{rail.title}</RailHead>
+            <div className={railClass}>
+              {items.map((s) => (
+                <PosterCard key={s.id} story={s} onOpen={onOpen} />
+              ))}
+            </div>
+          </section>
+        );
+      })}
 
-      <section className="mt-7">
-        <RailHead>New on LoreWire</RailHead>
-        <div className={railClass}>
-          {NEW_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}
-        </div>
-      </section>
+      {newRowIds && newRowIds.length > 0 && (
+        <section className="mt-7">
+          <RailHead>New on LoreWire</RailHead>
+          <div className={railClass}>
+            {newRowIds.map((id) => {
+              const s = tryById(id);
+              if (!s) return null;
+              return <PosterCard key={id} story={s} onOpen={onOpen} />;
+            })}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
