@@ -56,9 +56,15 @@ export function RenderAfterEditsBanner({
   /** Bumps every time the parent's config changes (any tab edit), so the
    *  banner re-fetches the plan after the autosave has flushed. */
   configKey: configKeyProp,
+  /** Optional notify-up callback. When the action returns a render_id the
+   *  banner calls this so the parent (ShortEditorClient) can flip its
+   *  RenderStatusPanel onto the new id without waiting for
+   *  router.refresh() to re-flow server props. */
+  onRenderQueued,
 }: {
   storyId: string;
   configKey: string;
+  onRenderQueued?: (renderId: string) => void;
 }) {
   const router = useRouter();
   const [plan, setPlan] = useState<ShortRenderPlan | null>(null);
@@ -119,6 +125,9 @@ export function RenderAfterEditsBanner({
         lane,
         render_id: r.renderId,
       });
+      if (r.renderId && onRenderQueued) {
+        onRenderQueued(r.renderId);
+      }
       router.refresh();
     });
   }
