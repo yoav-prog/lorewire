@@ -18,8 +18,14 @@ import {
   getHomepageCuration,
   getLiveStoryMedia,
   type HomepageCuration,
+  type HomepageCurationBehavior,
   type LiveStoryMediaResult,
 } from "@/app/actions";
+
+const DEFAULT_CURATION_BEHAVIOR: HomepageCurationBehavior = {
+  emptyRailBehavior: "fallback",
+  heroRequired: false,
+};
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -884,10 +890,14 @@ const CATEGORY_RAILS: CategoryRail[] = [
 
 function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
   // Fetch the live admin curation once on mount. Each rail prefers the
-  // curated list; empty curation -> hardcoded fallback so the page is
-  // never blank during the rollout. Failure also falls back silently so
-  // a DB blip can't take the homepage down.
+  // curated list; empty curation honours the settings.curation
+  // .empty_rail_behavior toggle ("fallback" -> hardcoded ids, "hide" ->
+  // skip the rail entirely). Failure also falls back silently so a DB
+  // blip can't take the homepage down.
   const [curation, setCuration] = useState<HomepageCuration | null>(null);
+  const [behavior, setBehavior] = useState<HomepageCurationBehavior>(
+    DEFAULT_CURATION_BEHAVIOR,
+  );
   useEffect(() => {
     let cancelled = false;
     getHomepageCuration()
@@ -899,8 +909,10 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
           per_surface: Object.fromEntries(
             Object.entries(r.curation).map(([k, v]) => [k, v.length]),
           ),
+          behavior: r.behavior,
         });
         setCuration(r.curation);
+        setBehavior(r.behavior);
       })
       .catch((err) => {
         // eslint-disable-next-line no-console -- rule 14
@@ -911,25 +923,40 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
     };
   }, []);
 
+  // _resolveRail returns the array to render OR null when the settings
+  // say "hide an empty rail" and there's nothing curated. Caller must
+  // skip a null result. The "use fallback" branch logs so we can see
+  // when a rail is leaning on hardcoded ids.
   function _resolveRail(
     curated: string[] | undefined,
     fallback: string[],
     surface: string,
-  ): string[] {
+  ): string[] | null {
     if (curated && curated.length > 0) return curated;
-    if (curated && curated.length === 0 && curation) {
+    if (curation && behavior.emptyRailBehavior === "hide") {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[lorewire curation hide]", { surface, reason: "empty" });
+      return null;
+    }
+    if (curated && curation) {
       // eslint-disable-next-line no-console -- rule 14
       console.info("[lorewire curation fallback]", { surface, reason: "empty" });
     }
     return fallback;
   }
 
+  // Hero behaviour: curation.hero_required forces "no hero curation -> no
+  // hero", which `HomePage` honours by rendering null in the hero slot.
+  // Default (false) preserves today's envelope hero so a fresh install
+  // doesn't show a blank top of the home page.
   const heroIds = _resolveRail(
     curation?.hero,
-    ["envelope"],
+    behavior.heroRequired ? [] : ["envelope"],
     "hero",
   );
-  const heroStory = tryById(heroIds[0] ?? "envelope") ?? byId("envelope");
+  const heroStory = heroIds && heroIds[0]
+    ? tryById(heroIds[0])
+    : (!behavior.heroRequired ? byId("envelope") : null);
   const continueIds = _resolveRail(
     curation?.continue,
     CONTINUE.map((c) => c.id),
@@ -940,27 +967,36 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
   // bar — admin-curated rail acts as a "currently featured" strip. When
   // we fall back to the hardcoded list, restore the demo progress so
   // the existing visual stays intact.
-  const continueWithProgress = continueIds.map((id) => {
-    const demo = CONTINUE.find((c) => c.id === id);
-    return { id, p: demo?.p };
-  });
+  const continueWithProgress = continueIds
+    ? continueIds.map((id) => {
+        const demo = CONTINUE.find((c) => c.id === id);
+        return { id, p: demo?.p };
+      })
+    : null;
   const top10Ids = _resolveRail(curation?.top10, TOP10, "top10");
   const newRowIds = _resolveRail(curation?.new_row, NEW_ROW, "new_row");
 
   return (
     <div className="pb-20">
-      <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />
-      <div className="relative -mt-20 z-10">
-        <Rail title="Continue Watching">
-          {continueWithProgress.map(({ id, p }) => {
-            const s = tryById(id);
-            if (!s) return null;
-            return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} progress={p} landscape />;
-          })}
-        </Rail>
-        <Rail title="Top 10 Today"><Top10Row onOpen={onOpen} ids={top10Ids} /></Rail>
+      {heroStory && <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />}
+      <div className={heroStory ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
+        {continueWithProgress && (
+          <Rail title="Continue Watching">
+            {continueWithProgress.map(({ id, p }) => {
+              const s = tryById(id);
+              if (!s) return null;
+              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} progress={p} landscape />;
+            })}
+          </Rail>
+        )}
+        {top10Ids && (
+          <Rail title="Top 10 Today">
+            <Top10Row onOpen={onOpen} ids={top10Ids} />
+          </Rail>
+        )}
         {CATEGORY_RAILS.map((rail) => {
           const ids = _resolveRail(curation?.[rail.surface], rail.fallback, rail.surface);
+          if (!ids) return null;
           // Skip rails that resolve to no displayable stories at all (no
           // curation + no fallback hits) so the homepage doesn't render
           // an empty section header.
@@ -972,13 +1008,15 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
             </Rail>
           );
         })}
-        <Rail title="New on LoreWire">
-          {newRowIds.map((id) => {
-            const s = tryById(id);
-            if (!s) return null;
-            return <PosterCard key={id} story={s} onOpen={onOpen} />;
-          })}
-        </Rail>
+        {newRowIds && (
+          <Rail title="New on LoreWire">
+            {newRowIds.map((id) => {
+              const s = tryById(id);
+              if (!s) return null;
+              return <PosterCard key={id} story={s} onOpen={onOpen} />;
+            })}
+          </Rail>
+        )}
       </div>
     </div>
   );

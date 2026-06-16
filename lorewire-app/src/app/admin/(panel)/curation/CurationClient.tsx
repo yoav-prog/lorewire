@@ -23,11 +23,21 @@ import {
   type CurationServerRender,
   type CurationServerRenderRow,
 } from "./actions";
+import { saveSettingAction } from "@/app/admin/actions";
 import {
   HOMEPAGE_SURFACES,
   SURFACE_CAPACITY,
   type HomepageSurface,
 } from "@/lib/homepage-curation-shared";
+
+// Mirrors HomepageCurationBehavior in @/app/actions. Duplicated here as
+// a plain type so the client doesn't need to import from a server-only
+// path (the actions file is fine for action calls, but pulling its
+// types means dragging the resolver into the client bundle).
+interface CurationBehavior {
+  emptyRailBehavior: "fallback" | "hide";
+  heroRequired: boolean;
+}
 
 interface RailSpec {
   surface: HomepageSurface;
@@ -66,8 +76,10 @@ const RAILS: RailSpec[] = [
 
 export function CurationClient({
   initial,
+  behavior,
 }: {
   initial: CurationServerRender;
+  behavior: CurationBehavior;
 }) {
   const router = useRouter();
   const [pickerSurface, setPickerSurface] = useState<HomepageSurface | null>(null);
@@ -87,6 +99,23 @@ export function CurationClient({
       }
       onSuccess?.();
       router.refresh();
+    });
+  }
+
+  function setBehavior(key: string, value: string): void {
+    setError(null);
+    startTransition(async () => {
+      const fd = new FormData();
+      fd.set("key", key);
+      fd.set("value", value);
+      try {
+        await saveSettingAction(fd);
+        // eslint-disable-next-line no-console -- rule 14
+        console.info("[admin curation behavior]", { key, value });
+        router.refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     });
   }
 
@@ -115,6 +144,45 @@ export function CurationClient({
           {error}
         </div>
       )}
+
+      <section className="rounded-lg border border-line bg-surface p-4">
+        <header className="mb-3">
+          <h2 className="font-display text-[15px] font-bold">Behaviour</h2>
+          <p className="mt-0.5 font-mono text-[10px] text-muted">
+            How the homepage behaves when a rail has nothing curated yet.
+          </p>
+        </header>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <BehaviorToggle
+            title="Empty rails"
+            description={
+              "Fallback uses the hardcoded sample list so the page is never blank. " +
+              "Hide skips the rail entirely once curation lands."
+            }
+            value={behavior.emptyRailBehavior}
+            options={[
+              { value: "fallback", label: "Fallback (recommended)" },
+              { value: "hide", label: "Hide empty rails" },
+            ]}
+            pending={pending}
+            onChange={(v) => setBehavior("curation.empty_rail_behavior", v)}
+          />
+          <BehaviorToggle
+            title="Hero rule"
+            description={
+              "Off keeps today's envelope hero as a fallback. On requires the " +
+              "hero pick to come from curation; no curation -> no hero block."
+            }
+            value={behavior.heroRequired ? "true" : "false"}
+            options={[
+              { value: "false", label: "Allow fallback hero" },
+              { value: "true", label: "Require curated hero" },
+            ]}
+            pending={pending}
+            onChange={(v) => setBehavior("curation.hero_required", v)}
+          />
+        </div>
+      </section>
 
       <div className="grid gap-4">
         {RAILS.map((rail) => {
@@ -202,6 +270,49 @@ export function CurationClient({
           }}
         />
       )}
+    </div>
+  );
+}
+
+function BehaviorToggle({
+  title,
+  description,
+  value,
+  options,
+  pending,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  value: string;
+  options: { value: string; label: string }[];
+  pending: boolean;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="rounded-md border border-line bg-bg p-3">
+      <p className="font-display text-[13px] font-bold text-ink">{title}</p>
+      <p className="mt-0.5 font-mono text-[10px] text-muted">{description}</p>
+      <div className="mt-2 flex flex-wrap gap-1">
+        {options.map((opt) => {
+          const active = opt.value === value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => !active && onChange(opt.value)}
+              disabled={pending}
+              className={
+                active
+                  ? "rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-bg"
+                  : "rounded-md border border-line px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:bg-accent/10 disabled:cursor-not-allowed disabled:opacity-50"
+              }
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -15,6 +15,7 @@
 
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
 import { all, one } from "@/lib/db";
+import { getSetting } from "@/lib/repo";
 import {
   HOMEPAGE_SURFACES,
   listAllCuration,
@@ -188,6 +189,22 @@ export async function getLiveStoryVideoUrl(
 // the resulting rail comes back empty.
 export type HomepageCuration = Record<HomepageSurface, string[]>;
 
+export type EmptyRailBehavior = "fallback" | "hide";
+
+export interface HomepageCurationBehavior {
+  /** When an empty curated rail meets the homepage: "fallback" uses the
+   *  hardcoded constants in stories.ts so the page stays populated;
+   *  "hide" skips the rail entirely. Default: "fallback" so a fresh
+   *  install renders today's visual without any setup. */
+  emptyRailBehavior: EmptyRailBehavior;
+  /** When true, the hero pick must come from the curation (empty
+   *  curation -> hide the hero). When false, the homepage falls back
+   *  to today's hardcoded envelope hero. Default: false so a new
+   *  install doesn't render blank-where-the-hero-should-be before any
+   *  curation has been set up. */
+  heroRequired: boolean;
+}
+
 export interface HomepageCurationResult {
   ok: boolean;
   /** Per-surface lists of story ids in position order, with stale/
@@ -201,6 +218,10 @@ export interface HomepageCurationResult {
    *  (use hardcoded constants) or "curation exists but is all stale"
    *  (still fall back, but log so the admin notices). */
   raw_curation_count: number;
+  /** Settings-driven render behaviour. Bundled here so the homepage
+   *  client component doesn't need a second round trip just to know
+   *  whether to fall back or hide an empty rail. */
+  behavior: HomepageCurationBehavior;
 }
 
 export async function getHomepageCuration(): Promise<HomepageCurationResult> {
@@ -246,5 +267,21 @@ export async function getHomepageCuration(): Promise<HomepageCurationResult> {
       }
     }
   }
-  return { ok: true, curation, raw_curation_count: rawCount };
+  // Pull both behaviour settings in parallel — single round trip cost is
+  // ~2 ms on SQLite and the same on Postgres pooled.
+  const [emptyRailRaw, heroRequiredRaw] = await Promise.all([
+    getSetting("curation.empty_rail_behavior"),
+    getSetting("curation.hero_required"),
+  ]);
+  const behavior: HomepageCurationBehavior = {
+    emptyRailBehavior:
+      emptyRailRaw === "hide" ? "hide" : "fallback",
+    heroRequired: heroRequiredRaw === "true",
+  };
+  return {
+    ok: true,
+    curation,
+    raw_curation_count: rawCount,
+    behavior,
+  };
 }
