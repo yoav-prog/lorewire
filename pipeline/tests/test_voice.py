@@ -144,6 +144,38 @@ class ProbeMp3DurationTests(unittest.TestCase):
         self.assertLess(seconds, 600.0)
 
 
+class GoogleAlignPayloadTests(unittest.TestCase):
+    """Locks the Google STT request shape — the punctuation flag in
+    particular, because flipping it back to False silently regresses
+    every caption boundary (questions lose `?`, short next sentences
+    glue onto the previous chunk) without the network telling us
+    anything went wrong."""
+
+    def _capture_payload(self, response: dict) -> dict:
+        captured: dict = {}
+
+        def _capture(url: str, payload: dict, timeout: int) -> dict:
+            captured["payload"] = payload
+            return response
+
+        with mock.patch.object(voice, "_google_post", side_effect=_capture):
+            voice._google_align(b"\xff\xfb\x00\x00", "en-US")
+        return captured["payload"]
+
+    def test_enables_automatic_punctuation(self):
+        payload = self._capture_payload({"results": []})
+        self.assertTrue(payload["config"]["enableAutomaticPunctuation"])
+
+    def test_keeps_word_time_offsets_and_pinned_sample_rate(self):
+        # Punctuation flag must coexist with the other hardening
+        # tricks (word offsets + 24kHz sample-rate pin) so adding it
+        # didn't accidentally drop a sibling config field.
+        payload = self._capture_payload({"results": []})
+        self.assertTrue(payload["config"]["enableWordTimeOffsets"])
+        self.assertEqual(payload["config"]["sampleRateHertz"], 24000)
+        self.assertEqual(payload["config"]["model"], "latest_long")
+
+
 class GeminiTtsTests(unittest.TestCase):
     def test_tier_detection(self):
         self.assertTrue(voice._is_gemini_tier("gemini-25-flash-tts"))
