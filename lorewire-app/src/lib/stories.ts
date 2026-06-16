@@ -76,6 +76,15 @@ export const byId = (id: string): Story => {
   return s;
 };
 
+// Same lookup but returns null instead of throwing. Use this when the id
+// might point at a story that isn't in the catalog (e.g. live homepage
+// curation that names a story published in the DB but not yet exported
+// into src/data/published.ts) so the rail can skip the missing entry
+// instead of crash-rendering the whole app shell.
+export const tryById = (id: string): Story | null => {
+  return STORIES.find((x) => x.id === id) ?? null;
+};
+
 export const CONTINUE: { id: string; p: number }[] = [
   { id: "wedding", p: 67 },
   { id: "rules", p: 30 },

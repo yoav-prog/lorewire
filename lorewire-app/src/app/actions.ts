@@ -14,7 +14,12 @@
 // long-form 16:9 stills.
 
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
-import { one } from "@/lib/db";
+import { all, one } from "@/lib/db";
+import {
+  HOMEPAGE_SURFACES,
+  listAllCuration,
+  type HomepageSurface,
+} from "@/lib/homepage-curation";
 
 // The short renderer writes its MP4 to GCS at `<storyId>-short/video.mp4`
 // (suffix from pipeline/shorts_render.SHORT_ID_SUFFIX). Anything else is
@@ -172,4 +177,74 @@ export async function getLiveStoryVideoUrl(
 ): Promise<LiveStoryVideoUrlResult> {
   const r = await getLiveStoryMedia(idOrSlug);
   return { ok: r.ok, video_url: r.video_url, found: r.found };
+}
+
+// Homepage curation: which stories appear on each rail. Returns the
+// public view — only published, non-noindex stories survive the filter
+// even if an unpublished or unknown id sits in the curation table.
+// The admin surface uses listAllCuration directly so it can show stale
+// rows with a "(unpublished)" chip; this public action silently drops
+// them and lets DesktopShell fall back to its hardcoded constants when
+// the resulting rail comes back empty.
+export type HomepageCuration = Record<HomepageSurface, string[]>;
+
+export interface HomepageCurationResult {
+  ok: boolean;
+  /** Per-surface lists of story ids in position order, with stale/
+   *  unpublished rows dropped. Empty arrays mean "no curation set" OR
+   *  "all curated rows are currently unpublished" — DesktopShell can't
+   *  distinguish, which is intentional (both cases should fall back to
+   *  the same default). */
+  curation: HomepageCuration;
+  /** Total curated story-ids seen in the table, ignoring publish state.
+   *  Lets DesktopShell decide whether "empty" means "no curation yet"
+   *  (use hardcoded constants) or "curation exists but is all stale"
+   *  (still fall back, but log so the admin notices). */
+  raw_curation_count: number;
+}
+
+export async function getHomepageCuration(): Promise<HomepageCurationResult> {
+  const grouped = await listAllCuration();
+  // Collect every curated story id across all surfaces, dedupe, ask the
+  // DB which of them are publishable. One round-trip beats N per-id reads.
+  const curatedIds = new Set<string>();
+  let rawCount = 0;
+  for (const surface of HOMEPAGE_SURFACES) {
+    for (const r of grouped[surface]) {
+      curatedIds.add(r.story_id);
+      rawCount++;
+    }
+  }
+  let publishedSet = new Set<string>();
+  if (curatedIds.size > 0) {
+    const ids = Array.from(curatedIds);
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM stories WHERE id IN (${placeholders}) ` +
+        "AND status = 'published' AND published_at IS NOT NULL " +
+        "AND (noindex IS NULL OR noindex = 0)",
+      ids,
+    );
+    publishedSet = new Set(rows.map((r) => r.id));
+  }
+  const curation: HomepageCuration = {
+    hero: [],
+    top10: [],
+    continue: [],
+    new_row: [],
+    entitled_row: [],
+    humor_row: [],
+    wholesome_row: [],
+    dating_row: [],
+    roommate_row: [],
+    drama_row: [],
+  };
+  for (const surface of HOMEPAGE_SURFACES) {
+    for (const r of grouped[surface]) {
+      if (publishedSet.has(r.story_id)) {
+        curation[surface].push(r.story_id);
+      }
+    }
+  }
+  return { ok: true, curation, raw_curation_count: rawCount };
 }

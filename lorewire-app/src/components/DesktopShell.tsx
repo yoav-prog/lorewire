@@ -5,14 +5,21 @@ import {
   CAT,
   STORIES,
   byId,
+  tryById,
   CONTINUE,
   TOP10,
   ENTITLED_ROW,
   NEW_ROW,
+  type Cat,
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
-import { getLiveStoryMedia, type LiveStoryMediaResult } from "@/app/actions";
+import {
+  getHomepageCuration,
+  getLiveStoryMedia,
+  type HomepageCuration,
+  type LiveStoryMediaResult,
+} from "@/app/actions";
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -240,15 +247,22 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape }: { 
   );
 }
 
-function Top10Row({ onOpen }: { onOpen: OpenFn }) {
+function Top10Row({ onOpen, ids }: { onOpen: OpenFn; ids: string[] }) {
+  // tryById skips curated ids that aren't in the static catalog (story
+  // published in DB but not yet exported into published.ts). Without
+  // this filter byId() would throw and crash the whole homepage.
   return (
     <>
-      {TOP10.slice(0, 10).map((id, i) => (
-        <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
-          <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
-          <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}><PosterArt story={byId(id)} /></div>
-        </button>
-      ))}
+      {ids.slice(0, 10).map((id, i) => {
+        const s = tryById(id);
+        if (!s) return null;
+        return (
+          <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
+            <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
+            <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}><PosterArt story={s} /></div>
+          </button>
+        );
+      })}
     </>
   );
 }
@@ -840,15 +854,131 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 }
 
 /* ----------------------------- PAGES ----------------------------- */
+
+// Category rows the homepage knows how to render. Each entry pairs the
+// curation surface key with the on-screen label + the fallback id list
+// used when the admin hasn't curated this rail yet. Keep in sync with
+// HOMEPAGE_SURFACES in lib/homepage-curation.ts.
+interface CategoryRail {
+  surface: keyof HomepageCuration;
+  title: string;
+  cat: Cat | null;
+  /** Hardcoded fallback ids when the curation rail is empty. Pulls from
+   *  STORIES filtered by category for category rows; new_row keeps the
+   *  manual NEW_ROW list. */
+  fallback: string[];
+}
+
+function _fallbackForCategory(cat: Cat): string[] {
+  return STORIES.filter((s) => s.cat === cat).map((s) => s.id).slice(0, 6);
+}
+
+const CATEGORY_RAILS: CategoryRail[] = [
+  { surface: "entitled_row", title: "Audacity: Entitled People", cat: "Entitled", fallback: ENTITLED_ROW },
+  { surface: "humor_row", title: "Humor & Awkward Moments", cat: "Humor", fallback: _fallbackForCategory("Humor") },
+  { surface: "wholesome_row", title: "Wholesome Wins", cat: "Wholesome", fallback: _fallbackForCategory("Wholesome") },
+  { surface: "dating_row", title: "Dating Disasters", cat: "Dating", fallback: _fallbackForCategory("Dating") },
+  { surface: "roommate_row", title: "Roommate Files", cat: "Roommate", fallback: _fallbackForCategory("Roommate") },
+  { surface: "drama_row", title: "Pure Drama", cat: "Drama", fallback: _fallbackForCategory("Drama") },
+];
+
 function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
+  // Fetch the live admin curation once on mount. Each rail prefers the
+  // curated list; empty curation -> hardcoded fallback so the page is
+  // never blank during the rollout. Failure also falls back silently so
+  // a DB blip can't take the homepage down.
+  const [curation, setCuration] = useState<HomepageCuration | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getHomepageCuration()
+      .then((r) => {
+        if (cancelled) return;
+        // eslint-disable-next-line no-console -- rule 14
+        console.info("[lorewire curation load]", {
+          raw_count: r.raw_curation_count,
+          per_surface: Object.fromEntries(
+            Object.entries(r.curation).map(([k, v]) => [k, v.length]),
+          ),
+        });
+        setCuration(r.curation);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console -- rule 14
+        console.warn("[lorewire curation load error]", { err: String(err) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function _resolveRail(
+    curated: string[] | undefined,
+    fallback: string[],
+    surface: string,
+  ): string[] {
+    if (curated && curated.length > 0) return curated;
+    if (curated && curated.length === 0 && curation) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[lorewire curation fallback]", { surface, reason: "empty" });
+    }
+    return fallback;
+  }
+
+  const heroIds = _resolveRail(
+    curation?.hero,
+    ["envelope"],
+    "hero",
+  );
+  const heroStory = tryById(heroIds[0] ?? "envelope") ?? byId("envelope");
+  const continueIds = _resolveRail(
+    curation?.continue,
+    CONTINUE.map((c) => c.id),
+    "continue",
+  );
+  // Continue Watching shows a progress bar in the hardcoded demo. Live
+  // curation has no per-user state, so curated entries render without a
+  // bar — admin-curated rail acts as a "currently featured" strip. When
+  // we fall back to the hardcoded list, restore the demo progress so
+  // the existing visual stays intact.
+  const continueWithProgress = continueIds.map((id) => {
+    const demo = CONTINUE.find((c) => c.id === id);
+    return { id, p: demo?.p };
+  });
+  const top10Ids = _resolveRail(curation?.top10, TOP10, "top10");
+  const newRowIds = _resolveRail(curation?.new_row, NEW_ROW, "new_row");
+
   return (
     <div className="pb-20">
-      <Hero story={byId("envelope")} onOpen={onOpen} onShuffle={onShuffle} />
+      <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />
       <div className="relative -mt-20 z-10">
-        <Rail title="Continue Watching">{CONTINUE.map(({ id, p }) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} w={300} h={170} progress={p} landscape />)}</Rail>
-        <Rail title="Top 10 Today"><Top10Row onOpen={onOpen} /></Rail>
-        <Rail title="Audacity: Entitled People">{ENTITLED_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}</Rail>
-        <Rail title="New on LoreWire">{NEW_ROW.map((id) => <PosterCard key={id} story={byId(id)} onOpen={onOpen} />)}</Rail>
+        <Rail title="Continue Watching">
+          {continueWithProgress.map(({ id, p }) => {
+            const s = tryById(id);
+            if (!s) return null;
+            return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} progress={p} landscape />;
+          })}
+        </Rail>
+        <Rail title="Top 10 Today"><Top10Row onOpen={onOpen} ids={top10Ids} /></Rail>
+        {CATEGORY_RAILS.map((rail) => {
+          const ids = _resolveRail(curation?.[rail.surface], rail.fallback, rail.surface);
+          // Skip rails that resolve to no displayable stories at all (no
+          // curation + no fallback hits) so the homepage doesn't render
+          // an empty section header.
+          const items = ids.map((id) => tryById(id)).filter((s): s is Story => s !== null);
+          if (items.length === 0) return null;
+          return (
+            <Rail key={rail.surface} title={rail.title}>
+              {items.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} />)}
+            </Rail>
+          );
+        })}
+        <Rail title="New on LoreWire">
+          {newRowIds.map((id) => {
+            const s = tryById(id);
+            if (!s) return null;
+            return <PosterCard key={id} story={s} onOpen={onOpen} />;
+          })}
+        </Rail>
       </div>
     </div>
   );
