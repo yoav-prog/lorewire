@@ -456,6 +456,25 @@ export const SHORT_RENDER_EVENTS: Table = {
   ],
 };
 
+// 2026-06-16 homepage curation. One row per slot on the public homepage —
+// `surface` names the rail ('hero', 'top10', 'continue', '<category>_row',
+// 'new_row'), `position` is 0-based ordering within the surface, `story_id`
+// points at stories.id. The (surface, position) pair is unique so two
+// stories can't claim the same slot. Public read filters out unpublished
+// or noindex stories silently; admin read keeps them so the editor can
+// see and prune broken refs. Plan: _plans/2026-06-16-homepage-curation.md.
+export const HOMEPAGE_CURATION: Table = {
+  name: "homepage_curation",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "surface", type: "TEXT" },
+    { name: "position", type: "INTEGER" },
+    { name: "story_id", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -472,6 +491,7 @@ export const TABLES: Table[] = [
   REDDIT_SOURCE,
   STORY_JOBS,
   VOICE_RENDERS,
+  HOMEPAGE_CURATION,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -529,4 +549,10 @@ export const POST_TABLE_DDL: string[] = [
   // ts, and we expect ~15-25 events per short so the lookup is hot-pathed.
   "CREATE INDEX IF NOT EXISTS idx_short_render_events_render_id " +
     "ON short_render_events(render_id, ts)",
+  // 2026-06-16 homepage curation. (surface, position) uniqueness is the
+  // load-bearing invariant — two stories can't share a slot, and add/remove/
+  // move operations depend on packed positions. Surface filter is also the
+  // hot read path (one query per rail) so the leading column matches.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_curation_surface_position " +
+    "ON homepage_curation(surface, position)",
 ];
