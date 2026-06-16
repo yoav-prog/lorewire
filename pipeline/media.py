@@ -513,6 +513,21 @@ def generate_media(
     portrait_hero_url: str | None = None
     landscape_hero_url: str | None = None
     category = idea.get("category", "Drama")
+    # Fresh-run hero gen runs BEFORE the stories row exists, so there's
+    # no hero_style_id to honor — resolver falls through the settings
+    # chain into the deterministic auto-pick. Same story_id every render
+    # → same picked style, so the catalog stays visually stable.
+    resolved_hero_style = stages.resolve_hero_style(
+        story_id=story_id,
+        category=category,
+        pinned_id=None,
+        get_setting=store.get_setting,
+    )
+    print(
+        f"[hero style resolve id={safe_id}] picked={resolved_hero_style.style.id} "
+        f"source={resolved_hero_style.source} "
+        f"whitelist={resolved_hero_style.whitelist or '<n/a>'}"
+    )
     for aspect_ratio, filename, label in (
         ("3:4", "hero.png", "hero portrait"),
         ("16:9", "hero-landscape.png", "hero landscape"),
@@ -526,7 +541,8 @@ def generate_media(
                 landscape_hero_url = public_url
             continue
         cinematic_prompt = stages.make_thumbnail_prompt(
-            title, category, body, aspect_ratio, dry_run=False
+            title, category, body, aspect_ratio, dry_run=False,
+            style=resolved_hero_style.style,
         )
         started = time.time()
         kie_url = _generate_with_retry(
@@ -865,7 +881,26 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         raise ValueError(f"story {safe_id} has no title — cannot build a hero prompt")
     body = (story.get("body") or "").strip()
     category = (story.get("category") or "Drama").strip()
-    print(f"[image regen hero] id={safe_id} title={title[:60]!r} (both orientations)")
+    # Resolve which named poster style this render should use. Phase 2 of
+    # _plans/2026-06-17-hero-style-registry.md: NULL row falls through to
+    # per-category default → global default → deterministic auto-pick.
+    # Log the resolved id + the layer it came from so a "wrong style"
+    # diagnosis can read one line and know which knob to turn.
+    resolved = stages.resolve_hero_style(
+        story_id=story["id"],
+        category=category,
+        pinned_id=story.get("hero_style_id"),
+        get_setting=store.get_setting,
+    )
+    print(
+        f"[hero style resolve id={safe_id}] picked={resolved.style.id} "
+        f"source={resolved.source} "
+        f"whitelist={resolved.whitelist or '<n/a>'}"
+    )
+    print(
+        f"[image regen hero] id={safe_id} title={title[:60]!r} "
+        f"style={resolved.style.id} (both orientations)"
+    )
 
     per_image_cents = _per_image_cost_cents()
     total_cents = 0
@@ -874,6 +909,7 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     # ─── 1. Portrait hero (3:4) — same prompt + dimensions as before. ─────
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
+        style=resolved.style,
     )
     store.log_render_event(
         "prompt_built",
@@ -916,8 +952,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     total_cents += per_image_cents
 
     # ─── 2. Landscape hero (16:9) — best-effort. ──────────────────────────
+    # Same resolved style as portrait so both aspects render as one
+    # coherent poster series.
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
+        style=resolved.style,
     )
     store.log_render_event(
         "kie_request_sent",
@@ -1025,8 +1064,24 @@ def _regen_hero_from_short(
             f"story {safe_id} short render has no character_base_url — "
             "re-render the short on the current shorts pipeline so the base is persisted"
         )
+    # Resolve which named poster style this render should use. Same
+    # chain as the text-only _regen_hero; the i2i seed and the style
+    # band are orthogonal — character comes from the reference image,
+    # composition + palette come from the resolved style.
+    resolved = stages.resolve_hero_style(
+        story_id=story["id"],
+        category=category,
+        pinned_id=story.get("hero_style_id"),
+        get_setting=store.get_setting,
+    )
+    print(
+        f"[hero style resolve id={safe_id}] picked={resolved.style.id} "
+        f"source={resolved.source} "
+        f"whitelist={resolved.whitelist or '<n/a>'}"
+    )
     print(
         f"[image regen hero from-short] id={safe_id} title={title[:60]!r} "
+        f"style={resolved.style.id} "
         f"base={character_base_url[:80]}..."
     )
 
@@ -1038,6 +1093,7 @@ def _regen_hero_from_short(
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
         character_base_url=character_base_url,
+        style=resolved.style,
     )
     store.log_render_event(
         "prompt_built",
@@ -1089,9 +1145,12 @@ def _regen_hero_from_short(
     total_cents += per_image_cents
 
     # ─── 2. Landscape (16:9) — best-effort ────────────────────────────────
+    # Same resolved style as portrait so both aspects render as one
+    # coherent poster series.
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
         character_base_url=character_base_url,
+        style=resolved.style,
     )
     store.log_render_event(
         "kie_request_sent",

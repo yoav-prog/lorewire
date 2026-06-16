@@ -119,6 +119,12 @@ SCHEMA_STATEMENTS = [
     # chain lives in pipeline/voice.py:synthesize.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_provider TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_id TEXT",
+    # 2026-06-17 hero style registry (_plans/2026-06-17-hero-style-registry.md).
+    # Closed-enum key from pipeline.stages.HERO_STYLES, NULL = "let the
+    # resolver pick" (per-category default → global default → deterministic
+    # auto-pick from the category's style whitelist). Admin override wins;
+    # a settings change never overwrites an existing row's pin.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_style_id TEXT",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -422,6 +428,11 @@ _COLUMNS = [
     # above for resolution chain). Both NULL on fresh-pipeline writes —
     # the picker UI lands them via setStoryVoiceAction in Phase 3.
     "voice_provider", "voice_id",
+    # 2026-06-17 hero style registry per-story override. NULL on
+    # fresh-pipeline writes — the picker UI lands it via the story
+    # edit page's "Hero style" dropdown. Resolution chain lives in
+    # pipeline/stages.py:resolve_hero_style.
+    "hero_style_id",
     "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
