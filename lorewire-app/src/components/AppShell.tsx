@@ -180,14 +180,33 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
 }
 
 /* ----------------------------- HOME ----------------------------- */
-function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle: () => void; pill: string; setPill: (p: string) => void }) {
+function Home({
+  onOpen,
+  onShuffle,
+  pill,
+  setPill,
+  curation,
+  behavior,
+  catalog,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  pill: string;
+  setPill: (p: string) => void;
+  // Hoisted from MobileShell so the modal mount site can also resolve
+  // the active story via the live catalog.
+  curation: ReturnType<typeof useHomepageCuration>["curation"];
+  behavior: ReturnType<typeof useHomepageCuration>["behavior"];
+  catalog: ReturnType<typeof useHomepageCuration>["catalog"];
+  resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+}) {
   // Live admin curation + live published catalog drive every rail. Empty
   // curation falls back to auto-derived defaults from the MERGED catalog
   // (live DB + sample STORIES) so newly published stories appear without
   // a re-export. Hero pick comes from curation.hero when set; otherwise
   // the legacy envelope default keeps the visual stable until curation
   // lands.
-  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
@@ -956,6 +975,10 @@ function MobileShell() {
   const [list, setList] = useState<string[]>([]);
   const screenRef = useRef<HTMLDivElement>(null);
 
+  // Single hook call at the shell level. Home receives it as props so
+  // the modal mount site below can call resolveStory too.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
   const shuffle = () => {
@@ -968,18 +991,35 @@ function MobileShell() {
     if (screenRef.current) screenRef.current.scrollTop = 0;
   }, [tab]);
 
+  // Live + sample catalog resolution so freshly-published stories open
+  // without throwing. byId would crash on an id that's not baked into
+  // published.ts; gating the modal on a non-null resolve keeps the
+  // shell standing.
+  const activeStory = active ? resolveStory(active.id) : null;
+
   return (
     <div className="relative mx-auto w-full max-w-[480px] h-[100dvh] overflow-hidden bg-bg">
       <div ref={screenRef} className="screen noscroll">
-        {tab === "Home" && <Home onOpen={open} onShuffle={shuffle} pill={pill} setPill={setPill} />}
+        {tab === "Home" && (
+          <Home
+            onOpen={open}
+            onShuffle={shuffle}
+            pill={pill}
+            setPill={setPill}
+            curation={curation}
+            behavior={behavior}
+            catalog={catalog}
+            resolveStory={resolveStory}
+          />
+        )}
         {tab === "Search" && <Search onOpen={open} />}
         {tab === "New" && <NewScreen onOpen={open} />}
         {tab === "My List" && <MyList onOpen={open} list={list} />}
       </div>
 
-      {active && (
+      {active && activeStory && (
         <TitleSheet
-          story={byId(active.id)}
+          story={activeStory}
           initialTab={active.tab}
           onClose={close}
           onOpen={open}

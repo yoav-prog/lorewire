@@ -862,14 +862,25 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 
 /* ----------------------------- PAGES ----------------------------- */
 
-function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
-  // Fetch the live admin curation + live published catalog once on
-  // mount. Each rail prefers the curated list; empty curation falls
-  // through to the settings-driven behaviour (auto-derive from the
-  // merged live+sample catalog, or hide). Failure also falls back
-  // silently so a DB blip can't take the homepage down.
-  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
-
+function HomePage({
+  onOpen,
+  onShuffle,
+  curation,
+  behavior,
+  catalog,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  // Curation state is hoisted into the top-level shell so the modal
+  // mount site can also use resolveStory. HomePage receives it as a
+  // prop instead of calling useHomepageCuration itself — two consumers
+  // of the same hook would mean two round trips.
+  curation: ReturnType<typeof useHomepageCuration>["curation"];
+  behavior: ReturnType<typeof useHomepageCuration>["behavior"];
+  catalog: ReturnType<typeof useHomepageCuration>["catalog"];
+  resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+}) {
   // Hero behaviour: curation.hero_required forces "no hero curation -> no
   // hero", which HomePage honours by rendering null in the hero slot.
   // Default (false) lets the empty-rail resolver auto-derive a hero so
@@ -978,16 +989,37 @@ export default function DesktopShell() {
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
   useEffect(() => { document.body.style.overflow = active ? "hidden" : ""; return () => { document.body.style.overflow = ""; }; }, [active]);
 
+  // Single hook call for the whole shell — HomePage receives the result
+  // as props so the modal mount site below can also call resolveStory.
+  // Two consumers would mean two round trips and a stale-state race.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
   const shuffle = () => { const r = STORIES[Math.floor(Math.random() * STORIES.length)]; open(r.id, "Watch"); };
   const toggleList = (id: string) => setList((l) => (l.includes(id) ? l.filter((x) => x !== id) : [...l, id]));
 
+  // Resolve the active story via the live + sample catalog so newly
+  // published stories (in the DB but not yet baked into published.ts)
+  // open without crashing. byId() throws on unknown ids — that's what
+  // produced the white screen "This page couldn't load" before; we
+  // gate the modal on a non-null resolution instead.
+  const activeStory = active ? resolveStory(active.id) : null;
+
   return (
     <div className="min-h-screen bg-bg">
       <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
 
-      {view === "Home" && <HomePage onOpen={open} onShuffle={shuffle} />}
+      {view === "Home" && (
+        <HomePage
+          onOpen={open}
+          onShuffle={shuffle}
+          curation={curation}
+          behavior={behavior}
+          catalog={catalog}
+          resolveStory={resolveStory}
+        />
+      )}
       {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} />}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} />}
       {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} />}
@@ -1000,7 +1032,16 @@ export default function DesktopShell() {
         </div>
       </footer>
 
-      {active && <DetailModal story={byId(active.id)} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} />}
+      {active && activeStory && (
+        <DetailModal
+          story={activeStory}
+          initialTab={active.tab}
+          onClose={close}
+          onOpen={open}
+          inList={list.includes(active.id)}
+          toggleList={toggleList}
+        />
+      )}
     </div>
   );
 }
