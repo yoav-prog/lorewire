@@ -113,10 +113,13 @@ export default function StoryJobEventTimeline({
           {!error && events.length === 0 && !loading && (
             <p className="font-mono text-[10px] text-muted">
               No events recorded yet. Worker writes events as it claims
-              and processes the row; if the queue is stuck, start a worker
-              locally with{" "}
+              and processes the row; if the queue is stuck, run{" "}
               <code className="text-ink">
                 python -m pipeline.story_jobs_worker
+              </code>{" "}
+              from the repo root, or{" "}
+              <code className="text-ink">
+                npm --prefix lorewire-app run dev:drain
               </code>
               .
             </p>
