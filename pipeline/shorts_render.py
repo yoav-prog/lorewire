@@ -56,13 +56,27 @@ def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> 
     proportionally onto the actual alignment-caption space so a scene lands near
     the beat it illustrates, then dedup-shift so no two frames share a start
     index (a shared start renders as a 1-frame flash in DoodleShort). Each frame
-    gets a stable `id` (the TS DoodleFrame type requires it)."""
+    gets a stable `id` (the TS DoodleFrame type requires it).
+
+    Carries `image_prompt` through when staged supplies it so the editor's
+    Scenes tab textarea can pre-fill with the exact bytes the model saw on
+    first generation. Frames missing image_prompt (e.g. a partial-success
+    short where one scene failed generation) emit no key — the editor falls
+    back to an empty textarea and the per-scene regen action surfaces the
+    "no image_prompt to regenerate from" error so the admin sees what's
+    missing instead of regenerating from nothing.
+    """
     span = max(1, caption_count - 1)
     pspan = max(1, planning_count - 1)
     mapped = []
     for f in staged:
         idx = max(0, min(caption_count - 1, round(f["planned"] * span / pspan)))
-        mapped.append({"id": f["id"], "url": f["url"], "idx": idx})
+        mapped.append({
+            "id": f["id"],
+            "url": f["url"],
+            "idx": idx,
+            "image_prompt": f.get("image_prompt"),
+        })
     mapped.sort(key=lambda x: x["idx"])
     frames: list[dict] = []
     used = -1
@@ -70,7 +84,14 @@ def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> 
         idx = it["idx"] if it["idx"] > used else used + 1
         idx = min(idx, caption_count - 1)
         used = idx
-        frames.append({"id": it["id"], "url": it["url"], "caption_chunk_start_index": idx})
+        frame: dict = {
+            "id": it["id"],
+            "url": it["url"],
+            "caption_chunk_start_index": idx,
+        }
+        if it.get("image_prompt"):
+            frame["image_prompt"] = it["image_prompt"]
+        frames.append(frame)
     return frames
 
 
@@ -143,9 +164,24 @@ def build_short_props(
         #    each frame's PLANNED caption index so a partial-download skip can't
         #    misalign the rest; the base frame is the opening (planned index 0).
         #    remote -> upload to GCS (https URLs); local -> staticFile paths.
+        #    image_prompt carries the FULL wrapped prompt that generated each
+        #    source URL so it survives into doodle_frames; editors see the
+        #    exact bytes the model received and per-scene regen replays them
+        #    verbatim. Base frame (i=0) uses assets.base_prompt; scene frames
+        #    use s["image_prompt"] persisted by generate_short_assets.
         progress("stage")
-        sources = [{"url": assets.base_url, "planned": 0}] + [
-            {"url": s["url"], "planned": int(s.get("caption_chunk_start_index", 0) or 0)}
+        sources = [
+            {
+                "url": assets.base_url,
+                "planned": 0,
+                "image_prompt": getattr(assets, "base_prompt", "") or "",
+            }
+        ] + [
+            {
+                "url": s["url"],
+                "planned": int(s.get("caption_chunk_start_index", 0) or 0),
+                "image_prompt": s.get("image_prompt") or "",
+            }
             for s in assets.scenes
         ]
         staged: list[dict] = []
@@ -161,7 +197,12 @@ def build_short_props(
                 gcs.publish(local, f"{safe_id}/{fname}", src["url"])
                 if remote else f"{safe_id}/{fname}"
             )
-            staged.append({"id": f"frame-{i:02d}", "url": url, "planned": src["planned"]})
+            staged.append({
+                "id": f"frame-{i:02d}",
+                "url": url,
+                "planned": src["planned"],
+                "image_prompt": src.get("image_prompt") or None,
+            })
             progress("stage", i + 1, len(sources))
         if not staged:
             print(f"[short id={safe_id}] no frames staged; skipping")

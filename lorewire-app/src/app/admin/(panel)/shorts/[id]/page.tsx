@@ -11,11 +11,13 @@ import { requireAdmin } from "@/lib/dal";
 import { getStory, getUserById } from "@/lib/repo";
 import { listVoices } from "@/lib/voice-library";
 import { readForeignSession } from "@/lib/short-edit-session";
+import { resolveSegmentsForStory } from "@/lib/segment-resolver";
 import {
   listArticlesLinkedToStoryAction,
   loadShortEditorState,
 } from "./actions";
 import { ShortEditorClient } from "./ShortEditorClient";
+import { ShortSegmentsStatusCard } from "./ShortSegmentsStatusCard";
 
 export default async function ShortEditorPage({
   params,
@@ -50,6 +52,18 @@ export default async function ShortEditorPage({
     ? (articlesResult.articles ?? [])
     : [];
 
+  // Mirror the render path's segment resolution so the editor surfaces
+  // exactly which 9:16 intro/outro will splice on the next Cloud Run
+  // render (and why if either is being skipped). Same chain
+  // api/render_short uses, so the editor reflects ground truth.
+  const segments = await resolveSegmentsForStory(story, "9:16").catch((err) => {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor page] resolveSegments failed", {
+      err: String(err),
+    });
+    return null;
+  });
+
   return (
     <div className="space-y-4">
       <header className="flex flex-wrap items-baseline justify-between gap-3 border-b border-line pb-3">
@@ -72,6 +86,20 @@ export default async function ShortEditorPage({
           Scenes · Captions · Script · Voice
         </div>
       </header>
+
+      {state.ok && segments && (
+        <ShortSegmentsStatusCard
+          storyId={id}
+          intro={{
+            label: segments.intro.segment?.label ?? null,
+            reason: segments.intro.reason,
+          }}
+          outro={{
+            label: segments.outro.segment?.label ?? null,
+            reason: segments.outro.reason,
+          }}
+        />
+      )}
 
       {!state.ok ? (
         <NoShortYet error={state.error ?? "unknown"} storyId={id} />
