@@ -32,6 +32,40 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+
+def _detect_vercel_runtime() -> None:
+    """Set VERCEL=1 in os.environ when the pipeline module is loaded from
+    Vercel's read-only Lambda mount (`/var/task/`).
+
+    Why: production hit `OSError: [Errno 30] Read-only file system:
+    '/var/task/api/_lib/lorewire-app'` while a story job's media stage
+    tried to mkdir the legacy public/generated/ tree. The relevant
+    detection (`pipeline/media.py:_staging_dir`) routes to /tmp ONLY when
+    `os.environ.get("VERCEL")` is truthy. Vercel docs say VERCEL=1 is set
+    on every function invocation, but observed prod runs are crashing
+    against the legacy path — meaning that env var is not always set
+    when the Python serverless function runs. The unmistakable signature
+    is the deployment mount itself: `/var/task` is Lambda's read-only
+    root. If the pipeline package was loaded from a path under there,
+    no amount of mkdir is going to write back to the bundle, and we MUST
+    route writes to /tmp.
+
+    Setting VERCEL=1 here means every downstream
+    `os.environ.get("VERCEL")` check Just Works regardless of whether
+    the runtime set it.
+    """
+    if os.environ.get("VERCEL") or os.environ.get("VERCEL_ENV"):
+        return
+    try:
+        if str(ROOT).startswith("/var/task"):
+            os.environ["VERCEL"] = "1"
+    except Exception:
+        # Belt + suspenders. A startup probe must never crash the import.
+        pass
+
+
+_detect_vercel_runtime()
+
 DB_PATH = os.environ.get("PIPELINE_DB", str(ROOT / "lorewire.db"))
 
 
