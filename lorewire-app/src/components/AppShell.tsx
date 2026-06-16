@@ -180,23 +180,43 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
 }
 
 /* ----------------------------- HOME ----------------------------- */
-function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle: () => void; pill: string; setPill: (p: string) => void }) {
-  // Live admin curation drives every rail. Empty curation falls back to
-  // the auto-derived defaults in lib/homepage-rails (sliced from STORIES
-  // by category / year) so the page never goes blank during the rollout.
-  // Hero pick comes from curation.hero when set; otherwise the legacy
-  // envelope default keeps the visual stable until the admin curates it.
-  const { curation, behavior } = useHomepageCuration();
+function Home({
+  onOpen,
+  onShuffle,
+  pill,
+  setPill,
+  curation,
+  behavior,
+  catalog,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  pill: string;
+  setPill: (p: string) => void;
+  // Hoisted from MobileShell so the modal mount site can also resolve
+  // the active story via the live catalog.
+  curation: ReturnType<typeof useHomepageCuration>["curation"];
+  behavior: ReturnType<typeof useHomepageCuration>["behavior"];
+  catalog: ReturnType<typeof useHomepageCuration>["catalog"];
+  resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+}) {
+  // Live admin curation + live published catalog drive every rail. Empty
+  // curation falls back to auto-derived defaults from the MERGED catalog
+  // (live DB + sample STORIES) so newly published stories appear without
+  // a re-export. Hero pick comes from curation.hero when set; otherwise
+  // the legacy envelope default keeps the visual stable until curation
+  // lands.
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior) ?? [];
+    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const featured =
-    (heroIds[0] && tryById(heroIds[0])) ??
-    (behavior.heroRequired ? null : tryById("envelope") ?? null);
+    (heroIds[0] && resolveStory(heroIds[0])) ??
+    (behavior.heroRequired ? null : resolveStory("envelope"));
 
-  const continueIds = resolveRailIds("continue", curation, behavior);
-  const top10Ids = resolveRailIds("top10", curation, behavior);
-  const newRowIds = resolveRailIds("new_row", curation, behavior);
+  const continueIds = resolveRailIds("continue", curation, behavior, catalog);
+  const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
+  const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
 
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
@@ -219,7 +239,7 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
           <RailHead>Continue Watching</RailHead>
           <div className={railClass}>
             {continueIds.map((id) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return <PosterCard key={id} story={s} onOpen={onOpen} w={150} h={96} />;
             })}
@@ -232,7 +252,7 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
           <RailHead>Top 10 Today</RailHead>
           <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
             {top10Ids.slice(0, 10).map((id, i) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return (
                 <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
@@ -246,10 +266,10 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
       )}
 
       {CATEGORY_RAILS.map((rail) => {
-        const ids = resolveRailIds(rail.surface, curation, behavior);
+        const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
         if (!ids) return null;
         const items = ids
-          .map((id) => tryById(id))
+          .map((id) => resolveStory(id))
           .filter((s): s is Story => s !== null);
         if (items.length === 0) return null;
         return (
@@ -269,7 +289,7 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
           <RailHead>New on LoreWire</RailHead>
           <div className={railClass}>
             {newRowIds.map((id) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return <PosterCard key={id} story={s} onOpen={onOpen} />;
             })}
@@ -955,6 +975,10 @@ function MobileShell() {
   const [list, setList] = useState<string[]>([]);
   const screenRef = useRef<HTMLDivElement>(null);
 
+  // Single hook call at the shell level. Home receives it as props so
+  // the modal mount site below can call resolveStory too.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
   const shuffle = () => {
@@ -967,18 +991,35 @@ function MobileShell() {
     if (screenRef.current) screenRef.current.scrollTop = 0;
   }, [tab]);
 
+  // Live + sample catalog resolution so freshly-published stories open
+  // without throwing. byId would crash on an id that's not baked into
+  // published.ts; gating the modal on a non-null resolve keeps the
+  // shell standing.
+  const activeStory = active ? resolveStory(active.id) : null;
+
   return (
     <div className="relative mx-auto w-full max-w-[480px] h-[100dvh] overflow-hidden bg-bg">
       <div ref={screenRef} className="screen noscroll">
-        {tab === "Home" && <Home onOpen={open} onShuffle={shuffle} pill={pill} setPill={setPill} />}
+        {tab === "Home" && (
+          <Home
+            onOpen={open}
+            onShuffle={shuffle}
+            pill={pill}
+            setPill={setPill}
+            curation={curation}
+            behavior={behavior}
+            catalog={catalog}
+            resolveStory={resolveStory}
+          />
+        )}
         {tab === "Search" && <Search onOpen={open} />}
         {tab === "New" && <NewScreen onOpen={open} />}
         {tab === "My List" && <MyList onOpen={open} list={list} />}
       </div>
 
-      {active && (
+      {active && activeStory && (
         <TitleSheet
-          story={byId(active.id)}
+          story={activeStory}
           initialTab={active.tab}
           onClose={close}
           onOpen={open}
