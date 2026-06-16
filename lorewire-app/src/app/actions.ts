@@ -316,6 +316,10 @@ export interface LiveCatalogStory {
   summary: string | null;
   duration: string | null;
   hero_image: string | null;
+  hero_image_landscape: string | null;
+  /** Python pipeline writes 1 when the hero artwork already has the
+   *  title baked in so the CSS title overlay doesn't double up. */
+  hero_has_baked_title: number | null;
   video_url: string | null;
   published_at: string | null;
   created_at: string | null;
@@ -394,13 +398,11 @@ export async function listPublishedShorts(
   const clause = `WHERE ${where.join(" AND ")}`;
   // Over-fetch by one so we know whether a further page exists without a second
   // COUNT round-trip. id is the deterministic tiebreak so the sort is stable
-  // across equal published_at values. Columns dropped vs feat/reels-feed:
-  // hero_image_landscape and hero_has_baked_title don't exist on this
-  // branch's schema yet (this branch never picked up that migration); the
-  // WireCard treats them as optional so absent fields are harmless.
+  // across equal published_at values.
   const rows = await all<LiveCatalogStory>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
-      "video_url, published_at, created_at FROM stories " +
+      "hero_image_landscape, hero_has_baked_title, video_url, " +
+      "published_at, created_at FROM stories " +
       `${clause} ` +
       "ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC " +
       `LIMIT ${limit + 1}`,
