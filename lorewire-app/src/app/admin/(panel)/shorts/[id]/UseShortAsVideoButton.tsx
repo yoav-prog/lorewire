@@ -6,6 +6,11 @@
 // Reversible: the long-form MP4 lives at a separate GCS key, so
 // re-rendering the long-form video restores it.
 //
+// After a successful apply the button surfaces the slug-linked "View
+// story" so the admin can verify the live page renders the short — the
+// previous version stopped at "Applied ✓" with no verification path,
+// which made silent no-op writes hard to notice.
+//
 // Plan: _plans/2026-06-16-short-editor-full-parity.md (Phase 5+ surfacing).
 
 import { useState, useTransition } from "react";
@@ -23,19 +28,31 @@ export function UseShortAsVideoButton({
 }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
-  const [applied, setApplied] = useState(false);
+  const [appliedSlug, setAppliedSlug] = useState<string | null>(null);
+  const [appliedUrl, setAppliedUrl] = useState<string | null>(null);
+  const applied = appliedUrl !== null;
   const [pending, startTransition] = useTransition();
 
   function apply() {
     setError(null);
-    setApplied(false);
+    setAppliedSlug(null);
+    setAppliedUrl(null);
     startTransition(async () => {
       const r = await applyLatestShortToStoryAction(storyId);
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[short editor apply-button result]", {
+        story_id: storyId,
+        ok: r.ok,
+        error: r.error ?? null,
+        url: r.url ?? null,
+        slug: r.slug ?? null,
+      });
       if (!r.ok) {
         setError(r.error ?? "apply failed");
         return;
       }
-      setApplied(true);
+      setAppliedUrl(r.url ?? null);
+      setAppliedSlug(r.slug ?? null);
       router.refresh();
     });
   }
@@ -48,22 +65,41 @@ export function UseShortAsVideoButton({
           Replaces the story&apos;s video URL with the latest finished short.
           Reversible: re-render the long-form video to switch back.
         </p>
+        {applied && (
+          <p className="mt-1 break-all font-mono text-[10px] text-muted">
+            video_url ← <span className="text-ink">{appliedUrl}</span>
+          </p>
+        )}
       </div>
-      <button
-        type="button"
-        onClick={apply}
-        disabled={pending || disabled}
-        title={disabled ? "Generate a short first" : undefined}
-        className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        {pending
-          ? "Applying…"
-          : applied
-            ? "Applied ✓"
-            : "Use as story video"}
-      </button>
+      <div className="flex items-center gap-2">
+        {applied && appliedSlug && (
+          <a
+            href={`/v/${appliedSlug}`}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-md border border-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent/10"
+          >
+            View story ↗
+          </a>
+        )}
+        <button
+          type="button"
+          onClick={apply}
+          disabled={pending || disabled}
+          title={disabled ? "Generate a short first" : undefined}
+          className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending
+            ? "Applying…"
+            : applied
+              ? "Re-apply latest"
+              : "Use as story video"}
+        </button>
+      </div>
       {error && (
-        <span className="font-mono text-[10px] text-warn">{error}</span>
+        <span className="basis-full font-mono text-[10px] text-warn">
+          {error}
+        </span>
       )}
     </div>
   );

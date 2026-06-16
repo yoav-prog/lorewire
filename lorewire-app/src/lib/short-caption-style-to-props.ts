@@ -110,3 +110,56 @@ export function shortCaptionStyleToProps(
         : DEFAULTS.word_highlight,
   };
 }
+
+// Sparse typed coercion for the render path. The editor persists every
+// caption_style field as a STRING (matches the settings-resolver shape),
+// but the Remotion renderer's resolveCaptionTemplate rejects string-typed
+// numerics (font_weight, position_y, padding_x, letter_spacing, line_height,
+// outline_width, size_scale) via an _isNumber guard and silently falls
+// back to defaults. Spreading the raw caption_style map onto
+// caption_template therefore drops every numeric override — only the
+// string-shaped fields (color, outline_color, text_transform, word_highlight,
+// entry_effect) survive the merge.
+//
+// This helper coerces each numeric field to a number BEFORE the merge so
+// the renderer receives the type it expects. Sparse: missing or empty
+// fields are omitted so the baseline caption_template (from the
+// settings-resolver) stays in charge of anything the admin didn't touch.
+//
+// Returns an empty object when caption_style is undefined or fully empty;
+// callers can short-circuit on `Object.keys(out).length === 0`.
+export function shortCaptionStyleToRenderTemplate(
+  caption_style: { [key: string]: string | undefined } | undefined,
+): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  if (!caption_style) return out;
+  const numericFields = [
+    "position_y",
+    "size_scale",
+    "padding_x",
+    "font_weight",
+    "letter_spacing",
+    "line_height",
+    "outline_width",
+  ] as const;
+  const stringFields = [
+    "text_transform",
+    "color",
+    "active_word_color",
+    "spoken_word_color",
+    "outline_color",
+    "entry_effect",
+    "word_highlight",
+  ] as const;
+  for (const f of numericFields) {
+    const raw = caption_style[f];
+    if (typeof raw !== "string" || raw.length === 0) continue;
+    const v = Number(raw);
+    if (Number.isFinite(v)) out[f] = v;
+  }
+  for (const f of stringFields) {
+    const raw = caption_style[f];
+    if (typeof raw === "string" && raw.length > 0) out[f] = raw;
+  }
+  return out;
+}

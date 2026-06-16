@@ -45,6 +45,7 @@ import {
   parseShortConfig,
   type ShortConfig,
 } from "@/lib/short-config";
+import { shortCaptionStyleToRenderTemplate } from "@/lib/short-caption-style-to-props";
 import {
   planShortRender,
   type ShortRenderPlan,
@@ -410,7 +411,14 @@ export async function renderShortLaneA(
   // into caption_template so the next render reflects the picked colors /
   // highlight / position. The baseline's caption_template (set by the
   // Python pipeline from settings) is the floor; per-field overrides win.
-  const styleOverride = cfg.config.caption_style ?? {};
+  //
+  // CRITICAL: caption_style fields are stored as STRINGS but the Remotion
+  // renderer's resolveCaptionTemplate rejects string-typed numerics (position_y,
+  // font_weight, etc.) and silently falls back to defaults. Coerce numerics
+  // through the sparse adapter so the renderer accepts every override.
+  const styleOverride = shortCaptionStyleToRenderTemplate(
+    cfg.config.caption_style as Record<string, string | undefined> | undefined,
+  );
   const baselineTemplate =
     (baselineProps as { caption_template?: Record<string, unknown> })
       .caption_template ?? {};
@@ -880,27 +888,57 @@ export async function revertShortScene(
 // video_url at its output_url. Reversible: the long-form MP4 stays at
 // its own GCS key, so re-rendering the long-form video restores it.
 
-export async function applyLatestShortToStoryAction(
-  storyId: string,
-): Promise<{ ok: boolean; error?: string; url?: string }> {
+export async function applyLatestShortToStoryAction(storyId: string): Promise<{
+  ok: boolean;
+  error?: string;
+  url?: string;
+  slug?: string | null;
+}> {
   const session = await requireAdmin();
   if (!storyId) return { ok: false, error: "missing story_id" };
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
   const latest = await latestDoneShortRenderForStory(storyId);
   if (!latest) return { ok: false, error: "no short generated yet" };
   if (latest.status !== "done" || !latest.output_url) {
     return { ok: false, error: "latest short is not done" };
   }
+  const previousUrl = story.video_url ?? null;
   await applyShortToStory(storyId, latest.output_url);
+  // Defense-in-depth: re-read the row and confirm video_url actually
+  // landed. If a constraint or trigger silently dropped the write the
+  // user would otherwise see "Applied ✓" forever on a no-op — surface
+  // it loudly instead.
+  const verify = await getStory(storyId);
+  const verifiedUrl = verify?.video_url ?? null;
+  const verified = verifiedUrl === latest.output_url;
   // eslint-disable-next-line no-console -- rule 14
   console.info("[short editor apply-to-story]", {
     story_id: storyId,
     render_id: latest.id,
     user_id: session.userId,
-    url: latest.output_url,
+    previous_url: previousUrl,
+    applied_url: latest.output_url,
+    verified_url: verifiedUrl,
+    verified,
+    slug: story.slug,
   });
+  if (!verified) {
+    return {
+      ok: false,
+      error:
+        "the database write reported success but the story's video_url did not change — check the server logs",
+    };
+  }
   revalidatePath(`/admin/videos/${storyId}`);
   revalidatePath(`/admin/shorts/${storyId}`);
-  return { ok: true, url: latest.output_url };
+  // Public reader paths so the change is visible to the live site on
+  // the next request, not after the next ISR tick.
+  revalidatePath(`/admin/stories/${storyId}`);
+  if (story.slug) {
+    revalidatePath(`/v/${story.slug}`);
+  }
+  return { ok: true, url: latest.output_url, slug: story.slug };
 }
 
 // ─── Articles linked to this story (for scene-to-article promote) ─────────
