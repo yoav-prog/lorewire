@@ -267,6 +267,23 @@ export async function getStoryShortConfigJson(
   return r?.short_config ?? null;
 }
 
+// Wipe `stories.short_config` so the short editor's loadCurrentConfig
+// re-seeds from the next done short_render's props instead of re-using
+// the persisted copy. Used by the Restart action — a "throw away and
+// start over" gesture by design. Bumps updated_at so the dashboard
+// list re-sorts.
+export async function clearStoryShortConfig(storyId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE stories SET short_config = NULL, updated_at = ? WHERE id = ?",
+    [now, storyId],
+  );
+  // eslint-disable-next-line no-console -- rule 14: observability from day one
+  console.info("[short editor config cleared]", {
+    story_id: storyId,
+  });
+}
+
 // Persists a canonical JSON string into the short_config column and bumps
 // updated_at so dashboard ORDER BY updated_at picks up freshly-edited
 // shorts. Caller is responsible for validating through parseShortConfig()
