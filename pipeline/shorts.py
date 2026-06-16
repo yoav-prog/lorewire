@@ -95,20 +95,48 @@ def chunk_for_planning(script: str, max_words: int = 6) -> list[str]:
     return chunks
 
 
-def build_plan_prompt(script: str, hook: str, payoff: str, captions: list[str], max_scenes: int) -> str:
+def build_plan_prompt(
+    script: str,
+    hook: str,
+    payoff: str,
+    captions: list[str],
+    max_scenes: int,
+    *,
+    source_body: str = "",
+) -> str:
     """Design ONE recurring main character + N varied scene frames. The same
     character appears in every frame (identity carried by i2i); each scene puts
     them in a different place / pose / mood, with supporting characters when the
-    beat needs them."""
+    beat needs them.
+
+    `source_body` is the full LoreWire article (= the retold Reddit post). The
+    character planner uses it as ground truth for the protagonist's
+    identity: pronouns, age/gender flair ("42M", "17F", "single dad"),
+    and any explicit role markers. Without this the LLM was inventing the
+    character from the short script alone — which often loses the original
+    gender, leaving a male protagonist's short with a female lead (or vice
+    versa) and the hero / poster art compounding the mismatch downstream.
+    """
     n = max(1, min(max_scenes, len(captions)))
     cap_lines = "\n".join(f"[{i}] {c}" for i, c in enumerate(captions))
     system = (
         "You are the art director for a vertical hand-drawn cartoon short. Design ONE recurring MAIN "
         "CHARACTER and a set of scene frames in which that SAME character appears in many DIFFERENT "
         "places, poses and moods.\n\n"
-        "MAIN CHARACTER: a vivid, specific, repeatable description (gender, hair, face, glasses or not, "
-        "exact clothing with colors, build) — specific enough that an artist redraws the identical person "
-        "every time. 1-2 sentences.\n\n"
+        "PROTAGONIST IDENTITY IS NON-NEGOTIABLE. Before you pick anything else, read the SOURCE ARTICLE "
+        "below and lock in the protagonist's:\n"
+        "  - GENDER (look for pronouns 'he/him', 'she/her', 'they/them'; explicit flair like '42M', "
+        "'17F', '34NB'; role words like 'mom', 'dad', 'husband', 'wife', 'brother', 'sister', 'son', "
+        "'daughter', 'boyfriend', 'girlfriend', 'OP's wife', 'my boss').\n"
+        "  - APPROX AGE BAND (teen / 20s / 30s / 40s / 50s / 60s+) from any age cues in the source.\n"
+        "  - ROLE/RELATIONSHIP to the story (employee, parent, tenant, dater, roommate, customer, etc.).\n"
+        "If the source contains explicit markers (e.g. '42M', 'I (29F)'), the protagonist's gender and "
+        "approximate age MUST match those markers verbatim. Never invent a different gender from what "
+        "the source describes.\n\n"
+        "MAIN CHARACTER: a vivid, specific, repeatable description (gender, age band, hair, face, "
+        "glasses or not, exact clothing with colors, build) — specific enough that an artist redraws "
+        "the identical person every time. 1-2 sentences. Open the description with the gender + age "
+        "band (e.g. 'A mid-40s man with...', 'A young woman in her late 20s with...').\n\n"
         f"SCENE FRAMES ({n} frames): each frame shows the SAME main character (identity unchanged) "
         "visualizing its caption beat, but in a DIFFERENT setting, body pose, facial expression and mood "
         "from the others — standing / sitting / crouching / walking / reacting, close-up vs wide, "
@@ -119,13 +147,23 @@ def build_plan_prompt(script: str, hook: str, payoff: str, captions: list[str], 
         "hook line the narrator says first, in a real setting (NOT a neutral pose, NOT a blank "
         "background). Pick a vivid moment that lands the hook visually.\n\n"
         "Output STRICTLY this JSON:\n"
-        '{\n  "character": "<vivid repeatable main-character description>",\n'
+        '{\n  "character": "<vivid repeatable main-character description, opens with gender + age band>",\n'
         '  "scenes": [\n    { "caption_chunk_start_index": <int 0-' + str(max(0, len(captions) - 1)) +
         '>, "scene": "<the same character in a new place/pose/mood for this beat>" }\n  ]\n}\n\n'
         "Return ONLY valid JSON."
     )
+    # The source body is the strongest signal for protagonist identity — the
+    # short script is a condensed retelling and the LLM rewriter sometimes
+    # drops gender markers. Falls back to script-only when no body is passed
+    # so legacy callers stay compatible.
+    source_block = (
+        f"SOURCE ARTICLE (ground truth for the protagonist's identity):\n\"\"\"\n{source_body}\n\"\"\"\n\n"
+        if source_body.strip()
+        else ""
+    )
     user = (
-        f"Hook: {hook}\nPayoff: {payoff}\n\nFull script:\n\"\"\"\n{script}\n\"\"\"\n\n"
+        f"{source_block}"
+        f"Hook: {hook}\nPayoff: {payoff}\n\nShort script:\n\"\"\"\n{script}\n\"\"\"\n\n"
         f"Pre-chunked captions (use these indices):\n{cap_lines}\n\n"
         f"Design ONE main character + {n} varied scene frames. JSON only."
     )
@@ -200,8 +238,14 @@ def generate_short_assets(
     progress("plan")
     plan = extract_json(
         llm.chat(
-            build_plan_prompt(script["short_script"], script.get("hook", ""), script.get("payoff", ""),
-                              caps, length.max_scenes),
+            build_plan_prompt(
+                script["short_script"],
+                script.get("hook", ""),
+                script.get("payoff", ""),
+                caps,
+                length.max_scenes,
+                source_body=body,
+            ),
             max_tokens=3600,
             model=llm_model,
         )

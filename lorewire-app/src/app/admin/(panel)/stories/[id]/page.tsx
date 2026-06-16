@@ -150,6 +150,11 @@ export default async function EditStory({
       hint: "The poster frame on the public reader and the OG card.",
     },
     {
+      asset: "hero_from_short",
+      label: "Restyle hero from short character",
+      hint: "Redraws the hero + landscape using the short's character as an i2i reference. Same poster style, same protagonist as the Watch tab.",
+    },
+    {
       asset: "scenes",
       label: sceneCountLabel,
       hint: sceneCountHint,
