@@ -345,8 +345,11 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
         On Vercel the cron at <code>/api/drain_story_jobs</code> drains
         every 2 minutes; in local dev run{" "}
         <code className="font-mono">python -m pipeline.story_jobs_worker</code>{" "}
-        (or <code className="font-mono">npm run dev:drain</code>) to move
-        the queue. Click into any row to watch its live timeline.
+        from the repo root, or{" "}
+        <code className="font-mono">
+          npm --prefix lorewire-app run dev:drain
+        </code>{" "}
+        to mirror the cron. Click into any row to watch its live timeline.
       </div>
     );
   }
