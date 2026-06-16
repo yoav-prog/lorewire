@@ -248,14 +248,23 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape }: { 
   );
 }
 
-function Top10Row({ onOpen, ids }: { onOpen: OpenFn; ids: string[] }) {
-  // tryById skips curated ids that aren't in the static catalog (story
-  // published in DB but not yet exported into published.ts). Without
-  // this filter byId() would throw and crash the whole homepage.
+function Top10Row({
+  onOpen,
+  ids,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  ids: string[];
+  resolveStory: (id: string) => Story | null;
+}) {
+  // resolveStory checks the live catalog + static STORIES so a freshly-
+  // published id (in the DB but not yet baked into published.ts) still
+  // renders. Returning null on a miss filters the entry out so a stale
+  // curation row can't crash the rail.
   return (
     <>
       {ids.slice(0, 10).map((id, i) => {
-        const s = tryById(id);
+        const s = resolveStory(id);
         if (!s) return null;
         return (
           <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
@@ -888,64 +897,69 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 
 /* ----------------------------- PAGES ----------------------------- */
 
-function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
-  // Fetch the live admin curation once on mount. Each rail prefers the
-  // curated list; empty curation falls through to the settings-driven
-  // behaviour (auto-derive a default from STORIES, or hide). Failure
-  // also falls back silently so a DB blip can't take the homepage down.
-  const { curation, behavior } = useHomepageCuration();
-
+function HomePage({
+  onOpen,
+  onShuffle,
+  curation,
+  behavior,
+  catalog,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  // Curation state is hoisted into the top-level shell so the modal
+  // mount site can also use resolveStory. HomePage receives it as a
+  // prop instead of calling useHomepageCuration itself — two consumers
+  // of the same hook would mean two round trips.
+  curation: ReturnType<typeof useHomepageCuration>["curation"];
+  behavior: ReturnType<typeof useHomepageCuration>["behavior"];
+  catalog: ReturnType<typeof useHomepageCuration>["catalog"];
+  resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+}) {
   // Hero behaviour: curation.hero_required forces "no hero curation -> no
   // hero", which HomePage honours by rendering null in the hero slot.
   // Default (false) lets the empty-rail resolver auto-derive a hero so
   // a fresh install doesn't show a blank top of the home page.
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior) ?? [];
+    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const heroStory =
-    heroIds[0]
-      ? tryById(heroIds[0])
-      : behavior.heroRequired
-        ? null
-        : tryById("envelope") ?? null;
+    (heroIds[0] && resolveStory(heroIds[0])) ??
+    (behavior.heroRequired ? null : resolveStory("envelope"));
 
-  const continueIds = resolveRailIds("continue", curation, behavior);
+  const continueIds = resolveRailIds("continue", curation, behavior, catalog);
   // Continue Watching had per-user-style progress bars in the legacy
-  // hardcoded demo. Live curation has no per-user state, so curated +
-  // derived entries render without a bar — the rail now reads as a
-  // "currently featured" strip. We could re-introduce real progress
-  // once user sessions land.
-  const continueItems = continueIds
-    ? continueIds.map((id) => ({ id, p: undefined as number | undefined }))
-    : null;
-  const top10Ids = resolveRailIds("top10", curation, behavior);
-  const newRowIds = resolveRailIds("new_row", curation, behavior);
+  // hardcoded demo. Live curation has no per-user state, so entries
+  // render without a bar — the rail now reads as a "currently featured"
+  // strip. We could re-introduce real progress once user sessions land.
+  const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
+  const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
 
   return (
     <div className="pb-20">
       {heroStory && <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />}
       <div className={heroStory ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
-        {continueItems && continueItems.length > 0 && (
+        {continueIds && continueIds.length > 0 && (
           <Rail title="Continue Watching">
-            {continueItems.map(({ id, p }) => {
-              const s = tryById(id);
+            {continueIds.map((id) => {
+              const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} progress={p} landscape />;
+              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} landscape />;
             })}
           </Rail>
         )}
         {top10Ids && top10Ids.length > 0 && (
           <Rail title="Top 10 Today">
-            <Top10Row onOpen={onOpen} ids={top10Ids} />
+            <Top10Row onOpen={onOpen} ids={top10Ids} resolveStory={resolveStory} />
           </Rail>
         )}
         {CATEGORY_RAILS.map((rail) => {
-          const ids = resolveRailIds(rail.surface, curation, behavior);
+          const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
           if (!ids) return null;
-          // Skip rails that resolve to no displayable stories at all (no
-          // curation + no fallback hits) so the homepage doesn't render
-          // an empty section header.
-          const items = ids.map((id) => tryById(id)).filter((s): s is Story => s !== null);
+          // Skip rails that resolve to no displayable stories at all
+          // (no curation + no fallback hits) so the homepage doesn't
+          // render an empty section header.
+          const items = ids.map((id) => resolveStory(id)).filter((s): s is Story => s !== null);
           if (items.length === 0) return null;
           return (
             <Rail key={rail.surface} title={rail.title}>
@@ -956,7 +970,7 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
         {newRowIds && newRowIds.length > 0 && (
           <Rail title="New on LoreWire">
             {newRowIds.map((id) => {
-              const s = tryById(id);
+              const s = resolveStory(id);
               if (!s) return null;
               return <PosterCard key={id} story={s} onOpen={onOpen} />;
             })}
@@ -1010,16 +1024,37 @@ export default function DesktopShell() {
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
   useEffect(() => { document.body.style.overflow = active ? "hidden" : ""; return () => { document.body.style.overflow = ""; }; }, [active]);
 
+  // Single hook call for the whole shell — HomePage receives the result
+  // as props so the modal mount site below can also call resolveStory.
+  // Two consumers would mean two round trips and a stale-state race.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
   const shuffle = () => { const r = STORIES[Math.floor(Math.random() * STORIES.length)]; open(r.id, "Watch"); };
   const toggleList = (id: string) => setList((l) => (l.includes(id) ? l.filter((x) => x !== id) : [...l, id]));
 
+  // Resolve the active story via the live + sample catalog so newly
+  // published stories (in the DB but not yet baked into published.ts)
+  // open without crashing. byId() throws on unknown ids — that's what
+  // produced the white screen "This page couldn't load" before; we
+  // gate the modal on a non-null resolution instead.
+  const activeStory = active ? resolveStory(active.id) : null;
+
   return (
     <div className="min-h-screen bg-bg">
       <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
 
-      {view === "Home" && <HomePage onOpen={open} onShuffle={shuffle} />}
+      {view === "Home" && (
+        <HomePage
+          onOpen={open}
+          onShuffle={shuffle}
+          curation={curation}
+          behavior={behavior}
+          catalog={catalog}
+          resolveStory={resolveStory}
+        />
+      )}
       {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} />}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} />}
       {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} />}
@@ -1032,7 +1067,16 @@ export default function DesktopShell() {
         </div>
       </footer>
 
-      {active && <DetailModal story={byId(active.id)} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} />}
+      {active && activeStory && (
+        <DetailModal
+          story={activeStory}
+          initialTab={active.tab}
+          onClose={close}
+          onOpen={open}
+          inList={list.includes(active.id)}
+          toggleList={toggleList}
+        />
+      )}
     </div>
   );
 }
