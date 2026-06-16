@@ -203,7 +203,10 @@ def build_plan_prompt(
         "happy / sneaky / worried / shocked / anxious, across varied locations. Bring in SUPPORTING "
         "characters (coworkers, a boss, a friend) when the beat needs them — when you do, name the "
         "entity in the scene text AND in the matching per-scene array so its bible cues attach. "
-        "Each scene 60-200 chars. Spread the chunk indices evenly across the whole script.\n\n"
+        "Each scene 60-200 chars. Spread the chunk indices evenly across the whole script.\n"
+        "FIRST SCENE MUST set caption_chunk_start_index=0 — it is the opener and must illustrate the "
+        "hook line the narrator says first, in a real setting (NOT a neutral pose, NOT a blank "
+        "background). Pick a vivid moment that lands the hook visually.\n\n"
         "Output STRICTLY this JSON:\n"
         "{\n"
         '  "character": "<vivid repeatable main-character description, grounded in the source>",\n'
