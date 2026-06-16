@@ -26,6 +26,8 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
   video_url: null,
   images: [],
+  audio_url: null,
+  alignment: [],
   is_short: false,
   found: false,
 };
@@ -577,17 +579,42 @@ function Read({
 /* ----------------------------- READ-ALONG ----------------------------- */
 const SCRIPT = ("Dana volunteered to collect the money before anyone else could blink. The envelope filled up fast, fat with twenties and one brave hundred. Then, over a single long weekend, it simply vanished from the drawer. She said she moved it somewhere safe. It was not, in any sense, safe.").split(" ");
 
-function ReadAlong({ story }: { story: Story }) {
-  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
-  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+function ReadAlong({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
+  // Prefer the live short's audio + alignment so the karaoke surface plays
+  // the same narration the Watch tab plays. Without this the read-along
+  // would keep playing the baked long-form audio while Watch shows the
+  // short — same story, two unrelated voices.
+  const audioUrl = liveMedia.audio_url ?? story.audioUrl;
+  const alignment =
+    liveMedia.alignment.length > 0 ? liveMedia.alignment : story.alignment;
+  const hasReal = !!audioUrl && !!alignment && alignment.length > 0;
+  return hasReal ? (
+    <RealReadAlong story={story} audioUrl={audioUrl} alignment={alignment} />
+  ) : (
+    <FakeReadAlong />
+  );
 }
 
-function RealReadAlong({ story }: { story: Story }) {
+function RealReadAlong({
+  story,
+  audioUrl,
+  alignment,
+}: {
+  story: Story;
+  audioUrl: string;
+  alignment: Array<{ word: string; start: number; end: number }>;
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
-  const words = story.alignment || [];
+  const words = alignment;
 
   const activeIdx = (() => {
     for (let i = 0; i < words.length; i++) {
@@ -618,14 +645,14 @@ function RealReadAlong({ story }: { story: Story }) {
     <div className="max-w-[760px]">
       <audio
         ref={audioRef}
-        src={story.audioUrl}
+        src={audioUrl}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
         onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
-        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: audioUrl })}
       />
       <div className="flex items-center gap-4">
         <button onClick={toggle} className="w-16 h-16 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition">
@@ -824,7 +851,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
             <div className="pt-7">
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
-              {tab === "Read-along" && <ReadAlong story={story} />}
+              {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
             </div>
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>

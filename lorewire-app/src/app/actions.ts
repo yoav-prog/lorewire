@@ -41,6 +41,16 @@ export interface LiveStoryMediaResult {
    *  long-form video (or no video), this falls back to stories.images
    *  and the caller should render at 16:9. */
   images: string[];
+  /** Narration audio for the read-along surface. When the applied video is
+   *  the short, this comes from short_renders.props.voiceover_url so the
+   *  read-along plays the same voice the Watch tab plays. Null falls the
+   *  read-along back to stories.audio_url (the long-form narration). */
+  audio_url: string | null;
+  /** Per-word timings for the read-along karaoke highlight, in seconds.
+   *  For shorts: flattened from short_renders.props.captions[].words[]
+   *  (each chunk carries per-word start_ms/end_ms). Empty array means
+   *  "use the baked story.alignment". */
+  alignment: Array<{ word: string; start: number; end: number }>;
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -89,6 +99,62 @@ function parseShortFrameUrls(propsJson: string | null): string[] {
   return out;
 }
 
+// Pulls the short's narration URL out of its props blob. The renderer stores
+// it as `voiceover_url` (a GCS URL when remote=True, a staticFile-relative
+// path when local); the read-along surface just hands the value to <audio
+// src>, so either shape works without extra handling here.
+function parseShortVoiceoverUrl(propsJson: string | null): string | null {
+  if (!propsJson) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(propsJson);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const url = (parsed as { voiceover_url?: unknown }).voiceover_url;
+  return typeof url === "string" && url.length > 0 ? url : null;
+}
+
+// Flattens the short's caption chunks into the word-level alignment shape
+// the read-along uses (`{word, start, end}` in seconds). Each chunk carries
+// its own per-word start_ms/end_ms — the same data the long-form alignment
+// stores, just bucketed by caption — so we just unwrap and convert units.
+function parseShortAlignment(
+  propsJson: string | null,
+): Array<{ word: string; start: number; end: number }> {
+  if (!propsJson) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(propsJson);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object") return [];
+  const captions = (parsed as { captions?: unknown }).captions;
+  if (!Array.isArray(captions)) return [];
+  const out: Array<{ word: string; start: number; end: number }> = [];
+  for (const c of captions) {
+    if (!c || typeof c !== "object") continue;
+    const words = (c as { words?: unknown }).words;
+    if (!Array.isArray(words)) continue;
+    for (const w of words) {
+      if (!w || typeof w !== "object") continue;
+      const word = (w as { word?: unknown }).word;
+      const startMs = (w as { start_ms?: unknown }).start_ms;
+      const endMs = (w as { end_ms?: unknown }).end_ms;
+      if (
+        typeof word === "string" &&
+        typeof startMs === "number" &&
+        typeof endMs === "number"
+      ) {
+        out.push({ word, start: startMs / 1000, end: endMs / 1000 });
+      }
+    }
+  }
+  return out;
+}
+
 function parseStoryImageList(raw: string | null | undefined): string[] {
   if (!raw) return [];
   try {
@@ -114,6 +180,8 @@ export async function getLiveStoryMedia(
     ok: true,
     video_url: null,
     images: [],
+    audio_url: null,
+    alignment: [],
     is_short: false,
     found: false,
   };
@@ -146,12 +214,19 @@ export async function getLiveStoryMedia(
   const isShort = isShortVideoUrl(row.video_url);
   // When the applied video is a short, replace the long-form image list
   // with the short's doodle scene frames so the article reads as the
-  // 9:16 doodle visual story instead of mixing styles.
+  // 9:16 doodle visual story instead of mixing styles. Read-along audio
+  // + alignment come from the same props row so the karaoke surface
+  // plays the short's narration verbatim — without this, Watch shows
+  // the short while Read-along plays the unrelated long-form voice.
   let images: string[];
+  let audioUrl: string | null = null;
+  let alignment: Array<{ word: string; start: number; end: number }> = [];
   if (isShort) {
     const propsJson = await latestDoneShortPropsForStory(row.id);
     const shortImages = parseShortFrameUrls(propsJson);
     images = shortImages.length > 0 ? shortImages : parseStoryImageList(row.images);
+    audioUrl = parseShortVoiceoverUrl(propsJson);
+    alignment = parseShortAlignment(propsJson);
   } else {
     images = parseStoryImageList(row.images);
   }
@@ -160,6 +235,8 @@ export async function getLiveStoryMedia(
     ok: true,
     video_url: row.video_url,
     images,
+    audio_url: audioUrl,
+    alignment,
     is_short: isShort,
     found: true,
   };
