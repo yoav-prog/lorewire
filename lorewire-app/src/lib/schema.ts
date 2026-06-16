@@ -98,6 +98,13 @@ export const STORIES: Table = {
     // server-side resolution chain lives in pipeline/voice.py:synthesize.
     { name: "voice_provider", type: "TEXT" },
     { name: "voice_id", type: "TEXT" },
+    // 2026-06-17 hero style registry (_plans/2026-06-17-hero-style-registry.md).
+    // Closed-enum key from pipeline/stages.py:HERO_STYLES. NULL means
+    // "let the resolver pick" — falls through to settings (per-category
+    // default → global default) → deterministic auto-pick from the
+    // story's category whitelist. Admin override always wins; settings
+    // changes never overwrite an existing row.
+    { name: "hero_style_id", type: "TEXT" },
   ],
 };
 

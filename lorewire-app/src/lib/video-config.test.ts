@@ -73,6 +73,7 @@ function emptyStoryRow(overrides: Partial<StoryRow> = {}): StoryRow {
     pipeline_cache: null,
     voice_provider: null,
     voice_id: null,
+    hero_style_id: null,
     ...overrides,
   };
 }

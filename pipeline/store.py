@@ -130,6 +130,12 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image_landscape TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image_square TEXT",
+    # 2026-06-17 hero style registry (_plans/2026-06-17-hero-style-registry.md).
+    # Closed-enum key from pipeline.stages.HERO_STYLES, NULL = "let the
+    # resolver pick" (per-category default → global default → deterministic
+    # auto-pick from the category's style whitelist). Admin override wins;
+    # a settings change never overwrites an existing row's pin.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_style_id TEXT",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -471,6 +477,11 @@ _COLUMNS = [
     # Written by media.generate_hero_and_thumbnail_from_short after the
     # short finishes; NULL on fresh-pipeline writes until that finisher runs.
     "thumbnail_image", "thumbnail_image_landscape", "thumbnail_image_square",
+    # 2026-06-17 hero style registry per-story override. NULL on
+    # fresh-pipeline writes — the picker UI lands it via the story
+    # edit page's "Hero style" dropdown. Resolution chain lives in
+    # pipeline/stages.py:resolve_hero_style.
+    "hero_style_id",
     "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
