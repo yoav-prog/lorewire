@@ -83,6 +83,12 @@ export function ShortEditorClient({
   const [tab, setTab] = useState<TabId>("scenes");
   const [config, setConfig] = useState<ShortConfig>(initialConfig);
   const configKey = useMemo(() => buildConfigKey(config), [config]);
+  // Active render id: hoisted client state so the banner can hand the
+  // panel the just-queued id directly. Seeded from initialRender so a
+  // page-cold-start still shows whatever was last in-flight.
+  const [activeRenderId, setActiveRenderId] = useState<string | null>(
+    initialRender?.id ?? null,
+  );
 
   // Heartbeat hook. We hold the session only while the banner is NOT up;
   // a foreign session means the take-over UI is the explicit gate to
@@ -135,7 +141,18 @@ export function ShortEditorClient({
         foreignOwnerEmail={foreignOwnerEmail}
       />
 
-      <RenderAfterEditsBanner storyId={storyId} configKey={configKey} />
+      <RenderAfterEditsBanner
+        storyId={storyId}
+        configKey={configKey}
+        onRenderQueued={setActiveRenderId}
+      />
+
+      {/* Render status — moved ABOVE the tabs in PR #40 so a click on
+          Render After Edits gives immediate, scroll-free feedback. */}
+      <RenderStatusPanel
+        activeRenderId={activeRenderId}
+        initialRender={initialRender}
+      />
 
       <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
         <div className="min-w-0 space-y-3">
@@ -214,8 +231,6 @@ export function ShortEditorClient({
           onConfigChange={setConfig}
         />
       )}
-
-          <RenderStatusPanel initialRender={initialRender} />
 
           <UseShortAsVideoButton
             storyId={storyId}

@@ -1,17 +1,16 @@
 "use client";
 
-// Render status surface for the short editor. After the user clicks
-// "Render after edits" the action queues a row but the editor previously
-// gave no visible feedback that anything was happening — the preview
-// drives off the live ShortConfig, not the rendered MP4. This panel
-// fixes that: it polls the latest render's status every 2.5 s while
-// in-flight, shows a status badge + error string + the rendered MP4
-// when done, and mounts the existing ShortRenderEventTimeline for the
-// per-phase log.
+// Render status surface for the short editor. Polls the active render's
+// status every 2.5 s while in-flight, shows a tone-coded badge, embeds
+// the rendered MP4 when done, and mounts the existing
+// ShortRenderEventTimeline below for the per-phase log.
 //
-// Polls only while in-flight; settled rows stop polling. router.refresh()
-// fires once the row hits 'done' so server state (the editor's
-// initialRender prop) catches up.
+// Active render id is HOISTED into ShortEditorClient state (not derived
+// from server props), so the banner can hand the panel the just-queued
+// id directly via onRenderQueued — no waiting for router.refresh() to
+// re-flow server props. The initial value comes from initialRender.id
+// (the editor's load) so a page-cold-start still surfaces whatever was
+// last in-flight.
 //
 // Plan: _plans/2026-06-16-short-editor-full-parity.md (editor visibility).
 
@@ -42,7 +41,7 @@ function statusBadge(row: ShortRenderRow | null): {
 } {
   if (!row) return { label: "—", tone: "none" };
   if (row.status === "queued")
-    return { label: "Queued · waiting for drain", tone: "queued" };
+    return { label: "Queued — drain dispatched", tone: "queued" };
   if (row.status === "generating" || row.status === "rendering") {
     const phase = PHASE_LABEL[row.phase ?? ""] ?? "Working…";
     const pct = Math.round((row.progress ?? 0) * 100);
@@ -56,21 +55,57 @@ function statusBadge(row: ShortRenderRow | null): {
 }
 
 export function RenderStatusPanel({
+  activeRenderId,
   initialRender,
 }: {
+  /** Live client-side render id, hoisted into ShortEditorClient and
+   *  bumped by the banner on a successful enqueue. Falls back to
+   *  initialRender.id when null (page-cold-start). */
+  activeRenderId: string | null;
+  /** Page-load snapshot, used to seed the first poll without waiting
+   *  for the client to learn the id. Null when no short exists yet. */
   initialRender: ShortRenderRow | null;
 }) {
   const router = useRouter();
-  const [row, setRow] = useState<ShortRenderRow | null>(initialRender);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const previousStatusRef = useRef<string | null>(initialRender?.status ?? null);
+  // The "tracked" render id we poll for. Resolves to activeRenderId when
+  // set (client state); otherwise initialRender.id; otherwise null.
+  const trackedId = activeRenderId ?? initialRender?.id ?? null;
 
-  // Mirror server state changes (router.refresh from the banner) into
-  // local state so the badge updates without waiting for a poll tick.
+  const [row, setRow] = useState<ShortRenderRow | null>(() => {
+    if (initialRender && initialRender.id === trackedId) return initialRender;
+    return null;
+  });
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const previousStatusRef = useRef<string | null>(row?.status ?? null);
+
+  // Tracked id changes (banner queued a new render). Reset local state
+  // and let the next poll tick (or the immediate fetch below) populate.
   useEffect(() => {
-    setRow(initialRender);
-    previousStatusRef.current = initialRender?.status ?? null;
-  }, [initialRender]);
+    if (!trackedId) {
+      setRow(null);
+      previousStatusRef.current = null;
+      return;
+    }
+    // If we already have the matching row (page load), keep it.
+    if (row && row.id === trackedId) return;
+    // Otherwise: clear stale state and trigger an immediate fetch so the
+    // user sees the badge update within ~100 ms of the click instead of
+    // waiting for the first poll interval to tick.
+    setRow(null);
+    previousStatusRef.current = null;
+    let cancelled = false;
+    getShortRenderStatusAction(trackedId)
+      .then((next) => {
+        if (cancelled || !next) return;
+        setRow(next);
+        previousStatusRef.current = next.status;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: row is read inside but a change shouldn't re-fire the fetch
+  }, [trackedId]);
 
   const inFlight =
     row !== null &&
@@ -92,14 +127,13 @@ export function RenderStatusPanel({
         const next = await getShortRenderStatusAction(id);
         if (next) {
           setRow(next);
-          // Settled — refresh server props so the editor's other surfaces
-          // (preview voiceover_url if the render rewrote it, ScenesTab
-          // "last render" hint, etc.) catch up.
           if (
             previousStatusRef.current !== "done" &&
             next.status === "done"
           ) {
             previousStatusRef.current = "done";
+            // Refresh server props so other surfaces (preview voiceover
+            // url after Lane B, etc.) catch up.
             router.refresh();
           } else {
             previousStatusRef.current = next.status;
@@ -115,20 +149,14 @@ export function RenderStatusPanel({
     };
   }, [inFlight, row, router]);
 
-  if (!row) {
-    return (
-      <div className="rounded-lg border border-line bg-surface p-3 text-[12px] text-muted">
-        No short rendered yet — generate one from the video editor first.
-      </div>
-    );
+  if (!trackedId || !row) {
+    return null;
   }
 
   const badge = statusBadge(row);
   const toneClass = {
-    queued:
-      "bg-surface text-ink border-line",
-    running:
-      "bg-accent/10 text-accent border-accent/40 animate-pulse",
+    queued: "bg-accent/10 text-accent border-accent/40 animate-pulse",
+    running: "bg-accent/10 text-accent border-accent/40 animate-pulse",
     done: "bg-accent/15 text-accent border-accent",
     error: "bg-warn/10 text-warn border-warn",
     cancelled: "bg-surface text-muted border-line",
@@ -139,7 +167,7 @@ export function RenderStatusPanel({
     <section className="space-y-2 rounded-lg border border-line bg-surface p-3">
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-          Latest render
+          Render
         </span>
         <span
           className={`rounded-md border px-2 py-1 font-mono text-[11px] uppercase tracking-wider ${toneClass}`}
@@ -179,6 +207,12 @@ export function RenderStatusPanel({
             </span>
           </div>
         </div>
+      )}
+
+      {row.status === "error" && row.error && (
+        <p className="rounded-md border border-warn bg-warn/10 px-3 py-2 font-mono text-[11px] text-warn">
+          {row.error}
+        </p>
       )}
 
       <ShortRenderEventTimeline
