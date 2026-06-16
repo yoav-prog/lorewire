@@ -97,7 +97,7 @@ export function planShortRender(
   // supply currentSegments (back-compat for callers that haven't been
   // updated yet — they just lose the segment-change detection).
   const segmentsChanged = currentSegments
-    ? !sameSegments(currentSegments, current._last_rendered_segments)
+    ? !sameSegments(currentSegments, current._last_rendered_segments, current)
     : false;
   const captionsOrStyleOrSegmentsChanged =
     captionsOrStyleChanged || segmentsChanged;
@@ -188,15 +188,27 @@ export function planShortRender(
 function sameSegments(
   current: CurrentResolvedSegments,
   baseline: ShortConfig["_last_rendered_segments"],
+  config: ShortConfig,
 ): boolean {
-  // No baseline stamped yet (first render hasn't completed) means we
-  // can't tell if anything changed; treat as "same" so the planner
-  // doesn't false-positive into Lane A on a brand-new short.
-  if (!baseline) return true;
-  return (
-    current.intro_segment_id === baseline.intro_segment_id &&
-    current.outro_segment_id === baseline.outro_segment_id
-  );
+  if (baseline) {
+    return (
+      current.intro_segment_id === baseline.intro_segment_id &&
+      current.outro_segment_id === baseline.outro_segment_id
+    );
+  }
+  // No baseline stamped yet — either the short was rendered before the
+  // stamping code shipped, or this is a brand-new short. We can't tell
+  // for sure if the rendered MP4 already has the current segments. If
+  // the admin set ANY per-short override (intro/outro pin or skip), they
+  // clearly want it applied — surface Lane A so they can render. With
+  // no override set we stay conservative (return "same") so a fresh
+  // short doesn't false-positive into Lane A on every page load.
+  const hasOverride =
+    !!config.intro_segment_id ||
+    !!config.outro_segment_id ||
+    !!config.skip_intro ||
+    !!config.skip_outro;
+  return !hasOverride;
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

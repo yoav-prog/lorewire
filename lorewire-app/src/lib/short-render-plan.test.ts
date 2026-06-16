@@ -240,9 +240,10 @@ describe("planShortRender — intro/outro segment changes", () => {
     expect(plan.diffs.segments).toBe(false);
   });
 
-  it("no _last_rendered_segments stamp keeps noop (first-render insurance)", () => {
-    // Brand-new short with nothing stamped: planner can't tell if segments
-    // changed, so it sticks with noop instead of false-positiving Lane A.
+  it("no _last_rendered_segments stamp with no override stays noop", () => {
+    // Brand-new short with nothing stamped + no per-short override: the
+    // planner can't tell if segments changed, so it sticks with noop
+    // instead of false-positiving Lane A on every page load.
     const cfg = configFromProps();
     const plan = planShortRender(cfg, baselineJson, {
       intro_segment_id: "anything",
@@ -250,6 +251,33 @@ describe("planShortRender — intro/outro segment changes", () => {
     });
     expect(plan.lane).toBe("noop");
     expect(plan.diffs.segments).toBe(false);
+  });
+
+  it("no _last_rendered_segments stamp WITH override triggers Lane A", () => {
+    // First time the admin sets an override on an old short (rendered
+    // before the segment-stamp code shipped). The current MP4 can't
+    // have the override segment because it didn't exist at render time
+    // — surface Lane A so the admin's click on the picker translates
+    // into a visible re-render.
+    const cfg = configFromProps({
+      intro_segment_id: "user-picked-intro",
+    });
+    const plan = planShortRender(cfg, baselineJson, {
+      intro_segment_id: "user-picked-intro",
+      outro_segment_id: null,
+    });
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.segments).toBe(true);
+  });
+
+  it("no stamp + skip override also triggers Lane A", () => {
+    const cfg = configFromProps({ skip_outro: true });
+    const plan = planShortRender(cfg, baselineJson, {
+      intro_segment_id: null,
+      outro_segment_id: null,
+    });
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.segments).toBe(true);
   });
 
   it("segments change combined with captions still surfaces both flags", () => {
