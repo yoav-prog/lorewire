@@ -325,6 +325,13 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
     );
   }
   if (enqueued > 0 || (sp.enqueued !== undefined && skippedActive > 0)) {
+    // 2026-06-16: banner copy now spells out who drains the queue. In
+    // production the Vercel cron at /api/drain_story_jobs ticks every
+    // 2 minutes; in local dev the cron doesn't fire and the admin has to
+    // run the worker themselves. The page can't tell which it is from
+    // here (server actions run on the same Vercel runtime), so the copy
+    // surfaces BOTH options and links to the per-row timeline where the
+    // admin can see for sure whether claims are landing.
     return (
       <div className="rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-[12px] text-accent">
         Enqueued <strong>{enqueued}</strong> row
@@ -335,8 +342,11 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
             Skipped {skippedActive} that already had an active job.
           </>
         )}{" "}
-        The hosted cron runs the article + media stages and hands the
-        video render off to Cloud Run; nothing to start locally.
+        On Vercel the cron at <code>/api/drain_story_jobs</code> drains
+        every 2 minutes; in local dev run{" "}
+        <code className="font-mono">python -m pipeline.story_jobs_worker</code>{" "}
+        (or <code className="font-mono">npm run dev:drain</code>) to move
+        the queue. Click into any row to watch its live timeline.
       </div>
     );
   }

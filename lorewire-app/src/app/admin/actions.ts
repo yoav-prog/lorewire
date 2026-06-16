@@ -2430,3 +2430,20 @@ export async function processRedditSourcesAction(
       (result.skipped_active ? `&skipped_active=${result.skipped_active}` : ""),
   );
 }
+
+// 2026-06-16 per-row event timeline. The StoryJobEventTimeline client
+// component polls this every 2s while the source row is queued/processing
+// and once on mount otherwise. Read-only; admin-gated.
+// Plan: _plans/2026-06-16-story-job-event-timeline.md.
+export async function listStoryJobEventsForRedditAction(
+  redditId: string,
+): Promise<
+  Awaited<
+    ReturnType<typeof import("@/lib/story-jobs").listStoryJobEventsForReddit>
+  >
+> {
+  await requireAdmin();
+  if (!redditId) return [];
+  const { listStoryJobEventsForReddit } = await import("@/lib/story-jobs");
+  return listStoryJobEventsForReddit(redditId);
+}

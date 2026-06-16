@@ -175,6 +175,18 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     """
     post = reddit_source_to_post(reddit_row)
     with_media = bool(claimed_job.get("with_media", 1))
+    job_id = claimed_job["id"]
+    reddit_id = claimed_job["reddit_id"]
+
+    # 2026-06-16 per-row event timeline. Worker emits one event per
+    # meaningful phase so the admin detail page can render a live log.
+    # See _plans/2026-06-16-story-job-event-timeline.md. The print() lines
+    # below are kept so the worker terminal still narrates locally.
+    store.log_story_job_event(
+        job_id, reddit_id, "claimed",
+        message="Worker claimed the row",
+        payload={"with_media": with_media, "subreddit": post.get("subreddit")},
+    )
 
     before_tokens = llm.totals["total_tokens"]
     # Snapshot of running cost so we can compute the per-job delta at the
@@ -188,17 +200,37 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     idea = stages.make_idea(post, dry_run=False)
     print(f"[story-jobs idea] reddit_id={post['id']} category={idea['category']}")
     store.update_story_job_progress(claimed_job["id"], 15)
+    store.log_story_job_event(
+        job_id, reddit_id, "idea_done",
+        message=f"Generated idea: {idea.get('headline', '')[:80]}",
+        payload={"category": idea.get("category"), "headline": idea.get("headline")},
+    )
 
     research = stages.research(idea, post, dry_run=False)
     store.update_story_job_progress(claimed_job["id"], 30)
+    store.log_story_job_event(
+        job_id, reddit_id, "research_done",
+        message="Researched supporting context",
+        payload={"keys": list(research.keys()) if isinstance(research, dict) else None},
+    )
 
     body = stages.write_article(idea, research, dry_run=False)
     store.update_story_job_progress(claimed_job["id"], 50)
+    store.log_story_job_event(
+        job_id, reddit_id, "article_done",
+        message=f"Wrote article ({len(body)} chars)",
+        payload={"char_count": len(body)},
+    )
 
     branded_title, branded_syn = stages.make_title_and_synopsis(
         idea, body, dry_run=False
     )
     store.update_story_job_progress(claimed_job["id"], 60)
+    store.log_story_job_event(
+        job_id, reddit_id, "title_done",
+        message=f"Title: {(branded_title or idea.get('headline', ''))[:80]}",
+        payload={"title": branded_title, "synopsis_chars": len(branded_syn or "")},
+    )
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     row = {
@@ -220,6 +252,10 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     }
 
     if with_media:
+        store.log_story_job_event(
+            job_id, reddit_id, "media_started",
+            message="Generating scenes + voice + alignment",
+        )
         media_cols = media.generate_media(
             idea["reddit_id"],
             idea,
@@ -231,6 +267,15 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         row.update(media_cols)
         row["tokens"] = llm.totals["total_tokens"] - before_tokens
         store.update_story_job_progress(claimed_job["id"], 90)
+        store.log_story_job_event(
+            job_id, reddit_id, "media_done",
+            message="Scenes + voice + alignment ready",
+            payload={
+                "hero_image": bool(media_cols.get("hero_image")),
+                "audio_url": bool(media_cols.get("audio_url")),
+                "alignment": bool(media_cols.get("alignment")),
+            },
+        )
         # Video render is OUT of band — enqueue into video_renders so the
         # Cloud Run service (api/dispatch_video_render -> Cloud Run
         # /render) picks it up. Done after upsert_story below because
@@ -253,6 +298,15 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         media_delta_usd, llm_token_delta,
     )
     store.upsert_story(row)
+    store.log_story_job_event(
+        job_id, reddit_id, "story_persisted",
+        message=f"Saved story (cost ~${row['cost_cents'] / 100:.2f})",
+        payload={
+            "story_id": row["id"],
+            "cost_cents": row["cost_cents"],
+            "tokens": row["tokens"],
+        },
+    )
 
     # Hand off to the video pipeline. The video_renders queue is what
     # the editor's existing "Render" button uses; auto-enqueueing here
@@ -263,6 +317,11 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     # admin doesn't need to know about the two-queue split.
     if with_media:
         _enqueue_video_render_for_story(row)
+        store.log_story_job_event(
+            job_id, reddit_id, "video_render_enqueued",
+            message="Long-form video handed off to Cloud Run",
+            payload={"story_id": row["id"]},
+        )
 
     # Auto-enqueue a short if the admin turned it on (global or per-category).
     # Shorts generate their own frames + voice from the story text, so this is
@@ -272,8 +331,18 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         from pipeline import shorts_auto
         if shorts_auto.maybe_enqueue_short_for_story(row["id"], row.get("category")):
             print(f"[story-jobs handoff] short auto-enqueued story_id={row['id']}")
+            store.log_story_job_event(
+                job_id, reddit_id, "auto_short_enqueued",
+                message="Auto-short enqueued for this category",
+                payload={"story_id": row["id"]},
+            )
     except Exception as e:  # noqa: BLE001 — auto-short must not break the job
         print(f"[story-jobs handoff] auto-short skipped: {e}")
+        store.log_story_job_event(
+            job_id, reddit_id, "auto_short_error",
+            level="warn",
+            message=f"Auto-short handoff failed: {e}",
+        )
 
     return row
 
@@ -414,11 +483,18 @@ def run_one_tick(
         result_row = pfn(claimed, reddit_row)
     except Exception as e:  # noqa: BLE001 — worker catches everything per-row
         traceback.print_exc()
-        store.fail_story_job(job_id, f"{type(e).__name__}: {e}")
+        err_msg = f"{type(e).__name__}: {e}"
+        store.fail_story_job(job_id, err_msg)
         # Leave the source row in 'queued' so a future Process re-pick is
         # possible without an admin "Reset" affordance.
         store.set_reddit_source_status(reddit_id, "queued")
-        print(f"[story-jobs error] job={job_id} {type(e).__name__}: {e}")
+        print(f"[story-jobs error] job={job_id} {err_msg}")
+        store.log_story_job_event(
+            job_id, reddit_id, "failed",
+            level="error",
+            message=err_msg[:200],
+            payload={"exc_type": type(e).__name__},
+        )
         return True
 
     story_id = result_row.get("id") if isinstance(result_row, dict) else None
@@ -426,6 +502,11 @@ def run_one_tick(
         store.fail_story_job(job_id, "process returned no story id")
         store.set_reddit_source_status(reddit_id, "queued")
         print(f"[story-jobs error] job={job_id} no story id returned")
+        store.log_story_job_event(
+            job_id, reddit_id, "failed",
+            level="error",
+            message="Process returned no story id",
+        )
         return True
 
     store.finish_story_job(job_id, story_id)
@@ -433,6 +514,11 @@ def run_one_tick(
     print(
         f"[story-jobs done] job={job_id} reddit_id={reddit_id} "
         f"story_id={story_id}"
+    )
+    store.log_story_job_event(
+        job_id, reddit_id, "finished",
+        message=f"Done. Story: {story_id}",
+        payload={"story_id": story_id},
     )
     return True
 

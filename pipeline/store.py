@@ -206,6 +206,28 @@ SCHEMA_STATEMENTS = [
         payload     TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_short_render_events_render_id ON short_render_events(render_id, ts)",
+    # 2026-06-16 story_jobs per-row event timeline. Mirrors short_render_events
+    # for the story_jobs queue. The worker writes one row per phase transition
+    # (claimed, idea_done, research_done, article_done, title_done, media_done,
+    # video_render_enqueued, forced_short, auto_short_enqueued, finished,
+    # failed); the reddit-source detail page reads via list_story_job_events
+    # and renders a live timeline so the admin can see what's happening to a
+    # row without tailing the worker terminal. Plan:
+    # _plans/2026-06-16-story-job-event-timeline.md. The reddit_id column is
+    # denormalised so the detail page can look events up by its URL parameter
+    # without joining through story_jobs.
+    """CREATE TABLE IF NOT EXISTS story_job_events (
+        id          TEXT PRIMARY KEY,
+        job_id      TEXT NOT NULL,
+        reddit_id   TEXT NOT NULL,
+        ts          TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        event       TEXT NOT NULL,
+        message     TEXT,
+        payload     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_story_job_events_reddit_id ON story_job_events(reddit_id, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_story_job_events_job_id ON story_job_events(job_id, ts)",
     # 2026-06-12 asset re-render: image regen queue. The admin clicks
     # Regenerate on any of a story's or article's image assets; the Next
     # server action inserts a row here and the local
@@ -3222,6 +3244,123 @@ def latest_story_job_for_reddit(reddit_id: str) -> dict | None:
             (reddit_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+# --- story_job_events helpers (2026-06-16 per-row timeline) -------------------
+# Mirrors log_short_render_event + list_short_render_events. The worker calls
+# log_story_job_event at every meaningful step in _default_process; the admin
+# detail page reads via list_story_job_events_for_reddit. Plan:
+# _plans/2026-06-16-story-job-event-timeline.md.
+
+
+def log_story_job_event(
+    job_id: str,
+    reddit_id: str,
+    event: str,
+    *,
+    message: str | None = None,
+    level: str = "info",
+    payload: dict | None = None,
+) -> None:
+    """Insert one row into story_job_events. Fire-and-swallow: any error is
+    caught and dropped on the floor (observability MUST NEVER break the
+    worker). Mirrors log_short_render_event.
+
+    `event` is a short machine-readable enum (idea_done, article_done,
+    finished, failed, ...); `message` is the human-readable line for the
+    timeline; `payload` is a JSON-serialisable dict for any structured
+    context the timeline UI wants to render (token counts, scene counts,
+    urls, etc.). Payload is JSON-encoded then capped at 2KB so a runaway
+    log site can't bomb storage.
+    """
+    try:
+        ev_id = uuid.uuid4().hex
+        ts = _now_iso()
+        payload_str = json.dumps(payload) if payload is not None else None
+        if payload_str is not None and len(payload_str) > 2000:
+            # Truncate the JSON value rather than dropping the event. We
+            # still want a row landing on the timeline; the payload just
+            # gets a marker so the reader knows it was capped.
+            payload_str = json.dumps({"truncated": True, "size": len(payload_str)})
+        message_capped = (message or None) and message[:2000]
+        if _is_postgres():
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO story_job_events "
+                        "(id, job_id, reddit_id, ts, level, event, message, payload) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (ev_id, job_id, reddit_id, ts, level, event,
+                         message_capped, payload_str),
+                    )
+                conn.commit()
+            return
+        with _sqlite_conn() as c:
+            c.execute(
+                "INSERT INTO story_job_events "
+                "(id, job_id, reddit_id, ts, level, event, message, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ev_id, job_id, reddit_id, ts, level, event,
+                 message_capped, payload_str),
+            )
+    except Exception:
+        # Never propagate. A failing observability sink crashing the worker
+        # would be the worst possible regression on the very feature
+        # we're shipping. Mirror log_short_render_event's swallow.
+        pass
+
+
+_STORY_JOB_EVENT_COLUMNS = [
+    "id", "job_id", "reddit_id", "ts", "level", "event", "message", "payload",
+]
+
+
+def list_story_job_events(job_id: str, *, limit: int = 200) -> list[dict]:
+    """Read every event for one job_id, oldest first. The timeline UI
+    renders top-down chronological. Limit defaults to 200 (an order of
+    magnitude over the ~15-20 events a normal job emits) so a bug that
+    fires a runaway log can't blow up the page render."""
+    cols = ", ".join(_STORY_JOB_EVENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM story_job_events "
+                    "WHERE job_id = %s ORDER BY ts ASC, id ASC LIMIT %s",
+                    (job_id, limit),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        rows = c.execute(
+            f"SELECT {cols} FROM story_job_events "
+            "WHERE job_id = ? ORDER BY ts ASC, id ASC LIMIT ?",
+            (job_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_story_job_events_for_reddit(reddit_id: str, *, limit: int = 200) -> list[dict]:
+    """Read every event for the LATEST job on this reddit_id. The detail
+    page route is /admin/reddit-sources/[reddit_id], so this is the
+    page-friendly reader. If no job has ever run for this reddit_id,
+    returns an empty list."""
+    cols = ", ".join(_STORY_JOB_EVENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM story_job_events "
+                    "WHERE reddit_id = %s ORDER BY ts ASC, id ASC LIMIT %s",
+                    (reddit_id, limit),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        rows = c.execute(
+            f"SELECT {cols} FROM story_job_events "
+            "WHERE reddit_id = ? ORDER BY ts ASC, id ASC LIMIT ?",
+            (reddit_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def count_pending_story_jobs() -> int:
