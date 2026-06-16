@@ -2951,10 +2951,19 @@ export async function publishReviewedStoryAction(
     reddit_id: redditId,
     story_id: story!.id,
   });
+  // Auto-curate AFTER status flip so a curation failure can't unpublish.
+  // The helper swallows its own errors; this `await` is just for ordering
+  // (we want the curation rows to exist before the revalidate fires so /
+  // serves the new state on first hit). See lib/publish-auto-curate.ts.
+  const { autoCurateOnPublish } = await import("@/lib/publish-auto-curate");
+  await autoCurateOnPublish(story!.id, story!.category);
   revalidatePath(REVIEW_ROUTE(redditId));
   revalidatePath("/admin/reddit-sources");
   revalidatePath(`/admin/stories/${story!.id}`);
   revalidatePath("/admin");
+  // Revalidate the public homepage so the freshly-curated story shows up
+  // without waiting for the next ISR tick.
+  revalidatePath("/");
   redirect(`${REVIEW_ROUTE(redditId)}?published=1`);
 }
 
