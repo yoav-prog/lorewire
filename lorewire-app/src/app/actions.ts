@@ -34,16 +34,7 @@ import {
   type RailCardRow,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
-
-// The short renderer writes its MP4 to GCS at `<storyId>-short/video.mp4`
-// (suffix from pipeline/shorts_render.SHORT_ID_SUFFIX). Anything else is
-// the long-form path. We detect the apply by matching this suffix on the
-// URL itself so we don't need to round-trip a separate flag column.
-const SHORT_VIDEO_PATH_RE = /-short\/video\.mp4(?:[?#].*)?$/;
-
-function isShortVideoUrl(url: string | null | undefined): boolean {
-  return typeof url === "string" && SHORT_VIDEO_PATH_RE.test(url);
-}
+import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 
 export interface LiveStoryMediaResult {
   ok: boolean;
@@ -286,6 +277,83 @@ export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
     limit: safeLimit,
   });
   return { ok: true, stories: rows };
+}
+
+// ─── Reels feed: published shorts, cursor-paginated ──────────────────────────
+// The Reels surface streams ONLY 9:16 short renders (the doodle shorts), most
+// recent first, one page at a time. A "short" is identified by its video_url
+// suffix (lib/short-video-url) — the long-form pipeline writes a different
+// path, so the same `stories` table serves both and this query filters in SQL
+// so pagination counts shorts, not all published stories. Public + unauthen-
+// ticated like its siblings: the published / non-noindex / has-slug filter is
+// load-bearing and mirrors listPublishedStories exactly.
+
+export interface ListShortsOpts {
+  /** Page size, clamped to 1..50. */
+  limit?: number;
+  /** Cursor: return shorts published strictly BEFORE this timestamp. Pass the
+   *  previous page's `nextCursor`; omit for the first page. */
+  beforePublishedAt?: string | null;
+}
+
+export interface ListShortsResult {
+  ok: boolean;
+  /** One page of shorts, newest first. Same projection the homepage rails use
+   *  (LiveCatalogStory) so the Reels card and the catalog adapter share a shape. */
+  shorts: LiveCatalogStory[];
+  /** Cursor for the next page (the published_at of the last row), or null when
+   *  this was the final page. */
+  nextCursor: string | null;
+}
+
+export async function listPublishedShorts(
+  opts: ListShortsOpts = {},
+): Promise<ListShortsResult> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 12, 50));
+  // Match the loosened public-visibility gate from getLiveCatalog: any story
+  // that's rendered (status ready or published) and has a slug surfaces.
+  // The previous strict gate dropped reels whose published_at was NULL
+  // because the publish action hadn't backfilled the timestamp yet.
+  const where: string[] = [
+    "status IN ('ready', 'published')",
+    "slug IS NOT NULL",
+    "(noindex IS NULL OR noindex = 0)",
+    // Shorts only — match the `<id>-short/video.mp4` object path in SQL.
+    "video_url LIKE ?",
+  ];
+  const params: unknown[] = [SHORT_VIDEO_URL_LIKE];
+  if (opts.beforePublishedAt) {
+    where.push("COALESCE(published_at, updated_at, created_at) < ?");
+    params.push(opts.beforePublishedAt);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  // Over-fetch by one so we know whether a further page exists without a second
+  // COUNT round-trip. id is the deterministic tiebreak so the sort is stable
+  // across equal published_at values. Columns dropped vs feat/reels-feed:
+  // hero_image_landscape and hero_has_baked_title don't exist on this
+  // branch's schema yet (this branch never picked up that migration); the
+  // ReelCard treats them as optional so absent fields are harmless.
+  const rows = await all<LiveCatalogStory>(
+    "SELECT id, slug, title, category, summary, duration, hero_image, " +
+      "video_url, published_at, created_at FROM stories " +
+      `${clause} ` +
+      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC " +
+      `LIMIT ${limit + 1}`,
+    params,
+  );
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  // Belt and braces: the SQL LIKE already filters, but re-assert the exact
+  // suffix in JS so a URL that merely contains the substring mid-path can't
+  // slip a non-short into the feed (the regex anchors it to the end).
+  const shorts = page.filter((s) => isShortVideoUrl(s.video_url));
+  // Cursor matches the SQL COALESCE order so a row with NULL published_at
+  // still produces a usable next-page key (uses created_at instead).
+  const last = page[page.length - 1];
+  const nextCursor = hasMore
+    ? last?.published_at ?? last?.created_at ?? null
+    : null;
+  return { ok: true, shorts, nextCursor };
 }
 
 export async function getHomepageCuration(): Promise<HomepageCurationResult> {
