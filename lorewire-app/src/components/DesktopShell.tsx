@@ -26,6 +26,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
   video_url: null,
   images: [],
+  captions: [],
   is_short: false,
   found: false,
 };
@@ -408,12 +409,19 @@ function _galleryFromStory(
   story: Story,
   liveMedia: LiveStoryMediaResult,
 ): { src: string; caption: string }[] | null {
-  // Prefer live images when the applied video is a short — those are the
-  // doodle scene frames generated for the 9:16 short. Fall back to the
-  // baked long-form story.images otherwise (or when the live read missed).
-  const imgs = liveMedia.is_short && liveMedia.images.length > 0
-    ? liveMedia.images
-    : story.images || [];
+  // When the live fetch found media, its images + captions are authoritative
+  // and aligned 1:1 — short doodle frames with their spoken lines, or live
+  // stills with body-derived captions. This is what gives a live-only story
+  // (not yet baked into published.ts) both its scenes and its text.
+  if (liveMedia.found && liveMedia.images.length > 0) {
+    return liveMedia.images.map((src, i) => ({
+      src,
+      caption: liveMedia.captions[i] ?? "",
+    }));
+  }
+  // Fall back to the baked story for legacy sample entries that aren't in the
+  // DB: word alignment when present, else body-sliced sentences.
+  const imgs = story.images || [];
   if (imgs.length === 0) return null;
   const words = story.alignment || [];
   if (words.length === 0) {
@@ -447,11 +455,15 @@ function GenArticle({
   liveMedia: LiveStoryMediaResult;
 }) {
   const paras = (story.body || "").split(/\n{2,}/);
-  // When the applied video is a short, the article reads alongside the
-  // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
-  // the long-form 16:9 illustrations are still the right fit.
+  // Use the live scene frames whenever the fetch found them (short doodle
+  // frames, or live stills for a story not yet re-exported); fall back to the
+  // baked stills. Aspect/crop still keys on whether the applied video is a
+  // short so doodle scenes stay 9:16 and long-form stays 16:9.
   const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
-  const scenes = useShortScenes ? liveMedia.images : (story.images || []);
+  const scenes =
+    liveMedia.found && liveMedia.images.length > 0
+      ? liveMedia.images
+      : story.images || [];
   const positions = _articleImagePositions(paras.length, scenes.length);
   const posList = Array.from(positions).sort((a, b) => a - b);
   const imgAt = new Map<number, string>();
