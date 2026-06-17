@@ -30,6 +30,8 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   images: [],
   captions: [],
   body: null,
+  audio_url: null,
+  alignment: [],
   is_short: false,
   found: false,
 };
@@ -494,10 +496,35 @@ function _articleImagePositions(paraCount: number, imageCount: number): Set<numb
   return positions;
 }
 
+// Split the article into paragraphs. Live bodies often arrive as one block
+// with no blank-line breaks, which left the piece as an unreadable wall of text
+// AND gave the scene images nowhere to land (placement needs 3+ paragraphs).
+// Fall back to grouping sentences into short paragraphs.
+function _articleParagraphs(body: string): string[] {
+  const byBreak = body.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  if (byBreak.length >= 3) return byBreak;
+  const sentences =
+    body
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  if (sentences.length < 3) {
+    return byBreak.length > 0 ? byBreak : body.trim() ? [body.trim()] : [];
+  }
+  // ~2 sentences per paragraph: enough paragraphs that image placement (which
+  // needs 3+) kicks in for any body of 5+ sentences, and it reads in chunks.
+  const out: string[] = [];
+  for (let i = 0; i < sentences.length; i += 2) {
+    out.push(sentences.slice(i, i + 2).join(" "));
+  }
+  return out;
+}
+
 function GenArticle({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaResult }) {
   // A live-only story carries no body on the client, so prefer the live body
   // the modal fetched — otherwise the article would fall through to the sample.
-  const paras = (story.body || liveMedia.body || "").split(/\n{2,}/);
+  const paras = _articleParagraphs(story.body || liveMedia.body || "");
   // Use the live scene frames whenever the fetch found them (short doodle
   // frames, or live stills for a story not yet re-exported); fall back to the
   // baked stills. Aspect/crop still keys on whether the applied video is a
@@ -662,19 +689,38 @@ const SCRIPT = (
   "She said she moved it somewhere safe. It was not, in any sense, safe."
 ).split(" ");
 
-function ReadAlong({ story }: { story: Story }) {
-  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
-  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+function ReadAlong({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaResult }) {
+  // Prefer the story's own narration; fall back to the live fetch (a short's
+  // voiceover + word timings, or the long-form audio) so a DB-only story gets
+  // a real read-along instead of the 15-second demo ticker.
+  const audioUrl = story.audioUrl ?? liveMedia.audio_url ?? undefined;
+  const alignment =
+    story.alignment && story.alignment.length > 0
+      ? story.alignment
+      : liveMedia.alignment;
+  return audioUrl && alignment.length > 0 ? (
+    <RealReadAlong audioUrl={audioUrl} alignment={alignment} storyId={story.id} />
+  ) : (
+    <FakeReadAlong />
+  );
 }
 
 // Real read-along: drives the karaoke from an <audio> element's timeupdate,
 // using the alignment word timings the pipeline writes (3.1 STT step).
-function RealReadAlong({ story }: { story: Story }) {
+function RealReadAlong({
+  audioUrl,
+  alignment,
+  storyId,
+}: {
+  audioUrl: string;
+  alignment: { word: string; start: number; end: number }[];
+  storyId: string;
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
-  const words = story.alignment || [];
+  const words = alignment;
 
   // Find the active word index by linear scan — same rule the Remotion
   // composition uses (the chunk has at most ~4 words; binary search would
@@ -690,7 +736,7 @@ function RealReadAlong({ story }: { story: Story }) {
     const a = audioRef.current;
     if (!a) return;
     if (a.paused) {
-      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId: story.id, e }));
+      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId, e }));
     } else {
       a.pause();
     }
@@ -708,14 +754,14 @@ function RealReadAlong({ story }: { story: Story }) {
     <div className="px-4 pt-4 pb-2">
       <audio
         ref={audioRef}
-        src={story.audioUrl}
+        src={audioUrl}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
         onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
-        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+        onError={() => console.warn("[lorewire audio err]", { storyId, src: audioUrl })}
       />
       <div className="flex items-center gap-3.5">
         <button onClick={toggle} className="w-14 h-14 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 active:scale-95 transition">
@@ -974,7 +1020,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         <div ref={watchRef} className="-mx-4 mt-2 scroll-mt-4">
           {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} autoPlaySignal={playNonce} videoRef={videoRef} />}
           {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
-          {tab === "Read-along" && <ReadAlong story={story} />}
+          {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
         </div>
 
         <section className="mt-8 -mx-4">

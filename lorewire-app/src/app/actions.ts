@@ -51,6 +51,13 @@ export interface LiveStoryMediaResult {
    *  src/data/published.ts, where `story.body` is absent on the client).
    *  Null when the story has no body. */
   body: string | null;
+  /** Narration audio for READ-ALONG: a short's voiceover, otherwise the
+   *  long-form stories.audio_url. Null when neither exists. */
+  audio_url: string | null;
+  /** Word timings for READ-ALONG, in seconds, aligned to `audio_url`. Built
+   *  from the short's caption chunks or the long-form stories.alignment. Empty
+   *  when no timings exist (the reader then shows its demo ticker). */
+  alignment: AlignedWord[];
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -75,27 +82,97 @@ async function latestDoneShortPropsForStory(
   return row?.props ?? null;
 }
 
-// Scene frame URLs from a done short's props. The short renders its doodle
-// scenes to doodle_frames[].url; the gallery shows these when the applied
-// video is a short.
-function parseShortFrameUrls(propsJson: string | null): string[] {
-  if (!propsJson) return [];
+export interface AlignedWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+// Everything READ needs out of a done short's props in one parse: the doodle
+// scene frame URLs (gallery + article), the voiceover URL and per-word timings
+// (read-along). Word timings come from the caption chunks' words[] in ms; we
+// convert to seconds to match the long-form stories.alignment contract.
+function parseShortMedia(propsJson: string | null): {
+  frameUrls: string[];
+  voiceoverUrl: string | null;
+  alignment: AlignedWord[];
+} {
+  const empty = {
+    frameUrls: [] as string[],
+    voiceoverUrl: null as string | null,
+    alignment: [] as AlignedWord[],
+  };
+  if (!propsJson) return empty;
   let parsed: unknown;
   try {
     parsed = JSON.parse(propsJson);
   } catch {
-    return [];
+    return empty;
   }
-  if (!parsed || typeof parsed !== "object") return [];
-  const frames = (parsed as { doodle_frames?: unknown }).doodle_frames;
-  if (!Array.isArray(frames)) return [];
-  const out: string[] = [];
-  for (const f of frames) {
-    if (f && typeof f === "object" && typeof (f as { url?: unknown }).url === "string") {
-      out.push((f as { url: string }).url);
+  if (!parsed || typeof parsed !== "object") return empty;
+  const obj = parsed as {
+    doodle_frames?: unknown;
+    captions?: unknown;
+    voiceover_url?: unknown;
+  };
+  const frameUrls: string[] = [];
+  if (Array.isArray(obj.doodle_frames)) {
+    for (const f of obj.doodle_frames) {
+      if (f && typeof f === "object" && typeof (f as { url?: unknown }).url === "string") {
+        frameUrls.push((f as { url: string }).url);
+      }
     }
   }
-  return out;
+  const voiceoverUrl =
+    typeof obj.voiceover_url === "string" ? obj.voiceover_url : null;
+  const alignment: AlignedWord[] = [];
+  if (Array.isArray(obj.captions)) {
+    for (const c of obj.captions) {
+      const ws = c && typeof c === "object" ? (c as { words?: unknown }).words : null;
+      if (!Array.isArray(ws)) continue;
+      for (const w of ws) {
+        if (
+          w &&
+          typeof w === "object" &&
+          typeof (w as { word?: unknown }).word === "string" &&
+          typeof (w as { start_ms?: unknown }).start_ms === "number" &&
+          typeof (w as { end_ms?: unknown }).end_ms === "number"
+        ) {
+          const ww = w as { word: string; start_ms: number; end_ms: number };
+          alignment.push({
+            word: ww.word,
+            start: ww.start_ms / 1000,
+            end: ww.end_ms / 1000,
+          });
+        }
+      }
+    }
+  }
+  return { frameUrls, voiceoverUrl, alignment };
+}
+
+// Long-form word timings: stories.alignment is a JSON array of
+// {word, start, end} already in seconds. Returns [] on missing/invalid.
+function parseAlignment(raw: string | null | undefined): AlignedWord[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter(
+          (w): w is AlignedWord =>
+            w &&
+            typeof w === "object" &&
+            typeof (w as { word?: unknown }).word === "string" &&
+            typeof (w as { start?: unknown }).start === "number" &&
+            typeof (w as { end?: unknown }).end === "number",
+        )
+        .map((w) => ({ word: w.word, start: w.start, end: w.end }));
+    }
+  } catch {
+    /* invalid JSON — fall through to empty */
+  }
+  return [];
 }
 
 // Slice prose into one short caption per scene so a gallery without word-level
@@ -152,6 +229,8 @@ export async function getLiveStoryMedia(
     images: [],
     captions: [],
     body: null,
+    audio_url: null,
+    alignment: [],
     is_short: false,
     found: false,
   };
@@ -164,8 +243,10 @@ export async function getLiveStoryMedia(
     images: string | null;
     body: string | null;
     summary: string | null;
+    audio_url: string | null;
+    alignment: string | null;
   }>(
-    "SELECT id, video_url, images, body, summary FROM stories " +
+    "SELECT id, video_url, images, body, summary, audio_url, alignment FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -180,24 +261,31 @@ export async function getLiveStoryMedia(
         images: bySlug.images,
         body: bySlug.body,
         summary: bySlug.summary,
+        audio_url: bySlug.audio_url,
+        alignment: bySlug.alignment,
       };
     }
   }
   if (!row) return empty;
 
   const isShort = isShortVideoUrl(row.video_url);
-  // Pick the scene images: a short shows its 9:16 doodle frames; everything
-  // else shows the long-form stills. Then caption every scene by slicing the
-  // article body (then summary) into one sentence each, so the gallery is
-  // never text-less and the captions stay uniform across cards (the spoken
-  // caption-chunk mapping produced wildly uneven lengths).
+  // A short reads off its own props: 9:16 doodle frames for the visuals, its
+  // voiceover + per-word timings for READ-ALONG. Everything else reads off the
+  // long-form columns (stills, stories.audio_url, stories.alignment). Captions
+  // for the gallery are one body sentence per scene either way.
   let images: string[];
+  let audioUrl: string | null;
+  let alignment: AlignedWord[];
   if (isShort) {
     const propsJson = await latestDoneShortPropsForStory(row.id);
-    const shortImages = parseShortFrameUrls(propsJson);
-    images = shortImages.length > 0 ? shortImages : parseStoryImageList(row.images);
+    const short = parseShortMedia(propsJson);
+    images = short.frameUrls.length > 0 ? short.frameUrls : parseStoryImageList(row.images);
+    audioUrl = short.voiceoverUrl ?? row.audio_url;
+    alignment = short.alignment.length > 0 ? short.alignment : parseAlignment(row.alignment);
   } else {
     images = parseStoryImageList(row.images);
+    audioUrl = row.audio_url;
+    alignment = parseAlignment(row.alignment);
   }
   const captions = captionsFromText(row.body ?? row.summary, images.length);
 
@@ -207,6 +295,8 @@ export async function getLiveStoryMedia(
     images,
     captions,
     body: row.body,
+    audio_url: audioUrl,
+    alignment,
     is_short: isShort,
     found: true,
   };
