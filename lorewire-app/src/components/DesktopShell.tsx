@@ -4,11 +4,10 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   CAT,
   STORIES,
-  byId,
-  tryById,
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import ReelsDesktop from "@/components/reels/ReelsDesktop";
 import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
@@ -18,6 +17,7 @@ import {
   resolveRailIds,
   useHomepageCuration,
 } from "@/lib/homepage-rails";
+import { useSavedStories } from "@/lib/engagement-store";
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -38,7 +38,7 @@ type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
 type IconCmp = (p: IconProps) => React.ReactElement;
 
-const NAV = ["Home", "Browse", "New & Hot", "My List"];
+const NAV = ["Home", "Reels", "Browse", "New & Hot", "My List"];
 
 /* ----------------------------- ICONS ----------------------------- */
 const Ico = ({ d, fill, size = 24, stroke = 1.7 }: IconProps & { d: React.ReactNode }) => (
@@ -1015,15 +1015,19 @@ function HomePage({
   );
 }
 
-function GridPage({ title, sub, ids, onOpen }: { title: string; sub?: string; ids: string[]; onOpen: OpenFn }) {
+function GridPage({ title, sub, ids, onOpen, resolveStory }: { title: string; sub?: string; ids: string[]; onOpen: OpenFn; resolveStory: (id: string) => Story | null }) {
+  // Resolve via the live+sample catalog, NOT byId — saved ids can be real
+  // shorts (saved from the Reels feed) that aren't in the baked sample catalog,
+  // and byId throws on an unknown id. Unresolved ids are skipped cleanly.
+  const items = ids.map(resolveStory).filter((s): s is Story => s !== null);
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">{title}</h1>
       {sub && <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">{sub}</p>}
       <div className="grid grid-cols-5 gap-5 mt-9">
-        {ids.map((id) => <div key={id} style={{ height: 296 }}><PosterCard story={byId(id)} onOpen={onOpen} w={"100%"} h={296} /></div>)}
+        {items.map((s) => <div key={s.id} style={{ height: 296 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={296} /></div>)}
       </div>
-      {ids.length === 0 && <p className="font-body text-muted mt-12">Nothing here yet.</p>}
+      {items.length === 0 && <p className="font-body text-muted mt-12">Nothing here yet.</p>}
     </div>
   );
 }
@@ -1046,9 +1050,13 @@ function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
 export default function DesktopShell() {
   const [view, setView] = useState("Home");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
-  const [list, setList] = useState<string[]>(["stranger", "wrongnumber"]);
+  const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
   const [solid, setSolid] = useState(false);
   const [query, setQuery] = useState("");
+
+  // My List is the persisted saved-stories store, shared with the Reels feed's
+  // Save button and the detail modal so a Save anywhere shows up everywhere.
+  const { saved: list, toggle: toggleList } = useSavedStories();
 
   useEffect(() => {
     const onS = () => setSolid(window.scrollY > 120);
@@ -1056,7 +1064,12 @@ export default function DesktopShell() {
     return () => window.removeEventListener("scroll", onS);
   }, []);
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
-  useEffect(() => { document.body.style.overflow = active ? "hidden" : ""; return () => { document.body.style.overflow = ""; }; }, [active]);
+  // Lock the page behind a modal AND while the Reels feed owns the viewport.
+  useEffect(() => {
+    const lock = active !== null || view === "Reels";
+    document.body.style.overflow = lock ? "hidden" : "";
+    return () => { document.body.style.overflow = ""; };
+  }, [active, view]);
 
   // Single hook call for the whole shell — HomePage receives the result
   // as props so the modal mount site below can also call resolveStory.
@@ -1065,8 +1078,9 @@ export default function DesktopShell() {
 
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
-  const shuffle = () => { const r = STORIES[Math.floor(Math.random() * STORIES.length)]; open(r.id, "Watch"); };
-  const toggleList = (id: string) => setList((l) => (l.includes(id) ? l.filter((x) => x !== id) : [...l, id]));
+  // "Play Something" jumps into the Reels feed (optionally at a story).
+  const openReels = (id?: string) => { setReelsStoryId(id ?? null); close(); setView("Reels"); };
+  const shuffle = () => openReels();
 
   // Resolve the active story via the live + sample catalog so newly
   // published stories (in the DB but not yet baked into published.ts)
@@ -1077,7 +1091,7 @@ export default function DesktopShell() {
 
   return (
     <div className="min-h-screen bg-bg">
-      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
+      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setReelsStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
 
       {view === "Home" && (
         <HomePage
@@ -1089,9 +1103,10 @@ export default function DesktopShell() {
           resolveStory={resolveStory}
         />
       )}
-      {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} />}
-      {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} />}
-      {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} />}
+      {view === "Reels" && <ReelsDesktop onOpenInfo={open} paused={!!active} initialStoryId={reelsStoryId ?? undefined} />}
+      {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} resolveStory={resolveStory} />}
+      {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} resolveStory={resolveStory} />}
+      {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} resolveStory={resolveStory} />}
       {view === "Search" && <SearchPage onOpen={open} query={query} />}
 
       <footer className="border-t border-line mt-10">
