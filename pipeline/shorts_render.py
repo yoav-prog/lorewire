@@ -324,6 +324,95 @@ def build_short_props(
             shutil.rmtree(work_dir, ignore_errors=True)
 
 
+def sync_short_config_from_lane_a(story_id: str, props: dict) -> bool:
+    """Mirror a Lane A render's fresh assets back into the editor's
+    short_config so the Scenes / Captions tabs and the editor's live preview
+    stop showing the stale baseline frames after a full re-render. The MP4
+    already reads the render row's props and is correct; this only closes
+    the editor-display gap (the editor reads short_config, which a full
+    regen otherwise never updates — only the FIRST seed via
+    defaultShortConfig populates it).
+
+    Wider surface than Lane B's caption sync because Lane A regenerates
+    everything: doodle_frames (URLs + prompts + ids), character_base_url,
+    captions, voiceover_url, duration_ms, narration script.
+
+    Pinned frames are PRESERVED — the ShortFrame schema marks a frame
+    `is_pinned` when the admin has manually swapped or edited it, and the
+    short-config schema doc says a full Regenerate "MUST preserve pinned
+    frames so the admin's work isn't blown away." Frames in the new render
+    that share an id with a pinned frame in short_config keep the old
+    url + image_prompt + alt + prev_image; everything else takes the new
+    values.
+
+    Best-effort: returns False (and never raises on a missing/malformed
+    config) so a sync miss can't fail an otherwise-good render. Mirrors
+    `shorts_lane_b.sync_short_config_captions`.
+    """
+    existing = store.fetch_story(story_id)
+    if not existing or not existing.get("short_config"):
+        return False
+    try:
+        config = json.loads(existing["short_config"])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(config, dict):
+        return False
+
+    pinned_by_id: dict[str, dict] = {}
+    for f in config.get("doodle_frames") or []:
+        if isinstance(f, dict) and f.get("is_pinned") and isinstance(f.get("id"), str):
+            pinned_by_id[f["id"]] = f
+
+    new_frames: list[dict] = []
+    for raw in props.get("doodle_frames") or []:
+        if not isinstance(raw, dict) or not isinstance(raw.get("id"), str):
+            continue
+        frame_id = raw["id"]
+        kept = pinned_by_id.get(frame_id)
+        if kept is not None:
+            # Preserve the pinned URL + prompt + alt + prev_image; refresh
+            # only the caption index so a re-render that re-mapped frames to
+            # different captions doesn't desync the pin from the narration.
+            merged = {**kept}
+            if isinstance(raw.get("caption_chunk_start_index"), int):
+                merged["caption_chunk_start_index"] = raw["caption_chunk_start_index"]
+            new_frames.append(merged)
+            continue
+        out: dict = {
+            "id": frame_id,
+            "url": str(raw.get("url", "")),
+            "caption_chunk_start_index": int(raw.get("caption_chunk_start_index") or 0),
+        }
+        if isinstance(raw.get("image_prompt"), str):
+            out["image_prompt"] = raw["image_prompt"]
+        if isinstance(raw.get("alt"), str):
+            out["alt"] = raw["alt"]
+        new_frames.append(out)
+    config["doodle_frames"] = new_frames
+
+    config["captions"] = [
+        {
+            "start_ms": int(c["start_ms"]),
+            "end_ms": int(c["end_ms"]),
+            "text": str(c.get("text", "")),
+        }
+        for c in (props.get("captions") or [])
+        if isinstance(c, dict) and "start_ms" in c and "end_ms" in c
+    ]
+    if isinstance(props.get("character_base_url"), str):
+        config["character_base_url"] = props["character_base_url"]
+    if isinstance(props.get("voiceover_url"), str):
+        config["voiceover_url"] = props["voiceover_url"]
+    if isinstance(props.get("duration_ms"), (int, float)) and props["duration_ms"]:
+        config["duration_ms"] = int(props["duration_ms"])
+    if isinstance(props.get("script"), str):
+        config["script"] = props["script"]
+
+    store.update_story_short_config(story_id, config)
+    return True
+
+
 def render_short_from_db(
     story_id: str,
     repo_root: Path,

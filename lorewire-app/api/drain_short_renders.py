@@ -169,6 +169,18 @@ def run_drain() -> dict:
         return {"generated": 0, "error": "no-assets"}
 
     store.store_short_props(render_id, json.dumps(built.props))
+    # Mirror Lane A's fresh frames + character base + voice back into the
+    # editor's short_config so the Scenes / Captions tabs and live preview
+    # stop showing the stale baseline after a full re-render. Best-effort:
+    # the MP4 is already correct from props, so a sync miss must not fail
+    # the run. Mirrors the Lane B caption sync above.
+    try:
+        if shorts_render.sync_short_config_from_lane_a(
+            claimed["story_id"], built.props
+        ):
+            _log("config_lane_a_sync", id=render_id, story=claimed["story_id"])
+    except Exception as e:  # noqa: BLE001 — editor sync is non-critical
+        _log("config_lane_a_sync_skip", id=render_id, error=str(e))
     elapsed = round(time.monotonic() - start, 2)
     _log("ready", id=render_id, elapsed_s=elapsed)
     return {"generated": 1, "render_id": render_id, "elapsed_s": elapsed}
