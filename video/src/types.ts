@@ -142,6 +142,12 @@ export interface ShortVideoConfig {
   // to today's render. Composition honors them in `Sequence` windows.
   clip_start_ms?: number;
   clip_end_ms?: number;
+  // Post-roll hold (ms) on the final scene. The shorts pipeline sets this so
+  // the last frame lingers past the narration and the closing word finishes
+  // before the outro splices on. Missing / 0 = no hold (long-form renders are
+  // unchanged). deriveCompositionMetadata grows durationInFrames by it and
+  // DoodleShort stretches the last frame's window to match.
+  end_hold_ms?: number;
   doodle_frames: DoodleFrame[];
   captions: ShortCaptionChunk[];
   // Wave 2 admin toggle: when true, each held image gets a slow Ken-Burns

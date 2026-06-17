@@ -107,6 +107,10 @@ export interface ShortVideoConfig {
   duration_ms: number;
   clip_start_ms?: number;
   clip_end_ms?: number;
+  // Post-roll hold (ms) on the final scene — shorts only. Mirror of
+  // video/src/types.ts; see that file for the full contract. The renderer
+  // reads it; the long-form editor never sets it.
+  end_hold_ms?: number;
   doodle_frames: DoodleFrame[];
   captions: ShortCaptionChunk[];
   ken_burns?: boolean;

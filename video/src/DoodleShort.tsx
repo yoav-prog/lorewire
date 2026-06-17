@@ -74,6 +74,13 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
   const clipEndMs = config.clip_end_ms ?? config.duration_ms;
   const clipStartFrames = Math.round((clipStartMs / 1000) * fps);
   const elapsedMs = (frame / fps) * 1000 + clipStartMs;
+  // Post-roll hold (see composition-metadata.ts): the LAST frame holds on
+  // screen this many ms past the narration so the final word lands before the
+  // outro. calculateMetadata already grew durationInFrames by the same amount;
+  // here we stretch only the last frame's window to fill that tail (otherwise
+  // the held time would render as the blank #ffffff background). Only shorts
+  // set it; 0 keeps every other render unchanged.
+  const endHoldMs = Math.max(0, config.end_hold_ms ?? 0);
 
   // Wave 3 Phase 1: resolve the caption template once so every chunk render
   // shares the same style object. Missing fields fall back to the original
@@ -95,7 +102,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
       const nextStartMs = nextFrame
         ? config.captions[nextFrame.caption_chunk_start_index]?.start_ms ??
           clipEndMs
-        : clipEndMs;
+        : clipEndMs + endHoldMs;
       const absoluteFromFrames = Math.max(0, Math.round((startMs / 1000) * fps));
       const lengthFrames = Math.max(
         1,

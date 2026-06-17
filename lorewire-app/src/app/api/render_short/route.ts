@@ -40,6 +40,16 @@ const longRunAgent = new Agent({
 
 const DEADLINE_MS = 770_000;
 
+// Post-roll hold (ms) injected onto every short's props before dispatch. Holds
+// the final scene on screen this much longer than the narration so the closing
+// word finishes before the outro splices on. Injected here (not stored on the
+// short_renders row) for two reasons: it applies to re-renders of shorts that
+// were generated before this shipped, and it can never double-count across the
+// A/B/C re-render lanes. The DoodleShort composition reads `end_hold_ms` and
+// grows both its duration and the last frame's window. Mirror of
+// pipeline/shorts_render.SHORT_END_HOLD_MS for the local render path.
+const SHORT_END_HOLD_MS = 1500;
+
 interface CloudRunRenderResponse {
   url?: unknown;
   error?: unknown;
@@ -192,6 +202,13 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       status: "error",
       error: err,
     });
+  }
+
+  // Hold the last scene past the narration so the closing word isn't clipped
+  // by the outro. Applied to whatever props the row carries (full generation
+  // or any re-render lane), so old shorts pick it up on their next render too.
+  if (inputProps && typeof inputProps === "object" && !Array.isArray(inputProps)) {
+    (inputProps as Record<string, unknown>).end_hold_ms = SHORT_END_HOLD_MS;
   }
 
   // Resolve the 9:16 intro/outro so Cloud Run splices them around the short,

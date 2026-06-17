@@ -33,6 +33,14 @@ from pipeline import gcs, images, media, shorts, store, video, voice
 SHORT_ID_SUFFIX = "-short"
 # Captions sit low (~bottom third) for shorts, matching the channel reference.
 SHORT_CAPTION_POSITION_Y = 0.72
+# Post-roll hold (ms) on the final scene: the last frame lingers this much past
+# the narration so the closing word finishes before the outro splices on. The
+# DoodleShort composition reads `end_hold_ms` and grows both its duration and
+# the last frame's window. Mirror of SHORT_END_HOLD_MS in the TS render route
+# (lorewire-app/src/app/api/render_short/route.ts), which re-injects the same
+# value for the Cloud Run path; this constant covers the local `npx remotion
+# render` path.
+SHORT_END_HOLD_MS = 1500
 
 ProgressFn = Callable[[str, int, int], None]
 
@@ -230,6 +238,7 @@ def build_short_props(
             "channel_name": "lorewire",
             "aspect": "9:16",
             "duration_ms": duration_ms,
+            "end_hold_ms": SHORT_END_HOLD_MS,
             "doodle_frames": doodle_frames,
             "captions": captions,
             "ken_burns": False,

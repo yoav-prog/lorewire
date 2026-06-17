@@ -98,3 +98,42 @@ describe("deriveCompositionMetadata — duration math (unchanged from before Pha
     expect(m.durationInFrames).toBe(1);
   });
 });
+
+describe("deriveCompositionMetadata — end_hold_ms post-roll", () => {
+  it("adds the hold to the rendered duration (shorts hold the last scene)", () => {
+    // 10s narration + 1.5s hold = 11.5s = 345 frames at 30 fps.
+    const m = deriveCompositionMetadata(
+      baseConfig({ duration_ms: 10000, end_hold_ms: 1500 }),
+    );
+    expect(m.durationInFrames).toBe(345);
+  });
+
+  it("is byte-identical to no hold when the field is absent or zero", () => {
+    const base = deriveCompositionMetadata(baseConfig({ duration_ms: 10000 }));
+    const zero = deriveCompositionMetadata(
+      baseConfig({ duration_ms: 10000, end_hold_ms: 0 }),
+    );
+    expect(zero.durationInFrames).toBe(base.durationInFrames);
+    expect(base.durationInFrames).toBe(300);
+  });
+
+  it("adds the hold on top of a trim window, never inside it", () => {
+    // 3s trimmed window + 1.5s hold = 4.5s = 135 frames.
+    const m = deriveCompositionMetadata(
+      baseConfig({
+        duration_ms: 10000,
+        clip_start_ms: 2000,
+        clip_end_ms: 5000,
+        end_hold_ms: 1500,
+      }),
+    );
+    expect(m.durationInFrames).toBe(135);
+  });
+
+  it("ignores a negative hold (treated as no hold)", () => {
+    const m = deriveCompositionMetadata(
+      baseConfig({ duration_ms: 10000, end_hold_ms: -500 }),
+    );
+    expect(m.durationInFrames).toBe(300);
+  });
+});
