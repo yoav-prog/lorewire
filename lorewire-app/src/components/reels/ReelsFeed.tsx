@@ -168,6 +168,7 @@ export default function ReelsFeed({
             active={i === activeIdx}
             mounted={Math.abs(i - activeIdx) <= MOUNT_RADIUS}
             eager={i === activeIdx || i === activeIdx + 1}
+            insetBottom={84}
             muted={muted}
             reducedMotion={reducedMotion}
             paused={paused}

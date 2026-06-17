@@ -179,8 +179,10 @@ export default function ReelsDesktop({
       className="fixed inset-x-0 bottom-0 top-[68px] z-30 flex items-center justify-center bg-black"
       style={{ overscrollBehavior: "contain" }}
     >
-      {/* Centred 9:16 stage; the windowed cards slide vertically between steps. */}
-      <div className="relative aspect-[9/16] h-[calc(100vh-110px)] max-h-[880px] overflow-hidden rounded-2xl">
+      {/* Centred portrait stage; the windowed cards slide vertically between
+          steps. Slightly taller than 9:16 so the video region stays ~9:16 once
+          the control bar takes its share. */}
+      <div className="relative aspect-[9/18] h-[calc(100vh-96px)] max-h-[940px] overflow-hidden rounded-2xl">
         {windowed.map((i) => (
           <div
             key={shorts[i].id}
@@ -197,6 +199,7 @@ export default function ReelsDesktop({
               active={i === activeIdx}
               mounted
               eager={i === activeIdx || i === activeIdx + 1}
+              insetBottom={18}
               muted={muted}
               reducedMotion={reducedMotion}
               paused={paused}
