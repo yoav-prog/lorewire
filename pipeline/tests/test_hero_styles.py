@@ -107,6 +107,43 @@ class DeterministicStylePickTests(unittest.TestCase):
         with self.assertRaises(IndexError):
             stages.deterministic_style_pick("story-id", [])
 
+    # Parity fixture shared with the TS resolver test
+    # (`lorewire-app/src/lib/hero-styles-resolver.test.ts`). Same inputs,
+    # same expected outputs on both sides — drift between Python and TS
+    # would make the admin picker caption show one style while the
+    # pipeline actually renders a different one. Keep these two test
+    # files synchronised on edit.
+    FIXED_THREE = ["a", "b", "c"]
+    PARITY_FIXED_THREE = {
+        "envelope": "b",
+        "cold-shower-revenge": "a",
+        "parking-spot-war": "c",
+        "s-1": "c",
+        "s-2": "a",
+        "s-3": "c",
+        "replyall": "b",
+    }
+    PARITY_ENTITLED = {
+        "envelope": "retro_pulp",
+        "cold-shower-revenge": "magazine_editorial",
+        "parking-spot-war": "comic_book",
+        "s-1": "comic_book",
+        "s-2": "magazine_editorial",
+        "s-3": "comic_book",
+        "replyall": "retro_pulp",
+    }
+
+    def test_parity_with_ts_on_fixed_three_whitelist(self):
+        for story_id, expected in self.PARITY_FIXED_THREE.items():
+            got = stages.deterministic_style_pick(story_id, self.FIXED_THREE)
+            self.assertEqual(got, expected, f"mismatch for {story_id!r}")
+
+    def test_parity_with_ts_on_entitled_whitelist(self):
+        whitelist = stages.CATEGORY_STYLE_WHITELIST["Entitled"]
+        for story_id, expected in self.PARITY_ENTITLED.items():
+            got = stages.deterministic_style_pick(story_id, whitelist)
+            self.assertEqual(got, expected, f"mismatch for {story_id!r}")
+
     def test_pick_is_independent_of_list_ordering(self):
         # Reordering the whitelist would otherwise change picks across
         # the catalog — undesirable when the admin reshuffles. The hash
