@@ -21,8 +21,6 @@
 import "server-only";
 import {
   pickSegmentPure,
-  resolveSegmentsForStory,
-  type ResolvedSegments,
   type SegmentKind,
   type SegmentPick,
   type SegmentResolverStory,
@@ -88,9 +86,13 @@ async function pickOne(
     }
   }
   // No short_config override -> walk the general chain (story columns +
-  // global active).
-  const fallback: ResolvedSegments = await resolveSegmentsForStory(story, "9:16");
-  const pick = kind === "intro" ? fallback.intro : fallback.outro;
+  // global active), but FORCE 9:16. A short is always vertical, so we must
+  // NOT let the resolver derive the aspect from the story's long-form
+  // video_config: a story whose long-form is 16:9 would otherwise resolve its
+  // short's intro/outro against the WIDE active pointer and miss the 9:16 one
+  // entirely. Calling pickSegmentPure directly pins the aspect the way the
+  // short_config-override path above already does.
+  const pick = await pickSegmentPure(kind, story, "9:16", getSetting, getSegment);
   return { ...pick, source: "story" };
 }
 

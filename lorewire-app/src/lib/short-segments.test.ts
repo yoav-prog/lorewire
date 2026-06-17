@@ -79,6 +79,21 @@ describe("resolveShortSegments", () => {
     expect(out.intro.reason).toBe("global-active");
   });
 
+  it("forces 9:16 even when the story has a 16:9 long-form video", async () => {
+    // A short is always vertical. The resolver must NOT read the story's
+    // long-form aspect — a 16:9 long-form story still resolves its short's
+    // intro against the 9:16 active pointer, not the wide one.
+    const introId = await seedSegment({ kind: "intro", label: "Vertical intro" });
+    await setSetting("video.active_intro_id_9x16", introId);
+    const wideStory = {
+      ...emptyStory,
+      video_config: JSON.stringify({ aspect: "16:9" }),
+    };
+    const out = await resolveShortSegments(null, wideStory);
+    expect(out.intro.segment?.label).toBe("Vertical intro");
+    expect(out.intro.reason).toBe("global-active");
+  });
+
   it("uses the short_config override over the global active", async () => {
     const globalId = await seedSegment({ kind: "intro", label: "Global intro" });
     const overrideId = await seedSegment({ kind: "intro", label: "Short-only intro" });
