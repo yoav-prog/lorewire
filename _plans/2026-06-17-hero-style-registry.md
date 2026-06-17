@@ -1,8 +1,50 @@
 # Hero style registry — Netflix-style poster variety
 
 **Date:** 2026-06-17
-**Status:** Approved (scope locked with user, awaiting implementation start)
+**Status:** ✅ Shipped on `feat/publish-auto-curate-on-rails` (commits below). Pending merge of PR #44 → main → prod deploy.
 **Builds on:** Phase 1 hero-from-short character consistency (commit `739b25a`).
+
+## What shipped
+
+All 5 sequenced steps from the original plan landed without scope creep. One small surprise — step 5 needed a TS mirror of the Python resolver so the per-story caption could show the resolved style + source layer accurately without a Python round-trip; that mirror is locked to the Python implementation via a shared parity fixture so the two can't drift.
+
+| Step | Commit | Highlight |
+|---|---|---|
+| Plan | `ef750bc` | Plan doc + scope decisions locked with user. |
+| 1. Schema + Python registry + resolver | `27f57ef` | `HERO_STYLES` (6 styles) + `CATEGORY_STYLE_WHITELIST` + `resolve_hero_style` (4-layer chain) + `stories.hero_style_id` column. 22 Python tests. |
+| 2. TS plumbing | `a50fe99` | `pipeline/scripts/sync_hero_styles.py` emits `lorewire-app/src/data/hero-styles.json`; TS `lib/hero-styles.ts` exposes typed accessors; parity test prevents drift. 12 TS tests. |
+| 3. Thumbnail generator | `407853a` | `pipeline/scripts/generate_hero_style_thumbnails.py` — text-only stock prompt, uploads to GCS, persists URL as `hero.thumbnail.<id>` setting. Idempotent, partial-success safe. 10 Python tests. |
+| 4. Picker + settings section | `c4b47ec` | New `HeroStylePicker` shared component (radio-grid of 6 thumbnails + auto card); `loadHeroStyleSettings` round-trips global + per-category + thumbnail URLs in one shot; settings page section "Hero & poster style" with 7 pickers. 11 TS tests. |
+| 5. Per-story picker | `9fc02a1` | `lib/hero-styles-resolver.ts` mirrors the Python resolver (parity-locked); `saveStoryHeroStyleAction` writes `stories.hero_style_id`; story edit page renders the picker with the full `heroStyleSourceLabel()` caption. 14 TS + 2 Python parity tests. |
+
+Total: **51 TS + 34 Python tests** added across the 5 steps. All green, including the new parity tests that lock the TS-Python boundary.
+
+## What deviated from the plan
+
+- **Plan said:** TS file as a code-generated dump.
+  **Shipped:** Python writes a JSON file (`src/data/hero-styles.json`), TS imports it. Same outcome (single source of truth in Python), cleaner pipeline (no codegen step, just JSON read).
+- **Plan said:** separate `HeroStylePickerPanelProps` between settings vs story.
+  **Shipped:** one shared `HeroStylePicker` accepts optional `formAction` + `formHiddenFields`. Same component drives both surfaces. Step 5 passes the per-story action; settings uses the default `saveSettingAction`.
+- **Plan said:** thumbnails would be generated under a dedicated GCS prefix and the URLs would be written into the TS registry directly.
+  **Shipped:** URLs persist as the setting `hero.thumbnail.<id>`. The committed `hero-styles.json` always has `thumbnail_url: null`; the picker reads URLs at render time via `loadHeroStyleSettings`. Trade-off: parity test stays stable across thumbnail regens (no JSON churn), at the cost of one extra settings-table read per picker render (negligible).
+- **Plan said:** new `saveStoryHeroStyleAction` would live alongside the existing `setStoryVoice`-style mutations.
+  **Shipped:** It does — uses the existing `requireAdmin` + `run()` repo helpers + closed-enum validator pattern.
+
+## Acceptance — what the admin can do today (after PR #44 merges)
+
+1. **Run `python -m pipeline.scripts.generate_hero_style_thumbnails`** once (~$0.24 in image gen). Seeds the 6 preview images.
+2. **`/admin/settings` → "Hero & poster style"** section. Pick a global default OR per-category defaults. Leave any picker on "Auto" to let the deterministic per-category short-list drive variety.
+3. **`/admin/stories/<id>` → "Hero & poster style"** picker. Caption surfaces the resolved style + the layer that produced it (e.g. "Currently resolves to 'Cinematic neo-noir'. Auto-picked from the Drama short-list (neo_noir, painted_realism, magazine_editorial)."). Empty = let the chain resolve at render time.
+4. **Click "Restyle hero from short character"** on the same page → the worker calls `_regen_hero_from_short`, which calls `resolve_hero_style` for the current story, runs `gpt-image-2-i2i` with the resolved style's prompt band + the short's character as the i2i seed. Hero + landscape land on `stories.hero_image` / `hero_image_landscape`.
+
+## Open follow-ups (NOT done — flagged for later)
+
+- **Settings page button "Generate style thumbnails"** that calls `generate_hero_style_thumbnails.py` as a server action. Today the script is CLI-only; admins running prod without shell access can't seed thumbnails without me. Low priority — once it's seeded it stays.
+- **Settings page "Resolution preview"** showing which style each Cat resolves to under the current settings (uses the same TS resolver). Nice-to-have for verifying a per-category default change had the intended effect without opening any story.
+- **Per-aspect style overrides.** Currently portrait + landscape share one resolved style per story (the explicit constraint you asked for). If we ever want different styles per aspect, the resolver gets one more layer.
+- **User-editable prompt bands.** Styles are closed-enum in code. If the library proves too narrow we expose editing in a follow-up plan.
+
+---
 
 ## Goal
 
