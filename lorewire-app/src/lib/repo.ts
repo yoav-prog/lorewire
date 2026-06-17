@@ -74,10 +74,16 @@ export interface StoryRow {
   // both at synthesize time via the resolution chain in voice.py.
   voice_provider: string | null;
   voice_id: string | null;
+  // 2026-06-17 hero style registry (_plans/2026-06-17-hero-style-registry.md).
+  // Closed-enum key from pipeline.stages.HERO_STYLES. NULL = "resolver picks"
+  // — falls through to per-category default → global default → deterministic
+  // auto-pick from the category's whitelist. Settings changes never overwrite
+  // an existing row's pin; only the per-story picker writes here.
+  hero_style_id: string | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
@@ -217,6 +223,23 @@ export async function getStoryShortConfigJson(
     [storyId],
   );
   return r?.short_config ?? null;
+}
+
+// Wipe `stories.short_config` so the short editor's loadCurrentConfig
+// re-seeds from the next done short_render's props instead of re-using
+// the persisted copy. Used by the Restart action — a "throw away and
+// start over" gesture by design. Bumps updated_at so the dashboard
+// list re-sorts.
+export async function clearStoryShortConfig(storyId: string): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE stories SET short_config = NULL, updated_at = ? WHERE id = ?",
+    [now, storyId],
+  );
+  // eslint-disable-next-line no-console -- rule 14: observability from day one
+  console.info("[short editor config cleared]", {
+    story_id: storyId,
+  });
 }
 
 // Persists a canonical JSON string into the short_config column and bumps

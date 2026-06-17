@@ -142,17 +142,53 @@ export interface MergedCatalog {
 export function mergeStaticAndLive(live: LiveCatalogStory[]): MergedCatalog {
   const liveStories = live.map(liveRowToStory);
   const byId = new Map<string, Story>();
-  // Live first so live ordering is the natural "most recent" order +
-  // a collision keeps the live record.
-  for (const s of liveStories) byId.set(s.id, s);
+  // On collision: MERGE field-by-field instead of replacing. The live
+  // projection (LiveCatalogStory) doesn't carry body / images / audioUrl /
+  // alignment / source_url — those live only in the PUBLISHED overlay
+  // that has already been folded into STORIES at module load. Without this
+  // merge, a story present in BOTH the DB and PUBLISHED loses its body
+  // because the live entry overwrites the static one, and the Read tab
+  // falls into the hardcoded envelope sample. Live wins where it has a
+  // value (so freshly-uploaded hero artwork / titles take precedence);
+  // static fills in everything the live projection can't carry.
+  const staticById = new Map<string, Story>(STORIES.map((s) => [s.id, s]));
+  for (const liveStory of liveStories) {
+    const staticVersion = staticById.get(liveStory.id);
+    byId.set(liveStory.id, staticVersion ? mergeLiveOverStatic(staticVersion, liveStory) : liveStory);
+  }
   for (const s of STORIES) {
     if (!byId.has(s.id)) byId.set(s.id, s);
   }
+  // The array preserves live order (most recent first) and appends any
+  // static-only entries that weren't in the live feed.
+  const mergedLiveOrder = liveStories.map((s) => byId.get(s.id)!);
   const array = [
-    ...liveStories,
-    ...STORIES.filter((s) => !byId.get(s.id) || byId.get(s.id) === s),
+    ...mergedLiveOrder,
+    ...STORIES.filter((s) => !liveStories.some((l) => l.id === s.id)),
   ];
   return { array, byId };
+}
+
+// Live wins for fields the LiveCatalogStory projection carries; static
+// supplies everything else (body, images, audio, alignment, source_url —
+// none of which the homepage rails fetch live to keep the catalog payload
+// small).
+function mergeLiveOverStatic(staticStory: Story, liveStory: Story): Story {
+  return {
+    ...staticStory,
+    id: liveStory.id,
+    title: liveStory.title || staticStory.title,
+    cat: liveStory.cat,
+    dur: liveStory.dur || staticStory.dur,
+    year: liveStory.year || staticStory.year,
+    glyph: liveStory.glyph || staticStory.glyph,
+    syn: liveStory.syn || staticStory.syn,
+    heroImage: liveStory.heroImage ?? staticStory.heroImage,
+    heroImageLandscape: liveStory.heroImageLandscape ?? staticStory.heroImageLandscape,
+    heroHasBakedTitle:
+      liveStory.heroHasBakedTitle ?? staticStory.heroHasBakedTitle,
+    videoUrl: liveStory.videoUrl ?? staticStory.videoUrl,
+  };
 }
 
 // Fetch curation + live catalog on mount and return a steady-state result

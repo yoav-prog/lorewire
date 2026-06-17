@@ -161,22 +161,23 @@ def build_short_props(
         duration_ms = max(int(captions[-1]["end_ms"]), 1)
 
         # 3) Stage frames. Scene URLs are remote (kie) so download first. Track
-        #    each frame's PLANNED caption index so a partial-download skip can't
-        #    misalign the rest; the base frame is the opening (planned index 0).
-        #    remote -> upload to GCS (https URLs); local -> staticFile paths.
-        #    image_prompt carries the FULL wrapped prompt that generated each
-        #    source URL so it survives into doodle_frames; editors see the
-        #    exact bytes the model received and per-scene regen replays them
-        #    verbatim. Base frame (i=0) uses assets.base_prompt; scene frames
-        #    use s["image_prompt"] persisted by generate_short_assets.
+        #    each scene's PLANNED caption index so a partial-download skip can't
+        #    misalign the rest. remote -> upload to GCS (https URLs); local ->
+        #    staticFile paths. image_prompt carries the FULL wrapped prompt that
+        #    generated each source URL so it survives into doodle_frames; editors
+        #    see the exact bytes the model received and per-scene regen replays
+        #    them verbatim.
+        #
+        #    The base image is staged separately (below) and goes into
+        #    props.character_base_url so per-scene regens can find it as the i2i
+        #    seed. We deliberately DON'T add it to doodle_frames anymore: it's
+        #    the character alone on a plain white background, which makes a weak
+        #    opener for every short. Scene 1 is a fuller composition and a
+        #    stronger first beat. The planner prompt now requires the first
+        #    scene to land at caption_chunk_start_index=0 so the opening visual
+        #    actually matches what the narrator says first.
         progress("stage")
         sources = [
-            {
-                "url": assets.base_url,
-                "planned": 0,
-                "image_prompt": getattr(assets, "base_prompt", "") or "",
-            }
-        ] + [
             {
                 "url": s["url"],
                 "planned": int(s.get("caption_chunk_start_index", 0) or 0),
@@ -204,9 +205,40 @@ def build_short_props(
                 "image_prompt": src.get("image_prompt") or None,
             })
             progress("stage", i + 1, len(sources))
+
+        # Stage the base image too — uploaded for the editor's i2i regen surface
+        # (props.character_base_url) and used as the on-screen fallback only
+        # when zero scenes staged successfully. Local mode keeps it under
+        # video/public/<id>-short/ so per-scene re-renders can re-read it.
+        base_fname = "base.png"
+        base_local = work_dir / base_fname
+        character_base_ref: str | None = None
+        try:
+            images.download(assets.base_url, base_local)
+            character_base_ref = (
+                gcs.publish(base_local, f"{safe_id}/{base_fname}", assets.base_url)
+                if remote else f"{safe_id}/{base_fname}"
+            )
+        except Exception as e:
+            print(f"[short id={safe_id} stage] base image staging FAILED: {e}")
+
         if not staged:
-            print(f"[short id={safe_id}] no frames staged; skipping")
-            return None
+            # Every scene failed generation/download. Fall back to the base
+            # image as a single doodle frame so the short still renders rather
+            # than aborting the whole render.
+            if not character_base_ref:
+                print(f"[short id={safe_id}] no frames staged and base missing; skipping")
+                return None
+            print(
+                f"[short id={safe_id}] no scene frames staged; "
+                f"falling back to base image as the only doodle frame"
+            )
+            staged.append({
+                "id": "frame-00",
+                "url": character_base_ref,
+                "planned": 0,
+                "image_prompt": getattr(assets, "base_prompt", "") or None,
+            })
 
         audio_ref = (
             gcs.publish(audio_path, f"{safe_id}/voice.mp3", str(audio_path))
@@ -218,6 +250,17 @@ def build_short_props(
             1, len(shorts.chunk_for_planning(assets.script.get("short_script", "")))
         )
         doodle_frames = _map_frames(staged, len(captions), planning_count)
+        # Defensive: even with the planner prompt pinning the first scene at
+        # caption 0, an off-spec LLM response can land scene-1 at a later
+        # chunk. Force the surviving first frame back to caption 0 so the
+        # opener never plays with no image on screen during the hook line.
+        if doodle_frames and doodle_frames[0]["caption_chunk_start_index"] > 0:
+            print(
+                f"[short id={safe_id}] first scene planned at "
+                f"caption {doodle_frames[0]['caption_chunk_start_index']}; "
+                f"pinning to 0 so the hook line has a visual"
+            )
+            doodle_frames[0]["caption_chunk_start_index"] = 0
 
         caption_template = {
             **video.resolve_caption_template(store.get_setting),
@@ -238,6 +281,11 @@ def build_short_props(
                        "prop_slide": False, "mouth_swap": False},
             "props_list": [],
             "character_image_mouth_removed": None,
+            # Persist the base image URL so the editor's per-scene regen can
+            # find the i2i seed even though the base is no longer one of the
+            # doodle_frames. Lane B / C and shorts_scene_regen read this key
+            # directly off short_config.
+            "character_base_url": character_base_ref,
         }
         print(
             f"[short id={safe_id} props] {len(captions)} caption chunks, "

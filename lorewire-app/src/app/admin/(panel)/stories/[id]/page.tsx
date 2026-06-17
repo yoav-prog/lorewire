@@ -9,10 +9,15 @@ import {
   type SegmentRow,
 } from "@/lib/repo";
 import {
+  loadHeroStyleSettings,
   saveStory,
+  saveStoryHeroStyleAction,
   setStoryOverrideAction,
   setStoryNoindexAction,
 } from "@/app/admin/actions";
+import { HeroStylePicker } from "@/app/admin/(panel)/_components/HeroStylePicker";
+import { resolveHeroStyleFromContext } from "@/lib/hero-styles-resolver";
+import { heroStyleSourceLabel } from "@/lib/hero-styles";
 import { statusClass } from "@/app/admin/ui";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import {
@@ -51,6 +56,11 @@ export default async function EditStory({
   const { id } = await params;
   const s = await getStory(id);
   if (!s) notFound();
+
+  // Hero style snapshot (global default + every per-category default +
+  // every pre-generated thumbnail URL) — one round trip drives the
+  // picker render + the resolver caption below.
+  const heroStyleSettings = await loadHeroStyleSettings();
 
   let gallery: string[] = [];
   try {
@@ -148,6 +158,11 @@ export default async function EditStory({
       asset: "hero",
       label: "Hero image",
       hint: "The poster frame on the public reader and the OG card.",
+    },
+    {
+      asset: "hero_from_short",
+      label: "Restyle hero from short character",
+      hint: "Redraws the hero + landscape using the short's character as an i2i reference. Same poster style, same protagonist as the Watch tab.",
     },
     {
       asset: "scenes",
@@ -355,6 +370,50 @@ export default async function EditStory({
             ownerId={s.id}
             assets={storyAssets}
           />
+
+          {/* Hero & poster style picker (step 5 of
+              _plans/2026-06-17-hero-style-registry.md). Reuses the same
+              shared HeroStylePicker the settings page renders, but
+              points its form at saveStoryHeroStyleAction so the value
+              lands on `stories.hero_style_id` (NULL = "use the
+              resolver chain"). The caption surfaces the resolved
+              style + the layer that produced it — the explicit
+              "show the resolution source" ask. The "Restyle hero from
+              short character" button on MediaRegenPanel above uses
+              the SAME resolution to pick which style to render. */}
+          {(() => {
+            const ctx = {
+              pinnedId: s.hero_style_id,
+              category: s.category ?? "Drama",
+              storyId: s.id,
+              globalStyleId: heroStyleSettings.globalStyleId,
+              categoryDefaults: heroStyleSettings.categoryDefaults,
+            };
+            const resolved = resolveHeroStyleFromContext(ctx);
+            const captionPrefix =
+              s.hero_style_id
+                ? `Pinned to "${resolved.style.label}"`
+                : `Currently resolves to "${resolved.style.label}"`;
+            const sourceLine = heroStyleSourceLabel(
+              resolved.source,
+              s.category ?? "Drama",
+              resolved.whitelist,
+            );
+            return (
+              <HeroStylePicker
+                label="Hero & poster style"
+                hint="Closed-enum override for which poster look gets rendered on this story. Empty = let the resolver chain pick (per-category default → global default → smart auto-pick from this category's short-list). Changing this only affects the NEXT hero render — click 'Restyle hero from short character' on the panel above to regenerate."
+                selectedId={s.hero_style_id ?? ""}
+                thumbnails={heroStyleSettings.thumbnails}
+                includeAutoOption
+                autoOptionLabel="Use the resolver chain"
+                formAction={saveStoryHeroStyleAction}
+                formHiddenFields={{ storyId: s.id }}
+                captionOverride={`${captionPrefix}. ${sourceLine}.`}
+                saveLabel="Save hero style"
+              />
+            );
+          })()}
 
           {/* Bible lives in `stories.pipeline_cache` (split off
               video_config 2026-06-14 — see

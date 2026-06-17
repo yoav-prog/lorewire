@@ -89,6 +89,87 @@ describe("buildConcatArgv", () => {
     assert.equal(argv.includes("-b:a"), false);
   });
 
+  it("applies a body tail-pad before the outro when configured", () => {
+    // intro(0) + body(1) + outro(2); pad on body should hold its last
+    // video frame for 1.5s + extend its audio with silence for the
+    // same. Concat picks up `[bv][ba]` in place of `[1:v:0][1:a:0]`.
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, bodyTailPadSec: 1.5 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[1:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];" +
+        "[1:a:0]apad=pad_dur=1.5[ba];" +
+        "[0:v:0][0:a:0][bv][ba][2:v:0][2:a:0]concat=n=3:v=1:a=1[v][a]",
+    );
+  });
+
+  it("pad without intro: body at index 0, outro at 1", () => {
+    // Same fix, no intro — body is input 0.
+    const argv = buildConcatArgv(
+      ["/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 0, bodyTailPadSec: 1.2 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0]tpad=stop_mode=clone:stop_duration=1.2[bv];" +
+        "[0:a:0]apad=pad_dur=1.2[ba];" +
+        "[bv][ba][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]",
+    );
+  });
+
+  it("skips the pad when nothing follows the body (no outro)", () => {
+    // intro + body, no outro — padding the body would just lengthen
+    // the output for no reason, so the filter graph drops to the
+    // pre-fix shape.
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, bodyTailPadSec: 1.5 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]",
+    );
+  });
+
+  it("skips the pad when bodyTailPadSec is 0 or missing", () => {
+    // Even with outro present, a 0-second (or unset) pad must produce
+    // the exact same argv as the unpadded path — back-compat.
+    const baseline = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+    );
+    const zero = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, bodyTailPadSec: 0 },
+    );
+    assert.deepEqual(zero, baseline);
+  });
+
+  it("body-tail-pad respects hasAudio=false (no apad clause)", () => {
+    // Without audio there's no [body:a:0] to pad — only the video gets
+    // the tpad clause and only [bv] feeds the concat.
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { hasAudio: false, bodyIndex: 1, bodyTailPadSec: 1.5 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[1:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];" +
+        "[0:v:0][bv][2:v:0]concat=n=3:v=1:a=0[v]",
+    );
+  });
+
   it("treats input paths as standalone argv tokens (no shell interpolation)", () => {
     // Paths with spaces, semicolons, and quotes pass through untouched —
     // any shell hazard at the call site is the spawner's problem, not

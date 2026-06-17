@@ -223,6 +223,135 @@ class FfmpegCmdShapeTests(unittest.TestCase):
         self.assertIn("concat=n=2:v=1:a=0", argv[fc_idx + 1])
         self.assertNotIn("-c:a", argv)
 
+    def test_splice_cmd_body_tail_pad_inserts_tpad_and_apad(self):
+        # intro(0) + body(1) + outro(2) with a 1.5s tail-pad. The body
+        # should land in the concat as [bv][ba] with tpad+apad prefixed,
+        # everything else unchanged.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, body_tail_pad_sec=1.5,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[1:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];"
+            "[1:a:0]apad=pad_dur=1.5[ba];"
+            "[0:v:0][0:a:0][bv][ba][2:v:0][2:a:0]"
+            "concat=n=3:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_body_at_index_zero_when_no_intro(self):
+        # No intro — body is input 0, outro is 1. Same tpad/apad
+        # mechanism, different stream indices.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=0, body_tail_pad_sec=1.2,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0]tpad=stop_mode=clone:stop_duration=1.2[bv];"
+            "[0:a:0]apad=pad_dur=1.2[ba];"
+            "[bv][ba][1:v:0][1:a:0]"
+            "concat=n=2:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_no_pad_when_nothing_follows_body(self):
+        # intro + body, no outro. Padding the body's tail would just
+        # lengthen the output for no reason — the graph drops the pad
+        # and falls back to the pre-fix shape.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4")],
+            Path("out.mp4"),
+            body_index=1, body_tail_pad_sec=1.5,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_pad_zero_is_backcompat(self):
+        # A zero-second pad must produce the exact same argv as the
+        # unpadded path so callers that haven't been updated stay
+        # byte-identical.
+        baseline = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+        )
+        zero = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, body_tail_pad_sec=0.0,
+        )
+        self.assertEqual(zero, baseline)
+
+    def test_splice_cmd_body_tail_pad_video_only(self):
+        # has_audio=False with a body-tail-pad: only the video gets the
+        # tpad clause; the audio pad clause + [ba] label drop entirely.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            has_audio=False,
+            body_index=1, body_tail_pad_sec=1.5,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[1:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];"
+            "[0:v:0][bv][2:v:0]"
+            "concat=n=3:v=1:a=0[v]",
+        )
+
+
+class OutroLeadInResolverTests(unittest.TestCase):
+    """The setting-driven default for `outro_lead_in_sec`. Unset →
+    1.5s. Bad value → 1.5s. Out-of-range → clamped. Test the resolver
+    in isolation so the splice call site stays a thin pass-through."""
+
+    def _g(self, value: str | None):
+        return lambda _key: value
+
+    def test_unset_returns_default(self):
+        self.assertEqual(
+            segments.resolve_outro_lead_in_sec(self._g(None)),
+            segments.DEFAULT_OUTRO_LEAD_IN_MS / 1000.0,
+        )
+
+    def test_empty_string_returns_default(self):
+        self.assertEqual(
+            segments.resolve_outro_lead_in_sec(self._g("   ")),
+            segments.DEFAULT_OUTRO_LEAD_IN_MS / 1000.0,
+        )
+
+    def test_valid_number_returns_seconds(self):
+        self.assertEqual(
+            segments.resolve_outro_lead_in_sec(self._g("2000")),
+            2.0,
+        )
+
+    def test_negative_clamped_to_zero(self):
+        # Defense against a typo that would otherwise emit a negative
+        # pad — ffmpeg would error or produce undefined output.
+        self.assertEqual(
+            segments.resolve_outro_lead_in_sec(self._g("-500")),
+            0.0,
+        )
+
+    def test_oversize_clamped_to_ten_seconds(self):
+        self.assertEqual(
+            segments.resolve_outro_lead_in_sec(self._g("999999")),
+            10.0,
+        )
+
+    def test_garbage_returns_default(self):
+        self.assertEqual(
+            segments.resolve_outro_lead_in_sec(self._g("not-a-number")),
+            segments.DEFAULT_OUTRO_LEAD_IN_MS / 1000.0,
+        )
+
 
 # ─── Phase 3 of _plans/2026-06-12-video-aspect-ratio.md ──────────────────────
 

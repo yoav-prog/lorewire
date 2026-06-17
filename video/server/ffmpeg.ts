@@ -47,7 +47,19 @@ export const AAC_BITRATE = "192k";
 export function buildConcatArgv(
   inputs: string[],
   output: string,
-  options: { hasAudio?: boolean } = {},
+  options: {
+    hasAudio?: boolean;
+    /** Index of the body input in `inputs`. When supplied together with a
+     *  positive `bodyTailPadSec`, the body's tail gets a held-frame +
+     *  silent audio pad before the concat so the narrator's last word
+     *  doesn't get stepped on by whatever comes after (typically the
+     *  outro). Pure mirror of pipeline/segments.py:_ffmpeg_splice_cmd. */
+    bodyIndex?: number;
+    /** Seconds of held-frame + silent-audio pad to insert on the body's
+     *  tail. 0 (the default) skips the pad — same argv shape as before
+     *  this option landed. */
+    bodyTailPadSec?: number;
+  } = {},
 ): string[] {
   const hasAudio = options.hasAudio ?? true;
   if (inputs.length < 2) {
@@ -55,19 +67,50 @@ export function buildConcatArgv(
       `splice needs at least 2 inputs, got ${inputs.length}`,
     );
   }
+  const bodyIndex = options.bodyIndex;
+  const bodyTailPadSec = options.bodyTailPadSec ?? 0;
+  // Pad only when (a) the caller actually wants one, (b) the body's index
+  // is valid, and (c) something follows the body — padding the tail of a
+  // body that's already last in the chain just lengthens the output for
+  // no reason.
+  const padActive =
+    bodyIndex !== undefined &&
+    bodyTailPadSec > 0 &&
+    bodyIndex >= 0 &&
+    bodyIndex < inputs.length - 1;
 
   const argv: string[] = ["ffmpeg", "-y"];
   for (const p of inputs) {
     argv.push("-i", p);
   }
 
-  // Filter graph mirrors the Python builder verbatim:
+  // Filter graph mirrors the Python builder verbatim. Without pad:
   //   [0:v:0][0:a:0][1:v:0][1:a:0]...concat=n=N:v=1:a=1[v][a]
+  // With pad applied to body at index B:
+  //   [B:v:0]tpad=stop_mode=clone:stop_duration=S[bv];
+  //   [B:a:0]apad=pad_dur=S[ba];
+  //   [0:v:0][0:a:0]...[bv][ba]...concat=...
   // When `hasAudio` is false the audio streams + the `[a]` label drop.
   let streams = "";
+  if (padActive) {
+    // `Number.toString` would emit "1.5", "0.5", etc. — same shape the
+    // Python side produces via format("g") and what ffmpeg's parser
+    // expects. No locale risk because Number stringification is
+    // locale-independent.
+    const padS = String(bodyTailPadSec);
+    streams += `[${bodyIndex}:v:0]tpad=stop_mode=clone:stop_duration=${padS}[bv];`;
+    if (hasAudio) {
+      streams += `[${bodyIndex}:a:0]apad=pad_dur=${padS}[ba];`;
+    }
+  }
   for (let i = 0; i < inputs.length; i++) {
-    streams += `[${i}:v:0]`;
-    if (hasAudio) streams += `[${i}:a:0]`;
+    if (padActive && i === bodyIndex) {
+      streams += `[bv]`;
+      if (hasAudio) streams += `[ba]`;
+    } else {
+      streams += `[${i}:v:0]`;
+      if (hasAudio) streams += `[${i}:a:0]`;
+    }
   }
   const audioFlag = hasAudio ? 1 : 0;
   streams += `concat=n=${inputs.length}:v=1:a=${audioFlag}[v]`;

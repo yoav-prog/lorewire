@@ -26,6 +26,10 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
   video_url: null,
   images: [],
+  audio_url: null,
+  alignment: [],
+  source_url: null,
+  body: null,
   is_short: false,
   found: false,
 };
@@ -420,7 +424,11 @@ function GenArticle({
   story: Story;
   liveMedia: LiveStoryMediaResult;
 }) {
-  const paras = (story.body || "").split(/\n{2,}/);
+  // Prefer live body so a story published in the DB but not yet re-exported
+  // into published.ts still renders its real article text instead of the
+  // hardcoded envelope sample fallback.
+  const articleBody = liveMedia.body ?? story.body ?? "";
+  const paras = articleBody.split(/\n{2,}/);
   // When the applied video is a short, the article reads alongside the
   // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
   // the long-form 16:9 illustrations are still the right fit.
@@ -471,22 +479,27 @@ function GenArticle({
           )}
         </React.Fragment>
       ))}
-      {isRealRedditUrl(story.source_url) ? (
-        <div className="mt-8 max-w-[660px]">
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
-          <RedditEmbed url={story.source_url!} title={story.title} />
-        </div>
-      ) : (
-        <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
-          <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
-            <span className="text-ink/80">r/AmItheAsshole</span>
-            <span>&middot;</span>
-            <span>retold by LoreWire</span>
-            <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
+      {(() => {
+        // Prefer the live source_url so admin edits to the Reddit link
+        // reach the public Article without a re-export of published.ts.
+        const liveSourceUrl = liveMedia.source_url ?? story.source_url;
+        return isRealRedditUrl(liveSourceUrl) ? (
+          <div className="mt-8 max-w-[660px]">
+            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
+            <RedditEmbed url={liveSourceUrl!} title={story.title} />
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
+            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
+            <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
+              <span className="text-ink/80">r/AmItheAsshole</span>
+              <span>&middot;</span>
+              <span>retold by LoreWire</span>
+              <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
+            </div>
+          </div>
+        );
+      })()}
     </article>
   );
 }
@@ -507,7 +520,7 @@ function Read({
         ))}
       </div>
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        (liveMedia.body || story.body) ? <GenArticle story={story} liveMedia={liveMedia} /> : (
         <article className="fade-in max-w-[660px]">
           <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
           <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>The $800 Envelope</h1>
@@ -586,17 +599,44 @@ function Read({
 /* ----------------------------- READ-ALONG ----------------------------- */
 const SCRIPT = ("Dana volunteered to collect the money before anyone else could blink. The envelope filled up fast, fat with twenties and one brave hundred. Then, over a single long weekend, it simply vanished from the drawer. She said she moved it somewhere safe. It was not, in any sense, safe.").split(" ");
 
-function ReadAlong({ story }: { story: Story }) {
-  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
-  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+function ReadAlong({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
+  // Prefer the live LONG-FORM audio + alignment from the stories row so
+  // a fresh "Regenerate voiceover" in the admin VoicePicker reaches this
+  // surface without a re-export of published.ts. liveMedia.audio_url is
+  // explicitly NOT the short's voiceover_url — see actions.ts: it sources
+  // stories.audio_url, which the voice_renders_worker writes whenever
+  // the admin regenerates the long-form narration.
+  const audioUrl = liveMedia.audio_url ?? story.audioUrl;
+  const alignment =
+    liveMedia.alignment.length > 0 ? liveMedia.alignment : story.alignment;
+  const hasReal = !!audioUrl && !!alignment && alignment.length > 0;
+  return hasReal ? (
+    <RealReadAlong story={story} audioUrl={audioUrl} alignment={alignment} />
+  ) : (
+    <FakeReadAlong />
+  );
 }
 
-function RealReadAlong({ story }: { story: Story }) {
+function RealReadAlong({
+  story,
+  audioUrl,
+  alignment,
+}: {
+  story: Story;
+  audioUrl: string;
+  alignment: Array<{ word: string; start: number; end: number }>;
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
-  const words = story.alignment || [];
+  const words = alignment;
 
   const activeIdx = (() => {
     for (let i = 0; i < words.length; i++) {
@@ -627,14 +667,14 @@ function RealReadAlong({ story }: { story: Story }) {
     <div className="max-w-[760px]">
       <audio
         ref={audioRef}
-        src={story.audioUrl}
+        src={audioUrl}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
         onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
-        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: audioUrl })}
       />
       <div className="flex items-center gap-4">
         <button onClick={toggle} className="w-16 h-16 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition">
@@ -833,7 +873,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
             <div className="pt-7">
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
-              {tab === "Read-along" && <ReadAlong story={story} />}
+              {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
             </div>
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>

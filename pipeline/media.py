@@ -513,6 +513,21 @@ def generate_media(
     portrait_hero_url: str | None = None
     landscape_hero_url: str | None = None
     category = idea.get("category", "Drama")
+    # Fresh-run hero gen runs BEFORE the stories row exists, so there's
+    # no hero_style_id to honor — resolver falls through the settings
+    # chain into the deterministic auto-pick. Same story_id every render
+    # → same picked style, so the catalog stays visually stable.
+    resolved_hero_style = stages.resolve_hero_style(
+        story_id=story_id,
+        category=category,
+        pinned_id=None,
+        get_setting=store.get_setting,
+    )
+    print(
+        f"[hero style resolve id={safe_id}] picked={resolved_hero_style.style.id} "
+        f"source={resolved_hero_style.source} "
+        f"whitelist={resolved_hero_style.whitelist or '<n/a>'}"
+    )
     for aspect_ratio, filename, label in (
         ("3:4", "hero.png", "hero portrait"),
         ("16:9", "hero-landscape.png", "hero landscape"),
@@ -526,7 +541,8 @@ def generate_media(
                 landscape_hero_url = public_url
             continue
         cinematic_prompt = stages.make_thumbnail_prompt(
-            title, category, body, aspect_ratio, dry_run=False
+            title, category, body, aspect_ratio, dry_run=False,
+            style=resolved_hero_style.style,
         )
         started = time.time()
         kie_url = _generate_with_retry(
@@ -773,6 +789,13 @@ def regen_one(
     if asset == "hero":
         return _regen_hero(story, out_dir, safe_id)
 
+    if asset == "hero_from_short":
+        # Pulls the short's persisted character (character_base_url) out of
+        # the latest done short_renders row and uses it as the i2i seed
+        # for the hero / poster gen. Net effect: the hero stops being a
+        # different person from the Watch tab's narrator character.
+        return _regen_hero_from_short(story, out_dir, safe_id)
+
     if asset == "scenes":
         return _regen_scenes(story, out_dir, safe_id)
 
@@ -858,7 +881,26 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         raise ValueError(f"story {safe_id} has no title — cannot build a hero prompt")
     body = (story.get("body") or "").strip()
     category = (story.get("category") or "Drama").strip()
-    print(f"[image regen hero] id={safe_id} title={title[:60]!r} (both orientations)")
+    # Resolve which named poster style this render should use. Phase 2 of
+    # _plans/2026-06-17-hero-style-registry.md: NULL row falls through to
+    # per-category default → global default → deterministic auto-pick.
+    # Log the resolved id + the layer it came from so a "wrong style"
+    # diagnosis can read one line and know which knob to turn.
+    resolved = stages.resolve_hero_style(
+        story_id=story["id"],
+        category=category,
+        pinned_id=story.get("hero_style_id"),
+        get_setting=store.get_setting,
+    )
+    print(
+        f"[hero style resolve id={safe_id}] picked={resolved.style.id} "
+        f"source={resolved.source} "
+        f"whitelist={resolved.whitelist or '<n/a>'}"
+    )
+    print(
+        f"[image regen hero] id={safe_id} title={title[:60]!r} "
+        f"style={resolved.style.id} (both orientations)"
+    )
 
     per_image_cents = _per_image_cost_cents()
     total_cents = 0
@@ -867,6 +909,7 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     # ─── 1. Portrait hero (3:4) — same prompt + dimensions as before. ─────
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
+        style=resolved.style,
     )
     store.log_render_event(
         "prompt_built",
@@ -909,8 +952,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     total_cents += per_image_cents
 
     # ─── 2. Landscape hero (16:9) — best-effort. ──────────────────────────
+    # Same resolved style as portrait so both aspects render as one
+    # coherent poster series.
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
+        style=resolved.style,
     )
     store.log_render_event(
         "kie_request_sent",
@@ -958,6 +1004,202 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
 
     # The queue's output_url shows the portrait by convention (the reader
     # picks portrait as primary). The full success is reflected in total_cents.
+    return portrait_url, total_cents
+
+
+def _regen_hero_from_short(
+    story: dict, out_dir: Path, safe_id: str
+) -> tuple[str, int]:
+    """Regenerate the hero set (portrait + landscape) using the short's
+    `character_base_url` as the i2i seed.
+
+    Mirrors `_regen_hero` step-for-step (same title-baked cinematic prompt,
+    same per-image cost, same portrait-first / landscape-best-effort flow)
+    except both kie calls pass `image_input=[character_base_url]`. The
+    prompt also flips to the character-faithful variant via
+    `make_thumbnail_prompt(..., character_base_url=...)` so the model
+    receives an explicit "redraw THIS person" instruction alongside the
+    reference image.
+
+    Why this exists: text-only hero gen invents a fresh face on every
+    call, so hero / poster / Watch ended up looking like three unrelated
+    people. Sourcing the seed from the short's persisted base character
+    makes the three surfaces visually agree about who the protagonist
+    is — different art styles, same person.
+
+    Raises ValueError when the story has no completed short render OR
+    that short's props don't carry a character_base_url. The queue
+    surfaces the message verbatim so the admin sees "render a short
+    first" instead of a silent failure.
+    """
+    title = (story.get("title") or "").strip()
+    if not title:
+        raise ValueError(f"story {safe_id} has no title — cannot build a hero prompt")
+    body = (story.get("body") or "").strip()
+    category = (story.get("category") or "Drama").strip()
+
+    # Pull the character_base_url off the latest done short render. We
+    # accept ANY done render rather than gating on the currently-applied
+    # one so the admin can restyle even when the short hasn't been
+    # promoted to stories.video_url yet.
+    latest = store.latest_short_render_for_story(story["id"])
+    if latest is None or (latest.get("status") or "") != "done":
+        raise ValueError(
+            f"story {safe_id} has no completed short render — generate a short first"
+        )
+    props_raw = latest.get("props")
+    if not props_raw:
+        raise ValueError(
+            f"story {safe_id} short render has no props blob — re-render the short"
+        )
+    try:
+        props = json.loads(props_raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"story {safe_id} short render props blob is not valid JSON: {e}"
+        ) from e
+    character_base_url = (props.get("character_base_url") or "").strip() if isinstance(props, dict) else ""
+    if not character_base_url:
+        raise ValueError(
+            f"story {safe_id} short render has no character_base_url — "
+            "re-render the short on the current shorts pipeline so the base is persisted"
+        )
+    # Resolve which named poster style this render should use. Same
+    # chain as the text-only _regen_hero; the i2i seed and the style
+    # band are orthogonal — character comes from the reference image,
+    # composition + palette come from the resolved style.
+    resolved = stages.resolve_hero_style(
+        story_id=story["id"],
+        category=category,
+        pinned_id=story.get("hero_style_id"),
+        get_setting=store.get_setting,
+    )
+    print(
+        f"[hero style resolve id={safe_id}] picked={resolved.style.id} "
+        f"source={resolved.source} "
+        f"whitelist={resolved.whitelist or '<n/a>'}"
+    )
+    print(
+        f"[image regen hero from-short] id={safe_id} title={title[:60]!r} "
+        f"style={resolved.style.id} "
+        f"base={character_base_url[:80]}..."
+    )
+
+    per_image_cents = _per_image_cost_cents()
+    total_cents = 0
+    portrait_url: str | None = None
+
+    # ─── 1. Portrait (3:4) ────────────────────────────────────────────────
+    portrait_prompt = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="3:4", dry_run=False,
+        character_base_url=character_base_url,
+        style=resolved.style,
+    )
+    store.log_render_event(
+        "prompt_built",
+        f"Portrait hero (i2i) prompt ready ({len(portrait_prompt)} chars)",
+        payload={"variant": "portrait", "aspect": "3:4", "mode": "i2i"},
+    )
+    store.log_render_event(
+        "kie_request_sent",
+        "Submitted to kie — waiting on portrait generation (i2i)",
+        payload={"variant": "portrait", "aspect": "3:4", "mode": "i2i"},
+    )
+    portrait_kie = _generate_with_retry(
+        portrait_prompt,
+        f"id={safe_id} hero regen portrait (i2i)",
+        aspect_ratio="3:4",
+        image_input=[character_base_url],
+        # Pin the i2i-capable variant. `kie/gpt-image-2` (no -i2i suffix)
+        # silently drops image_input per images.py:108-111, which would
+        # send us right back to text-only generation. The short itself
+        # uses the same model for scene gen — that's why the short keeps
+        # its character consistent and we're matching that contract.
+        model="kie/gpt-image-2-i2i",
+    )
+    if portrait_kie is None:
+        store.log_render_event(
+            "kie_failed",
+            "Portrait i2i generation returned no URL after retries",
+            level="error",
+            payload={"variant": "portrait", "mode": "i2i"},
+        )
+        raise RuntimeError("kie portrait hero (i2i) generation returned no URL after retries")
+    store.log_render_event(
+        "kie_response_received",
+        "kie returned a portrait image URL (i2i)",
+        payload={"variant": "portrait", "mode": "i2i"},
+    )
+    portrait_local = out_dir / "hero.png"
+    images.download(portrait_kie, portrait_local)
+    portrait_public = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
+    portrait_url = gcs.publish(
+        portrait_local, f"{safe_id}/hero.png", portrait_public,
+    )
+    store.log_render_event(
+        "image_saved",
+        f"Portrait (i2i) uploaded — {portrait_url}",
+        payload={"variant": "portrait", "url": portrait_url, "mode": "i2i"},
+    )
+    store.update_story_hero(story["id"], portrait_url)
+    total_cents += per_image_cents
+
+    # ─── 2. Landscape (16:9) — best-effort ────────────────────────────────
+    # Same resolved style as portrait so both aspects render as one
+    # coherent poster series.
+    landscape_prompt = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="16:9", dry_run=False,
+        character_base_url=character_base_url,
+        style=resolved.style,
+    )
+    store.log_render_event(
+        "kie_request_sent",
+        "Submitted to kie — waiting on landscape generation (i2i)",
+        payload={"variant": "landscape", "aspect": "16:9", "mode": "i2i"},
+    )
+    landscape_kie = _generate_with_retry(
+        landscape_prompt,
+        f"id={safe_id} hero regen landscape (i2i)",
+        aspect_ratio="16:9",
+        image_input=[character_base_url],
+        model="kie/gpt-image-2-i2i",
+    )
+    if landscape_kie is None:
+        store.log_render_event(
+            "kie_failed",
+            "Landscape i2i failed; portrait still updated (partial success)",
+            level="warn",
+            payload={"variant": "landscape", "mode": "i2i"},
+        )
+        print(
+            f"[image regen hero from-short] id={safe_id} landscape FAILED; "
+            "portrait still updated"
+        )
+    else:
+        try:
+            landscape_local = out_dir / "hero-landscape.png"
+            images.download(landscape_kie, landscape_local)
+            landscape_public = (
+                f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
+            )
+            landscape_url = gcs.publish(
+                landscape_local,
+                f"{safe_id}/hero-landscape.png",
+                landscape_public,
+            )
+            store.log_render_event(
+                "image_saved",
+                f"Landscape (i2i) uploaded — {landscape_url}",
+                payload={"variant": "landscape", "url": landscape_url, "mode": "i2i"},
+            )
+            store.update_story_hero_landscape(story["id"], landscape_url)
+            total_cents += per_image_cents
+        except Exception as e:
+            print(
+                f"[image regen hero from-short] id={safe_id} landscape download FAILED: {e}; "
+                "portrait still updated"
+            )
+
     return portrait_url, total_cents
 
 

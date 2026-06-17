@@ -7,12 +7,15 @@ voice, and video stages remain env-gated seams to port from /from-amir.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Literal
 
 from pipeline import config
 
@@ -241,8 +244,230 @@ CATEGORY_THUMBNAIL_STYLES = {
 }
 
 
+# --- hero style registry (Phase 2 of _plans/2026-06-17-hero-style-registry.md)
+
+# Closed enum of named poster styles the hero / poster gen can apply.
+# Each style ships a system_prompt_band that the thumbnail prompt builder
+# appends in place of the per-category default at CATEGORY_THUMBNAIL_STYLES.
+# Per rule 13: the id is the storage key written to stories.hero_style_id;
+# the admin can only pick from this set so a bogus value never reaches the
+# prompt.
+#
+# Adding / removing a style is a code change on purpose (MVP scope).
+# Once the library proves out we can consider making it settings-editable.
+
+
+@dataclass(frozen=True)
+class HeroStyle:
+    """One named poster style. `system_prompt_band` is the substring that
+    gets dropped into the thumbnail prompt in place of the per-category
+    default; `thumbnail_url` is the GCS URL of the pre-generated sample
+    image the admin picker shows (None until
+    pipeline.scripts.generate_hero_style_thumbnails has populated it)."""
+    id: str
+    label: str
+    system_prompt_band: str
+    thumbnail_url: str | None = None
+
+
+HERO_STYLES: dict[str, HeroStyle] = {
+    "magazine_editorial": HeroStyle(
+        id="magazine_editorial",
+        label="Magazine editorial",
+        system_prompt_band=(
+            "Bold satirical editorial poster, dramatic theatrical lighting, "
+            "expressive characters caught mid-confrontation, mid-century magazine "
+            "illustration palette with saturated red and burnt-orange accents on "
+            "deep neutrals, mild caricature without grotesque distortion."
+        ),
+    ),
+    "neo_noir": HeroStyle(
+        id="neo_noir",
+        label="Cinematic neo-noir",
+        system_prompt_band=(
+            "Cinematic neo-noir poster, moody atmospheric lighting with one strong "
+            "warm light source, hyperdetailed realistic illustration, deep blacks "
+            "and selective color, character silhouettes integrated into the "
+            "composition."
+        ),
+    ),
+    "retro_pulp": HeroStyle(
+        id="retro_pulp",
+        label="Retro pulp paperback",
+        system_prompt_band=(
+            "1950s mass-market pulp paperback cover, halftone shading and grit, "
+            "saturated reds and ochre yellows on cream paper, dramatic low angle, "
+            "hand-painted character expression with crisp ink linework over the "
+            "color block."
+        ),
+    ),
+    "comic_book": HeroStyle(
+        id="comic_book",
+        label="Comic book cover",
+        system_prompt_band=(
+            "Punchy comic-book cover art, bold ink outlines and confident black "
+            "shapes, halftone shading, vibrant pop palette, dynamic poster "
+            "composition with one strong reading order from title to character."
+        ),
+    ),
+    "painted_realism": HeroStyle(
+        id="painted_realism",
+        label="Painted realism",
+        system_prompt_band=(
+            "Oil-painted character study in painterly realism, museum lighting "
+            "with deep tonal range, restrained palette of warm earth tones and "
+            "muted shadow, brush-texture visible on every surface."
+        ),
+    ),
+    "vintage_hollywood": HeroStyle(
+        id="vintage_hollywood",
+        label="Vintage Hollywood",
+        system_prompt_band=(
+            "Mid-century theatrical Hollywood poster, hand-lettered display title, "
+            "painted matte composition with three-quarter character framing, "
+            "soft golden-hour palette and gentle storybook warmth."
+        ),
+    ),
+}
+
+
+# Per-category whitelist for the smart auto-pick. When stories.hero_style_id
+# is NULL and no setting overrides apply, the resolver hashes the story id
+# into one of these. Each category gets 2-3 styles that fit its tone so the
+# catalog varies WITHIN a category without ever picking a tonally-wrong
+# style for it. Whitelists are code-locked at MVP (per the plan).
+#
+# Every id here MUST also exist in HERO_STYLES — guarded by
+# pipeline/tests/test_hero_styles.py::WhitelistIntegrityTests so a typo
+# doesn't silently fall through to "auto-pick crashes".
+CATEGORY_STYLE_WHITELIST: dict[str, list[str]] = {
+    "Entitled": ["magazine_editorial", "retro_pulp", "comic_book"],
+    "Drama": ["neo_noir", "painted_realism", "magazine_editorial"],
+    "Humor": ["comic_book", "vintage_hollywood", "magazine_editorial"],
+    "Wholesome": ["vintage_hollywood", "painted_realism", "magazine_editorial"],
+    "Dating": ["magazine_editorial", "vintage_hollywood", "painted_realism"],
+    "Roommate": ["comic_book", "magazine_editorial", "painted_realism"],
+}
+
+
+def deterministic_style_pick(story_id: str, allowed: list[str]) -> str:
+    """Pick one of `allowed` deterministically from the story id.
+
+    Properties this function MUST keep:
+      - Same story_id + same allowed list → same pick (idempotent across
+        re-renders, so the admin who likes the auto-pick can leave it
+        alone forever).
+      - Different story_ids → distribution across `allowed` so the
+        catalog visually varies within a category.
+
+    Implementation: sha1 the id, fold the first 4 bytes mod len(allowed).
+    Cheap, deterministic, no random.choice (which would pull from a
+    non-deterministic PRNG state). Raises IndexError if `allowed` is
+    empty so a misconfigured whitelist fails loudly instead of silently
+    picking nothing.
+    """
+    if not allowed:
+        raise IndexError("deterministic_style_pick: allowed list is empty")
+    digest = hashlib.sha1(story_id.encode("utf-8")).digest()
+    return allowed[int.from_bytes(digest[:4], "big") % len(allowed)]
+
+
+# Source labels the resolver returns alongside the picked style — exposed
+# in the admin picker caption ("Auto-picked from Entitled whitelist",
+# "Inherited from category default", etc.) so the admin knows WHY this
+# story landed on this style.
+HeroStyleSource = Literal[
+    "per_story",         # stories.hero_style_id is set
+    "category_default",  # settings.hero.category_default.<cat>
+    "global_default",    # settings.hero.global_style_id
+    "auto_hash",         # deterministic_style_pick from CATEGORY_STYLE_WHITELIST
+]
+
+
+@dataclass(frozen=True)
+class ResolvedHeroStyle:
+    style: HeroStyle
+    source: HeroStyleSource
+    # When source="auto_hash", the whitelist that was hashed against.
+    # Empty list otherwise. Surfaced in the admin caption + the
+    # observability log so a "why did it pick neo_noir?" question has a
+    # one-line answer.
+    whitelist: list[str]
+
+
+def _safe_lookup(style_id: str | None) -> HeroStyle | None:
+    """Return a HERO_STYLES entry or None for any unknown / empty id.
+    Defensive against typos in settings rows + legacy values that aged
+    out of the registry — those fall through to the next resolution
+    layer instead of crashing the render."""
+    if not style_id:
+        return None
+    return HERO_STYLES.get(style_id)
+
+
+def resolve_hero_style(
+    story_id: str,
+    category: str,
+    pinned_id: str | None,
+    get_setting: Callable[[str], str | None],
+) -> ResolvedHeroStyle:
+    """Walk the four-step resolution chain and return the picked style
+    + the layer that produced it.
+
+    Chain (first hit wins):
+      1. stories.hero_style_id (the per-story pin from the picker).
+      2. settings["hero.category_default.<cat>"] (category default the
+         admin can set per category on /admin/settings).
+      3. settings["hero.global_style_id"] (one style for every category).
+      4. deterministic_style_pick(story_id, CATEGORY_STYLE_WHITELIST[cat])
+         — the smart auto-default. Stable per story id, varied across
+         the catalog.
+
+    Unknown / stale ids at any layer fall through to the next one rather
+    than blowing up the render, so a typo in a settings row can't take
+    a whole batch offline. Category lookups fall back to Drama's
+    whitelist when the story carries a tag the registry doesn't know.
+    """
+    # Layer 1: explicit per-story pin
+    style = _safe_lookup(pinned_id)
+    if style is not None:
+        return ResolvedHeroStyle(style=style, source="per_story", whitelist=[])
+
+    cat_key = (category or "Drama").strip()
+    # Settings keys are lowercased on the per-category default since
+    # the admin UI persists category names lowercased to keep them
+    # case-insensitive — match what the picker writes.
+    cat_setting_key = f"hero.category_default.{cat_key.lower()}"
+
+    # Layer 2: per-category default
+    style = _safe_lookup(get_setting(cat_setting_key))
+    if style is not None:
+        return ResolvedHeroStyle(style=style, source="category_default", whitelist=[])
+
+    # Layer 3: global default
+    style = _safe_lookup(get_setting("hero.global_style_id"))
+    if style is not None:
+        return ResolvedHeroStyle(style=style, source="global_default", whitelist=[])
+
+    # Layer 4: deterministic auto-pick
+    whitelist = CATEGORY_STYLE_WHITELIST.get(
+        cat_key, CATEGORY_STYLE_WHITELIST["Drama"]
+    )
+    picked = deterministic_style_pick(story_id, whitelist)
+    return ResolvedHeroStyle(
+        style=HERO_STYLES[picked], source="auto_hash", whitelist=list(whitelist),
+    )
+
+
 def make_thumbnail_prompt(
-    title: str, category: str, body: str, aspect_ratio: str, dry_run: bool
+    title: str,
+    category: str,
+    body: str,
+    aspect_ratio: str,
+    dry_run: bool,
+    *,
+    character_base_url: str | None = None,
+    style: HeroStyle | None = None,
 ) -> str:
     """Build a cinematic title-baked thumbnail prompt for hero / poster art.
 
@@ -252,8 +477,31 @@ def make_thumbnail_prompt(
     short bold text well; longer titles wrap or get abbreviated). Two aspect
     ratios are supported: '3:4' for portrait posters / mobile billboards, and
     '16:9' for desktop hero strips.
+
+    When `character_base_url` is supplied the prompt switches to a
+    character-faithful redraw: the caller MUST also pass
+    `image_input=[character_base_url]` to `images.generate` so the model
+    sees the short's base character as an i2i reference. Without that
+    handshake, the prompt change does nothing and the model still
+    invents a fresh face every call.
+
+    `style` (Phase 2 of _plans/2026-06-17-hero-style-registry.md) selects
+    which named look the prompt asks for. When supplied, the style's
+    `system_prompt_band` replaces the per-category default band — so a
+    Drama story can render in `comic_book` even though the category's
+    default is `neo_noir`. When None, the per-category default band
+    stays as the fallback so legacy callers (and the fresh-run pipeline
+    before it threads the resolver) keep producing byte-compatible
+    prompts. Caller-side resolution chain lives in
+    `pipeline.stages.resolve_hero_style`.
     """
-    style = CATEGORY_THUMBNAIL_STYLES.get(category, CATEGORY_THUMBNAIL_STYLES["Drama"])
+    # Resolved style wins; per-category default is the fall-through for
+    # callers that don't pass one. Both bands are the same SHAPE — a
+    # multi-sentence style cue we drop straight into the prompt body.
+    style_band = (
+        style.system_prompt_band if style is not None
+        else CATEGORY_THUMBNAIL_STYLES.get(category, CATEGORY_THUMBNAIL_STYLES["Drama"])
+    )
     orientation = (
         "Vertical streaming-thumbnail composition, character focal point "
         "centered, title baked into the upper or lower band"
@@ -262,14 +510,38 @@ def make_thumbnail_prompt(
         "to leave room for the title, title baked into the lower-third band"
     )
     if dry_run:
-        return f"[DRY] {title} cinematic {category} thumbnail at {aspect_ratio}"
+        suffix = " (i2i)" if character_base_url else ""
+        style_marker = f" [{style.id}]" if style is not None else ""
+        return (
+            f"[DRY] {title} cinematic {category} thumbnail at "
+            f"{aspect_ratio}{suffix}{style_marker}"
+        )
 
     # Take just the first couple of sentences of the article as the scene cue
     # so the model gets context without re-rendering the whole body each call.
     opening = " ".join(body.split()[:60])
+
+    if character_base_url:
+        # i2i variant: the reference image carries the protagonist's identity
+        # (the short's base character), so the prompt's job is (a) preserve
+        # that identity verbatim and (b) restyle the composition into the
+        # picked style. This is what keeps hero / poster characters
+        # consistent with the short.
+        return (
+            f"Redraw the EXACT same character from the reference image — same "
+            f"face, gender, build, hair, clothing, age — but reimagined as a "
+            f"cinematic editorial poster for a short documentary titled "
+            f"\"{title}\". {style_band} "
+            f"Composition focused on this scene from the story: {opening} "
+            f"Render the title \"{title}\" prominently in bold confident "
+            f"typography, integrated into the composition (not floating on a "
+            f"separate layer). {orientation}. High-resolution magazine-cover "
+            f"finish. No watermarks, no signatures, no extra text beyond the title."
+        )
+
     return (
         f"Cinematic editorial poster for a short documentary titled \"{title}\". "
-        f"{style} "
+        f"{style_band} "
         f"Composition focused on this scene from the story: {opening} "
         f"Render the title \"{title}\" prominently in bold confident "
         f"typography, integrated into the composition (not floating on a "

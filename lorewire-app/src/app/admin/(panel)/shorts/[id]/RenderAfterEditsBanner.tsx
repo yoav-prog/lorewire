@@ -28,6 +28,11 @@ const LANE_LABEL: Record<ShortRenderPlan["lane"], string> = {
   C: "Lane C · per-scene",
 };
 
+// Cost the noop-force re-render falls into — Lane A is the cheapest
+// fully-deterministic path (assembly only, no kie regen) so a "render
+// anyway" click can't accidentally burn a kie scene regen.
+const LANE_A_FALLBACK_CENTS = 5;
+
 function formatCents(cents: number): string {
   if (cents === 0) return "free";
   return `~$${(cents / 100).toFixed(2)}`;
@@ -48,7 +53,13 @@ function renderTooltip(
     const n = plan.touched_scene_ids.length;
     return `Regenerate ${n} scene${n === 1 ? "" : "s"} + re-render assembly (${cost})`;
   }
-  return cost;
+  // noop: the planner thinks nothing changed since the last successful
+  // render. We still expose the button so an admin can force a fresh
+  // render — for cases where the planner missed a change (recently:
+  // intro/outro overrides set + a stamping race that left the planner
+  // showing "no changes" while the rendered MP4 actually had no
+  // splice) or just to refresh the artifact.
+  return `Force a fresh Lane A assembly with the current state (~$${(LANE_A_FALLBACK_CENTS / 100).toFixed(2)})`;
 }
 
 export function RenderAfterEditsBanner({
@@ -98,16 +109,28 @@ export function RenderAfterEditsBanner({
     };
   }, [storyId, configKeyProp]);
 
-  // The banner intentionally renders ALWAYS — even on noop — so the user
-  // sees the (idle) cost story. It just disables the button.
+  // Render button is ALWAYS available — even on noop. The user explicitly
+  // asked for an "always re-render" escape hatch because the planner
+  // occasionally misses an upstream change (the original ask in
+  // 2026-06-17: intro/outro override stamping race that left the
+  // planner reading "no changes" right after an admin set both
+  // overrides). On noop, we route through Lane A — assembly only, no
+  // kie regen cost, deterministic.
   const lane = plan?.lane ?? "noop";
-  const ready = lane === "A" || lane === "B" || lane === "C";
+  // True once the initial preview round-trip has resolved (success OR
+  // error). We don't disable on noop, only while the round-trip is
+  // still in flight — otherwise the button flashes available before
+  // the lane is known.
+  const planLoaded = plan !== null || planError !== null;
 
   function onRender() {
-    if (!ready) return;
     setActionError(null);
     setPendingRender(true);
     startTransition(async () => {
+      // noop and Lane A both route through renderShortLaneA. The Lane A
+      // action accepts a noop plan now (force=true semantics) so an
+      // admin can refresh the artifact without depending on the
+      // planner detecting a delta. B + C keep their dedicated routes.
       const r =
         lane === "C"
           ? await renderShortLaneC(storyId)
@@ -151,15 +174,19 @@ export function RenderAfterEditsBanner({
         )}
       </div>
 
-      {ready && plan && (
+      {planLoaded && (
         <button
           type="button"
           onClick={onRender}
           disabled={pendingRender}
           className="rounded-md bg-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
-          title={renderTooltip(lane, plan)}
+          title={plan ? renderTooltip(lane, plan) : "Force a fresh render"}
         >
-          {pendingRender ? "Queueing…" : "Render after edits"}
+          {pendingRender
+            ? "Queueing…"
+            : lane === "noop"
+              ? "Re-render anyway"
+              : "Render after edits"}
         </button>
       )}
 

@@ -41,6 +41,31 @@ export interface LiveStoryMediaResult {
    *  long-form video (or no video), this falls back to stories.images
    *  and the caller should render at 16:9. */
   images: string[];
+  /** LONG-FORM narration audio for the Read-along surface, sourced from
+   *  stories.audio_url — the voice_renders_worker writes this whenever
+   *  the admin clicks "Regenerate voiceover" in the VoicePicker (with
+   *  whichever narrator they picked). This is deliberately NOT the
+   *  short's voiceover_url: Read-along reads the full article text, and
+   *  the short is a condensed retelling. Null means no DB row / no live
+   *  audio yet → caller falls back to the baked story.audioUrl. */
+  audio_url: string | null;
+  /** Long-form per-word alignment matching `audio_url`, sourced from
+   *  stories.alignment. Empty array means no live alignment yet → caller
+   *  falls back to the baked story.alignment. */
+  alignment: Array<{ word: string; start: number; end: number }>;
+  /** The story's source thread URL (typically a Reddit post), sourced
+   *  from stories.source_url. Admin edits to the source URL on the
+   *  /admin/stories/[id] page need to reach the public site without
+   *  a re-export of published.ts. Null means no row / unset → caller
+   *  falls back to the baked story.source_url. */
+  source_url: string | null;
+  /** The story's article body, sourced from stories.body. The
+   *  LiveCatalogStory projection deliberately drops body to keep the
+   *  homepage rails payload small, so without surfacing it here the
+   *  Read tab's `story.body` check stays false for every live-only
+   *  story and the article falls into the hardcoded envelope sample.
+   *  Null means no row / empty body → caller falls back to story.body. */
+  body: string | null;
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -102,6 +127,39 @@ function parseStoryImageList(raw: string | null | undefined): string[] {
   return [];
 }
 
+// stories.alignment is the JSON the voice_renders_worker writes after a
+// long-form regen — `[{word, start, end}, ...]` in seconds, same shape the
+// baked Story type carries. Parses defensively because (a) a malformed row
+// shouldn't crash an unauth public read and (b) callers can fall back to
+// the baked alignment when this returns empty.
+function parseStoryAlignment(
+  raw: string | null | undefined,
+): Array<{ word: string; start: number; end: number }> {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: Array<{ word: string; start: number; end: number }> = [];
+  for (const w of parsed) {
+    if (!w || typeof w !== "object") continue;
+    const word = (w as { word?: unknown }).word;
+    const start = (w as { start?: unknown }).start;
+    const end = (w as { end?: unknown }).end;
+    if (
+      typeof word === "string" &&
+      typeof start === "number" &&
+      typeof end === "number"
+    ) {
+      out.push({ word, start, end });
+    }
+  }
+  return out;
+}
+
 // idOrSlug accepts either the stories.id (UUIDs from the pipeline, slug-like
 // for legacy seeds) or stories.slug. Static catalog entries usually carry
 // `id` matching the DB id, but legacy samples may pre-date the slug
@@ -114,6 +172,10 @@ export async function getLiveStoryMedia(
     ok: true,
     video_url: null,
     images: [],
+    audio_url: null,
+    alignment: [],
+    source_url: null,
+    body: null,
     is_short: false,
     found: false,
   };
@@ -124,8 +186,12 @@ export async function getLiveStoryMedia(
     id: string;
     video_url: string | null;
     images: string | null;
+    audio_url: string | null;
+    alignment: string | null;
+    source_url: string | null;
+    body: string | null;
   }>(
-    "SELECT id, video_url, images FROM stories " +
+    "SELECT id, video_url, images, audio_url, alignment, source_url, body FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -138,6 +204,10 @@ export async function getLiveStoryMedia(
         id: bySlug.id,
         video_url: bySlug.video_url,
         images: bySlug.images,
+        audio_url: bySlug.audio_url,
+        alignment: bySlug.alignment,
+        source_url: bySlug.source_url,
+        body: bySlug.body,
       };
     }
   }
@@ -156,10 +226,19 @@ export async function getLiveStoryMedia(
     images = parseStoryImageList(row.images);
   }
 
+  // Long-form audio + alignment come straight off the stories row — these
+  // are what the voice_renders_worker writes when the admin clicks
+  // "Regenerate voiceover" in the VoicePicker. Pointedly NOT pulled from
+  // the short's voiceover_url: Read-along must follow the article text,
+  // and the short is a different (condensed) script.
   return {
     ok: true,
     video_url: row.video_url,
     images,
+    audio_url: row.audio_url,
+    alignment: parseStoryAlignment(row.alignment),
+    source_url: row.source_url,
+    body: row.body,
     is_short: isShort,
     found: true,
   };

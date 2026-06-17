@@ -20,7 +20,12 @@
 
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/dal";
-import { getSetting, getStory, setStoryConfigJson } from "@/lib/repo";
+import {
+  clearStoryShortConfig,
+  getSetting,
+  getStory,
+  setStoryConfigJson,
+} from "@/lib/repo";
 import {
   applyConfigPatch,
   defaultVideoConfig,
@@ -421,6 +426,16 @@ export async function cancelShortRenderAction(
 // queueShortRender(force=true) so the UI's "Restart" button has a dedicated
 // surface separate from the in-flight Regenerate semantics. force=true clears
 // props so the generation drain re-runs; previous costs are not re-charged.
+//
+// Also clears stories.short_config so the editor re-seeds from the next
+// render's props on the next page load. Without this, the editor reads
+// the stale already-seeded short_config and shows the OLD scenes
+// alongside the freshly-rendered video — the regression caught
+// 2026-06-17 where a Restart visibly succeeded (new MP4, new
+// short_renders row) but the Scenes tab still showed frame-00 as the
+// neutral base on white. Restart is a "throw away and start over"
+// gesture by design, so wiping the editor's local copy is the right
+// semantic — manual edits don't survive Restart anyway.
 export async function restartShortRenderAction(
   storyId: string,
   opts: {
@@ -437,11 +452,23 @@ export async function restartShortRenderAction(
     narration_style: opts.narrationStyle ?? null,
     length_preset: opts.lengthPreset ?? null,
   });
-  return queueShortRender(storyId, {
+  const result = await queueShortRender(storyId, {
     narrationStyle: opts.narrationStyle ?? null,
     lengthPreset: opts.lengthPreset ?? null,
     force: true,
   });
+  // Clear the editor's cached short_config only when the enqueue
+  // actually fired. A daily-cap rejection or "no-such-story" surface
+  // shouldn't wipe the row.
+  if (result.ok) {
+    await clearStoryShortConfig(storyId);
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short-events restart] cleared short_config so editor re-seeds", {
+      story_id: storyId,
+      render_id: result.render?.id ?? null,
+    });
+  }
+  return result;
 }
 
 // ─── editSession actions (concurrency banner / heartbeat) ─────────────────────
