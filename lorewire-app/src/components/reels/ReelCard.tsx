@@ -41,6 +41,22 @@ const SpeakerOff = ({ size = 22 }: { size?: number }) => (
 const PlayGlyph = ({ size = 30 }: { size?: number }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z" /></svg>
 );
+const HeartIcon = ({ filled, size = 26 }: { filled: boolean; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={filled ? "var(--color-accent)" : "none"} stroke={filled ? "var(--color-accent)" : "currentColor"} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 20.5S3.5 15 3.5 8.8A4.3 4.3 0 0 1 12 6.9a4.3 4.3 0 0 1 8.5 1.9C20.5 15 12 20.5 12 20.5Z" />
+  </svg>
+);
+const BookmarkIcon = ({ filled, size = 25 }: { filled: boolean; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 4h12v16l-6-4-6 4z" />
+  </svg>
+);
+const ShareUpIcon = ({ size = 24 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" />
+    <path d="M12 15V3M8 7l4-4 4 4" />
+  </svg>
+);
 
 export interface ReelCardProps {
   short: LiveCatalogStory;
@@ -59,6 +75,11 @@ export interface ReelCardProps {
   /** Hint visibility is owned by the feed so it shows once, not per card. */
   showSoundHint: boolean;
   onDismissSoundHint: () => void;
+  /** Engagement (local, honest — no fabricated counts). */
+  liked: boolean;
+  saved: boolean;
+  onToggleLike: (id: string) => void;
+  onToggleSave: (id: string) => void;
 }
 
 export default function ReelCard({
@@ -72,12 +93,18 @@ export default function ReelCard({
   onOpenInfo,
   showSoundHint,
   onDismissSoundHint,
+  liked,
+  saved,
+  onToggleLike,
+  onToggleSave,
 }: ReelCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [posterOk, setPosterOk] = useState(true);
   // In reduced-motion mode the user must press play; track that opt-in.
   const [userStarted, setUserStarted] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  // Transient "Link copied" confirmation after the clipboard-fallback share.
+  const [copied, setCopied] = useState(false);
 
   // Reset the reduced-motion opt-in the moment this card stops being active, so
   // re-entry requires a fresh tap. Done during render (the React 19 pattern the
@@ -138,6 +165,25 @@ export default function ReelCard({
       v.play().catch(() => {});
     } else {
       v.pause();
+    }
+  };
+
+  // Share the PUBLIC canonical reader URL (/v/[slug]) — never an internal id or
+  // a signed GCS URL. Native share sheet first, clipboard as the fallback.
+  const onShare = async () => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const url = short.slug ? `${origin}/v/${short.slug}` : origin;
+    const title = short.title ?? "LoreWire";
+    try {
+      if (typeof navigator !== "undefined" && navigator.share) {
+        await navigator.share({ title, url });
+      } else if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(url);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1800);
+      }
+    } catch {
+      /* user dismissed the share sheet or denied clipboard — nothing to do */
     }
   };
 
@@ -240,8 +286,57 @@ export default function ReelCard({
         </button>
       )}
 
-      {/* Bottom overlay: category, title, synopsis, Read CTA. */}
-      <div className="absolute inset-x-0 bottom-0 px-4 pb-[120px]">
+      {/* Engagement rail — local + honest: a heart with NO fabricated count,
+          Save that writes the real My List, and Share to the public /v/[slug]. */}
+      <div className="absolute bottom-[128px] right-2.5 flex flex-col items-center gap-5">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleLike(short.id);
+          }}
+          aria-label={liked ? "Unlike" : "Like"}
+          aria-pressed={liked}
+          className="flex flex-col items-center gap-1 text-ink active:scale-90 transition"
+        >
+          <span className="grid h-11 w-11 place-items-center rounded-full" style={{ background: "rgba(0,0,0,.4)" }}>
+            <HeartIcon filled={liked} />
+          </span>
+          <span className="font-body text-[11px] font-semibold ink-shadow">Like</span>
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSave(short.id);
+          }}
+          aria-label={saved ? "Remove from My List" : "Save to My List"}
+          aria-pressed={saved}
+          className="flex flex-col items-center gap-1 text-ink active:scale-90 transition"
+        >
+          <span className="grid h-11 w-11 place-items-center rounded-full" style={{ background: "rgba(0,0,0,.4)" }}>
+            <BookmarkIcon filled={saved} />
+          </span>
+          <span className="font-body text-[11px] font-semibold ink-shadow" style={{ color: saved ? "var(--color-accent)" : undefined }}>
+            {saved ? "Saved" : "Save"}
+          </span>
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onShare();
+          }}
+          aria-label="Share"
+          className="flex flex-col items-center gap-1 text-ink active:scale-90 transition"
+        >
+          <span className="grid h-11 w-11 place-items-center rounded-full" style={{ background: "rgba(0,0,0,.4)" }}>
+            <ShareUpIcon />
+          </span>
+          <span className="font-body text-[11px] font-semibold ink-shadow">{copied ? "Copied" : "Share"}</span>
+        </button>
+      </div>
+
+      {/* Bottom overlay: category, title, synopsis, Read CTA. The right padding
+          leaves room for the engagement rail so the title never runs under it. */}
+      <div className="absolute inset-x-0 bottom-0 pb-[120px] pl-4 pr-16">
         <div className="flex items-center gap-2 mb-2">
           {short.category && (
             <span

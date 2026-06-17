@@ -26,6 +26,7 @@ import React, {
 } from "react";
 import { listPublishedShorts, type LiveCatalogStory } from "@/app/actions";
 import ReelCard from "@/components/reels/ReelCard";
+import { useSavedStories, useLikedReels } from "@/lib/engagement-store";
 
 type OpenFn = (id: string, tab?: string) => void;
 
@@ -83,6 +84,11 @@ export default function ReelsFeed({
   const [soundHintShown, setSoundHintShown] = useState(true);
   const reducedMotion = usePrefersReducedMotion();
   const didInitialScroll = useRef(false);
+
+  // Engagement is subscribed ONCE here (one source of truth shared with the My
+  // List tab + Title sheet) and the booleans are passed down per card.
+  const { isSaved, toggle: toggleSave } = useSavedStories();
+  const { isLiked, toggle: toggleLike } = useLikedReels();
 
   // First page. `loading` already starts true, so no setState needed up front.
   useEffect(() => {
@@ -241,6 +247,10 @@ export default function ReelsFeed({
             onOpenInfo={onOpenInfo}
             showSoundHint={i === activeIdx && soundHintShown}
             onDismissSoundHint={dismissSoundHint}
+            liked={isLiked(s.id)}
+            saved={isSaved(s.id)}
+            onToggleLike={toggleLike}
+            onToggleSave={toggleSave}
           />
         </section>
       ))}

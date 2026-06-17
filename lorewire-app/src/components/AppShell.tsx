@@ -21,6 +21,7 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
+import { useSavedStories } from "@/lib/engagement-store";
 
 // Default before the per-story live fetch lands — the sheet renders the baked
 // story shape until getLiveStoryMedia resolves the current video + scene
@@ -1090,8 +1091,21 @@ function NewScreen({ onOpen }: { onOpen: OpenFn }) {
 }
 
 /* ----------------------------- MY LIST ----------------------------- */
-function MyList({ onOpen, list }: { onOpen: OpenFn; list: string[] }) {
-  const items = list.map(byId);
+function MyList({
+  onOpen,
+  list,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  list: string[];
+  resolveStory: (id: string) => Story | null;
+}) {
+  // Resolve through the live+sample catalog, NOT byId — saved ids can be real
+  // shorts the Reels feed saved that aren't in the baked sample catalog, and
+  // byId throws on an unknown id. Unresolved ids are skipped cleanly.
+  const items = list
+    .map(resolveStory)
+    .filter((s): s is Story => s !== null);
   return (
     <div className="pt-14 px-4 pb-28">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-5">My List</h1>
@@ -1131,8 +1145,12 @@ function MobileShell() {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
-  const [list, setList] = useState<string[]>([]);
+  const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
   const screenRef = useRef<HTMLDivElement>(null);
+
+  // My List is the persisted saved-stories store, shared with the Reels feed's
+  // Save button and the Title sheet so a Save anywhere shows up everywhere.
+  const { saved: list, toggle: toggleList } = useSavedStories();
 
   // Single hook call at the shell level. Home receives it as props so
   // the modal mount site below can call resolveStory too.
@@ -1140,11 +1158,15 @@ function MobileShell() {
 
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
-  const shuffle = () => {
-    const r = STORIES[Math.floor(Math.random() * STORIES.length)];
-    open(r.id, "Watch");
+  // "Play Something" jumps straight into the Reels feed (Phase 7 deep-link). An
+  // id scrolls to that short if it's in the loaded pages; otherwise the feed
+  // opens at the top.
+  const openReels = (id?: string) => {
+    setReelsStoryId(id ?? null);
+    close();
+    setTab("Reels");
   };
-  const toggleList = (id: string) => setList((l) => (l.includes(id) ? l.filter((x) => x !== id) : [...l, id]));
+  const shuffle = () => openReels();
 
   useEffect(() => {
     if (screenRef.current) screenRef.current.scrollTop = 0;
@@ -1173,13 +1195,19 @@ function MobileShell() {
         )}
         {tab === "Search" && <Search onOpen={open} />}
         {tab === "New" && <NewScreen onOpen={open} />}
-        {tab === "My List" && <MyList onOpen={open} list={list} />}
+        {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} />}
       </div>
 
       {/* Reels rides above the (now-empty) screen as a full-cover layer, like
           the Title sheet does — it owns its own snap scroller and pauses
           whenever a sheet opens over it. */}
-      {tab === "Reels" && <ReelsFeed onOpenInfo={open} paused={!!active} />}
+      {tab === "Reels" && (
+        <ReelsFeed
+          onOpenInfo={open}
+          paused={!!active}
+          initialStoryId={reelsStoryId ?? undefined}
+        />
+      )}
 
       {active && activeStory && (
         <TitleSheet
@@ -1192,7 +1220,9 @@ function MobileShell() {
         />
       )}
 
-      <TabBar tab={tab} setTab={(t) => { close(); setTab(t); }} />
+      {/* Switching tabs via the nav clears any Reels deep-link target so a plain
+          tab tap always opens the feed at the top. */}
+      <TabBar tab={tab} setTab={(t) => { close(); setReelsStoryId(null); setTab(t); }} />
     </div>
   );
 }

@@ -5,10 +5,15 @@ Branch: `feat/reels-feed` (cut from `fix/mobile-short-gallery-captions-and-play`
 Status: IN PROGRESS. Decisions resolved (drop fake counts; engine = native
 scroll-snap + desktop paging). DONE: Phase 1 (data action), Phase 2 (mobile
 feed UI), Phase 3 (active-index autoplay + mute), Phase 5 (infinite scroll),
-plus reduced-motion. NEXT: Phase 6 engagement rail (Like / Save->My List /
-Share), Phase 7 deep-link from Billboard Play/Shuffle, Phase 8 desktop adapter,
-Phase 9 full a11y/QA. The standalone /reels route was intentionally NOT built —
-the shell's nav is client-state tabs, so Reels is a 5th in-shell tab (matches
+Phase 6 (engagement rail — local Like, Save->My List, Share to /v/[slug]),
+Phase 7 (deep-link: "Play Something" opens the feed; initialStoryId scrolls to
+a loaded short), plus reduced-motion. My List is now a persisted localStorage
+store (lib/engagement-store) shared by the feed, the My List tab, and the Title
+sheet; MyList resolves saved ids via the live catalog (not byId, which threw on
+real short ids). NEXT: Phase 8 desktop adapter, Phase 9 full a11y/QA, and the
+deep-link "fetch-around" so an arbitrary short (not just one on a loaded page)
+can be jumped to. The standalone /reels route was intentionally NOT built — the
+shell's nav is client-state tabs, so Reels is a 5th in-shell tab (matches
 Home/Search/New/My List); shareable per-reel URLs still use /v/[slug].
 
 ## Goal
