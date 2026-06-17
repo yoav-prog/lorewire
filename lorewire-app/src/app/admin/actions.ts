@@ -847,6 +847,46 @@ const SETTING_VALUE_VALIDATORS: Record<
   },
 };
 
+/** Persist the per-story hero style pin from the picker on
+ *  /admin/stories/[id]. Uses the same form shape as `saveSettingAction`
+ *  — `value` is the picked style id OR empty string (= "clear the pin
+ *  and fall back to the resolver chain"). Closed-enum validated so a
+ *  tampered client can't poison the prompt downstream. Reads
+ *  `storyId` from the form so the action is callable straight from
+ *  `<form action={...}>`. */
+export async function saveStoryHeroStyleAction(
+  formData: FormData,
+): Promise<void> {
+  await requireCapability("content.manage");
+  const storyId = String(formData.get("storyId") ?? "");
+  const rawValue = String(formData.get("value") ?? "");
+  if (!storyId) {
+    console.warn("[story hero style] missing storyId");
+    return;
+  }
+  const validator = makeHeroStyleIdValidator();
+  const validated = validator(rawValue);
+  if (validated === null) {
+    console.warn("[story hero style] rejected", {
+      story_id: storyId,
+      raw: rawValue.slice(0, 32),
+    });
+    return;
+  }
+  // Empty string clears the pin (NULL on the row) so the resolver
+  // falls through to the next layer. Anything else is a known style id.
+  const value = validated === "" ? null : validated;
+  await run(
+    "UPDATE stories SET hero_style_id = ?, updated_at = ? WHERE id = ?",
+    [value, new Date().toISOString(), storyId],
+  );
+  console.info("[story hero style]", {
+    story_id: storyId,
+    hero_style_id: value,
+  });
+  revalidatePath(`/admin/stories/${storyId}`);
+}
+
 /** Per-category settings keys for the hero style registry resolution chain.
  *  Lowercased category names match what the resolver in
  *  `pipeline/stages.py:resolve_hero_style` reads. Centralised so the

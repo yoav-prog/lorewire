@@ -23,12 +23,19 @@ import { HERO_STYLES, type HeroStyle } from "@/lib/hero-styles";
 import { saveSettingAction } from "@/app/admin/actions";
 
 export interface HeroStylePickerProps {
-  /** Settings key the chosen value gets written to. Examples:
-   *  - "hero.global_style_id" (global default on /admin/settings)
-   *  - "hero.category_default.drama" (per-category default)
-   *  - "story.hero_style_id" pattern would go through a different action,
-   *    so the per-story picker (step 5) uses its own form. */
-  settingKey: string;
+  /** Settings key the chosen value gets written to. Used when no
+   *  `formAction` override is supplied — defaults to writing through
+   *  `saveSettingAction`. Pass an empty string when overriding via
+   *  `formAction` + `formHiddenFields`. */
+  settingKey?: string;
+  /** Optional override for the form's action. Step 5's per-story
+   *  picker passes `saveStoryHeroStyleAction` here so the value flows
+   *  into `stories.hero_style_id` instead of the settings table. */
+  formAction?: (formData: FormData) => Promise<void> | void;
+  /** Hidden inputs added to the form so the action gets whatever
+   *  identifier it needs (e.g. `{storyId}` for the per-story action).
+   *  Overrides the default `{key: settingKey}` shape when supplied. */
+  formHiddenFields?: Record<string, string>;
   /** Already-selected style id, or empty string when "auto / use default". */
   selectedId: string;
   /** GCS URL per style id, or null when step 3's thumbnail gen hasn't
@@ -55,6 +62,8 @@ const AUTO_VALUE = "";
 
 export function HeroStylePicker({
   settingKey,
+  formAction,
+  formHiddenFields,
   selectedId,
   thumbnails,
   includeAutoOption,
@@ -71,6 +80,20 @@ export function HeroStylePicker({
       ? "Falls through to the next layer in the resolver chain."
       : `Pinned to "${HERO_STYLES.find((s) => s.id === selected)?.label ?? selected}".`);
 
+  // Default action posts to saveSettingAction with `key=settingKey` —
+  // step 4's settings-page contract. Step 5's per-story picker overrides
+  // both `formAction` and `formHiddenFields` so the value lands on
+  // `stories.hero_style_id` instead of the settings table.
+  const action = formAction ?? saveSettingAction;
+  const hiddenFields =
+    formHiddenFields ?? (settingKey ? { key: settingKey } : {});
+
+  // For the test selector + form persistence we need ONE stable testid
+  // marker on the caption + ONE consistent hidden field set. Picker
+  // consumers passing formAction must also pass formHiddenFields so
+  // the wire-shape matches their action's expected fields.
+  const captionTestId = settingKey ? `${settingKey}-caption` : "hero-style-caption";
+
   return (
     <div className="space-y-2">
       <div className="flex flex-col gap-1">
@@ -82,8 +105,10 @@ export function HeroStylePicker({
         ) : null}
       </div>
 
-      <form action={saveSettingAction} className="space-y-3">
-        <input type="hidden" name="key" value={settingKey} />
+      <form action={action} className="space-y-3">
+        {Object.entries(hiddenFields).map(([name, value]) => (
+          <input key={name} type="hidden" name={name} value={value} />
+        ))}
         <div
           role="radiogroup"
           aria-label={label}
@@ -109,7 +134,7 @@ export function HeroStylePicker({
 
         <div className="flex items-center justify-between gap-3">
           <p
-            data-testid={`${settingKey}-caption`}
+            data-testid={captionTestId}
             className="text-[12px] text-ink/55"
           >
             {caption}
