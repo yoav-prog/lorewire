@@ -33,6 +33,10 @@ from pipeline import gcs, images, media, shorts, store, video, voice
 SHORT_ID_SUFFIX = "-short"
 # Captions sit low (~bottom third) for shorts, matching the channel reference.
 SHORT_CAPTION_POSITION_Y = 0.72
+# Phase 3 of _plans/2026-06-17-engagement-polls.md. Duration of the burnt-in
+# question end card that gets appended when the story has an enabled poll.
+# 2500ms matches the plan §N3 budget and the on-site widget's reveal cadence.
+QUESTION_CARD_MS = 2500
 
 ProgressFn = Callable[[str, int, int], None]
 
@@ -48,6 +52,48 @@ class ShortProps:
     Remotion composition consumes (local staticFile paths or remote GCS URLs)."""
     safe_id: str
     props: dict
+
+
+def _build_question_card(row: dict) -> dict | None:
+    """Phase 3 of _plans/2026-06-17-engagement-polls.md. Resolve the
+    burnt-in question card for this story's render.
+
+    Returns None when the story has no enabled poll — the short then
+    renders byte-identical to its pre-poll shape. Returns a dict
+    shaped for the DoodleShort composition's `question_card` prop
+    when a poll exists.
+
+    `slug` falls back to the story id when stories.slug is null. The
+    user lands on the same `/v/<slug>` reader either way; the URL is
+    just less pretty without a slug. Better than no link.
+    """
+    story_id = row.get("id")
+    if not story_id:
+        return None
+    poll = store.fetch_enabled_poll_for_story(story_id)
+    if not poll:
+        return None
+    question = (poll.get("question") or "").strip()
+    option_a = (poll.get("option_a_text") or "").strip()
+    option_b = (poll.get("option_b_text") or "").strip()
+    if not question or not option_a or not option_b:
+        # The TS save action enforces non-empty fields, so this
+        # should never trigger on a healthy row. Defense in depth
+        # against a hand-edited DB or a partial migration — skipping
+        # the card is preferable to a broken-looking render.
+        print(
+            f"[short id={story_id} poll] skipping question_card: "
+            f"missing question or option text"
+        )
+        return None
+    slug = (row.get("slug") or story_id).strip() or story_id
+    return {
+        "question": question,
+        "option_a": option_a,
+        "option_b": option_b,
+        "slug": slug,
+        "card_ms": QUESTION_CARD_MS,
+    }
 
 
 def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> list[dict]:
@@ -228,13 +274,24 @@ def build_short_props(
             **video.resolve_caption_template(store.get_setting),
             "position_y": SHORT_CAPTION_POSITION_Y,
         }
+
+        # Phase 3 of _plans/2026-06-17-engagement-polls.md. Resolve the
+        # burnt-in question end card and extend the composition's
+        # duration_ms so the card has its own tail beyond the narration.
+        # Missing poll -> None -> no card and no duration extension; the
+        # render is byte-identical to a pre-poll short.
+        question_card = _build_question_card(row)
+        rendered_duration_ms = duration_ms + (
+            question_card["card_ms"] if question_card else 0
+        )
+
         props = {
             "config_version": 2,
             "voiceover_url": audio_ref,
             "title": video._truncate_title(title),
             "channel_name": "lorewire",
             "aspect": "9:16",
-            "duration_ms": duration_ms,
+            "duration_ms": rendered_duration_ms,
             # The i2i character reference. Persisted (NOT as a visible frame)
             # so defaultShortConfig seeds short_config.character_base_url and
             # Lane C per-scene regen can re-pose the SAME character. The base
@@ -249,9 +306,14 @@ def build_short_props(
             "props_list": [],
             "character_image_mouth_removed": None,
         }
+        if question_card:
+            props["question_card"] = question_card
         print(
             f"[short id={safe_id} props] {len(captions)} caption chunks, "
-            f"{len(doodle_frames)} frames, {duration_ms/1000:.1f}s, remote={remote}"
+            f"{len(doodle_frames)} frames, {rendered_duration_ms/1000:.1f}s "
+            f"(narration {duration_ms/1000:.1f}s + card "
+            f"{(rendered_duration_ms - duration_ms)/1000:.1f}s), "
+            f"remote={remote}, has_poll={question_card is not None}"
         )
         return ShortProps(safe_id=safe_id, props=props)
     finally:

@@ -696,6 +696,51 @@ def fetch_story(story_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def fetch_enabled_poll_for_story(story_id: str) -> dict | None:
+    """Phase 3 of _plans/2026-06-17-engagement-polls.md. Returns the poll
+    row for `story_id` only when one exists AND `enabled = 1`.
+
+    Used by pipeline/shorts_render.py to decide whether to bake the
+    burnt-in question end card into the short. A missing or disabled
+    poll resolves to None and the short renders byte-identical to
+    pre-poll behavior. Best-effort: if the polls table doesn't exist
+    yet (first-boot ordering against a freshly-migrated DB) the lookup
+    swallows the OperationalError and returns None — the renderer just
+    won't emit the card on that one render.
+
+    The TS-side schema (lorewire-app/src/lib/schema.ts) is the source
+    of truth for the polls table; this reader only consumes it. See the
+    homepage_curation precedent for the "TS authors, Python reads"
+    split.
+    """
+    if not story_id:
+        return None
+    cols = (
+        "id, story_id, question, option_a_text, option_b_text, enabled, category"
+    )
+    if _is_postgres():
+        try:
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT {cols} FROM polls WHERE story_id = %s AND enabled = 1",
+                        (story_id,),
+                    )
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        except Exception:
+            return None
+    try:
+        with _sqlite_conn() as c:
+            row = c.execute(
+                f"SELECT {cols} FROM polls WHERE story_id = ? AND enabled = 1",
+                (story_id,),
+            ).fetchone()
+            return dict(row) if row else None
+    except sqlite3.OperationalError:
+        return None
+
+
 # --- video_segments helpers ---------------------------------------------------
 # A small relational library of intro/outro clips. The pipeline reads through
 # `fetch_segment` (single-row) and `list_segments` (admin list page); the admin
