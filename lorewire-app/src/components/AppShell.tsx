@@ -15,7 +15,27 @@ import {
   useHomepageCuration,
 } from "@/lib/homepage-rails";
 import DesktopShell from "@/components/DesktopShell";
+import ReelsFeed from "@/components/reels/ReelsFeed";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import {
+  getLiveStoryMedia,
+  type LiveStoryMediaResult,
+} from "@/app/actions";
+
+// Default before the per-story live fetch lands — the sheet renders the baked
+// story shape until getLiveStoryMedia resolves the current video + scene
+// frames. Mirrors DesktopShell so both surfaces share the same contract.
+const NO_LIVE_MEDIA: LiveStoryMediaResult = {
+  ok: true,
+  video_url: null,
+  images: [],
+  captions: [],
+  body: null,
+  audio_url: null,
+  alignment: [],
+  is_short: false,
+  found: false,
+};
 
 type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
@@ -54,6 +74,7 @@ const ShareI: IconCmp = (p) => <Ico {...p} d={<><circle cx="6" cy="12" r="2.3" /
 const ChevDown: IconCmp = (p) => <Ico {...p} d={<path d="m6 9 6 6 6-6" />} />;
 const ShuffleI: IconCmp = (p) => <Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5" /><path d="m18 5 2 2-2 2M18 15l2 2-2 2" /></>} />;
 const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /><path d="M12 11v5M12 8h.01" /></>} />;
+const ReelsI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
 
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; rounded?: boolean; showTitle?: boolean }) {
@@ -301,22 +322,46 @@ function Home({
 }
 
 /* ----------------------------- WATCH (real video or doodle frame) ----------------------------- */
-function WatchDoodle({ story }: { story: Story }) {
+function WatchDoodle({
+  story,
+  liveMedia,
+  autoPlaySignal = 0,
+  videoRef,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+  autoPlaySignal?: number;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+}) {
   // Real generated video gets a native player with the hero as poster; the
   // hand-drawn doodle stays as the fallback so older stories without media
-  // keep their illustrated look.
-  if (story.videoUrl) {
+  // keep their illustrated look. Prefer the live video_url (picks up an Apply
+  // Short that happened after the last export) and fall back to the baked one.
+  const videoUrl = liveMedia.video_url ?? story.videoUrl;
+  // The ref is owned by TitleSheet so a Play tap can start the video inside the
+  // gesture (mobile Safari then allows sound). This effect is the fallback for
+  // the case where Play switched in from another tab and the element only
+  // mounts now — autoplay may be blocked, but the controls are in view.
+  useEffect(() => {
+    if (autoPlaySignal > 0) {
+      videoRef.current?.play().catch((e) =>
+        console.warn("[lorewire watch autoplay blocked]", { storyId: story.id, e }),
+      );
+    }
+  }, [autoPlaySignal, story.id, videoRef]);
+  if (videoUrl) {
     return (
       <div className="px-4 pt-4 pb-2">
         <div className="relative rounded-[14px] overflow-hidden mx-auto bg-black" style={{ height: 430, width: "100%" }}>
           <video
-            src={story.videoUrl}
+            ref={videoRef}
+            src={videoUrl}
             poster={story.heroImage}
             controls
             preload="metadata"
             playsInline
             className="absolute inset-0 w-full h-full object-contain"
-            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: story.videoUrl })}
+            onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
         </div>
         <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted text-center mt-3">LoreWire Original &middot; doodle short</p>
@@ -382,14 +427,56 @@ const GALLERY = [
   { n: "4", t: "HR found the group chat. The receipts, as they say, were already screenshotted." },
 ];
 
+// When a story has no word-level alignment yet (no narration / STT step has
+// run), the gallery used to render bare images. Slice the article body into
+// one sentence per scene instead so every card still reads with text.
+function _captionsFromBody(body: string | undefined, count: number): string[] {
+  if (!body || count <= 0) return [];
+  const sentences =
+    body
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  if (sentences.length === 0) return [];
+  // Spread the available sentences across the scenes in reading order so each
+  // card gets a line that roughly tracks where it sits in the story.
+  return Array.from({ length: count }, (_, i) => {
+    const idx = Math.min(
+      Math.floor((i * sentences.length) / count),
+      sentences.length - 1,
+    );
+    return sentences[idx];
+  });
+}
+
 // Build gallery items from real pipeline assets. Each scene gets a short
 // caption pulled from the alignment words at that scene's slot — proportional
-// slicing keeps the prose moving in sync with the visual.
-function _galleryFromStory(story: Story): { src: string; caption: string }[] | null {
+// slicing keeps the prose moving in sync with the visual. Without alignment we
+// fall back to body-derived captions so the gallery never goes text-less.
+function _galleryFromStory(
+  story: Story,
+  liveMedia: LiveStoryMediaResult,
+): { src: string; caption: string }[] | null {
+  // When the live fetch found media, its images + captions are authoritative
+  // and aligned 1:1 — short doodle frames with their spoken lines, or live
+  // stills with body-derived captions. This is what gives a live-only story
+  // (not yet baked into published.ts) both its scenes and its text.
+  if (liveMedia.found && liveMedia.images.length > 0) {
+    return liveMedia.images.map((src, i) => ({
+      src,
+      caption: liveMedia.captions[i] ?? "",
+    }));
+  }
+  // Fall back to the baked story for legacy sample entries that aren't in the
+  // DB: word alignment when present, else body-sliced sentences.
   const imgs = story.images || [];
   if (imgs.length === 0) return null;
   const words = story.alignment || [];
-  if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
+  if (words.length === 0) {
+    const captions = _captionsFromBody(story.body, imgs.length);
+    return imgs.map((src, i) => ({ src, caption: captions[i] ?? "" }));
+  }
   const perScene = Math.max(1, Math.floor(words.length / imgs.length));
   return imgs.map((src, i) => {
     const start = i * perScene;
@@ -411,9 +498,44 @@ function _articleImagePositions(paraCount: number, imageCount: number): Set<numb
   return positions;
 }
 
-function GenArticle({ story }: { story: Story }) {
-  const paras = (story.body || "").split(/\n{2,}/);
-  const scenes = story.images || [];
+// Split the article into paragraphs. Live bodies often arrive as one block
+// with no blank-line breaks, which left the piece as an unreadable wall of text
+// AND gave the scene images nowhere to land (placement needs 3+ paragraphs).
+// Fall back to grouping sentences into short paragraphs.
+function _articleParagraphs(body: string): string[] {
+  const byBreak = body.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  if (byBreak.length >= 3) return byBreak;
+  const sentences =
+    body
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  if (sentences.length < 3) {
+    return byBreak.length > 0 ? byBreak : body.trim() ? [body.trim()] : [];
+  }
+  // ~2 sentences per paragraph: enough paragraphs that image placement (which
+  // needs 3+) kicks in for any body of 5+ sentences, and it reads in chunks.
+  const out: string[] = [];
+  for (let i = 0; i < sentences.length; i += 2) {
+    out.push(sentences.slice(i, i + 2).join(" "));
+  }
+  return out;
+}
+
+function GenArticle({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaResult }) {
+  // A live-only story carries no body on the client, so prefer the live body
+  // the modal fetched — otherwise the article would fall through to the sample.
+  const paras = _articleParagraphs(story.body || liveMedia.body || "");
+  // Use the live scene frames whenever the fetch found them (short doodle
+  // frames, or live stills for a story not yet re-exported); fall back to the
+  // baked stills. Aspect/crop still keys on whether the applied video is a
+  // short so doodle scenes stay 9:16 and long-form stays 16:9.
+  const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
+  const scenes =
+    liveMedia.found && liveMedia.images.length > 0
+      ? liveMedia.images
+      : story.images || [];
   const positions = _articleImagePositions(paras.length, scenes.length);
   // Map paragraph index -> which scene to render after it (left-to-right order).
   const posList = Array.from(positions).sort((a, b) => a - b);
@@ -421,6 +543,14 @@ function GenArticle({ story }: { story: Story }) {
   posList.forEach((p, i) => {
     if (scenes[i]) imgAt.set(p, scenes[i]);
   });
+  // Aspect + crop follow the source: doodle scenes are authored 9:16 and
+  // centre-crop best (bounded so a tall frame doesn't blow out the column);
+  // long-form stills stay 16:9 with the upper-third crop that frames faces.
+  const sceneAspect = useShortScenes ? "9/16" : "16/9";
+  const sceneObjectPos = useShortScenes ? "50% 50%" : "50% 30%";
+  const sceneWrapStyle: React.CSSProperties = useShortScenes
+    ? { background: "#15141A", aspectRatio: sceneAspect, maxWidth: 280, marginLeft: "auto", marginRight: "auto" }
+    : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
     <article className="fade-in">
@@ -435,8 +565,8 @@ function GenArticle({ story }: { story: Story }) {
           )}
           {imgAt.has(i) && (
             <figure className="my-5">
-              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "16/9" }}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: "50% 30%" }} />
+              <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
+                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
               </div>
               <figcaption className="font-mono text-[10px] text-muted mt-1.5">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
@@ -463,7 +593,7 @@ function GenArticle({ story }: { story: Story }) {
   );
 }
 
-function Read({ story }: { story: Story }) {
+function Read({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaResult }) {
   const [mode, setMode] = useState("Article");
   return (
     <div className="px-4 pt-3 pb-2">
@@ -477,66 +607,31 @@ function Read({ story }: { story: Story }) {
       </div>
 
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} /> : (
+        (story.body || liveMedia.body) ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        // No body anywhere yet (the live fetch is still in flight, or this is a
+        // sample story with no article). Show THIS story's own synopsis so it's
+        // never the wrong article — GenArticle takes over once the body lands.
         <article className="fade-in">
-          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
-          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>The $800 Envelope</h1>
-          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">
-            <span className="float-left font-display font-black text-accent mr-2 leading-[.8]" style={{ fontSize: 58 }}>I</span>
-            t started, as these things do, with the most enthusiastic person in the office. Dana volunteered to collect for the retirement gift before anyone else could even reach for their wallet, and within a day the cash was rolling in from every desk on the floor.
-          </p>
-          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">
-            The envelope was, by all accounts, fat. People remembered handing over twenties. One person swears they put in a hundred. And then, sometime over a long weekend, the envelope simply&hellip; relocated.
-          </p>
-
-          <figure className="my-5">
-            <div className="rounded-[12px] overflow-hidden" style={{ background: "#FBFAF4", height: 150 }}>
-              <div className="w-full h-full relative grain">
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="font-hand font-bold" style={{ fontSize: 40, color: "#E8462B", transform: "rotate(-3deg)" }}>poof.</span>
-                </div>
-              </div>
-            </div>
-            <figcaption className="font-mono text-[10px] text-muted mt-1.5">Illustration &middot; LoreWire Studio</figcaption>
-          </figure>
-
-          <p className="font-body text-[15px] leading-relaxed text-ink/90">
-            What follows is a slow-motion unraveling: a vague excuse, a suspiciously new handbag, and a group chat that had quietly been keeping receipts the entire time.
-          </p>
-
-          <blockquote className="my-6 text-center">
-            <p className="font-display font-bold uppercase tracking-tightest leading-[1.02] text-ink" style={{ fontSize: 24 }}>
-              &ldquo;I moved it somewhere safe,&rdquo; she said. <span className="text-accent">It was not somewhere safe.</span>
-            </p>
-          </blockquote>
-
-          <p className="font-body text-[15px] leading-relaxed text-ink/90">
-            By Monday, forty-one people wanted answers and exactly one of them worked in HR. The math, helpfully, did itself.
-          </p>
-
-          <div className="mt-6 rounded-[10px] p-4" style={{ background: "#15141A", borderLeft: "3px solid #E8462B" }}>
-            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2">From the original thread</p>
-            <p className="font-body italic text-[14.5px] text-ink/90 leading-relaxed">
-              &ldquo;She told us it was &lsquo;handled.&rsquo; It was handled the way a magician handles a coin.&rdquo;
-            </p>
-            <div className="flex items-center gap-2 mt-3 font-mono text-[11px] text-muted flex-wrap">
-              <span className="text-ink/80">u/throwaway_desk42</span><span>&middot;</span>
-              <span>r/AmItheAsshole</span><span>&middot;</span><span>Mar 2024</span>
-              <span className="ml-auto text-accent font-medium">View source &rarr;</span>
-            </div>
-          </div>
+          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
+          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>{story.title}</h1>
+          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">{story.syn}</p>
         </article>
         )
       ) : (
         (() => {
-          const items = _galleryFromStory(story);
+          const items = _galleryFromStory(story, liveMedia);
           if (items && items.length > 0) {
+            // 9:16 cards for the short's doodle frames so the gallery reads as
+            // a vertical scene strip; 3:4 stays for long-form 16:9 stills.
+            const useShort = liveMedia.is_short && liveMedia.images.length > 0;
+            const cardWidth = useShort ? 240 : 300;
+            const cardAspect = useShort ? "9/16" : "3/4";
             return (
               <div className="fade-in">
-                <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
+                <div className="flex items-start gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
                   {items.map((g, i) => (
-                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 300, background: "#15141A" }}>
-                      <div className="relative" style={{ aspectRatio: "3/4" }}>
+                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: cardWidth, background: "#15141A" }}>
+                      <div className="relative" style={{ aspectRatio: cardAspect }}>
                         <img src={g.src} alt="" className="absolute inset-0 w-full h-full object-cover" />
                         <span className="absolute top-3 left-4 font-mono text-[10px] uppercase tracking-[.2em] px-1.5 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${i + 1}`}</span>
                       </div>
@@ -544,14 +639,14 @@ function Read({ story }: { story: Story }) {
                     </div>
                   ))}
                 </div>
-                <Dots count={items.length} />
+                <Dots count={items.length} stride={cardWidth + 12} />
               </div>
             );
           }
           // Fallback to the hardcoded sample gallery for stories without pipeline assets.
           return (
             <div className="fade-in">
-              <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
+              <div className="flex items-start gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
                 {GALLERY.map((g, i) => (
                   <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 300, background: "#FBFAF4" }}>
                     <div className="h-[230px] relative grain flex items-center justify-center">
@@ -570,15 +665,15 @@ function Read({ story }: { story: Story }) {
     </div>
   );
 }
-function Dots({ count }: { count: number }) {
+function Dots({ count, stride = 312 }: { count: number; stride?: number }) {
   const [active, setActive] = useState(0);
   useEffect(() => {
     const el = document.getElementById("gallery-scroll");
     if (!el) return;
-    const onS = () => setActive(Math.round(el.scrollLeft / 312));
+    const onS = () => setActive(Math.round(el.scrollLeft / stride));
     el.addEventListener("scroll", onS, { passive: true });
     return () => el.removeEventListener("scroll", onS);
-  }, []);
+  }, [stride]);
   return (
     <div className="flex justify-center gap-1.5 mt-4">
       {Array.from({ length: count }).map((_, i) => (
@@ -596,19 +691,38 @@ const SCRIPT = (
   "She said she moved it somewhere safe. It was not, in any sense, safe."
 ).split(" ");
 
-function ReadAlong({ story }: { story: Story }) {
-  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
-  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+function ReadAlong({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaResult }) {
+  // Prefer the story's own narration; fall back to the live fetch (a short's
+  // voiceover + word timings, or the long-form audio) so a DB-only story gets
+  // a real read-along instead of the 15-second demo ticker.
+  const audioUrl = story.audioUrl ?? liveMedia.audio_url ?? undefined;
+  const alignment =
+    story.alignment && story.alignment.length > 0
+      ? story.alignment
+      : liveMedia.alignment;
+  return audioUrl && alignment.length > 0 ? (
+    <RealReadAlong audioUrl={audioUrl} alignment={alignment} storyId={story.id} />
+  ) : (
+    <FakeReadAlong />
+  );
 }
 
 // Real read-along: drives the karaoke from an <audio> element's timeupdate,
 // using the alignment word timings the pipeline writes (3.1 STT step).
-function RealReadAlong({ story }: { story: Story }) {
+function RealReadAlong({
+  audioUrl,
+  alignment,
+  storyId,
+}: {
+  audioUrl: string;
+  alignment: { word: string; start: number; end: number }[];
+  storyId: string;
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
-  const words = story.alignment || [];
+  const words = alignment;
 
   // Find the active word index by linear scan — same rule the Remotion
   // composition uses (the chunk has at most ~4 words; binary search would
@@ -624,7 +738,7 @@ function RealReadAlong({ story }: { story: Story }) {
     const a = audioRef.current;
     if (!a) return;
     if (a.paused) {
-      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId: story.id, e }));
+      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId, e }));
     } else {
       a.pause();
     }
@@ -642,14 +756,14 @@ function RealReadAlong({ story }: { story: Story }) {
     <div className="px-4 pt-4 pb-2">
       <audio
         ref={audioRef}
-        src={story.audioUrl}
+        src={audioUrl}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
         onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
-        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+        onError={() => console.warn("[lorewire audio err]", { storyId, src: audioUrl })}
       />
       <div className="flex items-center gap-3.5">
         <button onClick={toggle} className="w-14 h-14 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 active:scale-95 transition">
@@ -770,17 +884,62 @@ function FakeReadAlong() {
 /* ----------------------------- TITLE SHEET ----------------------------- */
 function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
+  const watchRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [playNonce, setPlayNonce] = useState(0);
+  // One live media fetch per story (mirrors DesktopShell's DetailModal) so the
+  // WATCH player + READ gallery/article all read off the CURRENT video + scene
+  // frames: an Apply Short that landed after the last export shows right away,
+  // and short stories render their 9:16 doodle scenes instead of long-form
+  // stills. Falls back to NO_LIVE_MEDIA on miss/error so the baked story stays
+  // canonical.
+  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
   // Reset the tab whenever the parent swaps in a different story or hands us
   // a new initialTab. React 19's set-state-in-effect rule rejects the old
   // useEffect pattern; the sanctioned alternative is to track the previous
-  // prop values during render and update state inline.
+  // prop values during render and update state inline. The play nonce + live
+  // media reset here too so browsing "More Like This" within the sheet never
+  // inherits a stale Play signal or the previous story's video.
   const [prevStoryId, setPrevStoryId] = useState(story.id);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (prevStoryId !== story.id || prevInitialTab !== initialTab) {
     setPrevStoryId(story.id);
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
+    setPlayNonce(0);
+    setLiveMedia(NO_LIVE_MEDIA);
   }
+  // Tapping a Play button switches to the Watch tab, scrolls its player into
+  // view (it sits well below the fold, under the synopsis and tab bar) and
+  // starts playback — without this the tab changes off-screen and Play reads
+  // as dead. Playing inside the tap (when the player is already mounted, the
+  // default on open) keeps mobile Safari from blocking sound; the nonce-driven
+  // effect in WatchDoodle covers the case where Play switched in from another
+  // tab and the <video> only mounts a beat later.
+  const startWatch = () => {
+    setTab("Watch");
+    setPlayNonce((n) => n + 1);
+    videoRef.current?.play().catch(() => {});
+  };
+  useEffect(() => {
+    if (playNonce > 0) {
+      watchRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [playNonce]);
+  useEffect(() => {
+    let cancelled = false;
+    getLiveStoryMedia(story.id)
+      .then((r) => {
+        if (cancelled || !r.found) return;
+        setLiveMedia(r);
+      })
+      .catch((err) =>
+        console.warn("[lorewire media live error]", { storyId: story.id, err: String(err) }),
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [story.id]);
   const c = CAT[story.cat];
   const more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
   if (more.length < 3) more.push(...STORIES.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
@@ -816,7 +975,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         <button onClick={onClose} className="absolute top-4 left-4 w-9 h-9 rounded-full flex items-center justify-center text-ink z-10" style={{ background: "rgba(0,0,0,.4)" }}>
           <ChevDown size={22} />
         </button>
-        <button onClick={() => setTab("Watch")} className="absolute left-1/2 top-[120px] -translate-x-1/2 w-16 h-16 rounded-full flex items-center justify-center text-bg active:scale-95 transition" style={{ background: "#F5F3EF", boxShadow: "0 10px 30px rgba(0,0,0,.4)" }}>
+        <button onClick={startWatch} className="absolute left-1/2 top-[120px] -translate-x-1/2 w-16 h-16 rounded-full flex items-center justify-center text-bg active:scale-95 transition" style={{ background: "#F5F3EF", boxShadow: "0 10px 30px rgba(0,0,0,.4)" }}>
           <PlayI size={28} />
         </button>
       </div>
@@ -832,7 +991,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ background: c, color: "#fff" }}>{story.cat}</span>
         </div>
 
-        <button onClick={() => setTab("Watch")} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition">
+        <button onClick={startWatch} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition">
           <PlayI /> Play
         </button>
 
@@ -860,10 +1019,10 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           ))}
         </div>
 
-        <div className="-mx-4 mt-2">
-          {tab === "Watch" && <WatchDoodle story={story} />}
-          {tab === "Read" && <Read story={story} />}
-          {tab === "Read-along" && <ReadAlong story={story} />}
+        <div ref={watchRef} className="-mx-4 mt-2 scroll-mt-4">
+          {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} autoPlaySignal={playNonce} videoRef={videoRef} />}
+          {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
+          {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
         </div>
 
         <section className="mt-8 -mx-4">
@@ -949,7 +1108,7 @@ function MyList({ onOpen, list }: { onOpen: OpenFn; list: string[] }) {
 
 /* ----------------------------- TAB BAR ----------------------------- */
 function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
-  const items: [string, IconCmp][] = [["Home", HomeI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
+  const items: [string, IconCmp][] = [["Home", HomeI], ["Reels", ReelsI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
   return (
     <div className="absolute bottom-0 left-0 right-0 z-50" style={{ background: "linear-gradient(0deg,#0A0A0C 70%, rgba(10,10,12,0))" }}>
       <div className="flex justify-around items-center pt-2.5 pb-7 px-2">
@@ -1016,6 +1175,11 @@ function MobileShell() {
         {tab === "New" && <NewScreen onOpen={open} />}
         {tab === "My List" && <MyList onOpen={open} list={list} />}
       </div>
+
+      {/* Reels rides above the (now-empty) screen as a full-cover layer, like
+          the Title sheet does — it owns its own snap scroller and pauses
+          whenever a sheet opens over it. */}
+      {tab === "Reels" && <ReelsFeed onOpenInfo={open} paused={!!active} />}
 
       {active && activeStory && (
         <TitleSheet

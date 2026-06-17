@@ -26,6 +26,10 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
   video_url: null,
   images: [],
+  captions: [],
+  body: null,
+  audio_url: null,
+  alignment: [],
   is_short: false,
   found: false,
 };
@@ -368,7 +372,7 @@ function GalleryScroller({ children, count }: { children: React.ReactNode; count
       >
         <span className="w-10 h-10 rounded-full bg-bg/85 border border-line flex items-center justify-center text-ink"><ChevL size={22} /></span>
       </button>
-      <div ref={ref} className="flex gap-5 overflow-x-auto noscroll snap-x snap-mandatory pb-2 -mx-1 px-1">{children}</div>
+      <div ref={ref} className="flex items-start gap-5 overflow-x-auto noscroll snap-x snap-mandatory pb-2 -mx-1 px-1">{children}</div>
       <button
         onClick={() => scroll(1)}
         className="absolute right-0 top-0 bottom-0 z-20 w-14 flex items-center justify-center transition-opacity"
@@ -381,19 +385,52 @@ function GalleryScroller({ children, count }: { children: React.ReactNode; count
   );
 }
 
+// When a story has no word-level alignment yet (no narration / STT step has
+// run), the gallery used to render bare images. Slice the article body into
+// one sentence per scene instead so every card still reads with text.
+function _captionsFromBody(body: string | undefined, count: number): string[] {
+  if (!body || count <= 0) return [];
+  const sentences =
+    body
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  if (sentences.length === 0) return [];
+  // Spread the available sentences across the scenes in reading order so each
+  // card gets a line that roughly tracks where it sits in the story.
+  return Array.from({ length: count }, (_, i) => {
+    const idx = Math.min(
+      Math.floor((i * sentences.length) / count),
+      sentences.length - 1,
+    );
+    return sentences[idx];
+  });
+}
+
 function _galleryFromStory(
   story: Story,
   liveMedia: LiveStoryMediaResult,
 ): { src: string; caption: string }[] | null {
-  // Prefer live images when the applied video is a short — those are the
-  // doodle scene frames generated for the 9:16 short. Fall back to the
-  // baked long-form story.images otherwise (or when the live read missed).
-  const imgs = liveMedia.is_short && liveMedia.images.length > 0
-    ? liveMedia.images
-    : story.images || [];
+  // When the live fetch found media, its images + captions are authoritative
+  // and aligned 1:1 — short doodle frames with their spoken lines, or live
+  // stills with body-derived captions. This is what gives a live-only story
+  // (not yet baked into published.ts) both its scenes and its text.
+  if (liveMedia.found && liveMedia.images.length > 0) {
+    return liveMedia.images.map((src, i) => ({
+      src,
+      caption: liveMedia.captions[i] ?? "",
+    }));
+  }
+  // Fall back to the baked story for legacy sample entries that aren't in the
+  // DB: word alignment when present, else body-sliced sentences.
+  const imgs = story.images || [];
   if (imgs.length === 0) return null;
   const words = story.alignment || [];
-  if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
+  if (words.length === 0) {
+    const captions = _captionsFromBody(story.body, imgs.length);
+    return imgs.map((src, i) => ({ src, caption: captions[i] ?? "" }));
+  }
   const perScene = Math.max(1, Math.floor(words.length / imgs.length));
   return imgs.map((src, i) => {
     const start = i * perScene;
@@ -413,6 +450,31 @@ function _articleImagePositions(paraCount: number, imageCount: number): Set<numb
   return positions;
 }
 
+// Split the article into paragraphs. Live bodies often arrive as one block
+// with no blank-line breaks, which left the piece as an unreadable wall of text
+// AND gave the scene images nowhere to land (placement needs 3+ paragraphs).
+// Fall back to grouping sentences into short paragraphs.
+function _articleParagraphs(body: string): string[] {
+  const byBreak = body.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+  if (byBreak.length >= 3) return byBreak;
+  const sentences =
+    body
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  if (sentences.length < 3) {
+    return byBreak.length > 0 ? byBreak : body.trim() ? [body.trim()] : [];
+  }
+  // ~2 sentences per paragraph: enough paragraphs that image placement (which
+  // needs 3+) kicks in for any body of 5+ sentences, and it reads in chunks.
+  const out: string[] = [];
+  for (let i = 0; i < sentences.length; i += 2) {
+    out.push(sentences.slice(i, i + 2).join(" "));
+  }
+  return out;
+}
+
 function GenArticle({
   story,
   liveMedia,
@@ -420,12 +482,18 @@ function GenArticle({
   story: Story;
   liveMedia: LiveStoryMediaResult;
 }) {
-  const paras = (story.body || "").split(/\n{2,}/);
-  // When the applied video is a short, the article reads alongside the
-  // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
-  // the long-form 16:9 illustrations are still the right fit.
+  // A live-only story carries no body on the client, so prefer the live body
+  // the modal fetched — otherwise the article would fall through to the sample.
+  const paras = _articleParagraphs(story.body || liveMedia.body || "");
+  // Use the live scene frames whenever the fetch found them (short doodle
+  // frames, or live stills for a story not yet re-exported); fall back to the
+  // baked stills. Aspect/crop still keys on whether the applied video is a
+  // short so doodle scenes stay 9:16 and long-form stays 16:9.
   const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
-  const scenes = useShortScenes ? liveMedia.images : (story.images || []);
+  const scenes =
+    liveMedia.found && liveMedia.images.length > 0
+      ? liveMedia.images
+      : story.images || [];
   const positions = _articleImagePositions(paras.length, scenes.length);
   const posList = Array.from(positions).sort((a, b) => a - b);
   const imgAt = new Map<number, string>();
@@ -507,34 +575,14 @@ function Read({
         ))}
       </div>
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        (story.body || liveMedia.body) ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        // No body anywhere yet (the live fetch is still in flight, or this is a
+        // sample story with no article). Show THIS story's own synopsis so it's
+        // never the wrong article — GenArticle takes over once the body lands.
         <article className="fade-in max-w-[660px]">
-          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
-          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>The $800 Envelope</h1>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">
-            <span className="float-left font-display font-black text-accent mr-2.5 leading-[.78]" style={{ fontSize: 72 }}>I</span>
-            t started, as these things do, with the most enthusiastic person in the office. Dana volunteered to collect for the retirement gift before anyone else could even reach for their wallet, and within a day the cash was rolling in from every desk on the floor.
-          </p>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">The envelope was, by all accounts, fat. People remembered handing over twenties. One person swears they put in a hundred. And then, sometime over a long weekend, the envelope simply&hellip; relocated.</p>
-          <figure className="my-7">
-            <div className="rounded-[12px] overflow-hidden grain relative" style={{ background: "#FBFAF4", height: 200 }}>
-              <div className="absolute inset-0 flex items-center justify-center"><span className="font-hand font-bold" style={{ fontSize: 54, color: "#E8462B", transform: "rotate(-3deg)" }}>poof.</span></div>
-            </div>
-            <figcaption className="font-mono text-[10px] text-muted mt-2">Illustration &middot; LoreWire Studio</figcaption>
-          </figure>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90">What follows is a slow-motion unraveling: a vague excuse, a suspiciously new handbag, and a group chat that had quietly been keeping receipts the entire time.</p>
-          <blockquote className="my-8 border-l-[3px] border-accent pl-5">
-            <p className="font-display font-bold uppercase tracking-tightest leading-[1.04] text-ink" style={{ fontSize: 28 }}>&ldquo;I moved it somewhere safe,&rdquo; she said. <span className="text-accent">It was not somewhere safe.</span></p>
-          </blockquote>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90">By Monday, forty-one people wanted answers and exactly one of them worked in HR. The math, helpfully, did itself.</p>
-          <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
-            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
-            <p className="font-body italic text-[15.5px] text-ink/90 leading-relaxed">&ldquo;She told us it was &lsquo;handled.&rsquo; It was handled the way a magician handles a coin.&rdquo;</p>
-            <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
-              <span className="text-ink/80">u/throwaway_desk42</span><span>&middot;</span><span>r/AmItheAsshole</span><span>&middot;</span><span>Mar 2024</span>
-              <span className="ml-auto text-accent font-medium">View source &rarr;</span>
-            </div>
-          </div>
+          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
+          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>{story.title}</h1>
+          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">{story.syn}</p>
         </article>
         )
       ) : (
@@ -586,17 +634,36 @@ function Read({
 /* ----------------------------- READ-ALONG ----------------------------- */
 const SCRIPT = ("Dana volunteered to collect the money before anyone else could blink. The envelope filled up fast, fat with twenties and one brave hundred. Then, over a single long weekend, it simply vanished from the drawer. She said she moved it somewhere safe. It was not, in any sense, safe.").split(" ");
 
-function ReadAlong({ story }: { story: Story }) {
-  const hasReal = !!story.audioUrl && !!story.alignment && story.alignment.length > 0;
-  return hasReal ? <RealReadAlong story={story} /> : <FakeReadAlong />;
+function ReadAlong({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaResult }) {
+  // Prefer the story's own narration; fall back to the live fetch (a short's
+  // voiceover + word timings, or the long-form audio) so a DB-only story gets
+  // a real read-along instead of the 15-second demo ticker.
+  const audioUrl = story.audioUrl ?? liveMedia.audio_url ?? undefined;
+  const alignment =
+    story.alignment && story.alignment.length > 0
+      ? story.alignment
+      : liveMedia.alignment;
+  return audioUrl && alignment.length > 0 ? (
+    <RealReadAlong audioUrl={audioUrl} alignment={alignment} storyId={story.id} />
+  ) : (
+    <FakeReadAlong />
+  );
 }
 
-function RealReadAlong({ story }: { story: Story }) {
+function RealReadAlong({
+  audioUrl,
+  alignment,
+  storyId,
+}: {
+  audioUrl: string;
+  alignment: { word: string; start: number; end: number }[];
+  storyId: string;
+}) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(0);
-  const words = story.alignment || [];
+  const words = alignment;
 
   const activeIdx = (() => {
     for (let i = 0; i < words.length; i++) {
@@ -609,7 +676,7 @@ function RealReadAlong({ story }: { story: Story }) {
     const a = audioRef.current;
     if (!a) return;
     if (a.paused) {
-      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId: story.id, e }));
+      a.play().catch((e) => console.warn("[lorewire audio play err]", { storyId, e }));
     } else {
       a.pause();
     }
@@ -627,14 +694,14 @@ function RealReadAlong({ story }: { story: Story }) {
     <div className="max-w-[760px]">
       <audio
         ref={audioRef}
-        src={story.audioUrl}
+        src={audioUrl}
         preload="metadata"
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => setPlaying(false)}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
         onTimeUpdate={(e) => setElapsed(e.currentTarget.currentTime)}
-        onError={() => console.warn("[lorewire audio err]", { storyId: story.id, src: story.audioUrl })}
+        onError={() => console.warn("[lorewire audio err]", { storyId, src: audioUrl })}
       />
       <div className="flex items-center gap-4">
         <button onClick={toggle} className="w-16 h-16 rounded-full bg-accent text-bg flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition">
@@ -726,16 +793,25 @@ function DetailModalHero({ story }: { story: Story }) {
 
 function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
-  // Reset the tab whenever the parent swaps in a different story or initialTab
-  // — React 19's set-state-in-effect rule rejects the old useEffect pattern.
-  // The sanctioned alternative is to track the previous prop values during
-  // render and update state inline.
+  // One live fetch per modal open, shared by WATCH + READ (Article + Gallery)
+  // so opening the modal hits the DB once and every subview sees a consistent
+  // "is this the short?" answer. Falls back to NO_LIVE_MEDIA on miss/error so
+  // subviews behave as if the baked story was canonical (legacy sample-only
+  // entries).
+  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
+  // Reset the tab + live media whenever the parent swaps in a different story
+  // or initialTab — React 19's set-state-in-effect rule rejects the old
+  // useEffect pattern. The sanctioned alternative is to track the previous
+  // prop values during render and update state inline; resetting liveMedia
+  // here (rather than at the top of the fetch effect) keeps that effect free
+  // of a synchronous setState.
   const [prevStoryId, setPrevStoryId] = useState(story.id);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (prevStoryId !== story.id || prevInitialTab !== initialTab) {
     setPrevStoryId(story.id);
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
+    setLiveMedia(NO_LIVE_MEDIA);
   }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -743,15 +819,8 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // One live fetch per modal open. Shared by WATCH, READ → Article, READ →
-  // Gallery so opening the modal hits the DB once instead of three times
-  // and every subview sees a consistent "is this the short?" answer.
-  // Falls back to NO_LIVE_MEDIA on miss/error so subviews behave as if
-  // the baked story was canonical (legacy sample-only entries).
-  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
   useEffect(() => {
     let cancelled = false;
-    setLiveMedia(NO_LIVE_MEDIA);
     getLiveStoryMedia(story.id)
       .then((r) => {
         if (cancelled) return;
@@ -833,7 +902,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
             <div className="pt-7">
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
-              {tab === "Read-along" && <ReadAlong story={story} />}
+              {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
             </div>
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>

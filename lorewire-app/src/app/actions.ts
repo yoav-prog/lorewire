@@ -21,16 +21,7 @@ import {
   listAllCuration,
   type HomepageSurface,
 } from "@/lib/homepage-curation";
-
-// The short renderer writes its MP4 to GCS at `<storyId>-short/video.mp4`
-// (suffix from pipeline/shorts_render.SHORT_ID_SUFFIX). Anything else is
-// the long-form path. We detect the apply by matching this suffix on the
-// URL itself so we don't need to round-trip a separate flag column.
-const SHORT_VIDEO_PATH_RE = /-short\/video\.mp4(?:[?#].*)?$/;
-
-function isShortVideoUrl(url: string | null | undefined): boolean {
-  return typeof url === "string" && SHORT_VIDEO_PATH_RE.test(url);
-}
+import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 
 export interface LiveStoryMediaResult {
   ok: boolean;
@@ -41,6 +32,23 @@ export interface LiveStoryMediaResult {
    *  long-form video (or no video), this falls back to stories.images
    *  and the caller should render at 16:9. */
   images: string[];
+  /** Caption text aligned 1:1 with `images`: one sentence per scene, sliced
+   *  from the article body (then summary) and length-capped so cards stay
+   *  uniform. Empty strings where no source text exists so the gallery degrades
+   *  cleanly instead of going blank. */
+  captions: string[];
+  /** The article body for this story, so the public READ → Article view can
+   *  render the real article for a live-only story (one not yet baked into
+   *  src/data/published.ts, where `story.body` is absent on the client).
+   *  Null when the story has no body. */
+  body: string | null;
+  /** Narration audio for READ-ALONG: a short's voiceover, otherwise the
+   *  long-form stories.audio_url. Null when neither exists. */
+  audio_url: string | null;
+  /** Word timings for READ-ALONG, in seconds, aligned to `audio_url`. Built
+   *  from the short's caption chunks or the long-form stories.alignment. Empty
+   *  when no timings exist (the reader then shows its demo ticker). */
+  alignment: AlignedWord[];
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -65,28 +73,124 @@ async function latestDoneShortPropsForStory(
   return row?.props ?? null;
 }
 
-function parseShortFrameUrls(propsJson: string | null): string[] {
-  if (!propsJson) return [];
+export interface AlignedWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+// Everything READ needs out of a done short's props in one parse: the doodle
+// scene frame URLs (gallery + article), the voiceover URL and per-word timings
+// (read-along). Word timings come from the caption chunks' words[] in ms; we
+// convert to seconds to match the long-form stories.alignment contract.
+function parseShortMedia(propsJson: string | null): {
+  frameUrls: string[];
+  voiceoverUrl: string | null;
+  alignment: AlignedWord[];
+} {
+  const empty = {
+    frameUrls: [] as string[],
+    voiceoverUrl: null as string | null,
+    alignment: [] as AlignedWord[],
+  };
+  if (!propsJson) return empty;
   let parsed: unknown;
   try {
     parsed = JSON.parse(propsJson);
   } catch {
-    return [];
+    return empty;
   }
-  if (!parsed || typeof parsed !== "object") return [];
-  const frames = (parsed as { doodle_frames?: unknown }).doodle_frames;
-  if (!Array.isArray(frames)) return [];
-  const out: string[] = [];
-  for (const f of frames) {
-    if (
-      f &&
-      typeof f === "object" &&
-      typeof (f as { url?: unknown }).url === "string"
-    ) {
-      out.push((f as { url: string }).url);
+  if (!parsed || typeof parsed !== "object") return empty;
+  const obj = parsed as {
+    doodle_frames?: unknown;
+    captions?: unknown;
+    voiceover_url?: unknown;
+  };
+  const frameUrls: string[] = [];
+  if (Array.isArray(obj.doodle_frames)) {
+    for (const f of obj.doodle_frames) {
+      if (f && typeof f === "object" && typeof (f as { url?: unknown }).url === "string") {
+        frameUrls.push((f as { url: string }).url);
+      }
     }
   }
-  return out;
+  const voiceoverUrl =
+    typeof obj.voiceover_url === "string" ? obj.voiceover_url : null;
+  const alignment: AlignedWord[] = [];
+  if (Array.isArray(obj.captions)) {
+    for (const c of obj.captions) {
+      const ws = c && typeof c === "object" ? (c as { words?: unknown }).words : null;
+      if (!Array.isArray(ws)) continue;
+      for (const w of ws) {
+        if (
+          w &&
+          typeof w === "object" &&
+          typeof (w as { word?: unknown }).word === "string" &&
+          typeof (w as { start_ms?: unknown }).start_ms === "number" &&
+          typeof (w as { end_ms?: unknown }).end_ms === "number"
+        ) {
+          const ww = w as { word: string; start_ms: number; end_ms: number };
+          alignment.push({
+            word: ww.word,
+            start: ww.start_ms / 1000,
+            end: ww.end_ms / 1000,
+          });
+        }
+      }
+    }
+  }
+  return { frameUrls, voiceoverUrl, alignment };
+}
+
+// Long-form word timings: stories.alignment is a JSON array of
+// {word, start, end} already in seconds. Returns [] on missing/invalid.
+function parseAlignment(raw: string | null | undefined): AlignedWord[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter(
+          (w): w is AlignedWord =>
+            w &&
+            typeof w === "object" &&
+            typeof (w as { word?: unknown }).word === "string" &&
+            typeof (w as { start?: unknown }).start === "number" &&
+            typeof (w as { end?: unknown }).end === "number",
+        )
+        .map((w) => ({ word: w.word, start: w.start, end: w.end }));
+    }
+  } catch {
+    /* invalid JSON — fall through to empty */
+  }
+  return [];
+}
+
+// Slice prose into one short caption per scene so a gallery without word-level
+// alignment still captions every image evenly. One sentence per scene, capped
+// so a single long sentence can't blow a card out of proportion. Mirrors the
+// client _captionsFromBody so live and baked stories caption the same way.
+function captionsFromText(
+  text: string | null | undefined,
+  count: number,
+): string[] {
+  if (!text || count <= 0) return [];
+  const sentences =
+    text
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  if (sentences.length === 0) return [];
+  const cap = (s: string) =>
+    s.length > 160 ? s.slice(0, 157).replace(/\s+\S*$/, "") + "..." : s;
+  return Array.from({ length: count }, (_, i) =>
+    cap(
+      sentences[
+        Math.min(Math.floor((i * sentences.length) / count), sentences.length - 1)
+      ],
+    ),
+  );
 }
 
 function parseStoryImageList(raw: string | null | undefined): string[] {
@@ -114,6 +218,10 @@ export async function getLiveStoryMedia(
     ok: true,
     video_url: null,
     images: [],
+    captions: [],
+    body: null,
+    audio_url: null,
+    alignment: [],
     is_short: false,
     found: false,
   };
@@ -124,8 +232,12 @@ export async function getLiveStoryMedia(
     id: string;
     video_url: string | null;
     images: string | null;
+    body: string | null;
+    summary: string | null;
+    audio_url: string | null;
+    alignment: string | null;
   }>(
-    "SELECT id, video_url, images FROM stories " +
+    "SELECT id, video_url, images, body, summary, audio_url, alignment FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -138,28 +250,44 @@ export async function getLiveStoryMedia(
         id: bySlug.id,
         video_url: bySlug.video_url,
         images: bySlug.images,
+        body: bySlug.body,
+        summary: bySlug.summary,
+        audio_url: bySlug.audio_url,
+        alignment: bySlug.alignment,
       };
     }
   }
   if (!row) return empty;
 
   const isShort = isShortVideoUrl(row.video_url);
-  // When the applied video is a short, replace the long-form image list
-  // with the short's doodle scene frames so the article reads as the
-  // 9:16 doodle visual story instead of mixing styles.
+  // A short reads off its own props: 9:16 doodle frames for the visuals, its
+  // voiceover + per-word timings for READ-ALONG. Everything else reads off the
+  // long-form columns (stills, stories.audio_url, stories.alignment). Captions
+  // for the gallery are one body sentence per scene either way.
   let images: string[];
+  let audioUrl: string | null;
+  let alignment: AlignedWord[];
   if (isShort) {
     const propsJson = await latestDoneShortPropsForStory(row.id);
-    const shortImages = parseShortFrameUrls(propsJson);
-    images = shortImages.length > 0 ? shortImages : parseStoryImageList(row.images);
+    const short = parseShortMedia(propsJson);
+    images = short.frameUrls.length > 0 ? short.frameUrls : parseStoryImageList(row.images);
+    audioUrl = short.voiceoverUrl ?? row.audio_url;
+    alignment = short.alignment.length > 0 ? short.alignment : parseAlignment(row.alignment);
   } else {
     images = parseStoryImageList(row.images);
+    audioUrl = row.audio_url;
+    alignment = parseAlignment(row.alignment);
   }
+  const captions = captionsFromText(row.body ?? row.summary, images.length);
 
   return {
     ok: true,
     video_url: row.video_url,
     images,
+    captions,
+    body: row.body,
+    audio_url: audioUrl,
+    alignment,
     is_short: isShort,
     found: true,
   };
@@ -267,6 +395,74 @@ export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
       `LIMIT ${safeLimit}`,
   );
   return { ok: true, stories: rows };
+}
+
+// ─── Reels feed: published shorts, cursor-paginated ──────────────────────────
+// The Reels surface streams ONLY 9:16 short renders (the doodle shorts), most
+// recent first, one page at a time. A "short" is identified by its video_url
+// suffix (lib/short-video-url) — the long-form pipeline writes a different
+// path, so the same `stories` table serves both and this query filters in SQL
+// so pagination counts shorts, not all published stories. Public + unauthen-
+// ticated like its siblings: the published / non-noindex / has-slug filter is
+// load-bearing and mirrors listPublishedStories exactly.
+
+export interface ListShortsOpts {
+  /** Page size, clamped to 1..50. */
+  limit?: number;
+  /** Cursor: return shorts published strictly BEFORE this timestamp. Pass the
+   *  previous page's `nextCursor`; omit for the first page. */
+  beforePublishedAt?: string | null;
+}
+
+export interface ListShortsResult {
+  ok: boolean;
+  /** One page of shorts, newest first. Same projection the homepage rails use
+   *  (LiveCatalogStory) so the Reels card and the catalog adapter share a shape. */
+  shorts: LiveCatalogStory[];
+  /** Cursor for the next page (the published_at of the last row), or null when
+   *  this was the final page. */
+  nextCursor: string | null;
+}
+
+export async function listPublishedShorts(
+  opts: ListShortsOpts = {},
+): Promise<ListShortsResult> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 12, 50));
+  const where: string[] = [
+    "status = 'published'",
+    "published_at IS NOT NULL",
+    "slug IS NOT NULL",
+    "(noindex IS NULL OR noindex = 0)",
+    // Shorts only — match the `<id>-short/video.mp4` object path in SQL.
+    "video_url LIKE ?",
+  ];
+  const params: unknown[] = [SHORT_VIDEO_URL_LIKE];
+  if (opts.beforePublishedAt) {
+    where.push("published_at < ?");
+    params.push(opts.beforePublishedAt);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  // Over-fetch by one so we know whether a further page exists without a second
+  // COUNT round-trip. id is the deterministic tiebreak so the sort is stable
+  // across equal published_at values.
+  const rows = await all<LiveCatalogStory>(
+    "SELECT id, slug, title, category, summary, duration, hero_image, " +
+      "hero_image_landscape, hero_has_baked_title, video_url, " +
+      `published_at, created_at FROM stories ${clause} ` +
+      "ORDER BY published_at DESC, id DESC " +
+      `LIMIT ${limit + 1}`,
+    params,
+  );
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  // Belt and braces: the SQL LIKE already filters, but re-assert the exact
+  // suffix in JS so a URL that merely contains the substring mid-path can't
+  // slip a non-short into the feed (the regex anchors it to the end).
+  const shorts = page.filter((s) => isShortVideoUrl(s.video_url));
+  const nextCursor = hasMore
+    ? page[page.length - 1]?.published_at ?? null
+    : null;
+  return { ok: true, shorts, nextCursor };
 }
 
 export async function getHomepageCuration(): Promise<HomepageCurationResult> {
