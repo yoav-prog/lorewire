@@ -122,6 +122,7 @@ def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> 
             "url": f["url"],
             "idx": idx,
             "image_prompt": f.get("image_prompt"),
+            "image_input_urls": f.get("image_input_urls") or [],
         })
     mapped.sort(key=lambda x: x["idx"])
     frames: list[dict] = []
@@ -137,6 +138,8 @@ def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> 
         }
         if it.get("image_prompt"):
             frame["image_prompt"] = it["image_prompt"]
+        if it.get("image_input_urls"):
+            frame["image_input_urls"] = it["image_input_urls"]
         frames.append(frame)
     # The opening scene must cover t=0 — DoodleShort windows frame 0 from its
     # caption's start_ms, so a first scene planned against a later beat would
@@ -232,6 +235,13 @@ def build_short_props(
                 "url": s["url"],
                 "planned": int(s.get("caption_chunk_start_index", 0) or 0),
                 "image_prompt": s.get("image_prompt") or "",
+                # The ordered ref list the original i2i call received (base
+                # first, then this scene's supporting characters / locations /
+                # items). Carried into doodle_frames so a per-scene regen can
+                # replay the SAME multi-ref input instead of falling back to
+                # base-only (which loses world-bible consistency for the wife /
+                # kitchen / envelope etc. on regen).
+                "image_input_urls": list(s.get("image_input_urls") or []),
             }
             for s in assets.scenes
         ]
@@ -253,6 +263,7 @@ def build_short_props(
                 "url": url,
                 "planned": src["planned"],
                 "image_prompt": src.get("image_prompt") or None,
+                "image_input_urls": src.get("image_input_urls") or [],
             })
             progress("stage", i + 1, len(sources))
         if not staged:
@@ -297,6 +308,16 @@ def build_short_props(
             # Lane C per-scene regen can re-pose the SAME character. The base
             # itself never appears in the video.
             "character_base_url": assets.base_url,
+            # World-bible reference gallery — t2i'd once per short, used as
+            # i2i `input_urls` for per-scene generation so the SAME wife /
+            # kitchen / envelope is redrawn every appearance. Same "i2i
+            # references only, never visible" contract as character_base_url:
+            # the renderer walks `doodle_frames` only, so these URLs are
+            # invisible in the rendered video. Empty dicts when the story
+            # has no recurring supporting cast / locations / items.
+            "supporting_character_refs": dict(assets.reference_gallery.supporting_chars),
+            "location_refs": dict(assets.reference_gallery.locations),
+            "item_refs": dict(assets.reference_gallery.items),
             "doodle_frames": doodle_frames,
             "captions": captions,
             "ken_burns": False,
@@ -388,8 +409,24 @@ def sync_short_config_from_lane_a(story_id: str, props: dict) -> bool:
             out["image_prompt"] = raw["image_prompt"]
         if isinstance(raw.get("alt"), str):
             out["alt"] = raw["alt"]
+        if isinstance(raw.get("image_input_urls"), list):
+            # Carry the per-scene multi-ref list (base + world-bible refs)
+            # so Lane C regen on this frame replays the same input set.
+            out["image_input_urls"] = [
+                u for u in raw["image_input_urls"] if isinstance(u, str)
+            ]
         new_frames.append(out)
     config["doodle_frames"] = new_frames
+    # Mirror the world-bible reference gallery (NOT visible frames — i2i
+    # inputs only) so the editor + Lane C regen can resolve recurring
+    # entities the same way the initial render did. Schema parity: these
+    # keys live alongside character_base_url at the top level.
+    for key in ("supporting_character_refs", "location_refs", "item_refs"):
+        if isinstance(props.get(key), dict):
+            config[key] = {
+                k: v for k, v in props[key].items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
 
     config["captions"] = [
         {
