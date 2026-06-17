@@ -21,6 +21,15 @@ import {
   resolveAspect,
   type VideoAspect,
 } from "@/lib/aspect";
+import { PollWidget } from "@/components/PollWidget";
+import {
+  DEFAULT_PUBLIC_FLOOR,
+  getAggregateByStoryId,
+  getPollByStoryId,
+  getVoteSideForCookie,
+  toResultView,
+} from "@/lib/polls";
+import { readVoteToken } from "@/lib/poll-cookie";
 
 // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
 // rendered aspect for a story so the reader's <video> container CSS
@@ -138,6 +147,29 @@ export default async function StoryReader({
   const videoAspect = await resolveStoryAspect(story.video_config);
   const videoCssRatio = aspectDims(videoAspect).cssRatio;
 
+  // Phase 2 of _plans/2026-06-17-engagement-polls.md. The widget
+  // lives between video and body — high enough that a phone user
+  // sees it after the play, low enough that the question doesn't
+  // pre-empt the story. We resolve the poll + aggregate + already-
+  // voted-side server-side so the first paint is correct (no post-
+  // hydration flash from pre-vote to post-vote). `voteToken` is
+  // read-only here — the cookie is only ISSUED on the first POST to
+  // /api/polls/vote, where a Set-Cookie response can be honored.
+  const poll = await getPollByStoryId(story.id);
+  const hasLivePoll = poll !== null && poll.enabled === 1;
+  const [voteToken, pollAggregate] = hasLivePoll
+    ? await Promise.all([
+        readVoteToken(),
+        getAggregateByStoryId(story.id),
+      ])
+    : [null, null];
+  const initialVotedSide = hasLivePoll
+    ? await getVoteSideForCookie(poll!.id, voteToken)
+    : null;
+  const pollResultView = hasLivePoll
+    ? toResultView(pollAggregate, DEFAULT_PUBLIC_FLOOR)
+    : null;
+
   console.info("[story reader] render", {
     id: story.id,
     slug: story.slug,
@@ -145,6 +177,8 @@ export default async function StoryReader({
     has_audio: Boolean(story.audio_url),
     aspect: videoAspect,
     bodyLen: story.body?.length ?? 0,
+    has_poll: hasLivePoll,
+    poll_already_voted: Boolean(initialVotedSide),
   });
 
   // Body is plain text from the Reddit pipeline; render as paragraphs so
@@ -194,6 +228,17 @@ export default async function StoryReader({
             className="block w-full rounded-2xl border border-line"
           />
         ) : null}
+
+        {hasLivePoll && poll && pollResultView && (
+          <PollWidget
+            storyId={story.id}
+            question={poll.question}
+            optionA={poll.option_a_text}
+            optionB={poll.option_b_text}
+            initialResult={pollResultView}
+            initialVotedSide={initialVotedSide}
+          />
+        )}
 
         {story.audio_url && !story.video_url && (
           <audio

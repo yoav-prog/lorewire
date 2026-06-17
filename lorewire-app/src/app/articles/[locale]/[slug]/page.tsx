@@ -26,6 +26,52 @@ import {
 } from "@/lib/articles";
 import type { ArticleLanguage, ArticleRow, ArticleType } from "@/lib/repo";
 import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { PollWidget } from "@/components/PollWidget";
+import {
+  DEFAULT_PUBLIC_FLOOR,
+  getAggregateByStoryId,
+  getPollByStoryId,
+  getVoteSideForCookie,
+  toResultView,
+  type PollResultView,
+  type PollSide,
+} from "@/lib/polls";
+import { readVoteToken } from "@/lib/poll-cookie";
+
+// Phase 2 of _plans/2026-06-17-engagement-polls.md. Standalone-article
+// polls are out of scope for v1; this reader inherits the linked
+// story's poll via article.story_id. When the article has no story
+// link OR the story has no enabled poll, the widget simply doesn't
+// render — the rest of the article reads identically.
+interface PollRender {
+  storyId: string;
+  question: string;
+  optionA: string;
+  optionB: string;
+  result: PollResultView;
+  votedSide: PollSide | null;
+}
+
+async function loadLinkedPoll(
+  article: ArticleRow,
+): Promise<PollRender | null> {
+  if (!article.story_id) return null;
+  const poll = await getPollByStoryId(article.story_id);
+  if (!poll || poll.enabled !== 1) return null;
+  const [voteToken, aggregate] = await Promise.all([
+    readVoteToken(),
+    getAggregateByStoryId(article.story_id),
+  ]);
+  const votedSide = await getVoteSideForCookie(poll.id, voteToken);
+  return {
+    storyId: article.story_id,
+    question: poll.question,
+    optionA: poll.option_a_text,
+    optionB: poll.option_b_text,
+    result: toResultView(aggregate, DEFAULT_PUBLIC_FLOOR),
+    votedSide,
+  };
+}
 
 function isLanguage(v: string): v is ArticleLanguage {
   return v === "he" || v === "en";
@@ -132,12 +178,19 @@ export default async function ArticleReader({
     siteName: seo.siteName,
   });
 
+  // Inherits the linked story's poll if one exists + is enabled.
+  // Renders after the body so the reader finishes the piece before
+  // being asked to take a side.
+  const linkedPoll = await loadLinkedPoll(article);
+
   console.info("[articles reader] render", {
     id: article.id,
     type,
     language,
     slug: article.slug,
     docLen: article.document?.length ?? 0,
+    has_linked_poll: linkedPoll !== null,
+    poll_already_voted: linkedPoll ? linkedPoll.votedSide !== null : false,
   });
 
   return (
@@ -237,6 +290,17 @@ export default async function ArticleReader({
       {/* Listicle items come AFTER the intro body — the writer's body is
           usually a short setup, then the numbered items carry the meat. */}
       {payload.type === "listicle" && <ListicleBlock payload={payload.payload} />}
+
+      {linkedPoll && (
+        <PollWidget
+          storyId={linkedPoll.storyId}
+          question={linkedPoll.question}
+          optionA={linkedPoll.optionA}
+          optionB={linkedPoll.optionB}
+          initialResult={linkedPoll.result}
+          initialVotedSide={linkedPoll.votedSide}
+        />
+      )}
     </article>
   );
 }
