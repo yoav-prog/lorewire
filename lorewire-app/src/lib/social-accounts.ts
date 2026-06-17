@@ -180,6 +180,20 @@ export async function markSocialAccountNeedsReauth(id: string): Promise<void> {
   );
 }
 
+// Persist a refreshed access token and its new expiry. Called by the upload
+// engine after a token refresh; leaves the refresh token and status untouched.
+export async function updateSocialAccountAccessToken(
+  id: string,
+  accessTokenEnc: string,
+  tokenExpiresAt: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    `UPDATE social_accounts SET access_token_enc = ?, token_expires_at = ?, updated_at = ? WHERE id = ?`,
+    [accessTokenEnc, tokenExpiresAt, now, id],
+  );
+}
+
 // --- oauth_flows (CSRF + PKCE staging) ---
 
 export interface OAuthFlowRow {
