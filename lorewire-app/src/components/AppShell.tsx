@@ -622,27 +622,9 @@ function Read({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaRes
         (() => {
           const items = _galleryFromStory(story, liveMedia);
           if (items && items.length > 0) {
-            // 9:16 cards for the short's doodle frames so the gallery reads as
-            // a vertical scene strip; 3:4 stays for long-form 16:9 stills.
+            // 9:16 frames for the short's doodle scenes; 3:4 for long-form stills.
             const useShort = liveMedia.is_short && liveMedia.images.length > 0;
-            const cardWidth = useShort ? 240 : 300;
-            const cardAspect = useShort ? "9/16" : "3/4";
-            return (
-              <div className="fade-in">
-                <div className="flex items-start gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
-                  {items.map((g, i) => (
-                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: cardWidth, background: "#15141A" }}>
-                      <div className="relative" style={{ aspectRatio: cardAspect }}>
-                        <img src={g.src} alt="" className="absolute inset-0 w-full h-full object-cover" />
-                        <span className="absolute top-3 left-4 font-mono text-[10px] uppercase tracking-[.2em] px-1.5 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${i + 1}`}</span>
-                      </div>
-                      {g.caption && <p className="font-body text-[14px] leading-snug text-ink/85 p-4">{g.caption}</p>}
-                    </div>
-                  ))}
-                </div>
-                <Dots count={items.length} stride={cardWidth + 12} />
-              </div>
-            );
+            return <GalleryCarousel items={items} useShort={useShort} />;
           }
           // Fallback to the hardcoded sample gallery for stories without pipeline assets.
           return (
@@ -666,6 +648,53 @@ function Read({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaRes
     </div>
   );
 }
+function GalleryChevron({ dir, size = 20 }: { dir: "left" | "right"; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+      <path d={dir === "left" ? "m15 6-6 6 6 6" : "m9 6 6 6-6 6"} />
+    </svg>
+  );
+}
+
+// One scene at a time: a single image with its caption directly below and
+// prev/next arrows on the frame. Mirror of the DesktopShell carousel so both
+// breakpoints behave identically — the user reads scenes in order and the
+// caption is always visible under the image.
+function GalleryCarousel({ items, useShort }: { items: { src: string; caption: string }[]; useShort: boolean }) {
+  const [idx, setIdx] = useState(0);
+  const n = items.length;
+  // Clamp at the ends so the n / total counter stays honest about position.
+  const go = (d: number) => setIdx((p) => Math.max(0, Math.min(n - 1, p + d)));
+  const g = items[idx];
+  const cardAspect = useShort ? "9/16" : "3/4";
+  const maxW = useShort ? 280 : 340;
+  const arrowCls =
+    "absolute top-1/2 -translate-y-1/2 z-20 w-10 h-10 rounded-full flex items-center justify-center transition disabled:opacity-0";
+  const arrowStyle = { background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.14)", color: "#F5F3EF" } as const;
+  return (
+    <div className="fade-in mx-auto" style={{ maxWidth: maxW }}>
+      <div className="relative rounded-[14px] overflow-hidden" style={{ aspectRatio: cardAspect, background: "#15141A" }}>
+        <img src={g.src} alt={`Scene ${idx + 1}`} className="absolute inset-0 w-full h-full object-cover" />
+        <span className="absolute top-3 left-4 font-mono text-[10px] uppercase tracking-[.2em] px-1.5 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${idx + 1}`}</span>
+        <button onClick={() => go(-1)} disabled={idx === 0} aria-label="Previous scene" className={`${arrowCls} left-2`} style={arrowStyle}><GalleryChevron dir="left" /></button>
+        <button onClick={() => go(1)} disabled={idx === n - 1} aria-label="Next scene" className={`${arrowCls} right-2`} style={arrowStyle}><GalleryChevron dir="right" /></button>
+      </div>
+      {g.caption && <p className="font-body text-[14.5px] leading-relaxed text-ink/85 mt-3.5">{g.caption}</p>}
+      <div className="flex items-center justify-between mt-3.5">
+        <span className="font-mono text-[11.5px] tracking-wide text-muted">{idx + 1} / {n}</span>
+        <button
+          onClick={() => go(1)}
+          disabled={idx === n - 1}
+          className="px-4 py-1.5 rounded-full font-body font-semibold text-[13px] transition disabled:opacity-40 flex items-center gap-1"
+          style={{ background: "#F5F3EF", color: "#0A0A0C" }}
+        >
+          Next <GalleryChevron dir="right" size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Dots({ count, stride = 312 }: { count: number; stride?: number }) {
   const [active, setActive] = useState(0);
   useEffect(() => {

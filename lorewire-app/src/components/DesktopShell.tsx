@@ -354,33 +354,43 @@ const GALLERY = [
   { n: "4", t: "HR found the group chat. The receipts, as they say, were already screenshotted." },
 ];
 
-// Horizontal scroller with left/right arrow buttons that appear on hover.
-// Same idiom Rail uses on the home rails, scoped here so the gallery doesn't
-// need its own rail-fade gradients (the modal background already provides
-// contrast).
-function GalleryScroller({ children, count }: { children: React.ReactNode; count: number }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [hover, setHover] = useState(false);
-  const scroll = (dir: number) => ref.current && ref.current.scrollBy({ left: dir * 480, behavior: "smooth" });
+// One scene at a time: a single image with its caption directly below and
+// prev/next arrows on the frame edges. Replaces the old multi-card scroller so
+// the caption is always visible (the tall 9:16 cards used to push it off the
+// modal) and the reader steps through scenes in order. Same component shape on
+// mobile (AppShell) so both breakpoints behave identically.
+function GalleryCarousel({ items, useShort }: { items: { src: string; caption: string }[]; useShort: boolean }) {
+  const [idx, setIdx] = useState(0);
+  const n = items.length;
+  // Clamp at the ends (vs wrap) so the n / total counter never lies about
+  // where you are — clearer for a first-look reader than silent loop-around.
+  const go = (d: number) => setIdx((p) => Math.max(0, Math.min(n - 1, p + d)));
+  const g = items[idx];
+  const cardAspect = useShort ? "9/16" : "3/4";
+  const maxW = useShort ? 300 : 460;
+  const arrowCls =
+    "absolute top-1/2 -translate-y-1/2 z-20 w-11 h-11 rounded-full flex items-center justify-center transition disabled:opacity-0";
+  const arrowStyle = { background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.14)", color: "#F5F3EF" } as const;
   return (
-    <div className="relative" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
-      <button
-        onClick={() => scroll(-1)}
-        className="absolute left-0 top-0 bottom-0 z-20 w-14 flex items-center justify-center transition-opacity"
-        style={{ opacity: hover && count > 2 ? 1 : 0 }}
-        aria-label="Previous scene"
-      >
-        <span className="w-10 h-10 rounded-full bg-bg/85 border border-line flex items-center justify-center text-ink"><ChevL size={22} /></span>
-      </button>
-      <div ref={ref} className="flex items-start gap-5 overflow-x-auto noscroll snap-x snap-mandatory pb-2 -mx-1 px-1">{children}</div>
-      <button
-        onClick={() => scroll(1)}
-        className="absolute right-0 top-0 bottom-0 z-20 w-14 flex items-center justify-center transition-opacity"
-        style={{ opacity: hover && count > 2 ? 1 : 0 }}
-        aria-label="Next scene"
-      >
-        <span className="w-10 h-10 rounded-full bg-bg/85 border border-line flex items-center justify-center text-ink"><ChevR size={22} /></span>
-      </button>
+    <div className="fade-in mx-auto" style={{ maxWidth: maxW }}>
+      <div className="relative rounded-[14px] overflow-hidden" style={{ aspectRatio: cardAspect, background: "#15141A" }}>
+        <img src={g.src} alt={`Scene ${idx + 1}`} className="absolute inset-0 w-full h-full object-cover" />
+        <span className="absolute top-4 left-5 font-mono text-[11px] uppercase tracking-[.2em] px-2 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${idx + 1}`}</span>
+        <button onClick={() => go(-1)} disabled={idx === 0} aria-label="Previous scene" className={`${arrowCls} left-3`} style={arrowStyle}><ChevL size={22} /></button>
+        <button onClick={() => go(1)} disabled={idx === n - 1} aria-label="Next scene" className={`${arrowCls} right-3`} style={arrowStyle}><ChevR size={22} /></button>
+      </div>
+      {g.caption && <p className="font-body text-[15.5px] leading-relaxed text-ink/85 mt-4">{g.caption}</p>}
+      <div className="flex items-center justify-between mt-4">
+        <span className="font-mono text-[12px] tracking-wide text-muted">{idx + 1} / {n}</span>
+        <button
+          onClick={() => go(1)}
+          disabled={idx === n - 1}
+          className="px-5 py-1.5 rounded-full font-body font-semibold text-[13.5px] transition disabled:opacity-40 flex items-center gap-1"
+          style={{ background: "#F5F3EF", color: "#0A0A0C" }}
+        >
+          Next <ChevR size={17} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -589,27 +599,10 @@ function Read({
         (() => {
           const items = _galleryFromStory(story, liveMedia);
           if (items && items.length > 0) {
-            // 9:16 cards when the source is the short's doodle frames so
-            // the gallery feels like a vertical scene strip; 3:4 stays for
-            // the long-form 16:9 stills so they fit cleanly cropped.
+            // 9:16 cards when the source is the short's doodle frames so the
+            // gallery reads as a vertical scene; 3:4 for long-form 16:9 stills.
             const useShort = liveMedia.is_short && liveMedia.images.length > 0;
-            const cardWidth = useShort ? 260 : 380;
-            const cardAspect = useShort ? "9/16" : "3/4";
-            return (
-              <div className="fade-in">
-                <GalleryScroller count={items.length}>
-                  {items.map((g, i) => (
-                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: cardWidth, background: "#15141A" }}>
-                      <div className="relative" style={{ aspectRatio: cardAspect }}>
-                        <img src={g.src} alt="" className="absolute inset-0 w-full h-full object-cover" />
-                        <span className="absolute top-4 left-5 font-mono text-[11px] uppercase tracking-[.2em] px-2 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${i + 1}`}</span>
-                      </div>
-                      {g.caption && <p className="font-body text-[15px] leading-snug text-ink/85 p-5">{g.caption}</p>}
-                    </div>
-                  ))}
-                </GalleryScroller>
-              </div>
-            );
+            return <GalleryCarousel items={items} useShort={useShort} />;
           }
           // Fallback for stories without pipeline assets.
           return (
