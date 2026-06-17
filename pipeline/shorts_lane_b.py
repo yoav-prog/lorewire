@@ -220,6 +220,50 @@ def _parse_lane_inputs(claimed: dict) -> dict[str, Any]:
     return parsed
 
 
+def sync_short_config_captions(story_id: str, props: dict[str, Any]) -> bool:
+    """Mirror a Lane B render's regenerated voice fields back into the editor's
+    short_config so the editor's live preview + Captions tab match the new
+    voiceover. The rendered MP4 already reads the render row's props and is
+    correct; this only closes the editor-display gap (the editor reads
+    short_config, which a voice re-render otherwise never updates).
+
+    Only the three fields the new voiceover drives are synced — captions,
+    voiceover_url, duration_ms — so it can't clobber pinned frames, caption
+    style, or pending manual caption edits (those flow through Lane A, which
+    writes short_config first). Captions are normalised to the
+    ShortCaptionChunk shape ({start_ms,end_ms,text}) the TS schema validates;
+    the per-word boundaries the render carries are dropped (short_config
+    doesn't store them).
+
+    Best-effort: returns False (and never raises on a missing/malformed config)
+    so a sync miss can't fail an otherwise-good render.
+    """
+    story = store.fetch_story(story_id)
+    if not story or not story.get("short_config"):
+        return False
+    try:
+        config = json.loads(story["short_config"])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    config["captions"] = [
+        {
+            "start_ms": int(c["start_ms"]),
+            "end_ms": int(c["end_ms"]),
+            "text": str(c.get("text", "")),
+        }
+        for c in (props.get("captions") or [])
+        if isinstance(c, dict) and "start_ms" in c and "end_ms" in c
+    ]
+    if props.get("voiceover_url"):
+        config["voiceover_url"] = props["voiceover_url"]
+    if props.get("duration_ms"):
+        config["duration_ms"] = int(props["duration_ms"])
+    store.update_story_short_config(story_id, config)
+    return True
+
+
 def clear_lane(render_id: str) -> None:
     """Flip lane: 'B' -> NULL once the build finishes so the render drain
     picks up the row on its next tick. lane_inputs is kept for audit; the

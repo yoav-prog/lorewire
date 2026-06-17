@@ -109,6 +109,17 @@ def run_drain() -> dict:
                 claimed, REPO_ROOT, remote=True, on_progress=on_progress,
             )
             store.store_short_props(render_id, json.dumps(laneB.props))
+            # Mirror the new voice-driven captions (+ audio + duration) back
+            # into the editor's short_config so its live preview + Captions tab
+            # stop showing the stale baseline captions. Best-effort: the MP4 is
+            # already correct from props, so a sync miss must not fail the run.
+            try:
+                if shorts_lane_b.sync_short_config_captions(
+                    claimed["story_id"], laneB.props
+                ):
+                    _log("config_caption_sync", id=render_id, story=claimed["story_id"])
+            except Exception as e:  # noqa: BLE001 — editor sync is non-critical
+                _log("config_caption_sync_skip", id=render_id, error=str(e))
             # Clear the lane so the render drain claims this row (filter
             # `props IS NOT NULL`); we deliberately keep lane_inputs around
             # for audit even after the build succeeds.

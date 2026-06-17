@@ -58,6 +58,74 @@ class _LaneBTestCase(unittest.TestCase):
             )
 
 
+class SyncShortConfigCaptionsTests(unittest.TestCase):
+    """After a Lane B voice re-render, the new captions must be mirrored into
+    the editor's short_config so the editor preview + Captions tab match the
+    new voiceover (the MP4 already reads props and is correct). Only the three
+    voice-driven fields sync; everything else in short_config is preserved.
+    See _plans/2026-06-17-shorts-editor-and-character-bugs.md."""
+
+    def test_syncs_three_fields_and_preserves_rest(self):
+        existing = {
+            "doodle_frames": [{"id": "frame-00", "url": "u0", "caption_chunk_start_index": 0}],
+            "captions": [{"start_ms": 0, "end_ms": 100, "text": "OLD"}],
+            "caption_style": {"highlight": "yellow"},
+            "voiceover_url": "old.mp3",
+            "duration_ms": 100,
+            "character_base_url": "https://gcs/base.png",
+        }
+        props = {
+            "captions": [
+                {"start_ms": 0, "end_ms": 500, "text": "new one", "words": [{"word": "new"}]},
+                {"start_ms": 500, "end_ms": 1000, "text": "two"},
+            ],
+            "voiceover_url": "new.mp3",
+            "duration_ms": 1000,
+        }
+        captured: dict = {}
+        with mock.patch.object(
+            shorts_lane_b.store, "fetch_story",
+            return_value={"short_config": json.dumps(existing)},
+        ), mock.patch.object(
+            shorts_lane_b.store, "update_story_short_config",
+            side_effect=lambda sid, cfg: captured.update(cfg=cfg),
+        ):
+            ok = shorts_lane_b.sync_short_config_captions("s1", props)
+        self.assertTrue(ok)
+        cfg = captured["cfg"]
+        self.assertEqual([c["text"] for c in cfg["captions"]], ["new one", "two"])
+        # Per-word boundaries are dropped — short_config doesn't store them.
+        self.assertNotIn("words", cfg["captions"][0])
+        self.assertEqual(cfg["voiceover_url"], "new.mp3")
+        self.assertEqual(cfg["duration_ms"], 1000)
+        # Untouched fields survive.
+        self.assertEqual(cfg["doodle_frames"], existing["doodle_frames"])
+        self.assertEqual(cfg["caption_style"], {"highlight": "yellow"})
+        self.assertEqual(cfg["character_base_url"], "https://gcs/base.png")
+
+    def test_noop_when_no_short_config(self):
+        with mock.patch.object(
+            shorts_lane_b.store, "fetch_story", return_value={"short_config": None},
+        ), mock.patch.object(
+            shorts_lane_b.store, "update_story_short_config",
+        ) as upd:
+            self.assertFalse(
+                shorts_lane_b.sync_short_config_captions("s1", {"captions": []})
+            )
+            upd.assert_not_called()
+
+    def test_noop_when_story_missing(self):
+        with mock.patch.object(
+            shorts_lane_b.store, "fetch_story", return_value=None,
+        ), mock.patch.object(
+            shorts_lane_b.store, "update_story_short_config",
+        ) as upd:
+            self.assertFalse(
+                shorts_lane_b.sync_short_config_captions("s1", {"captions": []})
+            )
+            upd.assert_not_called()
+
+
 class ValidationTests(_LaneBTestCase):
     def test_missing_lane_inputs_raises(self):
         with self.assertRaises(ValueError) as cm:
