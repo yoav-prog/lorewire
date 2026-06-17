@@ -3,6 +3,8 @@ import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import { listGoogleVoices, listElevenLabsVoices } from "@/lib/voice-providers";
 import SettingsShell from "@/app/admin/SettingsShell";
+import { loadHeroStyleSettings } from "@/app/admin/actions";
+import { HeroStylePicker } from "@/app/admin/(panel)/_components/HeroStylePicker";
 import {
   SettingChipGroup,
   SettingSlider,
@@ -38,6 +40,20 @@ import {
 // id fields stay text for now — API-backed dropdowns from Google Cloud TTS
 // and ElevenLabs land in the follow-up commit once provider credentials
 // are wired into the Node side.
+
+/** Categories paired with their lowercased settings key + display
+ *  label. Matches the resolver in `pipeline/stages.py:resolve_hero_style`
+ *  which reads `hero.category_default.<lowercase cat>` — the lowercase
+ *  is intentional so the admin UI's casing doesn't have to match the
+ *  story rows' casing. */
+const HERO_CATEGORY_KEYS: { category: string; key: string; label: string }[] = [
+  { category: "Entitled", key: "entitled", label: "Entitled" },
+  { category: "Drama", key: "drama", label: "Drama" },
+  { category: "Humor", key: "humor", label: "Humor" },
+  { category: "Wholesome", key: "wholesome", label: "Wholesome" },
+  { category: "Dating", key: "dating", label: "Dating" },
+  { category: "Roommate", key: "roommate", label: "Roommate" },
+];
 
 const STYLE_PRESETS = [
   { label: "Doodle marker", value: "doodle explainer, off-white paper, single marker" },
@@ -149,6 +165,13 @@ export default async function SettingsPage() {
     listGoogleVoices(),
     listElevenLabsVoices(),
   ]);
+
+  // Hero style registry — Phase 2 of
+  // _plans/2026-06-17-hero-style-registry.md. One round trip pulls the
+  // global default, every per-category default, and every pre-generated
+  // thumbnail URL so the picker renders without a follow-up round-trip
+  // per card.
+  const heroStyleSettings = await loadHeroStyleSettings();
 
   // Article-shorts auto-generate settings (global default + per-category).
   const [shortsAutoEnabled, shortsAutoNarration, shortsAutoLength] =
@@ -277,6 +300,44 @@ export default async function SettingsPage() {
               options={catOverrideOptions}
             />
           ))}
+        </Section>
+
+        <Section
+          title="Hero & poster style"
+          description="Which named look the hero / poster art uses on every render. Lives ABOVE the existing 'Video & image style' field below — that field still steers scene illustrations + narration; this one steers ONLY the hero / poster. Empty layers fall through: per-story pin → category default → global default → an automatic per-category short-list. Changing a default here only affects FUTURE renders; existing rows keep their current art until you click 'Restyle hero from short character' on the story."
+        >
+          <HeroStylePicker
+            settingKey="hero.global_style_id"
+            label="Global default"
+            hint="Applied to every category that doesn't have its own default set below. Leave on Auto-pick to let the per-category whitelist drive variety across the catalog."
+            selectedId={heroStyleSettings.globalStyleId}
+            thumbnails={heroStyleSettings.thumbnails}
+            includeAutoOption
+            autoOptionLabel="Auto-pick per category"
+          />
+          {HERO_CATEGORY_KEYS.map(({ category, key, label }) => {
+            const selected = heroStyleSettings.categoryDefaults[key] ?? "";
+            return (
+              <HeroStylePicker
+                key={key}
+                settingKey={`hero.category_default.${key}`}
+                label={`${label} default`}
+                hint={`Style applied to ${label} stories that don't have their own per-story pin.`}
+                selectedId={selected}
+                thumbnails={heroStyleSettings.thumbnails}
+                includeAutoOption
+                autoOptionLabel="Use global default"
+              />
+            );
+          })}
+          <p className="text-[12px] text-ink/55">
+            Need to populate the thumbnail previews? Run{" "}
+            <code className="rounded bg-line/30 px-1 py-0.5 text-[11px]">
+              python -m pipeline.scripts.generate_hero_style_thumbnails
+            </code>{" "}
+            once after a fresh install or after editing a style&apos;s prompt
+            band. Idempotent — re-running with no edits is a no-op.
+          </p>
         </Section>
 
         <Section

@@ -822,7 +822,106 @@ const SETTING_VALUE_VALIDATORS: Record<
     raw === "fallback" || raw === "hide" ? raw : null,
   "curation.hero_required": (raw) =>
     raw === "true" || raw === "false" ? raw : null,
+  // Hero style registry (Phase 2 of
+  // _plans/2026-06-17-hero-style-registry.md). Both layers (global +
+  // per-category) write into the same closed enum of HERO_STYLES ids,
+  // plus the empty string which the resolver reads as "fall through".
+  // Per rule 13: closed-enum validation here is the safety net
+  // against a tampered client poisoning the prompt downstream.
+  "hero.global_style_id": makeHeroStyleIdValidator(),
+  "hero.category_default.entitled": makeHeroStyleIdValidator(),
+  "hero.category_default.drama": makeHeroStyleIdValidator(),
+  "hero.category_default.humor": makeHeroStyleIdValidator(),
+  "hero.category_default.wholesome": makeHeroStyleIdValidator(),
+  "hero.category_default.dating": makeHeroStyleIdValidator(),
+  "hero.category_default.roommate": makeHeroStyleIdValidator(),
+  // 2026-06-17 outro tail-pad fix. Bounded so a typo can't produce a
+  // half-hour silent gap; matches the Python-side clamp in
+  // pipeline/segments.py:resolve_outro_lead_in_sec.
+  "video.outro_lead_in_ms": (raw) => {
+    if (raw === "") return "";
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n)) return null;
+    if (n < 0 || n > 10_000) return null;
+    return String(n);
+  },
 };
+
+/** Per-category settings keys for the hero style registry resolution chain.
+ *  Lowercased category names match what the resolver in
+ *  `pipeline/stages.py:resolve_hero_style` reads. Centralised so the
+ *  picker UI + the validator + the per-category read loop all agree on
+ *  one source of truth. */
+const HERO_CATEGORY_DEFAULT_KEYS = [
+  "hero.category_default.entitled",
+  "hero.category_default.drama",
+  "hero.category_default.humor",
+  "hero.category_default.wholesome",
+  "hero.category_default.dating",
+  "hero.category_default.roommate",
+] as const;
+
+/** Validator factory for hero style id settings. Accepts an empty
+ *  string (= "clear this layer") or a known style id; rejects
+ *  everything else so a tampered client can't poison the prompt
+ *  downstream. Lazily imports the registry so the action file stays
+ *  cheap to load. */
+function makeHeroStyleIdValidator() {
+  return (raw: string): string | null => {
+    if (raw === "") return "";
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- closed-enum lookup, no need for the whole module
+    const { isHeroStyleId } = require("@/lib/hero-styles") as typeof import("@/lib/hero-styles");
+    return isHeroStyleId(raw) ? raw : null;
+  };
+}
+
+export interface HeroStyleSettingsSnapshot {
+  /** Empty string when unset. The picker treats empty as "Auto-pick / use default". */
+  globalStyleId: string;
+  /** Per-category default lookups keyed by the lowercased Cat name. Empty
+   *  string when unset. */
+  categoryDefaults: Record<string, string>;
+  /** Each style's pre-generated preview URL, keyed by style id. Null
+   *  means step 3 hasn't run for that style yet — the picker shows a
+   *  placeholder block. */
+  thumbnails: Record<string, string | null>;
+}
+
+/** Read everything the hero style picker needs in one round trip — the
+ *  global default, every per-category default, and every pre-generated
+ *  thumbnail URL. Callers (the settings page; the per-story edit page
+ *  in step 5) render off the snapshot without re-querying. */
+export async function loadHeroStyleSettings(): Promise<HeroStyleSettingsSnapshot> {
+  await requireCapability("content.manage");
+  const { HERO_STYLES } = await import("@/lib/hero-styles");
+  const styleIds = HERO_STYLES.map((s) => s.id);
+
+  const [globalStyleId, ...categoryValues] = await Promise.all([
+    getSetting("hero.global_style_id"),
+    ...HERO_CATEGORY_DEFAULT_KEYS.map((k) => getSetting(k)),
+  ]);
+  const thumbnailValues = await Promise.all(
+    styleIds.map((id) => getSetting(`hero.thumbnail.${id}`)),
+  );
+
+  const categoryDefaults: Record<string, string> = {};
+  HERO_CATEGORY_DEFAULT_KEYS.forEach((key, idx) => {
+    const cat = key.replace("hero.category_default.", "");
+    categoryDefaults[cat] = (categoryValues[idx] ?? "") || "";
+  });
+
+  const thumbnails: Record<string, string | null> = {};
+  styleIds.forEach((id, idx) => {
+    const raw = (thumbnailValues[idx] ?? "").trim();
+    thumbnails[id] = raw === "" ? null : raw;
+  });
+
+  return {
+    globalStyleId: (globalStyleId ?? "") || "",
+    categoryDefaults,
+    thumbnails,
+  };
+}
 
 export async function saveSettingAction(formData: FormData): Promise<void> {
   await requireCapability("content.manage");
