@@ -354,6 +354,44 @@ class HappyPathTests(_LaneBTestCase):
         # Captions came from the chunker over the new alignment.
         self.assertGreater(len(built.props["captions"]), 0)
 
+    def test_duration_floors_at_real_audio_length(self):
+        # Last aligned word ends at 2.4s, but the real MP3 is 5s. The
+        # re-rendered body must cover the FULL audio so the spliced outro can't
+        # clip the new narration — duration floors at the probe value.
+        self._seed_baseline("baseline-d", "story-d", self._baseline_props())
+        claimed = {
+            "id": "lane-b-dur",
+            "story_id": "story-d",
+            "lane_inputs": json.dumps(
+                {
+                    "source_render_id": "baseline-d",
+                    "script": "Brand new narration text",
+                    "voice": None,
+                },
+            ),
+        }
+        fake_words = [
+            {"word": "Brand", "start": 0.0, "end": 0.6},
+            {"word": "text", "start": 1.9, "end": 2.4},
+        ]
+        with (
+            mock.patch.object(
+                shorts_lane_b.voice, "synthesize",
+                return_value={"words": fake_words, "audio": "voice.mp3", "provider": "g"},
+            ),
+            mock.patch.object(
+                shorts_lane_b.voice, "audio_duration_ms", return_value=5000,
+            ),
+            mock.patch.object(
+                shorts_lane_b.gcs, "publish",
+                side_effect=lambda local, key, fallback: f"https://gcs/{key}",
+            ),
+        ):
+            built = shorts_lane_b.build_short_props_lane_b(
+                claimed, Path(self._tmpdir.name), remote=True,
+            )
+        self.assertEqual(built.props["duration_ms"], 5000)
+
     def test_passes_voice_override_through_to_synthesize(self):
         self._seed_baseline("baseline-v", "story-2", self._baseline_props())
         claimed = {

@@ -141,7 +141,18 @@ def build_short_props_lane_b(
             "Lane B voice synthesis produced no caption chunks "
             "(empty alignment)"
         )
-    duration_ms = max(int(captions[-1]["end_ms"]), 1)
+    # Floor the body length at the real MP3 duration so the re-rendered short's
+    # concatenated outro can't clip the new narration's closing words — the
+    # last caption end_ms undershoots the real audio on some providers. Mirror
+    # of the full-render path in shorts_render.build_short_props.
+    caption_end_ms = int(captions[-1]["end_ms"])
+    audio_ms = voice.audio_duration_ms(audio_path)
+    duration_ms = max(caption_end_ms, audio_ms, 1)
+    if audio_ms > caption_end_ms:
+        print(
+            f"[short laneB duration] audio={audio_ms}ms > "
+            f"caption_end={caption_end_ms}ms — using audio length"
+        )
 
     if on_progress is not None:
         try:

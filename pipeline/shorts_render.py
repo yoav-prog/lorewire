@@ -173,7 +173,20 @@ def build_short_props(
         if not captions:
             print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
             return None
-        duration_ms = max(int(captions[-1]["end_ms"]), 1)
+        # The composition body MUST cover the WHOLE narration MP3, or the
+        # concatenated outro clips the closing words. The last caption's end_ms
+        # is a proxy that undershoots on some providers (it tracks the last
+        # aligned word, not the file's real length), so floor the duration at
+        # the actual audio length. end_hold_ms then adds the post-roll on top.
+        caption_end_ms = int(captions[-1]["end_ms"])
+        audio_ms = voice.audio_duration_ms(audio_path)
+        duration_ms = max(caption_end_ms, audio_ms, 1)
+        if audio_ms > caption_end_ms:
+            print(
+                f"[short id={safe_id} duration] audio={audio_ms}ms > "
+                f"caption_end={caption_end_ms}ms — using audio length so the "
+                f"outro doesn't clip the narration"
+            )
 
         # 3) Stage frames. Scene URLs are remote (kie) so download first. Track
         #    each frame's PLANNED caption index so a partial-download skip can't

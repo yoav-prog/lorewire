@@ -95,6 +95,28 @@ class BuildShortPropsBaseFrameTests(unittest.TestCase):
         # And the short still opens at t=0.
         self.assertEqual(props["doodle_frames"][0]["caption_chunk_start_index"], 0)
 
+    def test_duration_floors_at_real_audio_length(self):
+        # The last aligned word ends at ~2.1s, but the real MP3 runs 8s (a
+        # provider whose word timings undershoot the file). The composition body
+        # must cover the FULL audio or the concatenated outro clips the closing
+        # words, so duration_ms floors at the probe value.
+        words = [
+            {"word": "Hello", "start": 0.0, "end": 0.4},
+            {"word": "short.", "start": 1.6, "end": 2.1},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(shorts_render.store, "fetch_story",
+                              return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
+            mock.patch.object(shorts_render.shorts, "generate_short_assets",
+                              return_value=self._assets()), \
+            mock.patch.object(shorts_render.voice, "synthesize",
+                              return_value={"words": words}), \
+            mock.patch.object(shorts_render.voice, "audio_duration_ms", return_value=8000), \
+            mock.patch.object(shorts_render.images, "download", return_value=None), \
+            mock.patch.object(shorts_render.store, "get_setting", return_value=None):
+            built = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+        self.assertEqual(built.props["duration_ms"], 8000)
+
 
 class DoodleSuffixIdentityGuardTests(unittest.TestCase):
     """Regression guard: the shared doodle style suffix is appended to the base
