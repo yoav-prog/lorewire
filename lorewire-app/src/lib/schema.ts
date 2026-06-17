@@ -468,6 +468,32 @@ export const SHORT_RENDER_EVENTS: Table = {
   ],
 };
 
+// 2026-06-16 story_jobs per-row event timeline. Direct mirror of
+// SHORT_RENDER_EVENTS for the story_jobs queue: one row per phase the
+// worker enters (claimed, idea_done, research_done, article_done,
+// title_done, media_done, video_render_enqueued, forced_short,
+// auto_short_enqueued, finished, failed). The reddit-source detail page
+// reads via listStoryJobEvents and renders a live timeline so the admin
+// can see what's happening to a row without tailing the worker
+// terminal. Plan: _plans/2026-06-16-story-job-event-timeline.md.
+//
+// Carries `reddit_id` denormalised so the per-row detail page can look
+// events up by the URL parameter it has on hand (the page route is
+// /admin/reddit-sources/[reddit_id]) without joining through story_jobs.
+export const STORY_JOB_EVENTS: Table = {
+  name: "story_job_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "job_id", type: "TEXT" },
+    { name: "reddit_id", type: "TEXT" },
+    { name: "ts", type: "TEXT" },
+    { name: "level", type: "TEXT" },
+    { name: "event", type: "TEXT" },
+    { name: "message", type: "TEXT" },
+    { name: "payload", type: "TEXT" },
+  ],
+};
+
 // 2026-06-16 homepage curation. One row per slot on the public homepage —
 // `surface` names the rail ('hero', 'top10', 'continue', '<category>_row',
 // 'new_row'), `position` is 0-based ordering within the surface, `story_id`
@@ -502,6 +528,7 @@ export const TABLES: Table[] = [
   ARTICLE_REVISIONS,
   REDDIT_SOURCE,
   STORY_JOBS,
+  STORY_JOB_EVENTS,
   VOICE_RENDERS,
   HOMEPAGE_CURATION,
 ];
@@ -561,6 +588,14 @@ export const POST_TABLE_DDL: string[] = [
   // ts, and we expect ~15-25 events per short so the lookup is hot-pathed.
   "CREATE INDEX IF NOT EXISTS idx_short_render_events_render_id " +
     "ON short_render_events(render_id, ts)",
+  // 2026-06-16 story_jobs observability. Same shape as the short_render_events
+  // index. The detail page at /admin/reddit-sources/[reddit_id] reads by
+  // reddit_id (cheapest path on a page that already has the URL param); the
+  // job_id index supports the by-job lookup used by tests and the API.
+  "CREATE INDEX IF NOT EXISTS idx_story_job_events_reddit_id " +
+    "ON story_job_events(reddit_id, ts)",
+  "CREATE INDEX IF NOT EXISTS idx_story_job_events_job_id " +
+    "ON story_job_events(job_id, ts)",
   // 2026-06-16 homepage curation. (surface, position) uniqueness is the
   // load-bearing invariant — two stories can't share a slot, and add/remove/
   // move operations depend on packed positions. Surface filter is also the

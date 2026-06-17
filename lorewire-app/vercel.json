@@ -31,7 +31,7 @@
       "maxDuration": 300
     },
     "api/drain_story_jobs.py": {
-      "maxDuration": 300
+      "maxDuration": 900
     },
     "api/drain_voice_renders.py": {
       "maxDuration": 300
