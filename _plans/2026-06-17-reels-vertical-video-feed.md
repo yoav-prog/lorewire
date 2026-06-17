@@ -1,10 +1,15 @@
 # Reels — vertical swipeable video feed
 
 Date: 2026-06-17
-Branch (current): `fix/mobile-short-gallery-captions-and-play` (cut a new
-`feat/reels-feed` branch before Phase 1).
-Status: PLAN — awaiting green light on the engine choice and the engagement
-honesty call (see "Decision needed").
+Branch: `feat/reels-feed` (cut from `fix/mobile-short-gallery-captions-and-play`).
+Status: IN PROGRESS. Decisions resolved (drop fake counts; engine = native
+scroll-snap + desktop paging). DONE: Phase 1 (data action), Phase 2 (mobile
+feed UI), Phase 3 (active-index autoplay + mute), Phase 5 (infinite scroll),
+plus reduced-motion. NEXT: Phase 6 engagement rail (Like / Save->My List /
+Share), Phase 7 deep-link from Billboard Play/Shuffle, Phase 8 desktop adapter,
+Phase 9 full a11y/QA. The standalone /reels route was intentionally NOT built —
+the shell's nav is client-state tabs, so Reels is a 5th in-shell tab (matches
+Home/Search/New/My List); shareable per-reel URLs still use /v/[slug].
 
 ## Goal
 

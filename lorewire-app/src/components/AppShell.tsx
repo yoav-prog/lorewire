@@ -18,6 +18,7 @@ import {
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import DesktopShell from "@/components/DesktopShell";
+import ReelsFeed from "@/components/reels/ReelsFeed";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
 import {
   getLiveStoryMedia,
@@ -71,6 +72,7 @@ const ShareI: IconCmp = (p) => <Ico {...p} d={<><circle cx="6" cy="12" r="2.3" /
 const ChevDown: IconCmp = (p) => <Ico {...p} d={<path d="m6 9 6 6 6-6" />} />;
 const ShuffleI: IconCmp = (p) => <Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5" /><path d="m18 5 2 2-2 2M18 15l2 2-2 2" /></>} />;
 const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /><path d="M12 11v5M12 8h.01" /></>} />;
+const ReelsI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
 
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; rounded?: boolean; showTitle?: boolean }) {
@@ -1014,7 +1016,7 @@ function MyList({ onOpen, list }: { onOpen: OpenFn; list: string[] }) {
 
 /* ----------------------------- TAB BAR ----------------------------- */
 function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
-  const items: [string, IconCmp][] = [["Home", HomeI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
+  const items: [string, IconCmp][] = [["Home", HomeI], ["Reels", ReelsI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
   return (
     <div className="absolute bottom-0 left-0 right-0 z-50" style={{ background: "linear-gradient(0deg,#0A0A0C 70%, rgba(10,10,12,0))" }}>
       <div className="flex justify-around items-center pt-2.5 pb-7 px-2">
@@ -1060,6 +1062,11 @@ function MobileShell() {
         {tab === "New" && <NewScreen onOpen={open} />}
         {tab === "My List" && <MyList onOpen={open} list={list} />}
       </div>
+
+      {/* Reels rides above the (now-empty) screen as a full-cover layer, like
+          the Title sheet does — it owns its own snap scroller and pauses
+          whenever a sheet opens over it. */}
+      {tab === "Reels" && <ReelsFeed onOpenInfo={open} paused={!!active} />}
 
       {active && (
         <TitleSheet
