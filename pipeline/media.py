@@ -469,6 +469,7 @@ def generate_media(
     dry_run: bool,
     repo_root: Path,
     image_count: int | None = None,
+    short_only: bool = False,
 ) -> dict:
     """Generate images + narration for one story and return DB columns.
 
@@ -482,6 +483,13 @@ def generate_media(
     `title` is the branded LoreWire title — it goes into the cinematic
     thumbnail prompt so the image model bakes the title typography directly
     into the hero compositions.
+
+    `short_only=True` (Reddit imports defaulting to a short) produces the
+    hero thumbnails ONLY and skips the long-form scene set, props, mouth-swap,
+    and full-article voiceover — the short pipeline renders its own 9:16 frames
+    + narration and the story page reads those live, so generating the
+    long-form assets here is pure wasted spend. See
+    _plans/2026-06-17-short-only-media-and-gallery.md.
     """
     safe_id = _sanitize_id(story_id)
     out: dict = {}
@@ -494,18 +502,20 @@ def generate_media(
         out_dir.mkdir(parents=True, exist_ok=True)
     url_prefix = f"{PUBLIC_URL_PREFIX}/{safe_id}"
 
-    # --- scene image prompts: still doodle, used for Article + Gallery + the
-    # Remotion composition's per-shot illustrations. Scene count walks an
-    # explicit `image_count` override (legacy callers) -> `media.scene_count`
-    # when mode=manual -> the auto-derived count based on the body's word
-    # count (TTS isn't done yet at fresh-run, so no audio duration to read).
-    scene_count = _resolve_scene_count(image_count, body=body)
-    # `make_image_prompts` still yields hero + scenes, but the hero slot is
-    # overwritten downstream by the cinematic title-baked thumbnail. We keep
-    # using slot 0 from make_image_prompts only as a doodle scene-style
-    # fallback when the cinematic call fails.
-    prompts = stages.make_image_prompts(idea, body, dry_run, n=scene_count + 1)
-    print(f"[media id={safe_id} prompts] {len(prompts)} doodle scene prompts + 1 cinematic hero")
+    # Short-only stories (Reddit imports with output_format='short') render
+    # their visuals + narration through the short pipeline, which the story
+    # page reads live (see lib/actions.ts:getLiveStoryMedia). Generating the
+    # long-form scene set, props, mouth-swap, and full-article voiceover here
+    # would burn kie + TTS spend on assets that are thrown away, so the short
+    # path produces the hero thumbnails only. The scene prompt + image work
+    # below is guarded the same way. See
+    # _plans/2026-06-17-short-only-media-and-gallery.md.
+    scene_urls: list[str] = []
+    if short_only:
+        print(
+            f"[media id={safe_id} short-only] heroes only — skipping scenes, "
+            f"props, mouth-swap, and voice (the short pipeline owns those)"
+        )
 
     # Cinematic title-baked hero: portrait (3:4) for mobile billboard + posters,
     # landscape (16:9) for desktop hero strips. Same title typography baked into
@@ -553,9 +563,16 @@ def generate_media(
             landscape_hero_url = stored
 
     # Scene images (doodle aesthetic, used in Article + Gallery + Remotion).
-    # prompts[0] from make_image_prompts is the doodle hero fallback we don't
-    # need any more; the cinematic thumbnails own the hero slot now. Slice
-    # everything after for the scene set.
+    # Skipped wholesale for short-only stories — the short pipeline renders its
+    # own 9:16 frames and the story page reads those live, so the long-form
+    # scene set here would only be generated to be discarded.
+    #
+    # Scene count walks an explicit `image_count` override (legacy callers) ->
+    # `media.scene_count` when mode=manual -> the auto-derived count based on
+    # the body's word count (TTS isn't done yet at fresh-run, so no audio
+    # duration to read). `make_image_prompts` yields hero + scenes; slot 0 is
+    # the legacy doodle hero fallback (the cinematic thumbnails own the hero
+    # now), so the scene set is everything after it.
     #
     # Phase 2 of _plans/2026-06-12-video-aspect-ratio.md: scenes now follow
     # the resolved video aspect — portrait videos still ask kie for 3:4
@@ -563,42 +580,48 @@ def generate_media(
     # 16:9 so the wider canvas isn't getting object-fit-cropped. There's
     # no story row yet at the fresh-run point, so the resolver only sees
     # the global default + legacy 9:16 floor.
-    fresh_video_aspect = resolve_aspect_for_fresh_run()
-    scene_kie_aspect = scene_aspect_for(fresh_video_aspect)
-    print(
-        f"[media id={safe_id} aspect] video={fresh_video_aspect} "
-        f"scene_kie_aspect={scene_kie_aspect}"
-    )
-    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
-    scene_urls: list[str] = []
-    for i, prompt in enumerate(scene_prompts):
-        filename = f"scene-{i + 1}.png"
-        public_url = f"{url_prefix}/{filename}"
-        label = f"scene-{i + 1}"
-        if dry_run:
-            print(f"[media id={safe_id} {label}] (DRY RUN doodle) -> {public_url}")
-            scene_urls.append(public_url)
-            continue
-        started = time.time()
-        kie_url = _generate_with_retry(
-            prompt, f"id={safe_id} {label}", aspect_ratio=scene_kie_aspect,
-        )
-        if kie_url is None:
-            continue
-        local_path = out_dir / filename
-        try:
-            images.download(kie_url, local_path)
-        except Exception as e:
-            print(f"[media id={safe_id} {label}] download FAILED: {e}")
-            continue
-        stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
-        elapsed = time.time() - started
+    if not short_only:
+        scene_count = _resolve_scene_count(image_count, body=body)
+        prompts = stages.make_image_prompts(idea, body, dry_run, n=scene_count + 1)
         print(
-            f"[media id={safe_id} {label}] doodle "
-            f"({models.get_selected('images')}, {scene_kie_aspect}) "
-            f"-> {stored_url} ({elapsed:.1f}s)"
+            f"[media id={safe_id} prompts] {len(prompts)} doodle scene prompts "
+            f"+ 1 cinematic hero"
         )
-        scene_urls.append(stored_url)
+        fresh_video_aspect = resolve_aspect_for_fresh_run()
+        scene_kie_aspect = scene_aspect_for(fresh_video_aspect)
+        print(
+            f"[media id={safe_id} aspect] video={fresh_video_aspect} "
+            f"scene_kie_aspect={scene_kie_aspect}"
+        )
+        scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+        for i, prompt in enumerate(scene_prompts):
+            filename = f"scene-{i + 1}.png"
+            public_url = f"{url_prefix}/{filename}"
+            label = f"scene-{i + 1}"
+            if dry_run:
+                print(f"[media id={safe_id} {label}] (DRY RUN doodle) -> {public_url}")
+                scene_urls.append(public_url)
+                continue
+            started = time.time()
+            kie_url = _generate_with_retry(
+                prompt, f"id={safe_id} {label}", aspect_ratio=scene_kie_aspect,
+            )
+            if kie_url is None:
+                continue
+            local_path = out_dir / filename
+            try:
+                images.download(kie_url, local_path)
+            except Exception as e:
+                print(f"[media id={safe_id} {label}] download FAILED: {e}")
+                continue
+            stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+            elapsed = time.time() - started
+            print(
+                f"[media id={safe_id} {label}] doodle "
+                f"({models.get_selected('images')}, {scene_kie_aspect}) "
+                f"-> {stored_url} ({elapsed:.1f}s)"
+            )
+            scene_urls.append(stored_url)
 
     if portrait_hero_url:
         out["hero_image"] = portrait_hero_url
@@ -614,7 +637,8 @@ def generate_media(
     # Wave 3 Phase 3 PropSlideIn: generate a small library of prop cutouts when
     # the admin has the prop_slide motion beat enabled. Off by default so this
     # step (and its kie cost) is opt-in. Per-prop cost: ~$0.05 at gpt-image-2.
-    if not dry_run and _prop_slide_enabled():
+    # Props decorate the long-form video only, so the short-only path skips them.
+    if not dry_run and not short_only and _prop_slide_enabled():
         prop_count = _prop_count()
         plan = stages.make_prop_plan(idea, body, prop_count, dry_run=False)
         print(f"[media id={safe_id} props] planning {len(plan)} prop(s)")
@@ -652,7 +676,8 @@ def generate_media(
     # and a mouth-removed copy. The composition overlays SVG mouth shapes on
     # the mouth-removed version at a fixed anchor (cx=0.50, cy=0.62). Two
     # kie calls per story (~$0.10) so this is opt-in via video.mouth_swap.
-    if not dry_run and _mouth_swap_enabled():
+    # Talking head is a long-form composition beat, so the short path skips it.
+    if not dry_run and not short_only and _mouth_swap_enabled():
         char_prompt = stages.make_character_prompt(idea, body, dry_run=False)
         char_url, char_removed_url = _mouth_swap_block(
             char_prompt, safe_id, out_dir, url_prefix
@@ -663,7 +688,12 @@ def generate_media(
             out["character_image_mouth_removed"] = char_removed_url
 
     # --- voice
-    if dry_run:
+    if short_only:
+        # The short pipeline synthesizes its own narration from the script and
+        # the story page reads the short's voiceover live (READ-ALONG). A
+        # second full-article TTS pass here would never be played, so skip it.
+        print(f"[media id={safe_id} short-only] skipping voiceover (short owns narration)")
+    elif dry_run:
         narration_url = f"{url_prefix}/narration.mp3"
         print(f"[media id={safe_id} voice] (DRY RUN) -> {narration_url}")
         out["audio_url"] = narration_url
@@ -690,7 +720,9 @@ def generate_media(
             print(f"[media id={safe_id} voice] FAILED: {e}")
 
     # --- cost
-    narration_chars = len(body) if not dry_run else 0
+    # No narration was synthesized on the short-only or dry-run paths, so the
+    # voiceover char count (and thus its cost contribution) is zero.
+    narration_chars = 0 if (dry_run or short_only) else len(body)
     if not dry_run and out.get("alignment"):
         try:
             words = json.loads(out["alignment"])

@@ -209,6 +209,18 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     post = reddit_source_to_post(reddit_row)
     with_media = bool(claimed_job.get("with_media", 1))
 
+    # Resolve the output format UP FRONT (it used to be resolved at hand-off,
+    # after media). A short-only story skips the long-form scene set + voiceover
+    # inside generate_media — the short pipeline owns those — so the decision
+    # has to be known before the media step, not just when we branch below.
+    # See _plans/2026-06-17-short-only-media-and-gallery.md.
+    output_format, output_source = resolve_output_format(claimed_job)
+    print(
+        f"[reddit output] resolved reddit_id={post['id']} "
+        f"job_id={claimed_job['id']} format={output_format} "
+        f"source={output_source}"
+    )
+
     before_tokens = llm.totals["total_tokens"]
     # Snapshot of running cost so we can compute the per-job delta at the
     # end and persist it to stories.cost_cents. This is what the budget
@@ -260,6 +272,7 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             branded_title or idea["headline"],
             False,
             repo_root=REPO_ROOT,
+            short_only=(output_format == "short"),
         )
         row.update(media_cols)
         row["tokens"] = llm.totals["total_tokens"] - before_tokens
@@ -287,16 +300,10 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     )
     store.upsert_story(row)
 
-    # Resolve the per-row output format BEFORE handing off so the two
-    # branches stay symmetric (one enqueues a long-form render, the other
-    # force-enqueues a short; never both, never neither).
-    output_format, output_source = resolve_output_format(claimed_job)
-    print(
-        f"[reddit output] resolved reddit_id={post['id']} "
-        f"job_id={claimed_job['id']} format={output_format} "
-        f"source={output_source}"
-    )
-
+    # output_format was resolved up front (before the media step) so the short
+    # path could skip the long-form scene set. The two branches stay symmetric:
+    # one enqueues a long-form render, the other force-enqueues a short; never
+    # both, never neither.
     if output_format == "short":
         # Short-only branch (the new default for Reddit imports). Skip the
         # long-form video_renders enqueue entirely: the short pipeline

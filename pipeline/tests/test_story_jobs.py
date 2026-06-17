@@ -846,6 +846,57 @@ class CostCaptureTests(_IsolatedDB):
         self.assertEqual(compute_job_cost_cents(0.0, 0), 0)
 
 
+class ShortOnlyProcessTests(_IsolatedDB):
+    """_default_process resolves the output format BEFORE the media step and
+    passes short_only into generate_media, so a short-only Reddit import never
+    pays for the long-form scene set + voiceover. The short branch also skips
+    the long-form render and force-enqueues the short; the long branch does the
+    opposite. See _plans/2026-06-17-short-only-media-and-gallery.md."""
+
+    def _claimed(self, **overrides):
+        base = {
+            "id": "job-1", "reddit_id": "r1", "with_media": 1,
+            "output_format": None,
+        }
+        base.update(overrides)
+        return base
+
+    def _reddit_row(self):
+        return {
+            "reddit_id": "r1", "subreddit": "AmItheAsshole", "title": "Title",
+            "full_text": "Body text.", "comments": 0, "url": "",
+        }
+
+    def _run_process(self, claimed):
+        from pipeline import story_jobs_worker
+        idea = {"reddit_id": "r1", "category": "Drama", "headline": "H"}
+        with mock.patch.object(story_jobs_worker.stages, "make_idea", return_value=idea), \
+             mock.patch.object(story_jobs_worker.stages, "research", return_value={}), \
+             mock.patch.object(story_jobs_worker.stages, "write_article", return_value="Body."), \
+             mock.patch.object(story_jobs_worker.stages, "make_title_and_synopsis", return_value=("T", "S")), \
+             mock.patch.object(story_jobs_worker.media, "generate_media", return_value={}) as gen, \
+             mock.patch.object(story_jobs_worker.media, "running_cost_usd", return_value=0.0), \
+             mock.patch.object(story_jobs_worker.store, "upsert_story"), \
+             mock.patch.object(story_jobs_worker.store, "update_story_job_progress"), \
+             mock.patch.object(story_jobs_worker, "_enqueue_video_render_for_story") as enq_long, \
+             mock.patch("pipeline.shorts_auto.maybe_enqueue_short_for_story", return_value=True) as enq_short:
+            story_jobs_worker._default_process(claimed, self._reddit_row())
+        return gen, enq_long, enq_short
+
+    def test_short_default_passes_short_only_and_forces_short(self):
+        # output_format None + no setting -> resolves to 'short'.
+        gen, enq_long, enq_short = self._run_process(self._claimed())
+        self.assertTrue(gen.call_args.kwargs["short_only"])
+        enq_long.assert_not_called()
+        self.assertTrue(enq_short.called)
+        self.assertTrue(enq_short.call_args.kwargs.get("force"))
+
+    def test_long_override_passes_short_only_false_and_enqueues_render(self):
+        gen, enq_long, _ = self._run_process(self._claimed(output_format="long"))
+        self.assertFalse(gen.call_args.kwargs["short_only"])
+        enq_long.assert_called_once()
+
+
 class VideoRenderHandoffTests(_IsolatedDB):
     """The story-jobs worker no longer renders MP4 itself — instead it
     enqueues a video_renders row that the Cloud Run cron drain picks

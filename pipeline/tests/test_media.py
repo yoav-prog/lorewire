@@ -249,6 +249,67 @@ class ResolveSceneCountTests(unittest.TestCase):
             self.assertEqual(media._resolve_scene_count(None, body=body), 20)
 
 
+class GenerateMediaShortOnlyTests(unittest.TestCase):
+    """short_only=True (Reddit imports defaulting to a short) must produce the
+    hero thumbnail and NOTHING else: no long-form scene set, no props, no
+    mouth-swap, no full-article voiceover. The short pipeline renders its own
+    9:16 frames + narration and the story page reads those live, so generating
+    the long-form assets here is pure wasted kie + TTS spend. See
+    _plans/2026-06-17-short-only-media-and-gallery.md.
+
+    dry_run keeps every path offline; settings are stubbed to None so the one
+    store read (_budget_log) doesn't need a DB.
+    """
+
+    def _idea(self):
+        return {"reddit_id": "abc123", "category": "Drama", "headline": "X"}
+
+    def _run(self, short_only, prompts_return=None):
+        import tempfile
+        from pathlib import Path
+
+        with mock.patch("pipeline.media.store.get_setting", return_value=None), \
+             mock.patch(
+                 "pipeline.media.stages.make_image_prompts",
+                 return_value=prompts_return or ["hero", "s1", "s2"],
+             ) as prompts, \
+             mock.patch("pipeline.media.voice.synthesize") as synth:
+            out = media.generate_media(
+                "abc123", self._idea(), "Body one. Body two.", "Title",
+                True, Path(tempfile.gettempdir()), short_only=short_only,
+            )
+        return out, prompts, synth
+
+    def test_short_only_is_hero_only(self):
+        out, prompts, synth = self._run(short_only=True)
+        # Hero thumbnail survives — homepage cards + billboard read it.
+        self.assertIn("hero_image", out)
+        self.assertIn("hero_image_landscape", out)
+        # The wasted long-form assets are all absent.
+        for k in ("images", "audio_url", "alignment", "props"):
+            self.assertNotIn(k, out, f"short-only must not produce {k!r}")
+        # And we didn't even ASK for scene prompts or run TTS.
+        prompts.assert_not_called()
+        synth.assert_not_called()
+
+    def test_short_only_does_not_bill_for_voiceover(self):
+        # narration_chars is zeroed on the short path, so cost reflects the two
+        # hero images only — never the (un-synthesized) article voiceover.
+        out, _, _ = self._run(short_only=True)
+        with mock.patch("pipeline.media.models.get_selected") as get:
+            get.side_effect = lambda stage: {
+                "images": "kie/gpt-image-2", "voice": "elevenlabs/default",
+            }[stage]
+            hero_only = media._story_cost_cents(2, 0, 0.0)
+        self.assertEqual(out["cost_cents"], hero_only)
+
+    def test_full_run_still_makes_scenes_and_voice(self):
+        out, prompts, _ = self._run(short_only=False)
+        self.assertIn("images", out)
+        self.assertIn("audio_url", out)  # dry-run placeholder narration
+        prompts.assert_called_once()
+
+
 class StagingDirTests(unittest.TestCase):
     """Regression for the read-only-filesystem crash that hit production
     on 2026-06-14: the Vercel cron drain claimed a media job, called
