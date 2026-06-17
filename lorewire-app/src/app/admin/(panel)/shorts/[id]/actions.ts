@@ -547,10 +547,16 @@ export async function renderShortLaneA(
     currentPollFor(storyId),
   ]);
   const plan = planShortRender(cfg.config, baseline.props, segments, poll);
-  if (plan.lane === "noop") {
-    return { ok: false, error: "no edits since the last render", plan };
-  }
-  if (plan.lane !== "A") {
+  // Lane A now accepts BOTH lane="A" and lane="noop". The noop path is
+  // the user's "always re-render" escape hatch (added 2026-06-17 after
+  // an intro/outro stamping race left the planner reading "no changes"
+  // even though the rendered MP4 was missing the splice). Re-running
+  // Lane A on noop produces a fresh assembly with the current
+  // captions + style + resolved segments. Burning ~$0.05 of assembly
+  // compute to give the admin a deterministic recovery path is the
+  // right trade. B / C still require the matching planner verdict so
+  // a stale planner can't accidentally fire a per-scene regen.
+  if (plan.lane !== "A" && plan.lane !== "noop") {
     return {
       ok: false,
       error: `lane ${plan.lane} requires the matching phase (B=3, C=4) — current edits include more than just captions`,
@@ -662,32 +668,39 @@ export async function renderShortLaneA(
     .update(JSON.stringify(newCard ?? null))
     .digest("hex")
     .slice(0, 12);
+  // noop = "force re-render anyway" path. Skip the idempotency dedupe
+  // AND add a per-click timestamp suffix so the user can fire several
+  // force-renders in a row without colliding on the unique
+  // config_hash. Lane-A-with-real-diffs keeps the dedupe so a
+  // double-click on the same edits coalesces (the original intent).
+  const forceTag = plan.lane === "noop" ? `:force-${Date.now()}` : "";
   const configHash =
-    `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}:${pollDigest}`;
+    `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}:${pollDigest}${forceTag}`;
 
-  // Idempotency: if a row with this exact captions-digest already exists in
-  // queued / rendering / done status, we surface it instead of inserting a
-  // duplicate. Re-clicking the button is a no-op until the captions change.
-  const existing = await one<{ id: string; status: string }>(
-    "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
-    [storyId, configHash],
-  );
-  if (existing) {
-    // eslint-disable-next-line no-console -- rule 14
-    console.info("[short editor laneA dupe]", {
-      story_id: storyId,
-      existing_render_id: existing.id,
-      existing_status: existing.status,
-    });
-    await logShortRenderEvent(existing.id, "idempotent_hit", {
-      message: "Lane A render click coalesced with existing row",
-      payload: { lane: "A", current_status: existing.status },
-    });
-    return {
-      ok: true,
-      renderId: existing.id,
-      plan,
-    };
+  // Idempotency check ONLY for the planner-detected Lane A path.
+  // The noop force path always inserts a fresh row.
+  if (plan.lane === "A") {
+    const existing = await one<{ id: string; status: string }>(
+      "SELECT id, status FROM short_renders WHERE story_id = ? AND config_hash = ?",
+      [storyId, configHash],
+    );
+    if (existing) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[short editor laneA dupe]", {
+        story_id: storyId,
+        existing_render_id: existing.id,
+        existing_status: existing.status,
+      });
+      await logShortRenderEvent(existing.id, "idempotent_hit", {
+        message: "Lane A render click coalesced with existing row",
+        payload: { lane: "A", current_status: existing.status },
+      });
+      return {
+        ok: true,
+        renderId: existing.id,
+        plan,
+      };
+    }
   }
 
   const renderId = randomUUID();
@@ -709,10 +722,14 @@ export async function renderShortLaneA(
       now,
     ],
   );
+  const forced = plan.lane === "noop";
   await logShortRenderEvent(renderId, "queued", {
-    message: "Lane A assembly-only re-render queued",
+    message: forced
+      ? "Lane A force re-render queued (no detected changes)"
+      : "Lane A assembly-only re-render queued",
     payload: {
       lane: "A",
+      forced,
       baseline_render_id: baseline.id,
       caption_count: cfg.config.captions.length,
       estimated_cost_cents: plan.estimated_cost_cents,
@@ -725,6 +742,7 @@ export async function renderShortLaneA(
     render_id: renderId,
     baseline_render_id: baseline.id,
     caption_count: cfg.config.captions.length,
+    forced,
   });
   // Lane A row has props pre-baked → goes straight to the render drain.
   // Nudge so the user doesn't wait up to a minute for the cron tick.
