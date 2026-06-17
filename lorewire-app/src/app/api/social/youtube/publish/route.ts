@@ -1,15 +1,17 @@
 // POST /api/social/youtube/publish
 //
-// Publish a finished short to the connected YouTube channel. Body: { renderId }.
-// Flow: require admin -> resolve the done render + its story -> resolve the
-// active YouTube account -> idempotency guard -> audio-clearance gate (F9) ->
-// build + validate metadata -> insert an in_flight ledger row -> get a valid
-// access token -> stream the MP4 into the resumable videos.insert -> flip the
-// row to published (or failed). Plan sections 5, 7.1, 8, 9, 11.
+// Publish a finished short to the connected YouTube channel. Body: { storyId }.
+// Flow: require admin -> resolve the latest done render for the story + its
+// story row -> resolve the active YouTube account -> idempotency guard -> audio
+// clearance gate (F9) -> build + validate metadata -> insert an in_flight
+// youtube_publishes row -> get a valid access token -> stream the MP4 into the
+// resumable videos.insert -> flip the row to published (or failed). Targeting by
+// story (not render id) matches UseShortAsVideoButton: the editor is per-story
+// and always publishes the latest finished short. Plan sections 5, 7.1, 8, 9, 11.
 
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/dal";
-import { getShortRender } from "@/lib/short-render-queue";
+import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
 import { getStory } from "@/lib/repo";
 import { getActiveSocialAccount } from "@/lib/social-accounts";
 import { audioClearanceGate } from "@/lib/social-publish";
@@ -35,7 +37,7 @@ import {
 export const maxDuration = 300;
 
 interface PublishRequestBody {
-  renderId?: unknown;
+  storyId?: unknown;
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
@@ -47,16 +49,13 @@ export async function POST(req: Request): Promise<NextResponse> {
   } catch {
     return NextResponse.json({ error: "bad-json" }, { status: 400 });
   }
-  const renderId = payload.renderId;
-  if (typeof renderId !== "string" || !renderId) {
-    return NextResponse.json({ error: "missing-renderId" }, { status: 400 });
+  const storyId = payload.storyId;
+  if (typeof storyId !== "string" || !storyId) {
+    return NextResponse.json({ error: "missing-storyId" }, { status: 400 });
   }
 
-  const render = await getShortRender(renderId);
-  if (!render) {
-    return NextResponse.json({ error: "short-not-found" }, { status: 404 });
-  }
-  if (render.status !== "done" || !render.output_url) {
+  const render = await latestDoneShortRenderForStory(storyId);
+  if (!render || !render.output_url) {
     return NextResponse.json({ error: "short-not-ready" }, { status: 409 });
   }
 
@@ -68,7 +67,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // Idempotency: never double-publish a short. A finished publish returns its
   // URL; one in flight is reported as in-progress. Failed rows do not block a
   // retry. The fully race-proof guarantee arrives with the Phase 2 queue.
-  const active = await getActiveYoutubePublishForShort(renderId);
+  const active = await getActiveYoutubePublishForShort(render.id);
   if (active?.status === "published") {
     return NextResponse.json({
       status: "published",
@@ -85,7 +84,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   // source can never slip through, and the verdict is recorded on the row.
   const audio = audioClearanceGate({ source: "tts", platform: "youtube" });
   console.info("[social publish audio-check]", {
-    renderId,
+    renderId: render.id,
     clearance: audio.verdict,
     allowed: audio.allowed,
   });
@@ -97,7 +96,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
 
   // Build + validate the metadata from the story.
-  const story = await getStory(render.story_id);
+  const story = await getStory(storyId);
   const ytPayload = mapStoryToYoutubePayload({
     storyTitle: story?.title ?? "Lorewire short",
     storySummary: story?.summary,
@@ -112,13 +111,13 @@ export async function POST(req: Request): Promise<NextResponse> {
   }
 
   const publishId = await insertInFlightYoutubePublish({
-    shortId: renderId,
+    shortId: render.id,
     accountId: account.id,
     audioClearance: audio.verdict,
   });
   console.info("[social publish request]", {
     publishId,
-    renderId,
+    renderId: render.id,
     accountId: account.id,
     by: session.userId,
   });
@@ -149,7 +148,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     await markYoutubePublishFailed(publishId, detail);
-    console.error("[social publish fail]", { publishId, renderId, detail });
+    console.error("[social publish fail]", { publishId, renderId: render.id, detail });
     return NextResponse.json({ error: "upload-failed", detail }, { status: 502 });
   }
 }

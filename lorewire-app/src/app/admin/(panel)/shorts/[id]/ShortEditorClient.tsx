@@ -16,6 +16,7 @@ import { CaptionsTab } from "./CaptionsTab";
 import { CaptionStyleTab } from "./CaptionStyleTab";
 import { EditSessionBanner } from "./EditSessionBanner";
 import { RenderAfterEditsBanner } from "./RenderAfterEditsBanner";
+import { PublishToYoutubeButton } from "./PublishToYoutubeButton";
 import { RenderStatusPanel } from "./RenderStatusPanel";
 import { ScenesTab } from "./ScenesTab";
 import { ScriptTab } from "./ScriptTab";
@@ -233,6 +234,15 @@ export function ShortEditorClient({
       )}
 
           <UseShortAsVideoButton
+            storyId={storyId}
+            disabled={
+              initialRender === null ||
+              initialRender.status !== "done" ||
+              !initialRender.output_url
+            }
+          />
+
+          <PublishToYoutubeButton
             storyId={storyId}
             disabled={
               initialRender === null ||
