@@ -7,7 +7,12 @@ import Link from "next/link";
 // belong inside the video editor (see _plans/2026-06-12-admin-reorg-phase2.md
 // §"Captions are intentionally not a Settings sub-nav category").
 
-export type SettingsCategory = "general" | "models" | "seo" | "intros";
+export type SettingsCategory =
+  | "general"
+  | "models"
+  | "seo"
+  | "intros"
+  | "social";
 
 type CategoryDef = {
   key: SettingsCategory;
@@ -40,6 +45,12 @@ const CATEGORIES: CategoryDef[] = [
     label: "Intros & outros",
     href: "/admin/segments",
     description: "Branded clips spliced onto every rendered video.",
+  },
+  {
+    key: "social",
+    label: "Social accounts",
+    href: "/admin/settings/social-accounts",
+    description: "Accounts Lorewire publishes finished shorts to.",
   },
 ];
 
