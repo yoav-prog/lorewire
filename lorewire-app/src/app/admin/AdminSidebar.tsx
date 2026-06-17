@@ -71,6 +71,14 @@ const STATIC_GROUPS: SidebarGroup[] = [
         activePrefixes: ["/admin/curation"],
       },
       {
+        // Engagement polls overview. Author lives on the story edit
+        // page; this is the cross-cutting "every poll + how it's
+        // voting" view. Plan: _plans/2026-06-17-engagement-polls.md.
+        href: "/admin/polls",
+        label: "Polls",
+        activePrefixes: ["/admin/polls"],
+      },
+      {
         href: "/admin/settings",
         label: "Settings",
         // All four config URLs land on the Settings hub with the right

@@ -213,6 +213,52 @@ export async function setStoryAspectAction(formData: FormData): Promise<{
   return { ok: true };
 }
 
+// Phase 1 of _plans/2026-06-17-engagement-polls.md. Story-level poll
+// save: validates the editor inputs through validatePollInputs (single
+// trust boundary, also reused by the LLM auto-draft endpoint) and
+// upserts the row. The story's current category is snapshotted onto
+// polls.category so the rail queries don't have to join through
+// stories on the hot path. Returns a shape the client can branch on so
+// inline validation errors render without a refresh.
+export async function savePollAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+  created?: boolean;
+}> {
+  await requireAdmin();
+  const storyId = String(formData.get("story_id") ?? "");
+  if (!storyId) return { ok: false, error: "missing story id" };
+  const story = await getStoryRow(storyId);
+  if (!story) {
+    console.warn("[polls action] save: story not found", { story_id: storyId });
+    return { ok: false, error: "story not found" };
+  }
+  const { upsertPoll } = await import("@/lib/polls");
+  const result = await upsertPoll({
+    storyId,
+    question: String(formData.get("question") ?? ""),
+    optionA: String(formData.get("option_a") ?? ""),
+    optionB: String(formData.get("option_b") ?? ""),
+    enabled: String(formData.get("enabled") ?? "") === "1",
+    category: story.category,
+  });
+  if (!result.ok) {
+    console.warn("[polls action] save rejected", {
+      story_id: storyId,
+      error: result.error,
+    });
+    return { ok: false, error: result.error };
+  }
+  console.info("[polls action] save", {
+    story_id: storyId,
+    poll_id: result.pollId,
+    created: result.created,
+  });
+  revalidatePath(`/admin/stories/${storyId}`);
+  revalidatePath("/admin/polls");
+  return { ok: true, created: result.created };
+}
+
 // ─── Asset re-render ─────────────────────────────────────────────────────────
 // Enqueue one image-regen request. Admin clicks Regenerate on a hero, scene,
 // prop, mouth-swap, OG, or gallery image; we run a budget pre-flight, queue

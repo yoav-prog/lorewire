@@ -482,6 +482,74 @@ export const STORY_JOB_EVENTS: Table = {
   ],
 };
 
+// 2026-06-18 engagement polls. One row per story that has a poll.
+// `enabled = 0` hides the poll everywhere (admin can park a draft without
+// deleting it). `category` is denormalised from stories.category so the
+// rail queries ("Most Divisive", etc) filter without a join. Question +
+// option labels are short by contract (UI caps 80 / 24 / 24); the server
+// action enforces those before write. Plan:
+// _plans/2026-06-17-engagement-polls.md.
+export const POLLS: Table = {
+  name: "polls",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "question", type: "TEXT" },
+    { name: "option_a_text", type: "TEXT" },
+    { name: "option_b_text", type: "TEXT" },
+    { name: "enabled", type: "INTEGER" },
+    { name: "category", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-18 engagement polls vote log. Append-only, anonymous. One row
+// per (poll, cookie_token); the partial unique index in POST_TABLE_DDL
+// is what makes the same browser re-voting a no-op rather than a
+// duplicate. `cookie_token` is a 256-bit random nonce set
+// HttpOnly+Secure+SameSite=Lax — the anti-double-vote primitive. `side`
+// is closed enum 'A' | 'B'. `ip_ua_hash` is SHA-256 of (ip || '\n' ||
+// user_agent) used ONLY for the rate-limit bucket; the daily aggregate
+// refresh cron nulls it on rows older than 24h so it never becomes a
+// durable fingerprint. `story_id` and `category` are denormalised so the
+// rail queries don't join through polls -> stories.
+export const POLL_VOTES: Table = {
+  name: "poll_votes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "poll_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "side", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "ip_ua_hash", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-18 engagement polls projection. Refreshed every 5 minutes by
+// a Vercel cron. Reading this instead of COUNT(*)/GROUP BY on poll_votes
+// is what keeps the rail-query latency budget tight. `divisiveness` is
+// `1 - |0.5 - pctA| * 2` (1.0 = perfect 50/50, 0.0 = 100/0). `agreement`
+// is `1 - divisiveness`; both stored so the rail queries can ORDER BY
+// without recomputing.
+export const POLL_AGGREGATES: Table = {
+  name: "poll_aggregates",
+  columns: [
+    { name: "story_id", type: "TEXT", pk: true },
+    { name: "poll_id", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "votes_a", type: "INTEGER" },
+    { name: "votes_b", type: "INTEGER" },
+    { name: "total_votes", type: "INTEGER" },
+    { name: "divisiveness", type: "REAL" },
+    { name: "agreement", type: "REAL" },
+    { name: "last_vote_at", type: "TEXT" },
+    { name: "refreshed_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-16 homepage curation. One row per slot on the public homepage —
 // `surface` names the rail ('hero', 'top10', 'continue', '<category>_row',
 // 'new_row'), `position` is 0-based ordering within the surface, `story_id`
@@ -519,6 +587,9 @@ export const TABLES: Table[] = [
   STORY_JOB_EVENTS,
   VOICE_RENDERS,
   HOMEPAGE_CURATION,
+  POLLS,
+  POLL_VOTES,
+  POLL_AGGREGATES,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -590,4 +661,42 @@ export const POST_TABLE_DDL: string[] = [
   // hot read path (one query per rail) so the leading column matches.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_curation_surface_position " +
     "ON homepage_curation(surface, position)",
+  // 2026-06-18 engagement polls. story_id uniqueness is the load-bearing
+  // invariant — one poll per story. lib/polls.ts:upsertPoll targets this
+  // index via INSERT ... ON CONFLICT (story_id) DO UPDATE; without it,
+  // Postgres throws "no unique or exclusion constraint matching the ON
+  // CONFLICT specification" and the save action 500s. Mirrors the
+  // homepage_curation lesson learned in prod.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_polls_story_id ON polls(story_id)",
+  // Rail read shape: filter by category + enabled, surface a list.
+  "CREATE INDEX IF NOT EXISTS idx_polls_category_enabled " +
+    "ON polls(category, enabled)",
+  // 2026-06-18 engagement poll votes. (poll_id, cookie_token) uniqueness
+  // is the anti-double-vote primitive. lib/polls.ts:recordVote does
+  // INSERT ... ON CONFLICT (poll_id, cookie_token) DO NOTHING; missing
+  // this index would let the same browser vote twice on Postgres until
+  // an explicit duplicate check ran, AND would 500 the action because
+  // the ON CONFLICT clause has nothing to match.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_poll_votes_poll_cookie " +
+    "ON poll_votes(poll_id, cookie_token)",
+  // Per-poll vote count + per-story rollup read paths. Both are touched
+  // by the aggregate refresh cron + the per-story sparkline query on
+  // /admin/polls/[id].
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_poll_id ON poll_votes(poll_id)",
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_story_id " +
+    "ON poll_votes(story_id)",
+  // Retention sweep (24h prune of ip_ua_hash) + sparkline range scan
+  // both filter by created_at. Cheap to keep, expensive to retrofit.
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_created_at " +
+    "ON poll_votes(created_at)",
+  // 2026-06-18 engagement poll aggregates. The three rails ORDER BY
+  // divisiveness / agreement / category-divisiveness; without these
+  // indexes the rails would table-scan poll_aggregates on every public
+  // pageview.
+  "CREATE INDEX IF NOT EXISTS idx_poll_aggregates_divisiveness " +
+    "ON poll_aggregates(divisiveness DESC, total_votes DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_poll_aggregates_agreement " +
+    "ON poll_aggregates(agreement DESC, total_votes DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_poll_aggregates_category " +
+    "ON poll_aggregates(category, divisiveness DESC)",
 ];

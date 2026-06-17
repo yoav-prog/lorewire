@@ -104,13 +104,22 @@ describe("buildGroups", () => {
     );
   });
 
-  it("produces the three top-level entries in stable order", () => {
+  it("produces the top-level entries in stable order", () => {
+    // The ungrouped block grew from the original three (Overview, Content,
+    // Settings) as the studio added Reddit Sources (2026-06-14), Homepage
+    // curation (2026-06-16), and Polls (2026-06-18). Each insertion is
+    // intentional + sits between Content and Settings so Settings always
+    // anchors the bottom of the ungrouped block — this test pins both the
+    // membership and the position.
     for (const dev of [false, true]) {
       const groups = buildGroups(dev);
       expect(groups[0].label).toBeNull();
       expect(groups[0].items.map((i) => i.label)).toEqual([
         "Overview",
         "Content",
+        "Reddit Sources",
+        "Homepage",
+        "Polls",
         "Settings",
       ]);
     }

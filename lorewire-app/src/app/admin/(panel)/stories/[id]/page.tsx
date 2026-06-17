@@ -27,6 +27,12 @@ import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel
 import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StatusStepIndicator } from "./StatusStepIndicator";
 import { StoryAspectControl } from "./StoryAspectControl";
+import { PollEditor } from "./PollEditor";
+import {
+  getPollByStoryId,
+  getPresetForCategory,
+  type StoryCategory,
+} from "@/lib/polls";
 import {
   activeSegmentSettingKey,
   isVideoAspect,
@@ -71,13 +77,18 @@ export default async function EditStory({
   // ("0") so the picker is dark until the admin flips it on AND the
   // Phase 2.b bake script has populated preview MP3s — that's the
   // contract: don't ship UI that plays broken audio.
-  const [intros, outros, defaultAspectRaw, voicePickerEnabledRaw] =
+  const [intros, outros, defaultAspectRaw, voicePickerEnabledRaw, poll] =
     await Promise.all([
       listSegments("intro"),
       listSegments("outro"),
       getSetting("video.default_aspect"),
       getSetting("voice.picker_enabled"),
+      // Phase 1 of _plans/2026-06-17-engagement-polls.md. Either the
+      // existing poll row OR null; the editor seeds null rows with the
+      // category preset so the form is never empty on first author.
+      getPollByStoryId(id),
     ]);
+  const pollPreset = getPresetForCategory(s.category);
   const voicePickerEnabled = String(voicePickerEnabledRaw ?? "0") !== "0";
 
   // Resolve the aspect for THIS story's display. The chain is:
@@ -329,6 +340,15 @@ export default async function EditStory({
             <div className={`${LABEL} mb-3`}>Status</div>
             <StatusStepIndicator storyId={s.id} currentStatus={s.status} />
           </div>
+
+          <PollEditor
+            storyId={s.id}
+            storyCategory={s.category as StoryCategory | string | null}
+            poll={poll}
+            presetQuestion={pollPreset.question}
+            presetOptionA={pollPreset.optionA}
+            presetOptionB={pollPreset.optionB}
+          />
 
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={LABEL}>Search visibility</div>
