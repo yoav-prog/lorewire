@@ -196,6 +196,7 @@ export default function ReelsDesktop({
               short={shorts[i]}
               active={i === activeIdx}
               mounted
+              eager={i === activeIdx || i === activeIdx + 1}
               muted={muted}
               reducedMotion={reducedMotion}
               paused={paused}
