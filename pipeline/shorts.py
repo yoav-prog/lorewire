@@ -95,20 +95,50 @@ def chunk_for_planning(script: str, max_words: int = 6) -> list[str]:
     return chunks
 
 
-def build_plan_prompt(script: str, hook: str, payoff: str, captions: list[str], max_scenes: int) -> str:
+def build_plan_prompt(
+    script: str,
+    hook: str,
+    payoff: str,
+    captions: list[str],
+    max_scenes: int,
+    source: str = "",
+) -> str:
     """Design ONE recurring main character + N varied scene frames. The same
     character appears in every frame (identity carried by i2i); each scene puts
     them in a different place / pose / mood, with supporting characters when the
-    beat needs them."""
+    beat needs them.
+
+    `source` is the full original article (title + body). The planner uses it to
+    GROUND the character in the actual narrator/protagonist instead of inventing
+    a generic one — without it, the LLM defaults to the same stereotypical
+    "diverse" archetype every story (Asian woman, chin-length dark hair with a
+    gray streak, round glasses, teal button-up) which made every short look the
+    same person.
+    """
     n = max(1, min(max_scenes, len(captions)))
     cap_lines = "\n".join(f"[{i}] {c}" for i, c in enumerate(captions))
     system = (
         "You are the art director for a vertical hand-drawn cartoon short. Design ONE recurring MAIN "
         "CHARACTER and a set of scene frames in which that SAME character appears in many DIFFERENT "
         "places, poses and moods.\n\n"
-        "MAIN CHARACTER: a vivid, specific, repeatable description (gender, hair, face, glasses or not, "
-        "exact clothing with colors, build) — specific enough that an artist redraws the identical person "
-        "every time. 1-2 sentences.\n\n"
+        "MAIN CHARACTER — GROUND IT IN THE SOURCE:\n"
+        "First read the SOURCE ARTICLE below. Identify who the story is actually about (the narrator in "
+        "first-person posts, the named protagonist otherwise) and extract every explicit and implied "
+        "demographic clue: age (kid / teen / 20s / 30s / 40s / 50s / 60s+), gender, ethnicity / skin "
+        "tone, occupation, body type, clothing context (uniform, suit, hoodie, scrubs, apron). Reddit "
+        "posts almost always reveal age, gender and job in the first paragraph — USE THEM. Then describe "
+        "that real person, NOT an idealised stand-in.\n\n"
+        "ANTI-DEFAULT — do NOT fall back to: middle-aged East Asian woman, chin-length straight dark "
+        "hair with a gray / white streak, round wire-frame glasses, teal or blue button-up shirt, white "
+        "apron. That archetype is your trained default and it has been producing IDENTICAL-LOOKING "
+        "characters across totally different stories. When the source does not pin a detail, ROTATE: "
+        "rotate age bracket, gender, ethnicity, body type, hair length / colour / texture, facial hair, "
+        "and accessories. Glasses are OPTIONAL — only include them when the source implies them or "
+        "you have rotated to them deliberately. The character must look like a plausibly random human, "
+        "not a Studio Ghibli protagonist.\n\n"
+        "VIVID, REPEATABLE: 1-2 sentences, specific enough that an artist redraws the identical person "
+        "every frame — exact age band, gender, ethnicity / skin tone, hair (length, colour, texture), "
+        "facial features, clothing with colours, build. No vague words ('attractive', 'nondescript').\n\n"
         f"SCENE FRAMES ({n} frames): each frame shows the SAME main character (identity unchanged) "
         "visualizing its caption beat, but in a DIFFERENT setting, body pose, facial expression and mood "
         "from the others — standing / sitting / crouching / walking / reacting, close-up vs wide, "
@@ -116,15 +146,23 @@ def build_plan_prompt(script: str, hook: str, payoff: str, captions: list[str], 
         "characters (coworkers, a boss, a friend) when the beat needs them and describe them briefly. "
         "Each scene 60-200 chars. Spread the chunk indices evenly across the whole script.\n\n"
         "Output STRICTLY this JSON:\n"
-        '{\n  "character": "<vivid repeatable main-character description>",\n'
+        '{\n  "character": "<vivid repeatable main-character description, grounded in the source>",\n'
         '  "scenes": [\n    { "caption_chunk_start_index": <int 0-' + str(max(0, len(captions) - 1)) +
         '>, "scene": "<the same character in a new place/pose/mood for this beat>" }\n  ]\n}\n\n'
         "Return ONLY valid JSON."
     )
+    source_block = (
+        f"\nSOURCE ARTICLE (mine this for the protagonist's real demographics):\n"
+        f"\"\"\"\n{source.strip()}\n\"\"\"\n\n"
+        if source.strip()
+        else ""
+    )
     user = (
-        f"Hook: {hook}\nPayoff: {payoff}\n\nFull script:\n\"\"\"\n{script}\n\"\"\"\n\n"
+        f"Hook: {hook}\nPayoff: {payoff}\n"
+        f"{source_block}"
+        f"Narration script:\n\"\"\"\n{script}\n\"\"\"\n\n"
         f"Pre-chunked captions (use these indices):\n{cap_lines}\n\n"
-        f"Design ONE main character + {n} varied scene frames. JSON only."
+        f"Design ONE main character + {n} varied scene frames, grounded in the source. JSON only."
     )
     return f"{system}\n\n---\n\n{user}"
 
@@ -198,12 +236,17 @@ def generate_short_assets(
     plan = extract_json(
         llm.chat(
             build_plan_prompt(script["short_script"], script.get("hook", ""), script.get("payoff", ""),
-                              caps, length.max_scenes),
+                              caps, length.max_scenes, source=source),
             max_tokens=3600,
             model=llm_model,
         )
     )
     character = plan["character"].strip()
+    # Surfaced so the "every short is the same person" debugging loop can read
+    # exactly which character the planner picked for this story. Without this
+    # the only way to inspect the chosen character is to re-render and inspect
+    # the props blob — too late, too expensive.
+    print(f"[shorts plan] character chosen: {character!r}")
     planned = [s for s in plan.get("scenes", []) if (s.get("scene") or "").strip()]
 
     progress("base")
