@@ -381,6 +381,29 @@ function GalleryScroller({ children, count }: { children: React.ReactNode; count
   );
 }
 
+// When a story has no word-level alignment yet (no narration / STT step has
+// run), the gallery used to render bare images. Slice the article body into
+// one sentence per scene instead so every card still reads with text.
+function _captionsFromBody(body: string | undefined, count: number): string[] {
+  if (!body || count <= 0) return [];
+  const sentences =
+    body
+      .replace(/\s+/g, " ")
+      .match(/[^.!?]+[.!?]+/g)
+      ?.map((s) => s.trim())
+      .filter(Boolean) ?? [];
+  if (sentences.length === 0) return [];
+  // Spread the available sentences across the scenes in reading order so each
+  // card gets a line that roughly tracks where it sits in the story.
+  return Array.from({ length: count }, (_, i) => {
+    const idx = Math.min(
+      Math.floor((i * sentences.length) / count),
+      sentences.length - 1,
+    );
+    return sentences[idx];
+  });
+}
+
 function _galleryFromStory(
   story: Story,
   liveMedia: LiveStoryMediaResult,
@@ -393,7 +416,10 @@ function _galleryFromStory(
     : story.images || [];
   if (imgs.length === 0) return null;
   const words = story.alignment || [];
-  if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
+  if (words.length === 0) {
+    const captions = _captionsFromBody(story.body, imgs.length);
+    return imgs.map((src, i) => ({ src, caption: captions[i] ?? "" }));
+  }
   const perScene = Math.max(1, Math.floor(words.length / imgs.length));
   return imgs.map((src, i) => {
     const start = i * perScene;
@@ -726,16 +752,25 @@ function DetailModalHero({ story }: { story: Story }) {
 
 function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
-  // Reset the tab whenever the parent swaps in a different story or initialTab
-  // — React 19's set-state-in-effect rule rejects the old useEffect pattern.
-  // The sanctioned alternative is to track the previous prop values during
-  // render and update state inline.
+  // One live fetch per modal open, shared by WATCH + READ (Article + Gallery)
+  // so opening the modal hits the DB once and every subview sees a consistent
+  // "is this the short?" answer. Falls back to NO_LIVE_MEDIA on miss/error so
+  // subviews behave as if the baked story was canonical (legacy sample-only
+  // entries).
+  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
+  // Reset the tab + live media whenever the parent swaps in a different story
+  // or initialTab — React 19's set-state-in-effect rule rejects the old
+  // useEffect pattern. The sanctioned alternative is to track the previous
+  // prop values during render and update state inline; resetting liveMedia
+  // here (rather than at the top of the fetch effect) keeps that effect free
+  // of a synchronous setState.
   const [prevStoryId, setPrevStoryId] = useState(story.id);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (prevStoryId !== story.id || prevInitialTab !== initialTab) {
     setPrevStoryId(story.id);
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
+    setLiveMedia(NO_LIVE_MEDIA);
   }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -743,15 +778,8 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // One live fetch per modal open. Shared by WATCH, READ → Article, READ →
-  // Gallery so opening the modal hits the DB once instead of three times
-  // and every subview sees a consistent "is this the short?" answer.
-  // Falls back to NO_LIVE_MEDIA on miss/error so subviews behave as if
-  // the baked story was canonical (legacy sample-only entries).
-  const [liveMedia, setLiveMedia] = useState<LiveStoryMediaResult>(NO_LIVE_MEDIA);
   useEffect(() => {
     let cancelled = false;
-    setLiveMedia(NO_LIVE_MEDIA);
     getLiveStoryMedia(story.id)
       .then((r) => {
         if (cancelled) return;
