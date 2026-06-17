@@ -92,6 +92,13 @@ def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> 
         if it.get("image_prompt"):
             frame["image_prompt"] = it["image_prompt"]
         frames.append(frame)
+    # The opening scene must cover t=0 — DoodleShort windows frame 0 from its
+    # caption's start_ms, so a first scene planned against a later beat would
+    # leave the start blank. The base reference frame used to absorb this gap;
+    # now that it is no longer a visible frame, pin the first real scene to the
+    # first caption.
+    if frames:
+        frames[0]["caption_chunk_start_index"] = 0
     return frames
 
 
@@ -162,21 +169,19 @@ def build_short_props(
 
         # 3) Stage frames. Scene URLs are remote (kie) so download first. Track
         #    each frame's PLANNED caption index so a partial-download skip can't
-        #    misalign the rest; the base frame is the opening (planned index 0).
+        #    misalign the rest.
         #    remote -> upload to GCS (https URLs); local -> staticFile paths.
         #    image_prompt carries the FULL wrapped prompt that generated each
         #    source URL so it survives into doodle_frames; editors see the
         #    exact bytes the model received and per-scene regen replays them
-        #    verbatim. Base frame (i=0) uses assets.base_prompt; scene frames
-        #    use s["image_prompt"] persisted by generate_short_assets.
+        #    verbatim.
+        #    The base frame is the i2i CHARACTER REFERENCE only — a neutral
+        #    standing pose on a plain background, not a story beat. It must
+        #    NOT be staged as a visible frame (it used to lead every short).
+        #    We keep it solely as props.character_base_url (step 4) so the
+        #    editor + Lane C per-scene regen still have the identity anchor.
         progress("stage")
         sources = [
-            {
-                "url": assets.base_url,
-                "planned": 0,
-                "image_prompt": getattr(assets, "base_prompt", "") or "",
-            }
-        ] + [
             {
                 "url": s["url"],
                 "planned": int(s.get("caption_chunk_start_index", 0) or 0),
@@ -230,6 +235,11 @@ def build_short_props(
             "channel_name": "lorewire",
             "aspect": "9:16",
             "duration_ms": duration_ms,
+            # The i2i character reference. Persisted (NOT as a visible frame)
+            # so defaultShortConfig seeds short_config.character_base_url and
+            # Lane C per-scene regen can re-pose the SAME character. The base
+            # itself never appears in the video.
+            "character_base_url": assets.base_url,
             "doodle_frames": doodle_frames,
             "captions": captions,
             "ken_burns": False,
