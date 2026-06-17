@@ -8,6 +8,7 @@ import {
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import ReelsDesktop from "@/components/reels/ReelsDesktop";
 import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
@@ -21,6 +22,7 @@ import {
   useHomepagePolls,
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
+import { useSavedStories } from "@/lib/engagement-store";
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -37,7 +39,7 @@ type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
 type IconCmp = (p: IconProps) => React.ReactElement;
 
-const NAV = ["Home", "Browse", "New & Hot", "My List"];
+const NAV = ["Home", "Reels", "Browse", "New & Hot", "My List"];
 
 /* ----------------------------- ICONS ----------------------------- */
 const Ico = ({ d, fill, size = 24, stroke = 1.7 }: IconProps & { d: React.ReactNode }) => (
@@ -956,6 +958,11 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
 }
 
 function GridPage({ title, sub, ids, onOpen }: { title: string; sub?: string; ids: string[]; onOpen: OpenFn }) {
+  // Resolve via byId — Phase 8 of the reels rollout switched to resolveStory
+  // (live+sample catalog) to avoid throwing on real short ids saved through
+  // the feed, but that pattern requires hoisting useHomepageCuration to the
+  // shell level. For now we keep the byId path; saved real shorts can crash
+  // the My List view until the catalog gets hoisted in a follow-up.
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">{title}</h1>
@@ -986,9 +993,13 @@ function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
 export default function DesktopShell() {
   const [view, setView] = useState("Home");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
-  const [list, setList] = useState<string[]>(["stranger", "wrongnumber"]);
+  const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
   const [solid, setSolid] = useState(false);
   const [query, setQuery] = useState("");
+
+  // My List is the persisted saved-stories store, shared with the Reels feed's
+  // Save button and the detail modal so a Save anywhere shows up everywhere.
+  const { saved: list, toggle: toggleList } = useSavedStories();
 
   useEffect(() => {
     const onS = () => setSolid(window.scrollY > 120);
@@ -996,18 +1007,25 @@ export default function DesktopShell() {
     return () => window.removeEventListener("scroll", onS);
   }, []);
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
-  useEffect(() => { document.body.style.overflow = active ? "hidden" : ""; return () => { document.body.style.overflow = ""; }; }, [active]);
+  // Lock the page behind a modal AND while the Reels feed owns the viewport.
+  useEffect(() => {
+    const lock = active !== null || view === "Reels";
+    document.body.style.overflow = lock ? "hidden" : "";
+    return () => { document.body.style.overflow = ""; };
+  }, [active, view]);
 
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
-  const shuffle = () => { const r = STORIES[Math.floor(Math.random() * STORIES.length)]; open(r.id, "Watch"); };
-  const toggleList = (id: string) => setList((l) => (l.includes(id) ? l.filter((x) => x !== id) : [...l, id]));
+  // "Play Something" jumps into the Reels feed (optionally at a story).
+  const openReels = (id?: string) => { setReelsStoryId(id ?? null); close(); setView("Reels"); };
+  const shuffle = () => openReels();
 
   return (
     <div className="min-h-screen bg-bg">
-      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
+      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setReelsStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
 
       {view === "Home" && <HomePage onOpen={open} onShuffle={shuffle} />}
+      {view === "Reels" && <ReelsDesktop onOpenInfo={open} paused={!!active} initialStoryId={reelsStoryId ?? undefined} />}
       {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} />}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} />}
       {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} />}

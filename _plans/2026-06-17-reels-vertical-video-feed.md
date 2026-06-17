@@ -7,14 +7,20 @@ scroll-snap + desktop paging). DONE: Phase 1 (data action), Phase 2 (mobile
 feed UI), Phase 3 (active-index autoplay + mute), Phase 5 (infinite scroll),
 Phase 6 (engagement rail — local Like, Save->My List, Share to /v/[slug]),
 Phase 7 (deep-link: "Play Something" opens the feed; initialStoryId scrolls to
-a loaded short), plus reduced-motion. My List is now a persisted localStorage
-store (lib/engagement-store) shared by the feed, the My List tab, and the Title
-sheet; MyList resolves saved ids via the live catalog (not byId, which threw on
-real short ids). NEXT: Phase 8 desktop adapter, Phase 9 full a11y/QA, and the
-deep-link "fetch-around" so an arbitrary short (not just one on a loaded page)
-can be jumped to. The standalone /reels route was intentionally NOT built — the
-shell's nav is client-state tabs, so Reels is a 5th in-shell tab (matches
-Home/Search/New/My List); shareable per-reel URLs still use /v/[slug].
+a loaded short), Phase 8 (desktop adapter), plus reduced-motion. My List is now
+a persisted localStorage store (lib/engagement-store) shared by the mobile feed,
+the desktop feed, both My List surfaces, and the Title/Detail sheets; both
+MyList/GridPage resolve saved ids via the live catalog (not byId, which threw on
+real short ids). Mobile + desktop share lib/use-prefers-reduced-motion and
+components/reels/useReelsData (one fetch/pagination source); the mobile feed
+uses CSS scroll-snap, the desktop ReelsDesktop uses DISCRETE paging
+(Arrow/Page/Space keys + debounced wheel + on-screen up/down buttons) per the
+council. Desktop Reels is a 5th top-nav item in DesktopShell.
+NEXT: Phase 9 full a11y/QA, and the deep-link "fetch-around" so an arbitrary
+short (not just one already on a loaded page) can be jumped to. The standalone
+/reels route was intentionally NOT built — the shells' nav is client-state tabs,
+so Reels is a tab on both (matches Home/Search/New/My List); shareable per-reel
+URLs still use /v/[slug].
 
 ## Goal
 

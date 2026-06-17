@@ -17,16 +17,11 @@
 // placeholder of the same height. That bounds memory and GCS egress so we
 // don't download shorts the user never reaches.
 
-import React, {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
-import { listPublishedShorts, type LiveCatalogStory } from "@/app/actions";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import ReelCard from "@/components/reels/ReelCard";
+import { useReelsData } from "@/components/reels/useReelsData";
 import { useSavedStories, useLikedReels } from "@/lib/engagement-store";
+import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 
 type OpenFn = (id: string, tab?: string) => void;
 
@@ -36,26 +31,6 @@ const PAGE_SIZE = 8;
 const PREFETCH_WITHIN = 3;
 // Mount a live <video> for the active card +/- this many neighbours.
 const MOUNT_RADIUS = 1;
-
-// prefers-reduced-motion as an external store — the React-19-sanctioned way to
-// read a browser media query without setting state inside an effect. Returns
-// false during SSR so the first client paint matches the server.
-const RM_QUERY = "(prefers-reduced-motion: reduce)";
-function usePrefersReducedMotion(): boolean {
-  return useSyncExternalStore(
-    (notify) => {
-      if (typeof window === "undefined" || !window.matchMedia) return () => {};
-      const mq = window.matchMedia(RM_QUERY);
-      mq.addEventListener("change", notify);
-      return () => mq.removeEventListener("change", notify);
-    },
-    () =>
-      typeof window !== "undefined" && window.matchMedia
-        ? window.matchMedia(RM_QUERY).matches
-        : false,
-    () => false,
-  );
-}
 
 export interface ReelsFeedProps {
   /** Opens the existing Title sheet (Watch / Read / Read-along) for a story. */
@@ -74,11 +49,7 @@ export default function ReelsFeed({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Array<HTMLElement | null>>([]);
 
-  const [shorts, setShorts] = useState<LiveCatalogStory[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [reachedEnd, setReachedEnd] = useState(false);
+  const { shorts, loading, loadingMore, loadMore } = useReelsData(PAGE_SIZE);
   const [activeIdx, setActiveIdx] = useState(0);
   const [muted, setMuted] = useState(true);
   const [soundHintShown, setSoundHintShown] = useState(true);
@@ -89,50 +60,6 @@ export default function ReelsFeed({
   // List tab + Title sheet) and the booleans are passed down per card.
   const { isSaved, toggle: toggleSave } = useSavedStories();
   const { isLiked, toggle: toggleLike } = useLikedReels();
-
-  // First page. `loading` already starts true, so no setState needed up front.
-  useEffect(() => {
-    let cancelled = false;
-    listPublishedShorts({ limit: PAGE_SIZE })
-      .then((r) => {
-        if (cancelled) return;
-        setShorts(r.shorts);
-        setCursor(r.nextCursor);
-        setReachedEnd(r.nextCursor === null);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        console.warn("[reels feed load err]", String(e));
-        setReachedEnd(true);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Append the next page. Guarded so overlapping scrolls don't double-fetch.
-  const loadMore = useCallback(() => {
-    if (loadingMore || reachedEnd || cursor === null) return;
-    setLoadingMore(true);
-    listPublishedShorts({ limit: PAGE_SIZE, beforePublishedAt: cursor })
-      .then((r) => {
-        setShorts((prev) => {
-          // Dedupe by id in case a row straddles the cursor boundary.
-          const seen = new Set(prev.map((s) => s.id));
-          return [...prev, ...r.shorts.filter((s) => !seen.has(s.id))];
-        });
-        setCursor(r.nextCursor);
-        if (r.nextCursor === null) setReachedEnd(true);
-      })
-      .catch((e) => {
-        console.warn("[reels feed loadMore err]", String(e));
-        setReachedEnd(true);
-      })
-      .finally(() => setLoadingMore(false));
-  }, [loadingMore, reachedEnd, cursor]);
 
   // Keep a ref to the latest loadMore so the IntersectionObserver can trigger
   // prefetch without re-binding every time the cursor changes (assigning a ref
