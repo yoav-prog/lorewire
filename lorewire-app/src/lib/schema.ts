@@ -480,6 +480,79 @@ export const HOMEPAGE_CURATION: Table = {
   ],
 };
 
+// 2026-06-17 multi-platform shorts publisher, Phase 1 (see
+// _plans/2026-06-16-multi-platform-shorts-publisher.md). The owner's connected
+// social accounts, one row per platform connection. Unlike most tables here this
+// is TS-app-owned: the Python pipeline never touches it, so schema.ts is the
+// sole authority and there is no pipeline/store.py mirror. OAuth tokens are
+// sealed with AES-256-GCM (lib/token-cipher.ts) before they land in the
+// *_token_enc columns, which stay TEXT so the base64url envelope round-trips on
+// SQLite and Postgres without a BYTEA column. NOT NULL and DEFAULT are not
+// expressible in this Table shape (see createTableSql); required-ness is
+// enforced at the repo boundary. Uniqueness on (platform, external_id) lives in
+// POST_TABLE_DDL. Plan sections 6 and 8.
+export const SOCIAL_ACCOUNTS: Table = {
+  name: "social_accounts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "platform", type: "TEXT" }, // 'youtube' | 'tiktok' | 'instagram' | 'facebook'
+    { name: "display_name", type: "TEXT" }, // e.g. the YouTube channel title
+    { name: "external_id", type: "TEXT" }, // channel_id / user_id / page_id
+    { name: "scopes", type: "TEXT" }, // space-separated granted scopes
+    { name: "access_token_enc", type: "TEXT" }, // AES-256-GCM envelope
+    { name: "refresh_token_enc", type: "TEXT" }, // nullable on long-lived tokens
+    { name: "token_expires_at", type: "TEXT" }, // ISO-8601
+    { name: "status", type: "TEXT" }, // 'active' | 'revoked' | 'needs_reauth'
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-17 Phase 1 YouTube publish ledger. One row per publish attempt of a
+// short_renders row to a connected YouTube channel. Minimal on purpose: the
+// Phase 2 multi-platform queue (publish_requests / publish_jobs) folds this in
+// via a backfill migration. short_id and account_id reference short_renders.id
+// and social_accounts.id by convention (no FK, matching the rest of this
+// schema). audio_clearance records the F9 gate verdict at publish time.
+// Uniqueness on (short_id, external_post_id) in POST_TABLE_DDL stops one short
+// producing two rows for the same uploaded video id. TS-app-owned, no pipeline
+// mirror. Plan sections 6 and 3.F9.
+export const YOUTUBE_PUBLISHES: Table = {
+  name: "youtube_publishes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "short_id", type: "TEXT" },
+    { name: "account_id", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" }, // YouTube video id once known
+    { name: "public_url", type: "TEXT" },
+    { name: "status", type: "TEXT" }, // 'in_flight' | 'published' | 'failed'
+    { name: "last_error", type: "TEXT" },
+    { name: "audio_clearance", type: "TEXT" }, // F9 verdict at publish time
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-17 OAuth CSRF and PKCE staging. One short-lived row per in-flight
+// authorization: created when the admin clicks Connect, read once in the
+// callback, then deleted. `state` is the single-use random token the provider
+// echoes back (PK, so the callback looks the flow up by it); `code_verifier` is
+// the PKCE secret that must stay server-side; `session_ref` binds the flow to
+// the admin session that started it so a stolen state cannot be replayed from
+// another session; `expires_at` is an ISO-8601 ~10-minute TTL the callback
+// enforces. TS-app-owned. Plan section 8 (CSRF on every callback).
+export const OAUTH_FLOWS: Table = {
+  name: "oauth_flows",
+  columns: [
+    { name: "state", type: "TEXT", pk: true },
+    { name: "platform", type: "TEXT" },
+    { name: "code_verifier", type: "TEXT" },
+    { name: "session_ref", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -497,6 +570,9 @@ export const TABLES: Table[] = [
   STORY_JOBS,
   VOICE_RENDERS,
   HOMEPAGE_CURATION,
+  SOCIAL_ACCOUNTS,
+  YOUTUBE_PUBLISHES,
+  OAUTH_FLOWS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -560,4 +636,16 @@ export const POST_TABLE_DDL: string[] = [
   // hot read path (one query per rail) so the leading column matches.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_curation_surface_position " +
     "ON homepage_curation(surface, position)",
+  // 2026-06-17 multi-platform shorts publisher. One connection per (platform,
+  // external_id): re-connecting the same channel updates the existing row rather
+  // than inserting a duplicate, and the publish path resolves the account by
+  // platform. TS-app-owned, so this index is the sole authority (no store.py).
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_social_accounts_platform_external " +
+    "ON social_accounts(platform, external_id)",
+  // 2026-06-17 at most one youtube_publishes row per (short, external video id).
+  // NULLs are distinct on both engines, so several in-flight rows (NULL
+  // external_post_id) are allowed and the route guards re-clicks; this stops a
+  // short ever being tied to the same uploaded video twice.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_youtube_publishes_short_external " +
+    "ON youtube_publishes(short_id, external_post_id)",
 ];
