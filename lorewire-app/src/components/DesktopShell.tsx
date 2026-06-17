@@ -27,6 +27,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   video_url: null,
   images: [],
   captions: [],
+  body: null,
   is_short: false,
   found: false,
 };
@@ -369,7 +370,7 @@ function GalleryScroller({ children, count }: { children: React.ReactNode; count
       >
         <span className="w-10 h-10 rounded-full bg-bg/85 border border-line flex items-center justify-center text-ink"><ChevL size={22} /></span>
       </button>
-      <div ref={ref} className="flex gap-5 overflow-x-auto noscroll snap-x snap-mandatory pb-2 -mx-1 px-1">{children}</div>
+      <div ref={ref} className="flex items-start gap-5 overflow-x-auto noscroll snap-x snap-mandatory pb-2 -mx-1 px-1">{children}</div>
       <button
         onClick={() => scroll(1)}
         className="absolute right-0 top-0 bottom-0 z-20 w-14 flex items-center justify-center transition-opacity"
@@ -454,7 +455,9 @@ function GenArticle({
   story: Story;
   liveMedia: LiveStoryMediaResult;
 }) {
-  const paras = (story.body || "").split(/\n{2,}/);
+  // A live-only story carries no body on the client, so prefer the live body
+  // the modal fetched — otherwise the article would fall through to the sample.
+  const paras = (story.body || liveMedia.body || "").split(/\n{2,}/);
   // Use the live scene frames whenever the fetch found them (short doodle
   // frames, or live stills for a story not yet re-exported); fall back to the
   // baked stills. Aspect/crop still keys on whether the applied video is a
@@ -545,34 +548,14 @@ function Read({
         ))}
       </div>
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        (story.body || liveMedia.body) ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        // No body anywhere yet (the live fetch is still in flight, or this is a
+        // sample story with no article). Show THIS story's own synopsis so it's
+        // never the wrong article — GenArticle takes over once the body lands.
         <article className="fade-in max-w-[660px]">
-          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
-          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>The $800 Envelope</h1>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">
-            <span className="float-left font-display font-black text-accent mr-2.5 leading-[.78]" style={{ fontSize: 72 }}>I</span>
-            t started, as these things do, with the most enthusiastic person in the office. Dana volunteered to collect for the retirement gift before anyone else could even reach for their wallet, and within a day the cash was rolling in from every desk on the floor.
-          </p>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">The envelope was, by all accounts, fat. People remembered handing over twenties. One person swears they put in a hundred. And then, sometime over a long weekend, the envelope simply&hellip; relocated.</p>
-          <figure className="my-7">
-            <div className="rounded-[12px] overflow-hidden grain relative" style={{ background: "#FBFAF4", height: 200 }}>
-              <div className="absolute inset-0 flex items-center justify-center"><span className="font-hand font-bold" style={{ fontSize: 54, color: "#E8462B", transform: "rotate(-3deg)" }}>poof.</span></div>
-            </div>
-            <figcaption className="font-mono text-[10px] text-muted mt-2">Illustration &middot; LoreWire Studio</figcaption>
-          </figure>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90">What follows is a slow-motion unraveling: a vague excuse, a suspiciously new handbag, and a group chat that had quietly been keeping receipts the entire time.</p>
-          <blockquote className="my-8 border-l-[3px] border-accent pl-5">
-            <p className="font-display font-bold uppercase tracking-tightest leading-[1.04] text-ink" style={{ fontSize: 28 }}>&ldquo;I moved it somewhere safe,&rdquo; she said. <span className="text-accent">It was not somewhere safe.</span></p>
-          </blockquote>
-          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90">By Monday, forty-one people wanted answers and exactly one of them worked in HR. The math, helpfully, did itself.</p>
-          <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
-            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
-            <p className="font-body italic text-[15.5px] text-ink/90 leading-relaxed">&ldquo;She told us it was &lsquo;handled.&rsquo; It was handled the way a magician handles a coin.&rdquo;</p>
-            <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
-              <span className="text-ink/80">u/throwaway_desk42</span><span>&middot;</span><span>r/AmItheAsshole</span><span>&middot;</span><span>Mar 2024</span>
-              <span className="ml-auto text-accent font-medium">View source &rarr;</span>
-            </div>
-          </div>
+          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
+          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>{story.title}</h1>
+          <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">{story.syn}</p>
         </article>
         )
       ) : (

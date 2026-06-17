@@ -41,12 +41,16 @@ export interface LiveStoryMediaResult {
    *  long-form video (or no video), this falls back to stories.images
    *  and the caller should render at 16:9. */
   images: string[];
-  /** Caption text aligned 1:1 with `images`. For a short these are the spoken
-   *  lines under each doodle frame (from the short's caption chunks); otherwise
-   *  sentences sliced from the article body (then summary). Empty strings where
-   *  no source text exists so the gallery degrades cleanly instead of going
-   *  blank. */
+  /** Caption text aligned 1:1 with `images`: one sentence per scene, sliced
+   *  from the article body (then summary) and length-capped so cards stay
+   *  uniform. Empty strings where no source text exists so the gallery degrades
+   *  cleanly instead of going blank. */
   captions: string[];
+  /** The article body for this story, so the public READ → Article view can
+   *  render the real article for a live-only story (one not yet baked into
+   *  src/data/published.ts, where `story.body` is absent on the client).
+   *  Null when the story has no body. */
+  body: string | null;
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -71,61 +75,33 @@ async function latestDoneShortPropsForStory(
   return row?.props ?? null;
 }
 
-// Pull the short's scene frames AND the spoken line under each one. Every
-// doodle frame carries an `idx` into the caption-chunk space (set by
-// shorts_render._map_frames); a frame's caption is the chunk text from its idx
-// up to the next frame's idx. Returns urls + captions aligned 1:1 so the
-// gallery can label each doodle scene with what's said over it.
-function parseShortFrames(
-  propsJson: string | null,
-): { urls: string[]; captions: string[] } {
-  const empty = { urls: [] as string[], captions: [] as string[] };
-  if (!propsJson) return empty;
+// Scene frame URLs from a done short's props. The short renders its doodle
+// scenes to doodle_frames[].url; the gallery shows these when the applied
+// video is a short.
+function parseShortFrameUrls(propsJson: string | null): string[] {
+  if (!propsJson) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(propsJson);
   } catch {
-    return empty;
+    return [];
   }
-  if (!parsed || typeof parsed !== "object") return empty;
-  const obj = parsed as { doodle_frames?: unknown; captions?: unknown };
-  const rawCaps = Array.isArray(obj.captions) ? obj.captions : [];
-  const capTexts = rawCaps.map((c) =>
-    c && typeof c === "object" && typeof (c as { text?: unknown }).text === "string"
-      ? (c as { text: string }).text.trim()
-      : "",
-  );
-  const frames = (Array.isArray(obj.doodle_frames) ? obj.doodle_frames : [])
-    .filter(
-      (f): f is { url: string; idx?: number } =>
-        !!f &&
-        typeof f === "object" &&
-        typeof (f as { url?: unknown }).url === "string",
-    )
-    .map((f) => ({
-      url: (f as { url: string }).url,
-      idx:
-        typeof (f as { idx?: unknown }).idx === "number"
-          ? (f as { idx: number }).idx
-          : 0,
-    }))
-    .sort((a, b) => a.idx - b.idx);
-  if (frames.length === 0) return empty;
-  const urls = frames.map((f) => f.url);
-  const captions = frames.map((f, i) => {
-    const start = Math.max(0, Math.min(f.idx, capTexts.length));
-    const end =
-      i + 1 < frames.length
-        ? Math.max(start, Math.min(frames[i + 1].idx, capTexts.length))
-        : capTexts.length;
-    return capTexts.slice(start, end).join(" ").replace(/\s+/g, " ").trim();
-  });
-  return { urls, captions };
+  if (!parsed || typeof parsed !== "object") return [];
+  const frames = (parsed as { doodle_frames?: unknown }).doodle_frames;
+  if (!Array.isArray(frames)) return [];
+  const out: string[] = [];
+  for (const f of frames) {
+    if (f && typeof f === "object" && typeof (f as { url?: unknown }).url === "string") {
+      out.push((f as { url: string }).url);
+    }
+  }
+  return out;
 }
 
-// Slice prose into one sentence per scene so a gallery without word-level
-// alignment still captions every image. Mirrors the client _captionsFromBody
-// so live and baked stories caption the same way.
+// Slice prose into one short caption per scene so a gallery without word-level
+// alignment still captions every image evenly. One sentence per scene, capped
+// so a single long sentence can't blow a card out of proportion. Mirrors the
+// client _captionsFromBody so live and baked stories caption the same way.
 function captionsFromText(
   text: string | null | undefined,
   count: number,
@@ -138,10 +114,14 @@ function captionsFromText(
       ?.map((s) => s.trim())
       .filter(Boolean) ?? [];
   if (sentences.length === 0) return [];
+  const cap = (s: string) =>
+    s.length > 160 ? s.slice(0, 157).replace(/\s+\S*$/, "") + "..." : s;
   return Array.from({ length: count }, (_, i) =>
-    sentences[
-      Math.min(Math.floor((i * sentences.length) / count), sentences.length - 1)
-    ],
+    cap(
+      sentences[
+        Math.min(Math.floor((i * sentences.length) / count), sentences.length - 1)
+      ],
+    ),
   );
 }
 
@@ -171,6 +151,7 @@ export async function getLiveStoryMedia(
     video_url: null,
     images: [],
     captions: [],
+    body: null,
     is_short: false,
     found: false,
   };
@@ -205,33 +186,27 @@ export async function getLiveStoryMedia(
   if (!row) return empty;
 
   const isShort = isShortVideoUrl(row.video_url);
-  // Images + the caption under each, aligned 1:1. A short labels every doodle
-  // frame with the line spoken while it's on screen; otherwise the gallery
-  // slices the article body (then summary) into one sentence per scene so it's
-  // never text-less. When the applied video is a short we also swap the
-  // long-form stills for the short's 9:16 doodle frames so the visuals match.
+  // Pick the scene images: a short shows its 9:16 doodle frames; everything
+  // else shows the long-form stills. Then caption every scene by slicing the
+  // article body (then summary) into one sentence each, so the gallery is
+  // never text-less and the captions stay uniform across cards (the spoken
+  // caption-chunk mapping produced wildly uneven lengths).
   let images: string[];
-  let captions: string[];
   if (isShort) {
     const propsJson = await latestDoneShortPropsForStory(row.id);
-    const frames = parseShortFrames(propsJson);
-    if (frames.urls.length > 0) {
-      images = frames.urls;
-      captions = frames.captions;
-    } else {
-      images = parseStoryImageList(row.images);
-      captions = captionsFromText(row.body ?? row.summary, images.length);
-    }
+    const shortImages = parseShortFrameUrls(propsJson);
+    images = shortImages.length > 0 ? shortImages : parseStoryImageList(row.images);
   } else {
     images = parseStoryImageList(row.images);
-    captions = captionsFromText(row.body ?? row.summary, images.length);
   }
+  const captions = captionsFromText(row.body ?? row.summary, images.length);
 
   return {
     ok: true,
     video_url: row.video_url,
     images,
     captions,
+    body: row.body,
     is_short: isShort,
     found: true,
   };

@@ -29,6 +29,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   video_url: null,
   images: [],
   captions: [],
+  body: null,
   is_short: false,
   found: false,
 };
@@ -494,7 +495,9 @@ function _articleImagePositions(paraCount: number, imageCount: number): Set<numb
 }
 
 function GenArticle({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaResult }) {
-  const paras = (story.body || "").split(/\n{2,}/);
+  // A live-only story carries no body on the client, so prefer the live body
+  // the modal fetched — otherwise the article would fall through to the sample.
+  const paras = (story.body || liveMedia.body || "").split(/\n{2,}/);
   // Use the live scene frames whenever the fetch found them (short doodle
   // frames, or live stills for a story not yet re-exported); fall back to the
   // baked stills. Aspect/crop still keys on whether the applied video is a
@@ -575,54 +578,14 @@ function Read({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaRes
       </div>
 
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        (story.body || liveMedia.body) ? <GenArticle story={story} liveMedia={liveMedia} /> : (
+        // No body anywhere yet (the live fetch is still in flight, or this is a
+        // sample story with no article). Show THIS story's own synopsis so it's
+        // never the wrong article — GenArticle takes over once the body lands.
         <article className="fade-in">
-          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
-          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>The $800 Envelope</h1>
-          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">
-            <span className="float-left font-display font-black text-accent mr-2 leading-[.8]" style={{ fontSize: 58 }}>I</span>
-            t started, as these things do, with the most enthusiastic person in the office. Dana volunteered to collect for the retirement gift before anyone else could even reach for their wallet, and within a day the cash was rolling in from every desk on the floor.
-          </p>
-          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">
-            The envelope was, by all accounts, fat. People remembered handing over twenties. One person swears they put in a hundred. And then, sometime over a long weekend, the envelope simply&hellip; relocated.
-          </p>
-
-          <figure className="my-5">
-            <div className="rounded-[12px] overflow-hidden" style={{ background: "#FBFAF4", height: 150 }}>
-              <div className="w-full h-full relative grain">
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="font-hand font-bold" style={{ fontSize: 40, color: "#E8462B", transform: "rotate(-3deg)" }}>poof.</span>
-                </div>
-              </div>
-            </div>
-            <figcaption className="font-mono text-[10px] text-muted mt-1.5">Illustration &middot; LoreWire Studio</figcaption>
-          </figure>
-
-          <p className="font-body text-[15px] leading-relaxed text-ink/90">
-            What follows is a slow-motion unraveling: a vague excuse, a suspiciously new handbag, and a group chat that had quietly been keeping receipts the entire time.
-          </p>
-
-          <blockquote className="my-6 text-center">
-            <p className="font-display font-bold uppercase tracking-tightest leading-[1.02] text-ink" style={{ fontSize: 24 }}>
-              &ldquo;I moved it somewhere safe,&rdquo; she said. <span className="text-accent">It was not somewhere safe.</span>
-            </p>
-          </blockquote>
-
-          <p className="font-body text-[15px] leading-relaxed text-ink/90">
-            By Monday, forty-one people wanted answers and exactly one of them worked in HR. The math, helpfully, did itself.
-          </p>
-
-          <div className="mt-6 rounded-[10px] p-4" style={{ background: "#15141A", borderLeft: "3px solid #E8462B" }}>
-            <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2">From the original thread</p>
-            <p className="font-body italic text-[14.5px] text-ink/90 leading-relaxed">
-              &ldquo;She told us it was &lsquo;handled.&rsquo; It was handled the way a magician handles a coin.&rdquo;
-            </p>
-            <div className="flex items-center gap-2 mt-3 font-mono text-[11px] text-muted flex-wrap">
-              <span className="text-ink/80">u/throwaway_desk42</span><span>&middot;</span>
-              <span>r/AmItheAsshole</span><span>&middot;</span><span>Mar 2024</span>
-              <span className="ml-auto text-accent font-medium">View source &rarr;</span>
-            </div>
-          </div>
+          <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
+          <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>{story.title}</h1>
+          <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">{story.syn}</p>
         </article>
         )
       ) : (
@@ -636,7 +599,7 @@ function Read({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaRes
             const cardAspect = useShort ? "9/16" : "3/4";
             return (
               <div className="fade-in">
-                <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
+                <div className="flex items-start gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
                   {items.map((g, i) => (
                     <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: cardWidth, background: "#15141A" }}>
                       <div className="relative" style={{ aspectRatio: cardAspect }}>
@@ -654,7 +617,7 @@ function Read({ story, liveMedia }: { story: Story; liveMedia: LiveStoryMediaRes
           // Fallback to the hardcoded sample gallery for stories without pipeline assets.
           return (
             <div className="fade-in">
-              <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
+              <div className="flex items-start gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
                 {GALLERY.map((g, i) => (
                   <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 300, background: "#FBFAF4" }}>
                     <div className="h-[230px] relative grain flex items-center justify-center">
