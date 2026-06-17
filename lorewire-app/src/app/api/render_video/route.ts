@@ -82,6 +82,29 @@ interface CloudRunRenderResponse {
 interface CloudRunSegments {
   intro: string | null;
   outro: string | null;
+  /** Seconds of held-frame + silent-audio pad inserted on the body's
+   *  tail when an outro is present. Mirrors the
+   *  `outro_lead_in_sec` plumbing on the local pipeline (Python
+   *  `pipeline/segments.py:splice`). Cloud Run reads this off the
+   *  splice request body; null = no pad, keep the splice byte-equivalent
+   *  to the pre-fix behaviour. */
+  outroLeadInSec?: number;
+}
+
+/** Default silent gap between body and outro, in milliseconds. Tunable
+ *  via the `video.outro_lead_in_ms` setting; mirrors the Python default
+ *  in pipeline/segments.py:DEFAULT_OUTRO_LEAD_IN_MS. */
+const DEFAULT_OUTRO_LEAD_IN_MS = 1500;
+
+/** Read `video.outro_lead_in_ms` and return seconds clamped to a sane
+ *  range. Defaults to DEFAULT_OUTRO_LEAD_IN_MS when unset or
+ *  unparseable so a typo doesn't fail the render. */
+async function resolveOutroLeadInSec(): Promise<number> {
+  const raw = (await getSetting("video.outro_lead_in_ms")) ?? "";
+  const trimmed = raw.trim();
+  const ms = trimmed === "" ? DEFAULT_OUTRO_LEAD_IN_MS : Number(trimmed);
+  if (!Number.isFinite(ms)) return DEFAULT_OUTRO_LEAD_IN_MS / 1000;
+  return Math.max(0, Math.min(10_000, ms)) / 1000;
 }
 
 function namespacedLog(event: string, fields: Record<string, unknown>): void {
@@ -264,11 +287,18 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // so the render still produces a body-only MP4 instead of failing
   // the whole row over a missing segment row.
   const segments = await resolveSegmentsSafe(claimed.id, story);
+  // Tail-pad between body and outro so the narrator's last word isn't
+  // stepped on. Resolved from the same setting as the local-pipeline
+  // path so a single knob ("video.outro_lead_in_ms") controls both.
+  if (segments.outro !== null) {
+    segments.outroLeadInSec = await resolveOutroLeadInSec();
+  }
   await logVideoRenderEvent(claimed.id, "segments_resolved", {
     message: "Resolved intro/outro for this render.",
     payload: {
       intro_url: segments.intro,
       outro_url: segments.outro,
+      outro_lead_in_sec: segments.outroLeadInSec ?? 0,
     },
   });
   namespacedLog("segments_resolved", {
@@ -276,6 +306,7 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     story_id: claimed.story_id,
     has_intro: segments.intro !== null,
     has_outro: segments.outro !== null,
+    outro_lead_in_sec: segments.outroLeadInSec ?? 0,
   });
 
   await logVideoRenderEvent(claimed.id, "dispatch_start", {

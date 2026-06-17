@@ -88,6 +88,13 @@ export interface RenderResult {
 export interface SpliceSegments {
   intro: string | null;
   outro: string | null;
+  /** Seconds of held-frame + silent-audio pad to insert on the body's
+   *  tail when an outro is also present. Mirrors
+   *  `outro_lead_in_sec` on `pipeline/segments.py:splice`. Undefined or
+   *  0 leaves the splice unchanged. The dispatcher (Vercel cron) reads
+   *  the `video.outro_lead_in_ms` setting and POSTs the resolved value
+   *  here so this service stays config-free. */
+  outroLeadInSec?: number;
 }
 
 /** Test-side seam so the HTTP layer can stub the heavy lifting
@@ -415,12 +422,25 @@ async function spliceWithSegments(opts: {
   // Inputs in playback order: intro → body → outro. Any missing end is
   // simply skipped, matching `pipeline/segments.py:splice`.
   const inputs: string[] = [];
-  if (introPath) inputs.push(introPath);
+  let bodyIndex = 0;
+  if (introPath) {
+    inputs.push(introPath);
+    bodyIndex = 1;
+  }
   inputs.push(bodyPath);
   if (outroPath) inputs.push(outroPath);
 
-  const argv = buildConcatArgv(inputs, splicedPath);
-  spliceLog("ffmpeg", { story_id: storyId, argv });
+  // Pad only when an outro is going to play right after the body;
+  // padding before nothing just lengthens the output for no reason.
+  const padSec =
+    outroPath !== null && typeof segments.outroLeadInSec === "number"
+      ? Math.max(0, segments.outroLeadInSec)
+      : 0;
+  const argv = buildConcatArgv(inputs, splicedPath, {
+    bodyIndex,
+    bodyTailPadSec: padSec,
+  });
+  spliceLog("ffmpeg", { story_id: storyId, argv, body_tail_pad_sec: padSec });
   await runFfmpeg(argv, storyId);
 
   // Replace the body file with the spliced one. fs.rename is atomic

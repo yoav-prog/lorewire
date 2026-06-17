@@ -113,6 +113,33 @@ _SAFE_SEGMENT_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 # --- pure helpers (covered by pipeline/tests/test_segments.py) ---------------
 
+DEFAULT_OUTRO_LEAD_IN_MS = 1500
+"""Silent gap inserted between body and outro by default. 1.5s gives
+the narrator's last syllable a beat to breathe before the outro audio
+cuts in. Tunable via the `video.outro_lead_in_ms` setting; 0 disables."""
+
+
+def resolve_outro_lead_in_sec(get_setting: Callable[[str], Optional[str]]) -> float:
+    """Read `video.outro_lead_in_ms` from settings and return seconds.
+
+    Defaults to `DEFAULT_OUTRO_LEAD_IN_MS / 1000` when unset; clamps to
+    [0, 10] so a typo can't produce a half-hour silent gap or a negative
+    pad. Unparseable values fall back to the default rather than failing
+    the render.
+    """
+    raw = (get_setting("video.outro_lead_in_ms") or "").strip()
+    if not raw:
+        return DEFAULT_OUTRO_LEAD_IN_MS / 1000.0
+    try:
+        ms = float(raw)
+    except ValueError:
+        return DEFAULT_OUTRO_LEAD_IN_MS / 1000.0
+    # Bound to a sane range — defense against a fat-finger setting that
+    # would otherwise stretch every short to half an hour.
+    ms = max(0.0, min(ms, 10_000.0))
+    return ms / 1000.0
+
+
 def _ffmpeg_normalize_cmd(
     source: Path,
     output: Path,
@@ -146,19 +173,67 @@ def _ffmpeg_normalize_cmd(
 
 
 def _ffmpeg_splice_cmd(
-    inputs: list[Path], output: Path, has_audio: bool = True
+    inputs: list[Path],
+    output: Path,
+    has_audio: bool = True,
+    *,
+    body_index: int | None = None,
+    body_tail_pad_sec: float = 0.0,
 ) -> list[str]:
     """Build the ffmpeg argv that concatenates 2+ inputs with the concat
-    filter. All inputs are assumed normalized (same res/fps/codec). Pure."""
+    filter. All inputs are assumed normalized (same res/fps/codec). Pure.
+
+    When `body_index` is supplied AND `body_tail_pad_sec > 0`, the body
+    input gets a tail-pad inserted before the concat: `tpad=stop_mode=clone`
+    holds the last video frame for the pad duration, and `apad` extends
+    the audio track with silence for the same duration. The padded
+    streams feed into the concat in place of the raw body streams, so
+    everything that comes AFTER the body (typically the outro) starts
+    `body_tail_pad_sec` later — giving the narration a beat to land
+    before the outro audio cuts in.
+
+    Designed so the body is at one position in the inputs list (e.g.
+    index 1 when an intro precedes it; index 0 when not), and only the
+    body's streams get the pad — the intro / outro inputs are passed
+    through unchanged.
+    """
     if len(inputs) < 2:
         raise ValueError("splice needs at least 2 inputs")
+    pad_active = (
+        body_index is not None
+        and body_tail_pad_sec > 0.0
+        and 0 <= body_index < len(inputs)
+        # No point padding the body when nothing follows it (no outro).
+        and body_index < len(inputs) - 1
+    )
     argv: list[str] = ["ffmpeg", "-y"]
     for p in inputs:
         argv += ["-i", str(p)]
-    # Build the filter graph: [0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1[v][a]
+
+    # Filter graph. Without pad: [0:v][0:a][1:v][1:a]...concat=...
+    # With pad applied to body at index B:
+    #   [B:v:0]tpad=stop_mode=clone:stop_duration=S[bv];
+    #   [B:a:0]apad=pad_dur=S[ba];
+    #   [0:v:0][0:a:0]...[bv][ba]...concat=...
     streams = ""
+    if pad_active:
+        # Format with `g` to avoid trailing zeros — ffmpeg's filter parser
+        # is happy with either, but a clean number reads easier in logs.
+        pad_s = format(body_tail_pad_sec, "g")
+        streams += (
+            f"[{body_index}:v:0]tpad=stop_mode=clone:stop_duration={pad_s}[bv];"
+        )
+        if has_audio:
+            streams += f"[{body_index}:a:0]apad=pad_dur={pad_s}[ba];"
     for i in range(len(inputs)):
-        streams += f"[{i}:v:0]" + (f"[{i}:a:0]" if has_audio else "")
+        if pad_active and i == body_index:
+            streams += "[bv]"
+            if has_audio:
+                streams += "[ba]"
+        else:
+            streams += f"[{i}:v:0]"
+            if has_audio:
+                streams += f"[{i}:a:0]"
     a = 1 if has_audio else 0
     streams += f"concat=n={len(inputs)}:v=1:a={a}[v]"
     if has_audio:
@@ -441,6 +516,8 @@ def splice(
     outro_path: Path | None,
     output_path: Path,
     context_id: str = "",
+    *,
+    outro_lead_in_sec: float = 0.0,
 ) -> dict:
     """Glue intro + body + outro into `output_path` with one re-encode pass.
 
@@ -448,15 +525,23 @@ def splice(
     None this is a no-op file copy (atomic rename when the caller controls
     the temp dir). Returns `{"duration_ms": int}` on the final spliced file.
     Raises on ffmpeg failure.
+
+    `outro_lead_in_sec` (2026-06-17 fix) inserts a held-frame + silent
+    audio pad on the body's tail when an outro is present, so the
+    narrator's last word doesn't get stepped on by the outro cue.
+    Defaults to 0 for back-compat; callers that want the user-facing
+    default (1.5s) read `resolve_outro_lead_in_sec(store.get_setting)`.
     """
     tag = f"[video splice id={context_id or '?'}]"
     if not body_path.exists():
         raise RuntimeError(f"{tag} body missing: {body_path}")
     inputs: list[Path] = []
+    body_index = 0
     if intro_path:
         if not intro_path.exists():
             raise RuntimeError(f"{tag} intro missing: {intro_path}")
         inputs.append(intro_path)
+        body_index = 1
     inputs.append(body_path)
     if outro_path:
         if not outro_path.exists():
@@ -475,12 +560,20 @@ def splice(
         print(f"{tag} no segments active; copied body through ({duration_ms}ms)")
         return {"duration_ms": duration_ms}
 
-    argv = _ffmpeg_splice_cmd(inputs, output_path)
+    # Only pad when there's an outro to separate from the narration;
+    # tail-padding before just an intro-then-body chain would extend the
+    # output for no reason.
+    pad_sec = outro_lead_in_sec if outro_path is not None else 0.0
+    argv = _ffmpeg_splice_cmd(
+        inputs, output_path, body_index=body_index, body_tail_pad_sec=pad_sec,
+    )
     parts_desc = "+".join(
         ["intro" if intro_path else ""] +
         ["body"] +
         (["outro"] if outro_path else [])
     ).strip("+")
+    if pad_sec > 0:
+        parts_desc = parts_desc.replace("body", f"body+{pad_sec:g}s-pad")
     print(f"{tag} start parts={parts_desc} inputs={len(inputs)} -> {output_path.name}")
     started = time.time()
     result = _run_ffmpeg(argv, context=f"video splice id={context_id}")
