@@ -4,7 +4,6 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   CAT,
   STORIES,
-  byId,
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
@@ -867,13 +866,25 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 
 /* ----------------------------- PAGES ----------------------------- */
 
-function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void }) {
-  // Fetch the live admin curation + live published catalog once on
-  // mount. Each rail prefers the curated list; empty curation falls
-  // through to the settings-driven behaviour (auto-derive from the
-  // merged live+sample catalog, or hide). Failure also falls back
-  // silently so a DB blip can't take the homepage down.
-  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+function HomePage({
+  onOpen,
+  onShuffle,
+  curation,
+  behavior,
+  catalog,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  curation: ReturnType<typeof useHomepageCuration>["curation"];
+  behavior: ReturnType<typeof useHomepageCuration>["behavior"];
+  catalog: ReturnType<typeof useHomepageCuration>["catalog"];
+  resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+}) {
+  // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
+  // New & Hot grids can share the same resolveStory (saved real shorts aren't
+  // in the baked STORIES catalog). One hook call drives both the rails and
+  // every grid that resolves ids to cards.
   // Phase 4.5 of _plans/2026-06-17-engagement-polls.md. The three
   // derived rails — computed live from poll_aggregates, not curated.
   // Empty arrays (no votes yet OR rail disabled in settings) just
@@ -957,20 +968,32 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
   );
 }
 
-function GridPage({ title, sub, ids, onOpen }: { title: string; sub?: string; ids: string[]; onOpen: OpenFn }) {
-  // Resolve via byId — Phase 8 of the reels rollout switched to resolveStory
-  // (live+sample catalog) to avoid throwing on real short ids saved through
-  // the feed, but that pattern requires hoisting useHomepageCuration to the
-  // shell level. For now we keep the byId path; saved real shorts can crash
-  // the My List view until the catalog gets hoisted in a follow-up.
+function GridPage({
+  title,
+  sub,
+  ids,
+  onOpen,
+  resolveStory,
+}: {
+  title: string;
+  sub?: string;
+  ids: string[];
+  onOpen: OpenFn;
+  resolveStory: (id: string) => Story | null;
+}) {
+  // Resolve through the live+sample catalog, NOT byId — saved ids can be
+  // real shorts the Reels feed saved that aren't in the baked sample
+  // catalog, and byId throws on unknown ids. Unresolved ids are skipped
+  // cleanly so a stale My List entry can't crash the page.
+  const items = ids.map(resolveStory).filter((s): s is Story => s !== null);
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">{title}</h1>
       {sub && <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">{sub}</p>}
       <div className="grid grid-cols-5 gap-5 mt-9">
-        {ids.map((id) => <div key={id} style={{ height: 296 }}><PosterCard story={byId(id)} onOpen={onOpen} w={"100%"} h={296} /></div>)}
+        {items.map((s) => <div key={s.id} style={{ height: 296 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={296} /></div>)}
       </div>
-      {ids.length === 0 && <p className="font-body text-muted mt-12">Nothing here yet.</p>}
+      {items.length === 0 && <p className="font-body text-muted mt-12">Nothing here yet.</p>}
     </div>
   );
 }
@@ -1001,6 +1024,12 @@ export default function DesktopShell() {
   // Save button and the detail modal so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
 
+  // Hoisted curation + live-catalog hook. HomePage reads it through props
+  // instead of calling the hook itself so every grid (Browse / New & Hot /
+  // My List) can share resolveStory and resolve real-short ids saved
+  // through the Reels feed without throwing on byId.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+
   useEffect(() => {
     const onS = () => setSolid(window.scrollY > 120);
     window.addEventListener("scroll", onS, { passive: true });
@@ -1024,11 +1053,20 @@ export default function DesktopShell() {
     <div className="min-h-screen bg-bg">
       <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setReelsStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
 
-      {view === "Home" && <HomePage onOpen={open} onShuffle={shuffle} />}
+      {view === "Home" && (
+        <HomePage
+          onOpen={open}
+          onShuffle={shuffle}
+          curation={curation}
+          behavior={behavior}
+          catalog={catalog}
+          resolveStory={resolveStory}
+        />
+      )}
       {view === "Reels" && <ReelsDesktop onOpenInfo={open} paused={!!active} initialStoryId={reelsStoryId ?? undefined} />}
-      {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} />}
-      {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} />}
-      {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} />}
+      {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} resolveStory={resolveStory} />}
+      {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} resolveStory={resolveStory} />}
+      {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} resolveStory={resolveStory} />}
       {view === "Search" && <SearchPage onOpen={open} query={query} />}
 
       <footer className="border-t border-line mt-10">
@@ -1038,7 +1076,14 @@ export default function DesktopShell() {
         </div>
       </footer>
 
-      {active && <DetailModal story={byId(active.id)} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} />}
+      {active && (() => {
+        // resolveStory checks the live catalog first so real-short ids saved
+        // through the Reels feed (not in STORIES) still open the modal.
+        // Stale id -> render nothing; close button still works because
+        // `active` is set.
+        const s = resolveStory(active.id);
+        return s ? <DetailModal story={s} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} /> : null;
+      })()}
     </div>
   );
 }

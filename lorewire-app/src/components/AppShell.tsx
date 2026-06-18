@@ -200,14 +200,29 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
 }
 
 /* ----------------------------- HOME ----------------------------- */
-function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle: () => void; pill: string; setPill: (p: string) => void }) {
-  // Live admin curation + live published catalog drive every rail. Empty
-  // curation falls back to auto-derived defaults from the MERGED catalog
-  // (live DB + sample STORIES) so newly published stories appear without
-  // a re-export. Hero pick comes from curation.hero when set; otherwise
-  // the legacy envelope default keeps the visual stable until curation
-  // lands.
-  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+function Home({
+  onOpen,
+  onShuffle,
+  pill,
+  setPill,
+  curation,
+  behavior,
+  catalog,
+  resolveStory,
+}: {
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  pill: string;
+  setPill: (p: string) => void;
+  curation: ReturnType<typeof useHomepageCuration>["curation"];
+  behavior: ReturnType<typeof useHomepageCuration>["behavior"];
+  catalog: ReturnType<typeof useHomepageCuration>["catalog"];
+  resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+}) {
+  // Curation + live catalog are hoisted to MobileShell so MyList / TitleSheet
+  // can share resolveStory (saved real shorts aren't in the baked STORIES
+  // catalog). One hook call drives both the rails and every component that
+  // resolves an id to a card.
   // Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Same hook
   // DesktopShell uses; the rail visual stays identical between shells
   // because PollRailCard owns its own layout.
@@ -1060,12 +1075,12 @@ function MobileShell() {
   // Save button and the Title sheet so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
 
-  // Hoisted curation hook so MyList can use resolveStory (real shorts saved
-  // through the Reels feed aren't in the baked STORIES catalog). Home still
-  // calls the hook internally for the rails it owns — both calls hit the
-  // same React effect and the duplicate network round trip is a wash next
-  // to wiring resolveStory through the entire component tree.
-  const { resolveStory } = useHomepageCuration();
+  // Hoisted curation + live-catalog hook. Home receives the values as
+  // props instead of calling the hook itself so MyList and the modal
+  // mount site below share one `resolveStory` (real shorts saved through
+  // the Reels feed aren't in the baked STORIES catalog). One hook call
+  // drives every component on the shell that maps an id to a card.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
 
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
@@ -1086,7 +1101,18 @@ function MobileShell() {
   return (
     <div className="relative mx-auto w-full max-w-[480px] h-[100dvh] overflow-hidden bg-bg">
       <div ref={screenRef} className="screen noscroll">
-        {tab === "Home" && <Home onOpen={open} onShuffle={shuffle} pill={pill} setPill={setPill} />}
+        {tab === "Home" && (
+          <Home
+            onOpen={open}
+            onShuffle={shuffle}
+            pill={pill}
+            setPill={setPill}
+            curation={curation}
+            behavior={behavior}
+            catalog={catalog}
+            resolveStory={resolveStory}
+          />
+        )}
         {tab === "Search" && <Search onOpen={open} />}
         {tab === "New" && <NewScreen onOpen={open} />}
         {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} />}
@@ -1103,16 +1129,23 @@ function MobileShell() {
         />
       )}
 
-      {active && (
-        <TitleSheet
-          story={byId(active.id)}
-          initialTab={active.tab}
-          onClose={close}
-          onOpen={open}
-          inList={list.includes(active.id)}
-          toggleList={toggleList}
-        />
-      )}
+      {active && (() => {
+        // resolveStory checks the live catalog first so real-short ids saved
+        // through the Reels feed (not in STORIES) still open the sheet.
+        // Stale id -> render nothing; close button still works because
+        // `active` is set.
+        const s = resolveStory(active.id);
+        return s ? (
+          <TitleSheet
+            story={s}
+            initialTab={active.tab}
+            onClose={close}
+            onOpen={open}
+            inList={list.includes(active.id)}
+            toggleList={toggleList}
+          />
+        ) : null;
+      })()}
 
       {/* Switching tabs via the nav clears any Reels deep-link target so a plain
           tab tap always opens the feed at the top. */}
