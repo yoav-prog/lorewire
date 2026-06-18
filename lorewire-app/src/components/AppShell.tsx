@@ -23,6 +23,7 @@ import { PollWidget } from "@/components/PollWidget";
 import DesktopShell from "@/components/DesktopShell";
 import ReelsFeed from "@/components/reels/ReelsFeed";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import { alignScriptToWords } from "@/lib/script-graft";
 import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
@@ -440,10 +441,13 @@ function _galleryFromStory(
   story: Story,
   liveMedia: LiveStoryMediaResult,
 ): { src: string; caption: string }[] | null {
-  // Prefer live images when the applied video is a short — those are the
-  // doodle scene frames generated for the 9:16 short. Fall back to the
-  // baked long-form story.images otherwise (or when the live read missed).
-  const imgs = liveMedia.is_short && liveMedia.images.length > 0
+  // Prefer live images whenever the live read returned any — for shorts
+  // these are the 9:16 doodle scene frames; for long-form they are the
+  // 16:9 stills off the stories row. The baked `story.images` is the
+  // fallback for static catalog entries that have no live row at all
+  // (LiveCatalogStory deliberately drops images to keep the rail payload
+  // small, so a live-only long-form story has empty story.images).
+  const imgs = liveMedia.images.length > 0
     ? liveMedia.images
     : story.images || [];
   if (imgs.length === 0) return null;
@@ -489,9 +493,12 @@ function GenArticle({
   const paras = articleBody.split(/\n{2,}/);
   // When the applied video is a short, the article reads alongside the
   // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
-  // the long-form 16:9 illustrations are still the right fit.
+  // the long-form 16:9 illustrations are still the right fit. Either way,
+  // prefer the live row's images so live-only stories (whose `story.images`
+  // is empty because LiveCatalogStory drops it from the rail payload) still
+  // get scene illustrations between paragraphs.
   const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
-  const scenes = useShortScenes ? liveMedia.images : (story.images || []);
+  const scenes = liveMedia.images.length > 0 ? liveMedia.images : (story.images || []);
   const positions = _articleImagePositions(paras.length, scenes.length);
   // Map paragraph index -> which scene to render after it (left-to-right order).
   const posList = Array.from(positions).sort((a, b) => a - b);
@@ -745,8 +752,20 @@ function ReadAlong({
   // stories.audio_url, which the voice_renders_worker writes whenever
   // the admin regenerates the long-form narration.
   const audioUrl = liveMedia.audio_url ?? story.audioUrl;
-  const alignment =
+  const rawAlignment =
     liveMedia.alignment.length > 0 ? liveMedia.alignment : story.alignment;
+  // Script-graft: stories rendered before the pipeline's Phase-1 captions
+  // fix (commit 02c7cc3) carry STT homophones in the alignment text
+  // ("state" for "steak", "they're telling" for "in their telling"). Run
+  // the same edit-distance graft used in the pipeline so the read-along
+  // surface shows the real script. The graft is idempotent on already-
+  // correct alignment (ElevenLabs / post-fix Google), so wrapping
+  // unconditionally is safe and protects future drift too.
+  const scriptBody = liveMedia.body ?? story.body ?? "";
+  const alignment =
+    rawAlignment && scriptBody
+      ? alignScriptToWords(scriptBody, rawAlignment)
+      : rawAlignment;
   const hasReal = !!audioUrl && !!alignment && alignment.length > 0;
   return hasReal ? (
     <RealReadAlong story={story} audioUrl={audioUrl} alignment={alignment} />
