@@ -62,7 +62,7 @@ const VALUES_EMPTY: Record<string, string> = {
 };
 
 const PLACEHOLDERS: Record<string, string> = {
-  position_y: "0.55",
+  position_y: "0.68",
   color: "#0f172a",
   entry_effect: "fade",
 };

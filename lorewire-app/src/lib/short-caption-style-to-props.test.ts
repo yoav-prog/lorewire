@@ -73,7 +73,7 @@ describe("shortCaptionStyleToProps", () => {
     const props = shortCaptionStyleToProps(
       baseShort({ caption_style: { position_y: "not-a-number" } }),
     );
-    expect(props!.position_y).toBe(0.55);
+    expect(props!.position_y).toBe(0.68);
   });
 
   it("rejects unknown enum values and uses defaults", () => {

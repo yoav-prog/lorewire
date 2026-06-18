@@ -32,7 +32,7 @@ import {
 const CATEGORIES = ["Drama", "Entitled", "Humor", "Wholesome", "Dating", "Roommate"] as const;
 
 const DEFAULTS: Record<string, string> = {
-  "position_y": "0.55",
+  "position_y": "0.68",
   "size_scale": "1",
   "padding_x": "64",
   "text_transform": "uppercase",

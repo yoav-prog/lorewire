@@ -208,7 +208,7 @@ describe("toPreview", () => {
     await setSetting("caption.story.s1.text_transform", "italic"); // not in the allowed set
     const r = await resolveCaptionStyle({ storyId: "s1", category: null });
     const p = toPreview(r);
-    expect(p.position_y).toBe(0.55);
+    expect(p.position_y).toBe(0.68);
     expect(p.text_transform).toBe("uppercase");
   });
 

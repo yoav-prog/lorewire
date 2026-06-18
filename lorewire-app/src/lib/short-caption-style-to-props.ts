@@ -40,7 +40,7 @@ export interface ShortCaptionStyleProps {
 // Mirror of caption-style.ts CAPTION_DEFAULTS. Kept locally so this module
 // stays importable from client components (caption-style.ts is server-only).
 const DEFAULTS: ShortCaptionStyleProps = {
-  position_y: 0.55,
+  position_y: 0.68,
   size_scale: 1,
   padding_x: 64,
   text_transform: "uppercase",

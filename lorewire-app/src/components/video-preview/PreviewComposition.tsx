@@ -486,7 +486,7 @@ function CaptionBand({
   // values when caption style is absent (e.g. legacy callers that haven't
   // been updated). Base font size 88px is the pre-template behavior;
   // size_scale multiplies it.
-  const positionY = style?.position_y ?? 0.55;
+  const positionY = style?.position_y ?? 0.68;
   const sizeScale = style?.size_scale ?? 1;
   const paddingX = style?.padding_x ?? 64;
   const fontWeight = style?.font_weight ?? 900;

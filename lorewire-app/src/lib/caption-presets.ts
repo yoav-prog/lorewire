@@ -30,7 +30,7 @@ export const BUILT_IN_CAPTION_PRESETS: CaptionPreset[] = [
     name: "MrBeast bold",
     tagline: "Yellow + thick black outline, center-bottom, all caps.",
     values: {
-      position_y: "0.55",
+      position_y: "0.68",
       size_scale: "1.1",
       padding_x: "48",
       text_transform: "uppercase",

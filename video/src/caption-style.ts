@@ -29,7 +29,7 @@ export const DOODLE_CAPTION_STYLE: ResolvedDoodleCaptionStyle = {
   textTransform: "uppercase",
   letterSpacing: -0.5,
   lineHeight: 1.05,
-  positionY: 0.55,
+  positionY: 0.68,
   paddingX: 64,
   activeWordColor: "#ffffff",
   spokenWordColor: "rgba(250, 204, 21, 0.45)",

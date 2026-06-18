@@ -75,6 +75,33 @@ class ChunkAlignmentTests(unittest.TestCase):
             ],
         )
 
+    def test_breaks_on_char_cap_before_four_word_cap(self):
+        # Four long words would land at "antidisestablishmentarianism
+        # championship absolutely magnificent" (62 chars) — over the 30
+        # char single-line budget. The chunker forces a split when
+        # adding the next word would exceed MAX_CHARS_PER_CHUNK.
+        words = [
+            {"word": "antidisestablishmentarianism", "start": 0.0, "end": 1.0},
+            {"word": "championship",                 "start": 1.0, "end": 1.6},
+            {"word": "absolutely",                   "start": 1.6, "end": 2.1},
+            {"word": "magnificent",                  "start": 2.1, "end": 2.7},
+        ]
+        chunks = video._chunk_alignment(words)
+        # All chunks fit within the char cap.
+        for c in chunks:
+            self.assertLessEqual(len(c["text"]), video.MAX_CHARS_PER_CHUNK)
+        # And the four words did NOT all land in one chunk (the pre-Phase-3
+        # behavior would have grouped them into a 62-char one-liner).
+        self.assertGreater(len(chunks), 1)
+
+    def test_char_cap_does_not_split_short_words(self):
+        # Four 2-char words = "w0 w1 w2 w3" (11 chars) — under the cap.
+        # Regression that the char-cap only kicks in when actually needed.
+        words = [{"word": f"w{i}", "start": i * 0.2, "end": (i + 1) * 0.2} for i in range(4)]
+        chunks = video._chunk_alignment(words)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["text"], "w0 w1 w2 w3")
+
 
 class DistributeFramesTests(unittest.TestCase):
     def _captions(self, *starts_ms: int) -> list[dict]:
@@ -135,11 +162,22 @@ class PublicUrlResolutionTests(unittest.TestCase):
 class ResolveCaptionTemplateTests(unittest.TestCase):
     def test_all_unset_returns_defaults(self):
         t = video.resolve_caption_template(lambda k: None)
-        self.assertEqual(t["position_y"], 0.55)
+        self.assertEqual(t["position_y"], 0.68)
         self.assertEqual(t["color"], "#facc15")
         self.assertEqual(t["entry_effect"], "fade")
         self.assertEqual(t["word_highlight"], "karaoke")
         self.assertEqual(t["font_weight"], 900)
+
+    def test_default_position_y_is_inside_mobile_safe_zone(self):
+        # Phase 3: the default has to sit in the 9:16 lower-middle third
+        # (Y ~62-78%) — high enough to clear TikTok's 320 px button column
+        # at the bottom (which starts at ~83% on a 1920-tall canvas) and
+        # low enough not to read as a kicker. A test on the *constraint*
+        # rather than the exact value so future tuning inside the safe
+        # zone does not break the suite.
+        default_y = video._CAPTION_DEFAULTS["position_y"]
+        self.assertGreaterEqual(default_y, 0.62)
+        self.assertLessEqual(default_y, 0.78)
 
     def test_partial_override_merges_with_defaults(self):
         store = {"caption.color": "#00ff00", "caption.position_y": "0.75"}
@@ -155,7 +193,7 @@ class ResolveCaptionTemplateTests(unittest.TestCase):
         store = {"caption.font_weight": "not a number", "caption.position_y": "abc"}
         t = video.resolve_caption_template(lambda k: store.get(k))
         self.assertEqual(t["font_weight"], 900)
-        self.assertEqual(t["position_y"], 0.55)
+        self.assertEqual(t["position_y"], 0.68)
 
     def test_numeric_clamped_to_range(self):
         store = {"caption.position_y": "5", "caption.outline_width": "999", "caption.font_weight": "50"}

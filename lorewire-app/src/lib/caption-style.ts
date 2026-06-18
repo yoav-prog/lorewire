@@ -67,7 +67,11 @@ export type CaptionStyleField = (typeof CAPTION_STYLE_FIELDS)[number];
 // sync. The Remotion composition reads `effective` for each field; a fresh
 // install renders with these and nothing else.
 export const CAPTION_DEFAULTS: Record<CaptionStyleField, string> = {
-  position_y: "0.55",
+  // 0.68 is the 9:16 lower-middle third safe zone (clear of TikTok's
+  // ~320 px button column). See _plans/2026-06-18-caption-accuracy-and-naturalness.md
+  // Phase 3. Mirrored in pipeline/video.py:_CAPTION_DEFAULTS["position_y"]
+  // — change both together.
+  position_y: "0.68",
   size_scale: "1",
   padding_x: "64",
   text_transform: "uppercase",
@@ -254,7 +258,7 @@ export function toPreview(
     return (allowed as Set<string>).has(raw) ? (raw as T) : fallback;
   };
   return {
-    position_y: num("position_y", 0.55),
+    position_y: num("position_y", 0.68),
     size_scale: num("size_scale", 1),
     padding_x: num("padding_x", 64),
     text_transform: oneOf("text_transform", TEXT_TRANSFORMS, "uppercase"),
