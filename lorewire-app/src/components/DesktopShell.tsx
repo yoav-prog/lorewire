@@ -19,9 +19,11 @@ import {
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
+  useStoryPoll,
   type HomepageInitial,
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
+import { PollWidget } from "@/components/PollWidget";
 import { useSavedStories } from "@/lib/engagement-store";
 
 // Centralised default when no live media has loaded yet — the modal
@@ -763,6 +765,11 @@ function DetailModalHero({ story }: { story: Story }) {
 
 function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
+  // 2026-06-18 polls plan extension: fetch the per-story poll for the
+  // modal. Re-fires whenever the modal swaps stories (the hook keys
+  // on story.id). Renders below the tab content (Watch / Read /
+  // Read-along) so the user always sees the question + vote.
+  const { view: pollView } = useStoryPoll(story.id);
   // Reset the tab whenever the parent swaps in a different story or initialTab
   // — React 19's set-state-in-effect rule rejects the old useEffect pattern.
   // The sanctioned alternative is to track the previous prop values during
@@ -872,6 +879,18 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
             </div>
+            {pollView && (
+              <section className="mt-10">
+                <PollWidget
+                  pollId={pollView.pollId}
+                  question={pollView.question}
+                  optionA={pollView.optionA}
+                  optionB={pollView.optionB}
+                  initialResult={pollView.result}
+                  initialVotedSide={pollView.votedSide}
+                />
+              </section>
+            )}
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>
               <div className="grid grid-cols-3 gap-4">

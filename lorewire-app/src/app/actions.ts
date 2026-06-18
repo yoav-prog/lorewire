@@ -438,3 +438,66 @@ export async function getHomepagePolls(): Promise<HomepagePollRailsResult> {
 // "use server" files — even a plain object would be wrapped into a
 // server-function reference that can't be read during initial
 // render. Sentinel + hook stay co-located on the client side.)
+
+// 2026-06-18 polls plan extension: per-story poll fetch for client-
+// rendered surfaces that didn't go through the server-rendered reader.
+// The homepage DetailModal (DesktopShell + AppShell) renders inside a
+// client component, so it can't await the poll repo helpers directly.
+// This action returns the same shape a server reader resolves so the
+// PollWidget renders identically on every surface.
+//
+// Best-effort — any failure returns { ok: false } so the modal
+// degrades gracefully (no poll shown) instead of crashing.
+export interface StoryPollView {
+  pollId: string;
+  question: string;
+  optionA: string;
+  optionB: string;
+  result: import("@/lib/polls-shared").PollResultView;
+  votedSide: "A" | "B" | null;
+}
+
+export interface StoryPollViewResult {
+  ok: boolean;
+  /** Null when there's no enabled poll OR resolution failed. The
+   *  consumer treats this as "render nothing" without distinguishing
+   *  the two cases — both produce identical UX. */
+  view: StoryPollView | null;
+}
+
+export async function getPollForStoryView(
+  storyId: string,
+): Promise<StoryPollViewResult> {
+  if (!storyId) return { ok: true, view: null };
+  try {
+    const polls = await import("@/lib/polls");
+    const cookie = await import("@/lib/poll-cookie");
+    const poll = await polls.getPollByStoryId(storyId);
+    if (!poll || poll.enabled !== 1) {
+      return { ok: true, view: null };
+    }
+    const [voteToken, aggregate, floor] = await Promise.all([
+      cookie.readVoteToken(),
+      polls.getAggregateByStoryId(storyId),
+      polls.resolvePublicFloor(),
+    ]);
+    const votedSide = await polls.getVoteSideForCookie(poll.id, voteToken);
+    return {
+      ok: true,
+      view: {
+        pollId: poll.id,
+        question: poll.question,
+        optionA: poll.option_a_text,
+        optionB: poll.option_b_text,
+        result: polls.toResultView(aggregate, floor),
+        votedSide,
+      },
+    };
+  } catch (err) {
+    console.warn("[getPollForStoryView failed]", {
+      story_id: storyId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, view: null };
+  }
+}

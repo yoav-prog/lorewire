@@ -15,9 +15,11 @@ import {
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
+  useStoryPoll,
   type HomepageInitial,
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
+import { PollWidget } from "@/components/PollWidget";
 import DesktopShell from "@/components/DesktopShell";
 import ReelsFeed from "@/components/reels/ReelsFeed";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
@@ -930,6 +932,9 @@ function FakeReadAlong() {
 /* ----------------------------- TITLE SHEET ----------------------------- */
 function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
+  // 2026-06-18 polls plan extension: per-story poll for the mobile
+  // title sheet. Mirrors the DesktopShell DetailModal pattern.
+  const { view: pollView } = useStoryPoll(story.id);
   // Reset the tab whenever the parent swaps in a different story or hands us
   // a new initialTab. React 19's set-state-in-effect rule rejects the old
   // useEffect pattern; the sanctioned alternative is to track the previous
@@ -1065,6 +1070,19 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
           {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
         </div>
+
+        {pollView && (
+          <section className="mt-8">
+            <PollWidget
+              pollId={pollView.pollId}
+              question={pollView.question}
+              optionA={pollView.optionA}
+              optionB={pollView.optionB}
+              initialResult={pollView.result}
+              initialVotedSide={pollView.votedSide}
+            />
+          </section>
+        )}
 
         <section className="mt-8 -mx-4">
           <RailHead>More Like This</RailHead>

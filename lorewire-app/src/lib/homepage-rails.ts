@@ -22,13 +22,59 @@ import {
   getHomepageCuration,
   getHomepagePolls,
   getLiveCatalog,
+  getPollForStoryView,
   type HomepageCuration,
   type HomepageCurationBehavior,
   type HomepagePollRailsResult,
   type LiveCatalogStory,
+  type StoryPollView,
 } from "@/app/actions";
 import { CAT, STORIES, tryById, type Cat, type Story } from "@/lib/stories";
 import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
+
+/** 2026-06-18 polls plan extension: client-side fetch hook for the
+ *  per-story poll view the homepage DetailModal needs. Mirrors the
+ *  useHomepagePolls pattern — single round trip on mount, error path
+ *  returns null so the modal renders without a poll instead of
+ *  crashing. The storyId arg drives the dep array so the hook
+ *  re-fetches when the modal swaps to a different story. */
+export function useStoryPoll(storyId: string | null | undefined): {
+  view: StoryPollView | null;
+  loaded: boolean;
+} {
+  const [view, setView] = useState<StoryPollView | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!storyId) {
+      setView(null);
+      setLoaded(true);
+      return;
+    }
+    setLoaded(false);
+    getPollForStoryView(storyId)
+      .then((r) => {
+        if (cancelled) return;
+        setView(r.view);
+        setLoaded(true);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console -- rule 14
+        console.warn("[useStoryPoll fetch failed]", {
+          story_id: storyId,
+          err: String(err),
+        });
+        if (!cancelled) {
+          setView(null);
+          setLoaded(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [storyId]);
+  return { view, loaded };
+}
 
 // Re-exported here (client-safe module) so client components don't need
 // an explicit path to the server-only @/lib/homepage-data module. The
