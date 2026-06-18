@@ -15,9 +15,13 @@ import {
 } from "@/app/actions";
 import {
   CATEGORY_RAILS,
+  POLL_RAIL_KINDS,
+  POLL_RAIL_TITLES,
   resolveRailIds,
   useHomepageCuration,
+  useHomepagePolls,
 } from "@/lib/homepage-rails";
+import { PollRailCard } from "@/components/PollRail";
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -859,6 +863,12 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
   // behaviour (auto-derive a default from STORIES, or hide). Failure
   // also falls back silently so a DB blip can't take the homepage down.
   const { curation, behavior } = useHomepageCuration();
+  // Phase 4.5 of _plans/2026-06-17-engagement-polls.md. The three
+  // derived rails — computed live from poll_aggregates, not curated.
+  // Empty arrays (no votes yet OR rail disabled in settings) just
+  // render nothing; the homepage skips the section entirely so the
+  // page doesn't carry placeholder "no content" tiles.
+  const { rails: pollRails } = useHomepagePolls();
 
   // Hero behaviour: curation.hero_required forces "no hero curation -> no
   // hero", which HomePage honours by rendering null in the hero slot.
@@ -915,6 +925,17 @@ function HomePage({ onOpen, onShuffle }: { onOpen: OpenFn; onShuffle: () => void
           return (
             <Rail key={rail.surface} title={rail.title}>
               {items.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} />)}
+            </Rail>
+          );
+        })}
+        {POLL_RAIL_KINDS.map((kind) => {
+          const cards = pollRails[kind];
+          if (cards.length === 0) return null;
+          return (
+            <Rail key={`poll-${kind}`} title={POLL_RAIL_TITLES[kind]}>
+              {cards.map((row) => (
+                <PollRailCard key={row.storyId} row={row} kind={kind} />
+              ))}
             </Rail>
           );
         })}

@@ -21,6 +21,19 @@ import {
   listAllCuration,
   type HomepageSurface,
 } from "@/lib/homepage-curation";
+import {
+  HOMEPAGE_RAIL_LIMIT,
+  isRailEnabledValue,
+  POLL_RAIL_KINDS,
+  railEnabledSettingKey,
+  topAgreed,
+  topDivisive,
+  topUnpopular,
+  type HomepagePollRails,
+  type PollRailKind,
+  type RailCardRow,
+} from "@/lib/polls";
+import { readVoteToken } from "@/lib/poll-cookie";
 
 // The short renderer writes its MP4 to GCS at `<storyId>-short/video.mp4`
 // (suffix from pipeline/shorts_render.SHORT_ID_SUFFIX). Anything else is
@@ -285,3 +298,108 @@ export async function getHomepageCuration(): Promise<HomepageCurationResult> {
     behavior,
   };
 }
+
+// Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Three derived
+// homepage rails computed from poll_aggregates: divisive, agreed,
+// unpopular. Each respects its own settings flag — when explicitly
+// disabled the rail returns an empty array regardless of available
+// data; when enabled (the default) it returns up to
+// HOMEPAGE_RAIL_LIMIT cards.
+//
+// `unpopular` is cookie-personalized: a returning voter sees the
+// stories they themselves picked the minority on. A fresh visitor
+// without history hits the "smaller side under 15%" fallback (see
+// topUnpopular).
+//
+// Empty rails are returned as empty arrays — the consumer skips the
+// section rather than rendering a placeholder. Errors fall back to
+// empty arrays too: a busted rail query must NEVER take the
+// homepage down with it.
+
+export interface HomepagePollRailsResult {
+  ok: boolean;
+  rails: HomepagePollRails;
+  /** Per-rail enabled flag so the consumer can distinguish "off by
+   *  setting" from "on but no data yet". Not used by the renderer
+   *  today (we just check array length); kept on the response so
+   *  future admin UI can surface "you have it ENABLED but no data
+   *  meets the floor" without a second round trip. */
+  enabled: Record<PollRailKind, boolean>;
+}
+
+const EMPTY_RAILS: HomepagePollRails = {
+  divisive: [],
+  agreed: [],
+  unpopular: [],
+};
+
+export async function getHomepagePolls(): Promise<HomepagePollRailsResult> {
+  // Pull all four reads in one round trip — three settings + the
+  // cookie token (the cookie read is the cheap one but still serial
+  // if we don't parallelize). Settings are decoded through the
+  // shared isRailEnabledValue helper so absent = enabled.
+  const [
+    divisiveEnabledRaw,
+    agreedEnabledRaw,
+    unpopularEnabledRaw,
+    voteToken,
+  ] = await Promise.all([
+    getSetting(railEnabledSettingKey("divisive")),
+    getSetting(railEnabledSettingKey("agreed")),
+    getSetting(railEnabledSettingKey("unpopular")),
+    readVoteToken(),
+  ]);
+  const enabled: Record<PollRailKind, boolean> = {
+    divisive: isRailEnabledValue(divisiveEnabledRaw),
+    agreed: isRailEnabledValue(agreedEnabledRaw),
+    unpopular: isRailEnabledValue(unpopularEnabledRaw),
+  };
+
+  // Three queries in parallel — same shape, different sort, isolated
+  // failure handling so one slow / broken rail can't stall the others.
+  const safeQuery = async (
+    kind: PollRailKind,
+  ): Promise<RailCardRow[]> => {
+    if (!enabled[kind]) return [];
+    try {
+      if (kind === "divisive") {
+        return await topDivisive({ limit: HOMEPAGE_RAIL_LIMIT });
+      }
+      if (kind === "agreed") {
+        return await topAgreed({ limit: HOMEPAGE_RAIL_LIMIT });
+      }
+      return await topUnpopular({
+        cookieToken: voteToken,
+        limit: HOMEPAGE_RAIL_LIMIT,
+      });
+    } catch (err) {
+      console.warn("[homepage polls query failed]", {
+        rail: kind,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  };
+  const [divisive, agreed, unpopular] = await Promise.all(
+    POLL_RAIL_KINDS.map((k) => safeQuery(k)),
+  );
+
+  const rails: HomepagePollRails = { divisive, agreed, unpopular };
+  console.info("[homepage polls load]", {
+    counts: {
+      divisive: rails.divisive.length,
+      agreed: rails.agreed.length,
+      unpopular: rails.unpopular.length,
+    },
+    enabled,
+    has_cookie: voteToken !== null,
+  });
+
+  return { ok: true, rails, enabled };
+}
+
+// (Empty-state sentinel for the client hook lives in
+// lib/homepage-rails.ts. Next.js 16 forbids non-async exports from
+// "use server" files — even a plain object would be wrapped into a
+// server-function reference that can't be read during initial
+// render. Sentinel + hook stay co-located on the client side.)

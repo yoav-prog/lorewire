@@ -11,9 +11,13 @@ import {
 } from "@/lib/stories";
 import {
   CATEGORY_RAILS,
+  POLL_RAIL_KINDS,
+  POLL_RAIL_TITLES,
   resolveRailIds,
   useHomepageCuration,
+  useHomepagePolls,
 } from "@/lib/homepage-rails";
+import { PollRailCard } from "@/components/PollRail";
 import DesktopShell from "@/components/DesktopShell";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
 import {
@@ -201,6 +205,10 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
   // Hero pick comes from curation.hero when set; otherwise the legacy
   // envelope default keeps the visual stable until the admin curates it.
   const { curation, behavior } = useHomepageCuration();
+  // Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Same hook
+  // DesktopShell uses; the rail visual stays identical between shells
+  // because PollRailCard owns its own layout.
+  const { rails: pollRails } = useHomepagePolls();
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
     : resolveRailIds("hero", curation, behavior) ?? [];
@@ -272,6 +280,21 @@ function Home({ onOpen, onShuffle, pill, setPill }: { onOpen: OpenFn; onShuffle:
             <div className={railClass}>
               {items.map((s) => (
                 <PosterCard key={s.id} story={s} onOpen={onOpen} />
+              ))}
+            </div>
+          </section>
+        );
+      })}
+
+      {POLL_RAIL_KINDS.map((kind) => {
+        const cards = pollRails[kind];
+        if (cards.length === 0) return null;
+        return (
+          <section key={`poll-${kind}`} className="mt-7">
+            <RailHead>{POLL_RAIL_TITLES[kind]}</RailHead>
+            <div className={railClass}>
+              {cards.map((row) => (
+                <PollRailCard key={row.storyId} row={row} kind={kind} />
               ))}
             </div>
           </section>

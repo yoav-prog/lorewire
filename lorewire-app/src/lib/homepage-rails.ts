@@ -20,10 +20,26 @@
 import { useEffect, useState } from "react";
 import {
   getHomepageCuration,
+  getHomepagePolls,
   type HomepageCuration,
   type HomepageCurationBehavior,
+  type HomepagePollRailsResult,
 } from "@/app/actions";
 import { STORIES, type Cat } from "@/lib/stories";
+import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
+
+// Empty-state sentinel for the poll-rails hook. Lives here (client-
+// safe module) instead of in actions.ts because Next.js 16's "use
+// server" boundary refuses non-async exports — a plain object would
+// be wrapped into a server-function reference and useState would
+// fail with "Server Functions cannot be called during initial
+// render." Sentinel needs to be a plain object on the client side
+// to feed useState's initial value cleanly.
+const HOMEPAGE_POLL_RAILS_EMPTY: HomepagePollRailsResult = {
+  ok: false,
+  rails: { divisive: [], agreed: [], unpopular: [] },
+  enabled: { divisive: true, agreed: true, unpopular: true },
+};
 
 export const DEFAULT_CURATION_BEHAVIOR: HomepageCurationBehavior = {
   emptyRailBehavior: "fallback",
@@ -125,6 +141,68 @@ export function useHomepageCuration(): UseHomepageCurationResult {
   }, []);
   return { curation, behavior, loaded };
 }
+
+// Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Fetches the
+// three derived homepage rails (divisive / agreed / unpopular) on
+// mount. Mirrors useHomepageCuration's shape — a single round trip
+// resolved by getHomepagePolls, error path falls back to the empty-
+// rails sentinel so a busted query can never blank the rest of the
+// homepage. Re-exports POLL_RAIL_KINDS so callers iterate the same
+// order the server response carries.
+
+export { POLL_RAIL_KINDS };
+export type { PollRailKind };
+
+export interface UseHomepagePollsResult {
+  rails: HomepagePollRailsResult["rails"];
+  enabled: HomepagePollRailsResult["enabled"];
+  loaded: boolean;
+}
+
+export function useHomepagePolls(): UseHomepagePollsResult {
+  const [state, setState] = useState<HomepagePollRailsResult>(
+    HOMEPAGE_POLL_RAILS_EMPTY,
+  );
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getHomepagePolls()
+      .then((r) => {
+        if (cancelled) return;
+        // eslint-disable-next-line no-console -- rule 14
+        console.info("[lorewire polls rails load]", {
+          counts: {
+            divisive: r.rails.divisive.length,
+            agreed: r.rails.agreed.length,
+            unpopular: r.rails.unpopular.length,
+          },
+          enabled: r.enabled,
+        });
+        setState(r);
+        setLoaded(true);
+      })
+      .catch((err) => {
+        // eslint-disable-next-line no-console -- rule 14
+        console.warn("[lorewire polls rails load error]", {
+          err: String(err),
+        });
+        setLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return { rails: state.rails, enabled: state.enabled, loaded };
+}
+
+/** Stable display title per rail. Single source of truth so adding a
+ *  new rail kind in the future surfaces compile errors at every call
+ *  site. */
+export const POLL_RAIL_TITLES: Record<PollRailKind, string> = {
+  divisive: "Most divisive stories",
+  agreed: "Community agreed",
+  unpopular: "Unpopular opinions",
+};
 
 // Returns the id list to render for a surface, or `null` when the rail
 // should be skipped entirely (empty curation + behavior.emptyRailBehavior

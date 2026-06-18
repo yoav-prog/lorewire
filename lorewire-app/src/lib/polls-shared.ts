@@ -58,6 +58,65 @@ export interface PollResultView {
   lastVoteAt: string | null;
 }
 
+/** Card shape rendered on the public rail pages AND on the homepage
+ *  PollRail. Self-contained: carries every field the card needs so a
+ *  consumer never has to look the story up in a static catalog.
+ *
+ *  Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Moved into
+ *  polls-shared so the client-side homepage rail hook + component
+ *  can import the type without dragging the server-only db driver. */
+export interface RailCardRow {
+  storyId: string;
+  slug: string | null;
+  title: string | null;
+  category: string | null;
+  heroImage: string | null;
+  question: string;
+  optionAText: string;
+  optionBText: string;
+  votesA: number;
+  votesB: number;
+  totalVotes: number;
+  divisiveness: number;
+}
+
+/** Three derived homepage rails computed from poll_aggregates. The
+ *  three keys are stable for cross-process consumption (server
+ *  action → client hook → component map). */
+export const POLL_RAIL_KINDS = [
+  "divisive",
+  "agreed",
+  "unpopular",
+] as const;
+export type PollRailKind = (typeof POLL_RAIL_KINDS)[number];
+
+export interface HomepagePollRails {
+  divisive: RailCardRow[];
+  agreed: RailCardRow[];
+  unpopular: RailCardRow[];
+}
+
+/** Cap per-rail. Homepage rails are horizontal scrollers; 6 cards is
+ *  enough to feel populated without bloating the round trip or making
+ *  the rail "list-like" instead of "highlight reel"-like. */
+export const HOMEPAGE_RAIL_LIMIT = 6;
+
+/** Settings keys for the three rails. Reading a value of "0" (or the
+ *  literal string "false") forces the rail off; anything else keeps
+ *  it on. Defaults to on when the key is unset so a fresh install
+ *  doesn't have to flip anything to see the rails populate. */
+export function railEnabledSettingKey(kind: PollRailKind): string {
+  return `polls.rail.${kind}_enabled`;
+}
+
+export function isRailEnabledValue(v: string | null | undefined): boolean {
+  if (v === null || v === undefined) return true;
+  const trimmed = v.trim();
+  if (trimmed === "") return true;
+  if (trimmed === "0" || trimmed.toLowerCase() === "false") return false;
+  return true;
+}
+
 // ─── Public floor ─────────────────────────────────────────────────────────────
 
 /** Default minimum total votes before percentages are revealed. The

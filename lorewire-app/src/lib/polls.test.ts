@@ -15,12 +15,16 @@ import {
   getPollByStoryId,
   getPresetForCategory,
   getVoteSideForCookie,
+  HOMEPAGE_RAIL_LIMIT,
   isPollSide,
+  isRailEnabledValue,
   listPollOverview,
   pctA,
   pctBComplement,
   POLL_OPTION_MAX,
   POLL_QUESTION_MAX,
+  POLL_RAIL_KINDS,
+  railEnabledSettingKey,
   RAIL_MIN_VOTES,
   recordVote,
   refreshPollAggregateForStory,
@@ -810,6 +814,109 @@ describe("rail queries", () => {
 
   it("RAIL_MIN_VOTES tracks DEFAULT_PUBLIC_FLOOR", () => {
     expect(RAIL_MIN_VOTES).toBe(DEFAULT_PUBLIC_FLOOR);
+  });
+});
+
+// ─── Homepage rail settings helpers ───────────────────────────────────────────
+
+describe("railEnabledSettingKey", () => {
+  it("produces a stable key per rail kind", () => {
+    expect(railEnabledSettingKey("divisive")).toBe(
+      "polls.rail.divisive_enabled",
+    );
+    expect(railEnabledSettingKey("agreed")).toBe(
+      "polls.rail.agreed_enabled",
+    );
+    expect(railEnabledSettingKey("unpopular")).toBe(
+      "polls.rail.unpopular_enabled",
+    );
+  });
+
+  it("covers every rail kind", () => {
+    for (const kind of POLL_RAIL_KINDS) {
+      expect(railEnabledSettingKey(kind)).toMatch(
+        /^polls\.rail\.[a-z]+_enabled$/,
+      );
+    }
+  });
+});
+
+describe("isRailEnabledValue", () => {
+  it("treats missing/null/empty as enabled (default-on)", () => {
+    expect(isRailEnabledValue(null)).toBe(true);
+    expect(isRailEnabledValue(undefined)).toBe(true);
+    expect(isRailEnabledValue("")).toBe(true);
+    expect(isRailEnabledValue("   ")).toBe(true);
+  });
+
+  it("treats '0' or 'false' (any case) as disabled", () => {
+    expect(isRailEnabledValue("0")).toBe(false);
+    expect(isRailEnabledValue("false")).toBe(false);
+    expect(isRailEnabledValue("False")).toBe(false);
+    expect(isRailEnabledValue("FALSE")).toBe(false);
+  });
+
+  it("treats '1' / 'true' / any other non-zero value as enabled", () => {
+    expect(isRailEnabledValue("1")).toBe(true);
+    expect(isRailEnabledValue("true")).toBe(true);
+    expect(isRailEnabledValue("on")).toBe(true);
+    expect(isRailEnabledValue("yes")).toBe(true);
+  });
+});
+
+describe("HOMEPAGE_RAIL_LIMIT", () => {
+  it("is a sensible card-count cap (not 0, not absurd)", () => {
+    expect(HOMEPAGE_RAIL_LIMIT).toBeGreaterThan(0);
+    expect(HOMEPAGE_RAIL_LIMIT).toBeLessThanOrEqual(20);
+  });
+
+  it("rail queries respect it as a default limit", async () => {
+    // Seed > HOMEPAGE_RAIL_LIMIT stories so the cap is observable.
+    const seedCount = HOMEPAGE_RAIL_LIMIT + 4;
+    for (let i = 0; i < seedCount; i++) {
+      const id = `test-rail-cap-${i}`;
+      const now = new Date().toISOString();
+      await run(
+        "INSERT INTO stories (id, slug, category, title, status, published_at, created_at, updated_at) " +
+          "VALUES (?, ?, 'Drama', 'T', 'published', ?, ?, ?) " +
+          "ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, status='published'",
+        [id, `slug-cap-${i}`, now, now, now],
+      );
+      const u = await upsertPoll({
+        storyId: id,
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: true,
+        category: "Drama",
+      });
+      // Vary the split so divisiveness varies per row (50/50, 49/51, etc.)
+      const splitA = 40 + (i % 12);
+      const splitB = 80 - splitA;
+      for (let j = 0; j < splitA; j++) {
+        await recordVote({
+          pollId: u.pollId,
+          storyId: id,
+          category: "Drama",
+          side: "A",
+          cookieToken: `c-cap-${i}-a-${j}`,
+          ipUaHash: null,
+        });
+      }
+      for (let j = 0; j < splitB; j++) {
+        await recordVote({
+          pollId: u.pollId,
+          storyId: id,
+          category: "Drama",
+          side: "B",
+          cookieToken: `c-cap-${i}-b-${j}`,
+          ipUaHash: null,
+        });
+      }
+      await refreshPollAggregateForStory(id);
+    }
+    const rows = await topDivisive({ limit: HOMEPAGE_RAIL_LIMIT });
+    expect(rows.length).toBeLessThanOrEqual(HOMEPAGE_RAIL_LIMIT);
   });
 });
 

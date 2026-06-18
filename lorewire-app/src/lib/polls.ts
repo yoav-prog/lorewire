@@ -24,6 +24,7 @@ import {
   type PollAggregateRow,
   type PollRow,
   type PollSide,
+  type RailCardRow,
 } from "@/lib/polls-shared";
 
 // Re-export the entire client-safe surface so legacy server callers
@@ -34,19 +35,26 @@ export {
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
   getPresetForCategory,
+  HOMEPAGE_RAIL_LIMIT,
   isPollSide,
+  isRailEnabledValue,
   pctA,
   pctBComplement,
   POLL_OPTION_MAX,
   POLL_QUESTION_MAX,
+  POLL_RAIL_KINDS,
+  railEnabledSettingKey,
   toResultView,
   validatePollInputs,
+  type HomepagePollRails,
   type PollAggregateRow,
   type PollPreset,
+  type PollRailKind,
   type PollResultView,
   type PollRow,
   type PollSide,
   type PollValidation,
+  type RailCardRow,
   type StoryCategory,
 } from "@/lib/polls-shared";
 
@@ -343,24 +351,11 @@ export async function getVoteSideForCookie(
 }
 
 // ─── Public rails: divisive / agreed / unpopular ──────────────────────────────
-
-/** A story card for one of the three public rail pages. Each row carries
- *  the parent-story fields the card renders (slug + title + hero_image)
- *  joined against the aggregate so the page doesn't N+1. */
-export interface RailCardRow {
-  storyId: string;
-  slug: string | null;
-  title: string | null;
-  category: string | null;
-  heroImage: string | null;
-  question: string;
-  optionAText: string;
-  optionBText: string;
-  votesA: number;
-  votesB: number;
-  totalVotes: number;
-  divisiveness: number;
-}
+//
+// `RailCardRow` is the shared card shape consumed by both the public
+// /c/<surface> pages and the homepage PollRail. It lives in
+// polls-shared (re-exported above) so client components can import the
+// type without dragging the server-only db driver into the bundle.
 
 /** Default minimum total_votes a row must have before it can appear on
  *  a public rail. Below this the percentages would be misleading
