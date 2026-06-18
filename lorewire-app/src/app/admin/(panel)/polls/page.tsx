@@ -14,6 +14,7 @@ import {
   listPollOverview,
   toResultView,
 } from "@/lib/polls";
+import { BackfillButton } from "./BackfillButton";
 
 export const dynamic = "force-dynamic";
 
@@ -33,11 +34,13 @@ export default async function PollsOverviewPage() {
           Engagement polls
         </h1>
         <p className="text-[13px] text-muted">
-          One poll per story. Author them from the story edit page; this
-          table is the cross-cutting view of every active question and
-          how the audience is voting.
+          One poll per story or article. Author them from the
+          corresponding edit page; this table is the cross-cutting view
+          of every active question and how the audience is voting.
         </p>
       </header>
+
+      <BackfillButton />
 
       {rows.length === 0 ? (
         <div className="rounded-xl border border-dashed border-line bg-surface p-8 text-center">

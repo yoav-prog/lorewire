@@ -28,19 +28,15 @@ from pathlib import Path
 from typing import Callable
 
 from pipeline import gcs, images, media, narration, shorts, store, video
+from pipeline.question_card import (
+    QUESTION_CARD_MS,
+    build_question_card,
+)
 
 # Separate asset namespace from the long-form video so a story can have both.
 SHORT_ID_SUFFIX = "-short"
 # Captions sit low (~bottom third) for shorts, matching the channel reference.
 SHORT_CAPTION_POSITION_Y = 0.72
-# Phase 3 of _plans/2026-06-17-engagement-polls.md. Duration of the burnt-in
-# question end card that gets appended when the story has an enabled poll.
-# 2500ms matches the plan §N3 budget and the on-site widget's reveal cadence.
-# Mirrored on the TS side as QUESTION_CARD_DURATION_MS in
-# lorewire-app/src/lib/polls-shared.ts so the Lane A re-render path (TS-only,
-# bypasses this Python build) bakes cards with the same tail length. Keep
-# the two values aligned.
-QUESTION_CARD_MS = 2500
 
 ProgressFn = Callable[[str, int, int], None]
 
@@ -58,87 +54,11 @@ class ShortProps:
     props: dict
 
 
-def _resolve_card_ms() -> int:
-    """Resolve the question-card duration from settings, with bounds.
-
-    Default: QUESTION_CARD_MS (2500). Admin override key:
-    `polls.endcard.duration_ms` — accepts an integer in [500, 10000].
-    Sub-500ms barely registers as a hold; >10000ms is dead space.
-    Any parse error or out-of-range value falls back to the default.
-
-    Phase 5 follow-up of _plans/2026-06-17-engagement-polls.md.
-    """
-    raw = store.get_setting("polls.endcard.duration_ms")
-    if not raw:
-        return QUESTION_CARD_MS
-    try:
-        v = int(raw.strip())
-    except (TypeError, ValueError):
-        return QUESTION_CARD_MS
-    if 500 <= v <= 10000:
-        return v
-    return QUESTION_CARD_MS
-
-
-def _endcard_disabled_by_setting() -> bool:
-    """Master switch — when `polls.endcard.enabled` is explicitly off,
-    NO short carries a burnt-in card, even when the story has an
-    enabled poll. Falsy values: "0", "false" (case-insensitive),
-    "off", "no". Unset / blank / anything else = enabled.
-
-    Phase 5 follow-up of _plans/2026-06-17-engagement-polls.md.
-    """
-    raw = store.get_setting("polls.endcard.enabled")
-    if raw is None:
-        return False
-    return raw.strip().lower() in ("0", "false", "off", "no")
-
-
-def _build_question_card(row: dict) -> dict | None:
-    """Phase 3 of _plans/2026-06-17-engagement-polls.md. Resolve the
-    burnt-in question card for this story's render.
-
-    Returns None when the story has no enabled poll OR the admin has
-    flipped `polls.endcard.enabled` off via settings — the short then
-    renders byte-identical to its pre-poll shape. Returns a dict
-    shaped for the DoodleShort composition's `question_card` prop
-    when a poll exists.
-
-    `slug` falls back to the story id when stories.slug is null. The
-    user lands on the same `/v/<slug>` reader either way; the URL is
-    just less pretty without a slug. Better than no link.
-    """
-    story_id = row.get("id")
-    if not story_id:
-        return None
-    # Master switch first so the poll fetch is skipped when the card
-    # is disabled — no point reading the row just to throw it away.
-    if _endcard_disabled_by_setting():
-        return None
-    poll = store.fetch_enabled_poll_for_story(story_id)
-    if not poll:
-        return None
-    question = (poll.get("question") or "").strip()
-    option_a = (poll.get("option_a_text") or "").strip()
-    option_b = (poll.get("option_b_text") or "").strip()
-    if not question or not option_a or not option_b:
-        # The TS save action enforces non-empty fields, so this
-        # should never trigger on a healthy row. Defense in depth
-        # against a hand-edited DB or a partial migration — skipping
-        # the card is preferable to a broken-looking render.
-        print(
-            f"[short id={story_id} poll] skipping question_card: "
-            f"missing question or option text"
-        )
-        return None
-    slug = (row.get("slug") or story_id).strip() or story_id
-    return {
-        "question": question,
-        "option_a": option_a,
-        "option_b": option_b,
-        "slug": slug,
-        "card_ms": _resolve_card_ms(),
-    }
+# Question-card resolver lives in pipeline.question_card so both the
+# short and the long-form video render paths use one source of truth.
+# Re-exported as private names below to preserve the existing test
+# call sites that reach in through `shorts_render._build_question_card`.
+_build_question_card = build_question_card
 
 
 def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> list[dict]:

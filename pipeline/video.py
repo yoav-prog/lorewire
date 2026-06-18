@@ -359,12 +359,22 @@ def generate_video(
         f"aspect={resolved_aspect})"
     )
 
+    # 2026-06-18 polls plan extension: long-form video also carries the
+    # burnt-in question card at the tail, mirroring shorts_render. Same
+    # build_question_card helper, same duration extension. Skipped when
+    # story_row is None (CLI render with no DB row, e.g. dry-run).
+    from pipeline.question_card import build_question_card
+    question_card = build_question_card(story_row) if story_row else None
+    rendered_duration_ms = duration_ms + (
+        question_card["card_ms"] if question_card else 0
+    )
+
     config = {
         "voiceover_url": static_audio,
         "title": _truncate_title(title),
         "channel_name": "lorewire",
         "aspect": resolved_aspect,
-        "duration_ms": duration_ms,
+        "duration_ms": rendered_duration_ms,
         "doodle_frames": doodle_frames,
         "captions": captions,
         "ken_burns": ken_burns,
@@ -373,6 +383,13 @@ def generate_video(
         "props_list": static_props,
         "character_image_mouth_removed": static_character,
     }
+    if question_card:
+        config["question_card"] = question_card
+        print(
+            f"[video id={safe_id} props] question_card baked "
+            f"(narration {duration_ms / 1000:.1f}s + card "
+            f"{(rendered_duration_ms - duration_ms) / 1000:.1f}s)"
+        )
 
     props_dir = video_project / ".props"
     props_dir.mkdir(parents=True, exist_ok=True)

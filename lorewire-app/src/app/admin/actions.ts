@@ -138,6 +138,30 @@ export async function saveStory(formData: FormData): Promise<void> {
     body: String(formData.get("body") ?? ""),
     teleprompter: String(formData.get("teleprompter") ?? ""),
   });
+  // 2026-06-18 polls plan extension: every story should have a poll.
+  // Try to autodraft now that the admin has just saved (body may
+  // have meaningful content). Service is idempotent — skips when an
+  // enabled poll already exists. Best-effort: any failure logs and
+  // the save still succeeds.
+  try {
+    const body = String(formData.get("body") ?? "").trim();
+    if (body.length >= 50) {
+      const story = await getStoryRow(id);
+      const { autoDraftPollForSubject } = await import("@/lib/poll-autodraft");
+      await autoDraftPollForSubject({
+        kind: "story",
+        storyId: id,
+        title: story?.title ?? null,
+        body,
+        category: story?.category ?? null,
+      });
+    }
+  } catch (err) {
+    console.warn("[stories action] autodraft on save failed", {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   revalidatePath(`/admin/stories/${id}`);
   revalidatePath("/admin/stories");
 }
@@ -148,6 +172,33 @@ export async function changeStatus(formData: FormData): Promise<void> {
   const status = String(formData.get("status") ?? "") as StoryStatus;
   if (!id || !status) return;
   await setStatus(id, status);
+  // 2026-06-18 polls plan extension: fire the autodraft service when
+  // a story transitions to published — the public widget needs a poll
+  // by then. Idempotent (skips enabled polls). Body should be
+  // populated by the pipeline at this point.
+  if (status === "published") {
+    try {
+      const story = await getStoryRow(id);
+      const body = (story?.body ?? "").trim();
+      if (story && body.length >= 50) {
+        const { autoDraftPollForSubject } = await import(
+          "@/lib/poll-autodraft"
+        );
+        await autoDraftPollForSubject({
+          kind: "story",
+          storyId: id,
+          title: story.title,
+          body,
+          category: story.category,
+        });
+      }
+    } catch (err) {
+      console.warn("[stories action] autodraft on publish failed", {
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   revalidatePath(`/admin/stories/${id}`);
   revalidatePath("/admin/stories");
   revalidatePath("/admin");
@@ -257,6 +308,109 @@ export async function savePollAction(formData: FormData): Promise<{
   revalidatePath(`/admin/stories/${storyId}`);
   revalidatePath("/admin/polls");
   return { ok: true, created: result.created };
+}
+
+// 2026-06-18 polls plan extension: backfill action for the "every
+// article must have a poll, whether existing or new" requirement.
+// Walks every published story + article without an enabled poll and
+// fires the autodraft service. Best-effort per row: a per-row failure
+// logs and skips, never aborts the batch. Idempotent — re-running is
+// safe; rows with admin-saved (enabled=1) polls are left alone.
+//
+// Surfaces on /admin/polls as a button. Per-call cost: ~$0.001 per
+// row × (count of subjects without an enabled poll). With 50
+// existing articles + 100 stories that's ~$0.15.
+export interface BackfillPollsResult {
+  ok: boolean;
+  storiesScanned: number;
+  articlesScanned: number;
+  pollsCreatedFromLLM: number;
+  pollsCreatedAsDraft: number;
+  errors: number;
+}
+
+export async function backfillPollsAction(): Promise<BackfillPollsResult> {
+  await requireAdmin();
+  const startedAt = Date.now();
+  const result: BackfillPollsResult = {
+    ok: true,
+    storiesScanned: 0,
+    articlesScanned: 0,
+    pollsCreatedFromLLM: 0,
+    pollsCreatedAsDraft: 0,
+    errors: 0,
+  };
+  const { autoDraftPollForSubject, tiptapToPlainText } = await import(
+    "@/lib/poll-autodraft"
+  );
+  const { listStories, listArticlesSlim, getArticle } = await import(
+    "@/lib/repo"
+  );
+
+  // Stories: published rows the public reader can see. We don't try
+  // to autodraft drafts because admin hasn't decided on the body yet.
+  const stories = await listStories({ status: "published" });
+  for (const s of stories) {
+    result.storiesScanned += 1;
+    const body = (s.body ?? "").trim();
+    if (body.length < 50) {
+      continue; // not enough text for the LLM to make sense of
+    }
+    try {
+      const r = await autoDraftPollForSubject({
+        kind: "story",
+        storyId: s.id,
+        title: s.title,
+        body,
+        category: s.category,
+      });
+      if (r.ok && r.ai) result.pollsCreatedFromLLM += 1;
+      else if (r.ok && !r.ai) result.pollsCreatedAsDraft += 1;
+      else result.errors += 1;
+    } catch (err) {
+      result.errors += 1;
+      console.warn("[polls backfill story failed]", {
+        story_id: s.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Articles: every published article. Read each via getArticle so we
+  // have the document column for tiptapToPlainText.
+  const articles = await listArticlesSlim({ status: "published" });
+  for (const a of articles) {
+    result.articlesScanned += 1;
+    const full = await getArticle(a.id);
+    if (!full) continue;
+    const bodyText = tiptapToPlainText(full.document);
+    if (bodyText.length < 50) continue;
+    try {
+      const r = await autoDraftPollForSubject({
+        kind: "article",
+        articleId: a.id,
+        title: a.title,
+        bodyText,
+        type: a.type,
+      });
+      if (r.ok && r.ai) result.pollsCreatedFromLLM += 1;
+      else if (r.ok && !r.ai) result.pollsCreatedAsDraft += 1;
+      else result.errors += 1;
+    } catch (err) {
+      result.errors += 1;
+      console.warn("[polls backfill article failed]", {
+        article_id: a.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  console.info("[polls backfill done]", {
+    duration_ms: Date.now() - startedAt,
+    ...result,
+  });
+  revalidatePath("/admin/polls");
+  return result;
 }
 
 // 2026-06-18 standalone-article polls (plan §15). Mirrors
@@ -1258,6 +1412,28 @@ export async function createArticleAction(formData: FormData): Promise<void> {
     slug,
     titleLen: title.length,
   });
+  // 2026-06-18 polls plan extension: every article must have a poll
+  // row by default. On create the body is empty so the autodraft
+  // service inserts the category preset as a disabled draft —
+  // saveArticleAction calls the same service again once the editor
+  // has real content, which promotes the draft to enabled=1 via the
+  // LLM. Best-effort: any failure logs and the article create still
+  // succeeds (we never block the redirect on poll generation).
+  try {
+    const { autoDraftPollForSubject } = await import("@/lib/poll-autodraft");
+    await autoDraftPollForSubject({
+      kind: "article",
+      articleId: id,
+      title,
+      bodyText: "",
+      type,
+    });
+  } catch (err) {
+    console.warn("[articles action] autodraft failed", {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   revalidatePath("/admin/articles");
   redirect(`/admin/articles/${id}`);
 }
@@ -1308,6 +1484,34 @@ export async function saveArticleAction(formData: FormData): Promise<void> {
     revisionId,
     coalesced,
   });
+  // 2026-06-18 polls plan extension: try to upgrade an article's
+  // disabled-draft poll to an LLM-drafted enabled poll now that the
+  // editor save has populated real content. The autodraft service
+  // skips admin-saved (enabled=1) polls and only acts on the draft
+  // case. Best-effort: any error logs and the save still succeeds.
+  try {
+    const docForExtract = document || article.document || null;
+    const { autoDraftPollForSubject, tiptapToPlainText } =
+      await import("@/lib/poll-autodraft");
+    const bodyText = tiptapToPlainText(docForExtract);
+    // Only worth attempting when there's a meaningful body to read.
+    // Sub-50-char bodies almost always produce LLM rejection; skip
+    // so we don't burn cycles on every keystroke autosave.
+    if (bodyText.length >= 50) {
+      await autoDraftPollForSubject({
+        kind: "article",
+        articleId: id,
+        title: title || article.title,
+        bodyText,
+        type: article.type,
+      });
+    }
+  } catch (err) {
+    console.warn("[articles action] autodraft upgrade failed", {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   revalidatePath(`/admin/articles/${id}`);
   revalidatePath("/admin/articles");
   redirectToArticle(id, { saved: "1" });
