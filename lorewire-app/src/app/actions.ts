@@ -511,7 +511,13 @@ export async function getPollForStoryView(
       poll = await polls.getPollByStoryId(storyId);
     }
 
-    if (!poll || poll.enabled !== 1) {
+    // "Every story must have a poll, always visible" (2026-06-18 plan
+    // extension). We render enabled=0 fallback drafts too — the category
+    // preset is a real engagement question, and hiding it leaves the
+    // section empty for any story whose LLM autodraft fell back. The
+    // admin still controls the wording via PollEditor; the only way to
+    // hide a poll now is to delete the row.
+    if (!poll) {
       return { ok: true, view: null };
     }
     const [voteToken, aggregate, floor] = await Promise.all([
