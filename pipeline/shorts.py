@@ -430,7 +430,7 @@ def _resolve_scene_refs(
     return refs
 
 
-def _scene_prompt(character: str, scene: str) -> str:
+def _scene_prompt(character: str, scene: str, *, headcount: int = 1) -> str:
     """Per-scene i2i edit prompt. Minimal style — heavy lifting is in the
     reference images passed via input_urls, which lock identity for the main
     character and every recurring supporting character / location / prop. The
@@ -440,17 +440,22 @@ def _scene_prompt(character: str, scene: str) -> str:
 
     Cast bounding: when multiple human refs + a domestic location ref are
     stacked, image models drift toward inventing additional unnamed people
-    to populate the scene. The "no other people" line below is a general
-    constraint that ties the cast strictly to whatever the bible passed in;
-    it stays story-agnostic so it works whether the bible is a 1-person
-    monologue or a 4-character ensemble."""
+    to populate the scene. An explicit per-scene headcount, computed from
+    the actual number of human refs being passed, is a general constraint
+    (no story-specific role enumerations) that works whether the bible is
+    a 1-person monologue or a 4-character ensemble. The image model gets
+    a definite number to hold to instead of soft "no other people" guidance
+    that it learns to ignore when the scene's narrative tone suggests a
+    crowd / family / group."""
+    person_word = "person" if headcount == 1 else "people"
     return (
         f"{sis.COMPOSITION_PREFIX} {scene} The recurring main character, supporting characters, "
         f"locations and props all appear in the reference images — preserve their EXACT identity "
         f"(face, hair, clothing, setting details, prop shape and colour). Only the pose, expression, "
-        f"action, mood and camera framing change for this beat. CAST: the only people in this frame "
-        f"are those passed as reference images. Do not invent or add any other people. Main character "
-        f"cue: {character}. {sis.DOODLE_SUFFIX}"
+        f"action, mood and camera framing change for this beat. CAST: this frame shows EXACTLY "
+        f"{headcount} {person_word} — the human(s) shown in the reference images, drawn once each. "
+        f"Do not draw any additional figures. Do not draw any character twice. Main character cue: "
+        f"{character}. {sis.DOODLE_SUFFIX}"
     )
 
 
@@ -594,22 +599,34 @@ def generate_short_assets(
     # generation used (otherwise the regen would lose world-bible consistency
     # and the wife / kitchen / envelope would drift back to a fresh take).
     def _gen_one(i: int, s: dict) -> tuple[int, dict, str, str, list[str]]:
-        prompt = _scene_prompt(char_ref, s["scene"].strip())
         refs = _resolve_scene_refs(s, base_url, gallery)
-        # Surface focal-priority decisions so a "wife still drifting" debug
-        # session can see whether the reorder fired and which ref ended up
-        # in position 1 for each scene. Heuristic: the FIRST listed
-        # supporting char in scene["characters"] (if any) is the anchor.
-        focal_name = ""
+        # Headcount = protagonist (always present via base_url) + every
+        # distinct supporting char this scene actually named that the
+        # gallery can resolve. Locations + items don't count as people.
+        # Passing this into the prompt is what stops the model from
+        # populating a "warm kitchen with food" frame with hallucinated
+        # family members — soft "no other people" guidance had no effect.
+        char_names_lower: list[str] = []
         for n in s.get("characters") or []:
             cand = str(n).strip().lower() if isinstance(n, str) else ""
-            if cand and gallery.supporting_chars.get(cand):
-                focal_name = cand
-                break
+            if cand:
+                char_names_lower.append(cand)
+        supporting_count = sum(
+            1 for name in set(char_names_lower) if gallery.supporting_chars.get(name)
+        )
+        headcount = 1 + supporting_count
+        prompt = _scene_prompt(char_ref, s["scene"].strip(), headcount=headcount)
+        # Surface focal-priority + headcount decisions so a "wife still
+        # drifting" or "still hallucinating extras" debug session can see
+        # whether the reorder fired, which ref ended up in position 1, and
+        # exactly how many people the prompt declared.
+        focal_name = next(
+            (n for n in char_names_lower if gallery.supporting_chars.get(n)), "",
+        )
         anchor = "supporting" if focal_name else "main"
         print(
             f"[shorts ref order] scene={i} focal={focal_name or '-'} "
-            f"anchor={anchor} ref_count={len(refs)}"
+            f"anchor={anchor} ref_count={len(refs)} headcount={headcount}"
         )
         url = images.generate(
             prompt,
