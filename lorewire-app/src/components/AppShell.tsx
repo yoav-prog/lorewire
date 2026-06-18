@@ -442,7 +442,12 @@ function _galleryFromStory(
     ? liveMedia.images
     : story.images || [];
   if (imgs.length === 0) return null;
-  const words = story.alignment || [];
+  // Prefer the live long-form alignment so captions show on pure-live
+  // stories whose `story.alignment` is empty (the LiveCatalogStory
+  // projection drops it to keep the rails payload small).
+  const words = liveMedia.alignment.length > 0
+    ? liveMedia.alignment
+    : story.alignment || [];
   if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
   const perScene = Math.max(1, Math.floor(words.length / imgs.length));
   return imgs.map((src, i) => {
