@@ -33,6 +33,9 @@ import {
   refreshPollAggregateForStory,
   toResultView,
   topAgreed,
+  topArticleAgreed,
+  topArticleDivisive,
+  topArticleUnpopular,
   topDivisive,
   topUnpopular,
   upsertPoll,
@@ -1264,5 +1267,285 @@ describe("article polls — getVoteSideForCookie works for both subjects", () =>
     expect(
       await getVoteSideForCookie(u.pollId, "cookie-article-side"),
     ).toBe("B");
+  });
+});
+
+// ─── Article rail queries (parallel to story rails) ───────────────────────────
+
+describe("article rail queries", () => {
+  // Seed an article-poll with the requested split. Mirrors
+  // seedStoryWithSplit but for the article path.
+  async function seedArticleWithSplit(
+    articleId: string,
+    type: string,
+    aCount: number,
+    bCount: number,
+  ): Promise<string> {
+    await seedArticle(articleId, type);
+    const u = await upsertPoll({
+      articleId,
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: type,
+    });
+    for (let i = 0; i < aCount; i++) {
+      await recordVote({
+        pollId: u.pollId,
+        articleId,
+        category: type,
+        side: "A",
+        cookieToken: `c-art-rail-${articleId}-a-${i}`,
+        ipUaHash: null,
+      });
+    }
+    for (let i = 0; i < bCount; i++) {
+      await recordVote({
+        pollId: u.pollId,
+        articleId,
+        category: type,
+        side: "B",
+        cookieToken: `c-art-rail-${articleId}-b-${i}`,
+        ipUaHash: null,
+      });
+    }
+    return u.pollId;
+  }
+
+  describe("topArticleDivisive", () => {
+    it("sorts most-split first, then by total_votes", async () => {
+      await seedArticleWithSplit("test-poll-art-div-1", "feature", 50, 50);
+      await seedArticleWithSplit("test-poll-art-div-2", "feature", 75, 25);
+      await seedArticleWithSplit("test-poll-art-div-3", "feature", 49, 51);
+      const rows = await topArticleDivisive({ limit: 10 });
+      const ids = rows.map((r) => r.articleId);
+      expect(ids.indexOf("test-poll-art-div-1")).toBeLessThan(
+        ids.indexOf("test-poll-art-div-2"),
+      );
+      expect(ids.indexOf("test-poll-art-div-3")).toBeLessThan(
+        ids.indexOf("test-poll-art-div-2"),
+      );
+    });
+
+    it("drops articles below the rail floor", async () => {
+      await seedArticleWithSplit("test-poll-art-div-low", "feature", 5, 5);
+      const rows = await topArticleDivisive({ limit: 10 });
+      expect(rows.map((r) => r.articleId)).not.toContain(
+        "test-poll-art-div-low",
+      );
+    });
+
+    it("filters by article type (category) when requested", async () => {
+      await seedArticleWithSplit(
+        "test-poll-art-div-feature",
+        "feature",
+        50,
+        50,
+      );
+      await seedArticleWithSplit(
+        "test-poll-art-div-review",
+        "review",
+        50,
+        50,
+      );
+      const rows = await topArticleDivisive({
+        category: "feature",
+        limit: 10,
+      });
+      const ids = rows.map((r) => r.articleId);
+      expect(ids).toContain("test-poll-art-div-feature");
+      expect(ids).not.toContain("test-poll-art-div-review");
+    });
+
+    it("excludes the current article when excludeArticleId set", async () => {
+      await seedArticleWithSplit("test-poll-art-div-self", "feature", 50, 50);
+      await seedArticleWithSplit(
+        "test-poll-art-div-other",
+        "feature",
+        48,
+        52,
+      );
+      const rows = await topArticleDivisive({
+        excludeArticleId: "test-poll-art-div-self",
+        limit: 10,
+      });
+      expect(rows.map((r) => r.articleId)).not.toContain(
+        "test-poll-art-div-self",
+      );
+    });
+
+    it("does NOT surface story polls (story_id rows are filtered out)", async () => {
+      // A story poll with the same vote profile must NEVER leak into
+      // the article rail.
+      await seedStory("test-rail-story-leak", "Drama");
+      const su = await upsertPoll({
+        storyId: "test-rail-story-leak",
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: true,
+        category: "Drama",
+      });
+      for (let i = 0; i < 30; i++) {
+        await recordVote({
+          pollId: su.pollId,
+          storyId: "test-rail-story-leak",
+          category: "Drama",
+          side: i % 2 === 0 ? "A" : "B",
+          cookieToken: `c-leak-${i}`,
+          ipUaHash: null,
+        });
+      }
+      const rows = await topArticleDivisive({ limit: 10 });
+      // The story poll has no article_id so the WHERE clause filters
+      // it out entirely. Defensive: the assertion is "story id not
+      // present" since articleId would not match either way.
+      expect(rows.map((r) => r.articleId)).not.toContain(
+        "test-rail-story-leak",
+      );
+    });
+  });
+
+  describe("topArticleAgreed", () => {
+    it("sorts most-lopsided first", async () => {
+      await seedArticleWithSplit("test-poll-art-agr-1", "feature", 95, 5);
+      await seedArticleWithSplit("test-poll-art-agr-2", "feature", 50, 50);
+      await seedArticleWithSplit("test-poll-art-agr-3", "feature", 80, 20);
+      const rows = await topArticleAgreed({ limit: 10 });
+      const ids = rows.map((r) => r.articleId);
+      expect(ids.indexOf("test-poll-art-agr-1")).toBeLessThan(
+        ids.indexOf("test-poll-art-agr-3"),
+      );
+      expect(ids.indexOf("test-poll-art-agr-3")).toBeLessThan(
+        ids.indexOf("test-poll-art-agr-2"),
+      );
+    });
+  });
+
+  describe("topArticleUnpopular", () => {
+    it("fallback mode surfaces articles with smaller side under 15%", async () => {
+      await seedArticleWithSplit("test-poll-art-unp-95", "feature", 95, 5);
+      await seedArticleWithSplit("test-poll-art-unp-70", "feature", 70, 30);
+      const rows = await topArticleUnpopular({
+        cookieToken: null,
+        limit: 10,
+      });
+      const ids = rows.map((r) => r.articleId);
+      expect(ids).toContain("test-poll-art-unp-95");
+      expect(ids).not.toContain("test-poll-art-unp-70");
+    });
+
+    it("personalized mode surfaces articles where this cookie's side was the minority", async () => {
+      const myCookie = "test-poll-art-unp-cookie-me";
+      // Set up an article where 'me' voted A and A was the minority.
+      await seedArticle("test-poll-art-unp-personalized", "feature");
+      const u = await upsertPoll({
+        articleId: "test-poll-art-unp-personalized",
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: true,
+        category: "feature",
+      });
+      await recordVote({
+        pollId: u.pollId,
+        articleId: "test-poll-art-unp-personalized",
+        category: "feature",
+        side: "A",
+        cookieToken: myCookie,
+        ipUaHash: null,
+      });
+      // 24 more A voters + 75 B voters: A is 25/100, the minority.
+      for (let i = 0; i < 24; i++) {
+        await recordVote({
+          pollId: u.pollId,
+          articleId: "test-poll-art-unp-personalized",
+          category: "feature",
+          side: "A",
+          cookieToken: `c-unp-personalized-a-${i}`,
+          ipUaHash: null,
+        });
+      }
+      for (let i = 0; i < 75; i++) {
+        await recordVote({
+          pollId: u.pollId,
+          articleId: "test-poll-art-unp-personalized",
+          category: "feature",
+          side: "B",
+          cookieToken: `c-unp-personalized-b-${i}`,
+          ipUaHash: null,
+        });
+      }
+      const rows = await topArticleUnpopular({
+        cookieToken: myCookie,
+        limit: 10,
+      });
+      expect(rows.map((r) => r.articleId)).toContain(
+        "test-poll-art-unp-personalized",
+      );
+    });
+  });
+
+  describe("rail floor + visibility (article variant)", () => {
+    it("does not surface noindex articles", async () => {
+      const now = new Date().toISOString();
+      await run("DELETE FROM articles WHERE id = ?", [
+        "test-poll-art-noindex",
+      ]);
+      await run(
+        "INSERT INTO articles (id, type, language, slug, title, status, noindex, payload, created_at, updated_at) " +
+          "VALUES (?, 'feature', 'en', 'slug-noindex', 'T', 'published', 1, '{}', ?, ?)",
+        ["test-poll-art-noindex", now, now],
+      );
+      const u = await upsertPoll({
+        articleId: "test-poll-art-noindex",
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: true,
+        category: "feature",
+      });
+      for (let i = 0; i < 30; i++) {
+        await recordVote({
+          pollId: u.pollId,
+          articleId: "test-poll-art-noindex",
+          category: "feature",
+          side: i % 2 === 0 ? "A" : "B",
+          cookieToken: `c-noindex-${i}`,
+          ipUaHash: null,
+        });
+      }
+      const rows = await topArticleDivisive({ limit: 10 });
+      expect(rows.map((r) => r.articleId)).not.toContain(
+        "test-poll-art-noindex",
+      );
+    });
+
+    it("does not surface disabled article polls", async () => {
+      await seedArticle("test-poll-art-disabled", "feature");
+      const u = await upsertPoll({
+        articleId: "test-poll-art-disabled",
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: false,
+        category: "feature",
+      });
+      for (let i = 0; i < 30; i++) {
+        await recordVote({
+          pollId: u.pollId,
+          articleId: "test-poll-art-disabled",
+          category: "feature",
+          side: i % 2 === 0 ? "A" : "B",
+          cookieToken: `c-disabled-${i}`,
+          ipUaHash: null,
+        });
+      }
+      const rows = await topArticleDivisive({ limit: 10 });
+      expect(rows.map((r) => r.articleId)).not.toContain(
+        "test-poll-art-disabled",
+      );
+    });
   });
 });

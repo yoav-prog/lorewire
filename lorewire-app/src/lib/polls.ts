@@ -734,6 +734,262 @@ export async function topUnpopular(
   return rows.map(shapeRailRow);
 }
 
+// ─── Article rails: divisive / agreed / unpopular ────────────────────────────
+//
+// Mirrors the story-rail surface but for polls attached to articles.
+// Article polls don't have a projection row in `poll_aggregates` (we
+// compute live by design — see computeArticlePollAggregate), so the
+// rail queries compute counts inline via a GROUP BY against
+// `poll_votes`. Volume is low enough that the cost is negligible;
+// the `idx_poll_votes_poll_id` index makes the GROUP BY tight.
+
+/** A card row on the public article-rail pages. Self-contained —
+ *  carries every field the card renders so the page never has to
+ *  look the article up in a static catalog. */
+export interface ArticleRailCardRow {
+  pollId: string;
+  articleId: string;
+  slug: string | null;
+  title: string | null;
+  /** Snapshot of the article TYPE at the time the poll was authored
+   *  (news / feature / listicle / review). Powers the per-type
+   *  filter and the card chip. */
+  category: string | null;
+  heroImage: string | null;
+  language: string | null;
+  question: string;
+  optionAText: string;
+  optionBText: string;
+  votesA: number;
+  votesB: number;
+  totalVotes: number;
+  divisiveness: number;
+}
+
+export interface ArticleRailQueryOpts {
+  /** Optional filter by article TYPE (e.g. "feature", "review"). */
+  category?: string | null;
+  /** Exclude a specific article (the one the reader is currently
+   *  on). Used by a future post-vote follow-up on the article reader. */
+  excludeArticleId?: string | null;
+  limit?: number;
+}
+
+interface RawArticleRailRow {
+  poll_id: string;
+  article_id: string;
+  slug: string | null;
+  title: string | null;
+  category: string | null;
+  hero_image: string | null;
+  language: string | null;
+  question: string;
+  option_a_text: string;
+  option_b_text: string;
+  votes_a: number;
+  votes_b: number;
+}
+
+const ARTICLE_RAIL_BASE_SELECT = `
+  SELECT
+    p.id                AS poll_id,
+    p.article_id        AS article_id,
+    ar.slug             AS slug,
+    ar.title            AS title,
+    p.category          AS category,
+    ar.hero_image       AS hero_image,
+    ar.language         AS language,
+    p.question          AS question,
+    p.option_a_text     AS option_a_text,
+    p.option_b_text     AS option_b_text,
+    COALESCE(SUM(CASE WHEN pv.side = 'A' THEN 1 ELSE 0 END), 0) AS votes_a,
+    COALESCE(SUM(CASE WHEN pv.side = 'B' THEN 1 ELSE 0 END), 0) AS votes_b
+  FROM polls p
+  JOIN articles ar ON ar.id = p.article_id
+  LEFT JOIN poll_votes pv ON pv.poll_id = p.id
+  WHERE p.enabled = 1
+    AND p.article_id IS NOT NULL
+    AND ar.status = 'published'
+    AND ar.slug IS NOT NULL
+    AND (ar.noindex IS NULL OR ar.noindex = 0)`;
+
+function shapeArticleRailRow(r: RawArticleRailRow): ArticleRailCardRow {
+  const votesA = Number(r.votes_a) || 0;
+  const votesB = Number(r.votes_b) || 0;
+  return {
+    pollId: r.poll_id,
+    articleId: r.article_id,
+    slug: r.slug,
+    title: r.title,
+    category: r.category,
+    heroImage: r.hero_image,
+    language: r.language,
+    question: r.question,
+    optionAText: r.option_a_text,
+    optionBText: r.option_b_text,
+    votesA,
+    votesB,
+    totalVotes: votesA + votesB,
+    divisiveness: divisiveness(votesA, votesB),
+  };
+}
+
+/** Fetch every eligible article-poll row with its live counts and
+ *  enforce the rail floor in JS. Sorting + limiting happens at the
+ *  caller. Article-poll volume is the assumption-of-the-feature;
+ *  fetching all eligible rows + sorting in JS is fine until we have
+ *  evidence that the rail surface has thousands of entries. */
+async function listArticleRailRows(
+  opts: ArticleRailQueryOpts,
+): Promise<ArticleRailCardRow[]> {
+  const extra: string[] = [];
+  const params: unknown[] = [];
+  if (opts.category) {
+    extra.push("AND p.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeArticleId) {
+    extra.push("AND p.article_id <> ?");
+    params.push(opts.excludeArticleId);
+  }
+  const sql =
+    `${ARTICLE_RAIL_BASE_SELECT} ${extra.join(" ")}
+     GROUP BY p.id, p.article_id, ar.slug, ar.title, p.category,
+              ar.hero_image, ar.language, p.question,
+              p.option_a_text, p.option_b_text`;
+  const rows = await all<RawArticleRailRow>(sql, params);
+  return rows
+    .map(shapeArticleRailRow)
+    .filter((r) => r.totalVotes >= RAIL_MIN_VOTES);
+}
+
+/** Article polls whose audience is most split — divisiveness DESC,
+ *  total_votes DESC as the tie-breaker. Same floor + visibility
+ *  rules as the story rails. */
+export async function topArticleDivisive(
+  opts: ArticleRailQueryOpts = {},
+): Promise<ArticleRailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const eligible = await listArticleRailRows(opts);
+  eligible.sort(
+    (a, b) => b.divisiveness - a.divisiveness || b.totalVotes - a.totalVotes,
+  );
+  console.info("[polls rail query]", {
+    rail: "article-divisive",
+    category: opts.category ?? null,
+    exclude: opts.excludeArticleId ?? null,
+    limit,
+    eligible: eligible.length,
+  });
+  return eligible.slice(0, limit);
+}
+
+/** Article polls where the audience overwhelmingly agreed —
+ *  divisiveness ASC (most lopsided first), total_votes DESC tie-
+ *  breaker. */
+export async function topArticleAgreed(
+  opts: ArticleRailQueryOpts = {},
+): Promise<ArticleRailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const eligible = await listArticleRailRows(opts);
+  eligible.sort(
+    (a, b) => a.divisiveness - b.divisiveness || b.totalVotes - a.totalVotes,
+  );
+  console.info("[polls rail query]", {
+    rail: "article-agreed",
+    category: opts.category ?? null,
+    exclude: opts.excludeArticleId ?? null,
+    limit,
+    eligible: eligible.length,
+  });
+  return eligible.slice(0, limit);
+}
+
+export interface ArticleUnpopularQueryOpts extends ArticleRailQueryOpts {
+  /** When set, the rail returns articles where THIS cookie voted on
+   *  the minority side. When null, falls back to "smaller side under
+   *  15%" so a fresh visitor never sees an empty rail. */
+  cookieToken?: string | null;
+}
+
+/** Article-poll equivalent of topUnpopular. Personalized mode joins
+ *  poll_votes to find where the cookie's chosen side was the minority;
+ *  fallback mode surfaces any article where the smaller side polled
+ *  under 15%. */
+export async function topArticleUnpopular(
+  opts: ArticleUnpopularQueryOpts = {},
+): Promise<ArticleRailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const extra: string[] = [];
+  const params: unknown[] = [];
+  if (opts.category) {
+    extra.push("AND p.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeArticleId) {
+    extra.push("AND p.article_id <> ?");
+    params.push(opts.excludeArticleId);
+  }
+
+  if (opts.cookieToken) {
+    // Personalized mode: fetch every eligible article-rail row, then
+    // fetch the cookie's vote map (poll_id → side), then filter in JS
+    // to rows where the cookie's side was the minority. Cheaper than
+    // expressing the minority-check inside a nested SQL HAVING (which
+    // tripped SQLite's "misuse of aggregate function" rule) — and
+    // easier to read.
+    const eligible = await listArticleRailRows(opts);
+    const voteRows = await all<{ poll_id: string; side: string }>(
+      "SELECT poll_id, side FROM poll_votes WHERE cookie_token = ?",
+      [opts.cookieToken],
+    );
+    const cookieSideByPoll = new Map<string, PollSide>();
+    for (const v of voteRows) {
+      if (isPollSide(v.side)) cookieSideByPoll.set(v.poll_id, v.side);
+    }
+    const filtered = eligible.filter((r) => {
+      const side = cookieSideByPoll.get(r.pollId);
+      if (!side) return false; // cookie didn't vote on this poll
+      const total = r.votesA + r.votesB;
+      if (total <= 0) return false;
+      return side === "A"
+        ? r.votesA * 2 < total
+        : r.votesB * 2 < total;
+    });
+    filtered.sort(
+      (a, b) =>
+        a.divisiveness - b.divisiveness || b.totalVotes - a.totalVotes,
+    );
+    console.info("[polls rail query]", {
+      rail: "article-unpopular",
+      mode: "personalized",
+      category: opts.category ?? null,
+      limit,
+      eligible: filtered.length,
+    });
+    return filtered.slice(0, limit);
+  }
+
+  // Fallback: any article whose smaller side polled under 15%.
+  const eligible = (await listArticleRailRows(opts)).filter((r) => {
+    const total = r.totalVotes;
+    if (total <= 0) return false;
+    return r.votesA * 100 < total * 15 || r.votesB * 100 < total * 15;
+  });
+  eligible.sort(
+    (a, b) =>
+      a.divisiveness - b.divisiveness || b.totalVotes - a.totalVotes,
+  );
+  console.info("[polls rail query]", {
+    rail: "article-unpopular",
+    mode: "fallback",
+    category: opts.category ?? null,
+    limit,
+    eligible: eligible.length,
+  });
+  return eligible.slice(0, limit);
+}
+
 // ─── Admin overview ───────────────────────────────────────────────────────────
 
 export interface PollOverviewRow {

@@ -135,12 +135,20 @@ export default async function RailPage({
   return (
     <main className="mx-auto max-w-[900px] px-5 py-10">
       <header className="space-y-3">
-        <Link
-          href="/"
-          className="font-mono text-[11px] uppercase tracking-wider text-muted hover:text-ink"
-        >
-          ← lorewire.com
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/"
+            className="font-mono text-[11px] uppercase tracking-wider text-muted hover:text-ink"
+          >
+            ← lorewire.com
+          </Link>
+          <Link
+            href={`/c/articles/${surface}`}
+            className="font-mono text-[11px] uppercase tracking-wider text-muted hover:text-ink"
+          >
+            Article polls →
+          </Link>
+        </div>
         <h1 className="font-display text-[34px] font-extrabold leading-tight tracking-tightest text-ink">
           {meta.title}
         </h1>
