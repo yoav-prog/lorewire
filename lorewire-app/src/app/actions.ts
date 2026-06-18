@@ -260,18 +260,25 @@ export interface LiveCatalogResult {
   stories: LiveCatalogStory[];
 }
 
-// Returns published, non-noindex stories most-recent first. Used by the
-// homepage shells to render newly published stories that haven't been
-// re-exported into src/data/published.ts yet — `python -m pipeline.export_app`
-// is a deploy-required step; this fetch sidesteps it for live UX.
+// Returns any story the admin has finished rendering (status ready or
+// published) and not explicitly hidden. ORIGINAL filter required both
+// status = 'published' AND published_at IS NOT NULL — that silently
+// dropped stories whose status was flipped before the publish action
+// learned to backfill published_at, leaving the homepage blank of real
+// reels even when the admin saw them as published. We now accept
+// 'ready' as well (the story has a rendered MP4 and a slug) and order
+// by COALESCE(published_at, updated_at, created_at) so a published_at
+// of NULL doesn't bury the row. noindex stays a hard cut — that's the
+// admin opting OUT of public visibility on purpose.
 export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   const safeLimit = Math.max(1, Math.min(limit, 500));
   const rows = await all<LiveCatalogStory>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "video_url, published_at, created_at FROM stories " +
-      "WHERE status = 'published' AND published_at IS NOT NULL " +
+      "WHERE status IN ('ready', 'published') " +
+      "AND slug IS NOT NULL " +
       "AND (noindex IS NULL OR noindex = 0) " +
-      "ORDER BY published_at DESC " +
+      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC " +
       `LIMIT ${safeLimit}`,
   );
   console.info("[homepage live catalog load]", {
@@ -293,13 +300,21 @@ export async function getHomepageCuration(): Promise<HomepageCurationResult> {
       rawCount++;
     }
   }
+  // Curated rails honour the admin's explicit pick: a story the admin
+  // hand-placed on a rail is surfaced as long as it exists and isn't
+  // marked noindex. The previous filter additionally required
+  // status='published' AND published_at IS NOT NULL — that silently
+  // hid stories whose status flipped before the publish flow learned
+  // to backfill the timestamp, leaving the rail blank of real picks
+  // and falling back to the static sample. If the admin curated it,
+  // trust the admin. noindex stays a hard cut — that's an explicit
+  // opt-out from public visibility.
   let publishedSet = new Set<string>();
   if (curatedIds.size > 0) {
     const ids = Array.from(curatedIds);
     const placeholders = ids.map(() => "?").join(", ");
     const rows = await all<{ id: string }>(
       `SELECT id FROM stories WHERE id IN (${placeholders}) ` +
-        "AND status = 'published' AND published_at IS NOT NULL " +
         "AND (noindex IS NULL OR noindex = 0)",
       ids,
     );
