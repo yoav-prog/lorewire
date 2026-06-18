@@ -448,8 +448,11 @@ def generate_video(
         outro_local = segments.fetch_to_cache(outro_seg, repo_root) if outro_seg else None
         if intro_local or outro_local:
             tmp_out = out_mp4.with_name(out_mp4.stem + ".spliced.mp4")
+            outro_lead_in_sec = segments.resolve_outro_lead_in_sec(_store.get_setting)
             segments.splice(
-                out_mp4, intro_local, outro_local, tmp_out, context_id=safe_id
+                out_mp4, intro_local, outro_local, tmp_out,
+                context_id=safe_id,
+                outro_lead_in_sec=outro_lead_in_sec,
             )
             tmp_out.replace(out_mp4)
     except Exception as e:
