@@ -237,6 +237,50 @@ export interface HomepageCurationResult {
   behavior: HomepageCurationBehavior;
 }
 
+// Slim story projection the homepage rails render off. Mirrors the fields
+// the static `Story` interface in lib/stories ships (id, title, category,
+// duration, hero artwork, ...) so the client adapter can build a Story
+// without each rail component caring whether it came from the baked
+// catalog or the live DB.
+export interface LiveCatalogStory {
+  id: string;
+  slug: string | null;
+  title: string | null;
+  category: string | null;
+  summary: string | null;
+  duration: string | null;
+  hero_image: string | null;
+  video_url: string | null;
+  published_at: string | null;
+  created_at: string | null;
+}
+
+export interface LiveCatalogResult {
+  ok: boolean;
+  stories: LiveCatalogStory[];
+}
+
+// Returns published, non-noindex stories most-recent first. Used by the
+// homepage shells to render newly published stories that haven't been
+// re-exported into src/data/published.ts yet — `python -m pipeline.export_app`
+// is a deploy-required step; this fetch sidesteps it for live UX.
+export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
+  const safeLimit = Math.max(1, Math.min(limit, 500));
+  const rows = await all<LiveCatalogStory>(
+    "SELECT id, slug, title, category, summary, duration, hero_image, " +
+      "video_url, published_at, created_at FROM stories " +
+      "WHERE status = 'published' AND published_at IS NOT NULL " +
+      "AND (noindex IS NULL OR noindex = 0) " +
+      "ORDER BY published_at DESC " +
+      `LIMIT ${safeLimit}`,
+  );
+  console.info("[homepage live catalog load]", {
+    count: rows.length,
+    limit: safeLimit,
+  });
+  return { ok: true, stories: rows };
+}
+
 export async function getHomepageCuration(): Promise<HomepageCurationResult> {
   const grouped = await listAllCuration();
   // Collect every curated story id across all surfaces, dedupe, ask the
