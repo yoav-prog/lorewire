@@ -12,3 +12,9 @@ google-auth>=2.50,<3
 # the default when the env var is absent. The binary extra ships compiled libpq
 # so no separate system install is needed on Windows/macOS/Linux.
 psycopg[binary]>=3.1,<4
+# Number-to-words for the caption text normalizer (pipeline/text_normalize.py).
+# Pre-normalizing the script before TTS keeps the spoken audio and the caption
+# text in lockstep: "$1,000,000" becomes "one million dollars" in both, so the
+# karaoke highlight matches what the voice is saying. MIT licensed, pure
+# Python, one transitive dep (docopt for its unused CLI).
+num2words>=0.5,<1

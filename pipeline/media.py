@@ -22,7 +22,17 @@ import re
 import time
 from pathlib import Path
 
-from pipeline import captions, config, gcs, images, models, stages, store, voice
+from pipeline import (
+    captions,
+    config,
+    gcs,
+    images,
+    models,
+    stages,
+    store,
+    text_normalize,
+    voice,
+)
 from pipeline.aspect import (
     resolve_aspect_for_fresh_run,
     resolve_aspect_for_story,
@@ -672,7 +682,14 @@ def generate_media(
         narration_path = out_dir / "narration.mp3"
         started = time.time()
         try:
-            result = voice.synthesize(body, narration_path)
+            # Phase 2: pre-normalize the script into spoken form so the
+            # TTS and the captions share the same surface text. The voice
+            # reads "$1,000,000" as "one million dollars" — by feeding the
+            # normalized form to both `voice.synthesize` and the caption
+            # graft below, the karaoke highlight stays in sync with what
+            # the ear hears. See _plans/2026-06-18-caption-accuracy-and-naturalness.md.
+            narration_script = text_normalize.normalize_for_tts(body)
+            result = voice.synthesize(narration_script, narration_path)
             elapsed = time.time() - started
             # Script-graft: the provider's word timings are reliable, but
             # on the STT-derived Google path the word *text* can be wrong
@@ -680,16 +697,16 @@ def generate_media(
             # `captions.align_script_to_words` rewrites each word to the
             # matching source-script token while preserving timings. On
             # ElevenLabs (already script-authoritative) this is a no-op
-            # trust pass. See _plans/2026-06-18-caption-accuracy-and-naturalness.md.
+            # trust pass.
             words = captions.align_script_to_words(
-                body, result.get("words", []), result.get("provider", "")
+                narration_script, result.get("words", []), result.get("provider", "")
             )
             duration = words[-1]["end"] if words else 0.0
             stored_audio_url = gcs.publish(
                 narration_path, f"{safe_id}/narration.mp3", f"{url_prefix}/narration.mp3"
             )
             print(
-                f"[media id={safe_id} voice] {len(body)} chars "
+                f"[media id={safe_id} voice] {len(narration_script)} chars "
                 f"({models.get_selected('voice')}, provider={result['provider']}) "
                 f"-> {stored_audio_url} ({elapsed:.1f}s, {len(words)} words, ~{duration:.1f}s audio)"
             )
