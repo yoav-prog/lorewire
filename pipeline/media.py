@@ -22,7 +22,7 @@ import re
 import time
 from pathlib import Path
 
-from pipeline import config, gcs, images, models, stages, store, voice
+from pipeline import captions, config, gcs, images, models, stages, store, voice
 from pipeline.aspect import (
     resolve_aspect_for_fresh_run,
     resolve_aspect_for_story,
@@ -674,7 +674,16 @@ def generate_media(
         try:
             result = voice.synthesize(body, narration_path)
             elapsed = time.time() - started
-            words = result.get("words", [])
+            # Script-graft: the provider's word timings are reliable, but
+            # on the STT-derived Google path the word *text* can be wrong
+            # (homophones, missing punctuation, dropped/inserted words).
+            # `captions.align_script_to_words` rewrites each word to the
+            # matching source-script token while preserving timings. On
+            # ElevenLabs (already script-authoritative) this is a no-op
+            # trust pass. See _plans/2026-06-18-caption-accuracy-and-naturalness.md.
+            words = captions.align_script_to_words(
+                body, result.get("words", []), result.get("provider", "")
+            )
             duration = words[-1]["end"] if words else 0.0
             stored_audio_url = gcs.publish(
                 narration_path, f"{safe_id}/narration.mp3", f"{url_prefix}/narration.mp3"
