@@ -18,12 +18,16 @@
 
 import { useState, useTransition } from "react";
 import { savePollAction } from "@/app/admin/actions";
+// Phase 2/3 of _plans/2026-06-17-engagement-polls.md. Client
+// components import from `polls-shared` to avoid Turbopack pulling
+// the server-only db driver into the browser bundle. See the comment
+// at the top of lib/polls.ts for the build-time failure this fixes.
 import {
   POLL_OPTION_MAX,
   POLL_QUESTION_MAX,
   type PollRow,
   type StoryCategory,
-} from "@/lib/polls";
+} from "@/lib/polls-shared";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";

@@ -24,7 +24,11 @@
 // bounce. Hiding the result until commit IS the engagement primitive.
 
 import { useState, useTransition } from "react";
-import type { PollResultView, PollSide } from "@/lib/polls";
+// Phase 2 of _plans/2026-06-17-engagement-polls.md. Client component
+// imports from `polls-shared` so Turbopack doesn't pull the server-
+// only db driver into the browser bundle. See the comment at the
+// top of lib/polls.ts.
+import type { PollResultView, PollSide } from "@/lib/polls-shared";
 
 interface PollWidgetProps {
   storyId: string;
