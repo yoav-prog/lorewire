@@ -342,6 +342,251 @@ export async function getVoteSideForCookie(
   return isPollSide(row.side) ? row.side : null;
 }
 
+// ─── Public rails: divisive / agreed / unpopular ──────────────────────────────
+
+/** A story card for one of the three public rail pages. Each row carries
+ *  the parent-story fields the card renders (slug + title + hero_image)
+ *  joined against the aggregate so the page doesn't N+1. */
+export interface RailCardRow {
+  storyId: string;
+  slug: string | null;
+  title: string | null;
+  category: string | null;
+  heroImage: string | null;
+  question: string;
+  optionAText: string;
+  optionBText: string;
+  votesA: number;
+  votesB: number;
+  totalVotes: number;
+  divisiveness: number;
+}
+
+/** Default minimum total_votes a row must have before it can appear on
+ *  a public rail. Below this the percentages would be misleading
+ *  (1/0 reads 100/0 on a fresh poll), so we keep the card off the rail
+ *  entirely rather than show "<20 votes" copy on every entry. The
+ *  number tracks DEFAULT_PUBLIC_FLOOR so the rail floor matches the
+ *  on-widget floor. */
+export const RAIL_MIN_VOTES = DEFAULT_PUBLIC_FLOOR;
+
+/** Default rail page size. Plan §F8 paginates 20 per page. */
+export const RAIL_DEFAULT_LIMIT = 20;
+
+export interface RailQueryOpts {
+  /** Optional category filter — when set, only stories in that
+   *  category surface. Used by the post-vote follow-up: we keep the
+   *  reader in the same emotional register they just voted on. */
+  category?: string | null;
+  /** Exclude a specific story (the one the user is currently on). The
+   *  follow-up link uses this so the next card isn't the same story. */
+  excludeStoryId?: string | null;
+  /** Page size. Default RAIL_DEFAULT_LIMIT. */
+  limit?: number;
+}
+
+const RAIL_BASE_SELECT = `
+  SELECT
+    pa.story_id        AS story_id,
+    s.slug             AS slug,
+    s.title            AS title,
+    pa.category        AS category,
+    s.hero_image       AS hero_image,
+    p.question         AS question,
+    p.option_a_text    AS option_a_text,
+    p.option_b_text    AS option_b_text,
+    pa.votes_a         AS votes_a,
+    pa.votes_b         AS votes_b,
+    pa.total_votes     AS total_votes,
+    pa.divisiveness    AS divisiveness
+  FROM poll_aggregates pa
+  JOIN polls p ON p.id = pa.poll_id
+  JOIN stories s ON s.id = pa.story_id
+  WHERE p.enabled = 1
+    AND s.status = 'published'
+    AND s.slug IS NOT NULL
+    AND (s.noindex IS NULL OR s.noindex = 0)
+    AND pa.total_votes >= ?`;
+
+interface RawRailRow {
+  story_id: string;
+  slug: string | null;
+  title: string | null;
+  category: string | null;
+  hero_image: string | null;
+  question: string;
+  option_a_text: string;
+  option_b_text: string;
+  votes_a: number;
+  votes_b: number;
+  total_votes: number;
+  divisiveness: number;
+}
+
+function shapeRailRow(r: RawRailRow): RailCardRow {
+  return {
+    storyId: r.story_id,
+    slug: r.slug,
+    title: r.title,
+    category: r.category,
+    heroImage: r.hero_image,
+    question: r.question,
+    optionAText: r.option_a_text,
+    optionBText: r.option_b_text,
+    votesA: Number(r.votes_a) || 0,
+    votesB: Number(r.votes_b) || 0,
+    totalVotes: Number(r.total_votes) || 0,
+    divisiveness: Number(r.divisiveness) || 0,
+  };
+}
+
+/** Stories whose audience is most split — divisiveness DESC,
+ *  total_votes DESC as the tie-breaker so a 50/50 with 1k votes
+ *  outranks a 50/50 with 30. Drops any story below the rail floor
+ *  so a brand-new poll with 1 vote can't accidentally top the rail. */
+export async function topDivisive(
+  opts: RailQueryOpts = {},
+): Promise<RailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const where: string[] = [];
+  const params: unknown[] = [RAIL_MIN_VOTES];
+  if (opts.category) {
+    where.push("AND pa.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeStoryId) {
+    where.push("AND pa.story_id <> ?");
+    params.push(opts.excludeStoryId);
+  }
+  const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+    ORDER BY pa.divisiveness DESC, pa.total_votes DESC
+    LIMIT ${limit}`;
+  const rows = await all<RawRailRow>(sql, params);
+  console.info("[polls rail query]", {
+    rail: "divisive",
+    category: opts.category ?? null,
+    exclude: opts.excludeStoryId ?? null,
+    limit,
+    result_count: rows.length,
+  });
+  return rows.map(shapeRailRow);
+}
+
+/** Stories where the audience overwhelmingly agreed — sorts by
+ *  divisiveness ASC (lowest = most lopsided), with total_votes DESC
+ *  as the tie-breaker so a 95/5 with 1k votes outranks a 95/5 with 30.
+ *  Same floor logic as topDivisive. */
+export async function topAgreed(
+  opts: RailQueryOpts = {},
+): Promise<RailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const where: string[] = [];
+  const params: unknown[] = [RAIL_MIN_VOTES];
+  if (opts.category) {
+    where.push("AND pa.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeStoryId) {
+    where.push("AND pa.story_id <> ?");
+    params.push(opts.excludeStoryId);
+  }
+  const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+    ORDER BY pa.divisiveness ASC, pa.total_votes DESC
+    LIMIT ${limit}`;
+  const rows = await all<RawRailRow>(sql, params);
+  console.info("[polls rail query]", {
+    rail: "agreed",
+    category: opts.category ?? null,
+    exclude: opts.excludeStoryId ?? null,
+    limit,
+    result_count: rows.length,
+  });
+  return rows.map(shapeRailRow);
+}
+
+export interface UnpopularQueryOpts extends RailQueryOpts {
+  /** When set, the rail returns stories where THIS cookie voted on
+   *  the losing side — the V3 "you had an unpopular opinion" signal.
+   *  When null, falls back to "stories where the smaller side is <
+   *  15%" so the public surface never reads empty for a brand-new
+   *  visitor without any vote history. */
+  cookieToken?: string | null;
+}
+
+/** Stories where the requester's side was the minority. With a cookie
+ *  token we can compute this precisely from poll_votes; without one
+ *  (a fresh visitor with no vote history) we fall back to "stories
+ *  where the smaller side polled under 15%" so the rail is never
+ *  empty on first visit. The lossy fallback ships the same vibe as
+ *  the cookie-personalized version: every entry is a "most people
+ *  picked the other side" story.  */
+export async function topUnpopular(
+  opts: UnpopularQueryOpts = {},
+): Promise<RailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const where: string[] = [];
+  const params: unknown[] = [RAIL_MIN_VOTES];
+  if (opts.category) {
+    where.push("AND pa.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeStoryId) {
+    where.push("AND pa.story_id <> ?");
+    params.push(opts.excludeStoryId);
+  }
+
+  if (opts.cookieToken) {
+    // Personalized path: only include stories the cookie has voted on
+    // AND where that vote landed on the smaller side. We join the vote
+    // row in and add a server-side guard that the chosen side polled
+    // under 50% of total_votes.
+    const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+      AND EXISTS (
+        SELECT 1 FROM poll_votes v
+        WHERE v.poll_id = p.id
+          AND v.cookie_token = ?
+          AND (
+            (v.side = 'A' AND pa.votes_a * 2 < pa.total_votes)
+            OR (v.side = 'B' AND pa.votes_b * 2 < pa.total_votes)
+          )
+      )
+      ORDER BY pa.divisiveness ASC, pa.total_votes DESC
+      LIMIT ${limit}`;
+    const rows = await all<RawRailRow>(sql, [...params, opts.cookieToken]);
+    console.info("[polls rail query]", {
+      rail: "unpopular",
+      mode: "personalized",
+      category: opts.category ?? null,
+      exclude: opts.excludeStoryId ?? null,
+      limit,
+      result_count: rows.length,
+    });
+    return rows.map(shapeRailRow);
+  }
+
+  // Fallback: any story where the smaller side polled under 15%. SQL
+  // booleans differ across SQLite + Postgres but the arithmetic
+  // form (votes_a * 100 < total_votes * 15 OR symmetric) works
+  // identically on both.
+  const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+    AND (
+      pa.votes_a * 100 < pa.total_votes * 15
+      OR pa.votes_b * 100 < pa.total_votes * 15
+    )
+    ORDER BY pa.divisiveness ASC, pa.total_votes DESC
+    LIMIT ${limit}`;
+  const rows = await all<RawRailRow>(sql, params);
+  console.info("[polls rail query]", {
+    rail: "unpopular",
+    mode: "fallback",
+    category: opts.category ?? null,
+    exclude: opts.excludeStoryId ?? null,
+    limit,
+    result_count: rows.length,
+  });
+  return rows.map(shapeRailRow);
+}
+
 // ─── Admin overview ───────────────────────────────────────────────────────────
 
 export interface PollOverviewRow {

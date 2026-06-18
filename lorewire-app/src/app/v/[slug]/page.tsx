@@ -27,6 +27,7 @@ import {
   getAggregateByStoryId,
   getPollByStoryId,
   getVoteSideForCookie,
+  topDivisive,
   toResultView,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
@@ -170,6 +171,16 @@ export default async function StoryReader({
     ? toResultView(pollAggregate, DEFAULT_PUBLIC_FLOOR)
     : null;
 
+  // Phase 4 of _plans/2026-06-17-engagement-polls.md. Resolve a
+  // follow-up story for the post-vote reveal — the closest-split
+  // story in the same category, excluding the current one. Empty
+  // result is fine: the widget hides the link when followUp is null.
+  // We only bother resolving when the story HAS a live poll, since
+  // the widget is the only consumer.
+  const pollFollowUp = hasLivePoll
+    ? await resolveFollowUp(story.id, story.category)
+    : null;
+
   console.info("[story reader] render", {
     id: story.id,
     slug: story.slug,
@@ -237,6 +248,7 @@ export default async function StoryReader({
             optionB={poll.option_b_text}
             initialResult={pollResultView}
             initialVotedSide={initialVotedSide}
+            followUp={pollFollowUp}
           />
         )}
 
@@ -273,4 +285,32 @@ export default async function StoryReader({
       </article>
     </main>
   );
+}
+
+// Phase 4 of _plans/2026-06-17-engagement-polls.md. Resolves the
+// post-vote follow-up: the closest-split published story in the same
+// category, excluding the current one. Returns null when nothing
+// qualifies — the widget hides the link gracefully. Best-effort: any
+// failure logs and returns null so a busted rail query never crashes
+// the reader page.
+async function resolveFollowUp(
+  currentStoryId: string,
+  category: string | null,
+): Promise<{ href: string; title: string } | null> {
+  try {
+    const rows = await topDivisive({
+      category,
+      excludeStoryId: currentStoryId,
+      limit: 1,
+    });
+    const top = rows[0];
+    if (!top || !top.slug || !top.title) return null;
+    return { href: `/v/${top.slug}`, title: top.title };
+  } catch (err) {
+    console.warn("[v reader] follow-up resolve failed", {
+      story_id: currentStoryId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }

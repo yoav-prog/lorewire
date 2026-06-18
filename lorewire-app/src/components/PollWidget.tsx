@@ -43,6 +43,13 @@ interface PollWidgetProps {
    *  poll, if any. Drives the initial render — when set, the widget
    *  lands in the post-vote state immediately. */
   initialVotedSide: PollSide | null;
+  /** Phase 4 of _plans/2026-06-17-engagement-polls.md. Optional
+   *  follow-up story shown under the post-vote state. The parent
+   *  page resolves it server-side from the same-category Divisive
+   *  rail, excluding the current story; passing null hides the
+   *  link. The pair captures "after voting X, I clicked Y" — the
+   *  raw signal V3 personalization will eventually consume. */
+  followUp?: { href: string; title: string } | null;
 }
 
 type VotedSide = PollSide | null;
@@ -54,6 +61,7 @@ export function PollWidget({
   optionB,
   initialResult,
   initialVotedSide,
+  followUp = null,
 }: PollWidgetProps) {
   const [votedSide, setVotedSide] = useState<VotedSide>(initialVotedSide);
   const [result, setResult] = useState<PollResultView | null>(initialResult);
@@ -157,6 +165,28 @@ export function PollWidget({
             </span>
             .
           </p>
+
+          {followUp && (
+            <a
+              href={followUp.href}
+              className="group mt-1 flex items-center justify-between gap-3 rounded-lg border border-line bg-bg px-4 py-3 text-[14px] text-ink transition-colors hover:border-accent"
+            >
+              <span className="flex flex-col gap-0.5">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+                  See another close call
+                </span>
+                <span className="font-semibold leading-snug">
+                  {followUp.title}
+                </span>
+              </span>
+              <span
+                aria-hidden
+                className="text-[18px] text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-accent"
+              >
+                →
+              </span>
+            </a>
+          )}
         </div>
       )}
 

@@ -21,9 +21,13 @@ import {
   pctBComplement,
   POLL_OPTION_MAX,
   POLL_QUESTION_MAX,
+  RAIL_MIN_VOTES,
   recordVote,
   refreshPollAggregateForStory,
   toResultView,
+  topAgreed,
+  topDivisive,
+  topUnpopular,
   upsertPoll,
   validatePollInputs,
 } from "@/lib/polls";
@@ -33,6 +37,7 @@ async function reset(): Promise<void> {
   await run("DELETE FROM poll_aggregates WHERE 1=1");
   await run("DELETE FROM polls WHERE 1=1");
   await run("DELETE FROM stories WHERE id LIKE 'test-poll-%'");
+  await run("DELETE FROM stories WHERE id LIKE 'test-rail-%'");
 }
 
 async function seedStory(id: string, category: string | null = "Drama"): Promise<void> {
@@ -560,6 +565,251 @@ describe("getVoteSideForCookie", () => {
     });
     expect(await getVoteSideForCookie(u.pollId, "")).toBeNull();
     expect(await getVoteSideForCookie(u.pollId, null)).toBeNull();
+  });
+});
+
+// ─── Rails: divisive / agreed / unpopular ─────────────────────────────────────
+
+describe("rail queries", () => {
+  // Build N votes on a story with a configured split. Returns the pollId.
+  async function seedStoryWithSplit(
+    storyId: string,
+    category: string,
+    aCount: number,
+    bCount: number,
+    cookieCallback?: (cookie: string, side: "A" | "B") => void,
+  ): Promise<string> {
+    // Mark the story published + with a slug so the rail join can see it.
+    const now = new Date().toISOString();
+    await run(
+      "INSERT INTO stories (id, slug, category, title, status, published_at, created_at, updated_at) " +
+        "VALUES (?, ?, ?, ?, 'published', ?, ?, ?) " +
+        "ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, category=excluded.category, " +
+        "status='published', published_at=excluded.published_at, updated_at=excluded.updated_at",
+      [storyId, `slug-${storyId}`, category, `Test ${storyId}`, now, now, now],
+    );
+    const u = await upsertPoll({
+      storyId,
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category,
+    });
+    for (let i = 0; i < aCount; i++) {
+      const c = `c-${storyId}-a-${i}`;
+      await recordVote({
+        pollId: u.pollId,
+        storyId,
+        category,
+        side: "A",
+        cookieToken: c,
+        ipUaHash: null,
+      });
+      cookieCallback?.(c, "A");
+    }
+    for (let i = 0; i < bCount; i++) {
+      const c = `c-${storyId}-b-${i}`;
+      await recordVote({
+        pollId: u.pollId,
+        storyId,
+        category,
+        side: "B",
+        cookieToken: c,
+        ipUaHash: null,
+      });
+      cookieCallback?.(c, "B");
+    }
+    await refreshPollAggregateForStory(storyId);
+    return u.pollId;
+  }
+
+  describe("topDivisive", () => {
+    it("sorts most-split first, then by total_votes", async () => {
+      // Three stories at the same divisiveness band; total_votes tiebreaks.
+      await seedStoryWithSplit("test-rail-d-1", "Drama", 50, 50); // 50/50 × 100
+      await seedStoryWithSplit("test-rail-d-2", "Drama", 75, 25); // 75/25 × 100
+      await seedStoryWithSplit("test-rail-d-3", "Drama", 49, 51); // ~50/50 × 100
+      const rows = await topDivisive({ limit: 10 });
+      const ids = rows.map((r) => r.storyId);
+      // 50/50 (perfect) and 49/51 (near-perfect) outrank 75/25.
+      expect(ids.indexOf("test-rail-d-1")).toBeLessThan(ids.indexOf("test-rail-d-2"));
+      expect(ids.indexOf("test-rail-d-3")).toBeLessThan(ids.indexOf("test-rail-d-2"));
+    });
+
+    it("drops stories below the rail floor", async () => {
+      // Below RAIL_MIN_VOTES → excluded.
+      await seedStoryWithSplit("test-rail-d-low", "Drama", 5, 5);
+      const rows = await topDivisive({ limit: 10 });
+      expect(rows.map((r) => r.storyId)).not.toContain("test-rail-d-low");
+    });
+
+    it("filters by category when requested", async () => {
+      await seedStoryWithSplit("test-rail-d-cat-1", "Drama", 50, 50);
+      await seedStoryWithSplit("test-rail-d-cat-2", "Entitled", 50, 50);
+      const rows = await topDivisive({ category: "Drama", limit: 10 });
+      const ids = rows.map((r) => r.storyId);
+      expect(ids).toContain("test-rail-d-cat-1");
+      expect(ids).not.toContain("test-rail-d-cat-2");
+    });
+
+    it("excludes the current story when excludeStoryId set", async () => {
+      await seedStoryWithSplit("test-rail-d-self", "Drama", 50, 50);
+      await seedStoryWithSplit("test-rail-d-other", "Drama", 48, 52);
+      const rows = await topDivisive({
+        excludeStoryId: "test-rail-d-self",
+        limit: 10,
+      });
+      expect(rows.map((r) => r.storyId)).not.toContain("test-rail-d-self");
+    });
+  });
+
+  describe("topAgreed", () => {
+    it("sorts most-lopsided first, then by total_votes", async () => {
+      await seedStoryWithSplit("test-rail-a-1", "Drama", 95, 5); // ~95/5
+      await seedStoryWithSplit("test-rail-a-2", "Drama", 50, 50); // 50/50
+      await seedStoryWithSplit("test-rail-a-3", "Drama", 80, 20); // 80/20
+      const rows = await topAgreed({ limit: 10 });
+      const ids = rows.map((r) => r.storyId);
+      expect(ids.indexOf("test-rail-a-1")).toBeLessThan(ids.indexOf("test-rail-a-3"));
+      expect(ids.indexOf("test-rail-a-3")).toBeLessThan(ids.indexOf("test-rail-a-2"));
+    });
+  });
+
+  describe("topUnpopular", () => {
+    it("personalized mode returns stories where the cookie voted minority", async () => {
+      // Cookie 'me' votes A on the first story (where A is minority 25%) and
+      // A on the second story (where A is majority 75%). Only the first
+      // counts as an unpopular pick.
+      const cookieMe = "test-rail-u-cookie-me";
+      // Story 1: 25/75 split. Plant 'me' as one of the A voters.
+      await run("DELETE FROM stories WHERE id = ?", ["test-rail-u-1"]);
+      const now = new Date().toISOString();
+      await run(
+        "INSERT INTO stories (id, slug, category, title, status, published_at, created_at, updated_at) " +
+          "VALUES (?, ?, ?, 'T', 'published', ?, ?, ?)",
+        ["test-rail-u-1", "slug-rail-u-1", "Drama", now, now, now],
+      );
+      const u1 = await upsertPoll({
+        storyId: "test-rail-u-1",
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: true,
+        category: "Drama",
+      });
+      // 'me' votes A
+      await recordVote({
+        pollId: u1.pollId,
+        storyId: "test-rail-u-1",
+        category: "Drama",
+        side: "A",
+        cookieToken: cookieMe,
+        ipUaHash: null,
+      });
+      // Other voters: 24 A + 75 B (so A side has 25 total, B has 75)
+      for (let i = 0; i < 24; i++) {
+        await recordVote({
+          pollId: u1.pollId,
+          storyId: "test-rail-u-1",
+          category: "Drama",
+          side: "A",
+          cookieToken: `c-u-1-a-${i}`,
+          ipUaHash: null,
+        });
+      }
+      for (let i = 0; i < 75; i++) {
+        await recordVote({
+          pollId: u1.pollId,
+          storyId: "test-rail-u-1",
+          category: "Drama",
+          side: "B",
+          cookieToken: `c-u-1-b-${i}`,
+          ipUaHash: null,
+        });
+      }
+      await refreshPollAggregateForStory("test-rail-u-1");
+
+      // Story 2: 'me' votes A where A is the majority. Should NOT count.
+      await run("DELETE FROM stories WHERE id = ?", ["test-rail-u-2"]);
+      await run(
+        "INSERT INTO stories (id, slug, category, title, status, published_at, created_at, updated_at) " +
+          "VALUES (?, ?, ?, 'T', 'published', ?, ?, ?)",
+        ["test-rail-u-2", "slug-rail-u-2", "Drama", now, now, now],
+      );
+      const u2 = await upsertPoll({
+        storyId: "test-rail-u-2",
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: true,
+        category: "Drama",
+      });
+      await recordVote({
+        pollId: u2.pollId,
+        storyId: "test-rail-u-2",
+        category: "Drama",
+        side: "A",
+        cookieToken: cookieMe,
+        ipUaHash: null,
+      });
+      for (let i = 0; i < 74; i++) {
+        await recordVote({
+          pollId: u2.pollId,
+          storyId: "test-rail-u-2",
+          category: "Drama",
+          side: "A",
+          cookieToken: `c-u-2-a-${i}`,
+          ipUaHash: null,
+        });
+      }
+      for (let i = 0; i < 25; i++) {
+        await recordVote({
+          pollId: u2.pollId,
+          storyId: "test-rail-u-2",
+          category: "Drama",
+          side: "B",
+          cookieToken: `c-u-2-b-${i}`,
+          ipUaHash: null,
+        });
+      }
+      await refreshPollAggregateForStory("test-rail-u-2");
+
+      const rows = await topUnpopular({ cookieToken: cookieMe, limit: 10 });
+      const ids = rows.map((r) => r.storyId);
+      expect(ids).toContain("test-rail-u-1");
+      expect(ids).not.toContain("test-rail-u-2");
+    });
+
+    it("fallback mode (no cookie) returns stories with the smaller side under 15%", async () => {
+      // 95/5 qualifies (5% < 15%); 70/30 doesn't.
+      await seedStoryWithSplit("test-rail-u-fb-95", "Drama", 95, 5);
+      await seedStoryWithSplit("test-rail-u-fb-70", "Drama", 70, 30);
+      const rows = await topUnpopular({ cookieToken: null, limit: 10 });
+      const ids = rows.map((r) => r.storyId);
+      expect(ids).toContain("test-rail-u-fb-95");
+      expect(ids).not.toContain("test-rail-u-fb-70");
+    });
+  });
+
+  describe("rail floor + visibility", () => {
+    it("only surfaces published, non-noindex stories", async () => {
+      // Story published but noindex=1 should be hidden.
+      const now = new Date().toISOString();
+      await run("DELETE FROM stories WHERE id = ?", ["test-rail-noindex"]);
+      await run(
+        "INSERT INTO stories (id, slug, category, title, status, published_at, noindex, created_at, updated_at) " +
+          "VALUES (?, ?, 'Drama', 'T', 'published', ?, 1, ?, ?)",
+        ["test-rail-noindex", "slug-noindex", now, now, now],
+      );
+      await seedStoryWithSplit("test-rail-noindex", "Drama", 50, 50);
+      const rows = await topDivisive({ limit: 10 });
+      expect(rows.map((r) => r.storyId)).not.toContain("test-rail-noindex");
+    });
+  });
+
+  it("RAIL_MIN_VOTES tracks DEFAULT_PUBLIC_FLOOR", () => {
+    expect(RAIL_MIN_VOTES).toBe(DEFAULT_PUBLIC_FLOOR);
   });
 });
 

@@ -32,6 +32,7 @@ import {
   getAggregateByStoryId,
   getPollByStoryId,
   getVoteSideForCookie,
+  topDivisive,
   toResultView,
   type PollResultView,
   type PollSide,
@@ -50,6 +51,7 @@ interface PollRender {
   optionB: string;
   result: PollResultView;
   votedSide: PollSide | null;
+  followUp: { href: string; title: string } | null;
 }
 
 async function loadLinkedPoll(
@@ -63,6 +65,9 @@ async function loadLinkedPoll(
     getAggregateByStoryId(article.story_id),
   ]);
   const votedSide = await getVoteSideForCookie(poll.id, voteToken);
+  // Phase 4: same follow-up resolver shape as /v/[slug]. Falls back
+  // silently when the rail has no other entries in this category.
+  const followUp = await resolveFollowUp(article.story_id, poll.category);
   return {
     storyId: article.story_id,
     question: poll.question,
@@ -70,7 +75,30 @@ async function loadLinkedPoll(
     optionB: poll.option_b_text,
     result: toResultView(aggregate, DEFAULT_PUBLIC_FLOOR),
     votedSide,
+    followUp,
   };
+}
+
+async function resolveFollowUp(
+  currentStoryId: string,
+  category: string | null,
+): Promise<{ href: string; title: string } | null> {
+  try {
+    const rows = await topDivisive({
+      category,
+      excludeStoryId: currentStoryId,
+      limit: 1,
+    });
+    const top = rows[0];
+    if (!top || !top.slug || !top.title) return null;
+    return { href: `/v/${top.slug}`, title: top.title };
+  } catch (err) {
+    console.warn("[articles reader] follow-up resolve failed", {
+      story_id: currentStoryId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 function isLanguage(v: string): v is ArticleLanguage {
@@ -299,6 +327,7 @@ export default async function ArticleReader({
           optionB={linkedPoll.optionB}
           initialResult={linkedPoll.result}
           initialVotedSide={linkedPoll.votedSide}
+          followUp={linkedPoll.followUp}
         />
       )}
     </article>
