@@ -18,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from pipeline import gcs, media, segments
+from pipeline import gcs, media, segments, voice
 from pipeline.aspect import resolve_aspect_for_story
 
 VIDEO_PROJECT_RELATIVE = Path("video")
@@ -251,11 +251,27 @@ def generate_video(
         print(f"[video id={safe_id}] alignment produced no caption chunks; skipping")
         return {}
 
-    duration_ms = max(int(captions[-1]["end_ms"]), 1)
     video_project = repo_root / VIDEO_PROJECT_RELATIVE
     static_paths = _stage_assets(repo_root, video_project, safe_id, audio_url, image_urls)
     static_audio = static_paths["audio"]
     static_images = static_paths["images"]
+    # Mirror the shorts audio-floor: long-form body must cover the WHOLE
+    # narration MP3, or the concatenated outro clips closing words. The
+    # last caption's end_ms is a proxy that undershoots on providers whose
+    # word timings aren't calibrated to the audio. Floor the duration at
+    # the real audio length so the body always plays through. Failing
+    # probe returns 0 → the max stays at caption_end (old behaviour).
+    caption_end_ms = int(captions[-1]["end_ms"])
+    audio_disk_path = video_project / STATIC_DIR_RELATIVE / static_audio
+    audio_ms = voice.audio_duration_ms(audio_disk_path)
+    duration_ms = max(caption_end_ms, audio_ms, 1)
+    if audio_ms > caption_end_ms:
+        print(
+            f"[video id={safe_id} duration] audio={audio_ms}ms > "
+            f"caption_end={caption_end_ms}ms — flooring body at audio length "
+            f"so the outro doesn't clip the narration"
+        )
+        captions[-1] = {**captions[-1], "end_ms": audio_ms}
     doodle_frames = _distribute_frames(static_images, captions, duration_ms)
 
     # Wave 3 Phase 3 PropSlideIn: stage each prop PNG alongside the other

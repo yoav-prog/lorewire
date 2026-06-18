@@ -586,6 +586,39 @@ class AudioSanitizationTests(_LaneCTestCase):
         self.assertEqual(built.props["captions"], [])
         self.assertEqual(built.props["duration_ms"], 10000)
 
+    def test_reproduces_steak_standoff_prod_failure_scenario(self):
+        # The exact failure from prod (THE STEAK STANDOFF, render ffe95fbe at
+        # 2026-06-18T21:27Z): baseline had 29 captions whose last end_ms was
+        # 36600ms but the actual voice MP3 was 30048ms. Lane C inherited the
+        # bogus duration → 7s of dead audio in the rendered MP4 + outro
+        # clipping speech once the audio briefly resumed.
+        captions = [
+            {"start_ms": i * 1200, "end_ms": (i + 1) * 1200, "text": f"chunk-{i}"}
+            for i in range(29)
+        ]
+        # Tail of the last 5 chunks falls past audio_ms=30048; they're the
+        # "phantom" captions the user was reading while the audio was silent.
+        baseline = self._baseline_with_audio_state(
+            captions=captions,
+            duration_ms=36600,  # what Lane C inherited (wrong)
+        )
+        built = self._run_lane_c(
+            "base-prod", "story-prod", baseline, audio_probe_ms=30048,
+        )
+        # The phantom chunks past audio_ms must be dropped.
+        for cap in built.props["captions"]:
+            self.assertLess(
+                int(cap["start_ms"]), 30048,
+                f"phantom caption survived sanitization: {cap}",
+            )
+        # The last surviving caption is clamped to the real audio end.
+        self.assertEqual(built.props["captions"][-1]["end_ms"], 30048)
+        # And the body duration matches the real audio — no more 7s gap.
+        self.assertEqual(built.props["duration_ms"], 30048)
+        # Reduces from 29 to ~25 captions (5 phantom chunks dropped: those
+        # whose start_ms >= 30048).
+        self.assertLess(len(built.props["captions"]), len(captions))
+
     def test_sanitize_helper_falls_back_when_probe_returns_zero(self):
         # Pure-helper test on _sanitize_baseline_audio_metadata: probe=0
         # signals "don't change anything". Asserts the helper contract
