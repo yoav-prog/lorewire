@@ -952,8 +952,10 @@ function FakeReadAlong() {
 function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // 2026-06-18 polls plan extension: per-story poll for the mobile
-  // title sheet. Mirrors the DesktopShell DetailModal pattern.
-  const { view: pollView } = useStoryPoll(story.id);
+  // title sheet. Mirrors the DesktopShell DetailModal pattern; passing
+  // `story` lets the server lazy-autodraft on first open when no poll
+  // exists yet (every-story-has-a-poll invariant).
+  const { view: pollView } = useStoryPoll(story.id, story);
   // Reset the tab whenever the parent swaps in a different story or hands us
   // a new initialTab. React 19's set-state-in-effect rule rejects the old
   // useEffect pattern; the sanctioned alternative is to track the previous

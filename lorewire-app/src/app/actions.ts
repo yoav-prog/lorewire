@@ -457,6 +457,18 @@ export interface StoryPollView {
   votedSide: "A" | "B" | null;
 }
 
+/** Optional seed passed by the client so the server can lazy-autodraft
+ *  a poll on first DetailModal open for a story that doesn't have one
+ *  yet. Honors the "every story has a poll by default" invariant
+ *  without requiring a backfill run or admin re-save first. The autodraft
+ *  is idempotent + race-safe (SELECT-then-INSERT with re-read), so
+ *  concurrent first-views collapse to a single insert. */
+export interface StoryPollSeed {
+  title: string;
+  body: string;
+  category: string;
+}
+
 export interface StoryPollViewResult {
   ok: boolean;
   /** Null when there's no enabled poll OR resolution failed. The
@@ -467,12 +479,38 @@ export interface StoryPollViewResult {
 
 export async function getPollForStoryView(
   storyId: string,
+  seed?: StoryPollSeed,
 ): Promise<StoryPollViewResult> {
   if (!storyId) return { ok: true, view: null };
   try {
     const polls = await import("@/lib/polls");
     const cookie = await import("@/lib/poll-cookie");
-    const poll = await polls.getPollByStoryId(storyId);
+    let poll = await polls.getPollByStoryId(storyId);
+
+    // Lazy autodraft on read: if no poll exists yet AND the client
+    // sent seed context, draft one inline so the modal shows a poll
+    // on first open. One-time per story (subsequent loads hit the
+    // cached row). Logs the outcome for [getPollForStoryView] traces.
+    if (!poll && seed) {
+      const { autoDraftPollForSubject } = await import(
+        "@/lib/poll-autodraft"
+      );
+      const r = await autoDraftPollForSubject({
+        kind: "story",
+        storyId,
+        title: seed.title || null,
+        body: seed.body || null,
+        category: seed.category || null,
+      });
+      console.info("[getPollForStoryView lazy autodraft]", {
+        story_id: storyId,
+        ok: r.ok,
+        ai: r.ai,
+        fallback: r.fallbackReason ?? null,
+      });
+      poll = await polls.getPollByStoryId(storyId);
+    }
+
     if (!poll || poll.enabled !== 1) {
       return { ok: true, view: null };
     }

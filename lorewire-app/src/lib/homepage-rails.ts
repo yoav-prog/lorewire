@@ -27,6 +27,7 @@ import {
   type HomepageCurationBehavior,
   type HomepagePollRailsResult,
   type LiveCatalogStory,
+  type StoryPollSeed,
   type StoryPollView,
 } from "@/app/actions";
 import { CAT, STORIES, tryById, type Cat, type Story } from "@/lib/stories";
@@ -37,13 +38,25 @@ import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
  *  useHomepagePolls pattern — single round trip on mount, error path
  *  returns null so the modal renders without a poll instead of
  *  crashing. The storyId arg drives the dep array so the hook
- *  re-fetches when the modal swaps to a different story. */
-export function useStoryPoll(storyId: string | null | undefined): {
+ *  re-fetches when the modal swaps to a different story.
+ *
+ *  The optional `story` arg supplies title/body/category so the server
+ *  can lazy-autodraft a poll on first open if none exists yet —
+ *  honors the "every story has a poll by default" invariant for
+ *  stories published before the autodraft hooks landed. */
+export function useStoryPoll(
+  storyId: string | null | undefined,
+  story?: Pick<Story, "title" | "syn" | "body" | "cat"> | null,
+): {
   view: StoryPollView | null;
   loaded: boolean;
 } {
   const [view, setView] = useState<StoryPollView | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // Build the seed once per story so the dep array stays primitive.
+  const seedTitle = story?.title ?? "";
+  const seedBody = (story?.body ?? story?.syn ?? "") as string;
+  const seedCategory = (story?.cat ?? "") as string;
   useEffect(() => {
     let cancelled = false;
     if (!storyId) {
@@ -52,7 +65,11 @@ export function useStoryPoll(storyId: string | null | undefined): {
       return;
     }
     setLoaded(false);
-    getPollForStoryView(storyId)
+    const seed: StoryPollSeed | undefined =
+      seedTitle || seedBody || seedCategory
+        ? { title: seedTitle, body: seedBody, category: seedCategory }
+        : undefined;
+    getPollForStoryView(storyId, seed)
       .then((r) => {
         if (cancelled) return;
         setView(r.view);
@@ -72,7 +89,7 @@ export function useStoryPoll(storyId: string | null | undefined): {
     return () => {
       cancelled = true;
     };
-  }, [storyId]);
+  }, [storyId, seedTitle, seedBody, seedCategory]);
   return { view, loaded };
 }
 

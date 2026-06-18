@@ -788,8 +788,10 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
   // 2026-06-18 polls plan extension: fetch the per-story poll for the
   // modal. Re-fires whenever the modal swaps stories (the hook keys
   // on story.id). Renders below the tab content (Watch / Read /
-  // Read-along) so the user always sees the question + vote.
-  const { view: pollView } = useStoryPoll(story.id);
+  // Read-along) so the user always sees the question + vote. Passing
+  // `story` lets the server lazy-autodraft a poll on first open for
+  // stories published before the autodraft hooks landed.
+  const { view: pollView } = useStoryPoll(story.id, story);
   // Reset the tab whenever the parent swaps in a different story or initialTab
   // — React 19's set-state-in-effect rule rejects the old useEffect pattern.
   // The sanctioned alternative is to track the previous prop values during
