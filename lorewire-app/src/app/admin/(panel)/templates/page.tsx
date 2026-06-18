@@ -57,7 +57,7 @@ const POSITION_FIELDS: FieldDef[] = [
     max: 1,
     step: 0.01,
     endpoints: ["TOP", "BOTTOM"],
-    tickValue: 0.55,
+    tickValue: 0.68,
     hint: "Where the caption band sits inside the 1920px-tall frame.",
   },
   {

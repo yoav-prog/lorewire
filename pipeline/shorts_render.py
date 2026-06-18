@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from pipeline import gcs, images, media, shorts, store, video, voice
+from pipeline import gcs, images, media, narration, shorts, store, video
 
 # Separate asset namespace from the long-form video so a story can have both.
 SHORT_ID_SUFFIX = "-short"
@@ -250,16 +250,19 @@ def build_short_props(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 2) Voiceover over the spoken script + caption timing.
+        # 2) Voiceover over the spoken script + caption timing. Goes through
+        #    `narration.render_narration` so the normalize -> TTS -> script-graft
+        #    contract is applied (homophones / missing punctuation / dropped
+        #    words on the Google STT path are corrected here).
         progress("voice")
         spoken = re.sub(r"\s+", " ", assets.script.get("short_script", "")).strip()
         audio_path = work_dir / "voice.mp3"
-        vres = voice.synthesize(spoken, audio_path)
-        captions = video._chunk_alignment(vres.get("words") or [])
-        if not captions:
+        vres = narration.render_narration(spoken, audio_path)
+        caption_chunks = video._chunk_alignment(vres.get("words") or [])
+        if not caption_chunks:
             print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
             return None
-        duration_ms = max(int(captions[-1]["end_ms"]), 1)
+        duration_ms = max(int(caption_chunks[-1]["end_ms"]), 1)
 
         # 3) Stage frames. Scene URLs are remote (kie) so download first. Track
         #    each frame's PLANNED caption index so a partial-download skip can't
@@ -324,7 +327,7 @@ def build_short_props(
         planning_count = max(
             1, len(shorts.chunk_for_planning(assets.script.get("short_script", "")))
         )
-        doodle_frames = _map_frames(staged, len(captions), planning_count)
+        doodle_frames = _map_frames(staged, len(caption_chunks), planning_count)
 
         caption_template = {
             **video.resolve_caption_template(store.get_setting),
@@ -364,7 +367,7 @@ def build_short_props(
             "location_refs": dict(assets.reference_gallery.locations),
             "item_refs": dict(assets.reference_gallery.items),
             "doodle_frames": doodle_frames,
-            "captions": captions,
+            "captions": caption_chunks,
             "ken_burns": False,
             "caption_template": caption_template,
             "motion": {"micro_wiggle": False, "label_pop": False, "scribble_draw": False,
@@ -375,7 +378,7 @@ def build_short_props(
         if question_card:
             props["question_card"] = question_card
         print(
-            f"[short id={safe_id} props] {len(captions)} caption chunks, "
+            f"[short id={safe_id} props] {len(caption_chunks)} caption chunks, "
             f"{len(doodle_frames)} frames, {rendered_duration_ms/1000:.1f}s "
             f"(narration {duration_ms/1000:.1f}s + card "
             f"{(rendered_duration_ms - duration_ms)/1000:.1f}s), "

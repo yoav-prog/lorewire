@@ -318,9 +318,8 @@ class HappyPathTests(_LaneBTestCase):
         ]
 
         with (
-            mock.patch.object(
-                shorts_lane_b.voice,
-                "synthesize",
+            mock.patch(
+                "pipeline.voice.synthesize",
                 return_value={"words": fake_words, "audio": "voice.mp3", "provider": "g"},
             ) as mock_synth,
             mock.patch.object(
@@ -369,9 +368,8 @@ class HappyPathTests(_LaneBTestCase):
         }
 
         with (
-            mock.patch.object(
-                shorts_lane_b.voice,
-                "synthesize",
+            mock.patch(
+                "pipeline.voice.synthesize",
                 return_value={"words": [{"word": "x", "start": 0, "end": 0.3}],
                               "audio": "voice.mp3", "provider": "e"},
             ) as mock_synth,
@@ -436,8 +434,8 @@ class CaptionStyleOverrideTests(_LaneBTestCase):
             }),
         }
         with (
-            mock.patch.object(
-                shorts_lane_b.voice, "synthesize",
+            mock.patch(
+                "pipeline.voice.synthesize",
                 return_value={
                     "words": [{"word": "a", "start": 0, "end": 0.5}],
                     "audio": "x", "provider": "g",

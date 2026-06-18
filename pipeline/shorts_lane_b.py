@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from pipeline import gcs, store, video, voice
+from pipeline import gcs, narration, store, video
 
 # Shared with shorts_render.SHORT_ID_SUFFIX so the staged files end up in the
 # same GCS prefix that the original short uses. Keeps Cloud Run's render
@@ -129,19 +129,22 @@ def build_short_props_lane_b(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = work_dir / "voice.mp3"
-    vres = voice.synthesize(
+    # `narration.render_narration` applies the normalize -> TTS ->
+    # script-graft pipeline so Lane B's voice swap inherits the same
+    # caption-accuracy fix as the baseline render.
+    vres = narration.render_narration(
         script,
         audio_path,
         override_provider=provider,
         override_voice_id=voice_id,
     )
-    captions = video._chunk_alignment(vres.get("words") or [])
-    if not captions:
+    caption_chunks = video._chunk_alignment(vres.get("words") or [])
+    if not caption_chunks:
         raise RuntimeError(
             "Lane B voice synthesis produced no caption chunks "
             "(empty alignment)"
         )
-    duration_ms = max(int(captions[-1]["end_ms"]), 1)
+    duration_ms = max(int(caption_chunks[-1]["end_ms"]), 1)
 
     if on_progress is not None:
         try:
@@ -173,7 +176,7 @@ def build_short_props_lane_b(
     new_props = {
         **baseline_props,
         "voiceover_url": audio_ref,
-        "captions": captions,
+        "captions": caption_chunks,
         "duration_ms": duration_ms,
     }
     if style_override:

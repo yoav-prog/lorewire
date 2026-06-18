@@ -38,7 +38,7 @@ import traceback
 from pathlib import Path
 from typing import Callable
 
-from pipeline import gcs, store, video, voice
+from pipeline import gcs, narration, store, video
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLL_SECONDS = 5
@@ -116,7 +116,11 @@ def _default_process(render_row: dict, story_row: dict) -> dict:
     from pipeline import media
     before_usd = media.running_cost_usd()
 
-    result = voice.synthesize(
+    # Single entry point: normalize -> TTS -> script-graft alignment.
+    # Skipping any of the three puts homophones/missing punctuation/
+    # dropped words back into the admin regen's stored alignment, which
+    # the Read-along and gallery consumers then surface unchanged.
+    result = narration.render_narration(
         body,
         narration_path,
         override_provider=render_row.get("voice_provider"),
@@ -125,7 +129,7 @@ def _default_process(render_row: dict, story_row: dict) -> dict:
     print(
         f"[voice regen] story={story_row['id']} "
         f"provider={result.get('provider')} "
-        f"chars={len(body)} "
+        f"chars={len(result.get('spoken_script', ''))} "
         f"words={len(result.get('words', []))}"
     )
     store.update_voice_render_progress(render_row["id"], 60)
@@ -145,8 +149,8 @@ def _default_process(render_row: dict, story_row: dict) -> dict:
     # doesn't crash the editor preview's find().
     words = result.get("words", [])
     alignment_json = json.dumps(words)
-    captions = video._chunk_alignment(words)
-    duration_ms = captions[-1]["end_ms"] if captions else 0
+    caption_chunks = video._chunk_alignment(words)
+    duration_ms = caption_chunks[-1]["end_ms"] if caption_chunks else 0
 
     raw_config = story_row.get("video_config")
     cfg: dict = {}
@@ -157,7 +161,7 @@ def _default_process(render_row: dict, story_row: dict) -> dict:
                 cfg = parsed
         except json.JSONDecodeError:
             cfg = {}
-    cfg["captions"] = captions
+    cfg["captions"] = caption_chunks
     cfg["duration_ms"] = duration_ms
     # Trim window resets — the new audio has different ms boundaries so
     # the old clip_start_ms / clip_end_ms would land mid-word.
@@ -165,8 +169,8 @@ def _default_process(render_row: dict, story_row: dict) -> dict:
     cfg.pop("clip_end_ms", None)
     # Clamp doodle_frames' caption indices into the new range.
     frames = cfg.get("doodle_frames")
-    if isinstance(frames, list) and captions:
-        max_idx = len(captions) - 1
+    if isinstance(frames, list) and caption_chunks:
+        max_idx = len(caption_chunks) - 1
         for f in frames:
             if not isinstance(f, dict):
                 continue

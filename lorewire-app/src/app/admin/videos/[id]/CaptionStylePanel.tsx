@@ -80,7 +80,7 @@ const FIELD_SPECS: Record<CaptionStyleField, FieldSpec> = {
     max: 1,
     step: 0.01,
     endpoints: ["TOP", "BOTTOM"],
-    tickValue: 0.55,
+    tickValue: 0.68,
   },
   size_scale: {
     kind: "slider",

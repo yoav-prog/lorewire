@@ -99,6 +99,14 @@ class TimeTests(unittest.TestCase):
             "Wake up at six.",
         )
 
+    def test_time_with_midnight_hour(self):
+        # 0:30 reads as "zero thirty" — a valid 24-hour timestamp. The
+        # cardinal-fallback would otherwise produce "zero:30AM".
+        self.assertEqual(
+            text_normalize.normalize_for_tts("Logged at 0:30AM."),
+            "Logged at zero thirty AM.",
+        )
+
 
 class OrdinalTests(unittest.TestCase):
     def test_first(self):
@@ -212,6 +220,23 @@ class CardinalTests(unittest.TestCase):
         self.assertEqual(
             text_normalize.normalize_for_tts("Tested on GPT-4 today."),
             "Tested on GPT-4 today.",
+        )
+
+    def test_dotted_version_number_is_not_split(self):
+        # "3.14.2" is a version identifier — the cardinal rule must NOT
+        # eat "3.14" and leave a stranded ".2" suffix behind. Either
+        # the whole token survives or nothing matches; we go with the
+        # former because expanding to "three point one four point two"
+        # would mis-read a version as a decimal sequence.
+        self.assertEqual(
+            text_normalize.normalize_for_tts("Section 3.14.2 of the spec."),
+            "Section 3.14.2 of the spec.",
+        )
+
+    def test_ip_address_is_not_split(self):
+        self.assertEqual(
+            text_normalize.normalize_for_tts("The host 10.0.0.1 went down."),
+            "The host 10.0.0.1 went down.",
         )
 
 

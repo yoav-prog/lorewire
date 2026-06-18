@@ -77,7 +77,7 @@ class BuildShortPropsBaseFrameTests(unittest.TestCase):
                               return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
             mock.patch.object(shorts_render.shorts, "generate_short_assets",
                               return_value=self._assets()), \
-            mock.patch.object(shorts_render.voice, "synthesize",
+            mock.patch("pipeline.voice.synthesize",
                               return_value={"words": words}), \
             mock.patch.object(shorts_render.images, "download", return_value=None), \
             mock.patch.object(shorts_render.store, "get_setting", return_value=None):
@@ -345,7 +345,7 @@ class BuildShortPropsQuestionCardTests(unittest.TestCase):
                                              "title": "T", "body": "Body text here."}), \
             mock.patch.object(shorts_render.shorts, "generate_short_assets",
                               return_value=self._assets()), \
-            mock.patch.object(shorts_render.voice, "synthesize",
+            mock.patch("pipeline.voice.synthesize",
                               return_value={"words": self._words()}), \
             mock.patch.object(shorts_render.images, "download", return_value=None), \
             mock.patch.object(shorts_render.store, "get_setting", return_value=None), \

@@ -112,7 +112,10 @@ def _time_sub(m: re.Match) -> str:
         minute = int(m.group(2))
     except ValueError:
         return m.group(0)
-    if not (1 <= hour <= 23) or not (0 <= minute <= 59):
+    # 0:30 (midnight thirty) is a valid 24-hour time. Without 0 in
+    # range the cardinal pass would later mangle "0:30AM" into
+    # "zero:30AM" — silent garbage in a caption.
+    if not (0 <= hour <= 23) or not (0 <= minute <= 59):
         return m.group(0)
 
     if minute == 0:
@@ -188,7 +191,10 @@ _CARDINAL_RE = re.compile(
     # and the alphanumeric token survives. A truly negative number like
     # "-5" appears after whitespace, so its `-` sits at a position whose
     # own lookbehind sees a space and the consumption still fires.
-    r"(?<![\w$.:\-])(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)(?![\w\-])"
+    # The trailing `(?!\.\d)` keeps version-like dotted numbers ("3.14.2",
+    # IP addresses, sub-section ids) intact — without it the float
+    # branch would eat "3.14" and leave a stranded ".2" behind.
+    r"(?<![\w$.:\-])(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)(?![\w\-]|\.\d)"
 )
 
 
