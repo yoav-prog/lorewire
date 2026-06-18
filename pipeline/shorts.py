@@ -436,13 +436,21 @@ def _scene_prompt(character: str, scene: str) -> str:
     character and every recurring supporting character / location / prop. The
     text only describes the action / mood / framing change for this beat.
     Research basis: the field-standard ranking puts "reference image passing"
-    above "verbose prompt re-description" for multi-entity consistency."""
+    above "verbose prompt re-description" for multi-entity consistency.
+
+    Cast bounding: when multiple human refs + a domestic location ref are
+    stacked, image models drift toward inventing additional unnamed people
+    to populate the scene. The "no other people" line below is a general
+    constraint that ties the cast strictly to whatever the bible passed in;
+    it stays story-agnostic so it works whether the bible is a 1-person
+    monologue or a 4-character ensemble."""
     return (
         f"{sis.COMPOSITION_PREFIX} {scene} The recurring main character, supporting characters, "
         f"locations and props all appear in the reference images — preserve their EXACT identity "
         f"(face, hair, clothing, setting details, prop shape and colour). Only the pose, expression, "
-        f"action, mood and camera framing change for this beat. Main character cue: {character}. "
-        f"{sis.DOODLE_SUFFIX}"
+        f"action, mood and camera framing change for this beat. CAST: the only people in this frame "
+        f"are those passed as reference images. Do not invent or add any other people. Main character "
+        f"cue: {character}. {sis.DOODLE_SUFFIX}"
     )
 
 
