@@ -102,10 +102,46 @@ export function checkAndRecord(
   }
   bucket.hits.push(now);
   buckets.set(hash, bucket);
+  // Lazy GC: every Nth call, walk the Map and prune entries whose
+  // hits all expired. Without this, every unique IP+UA hash creates a
+  // Map entry that lives forever — fine on Vercel (cold-start resets)
+  // but a real leak on any long-lived runtime (future Cloud Run
+  // worker, dev server held open for days). The cost is O(map size)
+  // every GC_INTERVAL calls; the bound on Map size is ~unique active
+  // attackers, well under a thousand in realistic traffic.
+  maybeGcExpiredBuckets(now);
   return { ok: true, retryAfterSec: 0, inMinute: inMinute + 1, inHour: inHour + 1 };
+}
+
+/** How many checkAndRecord calls between sweeps. Trades GC overhead
+ *  for upper bound on stale-entry count: at 100 we GC every ~100
+ *  votes (one second at peak). */
+const GC_INTERVAL = 100;
+let gcCounter = 0;
+
+function maybeGcExpiredBuckets(now: number): void {
+  gcCounter += 1;
+  if (gcCounter < GC_INTERVAL) return;
+  gcCounter = 0;
+  const hourCut = now - ONE_HOUR_MS;
+  for (const [hash, bucket] of buckets) {
+    // A bucket is considered stale when EVERY hit is older than the
+    // hourly window — at that point any future checkAndRecord on this
+    // hash would behave identically with or without the prior bucket.
+    if (bucket.hits.length === 0 || bucket.hits.every((t) => t < hourCut)) {
+      buckets.delete(hash);
+    }
+  }
 }
 
 /** Test helper — resets the in-memory bucket so cases don't bleed. */
 export function __resetForTests(): void {
   buckets.clear();
+  gcCounter = 0;
+}
+
+/** Test-only inspection helper. Returns the current Map size so
+ *  memory-leak regression tests can assert eviction works. */
+export function __bucketCountForTests(): number {
+  return buckets.size;
 }

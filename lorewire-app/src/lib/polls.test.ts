@@ -5,7 +5,7 @@
 //
 // Plan: _plans/2026-06-17-engagement-polls.md.
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { run } from "@/lib/db";
 import {
   CATEGORY_POLL_PRESETS,
@@ -267,6 +267,52 @@ describe("toResultView", () => {
     expect(v.hasFloor).toBe(false);
     expect(v.totalVotes).toBe(0);
   });
+
+  // 2026-06-18 QA pass: divisiveness must ALSO be gated by hasFloor.
+  // Without that, a 3-vote 1A/2B poll would expose divisiveness=0.67
+  // through the API even though pctA/pctB stayed hidden.
+  it("hides divisiveness when below the floor", () => {
+    const v = toResultView(
+      {
+        story_id: "x",
+        poll_id: "p",
+        category: "Drama",
+        votes_a: 1,
+        votes_b: 2,
+        total_votes: 3,
+        // 1A / 2B → ~0.67 divisiveness on the aggregate row...
+        divisiveness: 0.6666,
+        agreement: 0.3333,
+        last_vote_at: null,
+        refreshed_at: null,
+      },
+      DEFAULT_PUBLIC_FLOOR,
+    );
+    expect(v.hasFloor).toBe(false);
+    // ...but the view zeros it out so consumers below floor can't
+    // infer split shape from the response body.
+    expect(v.divisiveness).toBe(0);
+  });
+
+  it("exposes divisiveness once the floor is crossed", () => {
+    const v = toResultView(
+      {
+        story_id: "x",
+        poll_id: "p",
+        category: "Drama",
+        votes_a: 14,
+        votes_b: 6,
+        total_votes: 20,
+        divisiveness: 0.6,
+        agreement: 0.4,
+        last_vote_at: null,
+        refreshed_at: null,
+      },
+      DEFAULT_PUBLIC_FLOOR,
+    );
+    expect(v.hasFloor).toBe(true);
+    expect(v.divisiveness).toBeCloseTo(0.6, 6);
+  });
 });
 
 // ─── Sides ────────────────────────────────────────────────────────────────────
@@ -455,6 +501,71 @@ describe("recordVote", () => {
       ipUaHash: null,
     });
     expect(r.ok).toBe(false);
+  });
+
+  // 2026-06-18 QA pass: regression test for the SELECT-then-INSERT
+  // race. Two concurrent recordVote calls for the same (poll,
+  // cookie_token) could both pass the existence check and both try
+  // to INSERT — the second hits the unique index and the driver
+  // throws. The route used to surface that as a 500 to the client.
+  // After the fix, recordVote catches the unique-violation, re-reads
+  // the row, and returns inserted=false (idempotent success).
+  //
+  // We simulate the race by inserting a vote BETWEEN recordVote's
+  // existence check and its INSERT — using a vi.spyOn on `one` so
+  // the SELECT returns null, then the INSERT collides with the row
+  // we planted in advance.
+  it("treats a unique-constraint collision as idempotent success (race-safe)", async () => {
+    const pollId = await seedPoll("test-poll-vote-race");
+    // Plant the conflicting row before recordVote runs.
+    await run(
+      `INSERT INTO poll_votes (id, poll_id, story_id, article_id, category, side, cookie_token, ip_ua_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        "planted-id",
+        pollId,
+        "test-poll-vote-race",
+        null,
+        "Drama",
+        "A",
+        "cookie-race",
+        null,
+        new Date().toISOString(),
+      ],
+    );
+    // Spy on `one` to return null on the existence check — simulating
+    // the race window where the SELECT ran BEFORE the conflicting row
+    // landed. The INSERT will then hit the unique index. The fix
+    // catches that exception and re-reads (real read this time, no
+    // spy), finds the planted row, and returns inserted=false.
+    const dbMod = await import("@/lib/db");
+    const realOne = dbMod.one;
+    let callCount = 0;
+    const oneSpy = vi
+      .spyOn(dbMod, "one")
+      .mockImplementation(async (sql, params) => {
+        callCount += 1;
+        // First call inside recordVote = the existence check. Force
+        // null so the code proceeds to INSERT. Second call = the
+        // post-error re-check. Let it through to find the planted
+        // row.
+        if (callCount === 1) return null as never;
+        return realOne(sql, params);
+      });
+    try {
+      const r = await recordVote({
+        pollId,
+        storyId: "test-poll-vote-race",
+        category: "Drama",
+        side: "B", // doesn't matter; planted row wins
+        cookieToken: "cookie-race",
+        ipUaHash: null,
+      });
+      expect(r.ok).toBe(true);
+      expect(r.inserted).toBe(false);
+    } finally {
+      oneSpy.mockRestore();
+    }
   });
 });
 

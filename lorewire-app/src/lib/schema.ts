@@ -718,6 +718,14 @@ export const POST_TABLE_DDL: string[] = [
   // both filter by created_at. Cheap to keep, expensive to retrofit.
   "CREATE INDEX IF NOT EXISTS idx_poll_votes_created_at " +
     "ON poll_votes(created_at)",
+  // 2026-06-18 QA pass: the personalized article-rail mode (and any
+  // future "what did this cookie vote on" admin view) reads by
+  // cookie_token alone. The compound idx_poll_votes_poll_cookie
+  // leads with poll_id so it can't service this query — without a
+  // standalone index here, the SELECT becomes a table scan as the
+  // vote log grows.
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_cookie_token " +
+    "ON poll_votes(cookie_token)",
   // 2026-06-18 engagement poll aggregates. The three rails ORDER BY
   // divisiveness / agreement / category-divisiveness; without these
   // indexes the rails would table-scan poll_aggregates on every public

@@ -7,6 +7,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  __bucketCountForTests,
   __resetForTests,
   checkAndRecord,
   DEFAULT_PER_HOUR,
@@ -122,5 +123,50 @@ describe("checkAndRecord (isolation)", () => {
     // h-iso-a is full; h-iso-b should still accept.
     const r = checkAndRecord("h-iso-b", { now });
     expect(r.ok).toBe(true);
+  });
+});
+
+// 2026-06-18 QA pass: regression test for the unbounded-Map memory
+// leak. Buckets whose hits all expired stay in the Map until the
+// lazy GC sweep runs. On a long-lived runtime this leaked at the
+// rate of "unique attacker fingerprints" — small per-request but
+// unbounded over time.
+describe("memory growth + lazy GC", () => {
+  it("buckets accumulate until the GC interval fires, then expired ones get evicted", () => {
+    let t = 1_000;
+    const now = () => t;
+    // GC fires every 100 calls (GC_INTERVAL). Fire 99 unique hashes
+    // — none of the buckets get evicted yet because no GC sweep ran.
+    for (let i = 0; i < 99; i++) {
+      checkAndRecord(`h-leak-${i}`, { now });
+    }
+    expect(__bucketCountForTests()).toBe(99);
+    // Now jump past the hour window so every existing bucket is
+    // stale, and fire the 100th call — that triggers the sweep.
+    t = 1_000 + 60 * 60 * 1000 + 1_000;
+    checkAndRecord("h-leak-trigger", { now });
+    // Sweep ran on the trigger call. All 99 old buckets had every
+    // hit expired → evicted. Only the trigger's bucket remains.
+    expect(__bucketCountForTests()).toBe(1);
+  });
+
+  it("active buckets survive the GC sweep", () => {
+    let t = 1_000;
+    const now = () => t;
+    // Mix of stale (recorded at t=1000) and active (recorded just
+    // before the sweep).
+    for (let i = 0; i < 50; i++) {
+      checkAndRecord(`h-stale-${i}`, { now });
+    }
+    // Advance past the hour window, then record fresh hits.
+    t = 1_000 + 60 * 60 * 1000 + 1_000;
+    for (let i = 0; i < 49; i++) {
+      checkAndRecord(`h-fresh-${i}`, { now });
+    }
+    // The 100th call (49 fresh + 50 stale + 1 trigger) fires the
+    // sweep. Stale buckets evicted; fresh buckets retained.
+    checkAndRecord(`h-sweep-trigger`, { now });
+    // 49 fresh + 1 trigger = 50 buckets. The 50 stale ones evicted.
+    expect(__bucketCountForTests()).toBe(50);
   });
 });

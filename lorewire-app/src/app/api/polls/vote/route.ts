@@ -62,6 +62,10 @@ interface VoteResponseOk {
   result: ReturnType<typeof toResultView>;
 }
 
+// Cached so the once-per-cold-start warning fires once per instance,
+// not once per request, even on a misconfigured prod deploy.
+let warnedAboutMissingSiteOriginInProd = false;
+
 function isAllowedOrigin(req: NextRequest): boolean {
   const origin = req.headers.get("origin");
   if (!origin) {
@@ -80,6 +84,17 @@ function isAllowedOrigin(req: NextRequest): boolean {
   if (process.env.NODE_ENV !== "production") {
     return /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
       /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin);
+  }
+  // Prod + NEXT_PUBLIC_SITE_ORIGIN unset = every vote 403'd silently.
+  // The deploy hygiene case the QA pass surfaced. Fail-closed is the
+  // right default for security, but we log once per instance so a
+  // misconfigured deploy shows up in logs instead of "nobody can
+  // vote and we don't know why".
+  if (!warnedAboutMissingSiteOriginInProd) {
+    warnedAboutMissingSiteOriginInProd = true;
+    console.warn(
+      "[polls vote] NEXT_PUBLIC_SITE_ORIGIN is unset in production — every vote will be rejected. Set the env var to the canonical site origin (e.g. https://lorewire.com).",
+    );
   }
   return false;
 }

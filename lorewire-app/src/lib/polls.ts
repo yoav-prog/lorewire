@@ -330,21 +330,55 @@ export async function recordVote(
   }
   const id = randomUUID();
   const now = new Date().toISOString();
-  await run(
-    `INSERT INTO poll_votes (id, poll_id, story_id, article_id, category, side, cookie_token, ip_ua_hash, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      input.pollId,
-      storyId,
-      articleId,
-      input.category,
-      input.side,
-      input.cookieToken,
-      input.ipUaHash,
-      now,
-    ],
-  );
+  try {
+    await run(
+      `INSERT INTO poll_votes (id, poll_id, story_id, article_id, category, side, cookie_token, ip_ua_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        input.pollId,
+        storyId,
+        articleId,
+        input.category,
+        input.side,
+        input.cookieToken,
+        input.ipUaHash,
+        now,
+      ],
+    );
+  } catch (err) {
+    // Race window: two concurrent same-cookie votes both passed the
+    // SELECT-then-INSERT check above, the second hits the unique
+    // index `idx_poll_votes_poll_cookie` and the driver throws. The
+    // user-visible outcome should be "already voted" idempotent
+    // success — the first INSERT already landed, this one is a no-op.
+    // Driver-agnostic check: re-read the row. If it now exists, the
+    // race lost cleanly. If it doesn't, the INSERT failed for some
+    // other reason and we surface the original error.
+    const after = await one<{ id: string }>(
+      "SELECT id FROM poll_votes WHERE poll_id = ? AND cookie_token = ?",
+      [input.pollId, input.cookieToken],
+    );
+    if (after) {
+      console.info("[polls vote race-coalesced]", {
+        poll_id: input.pollId,
+        story_id: storyId,
+        article_id: articleId,
+        cookie_prefix: input.cookieToken.slice(0, 8),
+        winner_id: after.id,
+      });
+      return { ok: true, inserted: false };
+    }
+    console.warn("[polls vote insert failed]", {
+      poll_id: input.pollId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      ok: false,
+      inserted: false,
+      error: err instanceof Error ? err.message : "insert failed",
+    };
+  }
   console.info("[polls vote]", {
     poll_id: input.pollId,
     story_id: storyId,

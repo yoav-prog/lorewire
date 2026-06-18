@@ -295,7 +295,12 @@ export function pctBComplement(votesA: number, votesB: number): number {
 /** Public-facing view derived from an aggregate row. Applies the
  *  floor: until `totalVotes >= floor` the widget hides percentages.
  *  Callers pass the floor through so settings.polls.public_floor can
- *  override it once that setting lands; the constant is the default. */
+ *  override it once that setting lands; the constant is the default.
+ *
+ *  Divisiveness is ALSO gated by the floor — without that gate, a
+ *  3-vote 1A/2B poll would expose divisiveness=0.67 to the response
+ *  body even though the percentages stayed hidden. Same privacy
+ *  intent, same threshold. */
 export function toResultView(
   agg: PollAggregateRow | null,
   floor: number = DEFAULT_PUBLIC_FLOOR,
@@ -307,7 +312,7 @@ export function toResultView(
     hasFloor,
     pctA: hasFloor ? pctA(agg?.votes_a ?? 0, agg?.votes_b ?? 0) : 0,
     pctB: hasFloor ? pctBComplement(agg?.votes_a ?? 0, agg?.votes_b ?? 0) : 0,
-    divisiveness: agg?.divisiveness ?? 0,
+    divisiveness: hasFloor ? agg?.divisiveness ?? 0 : 0,
     lastVoteAt: agg?.last_vote_at ?? null,
   };
 }
