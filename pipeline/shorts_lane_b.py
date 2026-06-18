@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from pipeline import gcs, narration, store, video
+from pipeline import gcs, narration, store, video, voice
 
 # Shared with shorts_render.SHORT_ID_SUFFIX so the staged files end up in the
 # same GCS prefix that the original short uses. Keeps Cloud Run's render
@@ -144,7 +144,21 @@ def build_short_props_lane_b(
             "Lane B voice synthesis produced no caption chunks "
             "(empty alignment)"
         )
-    duration_ms = max(int(caption_chunks[-1]["end_ms"]), 1)
+    # Floor the body length at the real MP3 duration so the re-rendered short's
+    # concatenated outro can't clip the new narration's closing words — the
+    # last caption end_ms undershoots the real audio on some providers. Mirror
+    # of the full-render path in shorts_render.build_short_props. Also extend
+    # the last caption's end_ms to cover the trailing audio so the on-screen
+    # text stays present until the audio actually ends.
+    caption_end_ms = int(caption_chunks[-1]["end_ms"])
+    audio_ms = voice.audio_duration_ms(audio_path)
+    duration_ms = max(caption_end_ms, audio_ms, 1)
+    if audio_ms > caption_end_ms:
+        print(
+            f"[short laneB duration] audio={audio_ms}ms > "
+            f"caption_end={caption_end_ms}ms — extending body + last caption"
+        )
+        caption_chunks[-1] = {**caption_chunks[-1], "end_ms": audio_ms}
 
     if on_progress is not None:
         try:

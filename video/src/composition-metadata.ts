@@ -38,7 +38,15 @@ export function deriveCompositionMetadata(
 ): DerivedCompositionMetadata {
   const clipStart = cfg.clip_start_ms ?? 0;
   const clipEnd = cfg.clip_end_ms ?? cfg.duration_ms;
-  const renderedMs = Math.max(1, clipEnd - clipStart);
+  // Post-roll hold: keep the final scene on screen `end_hold_ms` longer than
+  // the narration so the last spoken word finishes before the outro splices
+  // on. Only the shorts pipeline sets this field; a missing / zero value is
+  // byte-identical to the pre-hold render. Added AFTER the trim subtraction so
+  // the hold is always extra time at the very end, never eaten by a clip
+  // window. DoodleShort extends the last frame's Sequence by the same amount
+  // so the held image — not a blank canvas — fills the tail.
+  const endHoldMs = Math.max(0, cfg.end_hold_ms ?? 0);
+  const renderedMs = Math.max(1, clipEnd - clipStart) + endHoldMs;
   const durationInFrames = Math.max(1, Math.ceil((renderedMs / 1000) * FPS));
   const resolvedAspect = resolveAspect(cfg.aspect, globalDefaultAspect);
   const dims = aspectDims(resolvedAspect);

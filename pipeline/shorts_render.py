@@ -23,11 +23,12 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from pipeline import gcs, images, media, narration, shorts, store, video
+from pipeline import gcs, images, media, narration, shorts, store, video, voice
 from pipeline.question_card import (
     QUESTION_CARD_MS,
     build_question_card,
@@ -37,6 +38,14 @@ from pipeline.question_card import (
 SHORT_ID_SUFFIX = "-short"
 # Captions sit low (~bottom third) for shorts, matching the channel reference.
 SHORT_CAPTION_POSITION_Y = 0.72
+# Post-roll hold (ms) on the final scene: the last frame lingers this much past
+# the narration so the closing word finishes before the outro splices on. The
+# DoodleShort composition reads `end_hold_ms` and grows both its duration and
+# the last frame's window. Mirror of SHORT_END_HOLD_MS in the TS render route
+# (lorewire-app/src/app/api/render_short/route.ts), which re-injects the same
+# value for the Cloud Run path; this constant covers the local `npx remotion
+# render` path.
+SHORT_END_HOLD_MS = 1500
 
 ProgressFn = Callable[[str, int, int], None]
 
@@ -44,6 +53,23 @@ ProgressFn = Callable[[str, int, int], None]
 def _story_body(row: dict) -> str:
     """Text the script is written from. Prefer the body; fall back to summary."""
     return (row.get("body") or row.get("summary") or "").strip()
+
+
+def _cache_bust(url: str, token: str) -> str:
+    """Append `?v=<token>` so a regenerated short surfaces to the editor with
+    a fresh URL the browser doesn't have cached. GCS objects keep the same
+    underlying path (the renderer overwrites `frame-NN.png` per render so the
+    GCS bucket doesn't accumulate orphans), but the browser caches by URL —
+    without the bust, the editor shows the previous render's bytes from cache
+    even though GCS now serves the new ones. Query strings don't affect GCS
+    object resolution or signed URL semantics; the token is opaque metadata.
+    Returns the url unchanged on empty / non-string input."""
+    if not isinstance(url, str) or not url:
+        return url
+    if not token:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={token}"
 
 
 @dataclass
@@ -182,7 +208,29 @@ def build_short_props(
         if not caption_chunks:
             print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
             return None
-        duration_ms = max(int(caption_chunks[-1]["end_ms"]), 1)
+        # The composition body MUST cover the WHOLE narration MP3, or the
+        # concatenated outro clips the closing words. The last caption's end_ms
+        # is a proxy that undershoots on some providers (it tracks the last
+        # aligned word, not the file's real length), so floor the duration at
+        # the actual audio length. end_hold_ms then adds the post-roll on top.
+        caption_end_ms = int(caption_chunks[-1]["end_ms"])
+        audio_ms = voice.audio_duration_ms(audio_path)
+        duration_ms = max(caption_end_ms, audio_ms, 1)
+        # When audio runs past the last caption (TTS provider's word timings
+        # undershoot the real file), extend the last caption's end_ms to match
+        # the audio. Otherwise the user sees the last caption disappear while
+        # the narrator keeps talking — feels like "captions don't match the
+        # narration" when the gap is more than a fraction of a second. The
+        # text doesn't change: the trailing audio is the same closing phrase
+        # the last caption already shows; we're just keeping it on-screen
+        # until the audio actually ends.
+        if audio_ms > caption_end_ms:
+            print(
+                f"[short id={safe_id} duration] audio={audio_ms}ms > "
+                f"caption_end={caption_end_ms}ms — extending body + last "
+                f"caption so the outro doesn't clip the narration"
+            )
+            caption_chunks[-1] = {**caption_chunks[-1], "end_ms": audio_ms}
 
         # 3) Stage frames. Scene URLs are remote (kie) so download first. Track
         #    each frame's PLANNED caption index so a partial-download skip can't
@@ -213,6 +261,12 @@ def build_short_props(
             }
             for s in assets.scenes
         ]
+        # One cache-bust token per render: frame + audio + character_base +
+        # supporting refs all carry the same `?v=<token>` so the editor sees
+        # a coherent set of fresh URLs the moment the new render lands. The
+        # underlying GCS objects keep their stable paths (frame-NN.png /
+        # voice.mp3) so Cloud Run's fetcher resolves them normally.
+        cache_token = uuid.uuid4().hex[:8]
         staged: list[dict] = []
         for i, src in enumerate(sources):
             fname = f"frame-{i:02d}.png"
@@ -228,7 +282,7 @@ def build_short_props(
             )
             staged.append({
                 "id": f"frame-{i:02d}",
-                "url": url,
+                "url": _cache_bust(url, cache_token),
                 "planned": src["planned"],
                 "image_prompt": src.get("image_prompt") or None,
                 "image_input_urls": src.get("image_input_urls") or [],
@@ -238,9 +292,10 @@ def build_short_props(
             print(f"[short id={safe_id}] no frames staged; skipping")
             return None
 
-        audio_ref = (
+        audio_ref = _cache_bust(
             gcs.publish(audio_path, f"{safe_id}/voice.mp3", str(audio_path))
-            if remote else f"{safe_id}/voice.mp3"
+            if remote else f"{safe_id}/voice.mp3",
+            cache_token,
         )
 
         # 4) Map planned indices onto the actual caption space + dedup + add ids.
@@ -271,6 +326,13 @@ def build_short_props(
             "channel_name": "lorewire",
             "aspect": "9:16",
             "duration_ms": rendered_duration_ms,
+            # Post-roll hold (ms) on the final scene: the last frame lingers
+            # this much past the narration before the outro splices on. The
+            # body length + this hold define when the outro audio is allowed
+            # to start. Combined with the audio-duration floor on duration_ms
+            # below this guarantees the closing word always finishes before
+            # the outro music cuts in.
+            "end_hold_ms": SHORT_END_HOLD_MS,
             # The i2i character reference. Persisted (NOT as a visible frame)
             # so defaultShortConfig seeds short_config.character_base_url and
             # Lane C per-scene regen can re-pose the SAME character. The base

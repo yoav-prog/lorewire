@@ -95,6 +95,152 @@ class BuildShortPropsBaseFrameTests(unittest.TestCase):
         # And the short still opens at t=0.
         self.assertEqual(props["doodle_frames"][0]["caption_chunk_start_index"], 0)
 
+    def test_duration_floors_at_real_audio_length(self):
+        # The last aligned word ends at ~2.1s, but the real MP3 runs 8s (a
+        # provider whose word timings undershoot the file). The composition body
+        # must cover the FULL audio or the concatenated outro clips the closing
+        # words, so duration_ms floors at the probe value.
+        words = [
+            {"word": "Hello", "start": 0.0, "end": 0.4},
+            {"word": "short.", "start": 1.6, "end": 2.1},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(shorts_render.store, "fetch_story",
+                              return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
+            mock.patch.object(shorts_render.shorts, "generate_short_assets",
+                              return_value=self._assets()), \
+            mock.patch.object(shorts_render.voice, "synthesize",
+                              return_value={"words": words}), \
+            mock.patch.object(shorts_render.voice, "audio_duration_ms", return_value=8000), \
+            mock.patch.object(shorts_render.images, "download", return_value=None), \
+            mock.patch.object(shorts_render.store, "get_setting", return_value=None):
+            built = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+        self.assertEqual(built.props["duration_ms"], 8000)
+
+    def test_last_caption_extended_to_audio_tail_when_audio_runs_long(self):
+        # User-visible symptom: last caption disappears while the narrator
+        # keeps talking, so it reads as "captions don't match the narration".
+        # When the audio probe shows the file runs past the last caption's
+        # end_ms, extend the last caption to cover the trailing audio so the
+        # on-screen text stays present until the audio actually ends.
+        words = [
+            {"word": "Hello", "start": 0.0, "end": 0.4},
+            {"word": "short.", "start": 1.6, "end": 2.1},  # caption_end = 2100ms
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(shorts_render.store, "fetch_story",
+                              return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
+            mock.patch.object(shorts_render.shorts, "generate_short_assets",
+                              return_value=self._assets()), \
+            mock.patch.object(shorts_render.voice, "synthesize",
+                              return_value={"words": words}), \
+            mock.patch.object(shorts_render.voice, "audio_duration_ms", return_value=8000), \
+            mock.patch.object(shorts_render.images, "download", return_value=None), \
+            mock.patch.object(shorts_render.store, "get_setting", return_value=None):
+            built = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+        captions = built.props["captions"]
+        # The last caption now covers up to the audio's actual end.
+        self.assertEqual(captions[-1]["end_ms"], 8000)
+        # And the text wasn't rewritten — we only stretch the time window.
+        original_text = captions[-1]["text"]
+        self.assertIsInstance(original_text, str)
+        self.assertGreater(len(original_text), 0)
+
+    def test_last_caption_unchanged_when_audio_matches_alignment(self):
+        # Defensive: when the audio probe agrees with (or undershoots) the
+        # last caption's end_ms, the last caption stays exactly as the
+        # provider returned it. Avoids spurious end_ms bumps that could
+        # desync the caption timeline against itself.
+        words = [
+            {"word": "Hello", "start": 0.0, "end": 0.4},
+            {"word": "short.", "start": 1.6, "end": 2.1},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(shorts_render.store, "fetch_story",
+                              return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
+            mock.patch.object(shorts_render.shorts, "generate_short_assets",
+                              return_value=self._assets()), \
+            mock.patch.object(shorts_render.voice, "synthesize",
+                              return_value={"words": words}), \
+            mock.patch.object(shorts_render.voice, "audio_duration_ms", return_value=2100), \
+            mock.patch.object(shorts_render.images, "download", return_value=None), \
+            mock.patch.object(shorts_render.store, "get_setting", return_value=None):
+            built = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+        self.assertEqual(built.props["captions"][-1]["end_ms"], 2100)
+
+    def test_props_includes_end_hold_ms_so_outro_doesnt_clip(self):
+        # The 1.5s post-roll hold runs AFTER duration_ms. Combined with the
+        # audio-duration floor it means the held last frame plays for 1.5s
+        # past the narration before the outro splices on — a hard guarantee
+        # the closing word always finishes.
+        words = [
+            {"word": "Hello", "start": 0.0, "end": 0.4},
+            {"word": "short.", "start": 1.6, "end": 2.1},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(shorts_render.store, "fetch_story",
+                              return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
+            mock.patch.object(shorts_render.shorts, "generate_short_assets",
+                              return_value=self._assets()), \
+            mock.patch.object(shorts_render.voice, "synthesize",
+                              return_value={"words": words}), \
+            mock.patch.object(shorts_render.voice, "audio_duration_ms", return_value=2100), \
+            mock.patch.object(shorts_render.images, "download", return_value=None), \
+            mock.patch.object(shorts_render.store, "get_setting", return_value=None):
+            built = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+        self.assertEqual(built.props["end_hold_ms"], shorts_render.SHORT_END_HOLD_MS)
+        self.assertGreater(built.props["end_hold_ms"], 0)
+
+    def test_frame_urls_carry_cache_bust_query_so_editor_sees_fresh(self):
+        # User-visible symptom: the editor shows the previous render's scene
+        # thumbnails after a regenerate because each render overwrites
+        # frame-NN.png on GCS and the browser caches by URL. Appending
+        # `?v=<token>` makes every render produce visually distinct URLs so
+        # the browser hits a fresh fetch.
+        words = [{"word": "Hello", "start": 0.0, "end": 0.4}]
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(shorts_render.store, "fetch_story",
+                              return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
+            mock.patch.object(shorts_render.shorts, "generate_short_assets",
+                              return_value=self._assets()), \
+            mock.patch.object(shorts_render.voice, "synthesize",
+                              return_value={"words": words}), \
+            mock.patch.object(shorts_render.voice, "audio_duration_ms", return_value=1000), \
+            mock.patch.object(shorts_render.images, "download", return_value=None), \
+            mock.patch.object(shorts_render.store, "get_setting", return_value=None):
+            first = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+            second = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+        for frame in first.props["doodle_frames"]:
+            self.assertIn("?v=", frame["url"], f"frame missing cache-bust: {frame['url']}")
+        # Voice URL also gets the bust so the editor's audio preview refreshes.
+        self.assertIn("?v=", first.props["voiceover_url"])
+        # Each render produces a different token so URLs across regens differ.
+        self.assertNotEqual(
+            first.props["doodle_frames"][0]["url"],
+            second.props["doodle_frames"][0]["url"],
+            "two consecutive renders produced the same cache-bust URL",
+        )
+
+
+class CacheBustHelperTests(unittest.TestCase):
+    """Pure-helper tests for shorts_render._cache_bust. Covered separately so a
+    URL-shape edge case can't regress without a targeted failure."""
+
+    def test_appends_v_query_with_question_separator(self):
+        result = shorts_render._cache_bust("https://gcs/x.png", "abc12345")
+        self.assertEqual(result, "https://gcs/x.png?v=abc12345")
+
+    def test_appends_with_ampersand_when_url_already_has_query(self):
+        result = shorts_render._cache_bust("https://gcs/x.png?w=200", "abc12345")
+        self.assertEqual(result, "https://gcs/x.png?w=200&v=abc12345")
+
+    def test_returns_url_unchanged_on_empty_token(self):
+        self.assertEqual(shorts_render._cache_bust("https://gcs/x.png", ""), "https://gcs/x.png")
+
+    def test_returns_url_unchanged_on_non_string_input(self):
+        self.assertIsNone(shorts_render._cache_bust(None, "abc12345"))
+        self.assertEqual(shorts_render._cache_bust("", "abc12345"), "")
+
 
 class BuildQuestionCardTests(unittest.TestCase):
     """Phase 3 of _plans/2026-06-17-engagement-polls.md. The

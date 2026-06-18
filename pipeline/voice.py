@@ -475,6 +475,88 @@ def _probe_mp3_duration(mp3_bytes: bytes) -> float:
         return 0.0
 
 
+# MPEG audio frame tables for a general, pure-stdlib MP3 duration probe (no
+# ffmpeg/ffprobe, so it runs inside the Vercel drain). Unlike
+# _probe_mp3_duration above (hard-wired to Google's 24 kHz mono MPEG-2 Layer
+# III), this reads version + sample rate + bitrate off every frame header, so
+# it is correct for ElevenLabs (MPEG-1, 44.1 kHz) as well as Google.
+_MPEG_VERSION = {0b00: "2.5", 0b10: "2", 0b11: "1"}   # 0b01 is reserved
+_MPEG_LAYER = {0b01: 3, 0b10: 2, 0b11: 1}             # 0b00 is reserved
+_MP3_SAMPLE_RATES = {
+    "1": [44100, 48000, 32000, None],
+    "2": [22050, 24000, 16000, None],
+    "2.5": [11025, 12000, 8000, None],
+}
+# Bitrate (kbps) indexed by the 4-bit field. Keyed by (version_group, layer)
+# where version_group is "1" for MPEG-1 and "2" for MPEG-2 / 2.5 (they share
+# the lower-rate tables).
+_MP3_BITRATES = {
+    ("1", 1): [None, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, None],
+    ("1", 2): [None, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, None],
+    ("1", 3): [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
+    ("2", 1): [None, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, None],
+    ("2", 2): [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
+    ("2", 3): [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
+}
+_MP3_SAMPLES_PER_FRAME = {
+    ("1", 1): 384, ("1", 2): 1152, ("1", 3): 1152,
+    ("2", 1): 384, ("2", 2): 1152, ("2", 3): 576,
+    ("2.5", 1): 384, ("2.5", 2): 1152, ("2.5", 3): 576,
+}
+
+
+def audio_duration_ms(path) -> int:
+    """Real duration of a synthesized MP3 in milliseconds, summed from the MPEG
+    frame headers. Pure stdlib so it runs in the Vercel Python drain (no
+    ffprobe). Handles MPEG-1/2/2.5 across all three layers, so it is correct for
+    every TTS provider we use. Returns 0 on any failure so callers fall back to
+    their caption-derived duration cleanly.
+
+    Shorts use this as the FLOOR for the composition length: the rendered body
+    must be at least as long as the narration, or the concatenated outro clips
+    the closing words (the last-caption end_ms can undershoot the real audio).
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return 0
+    total_seconds = 0.0
+    i = 0
+    n = len(data)
+    while i < n - 4:
+        # 11-bit frame sync (0xFFE) marks a frame header.
+        if data[i] != 0xFF or (data[i + 1] & 0xE0) != 0xE0:
+            i += 1
+            continue
+        version = _MPEG_VERSION.get((data[i + 1] >> 3) & 0b11)
+        layer = _MPEG_LAYER.get((data[i + 1] >> 1) & 0b11)
+        if version is None or layer is None:
+            i += 1
+            continue
+        vgroup = "1" if version == "1" else "2"
+        bitrate_idx = (data[i + 2] >> 4) & 0x0F
+        srate_idx = (data[i + 2] >> 2) & 0b11
+        padding = (data[i + 2] >> 1) & 0x01
+        bitrate_kbps = _MP3_BITRATES.get((vgroup, layer), [None] * 16)[bitrate_idx]
+        sample_rate = _MP3_SAMPLE_RATES[version][srate_idx]
+        if not bitrate_kbps or not sample_rate:
+            i += 1
+            continue
+        if layer == 1:
+            frame_size = (12 * bitrate_kbps * 1000 // sample_rate + padding) * 4
+        else:
+            # Layer II always 144; Layer III is 144 on MPEG-1, 72 on MPEG-2/2.5.
+            coeff = 72 if (layer == 3 and version != "1") else 144
+            frame_size = coeff * bitrate_kbps * 1000 // sample_rate + padding
+        if frame_size <= 0:
+            i += 1
+            continue
+        total_seconds += _MP3_SAMPLES_PER_FRAME[(version, layer)] / sample_rate
+        i += frame_size
+    return int(round(total_seconds * 1000))
+
+
 def _parse_google_duration(value) -> float:
     """Google REST returns durations as strings like '1.500s' (proto Duration)."""
     if value is None:
