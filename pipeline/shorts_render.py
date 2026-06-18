@@ -58,11 +58,48 @@ class ShortProps:
     props: dict
 
 
+def _resolve_card_ms() -> int:
+    """Resolve the question-card duration from settings, with bounds.
+
+    Default: QUESTION_CARD_MS (2500). Admin override key:
+    `polls.endcard.duration_ms` — accepts an integer in [500, 10000].
+    Sub-500ms barely registers as a hold; >10000ms is dead space.
+    Any parse error or out-of-range value falls back to the default.
+
+    Phase 5 follow-up of _plans/2026-06-17-engagement-polls.md.
+    """
+    raw = store.get_setting("polls.endcard.duration_ms")
+    if not raw:
+        return QUESTION_CARD_MS
+    try:
+        v = int(raw.strip())
+    except (TypeError, ValueError):
+        return QUESTION_CARD_MS
+    if 500 <= v <= 10000:
+        return v
+    return QUESTION_CARD_MS
+
+
+def _endcard_disabled_by_setting() -> bool:
+    """Master switch — when `polls.endcard.enabled` is explicitly off,
+    NO short carries a burnt-in card, even when the story has an
+    enabled poll. Falsy values: "0", "false" (case-insensitive),
+    "off", "no". Unset / blank / anything else = enabled.
+
+    Phase 5 follow-up of _plans/2026-06-17-engagement-polls.md.
+    """
+    raw = store.get_setting("polls.endcard.enabled")
+    if raw is None:
+        return False
+    return raw.strip().lower() in ("0", "false", "off", "no")
+
+
 def _build_question_card(row: dict) -> dict | None:
     """Phase 3 of _plans/2026-06-17-engagement-polls.md. Resolve the
     burnt-in question card for this story's render.
 
-    Returns None when the story has no enabled poll — the short then
+    Returns None when the story has no enabled poll OR the admin has
+    flipped `polls.endcard.enabled` off via settings — the short then
     renders byte-identical to its pre-poll shape. Returns a dict
     shaped for the DoodleShort composition's `question_card` prop
     when a poll exists.
@@ -73,6 +110,10 @@ def _build_question_card(row: dict) -> dict | None:
     """
     story_id = row.get("id")
     if not story_id:
+        return None
+    # Master switch first so the poll fetch is skipped when the card
+    # is disabled — no point reading the row just to throw it away.
+    if _endcard_disabled_by_setting():
         return None
     poll = store.fetch_enabled_poll_for_story(story_id)
     if not poll:
@@ -96,7 +137,7 @@ def _build_question_card(row: dict) -> dict | None:
         "option_a": option_a,
         "option_b": option_b,
         "slug": slug,
-        "card_ms": QUESTION_CARD_MS,
+        "card_ms": _resolve_card_ms(),
     }
 
 

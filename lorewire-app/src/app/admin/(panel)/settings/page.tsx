@@ -173,6 +173,8 @@ export default async function SettingsPage() {
     railAgreed,
     railUnpopular,
     publicFloorRaw,
+    endcardEnabled,
+    endcardDurationRaw,
     hookYoutube,
     hookTiktok,
     hookInstagram,
@@ -182,6 +184,8 @@ export default async function SettingsPage() {
     getSetting(railEnabledSettingKey("agreed")),
     getSetting(railEnabledSettingKey("unpopular")),
     getSetting("polls.public_floor"),
+    getSetting("polls.endcard.enabled"),
+    getSetting("polls.endcard.duration_ms"),
     getSetting(pollHookSettingKey("youtube")),
     getSetting(pollHookSettingKey("tiktok")),
     getSetting(pollHookSettingKey("instagram")),
@@ -581,6 +585,21 @@ export default async function SettingsPage() {
             min={0}
             max={1000}
             step={1}
+          />
+          <SettingToggle
+            settingKey="polls.endcard.enabled"
+            label="Burnt-in question card on shorts"
+            hint="Bake the 2.5s end card into every short whose story has an enabled poll. Off = ship shorts without the card. Useful when A/B testing the social-platform funnel."
+            initialOn={readToggle(endcardEnabled, true)}
+          />
+          <SettingNumber
+            settingKey="polls.endcard.duration_ms"
+            label="Card hold (ms)"
+            hint="How long the burnt-in card stays on screen at the tail of the short. 500–10000ms. Default 2500ms. Out-of-range values fall back to the default at render time."
+            initial={endcardDurationRaw ?? "2500"}
+            min={500}
+            max={10000}
+            step={100}
           />
         </Section>
 

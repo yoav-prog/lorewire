@@ -18,6 +18,7 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/dal";
 import {
   getArticle,
+  getSetting,
   getStory,
   getStoryShortConfigJson,
   setStoryShortConfigJson,
@@ -431,18 +432,46 @@ interface QuestionCardProps {
   card_ms: number;
 }
 
+/** Read `polls.endcard.enabled` — falsy values disable the card
+ *  surface entirely. Mirrors the Python `_endcard_disabled_by_setting`
+ *  exactly so the TS Lane A path and the Python generation drain
+ *  produce identical card / no-card decisions for the same setting.
+ *  Phase 5 follow-up of _plans/2026-06-17-engagement-polls.md. */
+async function endcardDisabledBySetting(): Promise<boolean> {
+  const raw = await getSetting("polls.endcard.enabled");
+  if (raw === null) return false;
+  return ["0", "false", "off", "no"].includes(raw.trim().toLowerCase());
+}
+
+/** Read `polls.endcard.duration_ms` with bounds (500–10000ms). Any
+ *  parse error or out-of-range value falls back to the
+ *  QUESTION_CARD_DURATION_MS default. Mirrors the Python
+ *  `_resolve_card_ms` so the two build paths stay synchronized. */
+async function resolveCardMs(): Promise<number> {
+  const raw = await getSetting("polls.endcard.duration_ms");
+  if (!raw) return QUESTION_CARD_DURATION_MS;
+  const v = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(v)) return QUESTION_CARD_DURATION_MS;
+  if (v < 500 || v > 10000) return QUESTION_CARD_DURATION_MS;
+  return v;
+}
+
 /** Resolve the question_card the renderer should bake into the next
- *  Lane A re-render. Returns null when the story has no live poll OR
- *  the poll has any empty field — matches the Python guard so the two
- *  build paths produce identical card / no-card decisions for the
- *  same input. Slug falls back to the story id when stories.slug is
- *  null (mirrors the Python side). */
+ *  Lane A re-render. Returns null when the story has no live poll,
+ *  the poll has any empty field, OR the admin has flipped the master
+ *  switch off via `polls.endcard.enabled`. Card duration honours the
+ *  `polls.endcard.duration_ms` override. Slug falls back to the story
+ *  id when stories.slug is null (mirrors the Python side). */
 async function currentQuestionCardPropsFor(
   storyId: string,
 ): Promise<QuestionCardProps | null> {
-  const [poll, story] = await Promise.all([
+  // Master switch first — skip the poll + story reads when the card
+  // is disabled so a Lane A trigger doesn't waste round trips.
+  if (await endcardDisabledBySetting()) return null;
+  const [poll, story, cardMs] = await Promise.all([
     getPollByStoryId(storyId),
     getStory(storyId),
+    resolveCardMs(),
   ]);
   if (!poll || poll.enabled !== 1 || !story) return null;
   const question = (poll.question ?? "").trim();
@@ -455,7 +484,7 @@ async function currentQuestionCardPropsFor(
     option_a: optionA,
     option_b: optionB,
     slug,
-    card_ms: QUESTION_CARD_DURATION_MS,
+    card_ms: cardMs,
   };
 }
 

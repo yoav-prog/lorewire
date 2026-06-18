@@ -189,6 +189,122 @@ class BuildQuestionCardTests(unittest.TestCase):
         # so a malformed row never wastes a query.
         fetch.assert_not_called()
 
+    def test_returns_none_when_endcard_setting_disabled(self):
+        # Master switch: polls.endcard.enabled = "0" → no card, period.
+        # Even with a valid enabled poll on the row.
+        with mock.patch.object(
+            shorts_render.store,
+            "get_setting",
+            side_effect=lambda k: "0" if k == "polls.endcard.enabled" else None,
+        ), mock.patch.object(
+            shorts_render.store,
+            "fetch_enabled_poll_for_story",
+            return_value=self._poll(),
+        ) as fetch:
+            card = shorts_render._build_question_card(self._row())
+        self.assertIsNone(card)
+        # Bonus assertion: when the master switch is off, the poll
+        # fetch is skipped entirely (no point reading the row just
+        # to throw it away). Catches a perf regression.
+        fetch.assert_not_called()
+
+    def test_endcard_master_switch_treats_off_synonyms_as_disabled(self):
+        for val in ("0", "false", "False", "FALSE", "off", "OFF", "no"):
+            with mock.patch.object(
+                shorts_render.store,
+                "get_setting",
+                side_effect=lambda k, v=val: v if k == "polls.endcard.enabled" else None,
+            ), mock.patch.object(
+                shorts_render.store,
+                "fetch_enabled_poll_for_story",
+                return_value=self._poll(),
+            ):
+                card = shorts_render._build_question_card(self._row())
+            self.assertIsNone(card, f"setting value {val!r} should disable the card")
+
+    def test_endcard_master_switch_unset_defaults_to_enabled(self):
+        # Most common case: settings table has no row → get_setting
+        # returns None → the card IS rendered.
+        with mock.patch.object(
+            shorts_render.store,
+            "get_setting",
+            return_value=None,
+        ), mock.patch.object(
+            shorts_render.store,
+            "fetch_enabled_poll_for_story",
+            return_value=self._poll(),
+        ):
+            card = shorts_render._build_question_card(self._row())
+        self.assertIsNotNone(card)
+        self.assertEqual(card["card_ms"], shorts_render.QUESTION_CARD_MS)
+
+    def test_uses_duration_setting_override(self):
+        # Custom in-range duration honored verbatim.
+        def fake(k):
+            if k == "polls.endcard.duration_ms":
+                return "4000"
+            return None
+        with mock.patch.object(
+            shorts_render.store, "get_setting", side_effect=fake,
+        ), mock.patch.object(
+            shorts_render.store,
+            "fetch_enabled_poll_for_story",
+            return_value=self._poll(),
+        ):
+            card = shorts_render._build_question_card(self._row())
+        self.assertIsNotNone(card)
+        self.assertEqual(card["card_ms"], 4000)
+
+    def test_duration_above_ceiling_falls_back_to_default(self):
+        # 20000ms is out of the 500-10000ms window → default applies.
+        def fake(k):
+            if k == "polls.endcard.duration_ms":
+                return "20000"
+            return None
+        with mock.patch.object(
+            shorts_render.store, "get_setting", side_effect=fake,
+        ), mock.patch.object(
+            shorts_render.store,
+            "fetch_enabled_poll_for_story",
+            return_value=self._poll(),
+        ):
+            card = shorts_render._build_question_card(self._row())
+        self.assertIsNotNone(card)
+        self.assertEqual(card["card_ms"], shorts_render.QUESTION_CARD_MS)
+
+    def test_duration_below_floor_falls_back_to_default(self):
+        def fake(k):
+            if k == "polls.endcard.duration_ms":
+                return "100"  # sub-floor
+            return None
+        with mock.patch.object(
+            shorts_render.store, "get_setting", side_effect=fake,
+        ), mock.patch.object(
+            shorts_render.store,
+            "fetch_enabled_poll_for_story",
+            return_value=self._poll(),
+        ):
+            card = shorts_render._build_question_card(self._row())
+        self.assertIsNotNone(card)
+        self.assertEqual(card["card_ms"], shorts_render.QUESTION_CARD_MS)
+
+    def test_garbage_duration_value_falls_back_to_default(self):
+        # Non-numeric junk in the setting → default applies, no exception.
+        def fake(k):
+            if k == "polls.endcard.duration_ms":
+                return "abc"
+            return None
+        with mock.patch.object(
+            shorts_render.store, "get_setting", side_effect=fake,
+        ), mock.patch.object(
+            shorts_render.store,
+            "fetch_enabled_poll_for_story",
+            return_value=self._poll(),
+        ):
+            card = shorts_render._build_question_card(self._row())
+        self.assertIsNotNone(card)
+        self.assertEqual(card["card_ms"], shorts_render.QUESTION_CARD_MS)
+
 
 class BuildShortPropsQuestionCardTests(unittest.TestCase):
     """End-to-end: when a story has an enabled poll, build_short_props
