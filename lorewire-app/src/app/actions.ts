@@ -15,25 +15,13 @@
 
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
 import { all, one } from "@/lib/db";
-import { getSetting } from "@/lib/repo";
+import { type HomepageSurface } from "@/lib/homepage-curation";
 import {
-  HOMEPAGE_SURFACES,
-  listAllCuration,
-  type HomepageSurface,
-} from "@/lib/homepage-curation";
-import {
-  HOMEPAGE_RAIL_LIMIT,
-  isRailEnabledValue,
-  POLL_RAIL_KINDS,
-  railEnabledSettingKey,
-  topAgreed,
-  topDivisive,
-  topUnpopular,
-  type HomepagePollRails,
-  type PollRailKind,
-  type RailCardRow,
-} from "@/lib/polls";
-import { readVoteToken } from "@/lib/poll-cookie";
+  loadHomepageCuration,
+  loadHomepagePolls,
+  loadLiveCatalog,
+} from "@/lib/homepage-data";
+import type { HomepagePollRails, PollRailKind } from "@/lib/polls";
 import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 
 export interface LiveStoryMediaResult {
@@ -320,32 +308,12 @@ export interface LiveCatalogResult {
   stories: LiveCatalogStory[];
 }
 
-// Returns any story the admin has finished rendering (status ready or
-// published) and not explicitly hidden. ORIGINAL filter required both
-// status = 'published' AND published_at IS NOT NULL — that silently
-// dropped stories whose status was flipped before the publish action
-// learned to backfill published_at, leaving the homepage blank of real
-// reels even when the admin saw them as published. We now accept
-// 'ready' as well (the story has a rendered MP4 and a slug) and order
-// by COALESCE(published_at, updated_at, created_at) so a published_at
-// of NULL doesn't bury the row. noindex stays a hard cut — that's the
-// admin opting OUT of public visibility on purpose.
+// Public client entry: client components import this through "use server"
+// as an RPC. The body lives in @/lib/homepage-data so src/app/page.tsx can
+// run the same fetch at request time and seed the client shells' initial
+// render. Plan: _plans/2026-06-18-homepage-no-flash-ssr.md.
 export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
-  const safeLimit = Math.max(1, Math.min(limit, 500));
-  const rows = await all<LiveCatalogStory>(
-    "SELECT id, slug, title, category, summary, duration, hero_image, " +
-      "video_url, published_at, created_at FROM stories " +
-      "WHERE status IN ('ready', 'published') " +
-      "AND slug IS NOT NULL " +
-      "AND (noindex IS NULL OR noindex = 0) " +
-      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC " +
-      `LIMIT ${safeLimit}`,
-  );
-  console.info("[homepage live catalog load]", {
-    count: rows.length,
-    limit: safeLimit,
-  });
-  return { ok: true, stories: rows };
+  return loadLiveCatalog(limit);
 }
 
 // ─── Reels feed: published shorts, cursor-paginated ──────────────────────────
@@ -425,74 +393,10 @@ export async function listPublishedShorts(
   return { ok: true, shorts, nextCursor };
 }
 
+// Public client entry: see getLiveCatalog comment. Body lives in
+// @/lib/homepage-data.
 export async function getHomepageCuration(): Promise<HomepageCurationResult> {
-  const grouped = await listAllCuration();
-  // Collect every curated story id across all surfaces, dedupe, ask the
-  // DB which of them are publishable. One round-trip beats N per-id reads.
-  const curatedIds = new Set<string>();
-  let rawCount = 0;
-  for (const surface of HOMEPAGE_SURFACES) {
-    for (const r of grouped[surface]) {
-      curatedIds.add(r.story_id);
-      rawCount++;
-    }
-  }
-  // Curated rails honour the admin's explicit pick: a story the admin
-  // hand-placed on a rail is surfaced as long as it exists and isn't
-  // marked noindex. The previous filter additionally required
-  // status='published' AND published_at IS NOT NULL — that silently
-  // hid stories whose status flipped before the publish flow learned
-  // to backfill the timestamp, leaving the rail blank of real picks
-  // and falling back to the static sample. If the admin curated it,
-  // trust the admin. noindex stays a hard cut — that's an explicit
-  // opt-out from public visibility.
-  let publishedSet = new Set<string>();
-  if (curatedIds.size > 0) {
-    const ids = Array.from(curatedIds);
-    const placeholders = ids.map(() => "?").join(", ");
-    const rows = await all<{ id: string }>(
-      `SELECT id FROM stories WHERE id IN (${placeholders}) ` +
-        "AND (noindex IS NULL OR noindex = 0)",
-      ids,
-    );
-    publishedSet = new Set(rows.map((r) => r.id));
-  }
-  const curation: HomepageCuration = {
-    hero: [],
-    top10: [],
-    continue: [],
-    new_row: [],
-    entitled_row: [],
-    humor_row: [],
-    wholesome_row: [],
-    dating_row: [],
-    roommate_row: [],
-    drama_row: [],
-  };
-  for (const surface of HOMEPAGE_SURFACES) {
-    for (const r of grouped[surface]) {
-      if (publishedSet.has(r.story_id)) {
-        curation[surface].push(r.story_id);
-      }
-    }
-  }
-  // Pull both behaviour settings in parallel — single round trip cost is
-  // ~2 ms on SQLite and the same on Postgres pooled.
-  const [emptyRailRaw, heroRequiredRaw] = await Promise.all([
-    getSetting("curation.empty_rail_behavior"),
-    getSetting("curation.hero_required"),
-  ]);
-  const behavior: HomepageCurationBehavior = {
-    emptyRailBehavior:
-      emptyRailRaw === "hide" ? "hide" : "fallback",
-    heroRequired: heroRequiredRaw === "true",
-  };
-  return {
-    ok: true,
-    curation,
-    raw_curation_count: rawCount,
-    behavior,
-  };
+  return loadHomepageCuration();
 }
 
 // Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Three derived
@@ -523,75 +427,10 @@ export interface HomepagePollRailsResult {
   enabled: Record<PollRailKind, boolean>;
 }
 
-const EMPTY_RAILS: HomepagePollRails = {
-  divisive: [],
-  agreed: [],
-  unpopular: [],
-};
-
+// Public client entry: see getLiveCatalog comment. Body lives in
+// @/lib/homepage-data.
 export async function getHomepagePolls(): Promise<HomepagePollRailsResult> {
-  // Pull all four reads in one round trip — three settings + the
-  // cookie token (the cookie read is the cheap one but still serial
-  // if we don't parallelize). Settings are decoded through the
-  // shared isRailEnabledValue helper so absent = enabled.
-  const [
-    divisiveEnabledRaw,
-    agreedEnabledRaw,
-    unpopularEnabledRaw,
-    voteToken,
-  ] = await Promise.all([
-    getSetting(railEnabledSettingKey("divisive")),
-    getSetting(railEnabledSettingKey("agreed")),
-    getSetting(railEnabledSettingKey("unpopular")),
-    readVoteToken(),
-  ]);
-  const enabled: Record<PollRailKind, boolean> = {
-    divisive: isRailEnabledValue(divisiveEnabledRaw),
-    agreed: isRailEnabledValue(agreedEnabledRaw),
-    unpopular: isRailEnabledValue(unpopularEnabledRaw),
-  };
-
-  // Three queries in parallel — same shape, different sort, isolated
-  // failure handling so one slow / broken rail can't stall the others.
-  const safeQuery = async (
-    kind: PollRailKind,
-  ): Promise<RailCardRow[]> => {
-    if (!enabled[kind]) return [];
-    try {
-      if (kind === "divisive") {
-        return await topDivisive({ limit: HOMEPAGE_RAIL_LIMIT });
-      }
-      if (kind === "agreed") {
-        return await topAgreed({ limit: HOMEPAGE_RAIL_LIMIT });
-      }
-      return await topUnpopular({
-        cookieToken: voteToken,
-        limit: HOMEPAGE_RAIL_LIMIT,
-      });
-    } catch (err) {
-      console.warn("[homepage polls query failed]", {
-        rail: kind,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return [];
-    }
-  };
-  const [divisive, agreed, unpopular] = await Promise.all(
-    POLL_RAIL_KINDS.map((k) => safeQuery(k)),
-  );
-
-  const rails: HomepagePollRails = { divisive, agreed, unpopular };
-  console.info("[homepage polls load]", {
-    counts: {
-      divisive: rails.divisive.length,
-      agreed: rails.agreed.length,
-      unpopular: rails.unpopular.length,
-    },
-    enabled,
-    has_cookie: voteToken !== null,
-  });
-
-  return { ok: true, rails, enabled };
+  return loadHomepagePolls();
 }
 
 // (Empty-state sentinel for the client hook lives in

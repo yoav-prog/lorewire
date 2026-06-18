@@ -15,6 +15,7 @@ import {
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
+  type HomepageInitial,
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import DesktopShell from "@/components/DesktopShell";
@@ -212,6 +213,7 @@ function Home({
   behavior,
   catalog,
   resolveStory,
+  pollsInitial,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -221,6 +223,7 @@ function Home({
   behavior: ReturnType<typeof useHomepageCuration>["behavior"];
   catalog: ReturnType<typeof useHomepageCuration>["catalog"];
   resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+  pollsInitial: HomepageInitial["pollRails"];
 }) {
   // Curation + live catalog are hoisted to MobileShell so MyList / TitleSheet
   // can share resolveStory (saved real shorts aren't in the baked STORIES
@@ -228,14 +231,14 @@ function Home({
   // resolves an id to a card.
   // Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Same hook
   // DesktopShell uses; the rail visual stays identical between shells
-  // because PollRailCard owns its own layout.
-  const { rails: pollRails } = useHomepagePolls();
+  // because PollRailCard owns its own layout. Seeded from SSR (see
+  // _plans/2026-06-18-homepage-no-flash-ssr.md) so the rails paint on
+  // first byte instead of popping in after the client fetch.
+  const { rails: pollRails } = useHomepagePolls(pollsInitial);
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
-  const featured =
-    (heroIds[0] && resolveStory(heroIds[0])) ??
-    (behavior.heroRequired ? null : resolveStory("envelope"));
+  const featured = heroIds[0] ? resolveStory(heroIds[0]) : null;
 
   const continueIds = resolveRailIds("continue", curation, behavior, catalog);
   const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
@@ -1178,7 +1181,7 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
 }
 
 /* ----------------------------- MOBILE SHELL ----------------------------- */
-function MobileShell() {
+function MobileShell({ initial }: { initial: HomepageInitial }) {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
@@ -1193,8 +1196,14 @@ function MobileShell() {
   // props instead of calling the hook itself so MyList and the modal
   // mount site below share one `resolveStory` (real shorts saved through
   // the Reels feed aren't in the baked STORIES catalog). One hook call
-  // drives every component on the shell that maps an id to a card.
-  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+  // drives every component on the shell that maps an id to a card. The
+  // seed comes from src/app/page.tsx's SSR fetch so the first paint
+  // already shows the live curation — no client-fetch flash.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration({
+    curation: initial.curation,
+    behavior: initial.behavior,
+    liveRows: initial.liveRows,
+  });
 
   const open: OpenFn = (id, t) => setActive({ id, tab: t });
   const close = () => setActive(null);
@@ -1225,6 +1234,7 @@ function MobileShell() {
             behavior={behavior}
             catalog={catalog}
             resolveStory={resolveStory}
+            pollsInitial={initial.pollRails}
           />
         )}
         {tab === "Search" && <Search onOpen={open} />}
@@ -1271,14 +1281,19 @@ function MobileShell() {
 /* ----------------------------- RESPONSIVE APP ----------------------------- */
 // Mobile layout below the lg breakpoint, the desktop layout at lg and up.
 // Both mount; CSS shows exactly one, so neither layout regresses the other.
-export default function AppShell() {
+//
+// `initial` is the SSR-prefetched homepage payload from src/app/page.tsx.
+// Each shell forwards it into its own useHomepageCuration / useHomepagePolls
+// call so the first paint already shows the correct hero + rails. See
+// _plans/2026-06-18-homepage-no-flash-ssr.md.
+export default function AppShell({ initial }: { initial: HomepageInitial }) {
   return (
     <>
       <div className="lg:hidden">
-        <MobileShell />
+        <MobileShell initial={initial} />
       </div>
       <div className="hidden lg:block">
-        <DesktopShell />
+        <DesktopShell initial={initial} />
       </div>
     </>
   );

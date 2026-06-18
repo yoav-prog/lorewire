@@ -1,19 +1,39 @@
-// Tests for the live-catalog merging that drives the homepage rails.
-// The hook itself isn't tested here (React state + server actions) — these
-// cover the pure helpers it composes: `liveRowToStory` (DB row ->
-// Story shape), `mergeStaticAndLive` (live wins on id collision, live
-// rows come first, no dupes), and `fallbackIdsForSurface` reading off
-// the merged catalog (so newly published stories surface on the
-// auto-derived rails without a re-export).
+// @vitest-environment happy-dom
 
-import { describe, expect, it } from "vitest";
+// Tests for the live-catalog merging that drives the homepage rails AND
+// the seeded path of the useHomepageCuration / useHomepagePolls hooks
+// (added with _plans/2026-06-18-homepage-no-flash-ssr.md so the homepage
+// Server Component can pre-fetch the data and skip the client round trip).
+//
+// Pure helpers tested: `liveRowToStory` (DB row -> Story shape),
+// `mergeStaticAndLive` (live wins on id collision, live rows come first,
+// no dupes), and `fallbackIdsForSurface` reading off the merged catalog
+// (so newly published stories surface on the auto-derived rails without
+// a re-export).
+//
+// Hook tests: the seeded path returns synchronously with loaded=true and
+// never schedules a fetch. The legacy (unseeded) path is unchanged and
+// covered live by the dev server today; we don't add a brittle integ
+// test for it here.
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import {
   fallbackIdsForSurface,
   liveRowToStory,
   mergeStaticAndLive,
+  useHomepageCuration,
+  useHomepagePolls,
 } from "@/lib/homepage-rails";
 import { STORIES } from "@/lib/stories";
-import type { LiveCatalogStory } from "@/app/actions";
+import * as actions from "@/app/actions";
+import type {
+  HomepageCuration,
+  HomepageCurationBehavior,
+  HomepagePollRailsResult,
+  LiveCatalogStory,
+} from "@/app/actions";
 
 function liveRow(overrides: Partial<LiveCatalogStory> = {}): LiveCatalogStory {
   return {
@@ -90,6 +110,135 @@ describe("mergeStaticAndLive", () => {
     const merged = mergeStaticAndLive([]);
     expect(merged.array.length).toBe(STORIES.length);
     expect(merged.array[0].id).toBe(STORIES[0].id);
+  });
+});
+
+// Minimal hook host that mirrors components/ui/useDebouncedSave.test.tsx's
+// approach: create a real React root, render a probe, capture the hook's
+// return value into `current`. happy-dom (the test environment for this
+// file) supplies the document the root needs.
+function hostHook<T>(hook: () => T): { current: T; cleanup: () => void } {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | null = null;
+  const result = { current: undefined as unknown as T };
+  function Probe() {
+    result.current = hook();
+    return null;
+  }
+  act(() => {
+    root = createRoot(container);
+    root.render(<Probe />);
+  });
+  return {
+    get current() {
+      return result.current;
+    },
+    cleanup() {
+      act(() => {
+        root?.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
+const SEED_CURATION: HomepageCuration = {
+  hero: ["seed-hero"],
+  top10: ["seed-top-1", "seed-top-2"],
+  continue: [],
+  new_row: [],
+  entitled_row: [],
+  humor_row: [],
+  wholesome_row: [],
+  dating_row: [],
+  roommate_row: [],
+  drama_row: [],
+};
+
+const SEED_BEHAVIOR: HomepageCurationBehavior = {
+  emptyRailBehavior: "fallback",
+  heroRequired: false,
+};
+
+const SEED_LIVE_ROWS: LiveCatalogStory[] = [
+  liveRow({ id: "seed-hero", title: "seed hero" }),
+];
+
+const SEED_POLLS: HomepagePollRailsResult = {
+  ok: true,
+  rails: { divisive: [], agreed: [], unpopular: [] },
+  enabled: { divisive: true, agreed: true, unpopular: true },
+};
+
+describe("useHomepageCuration (seeded SSR path)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("initialises synchronously from the seed and reports loaded=true on first render", () => {
+    const spy = vi.spyOn(actions, "getHomepageCuration");
+    const liveSpy = vi.spyOn(actions, "getLiveCatalog");
+    const host = hostHook(() =>
+      useHomepageCuration({
+        curation: SEED_CURATION,
+        behavior: SEED_BEHAVIOR,
+        liveRows: SEED_LIVE_ROWS,
+      }),
+    );
+    try {
+      expect(host.current.loaded).toBe(true);
+      expect(host.current.curation).toBe(SEED_CURATION);
+      expect(host.current.behavior).toBe(SEED_BEHAVIOR);
+      // The seed's live row must appear at the top of the merged catalog
+      // — that's the load-bearing guarantee that the seeded hero / CW
+      // rail render real content on the first paint, not the static
+      // sample. `catalog.array[0]` is what `fallbackIdsForSurface("hero")`
+      // returns when curation is empty.
+      expect(host.current.catalog.array[0].id).toBe("seed-hero");
+      // And no client fetch was scheduled.
+      expect(spy).not.toHaveBeenCalled();
+      expect(liveSpy).not.toHaveBeenCalled();
+    } finally {
+      host.cleanup();
+    }
+  });
+
+  it("a null seed curation still keeps loaded=true (SSR succeeded but no curation rows yet)", () => {
+    const host = hostHook(() =>
+      useHomepageCuration({
+        curation: null,
+        behavior: SEED_BEHAVIOR,
+        liveRows: SEED_LIVE_ROWS,
+      }),
+    );
+    try {
+      expect(host.current.loaded).toBe(true);
+      expect(host.current.curation).toBeNull();
+      // resolveStory still works for live ids.
+      expect(host.current.resolveStory("seed-hero")?.title).toBe("SEED HERO");
+    } finally {
+      host.cleanup();
+    }
+  });
+});
+
+describe("useHomepagePolls (seeded SSR path)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("initialises synchronously from the polls seed and skips the client fetch", () => {
+    const spy = vi.spyOn(actions, "getHomepagePolls");
+    const host = hostHook(() => useHomepagePolls(SEED_POLLS));
+    try {
+      expect(host.current.loaded).toBe(true);
+      expect(host.current.rails).toBe(SEED_POLLS.rails);
+      expect(host.current.enabled).toBe(SEED_POLLS.enabled);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      host.cleanup();
+    }
   });
 });
 

@@ -19,6 +19,7 @@ import {
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
+  type HomepageInitial,
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import { useSavedStories } from "@/lib/engagement-store";
@@ -905,6 +906,7 @@ function HomePage({
   behavior,
   catalog,
   resolveStory,
+  pollsInitial,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -912,6 +914,7 @@ function HomePage({
   behavior: ReturnType<typeof useHomepageCuration>["behavior"];
   catalog: ReturnType<typeof useHomepageCuration>["catalog"];
   resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
+  pollsInitial: HomepageInitial["pollRails"];
 }) {
   // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
   // New & Hot grids can share the same resolveStory (saved real shorts aren't
@@ -921,8 +924,10 @@ function HomePage({
   // derived rails — computed live from poll_aggregates, not curated.
   // Empty arrays (no votes yet OR rail disabled in settings) just
   // render nothing; the homepage skips the section entirely so the
-  // page doesn't carry placeholder "no content" tiles.
-  const { rails: pollRails } = useHomepagePolls();
+  // page doesn't carry placeholder "no content" tiles. Seeded from SSR
+  // (see _plans/2026-06-18-homepage-no-flash-ssr.md) so the rails paint
+  // on first byte instead of popping in after a client fetch.
+  const { rails: pollRails } = useHomepagePolls(pollsInitial);
 
   // Hero behaviour: curation.hero_required forces "no hero curation -> no
   // hero", which HomePage honours by rendering null in the hero slot.
@@ -931,9 +936,7 @@ function HomePage({
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
-  const heroStory =
-    (heroIds[0] && resolveStory(heroIds[0])) ??
-    (behavior.heroRequired ? null : resolveStory("envelope"));
+  const heroStory = heroIds[0] ? resolveStory(heroIds[0]) : null;
 
   const continueIds = resolveRailIds("continue", curation, behavior, catalog);
   // Continue Watching had per-user-style progress bars in the legacy
@@ -1045,7 +1048,7 @@ function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
 }
 
 /* ----------------------------- DESKTOP SHELL ----------------------------- */
-export default function DesktopShell() {
+export default function DesktopShell({ initial }: { initial: HomepageInitial }) {
   const [view, setView] = useState("Home");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
   const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
@@ -1059,8 +1062,15 @@ export default function DesktopShell() {
   // Hoisted curation + live-catalog hook. HomePage reads it through props
   // instead of calling the hook itself so every grid (Browse / New & Hot /
   // My List) can share resolveStory and resolve real-short ids saved
-  // through the Reels feed without throwing on byId.
-  const { curation, behavior, catalog, resolveStory } = useHomepageCuration();
+  // through the Reels feed without throwing on byId. The seed comes from
+  // src/app/page.tsx's SSR fetch so the first paint already shows the
+  // correct curation — no client-fetch flash. See
+  // _plans/2026-06-18-homepage-no-flash-ssr.md.
+  const { curation, behavior, catalog, resolveStory } = useHomepageCuration({
+    curation: initial.curation,
+    behavior: initial.behavior,
+    liveRows: initial.liveRows,
+  });
 
   useEffect(() => {
     const onS = () => setSolid(window.scrollY > 120);
@@ -1093,6 +1103,7 @@ export default function DesktopShell() {
           behavior={behavior}
           catalog={catalog}
           resolveStory={resolveStory}
+          pollsInitial={initial.pollRails}
         />
       )}
       {view === "Reels" && <ReelsDesktop onOpenInfo={open} paused={!!active} initialStoryId={reelsStoryId ?? undefined} />}

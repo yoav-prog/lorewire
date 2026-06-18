@@ -30,6 +30,11 @@ import {
 import { CAT, STORIES, tryById, type Cat, type Story } from "@/lib/stories";
 import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
 
+// Re-exported here (client-safe module) so client components don't need
+// an explicit path to the server-only @/lib/homepage-data module. The
+// type is erased at compile time so there's never a runtime crossing.
+export type { HomepageInitial } from "@/lib/homepage-data";
+
 // Empty-state sentinel for the poll-rails hook. Lives here (client-
 // safe module) instead of in actions.ts because Next.js 16's "use
 // server" boundary refuses non-async exports — a plain object would
@@ -213,6 +218,21 @@ function mergeLiveOverStatic(staticStory: Story, liveStory: Story): Story {
 // resolveStory(id) is the homepage's source of truth for card metadata:
 // live DB row first, sample STORIES second, null when neither knows the
 // id (filtered out at the rail layer so stale curation can't crash).
+//
+// When `initial` is provided, the hook initializes state from it and
+// skips the useEffect fetch entirely — that path is taken when the
+// homepage Server Component (src/app/page.tsx) pre-fetched the data
+// and seeded the shells with it. `loaded` starts `true` because the
+// data is already known. Without a seed, the hook keeps its legacy
+// "fetch on mount" behavior so any caller that hasn't been migrated
+// (or a future caller without an SSR path) still works.
+// Plan: _plans/2026-06-18-homepage-no-flash-ssr.md.
+export interface UseHomepageCurationInitial {
+  curation: HomepageCuration | null;
+  behavior: HomepageCurationBehavior;
+  liveRows: LiveCatalogStory[];
+}
+
 export interface UseHomepageCurationResult {
   curation: HomepageCuration | null;
   behavior: HomepageCurationBehavior;
@@ -225,14 +245,27 @@ export interface UseHomepageCurationResult {
 // fetch lands) so consumers don't paint with a stale closure.
 const EMPTY_LIVE: LiveCatalogStory[] = [];
 
-export function useHomepageCuration(): UseHomepageCurationResult {
-  const [curation, setCuration] = useState<HomepageCuration | null>(null);
-  const [behavior, setBehavior] = useState<HomepageCurationBehavior>(
-    DEFAULT_CURATION_BEHAVIOR,
+export function useHomepageCuration(
+  initial?: UseHomepageCurationInitial,
+): UseHomepageCurationResult {
+  const [curation, setCuration] = useState<HomepageCuration | null>(
+    initial?.curation ?? null,
   );
-  const [liveRows, setLiveRows] = useState<LiveCatalogStory[]>(EMPTY_LIVE);
-  const [loaded, setLoaded] = useState(false);
+  const [behavior, setBehavior] = useState<HomepageCurationBehavior>(
+    initial?.behavior ?? DEFAULT_CURATION_BEHAVIOR,
+  );
+  const [liveRows, setLiveRows] = useState<LiveCatalogStory[]>(
+    initial?.liveRows ?? EMPTY_LIVE,
+  );
+  const [loaded, setLoaded] = useState(initial !== undefined);
+  // Seeded path: SSR already resolved the data, no client fetch needed.
+  // The empty dep list keeps this effect from re-running on prop changes
+  // — the seed is locked in at first mount, which is what we want for
+  // a stable steady-state homepage. A future hot-reload-on-navigate
+  // refinement would re-seed; today's pages don't need it.
+  const seeded = initial !== undefined;
   useEffect(() => {
+    if (seeded) return;
     let cancelled = false;
     Promise.all([getHomepageCuration(), getLiveCatalog()])
       .then(([cur, live]) => {
@@ -259,7 +292,7 @@ export function useHomepageCuration(): UseHomepageCurationResult {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [seeded]);
   // Recompute the merged catalog only when the live rows change so every
   // rail rendering off it shares one stable reference.
   const catalog = useMemo(() => mergeStaticAndLive(liveRows), [liveRows]);
@@ -288,12 +321,20 @@ export interface UseHomepagePollsResult {
   loaded: boolean;
 }
 
-export function useHomepagePolls(): UseHomepagePollsResult {
+// `initial` mirrors useHomepageCuration: when the homepage Server
+// Component pre-fetched the polls payload, the hook initializes state
+// from it and skips the client fetch. See useHomepageCuration for the
+// rationale and the legacy-path contract.
+export function useHomepagePolls(
+  initial?: HomepagePollRailsResult,
+): UseHomepagePollsResult {
   const [state, setState] = useState<HomepagePollRailsResult>(
-    HOMEPAGE_POLL_RAILS_EMPTY,
+    initial ?? HOMEPAGE_POLL_RAILS_EMPTY,
   );
-  const [loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(initial !== undefined);
+  const seeded = initial !== undefined;
   useEffect(() => {
+    if (seeded) return;
     let cancelled = false;
     getHomepagePolls()
       .then((r) => {
@@ -320,7 +361,7 @@ export function useHomepagePolls(): UseHomepagePollsResult {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [seeded]);
   return { rails: state.rails, enabled: state.enabled, loaded };
 }
 
