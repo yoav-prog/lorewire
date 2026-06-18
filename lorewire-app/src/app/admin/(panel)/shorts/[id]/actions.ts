@@ -606,9 +606,23 @@ export async function renderShortLaneA(
         cfg.config.captions[cfg.config.captions.length - 1]?.end_ms ?? 1,
       )
     : 1;
-  const renderedDurationMs = newCard
+  // Floor at the baseline's duration_ms so Lane A can never SHORTEN the
+  // body relative to the baseline. The baseline's duration was computed
+  // from the actual audio (`pipeline/voice.audio_duration_ms` in the
+  // generation drain), so shrinking below it would clip the narration.
+  // The editor can EXTEND captions safely (last-caption end_ms > baseline),
+  // and the question card can stretch the tail; we just never go below.
+  const baselineDurationMs = Number(
+    (baselineProps as { duration_ms?: unknown }).duration_ms ?? 0,
+  );
+  const captionsDurationMs = newCard
     ? narrationEndMs + newCard.card_ms
     : narrationEndMs;
+  const renderedDurationMs = Math.max(
+    baselineDurationMs,
+    captionsDurationMs,
+    1,
+  );
 
   // Build newProps with the card swapped in or stripped. The
   // `question_card` key is conditionally present so a removed-poll

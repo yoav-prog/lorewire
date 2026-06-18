@@ -259,24 +259,29 @@ class HappyPathTests(_LaneCTestCase):
 
         frames = built.props["doodle_frames"]
         # frame-00 and frame-02 swapped to the new urls; frame-01 untouched.
+        # All three urls carry the per-render `?v=<token>` cache-bust so the
+        # editor doesn't show the previous render's bytes from image cache.
         self.assertEqual(frames[0]["id"], "frame-00")
-        self.assertEqual(frames[0]["url"], "https://gcs/frame-00-NEW.png")
+        self.assertRegex(frames[0]["url"], r"^https://gcs/frame-00-NEW\.png\?v=[0-9a-f]{8}$")
         self.assertEqual(frames[1]["id"], "frame-01")
-        self.assertEqual(frames[1]["url"], "https://gcs/01-old.png")
+        self.assertRegex(frames[1]["url"], r"^https://gcs/01-old\.png\?v=[0-9a-f]{8}$")
         self.assertEqual(frames[2]["id"], "frame-02")
-        self.assertEqual(frames[2]["url"], "https://gcs/frame-02-NEW.png")
+        self.assertRegex(frames[2]["url"], r"^https://gcs/frame-02-NEW\.png\?v=[0-9a-f]{8}$")
+        # Every frame shares the same token.
+        token = frames[0]["url"].rsplit("=", 1)[1]
+        for f in frames:
+            self.assertTrue(f["url"].endswith(f"?v={token}"))
 
-        # Voice + captions + title untouched.
-        self.assertEqual(
-            built.props["voiceover_url"], "https://gcs/voice.mp3",
+        # Voice URL also carries the bust (so the editor's audio preview refreshes).
+        self.assertRegex(
+            built.props["voiceover_url"],
+            r"^https://gcs/voice\.mp3\?v=[0-9a-f]{8}$",
         )
+        # Captions are unchanged when the audio probe couldn't reach the URL
+        # (mock URLs fail to resolve in unit tests).
         self.assertEqual(built.props["captions"], self._baseline_props()["captions"])
         self.assertEqual(built.props["title"], "Old title")
-        self.assertEqual(
-            built.props["caption_chunk_start_index"]
-            if False else frames[0]["caption_chunk_start_index"],
-            0,
-        )
+        self.assertEqual(frames[0]["caption_chunk_start_index"], 0)
 
     def test_progress_callback_fires_per_scene(self):
         self._seed_baseline("base-p", "story-p", self._baseline_props())
@@ -416,6 +421,220 @@ class CaptionStyleOverrideTests(_LaneCTestCase):
         self.assertEqual(
             built.props["caption_template"], {"color": "#00ff00"},
         )
+
+
+class AudioSanitizationTests(_LaneCTestCase):
+    """Lane C reuses the baseline's voice + captions, so a baseline rendered
+    BEFORE the audio-duration floor existed can carry stale metadata: phantom
+    captions past the actual audio end, or a duration_ms that undershoots the
+    audio. Lane C now re-probes the baseline's voice MP3 and reconciles
+    duration_ms + captions against the real audio length so old baselines
+    can't poison new Lane C renders. Falls back to baseline-as-is on probe
+    failure — never makes things worse."""
+
+    def _baseline_with_audio_state(
+        self,
+        captions: list[dict],
+        duration_ms: int,
+        end_hold_ms: int | None = None,
+    ) -> dict:
+        props = {
+            "config_version": 2,
+            "voiceover_url": "https://gcs/voice.mp3",
+            "duration_ms": duration_ms,
+            "doodle_frames": [
+                {"id": "frame-00", "url": "https://gcs/00.png",
+                 "caption_chunk_start_index": 0},
+            ],
+            "captions": captions,
+        }
+        if end_hold_ms is not None:
+            props["end_hold_ms"] = end_hold_ms
+        return props
+
+    def _short_config(self) -> dict:
+        return {
+            "config_version": 1,
+            "character_base_url": "https://gcs/base.png",
+            "doodle_frames": [
+                {"id": "frame-00", "url": "https://gcs/00.png",
+                 "image_prompt": "a beat"},
+            ],
+            "captions": [],
+        }
+
+    def _run_lane_c(
+        self,
+        baseline_id: str,
+        story_id: str,
+        baseline_props: dict,
+        audio_probe_ms: int,
+    ):
+        self._seed_baseline(baseline_id, story_id, baseline_props)
+        self._seed_story_with_config(story_id, self._short_config())
+        with mock.patch.object(
+            shorts_lane_c.shorts_scene_regen,
+            "regen_short_scene",
+            return_value=("https://gcs/x.png", 5),
+        ), mock.patch.object(
+            shorts_lane_c,
+            "_probe_baseline_audio_ms",
+            return_value=audio_probe_ms,
+        ):
+            return shorts_lane_c.build_short_props_lane_c(
+                {
+                    "story_id": story_id,
+                    "lane_inputs": json.dumps(
+                        {
+                            "source_render_id": baseline_id,
+                            "touched_frame_ids": ["frame-00"],
+                        },
+                    ),
+                },
+                Path(self._tmpdir.name),
+            )
+
+    def test_audio_runs_past_captions_extends_last_caption(self):
+        # Baseline captions end at 20s but real audio is 25s. Lane C bumps
+        # the last caption to cover the trailing 5s of speech so the
+        # on-screen text stays present until the audio ends.
+        baseline = self._baseline_with_audio_state(
+            captions=[
+                {"start_ms": 0, "end_ms": 5000, "text": "first"},
+                {"start_ms": 5000, "end_ms": 20000, "text": "second"},
+            ],
+            duration_ms=20000,
+        )
+        built = self._run_lane_c("base-ext", "story-ext", baseline, audio_probe_ms=25000)
+        captions = built.props["captions"]
+        self.assertEqual(len(captions), 2)
+        self.assertEqual(captions[-1]["end_ms"], 25000)
+        self.assertEqual(captions[-1]["text"], "second")
+        self.assertEqual(built.props["duration_ms"], 25000)
+
+    def test_audio_shorter_than_captions_trims_phantom_chunks(self):
+        # Baseline captions extend to 36s but real audio is 30s. The 30-36s
+        # captions describe content that doesn't exist in the audio — the
+        # exact "captions completely unrelated to narration" symptom. Lane C
+        # drops chunks past the audio length and clamps the last surviving
+        # chunk to the audio end.
+        baseline = self._baseline_with_audio_state(
+            captions=[
+                {"start_ms": 0, "end_ms": 10000, "text": "early"},
+                {"start_ms": 10000, "end_ms": 20000, "text": "middle"},
+                {"start_ms": 20000, "end_ms": 30500, "text": "boundary"},
+                {"start_ms": 30500, "end_ms": 36000, "text": "phantom"},
+            ],
+            duration_ms=36000,
+        )
+        built = self._run_lane_c("base-trim", "story-trim", baseline, audio_probe_ms=30000)
+        captions = built.props["captions"]
+        # The phantom chunk is dropped (its start was past audio_ms).
+        texts = [c["text"] for c in captions]
+        self.assertNotIn("phantom", texts)
+        self.assertEqual(len(captions), 3)
+        # Last surviving caption clamps to the audio end.
+        self.assertEqual(captions[-1]["end_ms"], 30000)
+        # And duration matches the real audio.
+        self.assertEqual(built.props["duration_ms"], 30000)
+
+    def test_probe_failure_preserves_baseline_metadata(self):
+        # When the probe can't reach the voice URL, the sanitizer must not
+        # mutate anything — old behavior is the safe fallback. This is the
+        # default path for any baseline whose GCS object got expired or
+        # whose URL is malformed.
+        baseline = self._baseline_with_audio_state(
+            captions=[{"start_ms": 0, "end_ms": 30000, "text": "all of it"}],
+            duration_ms=30000,
+        )
+        built = self._run_lane_c("base-keep", "story-keep", baseline, audio_probe_ms=0)
+        self.assertEqual(built.props["captions"], baseline["captions"])
+        self.assertEqual(built.props["duration_ms"], 30000)
+
+    def test_end_hold_ms_backfilled_when_baseline_missing_it(self):
+        # Baselines rendered before 61a4ba0 / 6775c13 cherry-pick don't carry
+        # end_hold_ms. Lane C must backfill it so the outro can't splice in
+        # immediately at body end (the original "outro cuts speech" symptom).
+        baseline = self._baseline_with_audio_state(
+            captions=[{"start_ms": 0, "end_ms": 30000, "text": "x"}],
+            duration_ms=30000,
+            end_hold_ms=None,  # legacy baseline
+        )
+        built = self._run_lane_c("base-eh", "story-eh", baseline, audio_probe_ms=30000)
+        self.assertEqual(built.props["end_hold_ms"], shorts_lane_c.SHORT_END_HOLD_MS)
+
+    def test_end_hold_ms_preserved_when_baseline_carries_it(self):
+        # If the baseline already had its own end_hold_ms (a newer render),
+        # respect that value — don't blindly overwrite with the constant.
+        baseline = self._baseline_with_audio_state(
+            captions=[{"start_ms": 0, "end_ms": 30000, "text": "x"}],
+            duration_ms=30000,
+            end_hold_ms=2200,  # custom value
+        )
+        built = self._run_lane_c("base-eh2", "story-eh2", baseline, audio_probe_ms=30000)
+        self.assertEqual(built.props["end_hold_ms"], 2200)
+
+    def test_empty_baseline_captions_dont_crash(self):
+        # Defensive: a baseline whose captions list is empty (failed alignment
+        # at gen time) must not raise. We return zero captions + use audio_ms
+        # as the duration floor.
+        baseline = self._baseline_with_audio_state(
+            captions=[],
+            duration_ms=10000,
+        )
+        built = self._run_lane_c("base-zc", "story-zc", baseline, audio_probe_ms=10000)
+        self.assertEqual(built.props["captions"], [])
+        self.assertEqual(built.props["duration_ms"], 10000)
+
+    def test_sanitize_helper_falls_back_when_probe_returns_zero(self):
+        # Pure-helper test on _sanitize_baseline_audio_metadata: probe=0
+        # signals "don't change anything". Asserts the helper contract
+        # without going through the full lane c build.
+        baseline = {
+            "voiceover_url": "https://gcs/v.mp3",
+            "duration_ms": 30000,
+            "captions": [
+                {"start_ms": 0, "end_ms": 20000, "text": "a"},
+                {"start_ms": 20000, "end_ms": 30000, "text": "b"},
+            ],
+        }
+        with mock.patch.object(
+            shorts_lane_c, "_probe_baseline_audio_ms", return_value=0,
+        ):
+            caps, dur, audio_ms = shorts_lane_c._sanitize_baseline_audio_metadata(
+                baseline, baseline["voiceover_url"],
+            )
+        self.assertEqual(caps, baseline["captions"])
+        self.assertEqual(dur, 30000)
+        self.assertEqual(audio_ms, 0)
+
+
+class CacheBustHelperTests(unittest.TestCase):
+    """Pure-helper tests for shorts_lane_c._cache_bust. Mirror of the
+    shorts_render helper tests — same contract, separate import so a regression
+    in one doesn't mask the other."""
+
+    def test_appends_v_query_with_question_separator(self):
+        self.assertEqual(
+            shorts_lane_c._cache_bust("https://gcs/x.png", "abc12345"),
+            "https://gcs/x.png?v=abc12345",
+        )
+
+    def test_appends_with_ampersand_when_url_already_has_query(self):
+        self.assertEqual(
+            shorts_lane_c._cache_bust("https://gcs/x.png?w=200", "abc12345"),
+            "https://gcs/x.png?w=200&v=abc12345",
+        )
+
+    def test_returns_url_unchanged_on_empty_token(self):
+        self.assertEqual(
+            shorts_lane_c._cache_bust("https://gcs/x.png", ""),
+            "https://gcs/x.png",
+        )
+
+    def test_returns_url_unchanged_on_non_string_input(self):
+        self.assertIsNone(shorts_lane_c._cache_bust(None, "abc12345"))
+        self.assertEqual(shorts_lane_c._cache_bust("", "abc12345"), "")
 
 
 class ClearLaneTests(_LaneCTestCase):
