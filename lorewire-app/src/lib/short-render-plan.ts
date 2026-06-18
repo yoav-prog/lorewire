@@ -41,6 +41,12 @@ export interface ShortRenderPlan {
      *  on intro/outro override changes — the assembly re-renders with the
      *  new segment without touching the body of the short. */
     segments: boolean;
+    /** True when the current poll (question + option labels) differs
+     *  from what was baked into the last render's burnt-in question
+     *  card. Also true when a poll was added or removed since the
+     *  last render. Drives a Lane A trigger so the burnt-in card
+     *  catches up to the on-site widget after an admin edit. */
+    poll: boolean;
   };
   /** Human-readable rationale the UI surfaces next to the lane choice. */
   reason: string;
@@ -54,12 +60,31 @@ export interface CurrentResolvedSegments {
   outro_segment_id: string | null;
 }
 
+/** Current poll fingerprint for the short. Phase 3 polish of
+ *  _plans/2026-06-17-engagement-polls.md. The renderer bakes a
+ *  question_card into the tail of every short whose story has an
+ *  enabled poll; when the admin later edits the question or option
+ *  labels the previously-rendered MP4 is now stale. Passing this in
+ *  lets the planner trigger Lane A (assembly-only) on a poll edit —
+ *  the body video stays identical, only the end card needs a new
+ *  draw.
+ *
+ *  Null = no live poll on this story (or the poll was disabled);
+ *  null with a baseline that had a card means the card should
+ *  disappear — also a Lane A trigger. */
+export interface CurrentPoll {
+  question: string;
+  option_a: string;
+  option_b: string;
+}
+
 interface BaselineProps {
   doodle_frames?: unknown;
   captions?: unknown;
   voiceover_url?: unknown;
   voice?: unknown;
   script?: unknown;
+  question_card?: unknown;
 }
 
 // Cost knobs. Per the plan; these are estimates the UI surfaces — the actual
@@ -74,6 +99,7 @@ export function planShortRender(
   current: ShortConfig,
   baselinePropsJson: string | null,
   currentSegments?: CurrentResolvedSegments,
+  currentPoll?: CurrentPoll | null,
 ): ShortRenderPlan {
   const baseline = parseBaseline(baselinePropsJson);
 
@@ -99,8 +125,19 @@ export function planShortRender(
   const segmentsChanged = currentSegments
     ? !sameSegments(currentSegments, current._last_rendered_segments, current)
     : false;
-  const captionsOrStyleOrSegmentsChanged =
-    captionsOrStyleChanged || segmentsChanged;
+  // Poll question card: compare current poll text against what was
+  // baked into baseline.question_card. Phase 3 polish of
+  // _plans/2026-06-17-engagement-polls.md. Lane A trigger because the
+  // burnt-in card is a render-time projection — body video stays the
+  // same length, only the tail frame needs a new draw. Skipped when
+  // the caller passes `undefined` (back-compat for the existing test
+  // suite that hasn't been updated yet).
+  const pollChanged =
+    currentPoll === undefined
+      ? false
+      : !sameQuestionCard(currentPoll, baseline.question_card);
+  const captionsOrStyleOrSegmentsOrPollChanged =
+    captionsOrStyleChanged || segmentsChanged || pollChanged;
 
   // Lane C wins when any frame diverges from the baseline (the editor's
   // per-scene regen has happened OR the user edited a prompt without a
@@ -119,6 +156,7 @@ export function planShortRender(
         voiceover_url: voiceoverUrlChanged,
         frames: touchedFrames,
         segments: segmentsChanged,
+        poll: pollChanged,
       },
       reason: `${touchedFrames.length} scene${
         touchedFrames.length === 1 ? "" : "s"
@@ -139,6 +177,7 @@ export function planShortRender(
         voiceover_url: voiceoverUrlChanged,
         frames: [],
         segments: segmentsChanged,
+        poll: pollChanged,
       },
       reason: scriptChanged
         ? "Script changed — needs voice resynthesis + assembly"
@@ -148,7 +187,7 @@ export function planShortRender(
     };
   }
 
-  if (captionsOrStyleOrSegmentsChanged) {
+  if (captionsOrStyleOrSegmentsOrPollChanged) {
     return {
       lane: "A",
       touched_scene_ids: [],
@@ -160,12 +199,20 @@ export function planShortRender(
         voiceover_url: false,
         frames: [],
         segments: segmentsChanged,
+        poll: pollChanged,
       },
+      // Reason priority: captions > caption-style > segments > poll.
+      // Captions are the most "the viewer will notice"; the poll card
+      // is the least disruptive change (only the 2.5s tail). Surfaces
+      // the highest-impact reason first so the admin understands why
+      // the re-render is suggested.
       reason: captionsChanged
         ? "Captions changed — assembly-only re-render"
         : styleChanged
           ? "Caption style changed — assembly-only re-render"
-          : "Intro/outro changed — assembly-only re-render",
+          : segmentsChanged
+            ? "Intro/outro changed — assembly-only re-render"
+            : "Poll question changed — re-render to update the burnt-in card",
     };
   }
 
@@ -180,9 +227,52 @@ export function planShortRender(
       voiceover_url: false,
       frames: [],
       segments: false,
+      poll: false,
     },
     reason: "No edits since the last successful render",
   };
+}
+
+/** True when the current poll matches what was baked into the
+ *  baseline render's question card. Handles every combo of
+ *  presence/absence:
+ *    - both null   → same (nothing to render either way)
+ *    - both set    → diff question + option_a + option_b
+ *    - one set     → changed (card needs to appear or disappear)
+ *  Whitespace is trimmed before comparing because the editor
+ *  validator does the same trim on save — a trailing space the admin
+ *  added shouldn't trigger a re-render. */
+function sameQuestionCard(
+  current: CurrentPoll | null,
+  baseline: unknown,
+): boolean {
+  const baselineCard =
+    baseline && typeof baseline === "object" && !Array.isArray(baseline)
+      ? (baseline as {
+          question?: unknown;
+          option_a?: unknown;
+          option_b?: unknown;
+        })
+      : null;
+  if (!current && !baselineCard) return true;
+  if (!current || !baselineCard) return false;
+  const baseQ =
+    typeof baselineCard.question === "string"
+      ? baselineCard.question.trim()
+      : "";
+  const baseA =
+    typeof baselineCard.option_a === "string"
+      ? baselineCard.option_a.trim()
+      : "";
+  const baseB =
+    typeof baselineCard.option_b === "string"
+      ? baselineCard.option_b.trim()
+      : "";
+  return (
+    current.question.trim() === baseQ &&
+    current.option_a.trim() === baseA &&
+    current.option_b.trim() === baseB
+  );
 }
 
 function sameSegments(

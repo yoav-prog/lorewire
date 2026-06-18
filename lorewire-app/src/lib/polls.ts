@@ -43,6 +43,7 @@ export {
   POLL_OPTION_MAX,
   POLL_QUESTION_MAX,
   POLL_RAIL_KINDS,
+  QUESTION_CARD_DURATION_MS,
   railEnabledSettingKey,
   toResultView,
   validatePollInputs,

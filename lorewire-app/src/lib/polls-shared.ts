@@ -101,6 +101,16 @@ export interface HomepagePollRails {
  *  the rail "list-like" instead of "highlight reel"-like. */
 export const HOMEPAGE_RAIL_LIMIT = 6;
 
+/** Duration (ms) of the burnt-in question end card. Phase 3 of
+ *  _plans/2026-06-17-engagement-polls.md. Used by the TS Lane A
+ *  re-render path to compute the new duration_ms when the admin
+ *  edits a poll. MUST stay in sync with QUESTION_CARD_MS in
+ *  pipeline/shorts_render.py — the Python build path is the source
+ *  of truth for fresh generations; this constant only applies when
+ *  the TS Lane A action bakes a new card without going through
+ *  Python. Both render the same 2.5s tail. */
+export const QUESTION_CARD_DURATION_MS = 2500;
+
 /** Settings keys for the three rails. Reading a value of "0" (or the
  *  literal string "false") forces the rail off; anything else keeps
  *  it on. Defaults to on when the key is unset so a fresh install

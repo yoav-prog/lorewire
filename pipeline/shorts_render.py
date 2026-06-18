@@ -36,6 +36,10 @@ SHORT_CAPTION_POSITION_Y = 0.72
 # Phase 3 of _plans/2026-06-17-engagement-polls.md. Duration of the burnt-in
 # question end card that gets appended when the story has an enabled poll.
 # 2500ms matches the plan §N3 budget and the on-site widget's reveal cadence.
+# Mirrored on the TS side as QUESTION_CARD_DURATION_MS in
+# lorewire-app/src/lib/polls-shared.ts so the Lane A re-render path (TS-only,
+# bypasses this Python build) bakes cards with the same tail length. Keep
+# the two values aligned.
 QUESTION_CARD_MS = 2500
 
 ProgressFn = Callable[[str, int, int], None]

@@ -48,10 +48,15 @@ import {
 import { shortCaptionStyleToRenderTemplate } from "@/lib/short-caption-style-to-props";
 import {
   planShortRender,
+  type CurrentPoll,
   type CurrentResolvedSegments,
   type ShortRenderPlan,
 } from "@/lib/short-render-plan";
 import { resolveShortSegments } from "@/lib/short-segments";
+import {
+  getPollByStoryId,
+  QUESTION_CARD_DURATION_MS,
+} from "@/lib/polls";
 import { nudgeDrain } from "@/lib/drain-nudge";
 import {
   nextSessionFor,
@@ -399,6 +404,61 @@ async function currentSegmentsFor(
   };
 }
 
+// Phase 3 polish of _plans/2026-06-17-engagement-polls.md. Mirror of
+// currentSegmentsFor for the burnt-in question card: the render bakes
+// a snapshot of polls.question + option labels into the tail of every
+// short, and when the admin later edits the poll the previous MP4 is
+// stale. Returns null when the story has no live poll (poll missing
+// OR enabled=0) so the planner can also detect "poll was removed
+// since the last render."
+async function currentPollFor(storyId: string): Promise<CurrentPoll | null> {
+  const poll = await getPollByStoryId(storyId);
+  if (!poll || poll.enabled !== 1) return null;
+  return {
+    question: poll.question,
+    option_a: poll.option_a_text,
+    option_b: poll.option_b_text,
+  };
+}
+
+/** Shape of the question_card prop the renderer consumes. Matches the
+ *  Python emitter in pipeline/shorts_render.py:_build_question_card. */
+interface QuestionCardProps {
+  question: string;
+  option_a: string;
+  option_b: string;
+  slug: string;
+  card_ms: number;
+}
+
+/** Resolve the question_card the renderer should bake into the next
+ *  Lane A re-render. Returns null when the story has no live poll OR
+ *  the poll has any empty field — matches the Python guard so the two
+ *  build paths produce identical card / no-card decisions for the
+ *  same input. Slug falls back to the story id when stories.slug is
+ *  null (mirrors the Python side). */
+async function currentQuestionCardPropsFor(
+  storyId: string,
+): Promise<QuestionCardProps | null> {
+  const [poll, story] = await Promise.all([
+    getPollByStoryId(storyId),
+    getStory(storyId),
+  ]);
+  if (!poll || poll.enabled !== 1 || !story) return null;
+  const question = (poll.question ?? "").trim();
+  const optionA = (poll.option_a_text ?? "").trim();
+  const optionB = (poll.option_b_text ?? "").trim();
+  if (!question || !optionA || !optionB) return null;
+  const slug = (story.slug ?? storyId).trim() || storyId;
+  return {
+    question,
+    option_a: optionA,
+    option_b: optionB,
+    slug,
+    card_ms: QUESTION_CARD_DURATION_MS,
+  };
+}
+
 export async function previewRenderPlan(storyId: string): Promise<{
   ok: boolean;
   error?: string;
@@ -418,8 +478,11 @@ export async function previewRenderPlan(storyId: string): Promise<{
       error: "no baseline render to diff against — generate a short first",
     };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   return { ok: true, plan, baselineRenderId: baseline.id };
 }
 
@@ -450,8 +513,11 @@ export async function renderShortLaneA(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -475,8 +541,8 @@ export async function renderShortLaneA(
   }
 
   // Lane A swap: the renderer needs the new captions; everything else (frames,
-  // voiceover_url, character, duration_ms) stays exactly as the baseline
-  // shipped, because Lane A is "edit captions and re-render the same MP4."
+  // voiceover_url, character) stays exactly as the baseline shipped, because
+  // Lane A is "edit captions and re-render the same MP4."
   // Caption style: if the editor has any caption_style override, merge it
   // into caption_template so the next render reflects the picked colors /
   // highlight / position. The baseline's caption_template (set by the
@@ -492,21 +558,55 @@ export async function renderShortLaneA(
   const baselineTemplate =
     (baselineProps as { caption_template?: Record<string, unknown> })
       .caption_template ?? {};
-  const newProps = {
+
+  // Question card (Phase 3 polish of engagement-polls plan). When the
+  // poll text changes the planner flips to Lane A; this swap must
+  // bake the CURRENT poll into newProps so the re-rendered card
+  // actually reflects the edit. Without this, the banner triggers a
+  // re-render that produces the same stale card — purely decorative.
+  // Mirrors the Python build path so both lanes (TS-Lane-A and Python
+  // generation drain) emit identical card-shape decisions.
+  const newCard = await currentQuestionCardPropsFor(storyId);
+  // Narration end (ms) from the current captions, mirroring the Python
+  // build path's `duration_ms = max(captions[-1].end_ms, 1)`. The body
+  // audio is unchanged for Lane A so the caption-derived end IS the
+  // narration end; we re-add the card tail when one exists.
+  const narrationEndMs = cfg.config.captions.length > 0
+    ? Math.max(
+        1,
+        cfg.config.captions[cfg.config.captions.length - 1]?.end_ms ?? 1,
+      )
+    : 1;
+  const renderedDurationMs = newCard
+    ? narrationEndMs + newCard.card_ms
+    : narrationEndMs;
+
+  // Build newProps with the card swapped in or stripped. The
+  // `question_card` key is conditionally present so a removed-poll
+  // case (current null + baseline had card) produces props with NO
+  // question_card field — the renderer treats absence as "no card."
+  const newProps: Record<string, unknown> = {
     ...baselineProps,
     captions: cfg.config.captions,
     caption_template: {
       ...baselineTemplate,
       ...styleOverride,
     },
+    duration_ms: renderedDurationMs,
   };
+  if (newCard) {
+    newProps.question_card = newCard;
+  } else {
+    delete newProps.question_card;
+  }
 
   // Distinct config_hash so this row coexists with the baseline (the same
   // story may have multiple "edit and re-render" runs from the same vibe +
   // length pair). Including the lane + a digest of captions + the resolved
-  // segments keeps it stable across identical re-clicks (idempotent if the
-  // user clicks twice without editing in between) AND triggers a fresh row
-  // when only the intro/outro override changed.
+  // segments + a poll fingerprint keeps it stable across identical re-clicks
+  // (idempotent if the user clicks twice without editing in between) AND
+  // triggers a fresh row when only the intro/outro override OR the poll
+  // text changed.
   const captionsDigest = createHash("sha256")
     .update(JSON.stringify(cfg.config.captions))
     .digest("hex")
@@ -515,7 +615,12 @@ export async function renderShortLaneA(
     .update(JSON.stringify(segments))
     .digest("hex")
     .slice(0, 12);
-  const configHash = `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}`;
+  const pollDigest = createHash("sha256")
+    .update(JSON.stringify(newCard ?? null))
+    .digest("hex")
+    .slice(0, 12);
+  const configHash =
+    `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}:${pollDigest}`;
 
   // Idempotency: if a row with this exact captions-digest already exists in
   // queued / rendering / done status, we surface it instead of inserting a
@@ -605,8 +710,11 @@ export async function renderShortLaneB(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -756,8 +864,11 @@ export async function renderShortLaneC(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
