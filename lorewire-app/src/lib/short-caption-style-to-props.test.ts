@@ -3,6 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  baselineCaptionTemplateToProps,
+  resolveShortCaptionStyle,
   shortCaptionStyleToProps,
   shortCaptionStyleToRenderTemplate,
 } from "@/lib/short-caption-style-to-props";
@@ -160,5 +162,107 @@ describe("shortCaptionStyleToRenderTemplate", () => {
     } as Record<string, string>);
     expect(out.color).toBe("#abcdef");
     expect(out).not.toHaveProperty("mystery_field");
+  });
+});
+
+describe("baselineCaptionTemplateToProps", () => {
+  it("returns hardcoded defaults when template is null/undefined", () => {
+    const a = baselineCaptionTemplateToProps(null);
+    const b = baselineCaptionTemplateToProps(undefined);
+    expect(a.color).toBe("#facc15");
+    expect(b.color).toBe("#facc15");
+    expect(a.word_highlight).toBe("karaoke");
+  });
+
+  it("lifts numeric and string fields from the template", () => {
+    const out = baselineCaptionTemplateToProps({
+      color: "#ff0000",
+      font_weight: 700,
+      word_highlight: "color",
+      position_y: 0.8,
+    });
+    expect(out.color).toBe("#ff0000");
+    expect(out.font_weight).toBe(700);
+    expect(out.word_highlight).toBe("color");
+    expect(out.position_y).toBe(0.8);
+  });
+
+  it("falls back to defaults for missing or malformed fields", () => {
+    const out = baselineCaptionTemplateToProps({
+      // numeric field with the WRONG type → fallback
+      font_weight: "900" as unknown as number,
+      // enum field with an unknown value → fallback
+      word_highlight: "rainbow" as unknown as string,
+    });
+    expect(out.font_weight).toBe(900);
+    expect(out.word_highlight).toBe("karaoke");
+  });
+});
+
+describe("resolveShortCaptionStyle", () => {
+  it("uses baseline template when no override is set", () => {
+    // The bug we hit in prod: a `caption.color = #ff0000` setting baked
+    // red into every render's caption_template, but the preview kept
+    // showing yellow because it used hardcoded TS defaults. The resolver
+    // must now read the baseline so the preview matches the renderer.
+    const out = resolveShortCaptionStyle(
+      baseShort(),
+      { color: "#ff0000", word_highlight: "color" },
+    );
+    expect(out.color).toBe("#ff0000");
+    expect(out.word_highlight).toBe("color");
+  });
+
+  it("lets a caption_style override beat the baseline", () => {
+    const out = resolveShortCaptionStyle(
+      baseShort({
+        caption_style: {
+          color: "#00ff00",
+          font_weight: "500",
+        },
+      }),
+      { color: "#ff0000", font_weight: 900 },
+    );
+    expect(out.color).toBe("#00ff00");
+    expect(out.font_weight).toBe(500);
+  });
+
+  it("falls through to TS defaults when neither baseline nor override sets a field", () => {
+    const out = resolveShortCaptionStyle(baseShort(), null);
+    expect(out.color).toBe("#facc15");
+    expect(out.word_highlight).toBe("karaoke");
+  });
+
+  it("returns the baseline when caption_style is undefined", () => {
+    const out = resolveShortCaptionStyle(
+      baseShort(),
+      { position_y: 0.9, color: "#abcdef" },
+    );
+    expect(out.position_y).toBe(0.9);
+    expect(out.color).toBe("#abcdef");
+  });
+
+  it("ignores empty-string override fields (no-op edit) so the baseline shows through", () => {
+    // The editor patches with "" to clear an override → must NOT mask the
+    // baseline with TS defaults; the baseline value is what's currently
+    // rendered and what the preview should keep showing.
+    const out = resolveShortCaptionStyle(
+      baseShort({
+        caption_style: { color: "", font_weight: "" },
+      }),
+      { color: "#ff0000", font_weight: 600 },
+    );
+    expect(out.color).toBe("#ff0000");
+    expect(out.font_weight).toBe(600);
+  });
+
+  it("ignores invalid enum overrides and keeps the baseline value", () => {
+    const out = resolveShortCaptionStyle(
+      baseShort({
+        caption_style: { word_highlight: "rainbow" as unknown as string },
+      }),
+      { word_highlight: "color" },
+    );
+    expect(out.word_highlight).toBe("color");
   });
 });

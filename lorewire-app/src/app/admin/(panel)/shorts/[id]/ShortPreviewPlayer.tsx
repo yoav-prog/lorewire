@@ -26,7 +26,7 @@
 import dynamic from "next/dynamic";
 import { useMemo } from "react";
 import type { ShortConfig } from "@/lib/short-config";
-import { shortCaptionStyleToProps } from "@/lib/short-caption-style-to-props";
+import { resolveShortCaptionStyle } from "@/lib/short-caption-style-to-props";
 import { shortConfigToVideoConfig } from "@/lib/short-config-to-video-config";
 
 const FPS = 30;
@@ -61,7 +61,19 @@ const PreviewCompositionNoSSR = dynamic(
   { ssr: false },
 );
 
-export function ShortPreviewPlayer({ config }: { config: ShortConfig }) {
+export function ShortPreviewPlayer({
+  config,
+  baselineCaptionTemplate,
+}: {
+  config: ShortConfig;
+  /** caption_template extracted from the latest done short_render's props.
+   *  Used as the floor for the preview's style so a settings-level override
+   *  (e.g. `caption.color = #ff0000` baked into every render's template)
+   *  shows up in the preview too — not just in the rendered MP4. Pre-fix
+   *  the preview used TS-hardcoded defaults (yellow) which lied about what
+   *  the next render would actually look like. */
+  baselineCaptionTemplate?: Record<string, unknown> | null;
+}) {
   // Memoize the converted ShortVideoConfig so the Player doesn't see a fresh
   // object reference on every keystroke — only on actual config changes.
   const videoConfig = useMemo(
@@ -91,12 +103,14 @@ export function ShortPreviewPlayer({ config }: { config: ShortConfig }) {
   // mounts → silent playback. Caught in prod after the initial preview
   // ship.
   const audioUrl = config.voiceover_url ?? null;
-  // Caption style: pass undefined when no overrides exist so the composition
-  // falls back to its hardcoded defaults (cheaper re-renders + matches what
-  // the renderer does in the same state).
+  // Caption style: layer DEFAULTS → baseline render's caption_template →
+  // editor's caption_style overrides. Passing the result unconditionally
+  // (always non-null now) means the preview shows the SAME style stack the
+  // renderer will use, including settings-level overrides that pre-fix
+  // never reached the preview.
   const captionStyle = useMemo(
-    () => shortCaptionStyleToProps(config) ?? undefined,
-    [config],
+    () => resolveShortCaptionStyle(config, baselineCaptionTemplate),
+    [config, baselineCaptionTemplate],
   );
   const playerInputProps = useMemo(
     () => ({

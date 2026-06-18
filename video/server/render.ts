@@ -218,6 +218,18 @@ export async function renderAndUploadStory(
     // signed URLs — matches how the rest of the GCS pipeline
     // (hero images, narration audio) already serves assets.
     predefinedAcl: "publicRead",
+    // CRITICAL: every short re-render writes to the SAME GCS key (one
+    // canonical MP4 per story). GCS defaults public objects to
+    // Cache-Control: public, max-age=3600 — so the editor's <video>
+    // player would serve the cached OLD MP4 for up to an hour after a
+    // re-render finishes ("I edited captions, clicked Render, file at
+    // the URL is still the old one"). Force a revalidate-on-every-play
+    // policy so the player picks up the freshly-uploaded bytes the
+    // moment they land. The HEAD+ETag round-trip adds <100ms per play
+    // — trivial against the human-perception bar.
+    metadata: {
+      cacheControl: "no-cache, max-age=0, must-revalidate",
+    },
   });
   const publicUrl = `https://storage.googleapis.com/${gcsBucket}/${key}`;
 

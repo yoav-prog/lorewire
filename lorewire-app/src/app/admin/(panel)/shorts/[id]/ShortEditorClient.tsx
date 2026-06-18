@@ -89,6 +89,29 @@ export function ShortEditorClient({
   const [activeRenderId, setActiveRenderId] = useState<string | null>(
     initialRender?.id ?? null,
   );
+  // Caption template from the LAST done render's props. Used as the floor
+  // for the editor preview's caption style so a settings-level color /
+  // position / weight override (baked into every fresh render's
+  // caption_template by the Python pipeline) shows up in the preview too.
+  // Pre-fix the preview used TS-hardcoded yellow defaults regardless of
+  // what the renderer actually baked in. Memoized: re-parses only when the
+  // initialRender's props string identity changes.
+  const baselineCaptionTemplate = useMemo<Record<string, unknown> | null>(() => {
+    const raw = initialRender?.props;
+    if (typeof raw !== "string" || raw.length === 0) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return null;
+      }
+      const t = (parsed as Record<string, unknown>).caption_template;
+      return t && typeof t === "object" && !Array.isArray(t)
+        ? (t as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  }, [initialRender?.props]);
 
   // Heartbeat hook. We hold the session only while the banner is NOT up;
   // a foreign session means the take-over UI is the explicit gate to
@@ -243,7 +266,10 @@ export function ShortEditorClient({
         </div>
 
         <aside className="min-w-0">
-          <ShortPreviewPlayer config={config} />
+          <ShortPreviewPlayer
+            config={config}
+            baselineCaptionTemplate={baselineCaptionTemplate}
+          />
         </aside>
       </div>
     </div>
