@@ -39,12 +39,12 @@ import {
 } from "@/lib/poll-rate-limit";
 import {
   computeArticlePollAggregate,
-  DEFAULT_PUBLIC_FLOOR,
   getAggregateByStoryId,
   getPollById,
   isPollSide,
   recordVote,
   refreshPollAggregateForStory,
+  resolvePublicFloor,
   toResultView,
 } from "@/lib/polls";
 
@@ -176,17 +176,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // Aggregate response: story polls go through the persisted
   // projection (refresh inline so the post-vote percentages reveal
   // immediately); article polls compute live every time since they
-  // bypass the projection table by design.
+  // bypass the projection table by design. Floor resolves through
+  // settings so an admin can lower it (or raise it) without a deploy.
+  const floor = await resolvePublicFloor();
   let view: ReturnType<typeof toResultView>;
   if (poll.story_id) {
     if (result.inserted) {
       await refreshPollAggregateForStory(poll.story_id);
     }
     const agg = await getAggregateByStoryId(poll.story_id);
-    view = toResultView(agg, DEFAULT_PUBLIC_FLOOR);
+    view = toResultView(agg, floor);
   } else {
     const agg = await computeArticlePollAggregate(poll);
-    view = toResultView(agg, DEFAULT_PUBLIC_FLOOR);
+    view = toResultView(agg, floor);
   }
 
   const response: VoteResponseOk = {

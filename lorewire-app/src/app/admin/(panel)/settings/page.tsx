@@ -10,6 +10,7 @@ import {
   SettingNumber,
   SettingPresetText,
   SettingSelect,
+  SettingText,
   type SelectOption,
 } from "./_components/SettingControls";
 import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
@@ -20,6 +21,16 @@ import {
   LEGACY_DEFAULT_ASPECT,
   type VideoAspect,
 } from "@/lib/aspect";
+import {
+  DEFAULT_PUBLIC_FLOOR,
+  POLL_RAIL_KINDS,
+  railEnabledSettingKey,
+} from "@/lib/polls";
+import {
+  DEFAULT_POLL_HOOK_TEMPLATES,
+  pollHookSettingKey,
+  PUBLISHER_PLATFORMS,
+} from "@/lib/publisher-poll-hook";
 
 // Settings / General. Every field now uses the right control: toggles for
 // the booleans (previously stringy "0"/"1"), number inputs with min/max for
@@ -146,6 +157,43 @@ export default async function SettingsPage() {
       getSetting("shorts.auto.narration"),
       getSetting("shorts.auto.length"),
     ]);
+
+  // Engagement-poll settings (Phase 4.5 + Phase 5 + Phase 5 follow-up
+  // of _plans/2026-06-17-engagement-polls.md):
+  //   - Three rail toggles read by getHomepagePolls in
+  //     app/actions.ts when composing the homepage feed.
+  //   - polls.public_floor read by resolvePublicFloor — controls when
+  //     percentages reveal on the on-site widget.
+  //   - publisher.caption.<platform>.poll_hook_template — per-platform
+  //     caption-suffix override consumed by lib/publisher-poll-hook
+  //     when the publisher integrates (Phase 1 of the publisher plan).
+  //     Default templates ship per §F4; admin can override per platform.
+  const [
+    railDivisive,
+    railAgreed,
+    railUnpopular,
+    publicFloorRaw,
+    hookYoutube,
+    hookTiktok,
+    hookInstagram,
+    hookFacebook,
+  ] = await Promise.all([
+    getSetting(railEnabledSettingKey("divisive")),
+    getSetting(railEnabledSettingKey("agreed")),
+    getSetting(railEnabledSettingKey("unpopular")),
+    getSetting("polls.public_floor"),
+    getSetting(pollHookSettingKey("youtube")),
+    getSetting(pollHookSettingKey("tiktok")),
+    getSetting(pollHookSettingKey("instagram")),
+    getSetting(pollHookSettingKey("facebook")),
+  ]);
+  // Bundle so the section render below stays tidy.
+  const pollHookOverrides: Record<(typeof PUBLISHER_PLATFORMS)[number], string> = {
+    youtube: hookYoutube ?? "",
+    tiktok: hookTiktok ?? "",
+    instagram: hookInstagram ?? "",
+    facebook: hookFacebook ?? "",
+  };
   const SHORT_CATEGORIES = [
     "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
   ];
@@ -501,6 +549,55 @@ export default async function SettingsPage() {
               <span className="font-mono text-[14px] text-muted">→</span>
             </div>
           </Link>
+        </Section>
+
+        <Section
+          title="Engagement — Polls"
+          description="Story- and article-attached polls (the burnt-in question card on shorts + the on-site widget). Plan: _plans/2026-06-17-engagement-polls.md."
+        >
+          <SettingToggle
+            settingKey={railEnabledSettingKey("divisive")}
+            label="Most Divisive rail on the homepage"
+            hint="Surface polls whose votes split closest to 50/50. Auto-hides when there's nothing above the floor; turn off to suppress the section entirely."
+            initialOn={readToggle(railDivisive, true)}
+          />
+          <SettingToggle
+            settingKey={railEnabledSettingKey("agreed")}
+            label="Community Agreed rail on the homepage"
+            hint="Surface the most lopsided polls. Same auto-hide behaviour as Divisive."
+            initialOn={readToggle(railAgreed, true)}
+          />
+          <SettingToggle
+            settingKey={railEnabledSettingKey("unpopular")}
+            label="Unpopular Opinions rail on the homepage"
+            hint="Personalized when the visitor has vote history; falls back to landslide stories otherwise."
+            initialOn={readToggle(railUnpopular, true)}
+          />
+          <SettingNumber
+            settingKey="polls.public_floor"
+            label="Public reveal floor (vote count)"
+            hint={`Below this total, the widget hides percentages and shows the pre-floor copy. Prevents misleading 100/0 readouts on fresh polls. Default ${DEFAULT_PUBLIC_FLOOR}.`}
+            initial={publicFloorRaw ?? String(DEFAULT_PUBLIC_FLOOR)}
+            min={0}
+            max={1000}
+            step={1}
+          />
+        </Section>
+
+        <Section
+          title="Engagement — Publisher caption hooks"
+          description="Per-platform caption suffix appended when a short with an enabled poll is published. Empty = use the default for that platform. Substitution tokens: {question} and {slug}."
+        >
+          {PUBLISHER_PLATFORMS.map((platform) => (
+            <SettingText
+              key={platform}
+              settingKey={pollHookSettingKey(platform)}
+              label={`${platform[0].toUpperCase()}${platform.slice(1)} caption hook`}
+              hint={`Default: ${DEFAULT_POLL_HOOK_TEMPLATES[platform].replace(/\n/g, "\\n")}`}
+              initial={pollHookOverrides[platform]}
+              placeholder="Leave empty to use the platform default"
+            />
+          ))}
         </Section>
       </div>
     </SettingsShell>

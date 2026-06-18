@@ -16,6 +16,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
+import { getSetting } from "@/lib/repo";
 import {
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
@@ -58,6 +59,26 @@ export {
   type RailCardRow,
   type StoryCategory,
 } from "@/lib/polls-shared";
+
+// ─── Settings-driven floor ────────────────────────────────────────────────────
+
+/** Resolve the public floor (minimum total votes before percentages
+ *  reveal) from settings. Admin override key is `polls.public_floor`;
+ *  unset/blank/malformed values fall through to DEFAULT_PUBLIC_FLOOR.
+ *  Negative values also fall through — a negative floor would expose
+ *  percentages on zero-vote polls, which is the misleading shape the
+ *  floor exists to prevent.
+ *
+ *  The constant DEFAULT_PUBLIC_FLOOR stays as the in-code default so
+ *  call sites that don't need runtime overrides (admin overview copy,
+ *  tests) can use it directly without an await. */
+export async function resolvePublicFloor(): Promise<number> {
+  const raw = await getSetting("polls.public_floor");
+  if (!raw) return DEFAULT_PUBLIC_FLOOR;
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_PUBLIC_FLOOR;
+  return n;
+}
 
 // ─── Reads ────────────────────────────────────────────────────────────────────
 

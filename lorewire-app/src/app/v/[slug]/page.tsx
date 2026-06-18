@@ -23,10 +23,10 @@ import {
 } from "@/lib/aspect";
 import { PollWidget } from "@/components/PollWidget";
 import {
-  DEFAULT_PUBLIC_FLOOR,
   getAggregateByStoryId,
   getPollByStoryId,
   getVoteSideForCookie,
+  resolvePublicFloor,
   topDivisive,
   toResultView,
 } from "@/lib/polls";
@@ -168,7 +168,7 @@ export default async function StoryReader({
     ? await getVoteSideForCookie(poll!.id, voteToken)
     : null;
   const pollResultView = hasLivePoll
-    ? toResultView(pollAggregate, DEFAULT_PUBLIC_FLOOR)
+    ? toResultView(pollAggregate, await resolvePublicFloor())
     : null;
 
   // Phase 4 of _plans/2026-06-17-engagement-polls.md. Resolve a

@@ -29,11 +29,11 @@ import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
 import { PollWidget } from "@/components/PollWidget";
 import {
   computeArticlePollAggregate,
-  DEFAULT_PUBLIC_FLOOR,
   getAggregateByStoryId,
   getPollByArticleId,
   getPollByStoryId,
   getVoteSideForCookie,
+  resolvePublicFloor,
   topDivisive,
   toResultView,
   type PollResultView,
@@ -88,16 +88,17 @@ async function buildArticleOwnPollRender(
   poll: PollRow,
 ): Promise<PollRender> {
   const voteToken = await readVoteToken();
-  const [aggregate, votedSide] = await Promise.all([
+  const [aggregate, votedSide, floor] = await Promise.all([
     computeArticlePollAggregate(poll),
     getVoteSideForCookie(poll.id, voteToken),
+    resolvePublicFloor(),
   ]);
   return {
     pollId: poll.id,
     question: poll.question,
     optionA: poll.option_a_text,
     optionB: poll.option_b_text,
-    result: toResultView(aggregate, DEFAULT_PUBLIC_FLOOR),
+    result: toResultView(aggregate, floor),
     votedSide,
     // Article-own polls don't ride the story-only divisive rail, so
     // no follow-up. Could change later if we add an article-only
@@ -110,9 +111,10 @@ async function buildLinkedStoryPollRender(
   storyId: string,
   poll: PollRow,
 ): Promise<PollRender> {
-  const [voteToken, aggregate] = await Promise.all([
+  const [voteToken, aggregate, floor] = await Promise.all([
     readVoteToken(),
     getAggregateByStoryId(storyId),
+    resolvePublicFloor(),
   ]);
   const votedSide = await getVoteSideForCookie(poll.id, voteToken);
   // Phase 4: same follow-up resolver shape as /v/[slug]. Falls back
@@ -123,7 +125,7 @@ async function buildLinkedStoryPollRender(
     question: poll.question,
     optionA: poll.option_a_text,
     optionB: poll.option_b_text,
-    result: toResultView(aggregate, DEFAULT_PUBLIC_FLOOR),
+    result: toResultView(aggregate, floor),
     votedSide,
     followUp,
   };
