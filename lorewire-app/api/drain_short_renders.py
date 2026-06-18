@@ -41,10 +41,13 @@ if not LOG.handlers:
     _h.setFormatter(logging.Formatter("%(message)s"))
     LOG.addHandler(_h)
 
-# One short's parallelized generation runs ~200s; cap at one per tick so the
-# function finishes inside the 300s ceiling and the next minute's tick claims
-# the next row. REPO_ROOT is unused in remote mode (assets stage to /tmp + GCS)
-# but build_short_props takes it for the local path, so pass the api dir.
+# One short's parallelized generation runs ~200s in the average case but
+# pushes well past 300s on long-narration / 12-scene runs (kie i2i tails),
+# so the function is capped at 800s in vercel.json — same ceiling the
+# render cron trusts. Cap at one short per tick so the function still
+# finishes inside its budget; the next minute's tick claims the next row.
+# REPO_ROOT is unused in remote mode (assets stage to /tmp + GCS) but
+# build_short_props takes it for the local path, so pass the api dir.
 REPO_ROOT = _HERE
 
 # Crash-recovery thresholds for the reaper. A 'generating' row past ~15 min means

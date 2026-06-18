@@ -41,7 +41,7 @@
       "maxDuration": 300
     },
     "api/drain_short_renders.py": {
-      "maxDuration": 300
+      "maxDuration": 800
     },
     "src/app/api/render_video/route.ts": {
       "maxDuration": 800
