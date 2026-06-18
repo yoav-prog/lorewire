@@ -133,9 +133,12 @@ class EntityLookupTests(unittest.TestCase):
 
 
 class ResolveSceneRefsTests(unittest.TestCase):
-    """Per-scene `input_urls` assembly. Base char URL must always lead the
-    list (identity anchor); supporting characters / locations / items follow;
-    duplicates and unknown names dropped; capped at INPUT_URLS_MAX."""
+    """Per-scene `input_urls` assembly. The FIRST listed supporting char in
+    scene.characters (if any) leads as the focal anchor; protagonist base
+    follows; remaining supporting / locations / items append. Duplicates and
+    unknown names dropped; capped at INPUT_URLS_MAX. When no supporting char
+    is named, the base URL leads (protagonist-focal default).
+    """
 
     def _gallery(self) -> shorts.ReferenceGallery:
         return shorts.ReferenceGallery(
@@ -144,12 +147,17 @@ class ResolveSceneRefsTests(unittest.TestCase):
             items={"envelope": "envelope-ref"},
         )
 
-    def test_base_always_first(self) -> None:
+    def test_focal_supporting_leads_when_named(self) -> None:
+        # When a supporting char is listed, she's the focal anchor at
+        # position 1 — protagonist base demoted to position 2.
         scene = {"characters": ["wife"], "locations": [], "items": []}
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
-        self.assertEqual(refs[0], "base-url")
+        self.assertEqual(refs[0], "wife-ref")
+        self.assertEqual(refs[1], "base-url")
 
     def test_pulls_referenced_entities_in_order(self) -> None:
+        # First supporting char becomes anchor; remaining supporting /
+        # locations / items follow protagonist.
         scene = {
             "characters": ["wife", "boss"],
             "locations": ["kitchen"],
@@ -158,18 +166,22 @@ class ResolveSceneRefsTests(unittest.TestCase):
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
         self.assertEqual(
             refs,
-            ["base-url", "wife-ref", "boss-ref", "kitchen-ref", "envelope-ref"],
+            ["wife-ref", "base-url", "boss-ref", "kitchen-ref", "envelope-ref"],
         )
 
     def test_drops_unknown_entity_names(self) -> None:
+        # No known supporting char → protagonist-focal default. Unknown
+        # location / character names get silently dropped.
         scene = {"characters": ["ghost"], "locations": ["void"], "items": []}
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
         self.assertEqual(refs, ["base-url"])
 
     def test_case_insensitive_name_lookup(self) -> None:
+        # Planner sometimes emits Title Case or UPPER. Lowercase lookup
+        # is the load-bearing contract for matching gallery keys.
         scene = {"characters": ["WIFE"], "locations": ["Kitchen"], "items": []}
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
-        self.assertEqual(refs, ["base-url", "wife-ref", "kitchen-ref"])
+        self.assertEqual(refs, ["wife-ref", "base-url", "kitchen-ref"])
 
     def test_dedupes_repeated_urls(self) -> None:
         # If the planner names "wife" twice (which it shouldn't but might),
@@ -177,7 +189,7 @@ class ResolveSceneRefsTests(unittest.TestCase):
         # wasted input slots.
         scene = {"characters": ["wife", "wife"], "locations": [], "items": []}
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
-        self.assertEqual(refs, ["base-url", "wife-ref"])
+        self.assertEqual(refs, ["wife-ref", "base-url"])
 
     def test_caps_at_input_urls_max(self) -> None:
         many_chars = {f"c{i}": f"ref-{i}" for i in range(20)}
@@ -194,8 +206,9 @@ class ResolveSceneRefsTests(unittest.TestCase):
         refs = shorts._resolve_scene_refs(scene, "base-url", empty)
         self.assertEqual(refs, ["base-url"])
 
-    def test_focal_character_promotes_supporting_to_position_1(self) -> None:
-        # When the scene is framed on the wife, her ref must lead. The
+    def test_first_listed_supporting_char_becomes_focal_anchor(self) -> None:
+        # When the planner lists wife FIRST in scene.characters (signalling
+        # she's the visual subject of this beat), her ref must lead. The
         # protagonist's base stays in the set (so kie still has him to
         # anchor the cook's identity in the same frame) but at position 2.
         # Without this, kie's position-1-strongest heuristic locks the
@@ -205,60 +218,123 @@ class ResolveSceneRefsTests(unittest.TestCase):
             "characters": ["wife"],
             "locations": ["kitchen"],
             "items": [],
-            "focal_character": "wife",
         }
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
         self.assertEqual(refs, ["wife-ref", "base-url", "kitchen-ref"])
 
-    def test_focal_character_unknown_falls_back_to_default(self) -> None:
-        # A focal name the gallery doesn't know (planner typo, name drift)
-        # must NOT crash and must NOT silently drop the protagonist anchor —
-        # we fall back to the default base-first ordering.
+    def test_focal_uses_first_known_supporting_when_multiple_listed(self) -> None:
+        # If the planner lists ["wife", "boss"], wife is the focal anchor —
+        # first-listed by convention is the visual subject; boss still
+        # appears in the ref set right after the protagonist.
         scene = {
-            "characters": ["wife"],
+            "characters": ["wife", "boss"],
             "locations": [],
             "items": [],
-            "focal_character": "ghost",
         }
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
-        self.assertEqual(refs, ["base-url", "wife-ref"])
+        self.assertEqual(refs, ["wife-ref", "base-url", "boss-ref"])
 
-    def test_focal_character_omitted_keeps_default_ordering(self) -> None:
-        # The common case: most scenes are framed on the protagonist and
-        # the planner omits focal_character. Order must match the pre-fix
-        # behaviour so this change is back-compat for every existing render.
-        scene = {"characters": ["wife"], "locations": [], "items": []}
+    def test_focal_skips_unknown_names_to_find_known_supporting(self) -> None:
+        # A planner typo at position 0 ("ghost") must not block the focal
+        # promotion of the real sub-char at position 1. We scan until we
+        # find a known supporting char or fall back to base-first.
+        scene = {
+            "characters": ["ghost", "wife"],
+            "locations": [],
+            "items": [],
+        }
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
-        self.assertEqual(refs, ["base-url", "wife-ref"])
+        self.assertEqual(refs, ["wife-ref", "base-url"])
 
-    def test_focal_character_locations_and_items_still_appended(self) -> None:
-        # Focal promotion must NOT drop locations / items from the ref set.
-        # The kitchen + steak need to keep their anchors even when the
-        # wife's ref takes position 1.
+    def test_focal_promotion_keeps_locations_and_items(self) -> None:
+        # The location + item refs must still get appended after the
+        # protagonist when a sub-character takes position 1.
         scene = {
             "characters": ["wife"],
             "locations": ["kitchen"],
             "items": ["envelope"],
-            "focal_character": "wife",
         }
         refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
         self.assertEqual(
             refs, ["wife-ref", "base-url", "kitchen-ref", "envelope-ref"],
         )
 
-    def test_focal_character_non_string_treated_as_omitted(self) -> None:
-        # Planner edge case: a bool / null / int slipping through. The
-        # resolver must coerce safely and fall back to default ordering
-        # without raising.
-        for bad in (None, 0, False, ["wife"], {"name": "wife"}):
-            scene = {
-                "characters": ["wife"],
-                "locations": [],
-                "items": [],
-                "focal_character": bad,
-            }
-            refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
-            self.assertEqual(refs, ["base-url", "wife-ref"], f"focal={bad!r}")
+    def test_no_supporting_chars_keeps_default_ordering(self) -> None:
+        # A protagonist-only scene (most scenes are like this) must keep
+        # base_url at position 1 — back-compat with every existing render.
+        scene = {"characters": [], "locations": ["kitchen"], "items": []}
+        refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
+        self.assertEqual(refs, ["base-url", "kitchen-ref"])
+
+    def test_focal_resilient_to_non_string_character_entries(self) -> None:
+        # Planner edge case: nulls / ints slipping into the characters
+        # list. The resolver must coerce safely and keep finding the next
+        # known supporting name instead of crashing.
+        scene = {
+            "characters": [None, 42, "wife"],
+            "locations": [],
+            "items": [],
+        }
+        refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
+        self.assertEqual(refs, ["wife-ref", "base-url"])
+
+
+class RedistributeChunkIndicesTests(unittest.TestCase):
+    """Caption-chunk timing override. The planner concentrates frames on
+    the script's first half and lets the last frame hold 20+ seconds; this
+    helper rebalances chunk indices so per-frame on-screen duration is
+    roughly even regardless of what the LLM emitted."""
+
+    def test_distributes_evenly_when_chunks_divisible(self) -> None:
+        scenes = [{"caption_chunk_start_index": 99} for _ in range(4)]
+        shorts._redistribute_chunk_indices(scenes, total_chunks=16)
+        self.assertEqual(
+            [s["caption_chunk_start_index"] for s in scenes], [0, 4, 8, 12],
+        )
+
+    def test_fixes_lazy_planner_dropping_tail(self) -> None:
+        # Reproduces the real Steak Standoff failure: 12 scenes, 33 caps,
+        # planner clustered indices on the first half. After redistribute
+        # the last frame's start sits comfortably before the tail.
+        scenes = [
+            {"caption_chunk_start_index": i}
+            for i in [0, 1, 3, 4, 6, 7, 8, 10, 11, 13, 14, 15]
+        ]
+        shorts._redistribute_chunk_indices(scenes, total_chunks=33)
+        out = [s["caption_chunk_start_index"] for s in scenes]
+        self.assertEqual(out[0], 0)
+        # Last frame must NOT start before the second-to-last + 1 — i.e.
+        # monotonic non-decreasing — and the gap from the last frame to
+        # total_chunks must be small (the bug we're fixing was 18 chunks
+        # left to one frame; here it should be <= 3).
+        self.assertLessEqual(33 - out[-1], 33 // len(scenes) + 1)
+        for prev, curr in zip(out, out[1:]):
+            self.assertGreaterEqual(curr, prev)
+
+    def test_no_op_on_empty_scenes(self) -> None:
+        scenes: list[dict] = []
+        shorts._redistribute_chunk_indices(scenes, total_chunks=10)
+        self.assertEqual(scenes, [])
+
+    def test_no_op_on_zero_chunks(self) -> None:
+        # Defensive: a malformed script with no captions must not crash.
+        scenes = [{"caption_chunk_start_index": 0}]
+        shorts._redistribute_chunk_indices(scenes, total_chunks=0)
+        self.assertEqual(scenes[0]["caption_chunk_start_index"], 0)
+
+    def test_single_scene_anchors_at_zero(self) -> None:
+        scenes = [{"caption_chunk_start_index": 7}]
+        shorts._redistribute_chunk_indices(scenes, total_chunks=15)
+        self.assertEqual(scenes[0]["caption_chunk_start_index"], 0)
+
+    def test_more_scenes_than_chunks_still_monotonic(self) -> None:
+        # 5 scenes over 3 chunks — pathological but the helper must still
+        # produce non-decreasing indices and not raise.
+        scenes = [{} for _ in range(5)]
+        shorts._redistribute_chunk_indices(scenes, total_chunks=3)
+        out = [s["caption_chunk_start_index"] for s in scenes]
+        for prev, curr in zip(out, out[1:]):
+            self.assertGreaterEqual(curr, prev)
 
 
 if __name__ == "__main__":
