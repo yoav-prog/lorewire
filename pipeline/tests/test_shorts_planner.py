@@ -194,6 +194,72 @@ class ResolveSceneRefsTests(unittest.TestCase):
         refs = shorts._resolve_scene_refs(scene, "base-url", empty)
         self.assertEqual(refs, ["base-url"])
 
+    def test_focal_character_promotes_supporting_to_position_1(self) -> None:
+        # When the scene is framed on the wife, her ref must lead. The
+        # protagonist's base stays in the set (so kie still has him to
+        # anchor the cook's identity in the same frame) but at position 2.
+        # Without this, kie's position-1-strongest heuristic locks the
+        # protagonist hard and the wife drifts between scenes — exactly
+        # what THE STEAK STANDOFF was hitting in prod.
+        scene = {
+            "characters": ["wife"],
+            "locations": ["kitchen"],
+            "items": [],
+            "focal_character": "wife",
+        }
+        refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
+        self.assertEqual(refs, ["wife-ref", "base-url", "kitchen-ref"])
+
+    def test_focal_character_unknown_falls_back_to_default(self) -> None:
+        # A focal name the gallery doesn't know (planner typo, name drift)
+        # must NOT crash and must NOT silently drop the protagonist anchor —
+        # we fall back to the default base-first ordering.
+        scene = {
+            "characters": ["wife"],
+            "locations": [],
+            "items": [],
+            "focal_character": "ghost",
+        }
+        refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
+        self.assertEqual(refs, ["base-url", "wife-ref"])
+
+    def test_focal_character_omitted_keeps_default_ordering(self) -> None:
+        # The common case: most scenes are framed on the protagonist and
+        # the planner omits focal_character. Order must match the pre-fix
+        # behaviour so this change is back-compat for every existing render.
+        scene = {"characters": ["wife"], "locations": [], "items": []}
+        refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
+        self.assertEqual(refs, ["base-url", "wife-ref"])
+
+    def test_focal_character_locations_and_items_still_appended(self) -> None:
+        # Focal promotion must NOT drop locations / items from the ref set.
+        # The kitchen + steak need to keep their anchors even when the
+        # wife's ref takes position 1.
+        scene = {
+            "characters": ["wife"],
+            "locations": ["kitchen"],
+            "items": ["envelope"],
+            "focal_character": "wife",
+        }
+        refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
+        self.assertEqual(
+            refs, ["wife-ref", "base-url", "kitchen-ref", "envelope-ref"],
+        )
+
+    def test_focal_character_non_string_treated_as_omitted(self) -> None:
+        # Planner edge case: a bool / null / int slipping through. The
+        # resolver must coerce safely and fall back to default ordering
+        # without raising.
+        for bad in (None, 0, False, ["wife"], {"name": "wife"}):
+            scene = {
+                "characters": ["wife"],
+                "locations": [],
+                "items": [],
+                "focal_character": bad,
+            }
+            refs = shorts._resolve_scene_refs(scene, "base-url", self._gallery())
+            self.assertEqual(refs, ["base-url", "wife-ref"], f"focal={bad!r}")
+
 
 if __name__ == "__main__":
     unittest.main()

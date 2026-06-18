@@ -172,6 +172,13 @@ def build_plan_prompt(
         "characters (coworkers, a boss, a friend) when the beat needs them — when you do, name the "
         "entity in the scene text AND in the matching per-scene array so its bible cues attach. "
         "Each scene 60-200 chars. Spread the chunk indices evenly across the whole script.\n\n"
+        "FOCAL CHARACTER per scene: when the visual subject of a scene is a SUPPORTING character (the "
+        "scene is framed on the wife reacting, the boss shouting, the brother sneaking — not on the main "
+        "character), set `focal_character` to that supporting character's name. The image generator "
+        "uses this to anchor identity on the right person so the wife / boss / brother doesn't drift "
+        "between her scenes. When the scene is framed on the main character (most scenes), OMIT "
+        "`focal_character` or set it to null. Never name the main character here — main is the implicit "
+        "default. Names must match supporting_characters[].name exactly.\n\n"
         "Output STRICTLY this JSON:\n"
         "{\n"
         '  "character": "<vivid repeatable main-character description, grounded in the source>",\n'
@@ -190,7 +197,8 @@ def build_plan_prompt(
         '      "scene": "<the main character in a new place/pose/mood for this beat>",\n'
         '      "characters": ["<names from supporting_characters that appear in this scene>"],\n'
         '      "locations": ["<names from locations>"],\n'
-        '      "items": ["<names from items>"]\n'
+        '      "items": ["<names from items>"],\n'
+        '      "focal_character": "<optional: name from supporting_characters when THEY are the visual subject; omit when the main character is the subject>"\n'
         "    }\n"
         "  ]\n"
         "}\n\n"
@@ -359,17 +367,38 @@ def _resolve_scene_refs(
     gallery: ReferenceGallery,
 ) -> list[str]:
     """Build the input_urls list for ONE scene's i2i call. Order matters —
-    base (main character identity) first; then supporting characters, then
-    locations, then items. The model's documented behaviour treats earlier
-    images as stronger anchors so identity holds even when many references
-    stack. Capped at INPUT_URLS_MAX (gpt-image-2 hard limit).
+    the model's documented behaviour treats earlier images as stronger
+    anchors so identity holds even when many references stack.
+
+    Default ordering: base (main character identity) first, then supporting
+    characters, then locations, then items. Capped at INPUT_URLS_MAX
+    (gpt-image-2 hard limit).
+
+    Focal-character override: when `scene["focal_character"]` names a known
+    supporting char (matching `gallery.supporting_chars`), that ref is
+    promoted to position 1 ahead of `base_url`. The protagonist stays in
+    the ref set (still locked) but cedes the strongest anchor for scenes
+    where a sub-character is the visual subject. Without this, scenes
+    framed on the wife / boss / brother get kie-drifted because the
+    protagonist's position-1 ref dominates. Unknown focal names fall back
+    to the default ordering.
     """
-    refs: list[str] = [base_url]
-    seen: set[str] = {base_url}
+    refs: list[str] = []
+    seen: set[str] = set()
     def _push(url: str | None) -> None:
         if url and url not in seen and len(refs) < INPUT_URLS_MAX:
             refs.append(url)
             seen.add(url)
+
+    focal_raw = scene.get("focal_character")
+    focal_name = str(focal_raw).strip().lower() if isinstance(focal_raw, str) else ""
+    focal_ref = gallery.supporting_chars.get(focal_name) if focal_name else None
+    if focal_ref:
+        _push(focal_ref)
+        _push(base_url)
+    else:
+        _push(base_url)
+
     for name in scene.get("characters") or []:
         _push(gallery.supporting_chars.get(str(name).strip().lower()))
     for name in scene.get("locations") or []:
@@ -536,6 +565,16 @@ def generate_short_assets(
     def _gen_one(i: int, s: dict) -> tuple[int, dict, str, str, list[str]]:
         prompt = _scene_prompt(char_ref, s["scene"].strip())
         refs = _resolve_scene_refs(s, base_url, gallery)
+        # Surface focal-priority decisions so a "wife still drifting" debug
+        # session can see whether the reorder fired and which ref ended up
+        # in position 1 for each scene.
+        focal_raw = s.get("focal_character")
+        focal_logged = (focal_raw or "").strip().lower() if isinstance(focal_raw, str) else ""
+        anchor = "supporting" if (focal_logged and gallery.supporting_chars.get(focal_logged)) else "main"
+        print(
+            f"[shorts ref order] scene={i} focal={focal_logged or '-'} "
+            f"anchor={anchor} ref_count={len(refs)}"
+        )
         url = images.generate(
             prompt,
             aspect_ratio="9:16",
