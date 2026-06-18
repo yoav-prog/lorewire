@@ -45,6 +45,13 @@ export interface LiveStoryMediaResult {
    *  long-form video (or no video), this falls back to stories.images
    *  and the caller should render at 16:9. */
   images: string[];
+  /** The story's article body, sourced from stories.body. The
+   *  LiveCatalogStory projection deliberately drops body to keep the
+   *  homepage rails payload small, so without surfacing it here the
+   *  Read tab's `story.body` check stays false for every live-only
+   *  story and the article falls into the hardcoded envelope sample.
+   *  Null means no row / empty body → caller falls back to story.body. */
+  body: string | null;
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -118,6 +125,7 @@ export async function getLiveStoryMedia(
     ok: true,
     video_url: null,
     images: [],
+    body: null,
     is_short: false,
     found: false,
   };
@@ -128,8 +136,9 @@ export async function getLiveStoryMedia(
     id: string;
     video_url: string | null;
     images: string | null;
+    body: string | null;
   }>(
-    "SELECT id, video_url, images FROM stories " +
+    "SELECT id, video_url, images, body FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -142,6 +151,7 @@ export async function getLiveStoryMedia(
         id: bySlug.id,
         video_url: bySlug.video_url,
         images: bySlug.images,
+        body: bySlug.body,
       };
     }
   }
@@ -164,6 +174,7 @@ export async function getLiveStoryMedia(
     ok: true,
     video_url: row.video_url,
     images,
+    body: row.body,
     is_short: isShort,
     found: true,
   };

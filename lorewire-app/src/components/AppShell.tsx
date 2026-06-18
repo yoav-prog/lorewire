@@ -32,6 +32,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
   video_url: null,
   images: [],
+  body: null,
   is_short: false,
   found: false,
 };
@@ -428,8 +429,16 @@ const GALLERY = [
 // Build gallery items from real pipeline assets. Each scene gets a short
 // caption pulled from the alignment words at that scene's slot — proportional
 // slicing keeps the prose moving in sync with the visual.
-function _galleryFromStory(story: Story): { src: string; caption: string }[] | null {
-  const imgs = story.images || [];
+function _galleryFromStory(
+  story: Story,
+  liveMedia: LiveStoryMediaResult,
+): { src: string; caption: string }[] | null {
+  // Prefer live images when the applied video is a short — those are the
+  // doodle scene frames generated for the 9:16 short. Fall back to the
+  // baked long-form story.images otherwise (or when the live read missed).
+  const imgs = liveMedia.is_short && liveMedia.images.length > 0
+    ? liveMedia.images
+    : story.images || [];
   if (imgs.length === 0) return null;
   const words = story.alignment || [];
   if (words.length === 0) return imgs.map((src) => ({ src, caption: "" }));
@@ -454,9 +463,23 @@ function _articleImagePositions(paraCount: number, imageCount: number): Set<numb
   return positions;
 }
 
-function GenArticle({ story }: { story: Story }) {
-  const paras = (story.body || "").split(/\n{2,}/);
-  const scenes = story.images || [];
+function GenArticle({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
+  // Prefer live body so a story that's published in the DB but not yet
+  // re-exported into published.ts still renders its real article text
+  // instead of the hardcoded envelope sample fallback.
+  const articleBody = liveMedia.body ?? story.body ?? "";
+  const paras = articleBody.split(/\n{2,}/);
+  // When the applied video is a short, the article reads alongside the
+  // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
+  // the long-form 16:9 illustrations are still the right fit.
+  const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
+  const scenes = useShortScenes ? liveMedia.images : (story.images || []);
   const positions = _articleImagePositions(paras.length, scenes.length);
   // Map paragraph index -> which scene to render after it (left-to-right order).
   const posList = Array.from(positions).sort((a, b) => a - b);
@@ -464,6 +487,23 @@ function GenArticle({ story }: { story: Story }) {
   posList.forEach((p, i) => {
     if (scenes[i]) imgAt.set(p, scenes[i]);
   });
+
+  // Aspect ratio + crop behaviour tracks the source. Long-form
+  // illustrations are 16:9 and benefit from the upper-third crop to put
+  // faces in frame. Doodle scenes are authored 9:16 and centre-crop the
+  // best; bound the width so the column doesn't blow out the article
+  // measure on phones.
+  const sceneAspect = useShortScenes ? "9/16" : "16/9";
+  const sceneObjectPos = useShortScenes ? "50% 50%" : "50% 30%";
+  const sceneWrapStyle: React.CSSProperties = useShortScenes
+    ? {
+        background: "#15141A",
+        aspectRatio: sceneAspect,
+        maxWidth: 280,
+        marginLeft: "auto",
+        marginRight: "auto",
+      }
+    : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
     <article className="fade-in">
@@ -478,10 +518,10 @@ function GenArticle({ story }: { story: Story }) {
           )}
           {imgAt.has(i) && (
             <figure className="my-5">
-              <div className="rounded-[12px] overflow-hidden relative" style={{ background: "#15141A", aspectRatio: "16/9" }}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: "50% 30%" }} />
+              <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
+                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
               </div>
-              <figcaption className="font-mono text-[10px] text-muted mt-1.5">Illustration &middot; LoreWire Studio</figcaption>
+              <figcaption className="font-mono text-[10px] text-muted mt-1.5 text-center">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
           )}
         </React.Fragment>
@@ -506,7 +546,13 @@ function GenArticle({ story }: { story: Story }) {
   );
 }
 
-function Read({ story }: { story: Story }) {
+function Read({
+  story,
+  liveMedia,
+}: {
+  story: Story;
+  liveMedia: LiveStoryMediaResult;
+}) {
   const [mode, setMode] = useState("Article");
   return (
     <div className="px-4 pt-3 pb-2">
@@ -520,7 +566,7 @@ function Read({ story }: { story: Story }) {
       </div>
 
       {mode === "Article" ? (
-        story.body ? <GenArticle story={story} /> : (
+        (liveMedia.body || story.body) ? <GenArticle story={story} liveMedia={liveMedia} /> : (
         <article className="fade-in">
           <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">Entitled &middot; 6 min read</p>
           <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>The $800 Envelope</h1>
@@ -572,24 +618,11 @@ function Read({ story }: { story: Story }) {
         )
       ) : (
         (() => {
-          const items = _galleryFromStory(story);
+          const items = _galleryFromStory(story, liveMedia);
           if (items && items.length > 0) {
-            return (
-              <div className="fade-in">
-                <div className="flex gap-3 overflow-x-auto noscroll snap-x snap-mandatory -mx-1 px-1" id="gallery-scroll">
-                  {items.map((g, i) => (
-                    <div key={i} className="snap-center shrink-0 rounded-[14px] overflow-hidden" style={{ width: 300, background: "#15141A" }}>
-                      <div className="relative" style={{ aspectRatio: "3/4" }}>
-                        <img src={g.src} alt="" className="absolute inset-0 w-full h-full object-cover" />
-                        <span className="absolute top-3 left-4 font-mono text-[10px] uppercase tracking-[.2em] px-1.5 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${i + 1}`}</span>
-                      </div>
-                      {g.caption && <p className="font-body text-[14px] leading-snug text-ink/85 p-4">{g.caption}</p>}
-                    </div>
-                  ))}
-                </div>
-                <Dots count={items.length} />
-              </div>
-            );
+            // 9:16 frames for the short's doodle scenes; 3:4 for long-form stills.
+            const useShort = liveMedia.is_short && liveMedia.images.length > 0;
+            return <GalleryCarousel items={items} useShort={useShort} />;
           }
           // Fallback to the hardcoded sample gallery for stories without pipeline assets.
           return (
@@ -613,6 +646,53 @@ function Read({ story }: { story: Story }) {
     </div>
   );
 }
+function GalleryChevron({ dir, size = 20 }: { dir: "left" | "right"; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+      <path d={dir === "left" ? "m15 6-6 6 6 6" : "m9 6 6 6-6 6"} />
+    </svg>
+  );
+}
+
+// One scene at a time: a single image with its caption directly below and
+// prev/next arrows on the frame. Mirror of the DesktopShell carousel so both
+// breakpoints behave identically — the user reads scenes in order and the
+// caption is always visible under the image.
+function GalleryCarousel({ items, useShort }: { items: { src: string; caption: string }[]; useShort: boolean }) {
+  const [idx, setIdx] = useState(0);
+  const n = items.length;
+  // Clamp at the ends so the n / total counter stays honest about position.
+  const go = (d: number) => setIdx((p) => Math.max(0, Math.min(n - 1, p + d)));
+  const g = items[idx];
+  const cardAspect = useShort ? "9/16" : "3/4";
+  const maxW = useShort ? 280 : 340;
+  const arrowCls =
+    "absolute top-1/2 -translate-y-1/2 z-20 w-10 h-10 rounded-full flex items-center justify-center transition disabled:opacity-0";
+  const arrowStyle = { background: "rgba(0,0,0,.55)", border: "1px solid rgba(255,255,255,.14)", color: "#F5F3EF" } as const;
+  return (
+    <div className="fade-in mx-auto" style={{ maxWidth: maxW }}>
+      <div className="relative rounded-[14px] overflow-hidden" style={{ aspectRatio: cardAspect, background: "#15141A" }}>
+        <img src={g.src} alt={`Scene ${idx + 1}`} className="absolute inset-0 w-full h-full object-cover" />
+        <span className="absolute top-3 left-4 font-mono text-[10px] uppercase tracking-[.2em] px-1.5 py-0.5 rounded text-ink" style={{ background: "rgba(0,0,0,.55)" }}>{`Scene ${idx + 1}`}</span>
+        <button onClick={() => go(-1)} disabled={idx === 0} aria-label="Previous scene" className={`${arrowCls} left-2`} style={arrowStyle}><GalleryChevron dir="left" /></button>
+        <button onClick={() => go(1)} disabled={idx === n - 1} aria-label="Next scene" className={`${arrowCls} right-2`} style={arrowStyle}><GalleryChevron dir="right" /></button>
+      </div>
+      {g.caption && <p className="font-body text-[14.5px] leading-relaxed text-ink/85 mt-3.5">{g.caption}</p>}
+      <div className="flex items-center justify-between mt-3.5">
+        <span className="font-mono text-[11.5px] tracking-wide text-muted">{idx + 1} / {n}</span>
+        <button
+          onClick={() => go(1)}
+          disabled={idx === n - 1}
+          className="px-4 py-1.5 rounded-full font-body font-semibold text-[13px] transition disabled:opacity-40 flex items-center gap-1"
+          style={{ background: "#F5F3EF", color: "#0A0A0C" }}
+        >
+          Next <GalleryChevron dir="right" size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function Dots({ count }: { count: number }) {
   const [active, setActive] = useState(0);
   useEffect(() => {
@@ -945,7 +1025,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
 
         <div className="-mx-4 mt-2">
           {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
-          {tab === "Read" && <Read story={story} />}
+          {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
           {tab === "Read-along" && <ReadAlong story={story} />}
         </div>
 
