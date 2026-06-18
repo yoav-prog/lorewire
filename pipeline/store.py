@@ -1868,10 +1868,23 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
     # Per stalled status: give up rows that have exhausted their attempts, then
     # revive (and increment) the rest. The two WHERE clauses are disjoint
     # (COALESCE(attempts,0) >= cap vs < cap), so a row is handled by exactly one.
+    # We SELECT the affected ids before each UPDATE so the timeline can show
+    # which specific rows were reset (or finally given up). The select+update
+    # split adds no real race risk: only the drain ticks call this and they
+    # serialize via the cron's per-minute schedule + the advisory lock.
+    gave_up: list[tuple[str, str]] = []
+    revived: list[tuple[str, str, int]] = []
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
+                    cur.execute(
+                        "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                        f"WHERE status='{status}' AND started_at IS NOT NULL "
+                        "AND started_at < %s AND COALESCE(attempts, 0) >= %s",
+                        (cutoff, cap),
+                    )
+                    give_up_rows = cur.fetchall()
                     cur.execute(
                         "UPDATE short_renders SET status='error', error=%s, finished_at=%s "
                         f"WHERE status='{status}' AND started_at IS NOT NULL "
@@ -1879,6 +1892,14 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                         (give_up_msg, now, cutoff, cap),
                     )
                     total += cur.rowcount
+                    gave_up.extend((row[0], status) for row in give_up_rows)
+                    cur.execute(
+                        "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                        f"WHERE status='{status}' AND started_at IS NOT NULL "
+                        "AND started_at < %s AND COALESCE(attempts, 0) < %s",
+                        (cutoff, cap),
+                    )
+                    revive_rows = cur.fetchall()
                     cur.execute(
                         "UPDATE short_renders SET status='queued', started_at=NULL, "
                         "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
@@ -1887,26 +1908,70 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                         (cutoff, cap),
                     )
                     total += cur.rowcount
+                    revived.extend((row[0], status, int(row[1])) for row in revive_rows)
             conn.commit()
-        return int(total)
-    with _sqlite_conn() as c:
-        for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
-            cur = c.execute(
-                "UPDATE short_renders SET status='error', error=?, finished_at=? "
-                f"WHERE status='{status}' AND started_at IS NOT NULL "
-                "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
-                (give_up_msg, now, cutoff, cap),
+    else:
+        with _sqlite_conn() as c:
+            for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
+                give_up_rows = c.execute(
+                    "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
+                    (cutoff, cap),
+                ).fetchall()
+                cur = c.execute(
+                    "UPDATE short_renders SET status='error', error=?, finished_at=? "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
+                    (give_up_msg, now, cutoff, cap),
+                )
+                total += cur.rowcount
+                gave_up.extend((row[0], status) for row in give_up_rows)
+                revive_rows = c.execute(
+                    "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) < ?",
+                    (cutoff, cap),
+                ).fetchall()
+                cur = c.execute(
+                    "UPDATE short_renders SET status='queued', started_at=NULL, "
+                    "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) < ?",
+                    (cutoff, cap),
+                )
+                total += cur.rowcount
+                revived.extend((row[0], status, int(row[1])) for row in revive_rows)
+    # Per-row timeline events so the admin sees a stuck row come unstuck. Done
+    # outside the transaction so a logging hiccup doesn't roll back the reset
+    # itself; log_short_render_event already fire-and-swallows.
+    for render_id, stalled_status in gave_up:
+        try:
+            log_short_render_event(
+                render_id,
+                "reaper_gave_up",
+                level="error",
+                message=give_up_msg,
+                payload={"stalled_status": stalled_status, "attempts_cap": cap},
             )
-            total += cur.rowcount
-            cur = c.execute(
-                "UPDATE short_renders SET status='queued', started_at=NULL, "
-                "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
-                f"WHERE status='{status}' AND started_at IS NOT NULL "
-                "AND started_at < ? AND COALESCE(attempts, 0) < ?",
-                (cutoff, cap),
+        except Exception:
+            pass
+    for render_id, stalled_status, prev_attempts in revived:
+        try:
+            log_short_render_event(
+                render_id,
+                "reaper_revived",
+                level="warn",
+                message=f"Reset from stuck {stalled_status} to queued",
+                payload={
+                    "stalled_status": stalled_status,
+                    "previous_attempts": prev_attempts,
+                    "new_attempts": prev_attempts + 1,
+                },
             )
-            total += cur.rowcount
-        return int(total)
+        except Exception:
+            pass
+    return int(total)
 
 
 class _AdvisoryLock:

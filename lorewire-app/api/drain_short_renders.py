@@ -25,6 +25,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from typing import Callable
 
 _HERE = Path(__file__).resolve().parent
 _LIB = _HERE / "_lib"
@@ -59,11 +60,60 @@ RENDERING_STALE_S = 1800
 # stamps 0.5 when props land). The render cron drives 0.5..1.0.
 _PHASE_FRACTION = {"script": 0.03, "plan": 0.06, "base": 0.10, "voice": 0.42, "stage": 0.46}
 
+# Human-readable labels for the timeline. Mirrors short_render_worker._PHASE_MESSAGE
+# so the gen-half phases read the same as the render-half phases. The ShortRenderEventTimeline
+# UI displays this string verbatim next to the [phase_<name>] event tag.
+_PHASE_MESSAGE = {
+    "script": "Writing script…",
+    "plan": "Planning scenes…",
+    "base": "Drawing character…",
+    "scene": "Drawing scenes…",
+    "voice": "Recording voiceover…",
+    "stage": "Assembling…",
+}
+
 
 def _frac(phase: str, cur: int, total: int) -> float:
     if phase == "scene" and total > 0:
         return round(0.10 + 0.32 * (cur / total), 3)
     return _PHASE_FRACTION.get(phase, 0.0)
+
+
+def _progress_for(render_id: str) -> Callable[[str, int, int], None]:
+    """Build an on_progress callback that mirrors short_render_worker._progress_for:
+    persists progress AND emits a short_render_events row on each PHASE TRANSITION
+    so the admin timeline surfaces generation progress in real time (not only after
+    the render cron picks up the row). Scene events fire per scene because the
+    timelapse value is "scene 3/12 done" not "scene". log_short_render_event is
+    fire-and-swallow so a logging failure can never break the generation."""
+    last_phase = {"name": None}
+
+    def cb(phase: str, cur: int = 0, total: int = 0) -> None:
+        frac = _frac(phase, cur, total)
+        try:
+            store.update_short_render_progress(render_id, frac, phase)
+        except Exception:
+            pass  # progress is observability, never fail the run on it
+        try:
+            if phase == "scene" and total > 0:
+                store.log_short_render_event(
+                    render_id,
+                    "scene_generated",
+                    message=f"Scene {cur}/{total} generated",
+                    payload={"scene_index": cur, "scene_total": total},
+                )
+            elif phase != last_phase["name"]:
+                store.log_short_render_event(
+                    render_id,
+                    f"phase_{phase}",
+                    message=_PHASE_MESSAGE.get(phase, phase),
+                    payload={"phase": phase, "progress": round(frac, 3)},
+                )
+        except Exception:
+            pass
+        last_phase["name"] = phase
+
+    return cb
 
 
 def _log(event: str, **fields) -> None:
@@ -91,12 +141,27 @@ def run_drain() -> dict:
     render_id = claimed["id"]
     _log("claim", id=render_id, story=claimed["story_id"],
          narration=claimed.get("narration_style"), length=claimed.get("length_preset"))
+    # Emit a timeline event so the admin sees the drain pick up the row.
+    # Until this landed, the timeline went silent between `forced_done_reset`
+    # and the render cron's later `claimed` event — and a drain failure mid-way
+    # was completely invisible. Fire-and-swallow so a logging issue can't
+    # poison the generation run itself.
+    try:
+        store.log_short_render_event(
+            render_id,
+            "generation_started",
+            message="Drain claimed the row for generation",
+            payload={
+                "story_id": claimed["story_id"],
+                "narration_style": claimed.get("narration_style"),
+                "length_preset": claimed.get("length_preset"),
+                "lane": claimed.get("lane"),
+            },
+        )
+    except Exception:
+        pass
 
-    def on_progress(phase: str, cur: int = 0, total: int = 0) -> None:
-        try:
-            store.update_short_render_progress(render_id, _frac(phase, cur, total), phase)
-        except Exception:
-            pass  # progress is observability, never fail the run on it
+    on_progress = _progress_for(render_id)
 
     lane = claimed.get("lane")
     try:
@@ -126,6 +191,15 @@ def run_drain() -> dict:
             shorts_lane_b.clear_lane(render_id)
             elapsed = round(time.monotonic() - start, 2)
             _log("ready", id=render_id, elapsed_s=elapsed, lane="B")
+            try:
+                store.log_short_render_event(
+                    render_id,
+                    "generation_ready",
+                    message="Generation complete, awaiting render cron",
+                    payload={"elapsed_s": elapsed, "lane": "B"},
+                )
+            except Exception:
+                pass
             return {"generated": 1, "render_id": render_id, "elapsed_s": elapsed, "lane": "B"}
 
         if lane == "C":
@@ -143,6 +217,15 @@ def run_drain() -> dict:
             elapsed = round(time.monotonic() - start, 2)
             _log("ready", id=render_id, elapsed_s=elapsed, lane="C",
                  regen_count=laneC.regen_count)
+            try:
+                store.log_short_render_event(
+                    render_id,
+                    "generation_ready",
+                    message="Generation complete, awaiting render cron",
+                    payload={"elapsed_s": elapsed, "lane": "C", "regen_count": laneC.regen_count},
+                )
+            except Exception:
+                pass
             return {
                 "generated": 1,
                 "render_id": render_id,
@@ -160,11 +243,34 @@ def run_drain() -> dict:
         )
     except Exception as exc:  # noqa: BLE001 — surface to the row
         store.fail_short_render(render_id, f"{type(exc).__name__}: {exc}")
+        # Mirror short_render_worker's `failed` timeline event so a generation
+        # crash is no longer invisible. Truncate the error to keep one bad row
+        # from blowing out the timeline payload size.
+        try:
+            store.log_short_render_event(
+                render_id,
+                "generation_failed",
+                level="error",
+                message="Generation failed",
+                payload={"error": f"{type(exc).__name__}: {str(exc)[:500]}", "lane": lane},
+            )
+        except Exception:
+            pass
         _log("err", id=render_id, error=str(exc), lane=lane)
         return {"generated": 0, "error": str(exc)}
 
     if not built:
         store.fail_short_render(render_id, "generation produced no assets")
+        try:
+            store.log_short_render_event(
+                render_id,
+                "generation_failed",
+                level="error",
+                message="Generation produced no assets",
+                payload={"lane": lane},
+            )
+        except Exception:
+            pass
         _log("err", id=render_id, error="no assets")
         return {"generated": 0, "error": "no-assets"}
 
@@ -183,6 +289,15 @@ def run_drain() -> dict:
         _log("config_lane_a_sync_skip", id=render_id, error=str(e))
     elapsed = round(time.monotonic() - start, 2)
     _log("ready", id=render_id, elapsed_s=elapsed)
+    try:
+        store.log_short_render_event(
+            render_id,
+            "generation_ready",
+            message="Generation complete, awaiting render cron",
+            payload={"elapsed_s": elapsed, "lane": "A"},
+        )
+    except Exception:
+        pass
     return {"generated": 1, "render_id": render_id, "elapsed_s": elapsed}
 
 

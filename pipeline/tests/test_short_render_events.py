@@ -155,5 +155,79 @@ class WorkerCancellationTests(_ShortEventsTestCase):
         self.assertFalse(any(e["event"] == "failed" for e in events))
 
 
+class ReaperEventTests(_ShortEventsTestCase):
+    """The reaper resets stuck 'generating' / 'rendering' rows back to queued
+    (or marks them error once attempts hit the cap). Without per-row timeline
+    events, a stuck row going through reap → re-claim → finish was invisible
+    to the admin — they only saw a long silent gap on the timeline."""
+
+    def _seed_stale_short(
+        self, render_id: str, story_id: str, status: str,
+        started_at: str, attempts: int,
+    ) -> None:
+        with sqlite3.connect(store.DB_PATH) as c:
+            c.execute(
+                "INSERT INTO short_renders "
+                "(id, story_id, config_hash, narration_style, length_preset, status, "
+                " phase, progress, error, output_url, props, requested_by, requested_at, "
+                " started_at, finished_at, attempts) "
+                "VALUES (?, ?, ?, 'suspense', 'standard', ?, NULL, 0, NULL, NULL, NULL, "
+                "        NULL, '2026-06-15T00:00:00.000Z', ?, NULL, ?)",
+                (render_id, story_id, f"hash-{render_id}", status, started_at, attempts),
+            )
+
+    def test_revives_stale_generating_row_and_emits_event(self):
+        # 2 hours stale → well past the 900s generating cutoff.
+        self._seed_stale_short(
+            "r-gen-stale", "story-x", "generating",
+            "2026-06-15T00:00:00.000Z", attempts=0,
+        )
+        acted = store.reap_stale_short_renders(900, 1800)
+        self.assertEqual(acted, 1)
+        with sqlite3.connect(store.DB_PATH) as c:
+            row = c.execute(
+                "SELECT status, attempts FROM short_renders WHERE id = ?",
+                ("r-gen-stale",),
+            ).fetchone()
+        self.assertEqual(row[0], "queued")
+        self.assertEqual(row[1], 1)
+        events = self._list_events("r-gen-stale")
+        revived = [e for e in events if e["event"] == "reaper_revived"]
+        self.assertEqual(len(revived), 1)
+        self.assertEqual(revived[0]["level"], "warn")
+        self.assertIn("generating", revived[0]["payload"])
+
+    def test_gives_up_when_attempts_cap_reached(self):
+        # At the cap → reap flips to error, not back to queued.
+        self._seed_stale_short(
+            "r-gen-doomed", "story-y", "generating",
+            "2026-06-15T00:00:00.000Z",
+            attempts=store.MAX_SHORT_RENDER_ATTEMPTS,
+        )
+        store.reap_stale_short_renders(900, 1800)
+        with sqlite3.connect(store.DB_PATH) as c:
+            row = c.execute(
+                "SELECT status FROM short_renders WHERE id = ?",
+                ("r-gen-doomed",),
+            ).fetchone()
+        self.assertEqual(row[0], "error")
+        events = self._list_events("r-gen-doomed")
+        gave_up = [e for e in events if e["event"] == "reaper_gave_up"]
+        self.assertEqual(len(gave_up), 1)
+        self.assertEqual(gave_up[0]["level"], "error")
+
+    def test_leaves_fresh_rows_alone(self):
+        # started_at is recent (now) → must not be touched.
+        import datetime as _dt
+        fresh = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        self._seed_stale_short(
+            "r-fresh", "story-z", "generating", fresh, attempts=0,
+        )
+        acted = store.reap_stale_short_renders(900, 1800)
+        self.assertEqual(acted, 0)
+        events = self._list_events("r-fresh")
+        self.assertEqual(events, [])
+
+
 if __name__ == "__main__":
     unittest.main()
