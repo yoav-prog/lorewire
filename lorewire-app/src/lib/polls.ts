@@ -62,7 +62,7 @@ export {
 // ─── Reads ────────────────────────────────────────────────────────────────────
 
 const POLL_COLS =
-  "id, story_id, question, option_a_text, option_b_text, enabled, category, created_at, updated_at";
+  "id, story_id, article_id, question, option_a_text, option_b_text, enabled, category, created_at, updated_at";
 
 export async function getPollByStoryId(
   storyId: string,
@@ -71,6 +71,18 @@ export async function getPollByStoryId(
   return one<PollRow>(
     `SELECT ${POLL_COLS} FROM polls WHERE story_id = ?`,
     [storyId],
+  );
+}
+
+/** Read the article-attached poll for an article id. Mirrors
+ *  getPollByStoryId. 2026-06-18 standalone-article polls (plan §15). */
+export async function getPollByArticleId(
+  articleId: string,
+): Promise<PollRow | null> {
+  if (!articleId) return null;
+  return one<PollRow>(
+    `SELECT ${POLL_COLS} FROM polls WHERE article_id = ?`,
+    [articleId],
   );
 }
 
@@ -94,15 +106,23 @@ export async function getAggregateByStoryId(
 
 // ─── Writes (admin) ───────────────────────────────────────────────────────────
 
+/** Subject discriminator is the presence of `storyId` vs `articleId`.
+ *  Runtime enforces exactly-one-set; the type allows both as optional
+ *  so existing call sites that pass only `storyId` keep typechecking
+ *  without a wave of edits. 2026-06-18 standalone-article polls
+ *  (plan §15). */
 export interface UpsertPollInput {
-  storyId: string;
+  storyId?: string;
+  articleId?: string;
   question: string;
   optionA: string;
   optionB: string;
   enabled: boolean;
-  /** Category snapshot from the story row at write time — denormalised
-   *  for fast rail queries. Pass null when the story has no category;
-   *  the rail queries treat null as "uncategorised" and never crash. */
+  /** Category snapshot from the parent row at write time —
+   *  denormalised for fast rail queries. For story polls this is the
+   *  story's `category`; for article polls it's the article's `type`
+   *  (news / feature / listicle / review). Null is fine; rail queries
+   *  treat null as "uncategorised." */
   category: string | null;
 }
 
@@ -113,9 +133,16 @@ export interface UpsertPollResult {
   error?: string;
 }
 
-/** Insert-or-update one row in polls keyed by story_id. The unique
- *  index `idx_polls_story_id` is what makes ON CONFLICT (story_id) DO
- *  UPDATE work; without it Postgres would reject the statement. */
+/** Insert-or-update one row in polls keyed by the subject id. Lookup-
+ *  then-write rather than ON CONFLICT so the same code path covers
+ *  both subject kinds without needing per-subject conflict-target
+ *  syntax (Postgres requires the target column to be specified on the
+ *  ON CONFLICT clause). The partial unique indexes guarantee no two
+ *  rows can share a subject id; the lookup is cheap.
+ *
+ *  Runtime invariant: exactly one of (storyId, articleId) must be
+ *  set. Both null = caller forgot the subject; both set = caller bug
+ *  (a poll can't span both kinds). */
 export async function upsertPoll(
   input: UpsertPollInput,
 ): Promise<UpsertPollResult> {
@@ -127,11 +154,28 @@ export async function upsertPoll(
   if (!v.ok) {
     return { ok: false, pollId: "", created: false, error: v.error };
   }
-  if (!input.storyId) {
-    return { ok: false, pollId: "", created: false, error: "story_id required" };
+  const storyId = (input.storyId ?? "").trim() || null;
+  const articleId = (input.articleId ?? "").trim() || null;
+  if (!storyId && !articleId) {
+    return {
+      ok: false,
+      pollId: "",
+      created: false,
+      error: "subject required (storyId or articleId)",
+    };
+  }
+  if (storyId && articleId) {
+    return {
+      ok: false,
+      pollId: "",
+      created: false,
+      error: "exactly one of storyId / articleId allowed",
+    };
   }
   const now = new Date().toISOString();
-  const existing = await getPollByStoryId(input.storyId);
+  const existing = storyId
+    ? await getPollByStoryId(storyId)
+    : await getPollByArticleId(articleId ?? "");
   if (existing) {
     await run(
       `UPDATE polls
@@ -149,18 +193,20 @@ export async function upsertPoll(
     );
     console.info("[polls repo] update", {
       poll_id: existing.id,
-      story_id: input.storyId,
+      story_id: storyId,
+      article_id: articleId,
       enabled: input.enabled,
     });
     return { ok: true, pollId: existing.id, created: false };
   }
   const id = randomUUID();
   await run(
-    `INSERT INTO polls (id, story_id, question, option_a_text, option_b_text, enabled, category, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO polls (id, story_id, article_id, question, option_a_text, option_b_text, enabled, category, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
-      input.storyId,
+      storyId,
+      articleId,
       v.cleaned.question,
       v.cleaned.optionA,
       v.cleaned.optionB,
@@ -172,7 +218,8 @@ export async function upsertPoll(
   );
   console.info("[polls repo] create", {
     poll_id: id,
-    story_id: input.storyId,
+    story_id: storyId,
+    article_id: articleId,
     enabled: input.enabled,
   });
   return { ok: true, pollId: id, created: true };
@@ -182,7 +229,14 @@ export async function upsertPoll(
 
 export interface RecordVoteInput {
   pollId: string;
-  storyId: string;
+  /** Denormalised subject id. Exactly one of (storyId, articleId) is
+   *  populated at runtime, matching the poll's subject. Both fields
+   *  are optional in the TYPE so existing call sites that pass only
+   *  storyId keep working without edits — runtime check enforces
+   *  the invariant. The caller usually resolves them from the poll
+   *  row's `story_id` / `article_id` fields. */
+  storyId?: string | null;
+  articleId?: string | null;
   category: string | null;
   side: PollSide;
   cookieToken: string;
@@ -207,8 +261,29 @@ export interface RecordVoteResult {
 export async function recordVote(
   input: RecordVoteInput,
 ): Promise<RecordVoteResult> {
-  if (!input.pollId || !input.storyId || !input.cookieToken) {
+  if (!input.pollId || !input.cookieToken) {
     return { ok: false, inserted: false, error: "missing required fields" };
+  }
+  // Subject id: exactly one of storyId / articleId must be set. The
+  // both-undefined case = the caller forgot to pass the subject; the
+  // both-set case = a coding bug. Coerce undefined → null up front
+  // so the SQLite driver doesn't choke (it accepts null but rejects
+  // undefined as a parameter value).
+  const storyId = input.storyId ?? null;
+  const articleId = input.articleId ?? null;
+  if (!storyId && !articleId) {
+    return {
+      ok: false,
+      inserted: false,
+      error: "subject required (storyId or articleId)",
+    };
+  }
+  if (storyId && articleId) {
+    return {
+      ok: false,
+      inserted: false,
+      error: "exactly one of storyId / articleId allowed",
+    };
   }
   if (!isPollSide(input.side)) {
     return { ok: false, inserted: false, error: "side must be 'A' or 'B'" };
@@ -225,7 +300,8 @@ export async function recordVote(
   if (existing) {
     console.info("[polls vote duplicate]", {
       poll_id: input.pollId,
-      story_id: input.storyId,
+      story_id: storyId,
+      article_id: articleId,
       side: input.side,
       cookie_prefix: input.cookieToken.slice(0, 8),
     });
@@ -234,12 +310,13 @@ export async function recordVote(
   const id = randomUUID();
   const now = new Date().toISOString();
   await run(
-    `INSERT INTO poll_votes (id, poll_id, story_id, category, side, cookie_token, ip_ua_hash, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO poll_votes (id, poll_id, story_id, article_id, category, side, cookie_token, ip_ua_hash, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
       input.pollId,
-      input.storyId,
+      storyId,
+      articleId,
       input.category,
       input.side,
       input.cookieToken,
@@ -249,7 +326,8 @@ export async function recordVote(
   );
   console.info("[polls vote]", {
     poll_id: input.pollId,
-    story_id: input.storyId,
+    story_id: storyId,
+    article_id: articleId,
     side: input.side,
     cookie_prefix: input.cookieToken.slice(0, 8),
   });
@@ -330,6 +408,58 @@ export async function refreshPollAggregateForStory(
     total,
     divisiveness: Number(div.toFixed(4)),
   });
+}
+
+/** Live-compute the aggregate for an article poll. 2026-06-18
+ *  standalone-article polls. Article polls bypass the poll_aggregates
+ *  projection (no cron-refresh row, no rail surfacing) because we
+ *  expect low volume per article — a single GROUP BY against the
+ *  hot index `idx_poll_votes_poll_id` answers the widget read in
+ *  the same single-digit ms a row fetch would.
+ *
+ *  Returns an in-memory `PollAggregateRow` shape so existing
+ *  consumers (the widget's toResultView call site) don't branch on
+ *  subject kind. story_id stays null because article polls never
+ *  populate it. */
+export async function computeArticlePollAggregate(
+  poll: PollRow,
+): Promise<PollAggregateRow> {
+  const articleId = poll.article_id ?? "";
+  const counts = await all<{ side: string; c: number }>(
+    "SELECT side, COUNT(*) AS c FROM poll_votes WHERE poll_id = ? GROUP BY side",
+    [poll.id],
+  );
+  let votesA = 0;
+  let votesB = 0;
+  for (const row of counts) {
+    const c = Number(row.c) || 0;
+    if (row.side === "A") votesA = c;
+    else if (row.side === "B") votesB = c;
+  }
+  const total = votesA + votesB;
+  const div = divisiveness(votesA, votesB);
+  const last = await one<{ last_vote_at: string | null }>(
+    "SELECT MAX(created_at) AS last_vote_at FROM poll_votes WHERE poll_id = ?",
+    [poll.id],
+  );
+  console.info("[polls article aggregate compute]", {
+    article_id: articleId,
+    poll_id: poll.id,
+    total,
+    divisiveness: Number(div.toFixed(4)),
+  });
+  return {
+    story_id: "", // PollAggregateRow contract — empty for article polls
+    poll_id: poll.id,
+    category: poll.category,
+    votes_a: votesA,
+    votes_b: votesB,
+    total_votes: total,
+    divisiveness: div,
+    agreement: 1 - div,
+    last_vote_at: last?.last_vote_at ?? null,
+    refreshed_at: new Date().toISOString(),
+  };
 }
 
 /** Look up the side this cookie voted for on this poll, if any. Used
@@ -597,30 +727,60 @@ export interface PollOverviewRow {
 
 /** Read every poll + its aggregate + the parent story's title in one
  *  trip. Used by /admin/polls. Ordered newest-edit-first so the row
- *  the admin just touched bubbles to the top. */
+ *  the admin just touched bubbles to the top.
+ *
+ *  Article polls (story_id NULL) surface here too — their aggregate
+ *  is computed live per row (small overhead per row; this overview
+ *  isn't a hot path). storyTitle / storyCategory stay null for
+ *  article polls; the page renders an "Article poll" link instead. */
 export async function listPollOverview(): Promise<PollOverviewRow[]> {
   const polls = await all<PollRow>(
     `SELECT ${POLL_COLS} FROM polls ORDER BY COALESCE(updated_at, created_at) DESC`,
   );
   if (polls.length === 0) return [];
-  const ids = polls.map((p) => p.story_id);
-  const placeholders = ids.map(() => "?").join(", ");
-  const [aggs, stories] = await Promise.all([
-    all<PollAggregateRow>(
-      `SELECT ${AGG_COLS} FROM poll_aggregates WHERE story_id IN (${placeholders})`,
-      ids,
-    ),
-    all<{ id: string; title: string | null; category: string | null }>(
-      `SELECT id, title, category FROM stories WHERE id IN (${placeholders})`,
-      ids,
-    ),
-  ]);
+  // Only story polls need the join — article polls have null story_id
+  // and don't have a row in poll_aggregates either. Filter out the
+  // nulls before the SELECT so the IN clause stays clean.
+  const storyIds = polls
+    .map((p) => p.story_id)
+    .filter((id): id is string => id !== null);
+  let aggs: PollAggregateRow[] = [];
+  let stories: Array<{
+    id: string;
+    title: string | null;
+    category: string | null;
+  }> = [];
+  if (storyIds.length > 0) {
+    const placeholders = storyIds.map(() => "?").join(", ");
+    [aggs, stories] = await Promise.all([
+      all<PollAggregateRow>(
+        `SELECT ${AGG_COLS} FROM poll_aggregates WHERE story_id IN (${placeholders})`,
+        storyIds,
+      ),
+      all<{ id: string; title: string | null; category: string | null }>(
+        `SELECT id, title, category FROM stories WHERE id IN (${placeholders})`,
+        storyIds,
+      ),
+    ]);
+  }
   const aggByStory = new Map(aggs.map((a) => [a.story_id, a]));
   const storyById = new Map(stories.map((s) => [s.id, s]));
-  return polls.map((p) => ({
-    poll: p,
-    aggregate: aggByStory.get(p.story_id) ?? null,
-    storyTitle: storyById.get(p.story_id)?.title ?? null,
-    storyCategory: storyById.get(p.story_id)?.category ?? null,
-  }));
+  // For article polls we compute the aggregate live. Done in a loop
+  // so the await sequence is explicit; volume is small (one overview
+  // page, capped by total poll count).
+  const out: PollOverviewRow[] = [];
+  for (const p of polls) {
+    let aggregate: PollAggregateRow | null = null;
+    let storyTitle: string | null = null;
+    let storyCategory: string | null = null;
+    if (p.story_id) {
+      aggregate = aggByStory.get(p.story_id) ?? null;
+      storyTitle = storyById.get(p.story_id)?.title ?? null;
+      storyCategory = storyById.get(p.story_id)?.category ?? null;
+    } else if (p.article_id) {
+      aggregate = await computeArticlePollAggregate(p);
+    }
+    out.push({ poll: p, aggregate, storyTitle, storyCategory });
+  }
+  return out;
 }

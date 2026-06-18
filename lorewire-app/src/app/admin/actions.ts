@@ -259,6 +259,56 @@ export async function savePollAction(formData: FormData): Promise<{
   return { ok: true, created: result.created };
 }
 
+// 2026-06-18 standalone-article polls (plan §15). Mirrors
+// savePollAction for the article CMS surface. Articles get their
+// OWN poll authored on the article edit page — independent of any
+// linked story's poll. The article reader resolves article-own >
+// linked-story priority (see /articles/[locale]/[slug]/page.tsx).
+//
+// Category snapshot uses the article TYPE (news / feature /
+// listicle / review) so per-type analytics roll up without a join
+// to articles — same shape story polls use for stories.category.
+export async function saveArticlePollAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+  created?: boolean;
+}> {
+  await requireAdmin();
+  const articleId = String(formData.get("article_id") ?? "");
+  if (!articleId) return { ok: false, error: "missing article id" };
+  const article = await getArticle(articleId);
+  if (!article) {
+    console.warn("[polls action] save: article not found", {
+      article_id: articleId,
+    });
+    return { ok: false, error: "article not found" };
+  }
+  const { upsertPoll } = await import("@/lib/polls");
+  const result = await upsertPoll({
+    articleId,
+    question: String(formData.get("question") ?? ""),
+    optionA: String(formData.get("option_a") ?? ""),
+    optionB: String(formData.get("option_b") ?? ""),
+    enabled: String(formData.get("enabled") ?? "") === "1",
+    category: article.type,
+  });
+  if (!result.ok) {
+    console.warn("[polls action] save article rejected", {
+      article_id: articleId,
+      error: result.error,
+    });
+    return { ok: false, error: result.error };
+  }
+  console.info("[polls action] save article", {
+    article_id: articleId,
+    poll_id: result.pollId,
+    created: result.created,
+  });
+  revalidatePath(`/admin/articles/${articleId}`);
+  revalidatePath("/admin/polls");
+  return { ok: true, created: result.created };
+}
+
 // ─── Asset re-render ─────────────────────────────────────────────────────────
 // Enqueue one image-regen request. Admin clicks Regenerate on a hero, scene,
 // prop, mouth-swap, OG, or gallery image; we run a budget pre-flight, queue

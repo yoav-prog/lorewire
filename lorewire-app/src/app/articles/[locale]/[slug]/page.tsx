@@ -28,24 +28,37 @@ import type { ArticleLanguage, ArticleRow, ArticleType } from "@/lib/repo";
 import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
 import { PollWidget } from "@/components/PollWidget";
 import {
+  computeArticlePollAggregate,
   DEFAULT_PUBLIC_FLOOR,
   getAggregateByStoryId,
+  getPollByArticleId,
   getPollByStoryId,
   getVoteSideForCookie,
   topDivisive,
   toResultView,
   type PollResultView,
+  type PollRow,
   type PollSide,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
 
-// Phase 2 of _plans/2026-06-17-engagement-polls.md. Standalone-article
-// polls are out of scope for v1; this reader inherits the linked
-// story's poll via article.story_id. When the article has no story
-// link OR the story has no enabled poll, the widget simply doesn't
-// render — the rest of the article reads identically.
+// Phase 2 + §15 (standalone-article polls) of
+// _plans/2026-06-17-engagement-polls.md.
+//
+// Resolution priority on the article reader:
+//   1. The article's OWN poll (polls.article_id = article.id) wins.
+//      Authored directly on /admin/articles/[id]. Aggregates compute
+//      live via computeArticlePollAggregate (no projection row).
+//   2. The linked story's poll (polls.story_id = article.story_id)
+//      is the fallback inheritance from Phase 2. Aggregates come
+//      from poll_aggregates (cron-refreshed projection).
+//   3. No widget renders when neither resolves.
+//
+// The follow-up "see another close call" link only fires for the
+// story-attached path because the divisive rail is story-only by
+// design. An article-only poll renders without a follow-up.
 interface PollRender {
-  storyId: string;
+  pollId: string;
   question: string;
   optionA: string;
   optionB: string;
@@ -54,22 +67,59 @@ interface PollRender {
   followUp: { href: string; title: string } | null;
 }
 
-async function loadLinkedPoll(
+async function loadPollForArticle(
   article: ArticleRow,
 ): Promise<PollRender | null> {
+  // Priority 1: article-own poll. When the article CMS author wrote
+  // a poll directly on this article, it wins regardless of any linked
+  // story's poll. The author's intent for THIS article reads.
+  const ownPoll = await getPollByArticleId(article.id);
+  if (ownPoll && ownPoll.enabled === 1) {
+    return await buildArticleOwnPollRender(ownPoll);
+  }
+  // Priority 2: linked-story inheritance. Same behavior as Phase 2.
   if (!article.story_id) return null;
-  const poll = await getPollByStoryId(article.story_id);
-  if (!poll || poll.enabled !== 1) return null;
+  const storyPoll = await getPollByStoryId(article.story_id);
+  if (!storyPoll || storyPoll.enabled !== 1) return null;
+  return await buildLinkedStoryPollRender(article.story_id, storyPoll);
+}
+
+async function buildArticleOwnPollRender(
+  poll: PollRow,
+): Promise<PollRender> {
+  const voteToken = await readVoteToken();
+  const [aggregate, votedSide] = await Promise.all([
+    computeArticlePollAggregate(poll),
+    getVoteSideForCookie(poll.id, voteToken),
+  ]);
+  return {
+    pollId: poll.id,
+    question: poll.question,
+    optionA: poll.option_a_text,
+    optionB: poll.option_b_text,
+    result: toResultView(aggregate, DEFAULT_PUBLIC_FLOOR),
+    votedSide,
+    // Article-own polls don't ride the story-only divisive rail, so
+    // no follow-up. Could change later if we add an article-only
+    // rail surface; flagged for the V3 personalization work.
+    followUp: null,
+  };
+}
+
+async function buildLinkedStoryPollRender(
+  storyId: string,
+  poll: PollRow,
+): Promise<PollRender> {
   const [voteToken, aggregate] = await Promise.all([
     readVoteToken(),
-    getAggregateByStoryId(article.story_id),
+    getAggregateByStoryId(storyId),
   ]);
   const votedSide = await getVoteSideForCookie(poll.id, voteToken);
   // Phase 4: same follow-up resolver shape as /v/[slug]. Falls back
   // silently when the rail has no other entries in this category.
-  const followUp = await resolveFollowUp(article.story_id, poll.category);
+  const followUp = await resolveFollowUp(storyId, poll.category);
   return {
-    storyId: article.story_id,
+    pollId: poll.id,
     question: poll.question,
     optionA: poll.option_a_text,
     optionB: poll.option_b_text,
@@ -209,7 +259,7 @@ export default async function ArticleReader({
   // Inherits the linked story's poll if one exists + is enabled.
   // Renders after the body so the reader finishes the piece before
   // being asked to take a side.
-  const linkedPoll = await loadLinkedPoll(article);
+  const pollRender = await loadPollForArticle(article);
 
   console.info("[articles reader] render", {
     id: article.id,
@@ -217,8 +267,8 @@ export default async function ArticleReader({
     language,
     slug: article.slug,
     docLen: article.document?.length ?? 0,
-    has_linked_poll: linkedPoll !== null,
-    poll_already_voted: linkedPoll ? linkedPoll.votedSide !== null : false,
+    has_poll: pollRender !== null,
+    poll_already_voted: pollRender ? pollRender.votedSide !== null : false,
   });
 
   return (
@@ -319,15 +369,15 @@ export default async function ArticleReader({
           usually a short setup, then the numbered items carry the meat. */}
       {payload.type === "listicle" && <ListicleBlock payload={payload.payload} />}
 
-      {linkedPoll && (
+      {pollRender && (
         <PollWidget
-          storyId={linkedPoll.storyId}
-          question={linkedPoll.question}
-          optionA={linkedPoll.optionA}
-          optionB={linkedPoll.optionB}
-          initialResult={linkedPoll.result}
-          initialVotedSide={linkedPoll.votedSide}
-          followUp={linkedPoll.followUp}
+          pollId={pollRender.pollId}
+          question={pollRender.question}
+          optionA={pollRender.optionA}
+          optionB={pollRender.optionB}
+          initialResult={pollRender.result}
+          initialVotedSide={pollRender.votedSide}
+          followUp={pollRender.followUp}
         />
       )}
     </article>

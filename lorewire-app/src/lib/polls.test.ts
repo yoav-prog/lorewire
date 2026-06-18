@@ -9,9 +9,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { run } from "@/lib/db";
 import {
   CATEGORY_POLL_PRESETS,
+  computeArticlePollAggregate,
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
   getAggregateByStoryId,
+  getPollByArticleId,
+  getPollById,
   getPollByStoryId,
   getPresetForCategory,
   getVoteSideForCookie,
@@ -42,6 +45,21 @@ async function reset(): Promise<void> {
   await run("DELETE FROM polls WHERE 1=1");
   await run("DELETE FROM stories WHERE id LIKE 'test-poll-%'");
   await run("DELETE FROM stories WHERE id LIKE 'test-rail-%'");
+  await run("DELETE FROM articles WHERE id LIKE 'test-poll-art-%'");
+}
+
+async function seedArticle(
+  id: string,
+  type: string = "feature",
+  language: string = "en",
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "INSERT INTO articles (id, type, language, slug, title, status, payload, created_at, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, 'published', '{}', ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET type = excluded.type, updated_at = excluded.updated_at",
+    [id, type, language, `slug-${id}`, `Test ${id}`, now, now],
+  );
 }
 
 async function seedStory(id: string, category: string | null = "Drama"): Promise<void> {
@@ -964,5 +982,287 @@ describe("listPollOverview", () => {
   it("returns an empty array when there are no polls", async () => {
     const rows = await listPollOverview();
     expect(rows).toEqual([]);
+  });
+});
+
+// ─── Standalone-article polls (plan §15) ─────────────────────────────────────
+
+describe("article polls — upsert", () => {
+  it("creates an article-attached poll on the first call", async () => {
+    await seedArticle("test-poll-art-1", "feature");
+    const r = await upsertPoll({
+      articleId: "test-poll-art-1",
+      question: "Did this actually happen?",
+      optionA: "Yes",
+      optionB: "No",
+      enabled: true,
+      category: "feature",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.created).toBe(true);
+    const row = await getPollByArticleId("test-poll-art-1");
+    expect(row?.question).toBe("Did this actually happen?");
+    expect(row?.article_id).toBe("test-poll-art-1");
+    expect(row?.story_id).toBeNull();
+    expect(row?.category).toBe("feature");
+  });
+
+  it("updates the same row on the second call (one poll per article)", async () => {
+    await seedArticle("test-poll-art-2", "feature");
+    const a = await upsertPoll({
+      articleId: "test-poll-art-2",
+      question: "Q1?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    const b = await upsertPoll({
+      articleId: "test-poll-art-2",
+      question: "Q2?",
+      optionA: "C",
+      optionB: "D",
+      enabled: false,
+      category: "feature",
+    });
+    expect(b.created).toBe(false);
+    expect(b.pollId).toBe(a.pollId);
+    const row = await getPollByArticleId("test-poll-art-2");
+    expect(row?.question).toBe("Q2?");
+    expect(row?.enabled).toBe(0);
+  });
+
+  it("rejects an upsert with NEITHER storyId NOR articleId", async () => {
+    const r = await upsertPoll({
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: null,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/subject required/i);
+  });
+
+  it("rejects an upsert with BOTH storyId AND articleId set", async () => {
+    await seedStory("test-poll-3-story", "Drama");
+    await seedArticle("test-poll-art-3", "feature");
+    const r = await upsertPoll({
+      storyId: "test-poll-3-story",
+      articleId: "test-poll-art-3",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: null,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/exactly one of/i);
+  });
+
+  it("story poll and article poll with the SAME id can coexist (no collision)", async () => {
+    // Different subject ids that happen to look alike — the partial
+    // unique indexes filter by NOT NULL so story_id="X" and
+    // article_id="X" don't collide.
+    await seedStory("test-poll-collide-x", "Drama");
+    await seedArticle("test-poll-art-collide-x", "feature");
+    const s = await upsertPoll({
+      storyId: "test-poll-collide-x",
+      question: "S?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "Drama",
+    });
+    const a = await upsertPoll({
+      articleId: "test-poll-art-collide-x",
+      question: "A?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    expect(s.ok && a.ok).toBe(true);
+    expect(s.pollId).not.toBe(a.pollId);
+  });
+});
+
+describe("article polls — vote + live aggregate", () => {
+  it("recordVote accepts articleId in place of storyId", async () => {
+    await seedArticle("test-poll-art-vote-1", "feature");
+    const u = await upsertPoll({
+      articleId: "test-poll-art-vote-1",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    const r = await recordVote({
+      pollId: u.pollId,
+      articleId: "test-poll-art-vote-1",
+      category: "feature",
+      side: "A",
+      cookieToken: "cookie-art-1",
+      ipUaHash: null,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.inserted).toBe(true);
+  });
+
+  it("computeArticlePollAggregate produces correct live counts", async () => {
+    await seedArticle("test-poll-art-agg-1", "feature");
+    const u = await upsertPoll({
+      articleId: "test-poll-art-agg-1",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    for (let i = 0; i < 7; i++) {
+      await recordVote({
+        pollId: u.pollId,
+        articleId: "test-poll-art-agg-1",
+        category: "feature",
+        side: "A",
+        cookieToken: `cookie-art-agg-a-${i}`,
+        ipUaHash: null,
+      });
+    }
+    for (let i = 0; i < 3; i++) {
+      await recordVote({
+        pollId: u.pollId,
+        articleId: "test-poll-art-agg-1",
+        category: "feature",
+        side: "B",
+        cookieToken: `cookie-art-agg-b-${i}`,
+        ipUaHash: null,
+      });
+    }
+    const poll = await getPollById(u.pollId);
+    expect(poll).not.toBeNull();
+    const agg = await computeArticlePollAggregate(poll!);
+    expect(agg.votes_a).toBe(7);
+    expect(agg.votes_b).toBe(3);
+    expect(agg.total_votes).toBe(10);
+    expect(agg.divisiveness).toBeCloseTo(0.6, 4);
+    expect(agg.story_id).toBe(""); // contract: empty for article polls
+  });
+
+  it("computeArticlePollAggregate returns zeros for a poll with no votes", async () => {
+    await seedArticle("test-poll-art-agg-empty", "feature");
+    const u = await upsertPoll({
+      articleId: "test-poll-art-agg-empty",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    const poll = await getPollById(u.pollId);
+    const agg = await computeArticlePollAggregate(poll!);
+    expect(agg.total_votes).toBe(0);
+    expect(agg.divisiveness).toBe(0);
+  });
+
+  it("recordVote rejects when neither storyId nor articleId is set", async () => {
+    await seedArticle("test-poll-art-vote-rej", "feature");
+    const u = await upsertPoll({
+      articleId: "test-poll-art-vote-rej",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    const r = await recordVote({
+      pollId: u.pollId,
+      category: "feature",
+      side: "A",
+      cookieToken: "cookie-rej",
+      ipUaHash: null,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/subject required/i);
+  });
+
+  it("recordVote rejects when BOTH storyId and articleId are set", async () => {
+    await seedArticle("test-poll-art-vote-both", "feature");
+    const u = await upsertPoll({
+      articleId: "test-poll-art-vote-both",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    const r = await recordVote({
+      pollId: u.pollId,
+      storyId: "test-poll-art-vote-both",
+      articleId: "test-poll-art-vote-both",
+      category: "feature",
+      side: "A",
+      cookieToken: "cookie-both",
+      ipUaHash: null,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/exactly one of/i);
+  });
+
+  it("article-poll vote idempotency: same cookie re-vote = no-op", async () => {
+    await seedArticle("test-poll-art-idem", "feature");
+    const u = await upsertPoll({
+      articleId: "test-poll-art-idem",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    const first = await recordVote({
+      pollId: u.pollId,
+      articleId: "test-poll-art-idem",
+      category: "feature",
+      side: "A",
+      cookieToken: "cookie-idem",
+      ipUaHash: null,
+    });
+    const second = await recordVote({
+      pollId: u.pollId,
+      articleId: "test-poll-art-idem",
+      category: "feature",
+      side: "B",
+      cookieToken: "cookie-idem",
+      ipUaHash: null,
+    });
+    expect(first.inserted).toBe(true);
+    expect(second.inserted).toBe(false);
+    expect(second.ok).toBe(true);
+  });
+});
+
+describe("article polls — getVoteSideForCookie works for both subjects", () => {
+  it("returns the side for an article-poll cookie", async () => {
+    await seedArticle("test-poll-art-cookie", "feature");
+    const u = await upsertPoll({
+      articleId: "test-poll-art-cookie",
+      question: "Q?",
+      optionA: "A",
+      optionB: "B",
+      enabled: true,
+      category: "feature",
+    });
+    await recordVote({
+      pollId: u.pollId,
+      articleId: "test-poll-art-cookie",
+      category: "feature",
+      side: "B",
+      cookieToken: "cookie-article-side",
+      ipUaHash: null,
+    });
+    expect(
+      await getVoteSideForCookie(u.pollId, "cookie-article-side"),
+    ).toBe("B");
   });
 });

@@ -482,18 +482,27 @@ export const STORY_JOB_EVENTS: Table = {
   ],
 };
 
-// 2026-06-18 engagement polls. One row per story that has a poll.
-// `enabled = 0` hides the poll everywhere (admin can park a draft without
-// deleting it). `category` is denormalised from stories.category so the
-// rail queries ("Most Divisive", etc) filter without a join. Question +
-// option labels are short by contract (UI caps 80 / 24 / 24); the server
-// action enforces those before write. Plan:
-// _plans/2026-06-17-engagement-polls.md.
+// 2026-06-18 engagement polls. One row per story OR article that has
+// a poll. `enabled = 0` hides the poll everywhere (admin can park a
+// draft without deleting it). `category` is denormalised from
+// stories.category (or article-type for article polls) so the rail
+// queries ("Most Divisive", etc) filter without a join.
+//
+// Standalone-article polls (2026-06-18, plan §15): polls can attach
+// EITHER to a story (story_id non-null, article_id null) OR an
+// article (article_id non-null, story_id null) — never both, never
+// neither. The partial unique indexes in POST_TABLE_DDL enforce one
+// poll per subject. Story polls go through the existing aggregate
+// projection + rail surfaces; article polls compute counts live from
+// poll_votes (low expected volume, no projection table needed).
+//
+// Plan: _plans/2026-06-17-engagement-polls.md.
 export const POLLS: Table = {
   name: "polls",
   columns: [
     { name: "id", type: "TEXT", pk: true },
     { name: "story_id", type: "TEXT" },
+    { name: "article_id", type: "TEXT" },
     { name: "question", type: "TEXT" },
     { name: "option_a_text", type: "TEXT" },
     { name: "option_b_text", type: "TEXT" },
@@ -520,6 +529,14 @@ export const POLL_VOTES: Table = {
     { name: "id", type: "TEXT", pk: true },
     { name: "poll_id", type: "TEXT" },
     { name: "story_id", type: "TEXT" },
+    // 2026-06-18 standalone-article polls. Denormalised for
+    // article-poll analytics the same way story_id is for rails.
+    // Mutually exclusive with story_id at write time — recordVote
+    // enforces exactly one is populated based on which subject the
+    // parent poll is attached to. The unique index on (poll_id,
+    // cookie_token) doesn't change; it's the anti-double-vote
+    // primitive regardless of subject.
+    { name: "article_id", type: "TEXT" },
     { name: "category", type: "TEXT" },
     { name: "side", type: "TEXT" },
     { name: "cookie_token", type: "TEXT" },
@@ -661,13 +678,20 @@ export const POST_TABLE_DDL: string[] = [
   // hot read path (one query per rail) so the leading column matches.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_curation_surface_position " +
     "ON homepage_curation(surface, position)",
-  // 2026-06-18 engagement polls. story_id uniqueness is the load-bearing
-  // invariant — one poll per story. lib/polls.ts:upsertPoll targets this
-  // index via INSERT ... ON CONFLICT (story_id) DO UPDATE; without it,
-  // Postgres throws "no unique or exclusion constraint matching the ON
-  // CONFLICT specification" and the save action 500s. Mirrors the
-  // homepage_curation lesson learned in prod.
-  "CREATE UNIQUE INDEX IF NOT EXISTS idx_polls_story_id ON polls(story_id)",
+  // 2026-06-18 engagement polls. Both per-subject uniqueness indexes
+  // are PARTIAL — they only enforce uniqueness over the non-null
+  // values. The schema invariant is "exactly one of (story_id,
+  // article_id) is non-null"; the partial indexes mean an article-
+  // only poll (story_id NULL) doesn't collide on the story uniqueness
+  // check, and vice versa. lib/polls.ts:upsertPoll targets the
+  // matching index via lookup-then-write, NOT ON CONFLICT, so this
+  // shape works identically on SQLite + Postgres.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_polls_story_id " +
+    "ON polls(story_id) WHERE story_id IS NOT NULL",
+  // 2026-06-18 standalone-article polls (plan §15). Parallel partial
+  // unique to idx_polls_story_id — one poll per article.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_polls_article_id " +
+    "ON polls(article_id) WHERE article_id IS NOT NULL",
   // Rail read shape: filter by category + enabled, surface a list.
   "CREATE INDEX IF NOT EXISTS idx_polls_category_enabled " +
     "ON polls(category, enabled)",
@@ -685,6 +709,11 @@ export const POST_TABLE_DDL: string[] = [
   "CREATE INDEX IF NOT EXISTS idx_poll_votes_poll_id ON poll_votes(poll_id)",
   "CREATE INDEX IF NOT EXISTS idx_poll_votes_story_id " +
     "ON poll_votes(story_id)",
+  // 2026-06-18 standalone-article polls. Mirrors idx_poll_votes_story_id
+  // for the article-poll surface — supports the per-article analytics
+  // path (admin overview rollups, future article-only divisive rail).
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_article_id " +
+    "ON poll_votes(article_id)",
   // Retention sweep (24h prune of ip_ua_hash) + sparkline range scan
   // both filter by created_at. Cheap to keep, expensive to retrofit.
   "CREATE INDEX IF NOT EXISTS idx_poll_votes_created_at " +

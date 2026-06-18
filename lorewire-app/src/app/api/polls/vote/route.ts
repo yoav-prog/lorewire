@@ -10,6 +10,14 @@
 // force a full route revalidation; the fetch round-trip lets us paint
 // optimistically and patch with the server-confirmed numbers.
 //
+// 2026-06-18 standalone-article polls (plan §15): the body now
+// identifies the POLL directly (`pollId`) instead of the SUBJECT
+// (`storyId` only). The widget always knows the poll id (server-
+// resolved during page render and passed in as a prop), so the
+// route doesn't have to branch on subject kind to look it up. For
+// the aggregate response: story polls read from poll_aggregates;
+// article polls compute live via computeArticlePollAggregate.
+//
 // Security (rule 13):
 //   - Origin header MUST match NEXT_PUBLIC_SITE_ORIGIN (or be the dev
 //     fallback) so a cross-site script can't fire from another tab.
@@ -19,7 +27,7 @@
 //   - ip_ua_hash on poll_votes is one-way, pruned by retention, never
 //     surfaced anywhere public.
 //
-// Plan: _plans/2026-06-17-engagement-polls.md (§7 + §9).
+// Plan: _plans/2026-06-17-engagement-polls.md (§7 + §9 + §15).
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getOrIssueVoteToken } from "@/lib/poll-cookie";
@@ -30,9 +38,10 @@ import {
   DEFAULT_PER_MINUTE,
 } from "@/lib/poll-rate-limit";
 import {
+  computeArticlePollAggregate,
   DEFAULT_PUBLIC_FLOOR,
   getAggregateByStoryId,
-  getPollByStoryId,
+  getPollById,
   isPollSide,
   recordVote,
   refreshPollAggregateForStory,
@@ -40,7 +49,7 @@ import {
 } from "@/lib/polls";
 
 interface VoteBody {
-  storyId?: unknown;
+  pollId?: unknown;
   side?: unknown;
 }
 
@@ -91,9 +100,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  const storyId = typeof body.storyId === "string" ? body.storyId.trim() : "";
-  if (!storyId) {
-    return NextResponse.json({ error: "storyId required" }, { status: 400 });
+  const pollId = typeof body.pollId === "string" ? body.pollId.trim() : "";
+  if (!pollId) {
+    return NextResponse.json({ error: "pollId required" }, { status: 400 });
   }
   if (!isPollSide(body.side)) {
     return NextResponse.json(
@@ -103,8 +112,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // Resolve the poll BEFORE issuing a cookie — a vote on a non-existent
-  // or disabled story shouldn't pollute the client with a token.
-  const poll = await getPollByStoryId(storyId);
+  // or disabled poll shouldn't pollute the client with a token. The
+  // poll row carries the subject id (exactly one of story_id /
+  // article_id) which we then thread into recordVote.
+  const poll = await getPollById(pollId);
   if (!poll || poll.enabled !== 1) {
     return NextResponse.json({ error: "poll not available" }, { status: 404 });
   }
@@ -120,7 +131,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const limit = checkAndRecord(hash);
   if (!limit.ok) {
     console.warn("[polls vote rate-limit]", {
-      story_id: storyId,
+      poll_id: pollId,
       hash_prefix: hash.slice(0, 8),
       in_minute: limit.inMinute,
       in_hour: limit.inHour,
@@ -141,7 +152,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const result = await recordVote({
     pollId: poll.id,
-    storyId,
+    storyId: poll.story_id,
+    articleId: poll.article_id,
     category: poll.category,
     side: body.side,
     cookieToken,
@@ -152,7 +164,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // fields, bad side) — we've already validated, so this is
     // defense-in-depth.
     console.warn("[polls vote failed]", {
-      story_id: storyId,
+      poll_id: pollId,
       error: result.error,
     });
     return NextResponse.json(
@@ -161,21 +173,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
-  // On a fresh insert, refresh the aggregate inline so the client
-  // sees the new count immediately — without this the response would
-  // lag up to 5 minutes behind reality (until the cron tick) and the
-  // widget would show stale percentages on the post-vote reveal.
-  // Cheap: a single GROUP BY against the index. On a duplicate vote
-  // we skip the refresh — nothing changed.
-  if (result.inserted) {
-    await refreshPollAggregateForStory(storyId);
+  // Aggregate response: story polls go through the persisted
+  // projection (refresh inline so the post-vote percentages reveal
+  // immediately); article polls compute live every time since they
+  // bypass the projection table by design.
+  let view: ReturnType<typeof toResultView>;
+  if (poll.story_id) {
+    if (result.inserted) {
+      await refreshPollAggregateForStory(poll.story_id);
+    }
+    const agg = await getAggregateByStoryId(poll.story_id);
+    view = toResultView(agg, DEFAULT_PUBLIC_FLOOR);
+  } else {
+    const agg = await computeArticlePollAggregate(poll);
+    view = toResultView(agg, DEFAULT_PUBLIC_FLOOR);
   }
-  const agg = await getAggregateByStoryId(storyId);
 
   const response: VoteResponseOk = {
     ok: true,
     inserted: result.inserted,
-    result: toResultView(agg, DEFAULT_PUBLIC_FLOOR),
+    result: view,
   };
   return NextResponse.json(response);
 }

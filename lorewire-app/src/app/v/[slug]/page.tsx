@@ -242,7 +242,7 @@ export default async function StoryReader({
 
         {hasLivePoll && poll && pollResultView && (
           <PollWidget
-            storyId={story.id}
+            pollId={poll.id}
             question={poll.question}
             optionA={poll.option_a_text}
             optionB={poll.option_b_text}

@@ -19,7 +19,13 @@ export type PollSide = "A" | "B";
 
 export interface PollRow {
   id: string;
-  story_id: string;
+  /** Subject discriminator: exactly one of (story_id, article_id) is
+   *  non-null. Story polls power the homepage rails + the burnt-in
+   *  short card; article polls render on the article reader only and
+   *  compute aggregates live from poll_votes (no projection row).
+   *  2026-06-18 standalone-article polls (plan §15). */
+  story_id: string | null;
+  article_id: string | null;
   question: string;
   option_a_text: string;
   option_b_text: string;

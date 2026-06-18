@@ -31,7 +31,12 @@ import { useState, useTransition } from "react";
 import type { PollResultView, PollSide } from "@/lib/polls-shared";
 
 interface PollWidgetProps {
-  storyId: string;
+  /** 2026-06-18 standalone-article polls (plan §15): the widget
+   *  identifies the POLL directly, not the subject. The parent
+   *  server-resolves the poll row and passes the id in. Lets one
+   *  widget serve both story polls and article polls without
+   *  branching on subject kind. */
+  pollId: string;
   question: string;
   optionA: string;
   optionB: string;
@@ -55,7 +60,7 @@ interface PollWidgetProps {
 type VotedSide = PollSide | null;
 
 export function PollWidget({
-  storyId,
+  pollId,
   question,
   optionA,
   optionB,
@@ -82,7 +87,7 @@ export function PollWidget({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "same-origin",
-          body: JSON.stringify({ storyId, side }),
+          body: JSON.stringify({ pollId, side }),
         });
         const data = (await resp.json()) as {
           ok?: boolean;

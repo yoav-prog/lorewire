@@ -76,12 +76,29 @@ export default async function PollsOverviewPage() {
                     className="border-t border-line align-top"
                   >
                     <td className="px-4 py-3">
-                      <Link
-                        href={`/admin/stories/${row.poll.story_id}`}
-                        className="text-ink underline decoration-line hover:decoration-accent"
-                      >
-                        {row.storyTitle ?? `(${row.poll.story_id.slice(0, 8)})`}
-                      </Link>
+                      {row.poll.story_id ? (
+                        <Link
+                          href={`/admin/stories/${row.poll.story_id}`}
+                          className="text-ink underline decoration-line hover:decoration-accent"
+                        >
+                          {row.storyTitle ??
+                            `(${row.poll.story_id.slice(0, 8)})`}
+                        </Link>
+                      ) : row.poll.article_id ? (
+                        <Link
+                          href={`/admin/articles/${row.poll.article_id}`}
+                          className="text-ink underline decoration-line hover:decoration-accent"
+                        >
+                          Article poll{" "}
+                          <span className="font-mono text-muted">
+                            ({row.poll.article_id.slice(0, 8)})
+                          </span>
+                        </Link>
+                      ) : (
+                        <span className="font-mono text-[12px] text-muted">
+                          orphan poll ({row.poll.id.slice(0, 8)})
+                        </span>
+                      )}
                       {row.storyCategory && (
                         <div className="mt-0.5 font-mono text-[10px] uppercase tracking-wider text-muted">
                           {row.storyCategory}
