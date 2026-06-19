@@ -30,6 +30,7 @@ import {
 } from "@/lib/articles";
 import type { ContentRow, ContentSubKind } from "@/lib/repo";
 import { CATEGORIES, STATUSES, statusClass } from "@/app/admin/ui";
+import { matchesContentSearch } from "@/lib/content-search";
 
 const SUBKIND_LABELS: Record<ContentSubKind, string> = {
   video: "Video story",
@@ -107,6 +108,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   >([]);
   const [undo, setUndo] = useState<UndoState | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [query, setQuery] = useState("");
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -121,6 +123,20 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     for (const r of rows) m.set(rowKey(r.kind, r.id), r);
     return m;
   }, [rows]);
+
+  // The search bar narrows the visible row set in place. The full `rows`
+  // array still drives rowByKey so a row that's selected and then hidden
+  // by the query stays in `selected` — clearing the query restores it.
+  const filteredRows = useMemo(() => {
+    if (!query.trim()) return rows;
+    return rows.filter((r) => matchesContentSearch(r, query));
+  }, [rows, query]);
+
+  const filteredKeySet = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of filteredRows) s.add(rowKey(r.kind, r.id));
+    return s;
+  }, [filteredRows]);
 
   // selectedItems is the source of truth for "what's actually actionable".
   // Stale keys (selected rows that vanished after a filter change or a
@@ -148,7 +164,16 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   }, [selectedItems]);
 
   const anySelected = counts.total > 0;
-  const allSelected = rows.length > 0 && counts.total === rows.length;
+  // Header checkbox tracks the *visible* set (rows after the search filter).
+  // This matches the lazy-user expectation: type to narrow, click select-all,
+  // get exactly the rows you can see.
+  const allFilteredSelected = useMemo(() => {
+    if (filteredRows.length === 0) return false;
+    for (const key of filteredKeySet) {
+      if (!selected.has(key)) return false;
+    }
+    return true;
+  }, [filteredRows, filteredKeySet, selected]);
 
   function toggleOne(kind: Kind, id: string) {
     setSelected((prev) => {
@@ -163,8 +188,16 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
 
   function toggleAll() {
     setSelected((prev) => {
-      if (prev.size === rows.length) return new Set();
-      return new Set(rows.map((r) => rowKey(r.kind, r.id)));
+      const next = new Set(prev);
+      if (allFilteredSelected) {
+        // Deselect the visible set; rows hidden by the search query stay
+        // selected so they are not silently dropped.
+        for (const key of filteredKeySet) next.delete(key);
+      } else {
+        for (const key of filteredKeySet) next.add(key);
+      }
+      console.info("[content list selection]", { count: next.size });
+      return next;
     });
   }
 
@@ -327,28 +360,59 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         </ul>
       )}
 
+      <div className="relative">
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search title, slug, category, status, id…"
+          aria-label="Search content"
+          className="w-full rounded-xl border border-line bg-surface px-4 py-2 pr-9 text-[13px] text-ink placeholder:text-muted focus:border-accent focus:outline-none"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            aria-label="Clear search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-0.5 font-mono text-[12px] text-muted transition-colors hover:text-ink"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
       <div className="overflow-hidden rounded-xl border border-line">
         {rows.length === 0 ? (
           <p className="bg-surface p-6 text-center text-[14px] text-muted">
             No content matches this filter.
+          </p>
+        ) : filteredRows.length === 0 ? (
+          <p className="bg-surface p-6 text-center text-[14px] text-muted">
+            No content matches{" "}
+            <span className="font-mono text-ink">&ldquo;{query.trim()}&rdquo;</span>
+            .
           </p>
         ) : (
           <>
             <div className="flex items-center gap-3 border-b border-line bg-surface2 px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-muted">
               <input
                 type="checkbox"
-                checked={allSelected}
+                checked={allFilteredSelected}
                 onChange={toggleAll}
-                aria-label={allSelected ? "Clear selection" : "Select all"}
+                aria-label={
+                  allFilteredSelected ? "Clear selection" : "Select all"
+                }
                 className="h-3.5 w-3.5 cursor-pointer accent-accent"
               />
               <span>
                 {anySelected
                   ? `${counts.total} selected`
-                  : `${rows.length} ${rows.length === 1 ? "item" : "items"}`}
+                  : query.trim()
+                    ? `${filteredRows.length} of ${rows.length} ${rows.length === 1 ? "item" : "items"}`
+                    : `${rows.length} ${rows.length === 1 ? "item" : "items"}`}
               </span>
             </div>
-            {rows.map((r) => {
+            {filteredRows.map((r) => {
               const key = rowKey(r.kind, r.id);
               const isSelected = selected.has(key);
               return (
