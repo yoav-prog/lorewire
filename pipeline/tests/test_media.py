@@ -292,5 +292,88 @@ class StagingDirTests(unittest.TestCase):
         )
 
 
+class GenerateMediaSkipFlagsTests(unittest.TestCase):
+    """Verify the two skip flags on `generate_media` actually short-circuit
+    the right cost centers (plans:
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md
+    _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md).
+
+    The Reddit-source worker passes BOTH skip_hero=True and
+    skip_long_form_scenes=True, so the total kie image calls must be
+    ZERO — the hero is built later by the finisher, and the scenes
+    come from the short. Heavy mocking is intentional: the goal is
+    to exercise the GATING, not the rest of the pipeline."""
+
+    def setUp(self) -> None:
+        # Patches that prevent any real network / disk / config read.
+        # Each stub returns the minimum the function needs to keep going.
+        from pathlib import Path
+        self._tmpdir = Path(__file__).parent / "_tmp_skip_flags"
+        self._tmpdir.mkdir(exist_ok=True)
+        # Patch order: the narration step happens AFTER the hero+scene
+        # loops. We stub it to a quick no-op so the function can return
+        # without touching real TTS infra.
+        self._stack = [
+            # 3 prompts: first is the fallback hero (dropped by media.py), the
+            # other 2 are scene prompts. So default path = 2 hero variants + 2
+            # scene generations = 4 kie calls.
+            mock.patch.object(media.stages, "make_image_prompts", return_value=["p0", "p1", "p2"]),
+            mock.patch.object(media, "_resolve_scene_count", return_value=2),
+            mock.patch.object(media, "_generate_with_retry", return_value="https://kie/img.png"),
+            mock.patch.object(media.images, "download"),
+            mock.patch.object(media.gcs, "publish", side_effect=lambda local, key, url: url),
+            mock.patch.object(media.models, "get_selected", return_value="kie/gpt-image-2"),
+            mock.patch.object(media.narration, "render_narration",
+                              return_value={"words": [], "spoken_script": "", "provider": "stub"}),
+            mock.patch.object(media, "_budget_log"),
+            mock.patch.object(media, "_staging_dir", return_value=self._tmpdir),
+            mock.patch.object(media, "_prop_slide_enabled", return_value=False),
+            mock.patch.object(media, "_mouth_swap_enabled", return_value=False),
+        ]
+        self._mocks = [p.start() for p in self._stack]
+        self.gen_mock = self._mocks[2]  # _generate_with_retry
+
+    def tearDown(self) -> None:
+        for p in self._stack:
+            p.stop()
+
+    def _call(self, **kwargs):
+        from pathlib import Path
+        return media.generate_media(
+            "id1",
+            {"reddit_id": "id1", "category": "Drama", "headline": "T"},
+            "Some body.",
+            "Title",
+            False,
+            repo_root=Path("/repo"),
+            **kwargs,
+        )
+
+    def test_default_path_calls_kie_for_hero_and_scenes(self):
+        # Without the skip flags the gates are open: hero (2 variants) +
+        # 2 scene prompts = 4 kie calls.
+        self._call()
+        self.assertEqual(self.gen_mock.call_count, 4)
+
+    def test_skip_hero_drops_hero_kie_calls(self):
+        # Hero gone, 2 scene calls remain.
+        self._call(skip_hero=True)
+        self.assertEqual(self.gen_mock.call_count, 2)
+
+    def test_skip_long_form_scenes_drops_scene_kie_calls(self):
+        # Scene loop gone, 2 hero calls remain.
+        self._call(skip_long_form_scenes=True)
+        self.assertEqual(self.gen_mock.call_count, 2)
+
+    def test_both_skip_flags_zero_kie_calls(self):
+        # The Reddit-source worker path: zero paid kie image gen here.
+        out = self._call(skip_hero=True, skip_long_form_scenes=True)
+        self.assertEqual(self.gen_mock.call_count, 0)
+        # And the returned dict has no "images" key so the caller's
+        # store.upsert_story doesn't overwrite the column with an empty
+        # JSON list.
+        self.assertNotIn("images", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,8 +40,11 @@ SCENES = [
 
 CHARACTER_URL = "https://kie/character-base.png"
 
+SHORT_OUTPUT_URL = "https://gcs/bucket/short.mp4"
+
 DONE_SHORT = {
     "status": "done",
+    "output_url": SHORT_OUTPUT_URL,
     "props": json.dumps({
         "character_base_url": CHARACTER_URL,
         "scenes": SCENES,
@@ -90,6 +93,12 @@ def _patch_stack(stack: unittest.TestCase, **overrides):
         ),
         "update_thumb_square": mock.patch.object(
             media.store, "update_story_thumbnail_square",
+        ),
+        "update_scenes": mock.patch.object(
+            media.store, "update_story_scenes",
+        ),
+        "update_video_url": mock.patch.object(
+            media.store, "update_story_video_url",
         ),
     }
     base.update(overrides)
@@ -179,6 +188,60 @@ class HappyPathTests(unittest.TestCase):
         self.assertEqual(result["hero_index"], 0)
         self.assertEqual(result["thumbnail_index"], 3)
         self.assertEqual(result["picker_reasoning"], "calm vs dramatic")
+
+    def test_writes_short_scene_urls_into_stories_images(self):
+        # 2026-06-19 (plan:
+        # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+        # the worker stops generating long-form scene images, so the
+        # finisher hands the short's scene URLs off to stories.images
+        # for the public article reader's inline illustrations.
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self)
+            media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        mocks["update_scenes"].assert_called_once()
+        story_id, urls = mocks["update_scenes"].call_args.args
+        self.assertEqual(story_id, "abc123")
+        # All five SCENES carry URLs in the fixture; the handoff
+        # passes them through verbatim and in order.
+        self.assertEqual(urls, [s["url"] for s in SCENES])
+
+    def test_auto_applies_short_as_stories_video_url(self):
+        # 2026-06-19 (plan:
+        # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+        # the finisher writes the short's output_url to stories.video_url
+        # so the admin doesn't have to click the "Use as story video"
+        # button. Mirrors what UseShortAsVideoButton + applyShortToStory
+        # do on the TS side.
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self)
+            media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        mocks["update_video_url"].assert_called_once_with(
+            "abc123", SHORT_OUTPUT_URL,
+        )
+
+    def test_skips_video_url_apply_when_short_has_no_output_url(self):
+        # Edge case: the short marks status='done' before the renderer
+        # writes output_url (a race, or a render that failed midway but
+        # left status=done somehow). We shouldn't blank out an existing
+        # video_url by writing "". Skip the apply silently.
+        broken_short = {
+            "status": "done",
+            "output_url": None,
+            "props": DONE_SHORT["props"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self, latest_short=mock.patch.object(
+                media.store, "latest_short_render_for_story",
+                return_value=broken_short,
+            ))
+            media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        mocks["update_video_url"].assert_not_called()
 
 
 class PartialFailureTests(unittest.TestCase):

@@ -333,13 +333,16 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             job_id, reddit_id, "media_started",
             message="Generating scenes + voice + alignment (hero deferred to finisher)",
         )
-        # 2026-06-19 (plan:
-        # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md):
+        # 2026-06-19 (plans:
+        # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md
+        # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
         # The hero is generated AFTER the short completes — `skip_hero=True`
-        # tells `generate_media` to keep scenes + voice + alignment and skip
+        # tells `generate_media` to keep narration + alignment and skip
         # only the two t2i hero calls that the finisher will overwrite anyway.
-        # Net: -$0.08 in wasted hero gen per story; +0 latency until the short
-        # finishes (the worker now waits for it inline).
+        # `skip_long_form_scenes=True` skips the 27-31 long-form scene images
+        # (~$1.35-1.55/story); the finisher writes the short's own scenes into
+        # stories.images so the article reader still has inline illustrations.
+        # Net: -$1.43/story average vs. the pre-2026-06-19 worker path.
         media_cols = media.generate_media(
             idea["reddit_id"],
             idea,
@@ -348,17 +351,17 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             False,
             repo_root=REPO_ROOT,
             skip_hero=True,
+            skip_long_form_scenes=True,
         )
         row.update(media_cols)
         row["tokens"] = llm.totals["total_tokens"] - before_tokens
         store.update_story_job_progress(claimed_job["id"], 90)
         store.log_story_job_event(
             job_id, reddit_id, "media_done",
-            message="Scenes + voice + alignment ready (hero pending finisher)",
+            message="Voice + alignment ready (hero + scenes pending finisher)",
             payload={
                 "audio_url": bool(media_cols.get("audio_url")),
                 "alignment": bool(media_cols.get("alignment")),
-                "scenes": bool(media_cols.get("images")),
             },
         )
         # Video render is OUT of band — enqueue into video_renders so the
@@ -393,20 +396,14 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         },
     )
 
-    # Hand off to the video pipeline. The video_renders queue is what
-    # the editor's existing "Render" button uses; auto-enqueueing here
-    # means the admin doesn't have to remember to click it. The Cloud
-    # Run cron picks the row up within ~1 min and writes back
-    # stories.video_url. The publish gate already requires video_url
-    # IS NOT NULL, so the story stays at status='review' until then —
-    # admin doesn't need to know about the two-queue split.
-    if with_media:
-        _enqueue_video_render_for_story(row)
-        store.log_story_job_event(
-            job_id, reddit_id, "video_render_enqueued",
-            message="Long-form video handed off to Cloud Run",
-            payload={"story_id": row["id"]},
-        )
+    # 2026-06-19 (plan:
+    # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+    # The long-form video render is NO LONGER auto-enqueued for Reddit-source
+    # jobs. The MP4 render burned Cloud Run compute + worker time on top of
+    # an MP4 the public reader never asked for. The publish gate's video_url
+    # requirement has been dropped to match. The video editor's "Render"
+    # button on /admin/videos/[id] still works as an ad-hoc escape hatch
+    # when a specific story genuinely needs the long-form MP4.
 
     # 2026-06-19 (plan:
     # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md):

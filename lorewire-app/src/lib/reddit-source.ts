@@ -649,6 +649,13 @@ interface StoryReadinessInput {
   status: string | null;
   body: string | null;
   hero_image: string | null;
+  // 2026-06-19 (plan:
+  // _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+  // video_url is no longer checked here. Reddit-source stories don't
+  // auto-render long-form MP4s any more; the short carries the visual
+  // payload, the article reads from hero + scenes. Kept on the interface
+  // (rather than removed) so callers passing it as part of a wider story
+  // shape don't break — the field is just ignored.
   video_url: string | null;
 }
 
@@ -684,9 +691,9 @@ export function evaluatePublishReadiness(
   if (!story.hero_image) {
     missing.push("hero image is missing");
   }
-  if (!story.video_url) {
-    missing.push("video has not been rendered yet");
-  }
+  // 2026-06-19: video_url is no longer a publish prerequisite. See the
+  // comment on StoryReadinessInput above and
+  // _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md.
   if (story.status === "published") {
     missing.push("story is already published");
   }

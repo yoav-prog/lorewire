@@ -2227,6 +2227,31 @@ def update_story_hero_landscape(story_id: str, hero_url: str) -> None:
         )
 
 
+def update_story_video_url(story_id: str, url: str) -> None:
+    """Point stories.video_url at a URL. Mirror of the TS
+    `applyShortToStory` helper at lib/short-render-queue.ts:303 —
+    same pointer-swap semantics, called from the Python hero+thumbnail
+    finisher so the short is auto-applied as the story video the
+    moment it finishes (no manual button click). Plan:
+    _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET video_url = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET video_url = ?, updated_at = ? WHERE id = ?",
+            (url, now, story_id),
+        )
+
+
 def update_story_thumbnail(story_id: str, url: str) -> None:
     """Patch stories.thumbnail_image (3:4 portrait). Written by the
     hero+thumbnail finisher after a short completes. Sibling of

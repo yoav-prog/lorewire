@@ -480,6 +480,7 @@ def generate_media(
     image_count: int | None = None,
     *,
     skip_hero: bool = False,
+    skip_long_form_scenes: bool = False,
 ) -> dict:
     """Generate images + narration for one story and return DB columns.
 
@@ -501,6 +502,16 @@ def generate_media(
     per story (the t2i hero is immediately overwritten once the short is
     done). Scene images + narration still run unchanged because the
     finisher uses them as i2i inputs.
+
+    `skip_long_form_scenes=True` skips the per-scene kie image generations
+    (typically 27-31 per story at ~$0.05 each = ~$1.35-1.55). Used when the
+    caller plans to populate `stories.images` from the short's scene URLs
+    instead — every Reddit-source job goes through that path now because
+    the article doesn't ship a long-form MP4 anyway (the publish gate's
+    `video_url` requirement has been dropped). Narration + alignment still
+    run; only the image-generation loop is skipped, and `images` is left
+    out of the returned dict so the caller's downstream write isn't fooled
+    into overwriting with an empty list.
     """
     safe_id = _sanitize_id(story_id)
     out: dict = {}
@@ -598,7 +609,16 @@ def generate_media(
         f"[media id={safe_id} aspect] video={fresh_video_aspect} "
         f"scene_kie_aspect={scene_kie_aspect}"
     )
-    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+    scene_prompts = (
+        [] if skip_long_form_scenes
+        else (prompts[1:] if len(prompts) > 1 else prompts)
+    )
+    if skip_long_form_scenes:
+        print(
+            f"[media id={safe_id} scenes] skipped — caller will populate "
+            "stories.images from the short's scenes (saves ~$"
+            f"{(scene_count * 0.05):.2f} in kie gen per story)"
+        )
     scene_urls: list[str] = []
     for i, prompt in enumerate(scene_prompts):
         filename = f"scene-{i + 1}.png"
@@ -1278,6 +1298,40 @@ def _build_hero_and_thumbnail_from_short(
     scenes: list[dict] = [s for s in scenes_raw if isinstance(s, dict) and s.get("url")]
     if not scenes:
         raise ValueError(f"story {safe_id} short render scenes carry no URLs")
+
+    # 2026-06-19 (plan:
+    # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+    # Plumb the short's scene URLs into stories.images so the public
+    # article reader has inline illustrations. The Reddit-source worker
+    # path skips the 27-31 long-form scene gen entirely (~$1.43 saved
+    # per story) and relies on this handoff for article visuals. Idempotent:
+    # re-running the finisher just rewrites the same list.
+    scene_urls_for_article = [
+        s["url"] for s in scenes
+        if isinstance(s.get("url"), str) and s["url"]
+    ]
+    if scene_urls_for_article:
+        store.update_story_scenes(story["id"], scene_urls_for_article)
+        print(
+            f"[hero+thumb from-short] id={safe_id} wrote "
+            f"{len(scene_urls_for_article)} short scene URLs into stories.images"
+        )
+
+    # 2026-06-19: also auto-apply the short as the story's video. The
+    # admin's "Use this short as the story's video" button (at
+    # /admin/(panel)/shorts/[id]/UseShortAsVideoButton.tsx) used to be
+    # the only path that pointed stories.video_url at the short. The
+    # user shouldn't have to click it — when the short finishes, this
+    # IS the story's video. Mirrors the TS `applyShortToStory` helper
+    # exactly (a single column write). Idempotent: a re-render that
+    # produces the same URL is a no-op.
+    short_output_url = (latest.get("output_url") or "").strip()
+    if short_output_url:
+        store.update_story_video_url(story["id"], short_output_url)
+        print(
+            f"[hero+thumb from-short] id={safe_id} auto-applied short as "
+            f"stories.video_url={short_output_url}"
+        )
 
     pick = stages.pick_hero_and_thumbnail_scenes(title, body, scenes, dry_run=False)
     hero_idx = pick["hero_index"]
