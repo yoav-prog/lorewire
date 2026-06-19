@@ -329,6 +329,87 @@ export async function setStoryNoindex(
   console.info("[stories repo] noindex", { id, noindex });
 }
 
+// Hard delete a story and every row in the schema that is meaningless without
+// it. No FK constraints exist (see schema.ts) so the cleanup is explicit. The
+// behavior was chosen per _plans/2026-06-19-content-bulk-actions.md:
+//
+//   Owned rows -> DELETE (renders, render-events via parent-id chain, polls).
+//   User state -> DELETE (saves, likes, recently viewed, continue) so the
+//     public reader never resolves a "ghost" item it can't render.
+//   Loose links -> NULL (articles.story_id, reddit_source.story_id,
+//     story_jobs.story_id) so the parent rows keep working without the link.
+//   Curation slot -> DELETE the slot (an empty homepage tile is worse than
+//     no tile; admin can re-curate).
+//
+// Returns the row that was deleted (or null if it did not exist) so the
+// caller can fan rendered-media (audio_url, video_url) into GCS deletion.
+// Throws if the row exists but the cascade fails partway — the caller
+// should treat that as a batch-item failure.
+export async function deleteStory(id: string): Promise<StoryRow | null> {
+  const existing = await getStory(id);
+  if (!existing) return null;
+
+  // Render-event children first — they reference their parent render by id.
+  await run(
+    "DELETE FROM image_render_events WHERE render_id IN " +
+      "(SELECT id FROM image_renders WHERE owner_kind = 'story' AND owner_id = ?)",
+    [id],
+  );
+  await run(
+    "DELETE FROM video_render_events WHERE render_id IN " +
+      "(SELECT id FROM video_renders WHERE story_id = ?)",
+    [id],
+  );
+  await run(
+    "DELETE FROM short_render_events WHERE render_id IN " +
+      "(SELECT id FROM short_renders WHERE story_id = ?)",
+    [id],
+  );
+
+  // Owned-by-story queues and projections.
+  await run("DELETE FROM image_renders WHERE owner_kind = 'story' AND owner_id = ?", [id]);
+  await run("DELETE FROM video_renders WHERE story_id = ?", [id]);
+  await run("DELETE FROM short_renders WHERE story_id = ?", [id]);
+  await run("DELETE FROM voice_renders WHERE story_id = ?", [id]);
+  await run("DELETE FROM poll_votes WHERE story_id = ?", [id]);
+  await run("DELETE FROM polls WHERE story_id = ?", [id]);
+  await run("DELETE FROM poll_aggregates WHERE story_id = ?", [id]);
+
+  // Public-user state pointing at the story.
+  await run("DELETE FROM user_saves WHERE story_id = ?", [id]);
+  await run("DELETE FROM user_likes WHERE story_id = ?", [id]);
+  await run("DELETE FROM user_recently_viewed WHERE story_id = ?", [id]);
+  await run("DELETE FROM user_continue WHERE story_id = ?", [id]);
+
+  // Homepage slot pointing at the story is dropped (an empty slot misleads
+  // the reader; the editor can re-fill the position from /admin/homepage).
+  await run("DELETE FROM homepage_curation WHERE story_id = ?", [id]);
+
+  // Loose references — preserve the parent row, just unlink. articles.story_id
+  // is the hero/og borrow link; reddit_source.story_id is the "this Reddit
+  // post produced story X" trail; story_jobs.story_id is the job-history row.
+  await run("UPDATE articles SET story_id = NULL WHERE story_id = ?", [id]);
+  await run("UPDATE reddit_source SET story_id = NULL WHERE story_id = ?", [id]);
+  await run("UPDATE story_jobs SET story_id = NULL WHERE story_id = ?", [id]);
+
+  // Finally, the story row itself.
+  await run("DELETE FROM stories WHERE id = ?", [id]);
+  // eslint-disable-next-line no-console -- rule 14: observability from day one
+  console.info("[stories repo] delete", { id });
+  return existing;
+}
+
+// Thin wrapper around updateStory for callers that want a typed setter
+// instead of a Record<string, unknown>. Used by bulk-content actions so the
+// category-change path reads as `setStoryCategory(id, "Drama")` at the call
+// site. `category` is already in EDITABLE so this is purely a clarity win.
+export async function setStoryCategory(
+  id: string,
+  category: string,
+): Promise<void> {
+  await updateStory(id, { category });
+}
+
 // Phase 3 of _plans/2026-06-14-voiceover-picker.md. Set or clear the
 // per-story voice override. Pass `null` to either field to clear it —
 // NULL columns mean "use the global default", which is how the

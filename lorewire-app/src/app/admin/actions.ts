@@ -32,6 +32,8 @@ import {
   setStoryVoice,
   getStory as getStoryRow,
   deleteArticle,
+  deleteStory,
+  setStoryCategory,
   appendRevision,
   checkSlugAvailable,
   updateArticleSlug,
@@ -2746,4 +2748,372 @@ export async function listStoryJobEventsForRedditAction(
   if (!redditId) return [];
   const { listStoryJobEventsForReddit } = await import("@/lib/story-jobs");
   return listStoryJobEventsForReddit(redditId);
+}
+
+// --- Bulk content actions (2026-06-19) --------------------------------------
+// Plan: _plans/2026-06-19-content-bulk-actions.md.
+//
+// The /admin/content list is a client island that lets the operator tick
+// rows and run a bulk action (publish, unpublish, set-status, set-category,
+// delete). These actions are the server-side entry points. Both stories and
+// articles flow through one of two actions:
+//
+//   bulkUpdateContentAction(items, op)
+//     - status change (any STATUSES value), works on both kinds
+//     - category change (Story CATEGORIES), stories only — article items in
+//       the same batch are recorded as failures with reason "kind-mismatch"
+//
+//   bulkDeleteContentAction(items)
+//     - hard delete. Stories: deleteStory + deleteStoryMedia (the GCS
+//       cleanup is best-effort and never blocks the row delete). Articles:
+//       deleteArticle (cascades to revisions per the repo function).
+//
+// Both actions:
+//   - require admin via requireAdmin() at entry,
+//   - re-read each row from the database before mutating to defend against
+//     a client that lies about the `kind` of an id,
+//   - catch and record per-item errors so a batch keeps going past one
+//     bad row,
+//   - return a BulkActionResult the client uses to render success counts,
+//     failure lists, and the inline undo banner (status / category undo
+//     uses the `prev` map; delete is not undoable).
+//
+// Security note: input validation runs at the boundary (status / category
+// against the closed enums) BEFORE any DB call, so a forged client payload
+// can't land an arbitrary string in a column. Hard cap of MAX_BULK_ITEMS
+// protects against accidental "select all 200" runaway operations.
+
+const MAX_BULK_ITEMS = 200;
+
+const STORY_CATEGORIES = new Set([
+  "Drama",
+  "Entitled",
+  "Humor",
+  "Wholesome",
+  "Dating",
+  "Roommate",
+]);
+
+const STORY_STATUSES = new Set<StoryStatus>([
+  "draft",
+  "review",
+  "scripted",
+  "rendering",
+  "ready",
+  "published",
+  "archived",
+]);
+
+const ARTICLE_STATUSES_SET = new Set<ArticleStatus>([
+  "draft",
+  "review",
+  "published",
+  "archived",
+]);
+
+export type BulkContentKind = "story" | "article";
+
+export interface BulkContentItem {
+  kind: BulkContentKind;
+  id: string;
+}
+
+export type BulkUpdateOp =
+  | { type: "status"; status: string }
+  | { type: "category"; category: string };
+
+export interface BulkActionFailure {
+  kind: BulkContentKind;
+  id: string;
+  reason: string;
+}
+
+export interface BulkActionResult {
+  ok: BulkContentItem[];
+  failed: BulkActionFailure[];
+  // Previous values, keyed by `${kind}:${id}`. For status ops the value is
+  // the old status; for category ops the value is the old category (stories
+  // only). The client uses this to drive the inline undo banner — it calls
+  // bulkUpdateContentAction again with the previous values to reverse.
+  prev: Record<string, string | null>;
+}
+
+function isBulkContentKind(v: unknown): v is BulkContentKind {
+  return v === "story" || v === "article";
+}
+
+function validateItems(items: unknown): BulkContentItem[] {
+  if (!Array.isArray(items)) {
+    throw new Error("bulk-action: items is not an array");
+  }
+  if (items.length === 0) {
+    throw new Error("bulk-action: items is empty");
+  }
+  if (items.length > MAX_BULK_ITEMS) {
+    throw new Error(`bulk-action: exceeds ${MAX_BULK_ITEMS} items`);
+  }
+  const out: BulkContentItem[] = [];
+  for (const raw of items) {
+    if (!raw || typeof raw !== "object") {
+      throw new Error("bulk-action: item is not an object");
+    }
+    const kind = (raw as { kind?: unknown }).kind;
+    const id = (raw as { id?: unknown }).id;
+    if (!isBulkContentKind(kind)) {
+      throw new Error("bulk-action: invalid kind");
+    }
+    if (typeof id !== "string" || !id) {
+      throw new Error("bulk-action: invalid id");
+    }
+    out.push({ kind, id });
+  }
+  return out;
+}
+
+export async function bulkUpdateContentAction(
+  itemsInput: BulkContentItem[],
+  op: BulkUpdateOp,
+): Promise<BulkActionResult> {
+  await requireAdmin();
+  const items = validateItems(itemsInput);
+  if (!op || typeof op !== "object" || typeof op.type !== "string") {
+    throw new Error("bulk-action: invalid op");
+  }
+  if (op.type === "status") {
+    // Closed-enum check: status string must be in at least one of the two
+    // kind-specific sets. Per-item validation below narrows further so a
+    // story-only status like "scripted" can't be applied to an article row.
+    if (
+      !STORY_STATUSES.has(op.status as StoryStatus) &&
+      !ARTICLE_STATUSES_SET.has(op.status as ArticleStatus)
+    ) {
+      throw new Error("bulk-action: invalid status");
+    }
+  } else if (op.type === "category") {
+    if (!STORY_CATEGORIES.has(op.category)) {
+      throw new Error("bulk-action: invalid category");
+    }
+  } else {
+    throw new Error("bulk-action: unknown op type");
+  }
+
+  console.info("[content bulk action] start", {
+    type: op.type,
+    count: items.length,
+  });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+  const prev: Record<string, string | null> = {};
+
+  for (const item of items) {
+    try {
+      if (item.kind === "story") {
+        const story = await getStoryRow(item.id);
+        if (!story) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        if (op.type === "status") {
+          if (!STORY_STATUSES.has(op.status as StoryStatus)) {
+            failed.push({ ...item, reason: "invalid-status-for-story" });
+            continue;
+          }
+          const prevStatus = story.status;
+          await setStatus(item.id, op.status as StoryStatus);
+          // Mirror the side-effect from changeStatus(): a story that
+          // transitions to published gets an auto-drafted poll if it has
+          // enough body text. Failures are swallowed so a poll-draft
+          // problem can't make the batch publish look broken.
+          if (op.status === "published" && prevStatus !== "published") {
+            const body = (story.body ?? "").trim();
+            if (body.length >= 50) {
+              try {
+                const { autoDraftPollForSubject } = await import(
+                  "@/lib/poll-autodraft"
+                );
+                await autoDraftPollForSubject({
+                  kind: "story",
+                  storyId: item.id,
+                  title: story.title,
+                  body,
+                  category: story.category,
+                });
+              } catch (err) {
+                console.warn("[content bulk action] poll-autodraft failed", {
+                  id: item.id,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+          }
+          prev[`${item.kind}:${item.id}`] = prevStatus;
+        } else {
+          // category — story only
+          const prevCategory = story.category;
+          await setStoryCategory(item.id, op.category);
+          prev[`${item.kind}:${item.id}`] = prevCategory;
+        }
+      } else {
+        // article
+        const article = await getArticle(item.id);
+        if (!article) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        if (op.type === "category") {
+          // Category bulk action is stories-only by design: articles don't
+          // carry a writable category column, their `type` is the badge and
+          // type is set-at-creation per repo.ts:651-656.
+          failed.push({ ...item, reason: "kind-mismatch-category" });
+          continue;
+        }
+        if (!ARTICLE_STATUSES_SET.has(op.status as ArticleStatus)) {
+          failed.push({ ...item, reason: "invalid-status-for-article" });
+          continue;
+        }
+        // Mirror the publish guard from setArticleStatusAction: every
+        // image must carry alt text before the article is allowed to go
+        // public. Failing rows are recorded with a precise reason so the
+        // modal can show "3 images missing alt text" rather than a vague
+        // "publish failed".
+        if (op.status === "published") {
+          let doc: unknown = null;
+          try {
+            doc = article.document ? JSON.parse(article.document) : null;
+          } catch {
+            doc = null;
+          }
+          const missing =
+            countImagesMissingAlt(doc) + countGalleryImagesMissingAlt(doc);
+          if (missing > 0) {
+            failed.push({ ...item, reason: `alt-missing-${missing}` });
+            continue;
+          }
+        }
+        const prevStatus = article.status;
+        await setArticleStatus(item.id, op.status as ArticleStatus);
+        prev[`${item.kind}:${item.id}`] = prevStatus;
+      }
+      ok.push(item);
+      console.info("[content bulk item]", {
+        id: item.id,
+        kind: item.kind,
+        ok: true,
+        op: op.type,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content bulk action] failed", {
+        id: item.id,
+        kind: item.kind,
+        error: reason,
+      });
+    }
+  }
+
+  // Revalidate the list page once, and any per-item editor page that might
+  // be open in another tab so it doesn't show stale state after the action.
+  revalidatePath("/admin/content");
+  for (const item of ok) {
+    if (item.kind === "story") {
+      revalidatePath(`/admin/stories/${item.id}`);
+    } else {
+      revalidatePath(`/admin/articles/${item.id}`);
+    }
+  }
+
+  console.info("[content bulk action] done", {
+    type: op.type,
+    ok: ok.length,
+    failed: failed.length,
+  });
+  return { ok, failed, prev };
+}
+
+export async function bulkDeleteContentAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkActionResult> {
+  await requireAdmin();
+  const items = validateItems(itemsInput);
+
+  console.info("[content bulk action] start", {
+    type: "delete",
+    count: items.length,
+  });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+
+  for (const item of items) {
+    try {
+      if (item.kind === "story") {
+        const removed = await deleteStory(item.id);
+        if (!removed) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        // GCS cleanup is best-effort: a transient bucket error must not
+        // leave the DB row half-deleted. The row is already gone at this
+        // point; we log media failures but don't push to `failed` because
+        // the user-visible outcome (story gone from the inbox) succeeded.
+        try {
+          const { deleteStoryMedia } = await import("@/lib/gcs");
+          const media = await deleteStoryMedia(
+            removed.audio_url,
+            removed.video_url,
+          );
+          console.info("[content bulk item]", {
+            id: item.id,
+            kind: item.kind,
+            ok: true,
+            op: "delete",
+            mediaAttempted: media.attempted,
+            mediaSkipped: media.skipped,
+          });
+        } catch (mediaErr) {
+          console.warn("[content bulk action] media cleanup failed", {
+            id: item.id,
+            error:
+              mediaErr instanceof Error ? mediaErr.message : String(mediaErr),
+          });
+        }
+      } else {
+        const article = await getArticle(item.id);
+        if (!article) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        await deleteArticle(item.id);
+        console.info("[content bulk item]", {
+          id: item.id,
+          kind: item.kind,
+          ok: true,
+          op: "delete",
+        });
+      }
+      ok.push(item);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content bulk action] failed", {
+        id: item.id,
+        kind: item.kind,
+        op: "delete",
+        error: reason,
+      });
+    }
+  }
+
+  revalidatePath("/admin/content");
+  revalidatePath("/admin/stories");
+  revalidatePath("/admin/articles");
+
+  console.info("[content bulk action] done", {
+    type: "delete",
+    ok: ok.length,
+    failed: failed.length,
+  });
+  return { ok, failed, prev: {} };
 }

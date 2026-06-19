@@ -11,6 +11,7 @@ import { readFile } from "node:fs/promises";
 const TOKEN_URI = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/devstorage.read_write";
 const UPLOAD_BASE = "https://storage.googleapis.com/upload/storage/v1";
+const JSON_API_BASE = "https://storage.googleapis.com/storage/v1";
 const PUBLIC_BASE = "https://storage.googleapis.com";
 
 // 50 minutes — the access token lives for 60 minutes; we refresh 10 minutes
@@ -261,4 +262,105 @@ export async function createResumableUploadSession(
     sessionUri,
     publicUrl: `${PUBLIC_BASE}/${bucket}/${key}`,
   };
+}
+
+// Parsed reference to a GCS object. `bucket` and `key` are decoded — `key`
+// may contain forward slashes because GCS object names commonly do.
+export interface ParsedGcsUrl {
+  bucket: string;
+  key: string;
+}
+
+// Strictly parse a public GCS URL of the shape
+// https://storage.googleapis.com/<bucket>/<key> into its bucket and key.
+// Returns null for anything that doesn't match — caller is expected to log
+// and skip rather than guess. The bucket is the first path segment; the key
+// is the remainder (joined with `/` so nested paths round-trip). Query
+// strings and fragments are stripped before the split.
+export function parseGcsUrl(url: string | null | undefined): ParsedGcsUrl | null {
+  if (!url) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.host !== "storage.googleapis.com") return null;
+  // Leading slash trimmed so split lines up with [bucket, ...keyParts].
+  const path = parsed.pathname.replace(/^\/+/, "");
+  if (!path) return null;
+  const slash = path.indexOf("/");
+  if (slash < 0) return null;
+  const bucket = path.slice(0, slash);
+  const keyEncoded = path.slice(slash + 1);
+  if (!bucket || !keyEncoded) return null;
+  try {
+    return { bucket, key: decodeURIComponent(keyEncoded) };
+  } catch {
+    return null;
+  }
+}
+
+// Delete a single object from the configured GCS_BUCKET. Treats 404 as a
+// no-op so callers can fan out across "expected" media URLs without worrying
+// about partial state. Anything else (network error, 403, 5xx) throws so the
+// batch action can record the failure and surface it to the operator.
+//
+// Reference: https://cloud.google.com/storage/docs/json_api/v1/objects/delete
+// Verified 2026-06-19.
+export async function deleteObject(key: string): Promise<void> {
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) {
+    throw new Error("GCS_BUCKET is not set; cannot delete.");
+  }
+  const token = await accessToken();
+  const url = `${JSON_API_BASE}/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(key)}`;
+  const resp = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (resp.status === 204 || resp.status === 404) {
+    // eslint-disable-next-line no-console -- rule 14: observability from day one
+    console.info("[content gcs delete]", { bucket, key, status: resp.status });
+    return;
+  }
+  const text = await resp.text().catch(() => "");
+  throw new Error(`GCS delete HTTP ${resp.status}: ${text.slice(0, 200)}`);
+}
+
+// Delete the rendered audio and video objects for a story. Each URL is
+// parsed strictly via parseGcsUrl; an unparseable or cross-bucket URL is
+// logged and skipped — we never blindly DELETE a key we can't verify owns
+// the configured bucket. Returns the number of objects actually deleted (or
+// 404'd) so the caller can include it in batch result logs.
+export async function deleteStoryMedia(
+  audioUrl: string | null | undefined,
+  videoUrl: string | null | undefined,
+): Promise<{ attempted: number; skipped: number }> {
+  const bucket = process.env.GCS_BUCKET;
+  let attempted = 0;
+  let skipped = 0;
+  for (const candidate of [audioUrl, videoUrl]) {
+    if (!candidate) continue;
+    const parsed = parseGcsUrl(candidate);
+    if (!parsed) {
+      // eslint-disable-next-line no-console -- rule 14: observability from day one
+      console.warn("[content gcs delete] url unparseable", { url: candidate });
+      skipped += 1;
+      continue;
+    }
+    if (bucket && parsed.bucket !== bucket) {
+      // eslint-disable-next-line no-console -- rule 14: observability from day one
+      console.warn("[content gcs delete] cross-bucket url", {
+        url: candidate,
+        urlBucket: parsed.bucket,
+        configuredBucket: bucket,
+      });
+      skipped += 1;
+      continue;
+    }
+    await deleteObject(parsed.key);
+    attempted += 1;
+  }
+  return { attempted, skipped };
 }
