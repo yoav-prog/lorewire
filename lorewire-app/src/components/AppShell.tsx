@@ -25,6 +25,10 @@ import ReelsFeed from "@/components/reels/ReelsFeed";
 import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
+  placeArticleImages,
+  splitArticleParagraphs,
+} from "@/lib/article-image-positions";
+import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
@@ -465,20 +469,6 @@ function _galleryFromStory(
     return { src, caption: slice.map((w) => w.word).join(" ") };
   });
 }
-// Spread scene images evenly between paragraphs so the Article reads like a
-// magazine piece. With N paragraphs and M images, image i goes after paragraph
-// floor((i+1) * N / (M+1)) — the +1 keeps the first image off the top and the
-// last image off the footer.
-function _articleImagePositions(paraCount: number, imageCount: number): Set<number> {
-  if (imageCount === 0 || paraCount < 3) return new Set();
-  const positions = new Set<number>();
-  for (let i = 0; i < imageCount; i++) {
-    const idx = Math.floor(((i + 1) * paraCount) / (imageCount + 1));
-    positions.add(Math.max(1, Math.min(paraCount - 1, idx)));
-  }
-  return positions;
-}
-
 function GenArticle({
   story,
   liveMedia,
@@ -490,7 +480,10 @@ function GenArticle({
   // re-exported into published.ts still renders its real article text
   // instead of the hardcoded envelope sample fallback.
   const articleBody = liveMedia.body ?? story.body ?? "";
-  const paras = articleBody.split(/\n{2,}/);
+  // splitArticleParagraphs falls back to single-newline + sentence
+  // chunking so a single-blob body still gets paragraph slots for the
+  // image distributor to land in.
+  const paras = splitArticleParagraphs(articleBody);
   // When the applied video is a short, the article reads alongside the
   // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
   // the long-form 16:9 illustrations are still the right fit. Either way,
@@ -499,12 +492,18 @@ function GenArticle({
   // get scene illustrations between paragraphs.
   const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
   const scenes = liveMedia.images.length > 0 ? liveMedia.images : (story.images || []);
-  const positions = _articleImagePositions(paras.length, scenes.length);
-  // Map paragraph index -> which scene to render after it (left-to-right order).
-  const posList = Array.from(positions).sort((a, b) => a - b);
-  const imgAt = new Map<number, string>();
-  posList.forEach((p, i) => {
-    if (scenes[i]) imgAt.set(p, scenes[i]);
+  // placeArticleImages guarantees every scene renders — either inline
+  // between paragraphs or in the trailing extras strip below the body.
+  const placement = placeArticleImages(paras.length, scenes);
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[lorewire article images]", {
+    storyId: story.id,
+    para_count: paras.length,
+    scene_count: scenes.length,
+    inline_count: placement.inline.size,
+    extras_count: placement.extras.length,
+    use_short_scenes: useShortScenes,
+    body_source: liveMedia.body ? "live" : "static",
   });
 
   // Aspect ratio + crop behaviour tracks the source. Long-form
@@ -535,16 +534,28 @@ function GenArticle({
           ) : (
             <p className="font-body text-[15px] leading-relaxed text-ink/90 mt-4">{para}</p>
           )}
-          {imgAt.has(i) && (
+          {placement.inline.has(i) && (
             <figure className="my-5">
               <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
+                <img src={placement.inline.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
               </div>
               <figcaption className="font-mono text-[10px] text-muted mt-1.5 text-center">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
           )}
         </React.Fragment>
       ))}
+      {placement.extras.length > 0 && (
+        <div className="mt-5 grid gap-4">
+          {placement.extras.map((src, idx) => (
+            <figure key={`extra-${idx}`} className="m-0">
+              <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
+                <img src={src} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
+              </div>
+              <figcaption className="font-mono text-[10px] text-muted mt-1.5 text-center">Illustration &middot; LoreWire Studio</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
       {isRealRedditUrl(story.source_url) ? (
         <div className="mt-6">
           <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>

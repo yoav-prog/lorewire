@@ -10,6 +10,10 @@ import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
 import ReelsDesktop from "@/components/reels/ReelsDesktop";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
+  placeArticleImages,
+  splitArticleParagraphs,
+} from "@/lib/article-image-positions";
+import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
@@ -430,18 +434,6 @@ function _galleryFromStory(
     return { src, caption: slice.map((w) => w.word).join(" ") };
   });
 }
-// Same layout as the mobile GenArticle: evenly distributes scene images
-// between paragraphs so the Article reads like a magazine piece.
-function _articleImagePositions(paraCount: number, imageCount: number): Set<number> {
-  if (imageCount === 0 || paraCount < 3) return new Set();
-  const positions = new Set<number>();
-  for (let i = 0; i < imageCount; i++) {
-    const idx = Math.floor(((i + 1) * paraCount) / (imageCount + 1));
-    positions.add(Math.max(1, Math.min(paraCount - 1, idx)));
-  }
-  return positions;
-}
-
 function GenArticle({
   story,
   liveMedia,
@@ -453,7 +445,10 @@ function GenArticle({
   // re-exported into published.ts still renders its real article text
   // instead of the hardcoded envelope sample fallback.
   const articleBody = liveMedia.body ?? story.body ?? "";
-  const paras = articleBody.split(/\n{2,}/);
+  // splitArticleParagraphs falls back to single-newline + sentence
+  // chunking so a single-blob body still gets paragraph slots for the
+  // image distributor to land in.
+  const paras = splitArticleParagraphs(articleBody);
   // When the applied video is a short, the article reads alongside the
   // short's 9:16 doodle scenes — same visual story, same vibe. Otherwise
   // the long-form 16:9 illustrations are still the right fit.
@@ -463,11 +458,18 @@ function GenArticle({
   // scenes from the live row instead of falling through to no images.
   const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
   const scenes = liveMedia.images.length > 0 ? liveMedia.images : (story.images || []);
-  const positions = _articleImagePositions(paras.length, scenes.length);
-  const posList = Array.from(positions).sort((a, b) => a - b);
-  const imgAt = new Map<number, string>();
-  posList.forEach((p, i) => {
-    if (scenes[i]) imgAt.set(p, scenes[i]);
+  // placeArticleImages guarantees every scene renders — either inline
+  // between paragraphs or in the trailing extras strip below the body.
+  const placement = placeArticleImages(paras.length, scenes);
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[lorewire article images]", {
+    storyId: story.id,
+    para_count: paras.length,
+    scene_count: scenes.length,
+    inline_count: placement.inline.size,
+    extras_count: placement.extras.length,
+    use_short_scenes: useShortScenes,
+    body_source: liveMedia.body ? "live" : "static",
   });
 
   // Aspect ratio + crop behaviour switches with the source. Long-form
@@ -498,16 +500,28 @@ function GenArticle({
           ) : (
             <p className="font-body text-[16.5px] leading-[1.7] text-ink/90 mt-5">{para}</p>
           )}
-          {imgAt.has(i) && (
+          {placement.inline.has(i) && (
             <figure className="my-7">
               <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
-                <img src={imgAt.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
+                <img src={placement.inline.get(i)} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
               </div>
               <figcaption className="font-mono text-[11px] text-muted mt-2 text-center">Illustration &middot; LoreWire Studio</figcaption>
             </figure>
           )}
         </React.Fragment>
       ))}
+      {placement.extras.length > 0 && (
+        <div className="mt-7 grid gap-6">
+          {placement.extras.map((src, idx) => (
+            <figure key={`extra-${idx}`} className="m-0">
+              <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
+                <img src={src} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
+              </div>
+              <figcaption className="font-mono text-[11px] text-muted mt-2 text-center">Illustration &middot; LoreWire Studio</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
       {isRealRedditUrl(story.source_url) ? (
         <div className="mt-8 max-w-[660px]">
           <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
