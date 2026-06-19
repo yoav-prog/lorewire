@@ -22,7 +22,7 @@ import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
 import DesktopShell from "@/components/DesktopShell";
 import ReelsFeed from "@/components/reels/ReelsFeed";
-import { RedditEmbed, isRealRedditUrl } from "@/components/RedditEmbed";
+import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
   placeArticleImages,
@@ -506,6 +506,21 @@ function GenArticle({
     body_source: liveMedia.body ? "live" : "static",
   });
 
+  // Cross-check the article's source URL against the authoritative Reddit
+  // id (story.id, which equals stories.reddit_id for pipeline rows). When
+  // they disagree, the URL points at a different thread than the article
+  // was written from — refuse to embed rather than mislead the reader.
+  // The stub card still renders so the section never goes blank.
+  const redditTarget = resolveRedditEmbedTarget(story.source_url, story.id);
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[lorewire reddit embed]", {
+    storyId: story.id,
+    source_url: story.source_url ?? null,
+    rendered: redditTarget !== null,
+    embed_url: redditTarget?.url ?? null,
+    embed_reddit_id: redditTarget?.redditId ?? null,
+  });
+
   // Aspect ratio + crop behaviour tracks the source. Long-form
   // illustrations are 16:9 and benefit from the upper-third crop to put
   // faces in frame. Doodle scenes are authored 9:16 and centre-crop the
@@ -556,10 +571,10 @@ function GenArticle({
           ))}
         </div>
       )}
-      {isRealRedditUrl(story.source_url) ? (
+      {redditTarget ? (
         <div className="mt-6">
           <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
-          <RedditEmbed url={story.source_url!} title={story.title} />
+          <RedditEmbed url={redditTarget.url} title={story.title} />
         </div>
       ) : (
         <div className="mt-6 rounded-[10px] p-4" style={{ background: "#15141A", borderLeft: "3px solid #E8462B" }}>
