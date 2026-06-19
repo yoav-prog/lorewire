@@ -63,16 +63,21 @@ if not LOG.handlers:
     _h.setFormatter(logging.Formatter("%(message)s"))
     LOG.addHandler(_h)
 
-# 2026-06-16: bumped from 270 to 870 alongside the vercel.json
-# maxDuration bump (300 -> 900). 30s headroom under Vercel's new ceiling
-# for the response write + Python finalizers. The old 270s deadline
-# silently killed every with_media=True row in production because a
-# full pipeline run (LLM idea + research + article + title + kie images +
-# voice + alignment) takes 5-8 minutes; the cron retried the same row on
-# every tick, the row got reaped after 30 min, and the cycle restarted.
-# At 870s a normal job has comfortable headroom and outliers still get
-# reaped instead of looping forever.
-DEADLINE_S = 870
+# 2026-06-16: bumped from 270 to 770 alongside the vercel.json
+# maxDuration bump (300 -> 800). 30s headroom under Vercel Pro's 800s
+# ceiling for the response write + Python finalizers. The old 270s
+# deadline silently killed every with_media=True row in production
+# because a full pipeline run (LLM idea + research + article + title +
+# kie images + voice + alignment) takes 5-8 minutes; the cron retried
+# the same row on every tick, the row got reaped after 30 min, and the
+# cycle restarted. At 770s a normal job has comfortable headroom and
+# outliers still get reaped instead of looping forever.
+#
+# 2026-06-19: an earlier 900s value was over the Vercel Pro ceiling and
+# blocked every deploy on this branch with "invalid maxDuration for
+# plan". Lowered to 800 to match render_short / render_video /
+# drain_short_renders.
+DEADLINE_S = 770
 # Soft cap on rows per tick. story_jobs is heavier per-row than
 # image_renders (full pipeline) so we cap lower. Override via
 # DRAIN_STORY_JOBS_MAX_ROWS_PER_TICK.
