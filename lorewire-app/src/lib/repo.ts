@@ -166,6 +166,48 @@ export async function getStory(id: string): Promise<StoryRow | null> {
   return one<StoryRow>(`SELECT ${COLS} FROM stories WHERE id = ?`, [id]);
 }
 
+// Minimal-column candidate row used by the global admin search bar's
+// in-process scorer (plan:
+// _plans/2026-06-19-global-admin-search.md). Pairs with the
+// reddit-source equivalent; both feed the same scorer in `@/lib/admin-search`.
+export interface StorySearchCandidate {
+  id: string;
+  category: string | null;
+  title: string | null;
+  summary: string | null;
+  body: string | null;
+  updated_at: string | null;
+}
+
+/** Fetch up to `limit` stories where every token lands in at least one
+ * of (title, summary, category, body). Each token is parameter-bound.
+ * Mirrors `listRedditSourcesForSearch` — same shape, same contract, so
+ * the scorer treats them identically. */
+export async function listStoriesForSearch(
+  tokens: string[],
+  limit = 200,
+): Promise<StorySearchCandidate[]> {
+  if (tokens.length === 0) return [];
+  const cappedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  for (const t of tokens) {
+    parts.push(
+      "(LOWER(COALESCE(title, '')) LIKE ? OR LOWER(COALESCE(summary, '')) LIKE ? " +
+      "OR LOWER(COALESCE(category, '')) LIKE ? OR LOWER(COALESCE(body, '')) LIKE ?)",
+    );
+    const like = `%${t}%`;
+    params.push(like, like, like, like);
+  }
+  const where = parts.join(" AND ");
+  return all<StorySearchCandidate>(
+    `SELECT id, category, title, summary, body, updated_at ` +
+    `FROM stories WHERE ${where} ` +
+    `ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?`,
+    [...params, cappedLimit],
+  );
+}
+
 // 2026-06-11 video editor: typed read/write helpers for stories.video_config.
 // The column stores a stringified ShortVideoConfig v2 (see
 // lib/video-config.ts). Callers should parseVideoConfig() the result before

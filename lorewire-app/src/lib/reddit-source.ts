@@ -338,6 +338,54 @@ function buildWhere(
   return { where: parts.length ? parts.join(" AND ") : "1=1", params };
 }
 
+// Minimal-column candidate row used by the global admin search bar's
+// in-process scorer (plan:
+// _plans/2026-06-19-global-admin-search.md). Wider than RedditSourceRow
+// would be pulling unused columns; narrower than the search needs (body
+// is `full_text`, which we DO need for snippet fallback when summary is
+// empty). last_synced is the recency tiebreaker.
+export interface RedditSourceSearchCandidate {
+  reddit_id: string;
+  subreddit: string;
+  title: string;
+  summary: string | null;
+  full_text: string;
+  last_synced: string;
+}
+
+/** Fetch up to `limit` reddit_source rows where every token lands in at
+ * least one of (title, summary, subreddit, full_text). Each token is
+ * parameter-bound — no value ever touches string concatenation. Designed
+ * for the global admin search bar: the caller scores + ranks the result
+ * in JS. */
+export async function listRedditSourcesForSearch(
+  tokens: string[],
+  limit = 200,
+): Promise<RedditSourceSearchCandidate[]> {
+  if (tokens.length === 0) return [];
+  const cappedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  // AND across tokens, OR across fields: every typed token must land
+  // somewhere, but they can land in different columns ("leaf" in title,
+  // "blower" in full_text still wins).
+  for (const t of tokens) {
+    parts.push(
+      "(LOWER(title) LIKE ? OR LOWER(COALESCE(summary, '')) LIKE ? " +
+      "OR LOWER(subreddit) LIKE ? OR LOWER(full_text) LIKE ?)",
+    );
+    const like = `%${t}%`;
+    params.push(like, like, like, like);
+  }
+  const where = parts.join(" AND ");
+  return all<RedditSourceSearchCandidate>(
+    `SELECT reddit_id, subreddit, title, summary, full_text, last_synced ` +
+    `FROM reddit_source WHERE ${where} ` +
+    `ORDER BY last_synced DESC LIMIT ?`,
+    [...params, cappedLimit],
+  );
+}
+
 export async function listRedditSources(
   filters: RedditSourceFilters = {},
   opts: { limit?: number; offset?: number; orderBy?: RedditSourceOrderBy } = {},

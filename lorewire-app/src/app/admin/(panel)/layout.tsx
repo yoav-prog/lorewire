@@ -2,12 +2,13 @@ import { requireAdmin } from "@/lib/dal";
 import { logout } from "@/app/admin/actions";
 import AdminSidebar from "@/app/admin/AdminSidebar";
 import UserMenu from "@/app/admin/UserMenu";
-import CommandPalette from "@/app/admin/CommandPalette";
+import GlobalSearch from "@/app/admin/GlobalSearch";
 
 // Studio shell. Sidebar + content column. The sidebar holds the brand and all
-// navigation; the header is now a thin chrome line carrying just the user
-// menu (and, on mobile, sitting alongside the hamburger fixed-positioned by
-// the sidebar). See _plans/2026-06-11-admin-reorg.md for the full IA.
+// navigation; the header carries the global admin search bar + user menu.
+// Cmd-K / Ctrl-K and "/" both focus the search bar (the previous CommandPalette
+// stub is gone — see _plans/2026-06-19-global-admin-search.md).
+// See also _plans/2026-06-11-admin-reorg.md for the original IA.
 
 export default async function PanelLayout({
   children,
@@ -40,14 +41,16 @@ export default async function PanelLayout({
     <div className="flex min-h-screen">
       <AdminSidebar isDev={isDev} />
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-10 flex items-center justify-end gap-3 border-b border-line bg-bg/85 px-5 py-3 backdrop-blur md:px-7">
+        <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-bg/85 px-5 py-3 backdrop-blur md:px-7">
+          <div className="flex-1">
+            <GlobalSearch />
+          </div>
           <UserMenu email={session.email} signOutSlot={signOutSlot} />
         </header>
         <main className="mx-auto w-full max-w-[1100px] px-5 py-7 md:px-7">
           {children}
         </main>
       </div>
-      <CommandPalette />
     </div>
   );
 }
