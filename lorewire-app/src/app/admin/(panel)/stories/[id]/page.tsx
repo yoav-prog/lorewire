@@ -166,6 +166,17 @@ export default async function EditStory({
       hint: "Redraws the hero + landscape using the short's character as an i2i reference. Same poster style, same protagonist as the Watch tab.",
     },
     {
+      // 2026-06-19 finisher: i2i hero + thumbnail (3:4, 16:9, 1:1) using
+      // the short's character AND a picker-chosen scene as references.
+      // Story-jobs worker now runs this automatically after every short
+      // completes; this button backfills legacy stories that already have
+      // a short but no thumbnail. Five paid kie calls per click. Plan:
+      // _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md.
+      asset: "hero_thumbnail_from_short",
+      label: "Generate hero + thumbnail from short",
+      hint: "Builds hero (3:4 + 16:9) AND thumbnail (3:4 + 16:9 + 1:1) using the short's character plus a picker-chosen dramatic scene. Five i2i calls. Used to backfill stories that pre-date the auto-finisher.",
+    },
+    {
       asset: "scenes",
       label: sceneCountLabel,
       hint: sceneCountHint,

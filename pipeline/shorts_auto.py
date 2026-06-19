@@ -93,13 +93,24 @@ def maybe_enqueue_short_for_story(
     category: str | None,
     *,
     requested_by: str = "auto",
+    force: bool = False,
     get_setting: GetSetting = store.get_setting,
 ) -> bool:
     """Enqueue a short for the story if auto-generate is on for its category.
     Returns True if a row was enqueued (or already existed idempotently), False
-    when auto-generate is off. Safe to call on every story completion."""
+    when auto-generate is off. Safe to call on every story completion.
+
+    `force=True` bypasses the per-category gate so a caller that has
+    already committed to producing a short (e.g. the Reddit-source story
+    job, which now ships article + short + hero + thumbnail as one
+    unit per _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md)
+    can ignore the admin's "should this category auto-generate?" knob.
+    The global 24h cost cap (DEFAULT_AUTO_DAILY_CAP) is the real backstop
+    against a runaway "Process 200 selected" backfill and STILL applies —
+    force only skips the cheap enable check, never the cap check.
+    """
     cfg = resolve_short_auto_config(category, get_setting)
-    if not cfg["enabled"]:
+    if not cfg["enabled"] and not force:
         return False
 
     # Global cost guard: cap auto-requested shorts over a rolling 24h window.

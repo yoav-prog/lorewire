@@ -43,6 +43,21 @@ DEFAULT_POLL_SECONDS = 5
 # short enough to clean up a crashed worker within a useful window.
 STALE_AFTER_SECONDS = 30 * 60
 
+# 2026-06-19 hero+thumbnail-from-short finisher (plan:
+# _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+# How long the worker will inline-wait for a short to finish before bailing
+# on the finisher (the story still ships, just without scene-derived visuals).
+# Default 25 min covers a busy shorts queue without holding the worker slot
+# forever. Overridable via the `hero_thumbnail.wait_ceiling_seconds` setting.
+HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT = 25 * 60
+HERO_THUMB_WAIT_CEILING_SETTING_KEY = "hero_thumbnail.wait_ceiling_seconds"
+# Backoff between polls: tight at first (3s, 5s) so a fast short finisher
+# is picked up promptly, steady 10s thereafter so a stalled short doesn't
+# hammer the DB. Heartbeat event every 30s while waiting so the admin can
+# see "still waiting" in the timeline.
+HERO_THUMB_POLL_BACKOFF_SECONDS = (3, 5, 10)
+HERO_THUMB_HEARTBEAT_SECONDS = 30
+
 # Phase 7 daily-budget cap (see _plans/2026-06-14-story-jobs-followups.md).
 # Per-job spend estimate used by the worker's pre-claim budget gate.
 # The real number varies — a tight text-only run can be ~$0.10, a
@@ -129,6 +144,68 @@ def _budget_block_reason() -> str | None:
             f"> cap={cap}c"
         )
     return None
+
+
+def _hero_thumb_wait_ceiling_seconds() -> int:
+    """Read the admin-configurable wait ceiling for the hero+thumb finisher.
+    None or non-positive override falls back to the default. Kept as a
+    function (not a module constant) so a settings change is picked up on
+    the next tick without restarting the worker."""
+    raw = (store.get_setting(HERO_THUMB_WAIT_CEILING_SETTING_KEY) or "").strip()
+    if not raw:
+        return HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT
+    try:
+        v = int(float(raw))
+    except ValueError:
+        return HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT
+    return v if v > 0 else HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT
+
+
+def _wait_for_short_done(
+    story_id: str,
+    job_id: str,
+    reddit_id: str,
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
+) -> str:
+    """Inline-poll `short_renders` for `story_id` until the latest render hits
+    a terminal state (`done`, `failed`, `error`, or `cancelled`) or the wait
+    ceiling fires. Returns the final status string; the caller branches on it.
+
+    The `sleeper` and `now` parameters are injected so unit tests drive the
+    loop without real time passing. Heartbeats emit a `waiting_for_short`
+    story_job_event every HERO_THUMB_HEARTBEAT_SECONDS so the admin's row
+    timeline narrates the wait.
+    """
+    ceiling = _hero_thumb_wait_ceiling_seconds()
+    start = now()
+    last_heartbeat = start
+    poll_idx = 0
+    while True:
+        latest = store.latest_short_render_for_story(story_id)
+        status = (latest.get("status") if latest else "") or ""
+        if status in {"done", "failed", "error", "cancelled"}:
+            return status
+        elapsed = now() - start
+        if elapsed >= ceiling:
+            return "timeout"
+        if (now() - last_heartbeat) >= HERO_THUMB_HEARTBEAT_SECONDS:
+            store.log_story_job_event(
+                job_id, reddit_id, "waiting_for_short",
+                message=f"Still waiting on short ({int(elapsed)}s elapsed)",
+                payload={
+                    "elapsed_seconds": int(elapsed),
+                    "ceiling_seconds": ceiling,
+                    "short_status": status or "missing",
+                },
+            )
+            last_heartbeat = now()
+        delay = HERO_THUMB_POLL_BACKOFF_SECONDS[
+            min(poll_idx, len(HERO_THUMB_POLL_BACKOFF_SECONDS) - 1)
+        ]
+        sleeper(delay)
+        poll_idx += 1
 
 
 # Subreddit -> category mapping is owned by stages.SUBREDDIT_CATEGORY. We
@@ -254,8 +331,15 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     if with_media:
         store.log_story_job_event(
             job_id, reddit_id, "media_started",
-            message="Generating scenes + voice + alignment",
+            message="Generating scenes + voice + alignment (hero deferred to finisher)",
         )
+        # 2026-06-19 (plan:
+        # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md):
+        # The hero is generated AFTER the short completes — `skip_hero=True`
+        # tells `generate_media` to keep scenes + voice + alignment and skip
+        # only the two t2i hero calls that the finisher will overwrite anyway.
+        # Net: -$0.08 in wasted hero gen per story; +0 latency until the short
+        # finishes (the worker now waits for it inline).
         media_cols = media.generate_media(
             idea["reddit_id"],
             idea,
@@ -263,17 +347,18 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             branded_title or idea["headline"],
             False,
             repo_root=REPO_ROOT,
+            skip_hero=True,
         )
         row.update(media_cols)
         row["tokens"] = llm.totals["total_tokens"] - before_tokens
         store.update_story_job_progress(claimed_job["id"], 90)
         store.log_story_job_event(
             job_id, reddit_id, "media_done",
-            message="Scenes + voice + alignment ready",
+            message="Scenes + voice + alignment ready (hero pending finisher)",
             payload={
-                "hero_image": bool(media_cols.get("hero_image")),
                 "audio_url": bool(media_cols.get("audio_url")),
                 "alignment": bool(media_cols.get("alignment")),
+                "scenes": bool(media_cols.get("images")),
             },
         )
         # Video render is OUT of band — enqueue into video_renders so the
@@ -323,28 +408,147 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             payload={"story_id": row["id"]},
         )
 
-    # Auto-enqueue a short if the admin turned it on (global or per-category).
-    # Shorts generate their own frames + voice from the story text, so this is
-    # NOT gated on with_media. Off by default; a failure here never blocks story
-    # completion.
-    try:
-        from pipeline import shorts_auto
-        if shorts_auto.maybe_enqueue_short_for_story(row["id"], row.get("category")):
-            print(f"[story-jobs handoff] short auto-enqueued story_id={row['id']}")
-            store.log_story_job_event(
-                job_id, reddit_id, "auto_short_enqueued",
-                message="Auto-short enqueued for this category",
-                payload={"story_id": row["id"]},
-            )
-    except Exception as e:  # noqa: BLE001 — auto-short must not break the job
-        print(f"[story-jobs handoff] auto-short skipped: {e}")
-        store.log_story_job_event(
-            job_id, reddit_id, "auto_short_error",
-            level="warn",
-            message=f"Auto-short handoff failed: {e}",
-        )
+    # 2026-06-19 (plan:
+    # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md):
+    # Reddit-source story jobs now run the short to completion inline so the
+    # hero + thumbnail can be derived from the short's character_base_url + a
+    # picker-chosen scene. For with_media=False jobs we keep the legacy
+    # fire-and-forget shape (no short, no finisher) because the admin
+    # explicitly opted out of the visual pipeline.
+    if with_media:
+        _run_short_and_finisher(row, job_id, reddit_id)
 
     return row
+
+
+def _run_short_and_finisher(row: dict, job_id: str, reddit_id: str) -> None:
+    """Force-enqueue the short, wait inline for it, then run the hero +
+    thumbnail finisher. Best-effort throughout: failure at any step is
+    logged as a story_job_event but never raises — the article ships
+    even if the visuals are degraded (the public reader's fallback
+    chain handles missing hero/thumbnail).
+
+    Splits this orchestration out of `_default_process` so the inline-
+    wait branch (which is what blocks the worker slot for the short's
+    render duration) is unit-testable in isolation. The wait + finisher
+    pair is the entire 2026-06-19 plan in one function.
+    """
+    from pipeline import shorts_auto
+
+    story_id = row["id"]
+    try:
+        enqueued = shorts_auto.maybe_enqueue_short_for_story(
+            story_id, row.get("category"),
+            requested_by="story_job", force=True,
+        )
+    except Exception as e:  # noqa: BLE001 — short must not break the job
+        print(f"[story-jobs handoff] short enqueue failed: {e}")
+        store.log_story_job_event(
+            job_id, reddit_id, "short_enqueue_error",
+            level="warn",
+            message=f"Short enqueue raised: {e}"[:200],
+        )
+        return
+
+    if not enqueued:
+        # Hit the global 24h cost cap. No short to wait for; skip the
+        # finisher. The admin sees this in the timeline so they know
+        # why the story shipped without scene-derived visuals.
+        print(f"[story-jobs handoff] short enqueue refused (cap hit) story_id={story_id}")
+        store.log_story_job_event(
+            job_id, reddit_id, "short_enqueue_capped",
+            level="warn",
+            message="Daily shorts cap hit; skipping hero+thumbnail finisher",
+            payload={"story_id": story_id},
+        )
+        return
+
+    print(f"[story-jobs handoff] short force-enqueued story_id={story_id}")
+    store.log_story_job_event(
+        job_id, reddit_id, "short_enqueued_for_story",
+        message="Short enqueued (force) — waiting before hero+thumbnail finisher",
+        payload={"story_id": story_id},
+    )
+
+    final_status = _wait_for_short_done(story_id, job_id, reddit_id)
+    if final_status != "done":
+        # Reasons we land here: short failed, was cancelled, or hit the
+        # wait ceiling. In every case the article ships without the
+        # scene-derived hero+thumbnail and the admin can rerun the
+        # "Generate hero + thumbnail from short" button later once the
+        # short is healthy.
+        level = "error" if final_status in {"failed", "error"} else "warn"
+        store.log_story_job_event(
+            job_id, reddit_id, "hero_thumbnail_skipped",
+            level=level,
+            message=f"Short ended in status={final_status!r}; finisher skipped",
+            payload={"story_id": story_id, "short_status": final_status},
+        )
+        print(
+            f"[story-jobs handoff] short ended status={final_status} "
+            f"story_id={story_id}; finisher skipped"
+        )
+        return
+
+    try:
+        result = media.generate_hero_and_thumbnail_from_short(story_id, REPO_ROOT)
+    except ValueError as e:
+        # Expected setup failures (missing character_base_url, malformed
+        # props, etc.) — surfaced verbatim by `_build_hero_and_thumbnail_from_short`.
+        store.log_story_job_event(
+            job_id, reddit_id, "hero_thumbnail_skipped",
+            level="warn",
+            message=str(e)[:200],
+        )
+        print(f"[story-jobs handoff] finisher refused story_id={story_id}: {e}")
+        return
+    except Exception as e:  # noqa: BLE001 — finisher must not break the job
+        traceback.print_exc()
+        store.log_story_job_event(
+            job_id, reddit_id, "hero_thumbnail_error",
+            level="error",
+            message=f"Finisher raised: {e}"[:200],
+        )
+        print(f"[story-jobs handoff] finisher raised story_id={story_id}: {e}")
+        return
+
+    # Roll the finisher's spend into the story's cost column. The image
+    # columns were already written by the finisher's per-variant store
+    # helpers; we update the in-memory row dict so any caller that reads
+    # from it later sees a truthful view, and update cost_cents in the DB
+    # so the daily budget bar doesn't underreport.
+    extra_cents = int(result.get("cost_cents") or 0)
+    row["cost_cents"] = (row.get("cost_cents") or 0) + extra_cents
+    for col in (
+        "hero_image", "hero_image_landscape",
+        "thumbnail_image", "thumbnail_image_landscape", "thumbnail_image_square",
+    ):
+        if result.get(col):
+            row[col] = result[col]
+    store.upsert_story(row)
+    store.log_story_job_event(
+        job_id, reddit_id, "hero_thumbnail_built",
+        message=(
+            f"Hero+thumbnail built (+${extra_cents / 100:.2f}, "
+            f"hero=#{result.get('hero_index')}, thumb=#{result.get('thumbnail_index')})"
+        ),
+        payload={
+            "story_id": story_id,
+            "cost_cents_added": extra_cents,
+            "hero_index": result.get("hero_index"),
+            "thumbnail_index": result.get("thumbnail_index"),
+            "picker_reasoning": result.get("picker_reasoning"),
+            "hero_image": result.get("hero_image"),
+            "hero_image_landscape": result.get("hero_image_landscape"),
+            "thumbnail_image": result.get("thumbnail_image"),
+            "thumbnail_image_landscape": result.get("thumbnail_image_landscape"),
+            "thumbnail_image_square": result.get("thumbnail_image_square"),
+        },
+    )
+    print(
+        f"[story-jobs handoff] hero+thumbnail done story_id={story_id} "
+        f"+${extra_cents / 100:.2f}"
+    )
 
 
 def _enqueue_video_render_for_story(story_row: dict) -> None:

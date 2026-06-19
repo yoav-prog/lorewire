@@ -478,6 +478,8 @@ def generate_media(
     dry_run: bool,
     repo_root: Path,
     image_count: int | None = None,
+    *,
+    skip_hero: bool = False,
 ) -> dict:
     """Generate images + narration for one story and return DB columns.
 
@@ -491,6 +493,14 @@ def generate_media(
     `title` is the branded LoreWire title — it goes into the cinematic
     thumbnail prompt so the image model bakes the title typography directly
     into the hero compositions.
+
+    `skip_hero=True` defers hero generation to the downstream
+    `generate_hero_and_thumbnail_from_short` finisher (see plan
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    The story-jobs worker uses this so we don't burn two paid hero gens
+    per story (the t2i hero is immediately overwritten once the short is
+    done). Scene images + narration still run unchanged because the
+    finisher uses them as i2i inputs.
     """
     safe_id = _sanitize_id(story_id)
     out: dict = {}
@@ -522,10 +532,20 @@ def generate_media(
     portrait_hero_url: str | None = None
     landscape_hero_url: str | None = None
     category = idea.get("category", "Drama")
-    for aspect_ratio, filename, label in (
-        ("3:4", "hero.png", "hero portrait"),
-        ("16:9", "hero-landscape.png", "hero landscape"),
-    ):
+    hero_variants: tuple[tuple[str, str, str], ...] = (
+        () if skip_hero
+        else (
+            ("3:4", "hero.png", "hero portrait"),
+            ("16:9", "hero-landscape.png", "hero landscape"),
+        )
+    )
+    if skip_hero:
+        print(
+            f"[media id={safe_id} hero] skipped — caller will derive hero "
+            "from the short's character + a chosen scene (see "
+            "generate_hero_and_thumbnail_from_short)"
+        )
+    for aspect_ratio, filename, label in hero_variants:
         public_url = f"{url_prefix}/{filename}"
         if dry_run:
             print(f"[media id={safe_id} {label}] (DRY RUN cinematic) -> {public_url}")
@@ -792,6 +812,15 @@ def regen_one(
         # for the hero / poster gen. Net effect: the hero stops being a
         # different person from the Watch tab's narrator character.
         return _regen_hero_from_short(story, out_dir, safe_id)
+
+    if asset == "hero_thumbnail_from_short":
+        # 2026-06-19 hybrid finisher: hero + thumbnail (3:4, 16:9, 1:1)
+        # all i2i'd from the short's character_base_url PLUS a picker-chosen
+        # scene. Five paid kie calls per click — the legacy-row backfill
+        # surface for the same orchestration the story-jobs worker now runs
+        # automatically. Plan:
+        # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md.
+        return _regen_hero_and_thumbnail_from_short(story, out_dir, safe_id)
 
     if asset == "scenes":
         return _regen_scenes(story, out_dir, safe_id)
@@ -1155,6 +1184,266 @@ def _regen_hero_from_short(
             )
 
     return portrait_url, total_cents
+
+
+# Each variant in the hero+thumbnail finisher: which scene seeds it, what
+# aspect to ask kie for, where it lives in GCS, and which DB column to
+# patch. The tuple order is preserved so the call sequence matches what the
+# observability events claim is happening.
+_HeroThumbVariant = tuple[str, str, str, str, str]  # (seed, aspect, filename, label, column)
+_HERO_THUMB_VARIANTS: tuple[_HeroThumbVariant, ...] = (
+    ("hero",      "3:4",  "hero.png",                "hero portrait",     "hero_image"),
+    ("hero",      "16:9", "hero-landscape.png",      "hero landscape",    "hero_image_landscape"),
+    ("thumbnail", "3:4",  "thumbnail.png",           "thumb portrait",    "thumbnail_image"),
+    ("thumbnail", "16:9", "thumbnail-landscape.png", "thumb landscape",   "thumbnail_image_landscape"),
+    ("thumbnail", "1:1",  "thumbnail-square.png",    "thumb square",      "thumbnail_image_square"),
+)
+
+# Map a column name to the corresponding store update helper. Keeping this
+# as data (not an if/elif chain inside the loop) keeps the loop body short
+# and makes the dispatcher obvious. Stays in sync with the columns named
+# in `_HERO_THUMB_VARIANTS`.
+_HERO_THUMB_COLUMN_WRITERS = {
+    "hero_image":                lambda sid, url: store.update_story_hero(sid, url),
+    "hero_image_landscape":      lambda sid, url: store.update_story_hero_landscape(sid, url),
+    "thumbnail_image":           lambda sid, url: store.update_story_thumbnail(sid, url),
+    "thumbnail_image_landscape": lambda sid, url: store.update_story_thumbnail_landscape(sid, url),
+    "thumbnail_image_square":    lambda sid, url: store.update_story_thumbnail_square(sid, url),
+}
+
+
+def _build_hero_and_thumbnail_from_short(
+    story: dict, out_dir: Path, safe_id: str,
+) -> dict:
+    """Shared core for the story-jobs worker and the admin regen path.
+
+    Resolves the short's character_base_url + scene list, asks the LLM
+    which two scenes make the best hero / thumbnail, then generates all
+    five i2i variants (2 hero + 3 thumbnail) with two image inputs per
+    call — the character (identity) and the chosen scene (composition).
+    Writes each column as soon as its image lands so a partial failure
+    still leaves the public reader with whatever DID succeed; mirrors
+    the portrait-first / landscape-best-effort discipline of
+    `_regen_hero_from_short`.
+
+    Returns a dict with the five URLs (None for variants that failed),
+    `cost_cents` (only counts what actually shipped), `hero_index`,
+    `thumbnail_index`, and `picker_reasoning`. Raises ValueError on
+    setup failures (no short, no scenes, no character_base_url) so the
+    caller can surface a clear message to the admin.
+    """
+    title = (story.get("title") or "").strip()
+    if not title:
+        raise ValueError(f"story {safe_id} has no title — cannot build a hero prompt")
+    body = (story.get("body") or "").strip()
+    category = (story.get("category") or "Drama").strip()
+
+    latest = store.latest_short_render_for_story(story["id"])
+    if latest is None or (latest.get("status") or "") != "done":
+        raise ValueError(
+            f"story {safe_id} has no completed short render — generate a short first"
+        )
+    props_raw = latest.get("props")
+    if not props_raw:
+        raise ValueError(
+            f"story {safe_id} short render has no props blob — re-render the short"
+        )
+    try:
+        props = json.loads(props_raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"story {safe_id} short render props blob is not valid JSON: {e}"
+        ) from e
+    if not isinstance(props, dict):
+        raise ValueError(f"story {safe_id} short render props is not a JSON object")
+
+    character_base_url = (props.get("character_base_url") or "").strip()
+    if not character_base_url:
+        raise ValueError(
+            f"story {safe_id} short render has no character_base_url — "
+            "re-render the short on the current shorts pipeline so the base is persisted"
+        )
+
+    # Scenes live under either `scenes` (raw assets list from shorts.py) or
+    # `doodle_frames` (post-render Remotion props shape). Either source has a
+    # per-scene `url` and the description text we feed to the picker.
+    scenes_raw = props.get("scenes")
+    if not isinstance(scenes_raw, list) or not scenes_raw:
+        scenes_raw = props.get("doodle_frames")
+    if not isinstance(scenes_raw, list) or not scenes_raw:
+        raise ValueError(
+            f"story {safe_id} short render props has no usable scene list "
+            "(neither `scenes` nor `doodle_frames`)"
+        )
+    scenes: list[dict] = [s for s in scenes_raw if isinstance(s, dict) and s.get("url")]
+    if not scenes:
+        raise ValueError(f"story {safe_id} short render scenes carry no URLs")
+
+    pick = stages.pick_hero_and_thumbnail_scenes(title, body, scenes, dry_run=False)
+    hero_idx = pick["hero_index"]
+    thumb_idx = pick["thumbnail_index"]
+    hero_scene_url = scenes[hero_idx].get("url") or ""
+    thumb_scene_url = scenes[thumb_idx].get("url") or ""
+    if not hero_scene_url or not thumb_scene_url:
+        raise ValueError(
+            f"story {safe_id} picked scenes are missing URLs "
+            f"(hero={hero_idx}, thumb={thumb_idx})"
+        )
+
+    print(
+        f"[hero+thumb from-short] id={safe_id} title={title[:60]!r} "
+        f"character={character_base_url[:80]}... "
+        f"hero_scene=#{hero_idx} thumb_scene=#{thumb_idx} "
+        f"reason={pick['picker_reasoning'][:120]!r}"
+    )
+    store.log_render_event(
+        "scenes_picked",
+        f"Picker chose hero=#{hero_idx} thumb=#{thumb_idx}",
+        payload={
+            "hero_index": hero_idx,
+            "thumbnail_index": thumb_idx,
+            "hero_scene_url": hero_scene_url,
+            "thumbnail_scene_url": thumb_scene_url,
+            "picker_reasoning": pick["picker_reasoning"],
+        },
+    )
+
+    per_image_cents = _per_image_cost_cents()
+    seed_to_scene = {"hero": hero_scene_url, "thumbnail": thumb_scene_url}
+    result: dict = {
+        "hero_image": None,
+        "hero_image_landscape": None,
+        "thumbnail_image": None,
+        "thumbnail_image_landscape": None,
+        "thumbnail_image_square": None,
+        "cost_cents": 0,
+        "hero_index": hero_idx,
+        "thumbnail_index": thumb_idx,
+        "picker_reasoning": pick["picker_reasoning"],
+    }
+
+    for seed, aspect, filename, label, column in _HERO_THUMB_VARIANTS:
+        scene_url = seed_to_scene[seed]
+        prompt = stages.make_thumbnail_prompt(
+            title, category, body, aspect_ratio=aspect, dry_run=False,
+            character_base_url=character_base_url,
+            scene_image_url=scene_url,
+        )
+        store.log_render_event(
+            "kie_request_sent",
+            f"Submitted {label} to kie (hybrid i2i)",
+            payload={"variant": label, "aspect": aspect, "mode": "i2i+scene"},
+        )
+        kie_url = _generate_with_retry(
+            prompt,
+            f"id={safe_id} {label} (hybrid i2i)",
+            aspect_ratio=aspect,
+            # Order MUST be [character, scene] — `make_thumbnail_prompt`'s
+            # hybrid copy says "FIRST reference image" = identity source,
+            # "SECOND reference image" = composition source. Reverse the
+            # order and the model invents a fresh face in the scene's pose.
+            image_input=[character_base_url, scene_url],
+            model="kie/gpt-image-2-i2i",
+        )
+        if kie_url is None:
+            store.log_render_event(
+                "kie_failed",
+                f"{label} (hybrid i2i) returned no URL after retries",
+                level="warn",
+                payload={"variant": label},
+            )
+            print(
+                f"[hero+thumb from-short] id={safe_id} {label} FAILED; "
+                "other variants will still be attempted"
+            )
+            continue
+        try:
+            local_path = out_dir / filename
+            images.download(kie_url, local_path)
+            public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/{filename}"
+            stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+        except Exception as e:  # noqa: BLE001 — keep going on transient I/O
+            store.log_render_event(
+                "image_save_failed",
+                f"{label} download/upload failed: {e}",
+                level="warn",
+                payload={"variant": label, "error": str(e)[:200]},
+            )
+            print(
+                f"[hero+thumb from-short] id={safe_id} {label} "
+                f"download/upload FAILED: {e}; other variants will still be attempted"
+            )
+            continue
+        store.log_render_event(
+            "image_saved",
+            f"{label} uploaded — {stored_url}",
+            payload={"variant": label, "url": stored_url, "mode": "i2i+scene"},
+        )
+        _HERO_THUMB_COLUMN_WRITERS[column](story["id"], stored_url)
+        result[column] = stored_url
+        result["cost_cents"] += per_image_cents
+
+    return result
+
+
+def generate_hero_and_thumbnail_from_short(
+    story_id: str, repo_root: Path,
+) -> dict:
+    """Top-level finisher: produce the article's hero + thumbnail variants
+    using the latest short's character + a picker-chosen scene as i2i
+    inputs. Called by the story-jobs worker AFTER the short's render row
+    flips to status='done' (plan:
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+
+    Returns the result dict from `_build_hero_and_thumbnail_from_short`
+    (the five column URLs + cost_cents + picker metadata). Updates the
+    `stories` columns directly via the store helpers — the worker does
+    not need to merge anything into its row dict because the upsert has
+    already happened by the time this fires.
+
+    Raises ValueError on setup failures so the worker can mark the job
+    failed with a clear admin-facing message.
+    """
+    safe_id = _sanitize_id(story_id)
+    story = store.fetch_story(story_id)
+    if story is None:
+        raise ValueError(f"story {story_id!r} not found")
+    out_dir = _regen_out_dir(repo_root, safe_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return _build_hero_and_thumbnail_from_short(story, out_dir, safe_id)
+
+
+def _regen_hero_and_thumbnail_from_short(
+    story: dict, out_dir: Path, safe_id: str,
+) -> tuple[str, int]:
+    """Regen-worker wrapper around the finisher. Returns
+    (first_landed_url, total_cost_cents) to match the (url, cents)
+    contract that `regen_one`'s other handlers use.
+
+    Used by the admin's "Generate hero + thumbnail from short" button on
+    /admin/stories/[id] so a legacy story that already has a short but
+    no thumbnail can be backfilled by hand. Same five i2i calls, same
+    cost, same observability — just routed through the image_renders
+    queue instead of the story_jobs worker.
+    """
+    result = _build_hero_and_thumbnail_from_short(story, out_dir, safe_id)
+    # Prefer the portrait hero (the column the public reader checks first)
+    # as the queue's output_url sample. Fall back through the other variants
+    # if the portrait specifically failed.
+    first_url = (
+        result.get("hero_image")
+        or result.get("thumbnail_image")
+        or result.get("hero_image_landscape")
+        or result.get("thumbnail_image_landscape")
+        or result.get("thumbnail_image_square")
+        or ""
+    )
+    if not first_url:
+        raise RuntimeError(
+            f"story {safe_id} hero+thumb regen produced no images "
+            "(all five i2i calls failed) — check the timeline"
+        )
+    return first_url, int(result.get("cost_cents") or 0)
 
 
 def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:

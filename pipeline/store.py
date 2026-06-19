@@ -119,6 +119,17 @@ SCHEMA_STATEMENTS = [
     # chain lives in pipeline/voice.py:synthesize.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_provider TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_id TEXT",
+    # 2026-06-19 hero + thumbnail derived from the short's scenes (plan:
+    # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    # Thumbnail is a sibling of hero, kept in its own three orientations
+    # because the multi-platform shorts publisher needs distinct framing
+    # per surface — 3:4 for the in-app card, 16:9 for YouTube, 1:1 for
+    # Instagram. NULL across the board on legacy rows; the public reader's
+    # fallback chain prefers hero when a thumbnail variant is missing so
+    # nothing breaks before the finisher fills these in.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image_landscape TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image_square TEXT",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -437,6 +448,11 @@ _COLUMNS = [
     # above for resolution chain). Both NULL on fresh-pipeline writes —
     # the picker UI lands them via setStoryVoiceAction in Phase 3.
     "voice_provider", "voice_id",
+    # 2026-06-19 scene-derived thumbnail set (plan:
+    # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    # Written by media.generate_hero_and_thumbnail_from_short after the
+    # short finishes; NULL on fresh-pipeline writes until that finisher runs.
+    "thumbnail_image", "thumbnail_image_landscape", "thumbnail_image_square",
     "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
@@ -2208,6 +2224,77 @@ def update_story_hero_landscape(story_id: str, hero_url: str) -> None:
             "UPDATE stories SET hero_image_landscape = ?, updated_at = ? "
             "WHERE id = ?",
             (hero_url, now, story_id),
+        )
+
+
+def update_story_thumbnail(story_id: str, url: str) -> None:
+    """Patch stories.thumbnail_image (3:4 portrait). Written by the
+    hero+thumbnail finisher after a short completes. Sibling of
+    `update_story_hero` — kept separate from the hero column so the
+    public reader can render an in-app card thumbnail distinct from
+    the article header."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET thumbnail_image = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET thumbnail_image = ?, updated_at = ? WHERE id = ?",
+            (url, now, story_id),
+        )
+
+
+def update_story_thumbnail_landscape(story_id: str, url: str) -> None:
+    """Patch stories.thumbnail_image_landscape (16:9). The YouTube /
+    desktop social variant; rendered from the same scene + character
+    pair as the portrait so the three thumbnail orientations stay
+    visually coherent."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET thumbnail_image_landscape = %s, "
+                    "updated_at = %s WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET thumbnail_image_landscape = ?, updated_at = ? "
+            "WHERE id = ?",
+            (url, now, story_id),
+        )
+
+
+def update_story_thumbnail_square(story_id: str, url: str) -> None:
+    """Patch stories.thumbnail_image_square (1:1). Instagram-friendly
+    framing for the multi-platform shorts publisher. Same scene +
+    character inputs as the other two thumbnail variants."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET thumbnail_image_square = %s, "
+                    "updated_at = %s WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET thumbnail_image_square = ?, updated_at = ? "
+            "WHERE id = ?",
+            (url, now, story_id),
         )
 
 

@@ -249,40 +249,87 @@ def make_thumbnail_prompt(
     dry_run: bool,
     *,
     character_base_url: str | None = None,
+    scene_image_url: str | None = None,
 ) -> str:
     """Build a cinematic title-baked thumbnail prompt for hero / poster art.
 
     Each prompt names the scene briefly (from the article's opening lines),
     appends the category's visual identity, and instructs the image model to
     render the title prominently inside the composition (gpt-image-2 handles
-    short bold text well; longer titles wrap or get abbreviated). Two aspect
-    ratios are supported: '3:4' for portrait posters / mobile billboards, and
-    '16:9' for desktop hero strips.
+    short bold text well; longer titles wrap or get abbreviated). Three
+    aspect ratios are supported: '3:4' for portrait posters / mobile
+    billboards, '16:9' for desktop hero strips, and '1:1' for the
+    Instagram-square thumbnail variant.
 
     When `character_base_url` is supplied the prompt switches to a
     character-faithful redraw: the caller MUST also pass
     `image_input=[character_base_url]` to `images.generate` so the model
     sees the short's base character as an i2i reference. Without that
     handshake, the prompt change does nothing and the model still
-    invents a fresh face every call. The style band stays shared across
-    both aspects so portrait and landscape look like the same poster
-    series — only the composition / scene cue varies.
+    invents a fresh face every call.
+
+    When `scene_image_url` is ALSO supplied (the hybrid mode used by
+    `generate_hero_and_thumbnail_from_short` — see
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md),
+    the prompt names a second reference image and tells the model to
+    inherit its framing / mood / lighting while still preserving the
+    character's identity from the first reference. The caller MUST pass
+    `image_input=[character_base_url, scene_image_url]` in that order so
+    the prompt's "first reference" / "second reference" wording lines up
+    with what the model sees.
+
+    The style band stays shared across all aspects so the variants read
+    as one poster series — only the composition / scene cue varies.
     """
     style = CATEGORY_THUMBNAIL_STYLES.get(category, CATEGORY_THUMBNAIL_STYLES["Drama"])
-    orientation = (
-        "Vertical streaming-thumbnail composition, character focal point "
-        "centered, title baked into the upper or lower band"
-        if aspect_ratio == "3:4"
-        else "Wide cinematic banner composition, character focal point off-center "
-        "to leave room for the title, title baked into the lower-third band"
-    )
+    if aspect_ratio == "3:4":
+        orientation = (
+            "Vertical streaming-thumbnail composition, character focal point "
+            "centered, title baked into the upper or lower band"
+        )
+    elif aspect_ratio == "1:1":
+        orientation = (
+            "Square Instagram-thumbnail composition, character focal point "
+            "centered with breathing room on both sides, title baked into "
+            "the lower band"
+        )
+    else:
+        orientation = (
+            "Wide cinematic banner composition, character focal point off-center "
+            "to leave room for the title, title baked into the lower-third band"
+        )
     if dry_run:
-        suffix = " (i2i)" if character_base_url else ""
+        flags = []
+        if character_base_url:
+            flags.append("i2i")
+        if scene_image_url:
+            flags.append("scene-ref")
+        suffix = f" ({'+'.join(flags)})" if flags else ""
         return f"[DRY] {title} cinematic {category} thumbnail at {aspect_ratio}{suffix}"
 
     # Take just the first couple of sentences of the article as the scene cue
     # so the model gets context without re-rendering the whole body each call.
     opening = " ".join(body.split()[:60])
+
+    if character_base_url and scene_image_url:
+        # Hybrid mode: two reference images. First = the character (identity
+        # source), second = the chosen scene from the short (framing / mood
+        # source). Tell the model EXPLICITLY which is which because gpt-image-2
+        # i2i otherwise blends them; we need the face from #1 and the
+        # composition from #2, not a 50/50 mash.
+        return (
+            f"Redraw the EXACT same character from the FIRST reference image — "
+            f"same face, gender, build, hair, clothing, age — but place them in "
+            f"a composition INSPIRED BY the SECOND reference image's framing, "
+            f"mood, lighting, and dramatic moment. Reimagined as a cinematic "
+            f"editorial poster for a short documentary titled \"{title}\". "
+            f"{style} "
+            f"Scene context from the story: {opening} "
+            f"Render the title \"{title}\" prominently in bold confident "
+            f"typography, integrated into the composition (not floating on a "
+            f"separate layer). {orientation}. High-resolution magazine-cover "
+            f"finish. No watermarks, no signatures, no extra text beyond the title."
+        )
 
     if character_base_url:
         # i2i variant: the reference image carries the protagonist's identity
@@ -311,6 +358,134 @@ def make_thumbnail_prompt(
         f"separate layer). {orientation}. High-resolution magazine-cover "
         f"finish. No watermarks, no signatures, no extra text beyond the title."
     )
+
+
+def pick_hero_and_thumbnail_scenes(
+    title: str,
+    body: str,
+    scenes: list[dict],
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Pick a hero scene index and a (distinct) thumbnail scene index from a
+    short's generated scene list.
+
+    Used by `media.generate_hero_and_thumbnail_from_short` (see
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    The hero and thumbnail are i2i'd from the short's character_base_url PLUS
+    a chosen scene image — picking which scene is what this function does.
+
+    `scenes` is the list persisted in short_renders.props (one dict per scene
+    with a `scene` description and a `url`). Returns
+    `{"hero_index", "thumbnail_index", "picker_reasoning"}`. Both indexes are
+    guaranteed to be within `range(len(scenes))`. Distinct whenever the list
+    has >= 2 scenes; equal only when there's a single scene available.
+
+    Deterministic fallback (used when scenes is empty, dry_run, or the LLM call
+    fails / returns junk): hero = 0 (story opener establishes the character),
+    thumbnail = len(scenes) // 2 (typically the climactic mid-beat). Cheap and
+    predictable so tests don't need an LLM key.
+
+    The LLM call is intentionally tiny — title + body's first 60 words + numbered
+    scene descriptions — and uses the cheap `gpt-5-nano` model the title stage
+    already uses. Cost target: ~$0.001 per story. Skipped entirely under
+    `hero_thumbnail.scene_picker.enabled = off`.
+    """
+    from pipeline import llm, store
+
+    if not scenes:
+        return {"hero_index": 0, "thumbnail_index": 0, "picker_reasoning": "no scenes"}
+
+    n = len(scenes)
+    fallback_hero = 0
+    fallback_thumb = n // 2 if n > 1 else 0
+    fallback = {
+        "hero_index": fallback_hero,
+        "thumbnail_index": fallback_thumb,
+        "picker_reasoning": "deterministic fallback (hero=0, thumb=mid)",
+    }
+
+    if dry_run:
+        return {**fallback, "picker_reasoning": "[DRY] deterministic"}
+
+    if (store.get_setting("hero_thumbnail.scene_picker.enabled") or "on").strip().lower() in {
+        "off", "0", "false", "no",
+    }:
+        return {**fallback, "picker_reasoning": "picker disabled in settings"}
+
+    # Just the description text per scene; we don't show the image URL or
+    # prompt to the model — those add tokens without changing the choice.
+    scene_lines = "\n".join(
+        f"  {i}. {(s.get('scene') or '').strip()[:200]}"
+        for i, s in enumerate(scenes)
+    )
+    opening = " ".join((body or "").split()[:60])
+    instruction = (
+        "You pick the two most visually striking scenes from a short documentary "
+        "for use as poster art.\n"
+        f'Article title: "{title}"\n'
+        f"Article opening: {opening}\n\n"
+        "Scenes (numbered, with the description that was given to the image model):\n"
+        f"{scene_lines}\n\n"
+        "Pick TWO scenes:\n"
+        "  - hero_index: best as the article's header — establishes the protagonist clearly, "
+        "calm enough that a baked-in title reads.\n"
+        "  - thumbnail_index: best as the click-stopping social card — most dramatic, highest "
+        "emotional charge, must be DIFFERENT from hero_index when more than one scene exists.\n\n"
+        "Return ONLY a JSON object with three keys: "
+        '{"hero_index": <int>, "thumbnail_index": <int>, "reasoning": "<one short sentence>"}. '
+        "No prose, no fences."
+    )
+    try:
+        raw = llm.chat(instruction, 600, model="openai/gpt-5-nano").strip()
+    except Exception as e:  # noqa: BLE001 — picker must not break the pipeline
+        return {**fallback, "picker_reasoning": f"llm error: {e}"[:200]}
+
+    parsed = _parse_scene_picker(raw)
+    if parsed is None:
+        return {**fallback, "picker_reasoning": "llm returned unparseable JSON"}
+
+    hero_idx = parsed.get("hero_index")
+    thumb_idx = parsed.get("thumbnail_index")
+    reasoning = str(parsed.get("reasoning") or "")[:200]
+    if not isinstance(hero_idx, int) or not (0 <= hero_idx < n):
+        hero_idx = fallback_hero
+    if not isinstance(thumb_idx, int) or not (0 <= thumb_idx < n):
+        thumb_idx = fallback_thumb
+    # Distinctness: with 2+ scenes the two assets should look different. If the
+    # model picked the same index, nudge thumbnail one slot toward the middle
+    # so we don't ship two identical i2i seeds.
+    if n > 1 and hero_idx == thumb_idx:
+        thumb_idx = (hero_idx + 1) % n
+        reasoning = (reasoning + " | nudged for distinctness").strip(" |")
+
+    return {
+        "hero_index": hero_idx,
+        "thumbnail_index": thumb_idx,
+        "picker_reasoning": reasoning or "llm pick",
+    }
+
+
+def _parse_scene_picker(raw: str) -> dict | None:
+    """Mirror of `_parse_title_synopsis`: strip fences, find the outer JSON
+    object, return the parsed dict. None on any failure so the caller can
+    fall back deterministically."""
+    snippet = raw
+    if "```" in snippet:
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("{"):
+                snippet = stripped
+                break
+    start, end = snippet.find("{"), snippet.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(snippet[start : end + 1])
+    except json.JSONDecodeError:
+        return None
 
 
 # --- prop plan (Wave 3 Phase 3 PropSlideIn) ----------------------------------
