@@ -88,6 +88,10 @@ export interface ReelCardProps {
   saved: boolean;
   onToggleLike: (id: string) => void;
   onToggleSave: (id: string) => void;
+  /** Playback progress callback. Fires as `<video>` time advances. The
+   *  feed throttles + thresholds this for the Continue Watching store —
+   *  ReelCard just forwards the raw event so playback paths stay local. */
+  onTimeUpdate?: (currentTime: number, duration: number) => void;
 }
 
 export default function ReelCard({
@@ -107,6 +111,7 @@ export default function ReelCard({
   saved,
   onToggleLike,
   onToggleSave,
+  onTimeUpdate,
 }: ReelCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [posterOk, setPosterOk] = useState(true);
@@ -234,6 +239,16 @@ export default function ReelCard({
               if (shouldPlay) tryPlay();
             }}
             onPlay={() => setBlocked(false)}
+            onTimeUpdate={
+              onTimeUpdate
+                ? (e) => {
+                    const v = e.currentTarget;
+                    if (Number.isFinite(v.duration) && v.duration > 0) {
+                      onTimeUpdate(v.currentTime, v.duration);
+                    }
+                  }
+                : undefined
+            }
             onError={() =>
               console.warn("[reels video err]", { id: short.id, src: videoUrl })
             }

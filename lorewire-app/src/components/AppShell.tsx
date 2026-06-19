@@ -22,6 +22,7 @@ import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
 import DesktopShell from "@/components/DesktopShell";
 import ReelsFeed from "@/components/reels/ReelsFeed";
+import CookieConsent from "@/components/CookieConsent";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
@@ -32,7 +33,11 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
-import { useSavedStories } from "@/lib/engagement-store";
+import {
+  useContinueReading,
+  useRecentlyViewed,
+  useSavedStories,
+} from "@/lib/engagement-store";
 
 // Mirror DesktopShell's NO_LIVE_MEDIA seed: until the live fetch resolves
 // (or on miss/error) every subview falls back to the baked story shape.
@@ -242,12 +247,19 @@ function Home({
   // _plans/2026-06-18-homepage-no-flash-ssr.md) so the rails paint on
   // first byte instead of popping in after the client fetch.
   const { rails: pollRails } = useHomepagePolls(pollsInitial);
+  // 2026-06-19 Phase 2: per-user Continue Watching state from
+  // engagement-store. When the browser has in-progress entries, they
+  // beat the admin's "first-4-from-catalog" fallback (and lose to a
+  // hand-curated continue list — admin override stays authoritative).
+  const continueState = useContinueReading();
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const featured = heroIds[0] ? resolveStory(heroIds[0]) : null;
 
-  const continueIds = resolveRailIds("continue", curation, behavior, catalog);
+  const continueIds = resolveRailIds("continue", curation, behavior, catalog, {
+    continue: continueState.ids,
+  });
   const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
   const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
 
@@ -1256,6 +1268,11 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   // My List is the persisted saved-stories store, shared with the Reels feed's
   // Save button and the Title sheet so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
+  // 2026-06-19 Phase 2: Recently viewed is recorded whenever the user
+  // opens a story (the detail sheet or a deep-link into Reels). LRU
+  // ordering means the most-recent open bubbles to the front; the
+  // engagement-store caps the list at 50.
+  const { recordView } = useRecentlyViewed();
 
   // Hoisted curation + live-catalog hook. Home receives the values as
   // props instead of calling the hook itself so MyList and the modal
@@ -1270,12 +1287,16 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     liveRows: initial.liveRows,
   });
 
-  const open: OpenFn = (id, t) => setActive({ id, tab: t });
+  const open: OpenFn = (id, t) => {
+    setActive({ id, tab: t });
+    recordView(id);
+  };
   const close = () => setActive(null);
   // "Play Something" jumps straight into the Reels feed (Phase 7 deep-link). An
   // id scrolls to that short if it's in the loaded pages; otherwise the feed
   // opens at the top.
   const openReels = (id?: string) => {
+    if (id) recordView(id);
     setReelsStoryId(id ?? null);
     close();
     setTab("Reels");
@@ -1352,6 +1373,13 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
 // call so the first paint already shows the correct hero + rails. See
 // _plans/2026-06-18-homepage-no-flash-ssr.md.
 export default function AppShell({ initial }: { initial: HomepageInitial }) {
+  // CookieConsent mounts at the shell level so it's shared across the
+  // mobile and desktop adapters — one banner, one decision, one source
+  // of truth. Position is `fixed`, so it floats over whichever subview
+  // is rendered. The banner's own visibility logic handles SSR (renders
+  // nothing) and the grandfather branch (silent accept for existing
+  // users with prior persisted state). Plan:
+  // _plans/2026-06-19-anonymous-first-auth.md.
   return (
     <>
       <div className="lg:hidden">
@@ -1360,6 +1388,7 @@ export default function AppShell({ initial }: { initial: HomepageInitial }) {
       <div className="hidden lg:block">
         <DesktopShell initial={initial} />
       </div>
+      <CookieConsent />
     </>
   );
 }

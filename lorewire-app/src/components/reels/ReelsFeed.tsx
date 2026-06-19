@@ -20,7 +20,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import ReelCard from "@/components/reels/ReelCard";
 import { useReelsData } from "@/components/reels/useReelsData";
-import { useSavedStories, useLikedReels } from "@/lib/engagement-store";
+import {
+  useContinueReading,
+  useLikedReels,
+  useSavedStories,
+} from "@/lib/engagement-store";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 
 type OpenFn = (id: string, tab?: string) => void;
@@ -60,6 +64,36 @@ export default function ReelsFeed({
   // List tab + Title sheet) and the booleans are passed down per card.
   const { isSaved, toggle: toggleSave } = useSavedStories();
   const { isLiked, toggle: toggleLike } = useLikedReels();
+  // 2026-06-19 Phase 2: Continue Watching writes a progress entry per
+  // story as playback advances. Thresholds keep the rail honest:
+  //   - >= 5 s watched (filters out scrubbing past or accidental opens)
+  //   - < 90% complete (the user effectively finished — don't park it
+  //     in "Continue" forever)
+  //   - on remove when >= 90%: an entry that crossed the threshold gets
+  //     dropped so a re-watch from the top behaves cleanly.
+  // Throttle to one write per story per 5 s so timeupdate's ~4 Hz tick
+  // rate doesn't beat localStorage to death.
+  const { set: setContinue, remove: removeContinue } = useContinueReading();
+  const lastWriteAt = useRef<Map<string, number>>(new Map());
+  const onShortTimeUpdate = useCallback(
+    (storyId: string, currentTime: number, duration: number) => {
+      if (!Number.isFinite(duration) || duration <= 0) return;
+      const ratio = currentTime / duration;
+      if (ratio >= 0.9) {
+        // Finished (or near enough): drop the entry if we previously
+        // wrote one. Cheap idempotent remove — no-op when absent.
+        removeContinue(storyId);
+        return;
+      }
+      if (currentTime < 5) return;
+      const last = lastWriteAt.current.get(storyId) ?? 0;
+      const now = Date.now();
+      if (now - last < 5000) return;
+      lastWriteAt.current.set(storyId, now);
+      setContinue(storyId, { positionMs: Math.round(currentTime * 1000) });
+    },
+    [removeContinue, setContinue],
+  );
 
   // Keep a ref to the latest loadMore so the IntersectionObserver can trigger
   // prefetch without re-binding every time the cursor changes (assigning a ref
@@ -180,6 +214,7 @@ export default function ReelsFeed({
             saved={isSaved(s.id)}
             onToggleLike={toggleLike}
             onToggleSave={toggleSave}
+            onTimeUpdate={(t, d) => onShortTimeUpdate(s.id, t, d)}
           />
         </section>
       ))}

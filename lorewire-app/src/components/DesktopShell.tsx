@@ -29,7 +29,11 @@ import {
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
-import { useSavedStories } from "@/lib/engagement-store";
+import {
+  useContinueReading,
+  useRecentlyViewed,
+  useSavedStories,
+} from "@/lib/engagement-store";
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -998,6 +1002,11 @@ function HomePage({
   // (see _plans/2026-06-18-homepage-no-flash-ssr.md) so the rails paint
   // on first byte instead of popping in after a client fetch.
   const { rails: pollRails } = useHomepagePolls(pollsInitial);
+  // 2026-06-19 Phase 2: per-user Continue Watching now has a real
+  // progress source. Engagement-store tracks story progress in
+  // localStorage; this rail surfaces it. Resolution order in
+  // resolveRailIds is: admin curation → user state → catalog fallback.
+  const continueState = useContinueReading();
 
   // Hero behaviour: curation.hero_required forces "no hero curation -> no
   // hero", which HomePage honours by rendering null in the hero slot.
@@ -1008,11 +1017,9 @@ function HomePage({
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const heroStory = heroIds[0] ? resolveStory(heroIds[0]) : null;
 
-  const continueIds = resolveRailIds("continue", curation, behavior, catalog);
-  // Continue Watching had per-user-style progress bars in the legacy
-  // hardcoded demo. Live curation has no per-user state, so entries
-  // render without a bar — the rail now reads as a "currently featured"
-  // strip. We could re-introduce real progress once user sessions land.
+  const continueIds = resolveRailIds("continue", curation, behavior, catalog, {
+    continue: continueState.ids,
+  });
   const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
   const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
 
@@ -1128,6 +1135,10 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
   // My List is the persisted saved-stories store, shared with the Reels feed's
   // Save button and the detail modal so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
+  // 2026-06-19 Phase 2: Recently viewed is recorded whenever the user
+  // opens a story (detail sheet or Reels deep-link). LRU ordered, capped
+  // at 50 by the engagement-store.
+  const { recordView } = useRecentlyViewed();
 
   // Hoisted curation + live-catalog hook. HomePage reads it through props
   // instead of calling the hook itself so every grid (Browse / New & Hot /
@@ -1155,10 +1166,18 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     return () => { document.body.style.overflow = ""; };
   }, [active, view]);
 
-  const open: OpenFn = (id, t) => setActive({ id, tab: t });
+  const open: OpenFn = (id, t) => {
+    setActive({ id, tab: t });
+    recordView(id);
+  };
   const close = () => setActive(null);
   // "Play Something" jumps into the Reels feed (optionally at a story).
-  const openReels = (id?: string) => { setReelsStoryId(id ?? null); close(); setView("Reels"); };
+  const openReels = (id?: string) => {
+    if (id) recordView(id);
+    setReelsStoryId(id ?? null);
+    close();
+    setView("Reels");
+  };
   const shuffle = () => openReels();
 
   return (

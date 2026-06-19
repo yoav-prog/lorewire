@@ -441,14 +441,45 @@ export const POLL_RAIL_TITLES: Record<PollRailKind, string> = {
 // should be skipped entirely (empty curation + behavior.emptyRailBehavior
 // === "hide"). Logs the decision per rule 14 so a stale fallback or
 // hidden rail is greppable from the console.
+//
+// 2026-06-19 Phase 2 anonymous-first auth: `userOverrides` carries the
+// browser's per-user state (Continue Watching ids from
+// lib/engagement-store useContinueReading). Resolution order for the
+// `continue` surface specifically:
+//   1. Admin curation (if any) — admin override beats everything.
+//   2. User's continue_reading list — the real progress this browser
+//      has, sorted most-recent first.
+//   3. Static catalog fallback — first-N stories, the legacy behavior.
+// For every other surface, userOverrides is ignored. Keeps the rail
+// resolver pure (no React, no consent gate — the caller has already
+// honored consent before reading from engagement-store).
+export interface RailUserOverrides {
+  /** Story ids the user has in-progress on this device, most-recent first.
+   *  Read from useContinueReading().ids in the calling shell. */
+  continue?: string[];
+}
+
 export function resolveRailIds(
   surface: keyof HomepageCuration,
   curation: HomepageCuration | null,
   behavior: HomepageCurationBehavior,
   catalog: MergedCatalog,
+  userOverrides?: RailUserOverrides,
 ): string[] | null {
   const curated = curation?.[surface] ?? [];
   if (curated.length > 0) return curated;
+  if (
+    surface === "continue" &&
+    userOverrides?.continue &&
+    userOverrides.continue.length > 0
+  ) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[lorewire curation user-continue]", {
+      surface,
+      count: userOverrides.continue.length,
+    });
+    return userOverrides.continue;
+  }
   if (curation && behavior.emptyRailBehavior === "hide") {
     // eslint-disable-next-line no-console -- rule 14
     console.info("[lorewire curation hide]", { surface, reason: "empty" });

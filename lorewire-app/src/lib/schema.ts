@@ -134,6 +134,17 @@ export const SETTINGS: Table = {
   ],
 };
 
+// `users` predates the public-side auth work — its original purpose was admin
+// staff with email + password_hash + role. The 2026-06-19 anonymous-first plan
+// adds public-side rows (role='user') created via OAuth, so the additive
+// columns below cover both worlds:
+//   - admin staff rows keep password_hash, leave provider/provider_sub NULL.
+//   - OAuth user rows leave password_hash NULL, fill provider + provider_sub.
+// `anonymous_id` is the prior `lw_anon` cookie value at first sign-in, the
+// stitch between the anonymous browser and the registered identity. It's only
+// set on creation; later sign-ins on other devices don't overwrite it. NULL
+// for admin rows and for users who registered without prior anonymous use.
+// Plan: _plans/2026-06-19-anonymous-first-auth.md.
 export const USERS: Table = {
   name: "users",
   columns: [
@@ -141,7 +152,105 @@ export const USERS: Table = {
     { name: "email", type: "TEXT" },
     { name: "password_hash", type: "TEXT" },
     { name: "role", type: "TEXT" },
+    { name: "name", type: "TEXT" },
+    { name: "picture_url", type: "TEXT" },
+    { name: "provider", type: "TEXT" },
+    { name: "provider_sub", type: "TEXT" },
+    { name: "anonymous_id", type: "TEXT" },
+    { name: "last_seen_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: My List. One row per (user_id, story_id), enforced by
+// the unique index in POST_TABLE_DDL. `id` is a generated UUID so the row has
+// a stable handle for deletes; the upsert path targets (user_id, story_id).
+// Plan: _plans/2026-06-19-anonymous-first-auth.md §Storage layout.
+export const USER_SAVES: Table = {
+  name: "user_saves",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Likes. Parallel to USER_SAVES; reels feed Like button.
+export const USER_LIKES: Table = {
+  name: "user_likes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Favorite categories. `category` is one of the six closed
+// enum strings from src/app/admin/ui.ts (Drama, Entitled, Humor, Wholesome,
+// Dating, Roommate). Stored as text (not FK) because the enum is a code-level
+// type, not a row in a categories table — see plan §Resolved.
+export const USER_FAV_CATEGORIES: Table = {
+  name: "user_fav_categories",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Recently viewed. Capped server-side via a periodic prune
+// (the most recent 50 per user) — the index on (user_id, viewed_at DESC)
+// makes the prune cheap. `id` is generated per visit so the same story can
+// appear multiple times if revisited (read path collapses by story_id).
+export const USER_RECENTLY_VIEWED: Table = {
+  name: "user_recently_viewed",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "viewed_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-19 Phase 3 magic-link auth. One row per outstanding token. The
+// raw token is sent in the email and NEVER stored — we store only its
+// SHA-256 hash. Verify-by-lookup hashes the incoming token and matches
+// against token_hash. `used_at` is null until first verify; the verify
+// path enforces single-use by checking used_at IS NULL before accepting
+// the token. `email` is stored normalized (lowercased + trimmed) so the
+// users-table upsert sees the same key. Expired rows are pruned by a
+// future periodic cron; the verify path also rejects on expires_at <
+// now, so an unpruned row is harmless. Plan:
+// _plans/2026-06-19-anonymous-first-auth.md.
+export const MAGIC_LINK_TOKENS: Table = {
+  name: "magic_link_tokens",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "email", type: "TEXT" },
+    { name: "token_hash", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+    { name: "used_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Continue Watching / Reading. One row per (user_id,
+// story_id); a re-watch UPDATEs the existing row. `position_ms` for video,
+// `position_pct` (0-100) for article scroll progress — non-null exactly one
+// of the two depending on the surface. The unique index on (user_id,
+// story_id) is what the upsert path targets.
+export const USER_CONTINUE: Table = {
+  name: "user_continue",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "position_ms", type: "INTEGER" },
+    { name: "position_pct", type: "INTEGER" },
+    { name: "updated_at", type: "TEXT" },
   ],
 };
 
@@ -542,6 +651,15 @@ export const POLL_VOTES: Table = {
     { name: "cookie_token", type: "TEXT" },
     { name: "ip_ua_hash", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
+    // 2026-06-19 anonymous-first auth. Nullable: anonymous votes leave
+    // this NULL and stay anchored to cookie_token; signed-in votes set
+    // user_id and the OAuth callback's reconciliation step UPDATEs
+    // prior anon votes from the same browser to fill it. Anti-double-
+    // vote becomes two PARTIAL unique indexes (see POST_TABLE_DDL):
+    // (poll_id, user_id) WHERE user_id IS NOT NULL and the existing
+    // (poll_id, cookie_token) which now only enforces over anon rows.
+    // Plan: _plans/2026-06-19-anonymous-first-auth.md §Polls + auth.
+    { name: "user_id", type: "TEXT" },
   ],
 };
 
@@ -590,6 +708,12 @@ export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
   USERS,
+  USER_SAVES,
+  USER_LIKES,
+  USER_FAV_CATEGORIES,
+  USER_RECENTLY_VIEWED,
+  USER_CONTINUE,
+  MAGIC_LINK_TOKENS,
   VIDEO_SEGMENTS,
   VIDEO_RENDERS,
   VIDEO_RENDER_EVENTS,
@@ -736,4 +860,58 @@ export const POST_TABLE_DDL: string[] = [
     "ON poll_aggregates(agreement DESC, total_votes DESC)",
   "CREATE INDEX IF NOT EXISTS idx_poll_aggregates_category " +
     "ON poll_aggregates(category, divisiveness DESC)",
+  // 2026-06-19 anonymous-first auth. Load-bearing uniqueness for the
+  // OAuth callback's user lookup: (provider, provider_sub) is the
+  // identity key Google's `sub` claim maps to. The fallback by-email
+  // path uses the email index. Partial uniqueness on provider_sub so
+  // admin rows (provider IS NULL) don't collide.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_provider_sub " +
+    "ON users(provider, provider_sub) " +
+    "WHERE provider IS NOT NULL AND provider_sub IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+  // 2026-06-19 anonymous-first auth: per-user state tables. The unique
+  // indexes are the upsert anchors (lib/user-state.ts will INSERT ...
+  // ON CONFLICT(user_id, story_id) DO NOTHING for saves/likes; same
+  // shape for the others). The non-unique reads sort latest-first.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_saves_user_story " +
+    "ON user_saves(user_id, story_id)",
+  "CREATE INDEX IF NOT EXISTS idx_user_saves_user_created " +
+    "ON user_saves(user_id, created_at DESC)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_likes_user_story " +
+    "ON user_likes(user_id, story_id)",
+  "CREATE INDEX IF NOT EXISTS idx_user_likes_user_created " +
+    "ON user_likes(user_id, created_at DESC)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_fav_categories_user_cat " +
+    "ON user_fav_categories(user_id, category)",
+  // Recently-viewed: NOT unique on (user_id, story_id) — re-visits are
+  // separate rows, the read collapses by story_id. The (user_id,
+  // viewed_at) index supports both the latest-N read and the periodic
+  // prune that caps the per-user history at 50.
+  "CREATE INDEX IF NOT EXISTS idx_user_recently_viewed_user_viewed " +
+    "ON user_recently_viewed(user_id, viewed_at DESC)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_continue_user_story " +
+    "ON user_continue(user_id, story_id)",
+  "CREATE INDEX IF NOT EXISTS idx_user_continue_user_updated " +
+    "ON user_continue(user_id, updated_at DESC)",
+  // 2026-06-19 polls + auth. Signed-in users get a second anti-double-
+  // vote primitive keyed on user_id (anonymous votes keep using the
+  // existing idx_poll_votes_poll_cookie). PARTIAL: only enforces over
+  // rows that actually carry a user_id, so the anon row pattern is
+  // unchanged. The reconciliation UPDATE in the OAuth callback sets
+  // user_id on prior anon rows from the same browser; after that, the
+  // signed-in user can re-vote from a second device and recordVote
+  // sees the existing (poll_id, user_id) row and returns
+  // inserted=false without creating a duplicate. Plan:
+  // _plans/2026-06-19-anonymous-first-auth.md §Polls + auth integration.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_poll_votes_poll_user " +
+    "ON poll_votes(poll_id, user_id) WHERE user_id IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_user_id " +
+    "ON poll_votes(user_id) WHERE user_id IS NOT NULL",
+  // 2026-06-19 Phase 3 magic link. The verify path looks up by
+  // token_hash (cheapest index for the hot path); the periodic prune
+  // and the verify-time expiry check scan by expires_at.
+  "CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash " +
+    "ON magic_link_tokens(token_hash)",
+  "CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expires " +
+    "ON magic_link_tokens(expires_at)",
 ];
