@@ -3,25 +3,24 @@
 // Public-facing engagement-poll widget. Phase 2 of
 // _plans/2026-06-17-engagement-polls.md.
 //
-// Shared between /v/[slug] and the article reader so both surfaces
-// render the same component with the same vote contract. The parent
-// server component does the fetching (poll row + aggregate +
-// has-this-cookie-already-voted) and passes everything in as props;
-// this component owns the click → fetch → reveal flow.
+// Shared between /v/[slug], the article reader, and the homepage
+// DetailModal (DesktopShell + AppShell). The parent resolves the
+// poll row + aggregate + has-this-cookie-already-voted server-side
+// and passes everything in as props; this component owns the
+// click → fetch → reveal flow.
 //
 // State machine:
-//   initialVotedSide=null + total<floor   → "Be one of the first to vote"
-//                                            + two buttons.
-//   initialVotedSide=null + total>=floor  → two buttons (results stay
-//                                            hidden until the user
-//                                            decides — no peek-then-
-//                                            skip).
-//   initialVotedSide set OR just-voted    → percentages + total +
-//                                            "You picked X" pill.
+//   initialVotedSide=null + total<floor   → "Be one of the first" + duel tiles
+//   initialVotedSide=null + total>=floor  → vote count tease + duel tiles
+//                                            (percentages stay hidden until
+//                                            commit — no peek-then-skip)
+//   initialVotedSide set OR just-voted    → result bars + verdict kicker
 //
-// The pre-vote-with-existing-floor case is intentional: if we showed
-// percentages before they voted, the lazy user would skim them and
-// bounce. Hiding the result until commit IS the engagement primitive.
+// Visual language (2026-06-19 redesign): "duel" layout with a center
+// VS chip pre-vote, animated full-width bars post-vote, and a
+// verdict kicker telling the user where they landed in the split.
+// Built for the homepage DetailModal where the widget has to look
+// like it belongs next to the cinematic hero, not a SaaS form.
 
 import { useState, useTransition } from "react";
 // Phase 2 of _plans/2026-06-17-engagement-polls.md. Client component
@@ -116,102 +115,163 @@ export function PollWidget({
   const pctB = result?.pctB ?? 0;
   const showResults = Boolean(votedSide);
 
+  // Kicker copy used post-vote: tells the user where they landed.
+  // Tuned so it never reads as condescending — small typography,
+  // factual phrasing. Skipped when the floor hasn't been reached
+  // (no honest majority to claim yet).
+  const verdict = (() => {
+    if (!showResults || !hasFloor || !votedSide) return null;
+    const userPct = votedSide === "A" ? pctA : pctB;
+    if (userPct >= 60) return "You're with the majority.";
+    if (userPct <= 40) return "You're in the minority.";
+    return "It's a close call.";
+  })();
+
   return (
     <section
       aria-label="Story poll"
       data-testid="poll-widget"
-      className="rounded-2xl border border-line bg-surface p-5"
+      className="relative overflow-hidden rounded-2xl border border-line bg-surface"
+      style={{
+        backgroundImage:
+          "radial-gradient(120% 95% at 85% 0%, rgba(232,70,43,.10), transparent 55%), radial-gradient(80% 60% at 0% 100%, rgba(232,70,43,.06), transparent 60%)",
+      }}
     >
-      <h2 className="font-display text-[18px] font-bold leading-snug text-ink">
-        {question}
-      </h2>
+      {/* Hairline accent strip at the top — small but instantly readable
+          as "this section means something." */}
+      <div className="absolute inset-x-0 top-0 h-[3px] bg-gradient-to-r from-accent via-accent/70 to-transparent" />
 
-      {!showResults ? (
-        <>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <PollButton
-              label={optionA}
-              disabled={pending}
-              onClick={() => castVote("A")}
-            />
-            <PollButton
-              label={optionB}
-              disabled={pending}
-              onClick={() => castVote("B")}
-            />
-          </div>
-          <p className="mt-3 font-mono text-[11px] uppercase tracking-wider text-muted">
-            {hasFloor
-              ? `${totalVotes.toLocaleString()} votes so far — pick a side to reveal the split.`
-              : "Be one of the first to vote."}
-          </p>
-        </>
-      ) : (
-        <div className="mt-4 space-y-3">
-          <PollResultRow
-            label={optionA}
-            pct={pctA}
-            highlighted={votedSide === "A"}
-            hasFloor={hasFloor}
-          />
-          <PollResultRow
-            label={optionB}
-            pct={pctB}
-            highlighted={votedSide === "B"}
-            hasFloor={hasFloor}
-          />
-          <p className="font-mono text-[11px] uppercase tracking-wider text-muted">
-            {hasFloor
-              ? `${totalVotes.toLocaleString()} votes`
-              : `${totalVotes.toLocaleString()} vote${totalVotes === 1 ? "" : "s"} — percentages reveal once more voters chime in.`}{" "}
-            · You picked{" "}
-            <span className="text-ink">
-              {votedSide === "A" ? optionA : optionB}
+      <div className="px-5 py-6 sm:px-7 sm:py-7">
+        {/* Kicker row — small uppercase mono, gives the widget identity
+            and tells the user up front what they're looking at. */}
+        <div className="flex items-center justify-between gap-3 font-mono text-[10.5px] uppercase tracking-[.22em] text-muted">
+          <span className="flex items-center gap-2">
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent" />
+            {showResults ? "Your verdict" : "You decide"}
+          </span>
+          {hasFloor && (
+            <span className="tabular-nums text-ink/70">
+              {totalVotes.toLocaleString()} votes
             </span>
-            .
-          </p>
-
-          {followUp && (
-            <a
-              href={followUp.href}
-              className="group mt-1 flex items-center justify-between gap-3 rounded-lg border border-line bg-bg px-4 py-3 text-[14px] text-ink transition-colors hover:border-accent"
-            >
-              <span className="flex flex-col gap-0.5">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-                  See another close call
-                </span>
-                <span className="font-semibold leading-snug">
-                  {followUp.title}
-                </span>
-              </span>
-              <span
-                aria-hidden
-                className="text-[18px] text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-accent"
-              >
-                →
-              </span>
-            </a>
           )}
         </div>
-      )}
 
-      {error && (
-        <p
-          role="alert"
-          className="mt-3 rounded-md border border-cat-entitled/40 bg-cat-entitled/10 px-3 py-2 text-[12px] text-cat-entitled"
-        >
-          {error}
+        {/* Question — big, brand-voice display type. Tracks tight to
+            match the rest of the modal headings. */}
+        <h2 className="mt-3 font-display text-[22px] font-black uppercase leading-[1.05] tracking-tight text-ink sm:text-[26px]">
+          {question}
+        </h2>
+
+        {!showResults ? (
+          <DuelTiles
+            optionA={optionA}
+            optionB={optionB}
+            pending={pending}
+            onVote={castVote}
+          />
+        ) : (
+          <ResultStack
+            optionA={optionA}
+            optionB={optionB}
+            pctA={pctA}
+            pctB={pctB}
+            votedSide={votedSide}
+            hasFloor={hasFloor}
+          />
+        )}
+
+        {/* Footer line. Pre-vote: floor tease. Post-vote: verdict kicker. */}
+        <p className="mt-5 font-mono text-[11px] uppercase tracking-[.18em] text-muted">
+          {!showResults
+            ? hasFloor
+              ? "Pick a side to reveal the split."
+              : "Be one of the first to vote."
+            : hasFloor
+              ? verdict
+              : `${totalVotes.toLocaleString()} vote${totalVotes === 1 ? "" : "s"} — split reveals once more voters chime in.`}
         </p>
-      )}
+
+        {followUp && showResults && (
+          <a
+            href={followUp.href}
+            className="group mt-5 flex items-center justify-between gap-3 rounded-xl border border-line bg-bg/60 px-4 py-3 text-ink transition-colors hover:border-accent hover:bg-bg"
+          >
+            <span className="flex flex-col gap-0.5">
+              <span className="font-mono text-[10px] uppercase tracking-[.18em] text-muted">
+                Next close call
+              </span>
+              <span className="font-display text-[15px] font-bold uppercase leading-tight tracking-tight">
+                {followUp.title}
+              </span>
+            </span>
+            <span
+              aria-hidden
+              className="text-[20px] text-muted transition-transform group-hover:translate-x-0.5 group-hover:text-accent"
+            >
+              →
+            </span>
+          </a>
+        )}
+
+        {error && (
+          <p
+            role="alert"
+            className="mt-4 rounded-md border border-accent/40 bg-accent/10 px-3 py-2 font-body text-[12px] text-accent"
+          >
+            {error}
+          </p>
+        )}
+      </div>
     </section>
   );
 }
 
-function PollButton({
+/* ─── Pre-vote duel: two big tiles with a VS chip between them. ─── */
+
+function DuelTiles({
+  optionA,
+  optionB,
+  pending,
+  onVote,
+}: {
+  optionA: string;
+  optionB: string;
+  pending: boolean;
+  onVote: (side: PollSide) => void;
+}) {
+  return (
+    <div className="mt-5 grid grid-cols-[1fr_auto_1fr] items-stretch gap-3 sm:gap-4">
+      <DuelTile
+        letter="A"
+        label={optionA}
+        disabled={pending}
+        onClick={() => onVote("A")}
+      />
+      <div
+        aria-hidden
+        className="flex items-center justify-center"
+      >
+        <span className="font-display text-[12px] font-black uppercase tracking-[.2em] rounded-full border border-line bg-bg/80 px-2.5 py-1 text-muted">
+          VS
+        </span>
+      </div>
+      <DuelTile
+        letter="B"
+        label={optionB}
+        disabled={pending}
+        onClick={() => onVote("B")}
+      />
+    </div>
+  );
+}
+
+function DuelTile({
+  letter,
   label,
   disabled,
   onClick,
 }: {
+  letter: "A" | "B";
   label: string;
   disabled: boolean;
   onClick: () => void;
@@ -221,19 +281,69 @@ function PollButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="rounded-xl border border-line bg-bg px-5 py-3 text-[15px] font-semibold text-ink transition-colors hover:border-accent hover:bg-surface2 focus:outline-none focus-visible:border-accent disabled:cursor-not-allowed disabled:opacity-60"
+      className="group relative flex flex-col items-center justify-center gap-2 rounded-xl border border-line bg-bg/60 px-3 py-5 text-center text-ink transition-all duration-150 hover:-translate-y-0.5 hover:border-accent hover:bg-bg active:translate-y-0 active:scale-[.99] focus:outline-none focus-visible:border-accent disabled:cursor-not-allowed disabled:opacity-60 sm:py-6"
     >
-      {label}
+      <span className="font-mono text-[10px] uppercase tracking-[.22em] text-muted transition-colors group-hover:text-accent">
+        Side {letter}
+      </span>
+      <span className="font-display text-[16px] font-black uppercase leading-tight tracking-tight sm:text-[18px]">
+        {label}
+      </span>
+      <span
+        aria-hidden
+        className="mt-1 font-mono text-[9.5px] uppercase tracking-[.22em] text-muted opacity-0 transition-opacity group-hover:opacity-100"
+      >
+        Tap to vote
+      </span>
     </button>
   );
 }
 
-function PollResultRow({
+/* ─── Post-vote: stacked result rows with animated bars. ─── */
+
+function ResultStack({
+  optionA,
+  optionB,
+  pctA,
+  pctB,
+  votedSide,
+  hasFloor,
+}: {
+  optionA: string;
+  optionB: string;
+  pctA: number;
+  pctB: number;
+  votedSide: VotedSide;
+  hasFloor: boolean;
+}) {
+  return (
+    <div className="mt-5 space-y-3">
+      <ResultRow
+        letter="A"
+        label={optionA}
+        pct={pctA}
+        highlighted={votedSide === "A"}
+        hasFloor={hasFloor}
+      />
+      <ResultRow
+        letter="B"
+        label={optionB}
+        pct={pctB}
+        highlighted={votedSide === "B"}
+        hasFloor={hasFloor}
+      />
+    </div>
+  );
+}
+
+function ResultRow({
+  letter,
   label,
   pct,
   highlighted,
   hasFloor,
 }: {
+  letter: "A" | "B";
   label: string;
   pct: number;
   highlighted: boolean;
@@ -242,36 +352,50 @@ function PollResultRow({
   // Width of the inline progress bar mirrors pct on a floor-met poll;
   // pre-floor we show a flat track with no fill so a freshly-voted
   // 100%/0% never gets advertised.
-  const width = hasFloor ? `${Math.max(0, Math.min(100, pct))}%` : "0%";
+  const clamped = Math.max(0, Math.min(100, pct));
+  const width = hasFloor ? `${clamped}%` : "0%";
   return (
-    <div className="space-y-1">
-      <div className="flex items-baseline justify-between gap-3">
+    <div
+      className={`relative overflow-hidden rounded-xl border px-4 py-3 transition-colors ${
+        highlighted
+          ? "border-accent/60 bg-accent/[.06]"
+          : "border-line bg-bg/40"
+      }`}
+    >
+      {/* Animated fill bar sits behind the row content. */}
+      <div
+        aria-hidden
+        className={`pointer-events-none absolute inset-y-0 left-0 transition-[width] duration-700 ease-out ${
+          highlighted ? "bg-accent/25" : "bg-ink/[.08]"
+        }`}
+        style={{ width }}
+      />
+      <div className="relative flex items-center gap-3">
         <span
-          className={
-            highlighted
-              ? "font-semibold text-ink"
-              : "text-ink"
-          }
-        >
-          {label}
-          {highlighted && (
-            <span className="ml-2 rounded-full border border-accent/50 bg-accent/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-accent">
-              Your pick
-            </span>
-          )}
-        </span>
-        <span className="font-mono text-[13px] text-ink">
-          {hasFloor ? `${pct}%` : "—"}
-        </span>
-      </div>
-      <div className="h-2 overflow-hidden rounded-full bg-bg">
-        <div
           aria-hidden
-          className={`h-full transition-[width] duration-500 ${
-            highlighted ? "bg-accent" : "bg-line"
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full font-display text-[12px] font-black uppercase tracking-tight ${
+            highlighted
+              ? "bg-accent text-bg"
+              : "border border-line bg-bg/70 text-ink/70"
           }`}
-          style={{ width }}
-        />
+        >
+          {letter}
+        </span>
+        <span className="flex-1 truncate font-display text-[15px] font-bold uppercase leading-tight tracking-tight text-ink sm:text-[16px]">
+          {label}
+        </span>
+        {highlighted && (
+          <span className="font-mono text-[9.5px] uppercase tracking-[.22em] text-accent">
+            Your pick
+          </span>
+        )}
+        <span
+          className={`font-display text-[18px] font-black tabular-nums tracking-tight sm:text-[20px] ${
+            highlighted ? "text-accent" : "text-ink/70"
+          }`}
+        >
+          {hasFloor ? `${clamped}%` : "—"}
+        </span>
       </div>
     </div>
   );
