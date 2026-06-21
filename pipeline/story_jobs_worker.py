@@ -309,6 +309,34 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         payload={"title": branded_title, "synopsis_chars": len(branded_syn or "")},
     )
 
+    # 2026-06-21 LLM category classifier
+    # (_plans/2026-06-21-category-classifier-and-pills.md). Subreddit map
+    # is the fallback; the classifier reads the rewritten article body so
+    # it tags accurately regardless of which subreddit a CSV row came
+    # from. A failed call returns the fallback unchanged — never NULL,
+    # never junk — so the downstream upsert stays safe.
+    prev_category = idea["category"]
+    classified = stages.classify_category(
+        branded_title or idea["headline"],
+        body,
+        fallback_category=prev_category,
+    )
+    if classified != prev_category:
+        print(
+            f"[story-jobs classify] reddit_id={post['id']} "
+            f"{prev_category} -> {classified}"
+        )
+        store.log_story_job_event(
+            job_id, reddit_id, "category_reclassified",
+            message=f"Category {prev_category} -> {classified}",
+            payload={"prev": prev_category, "next": classified},
+        )
+        idea["category"] = classified
+    else:
+        print(
+            f"[story-jobs classify] reddit_id={post['id']} kept {prev_category}"
+        )
+
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     row = {
         "id": idea["reddit_id"],

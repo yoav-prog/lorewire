@@ -496,3 +496,33 @@ export function resolveRailIds(
   }
   return fallback;
 }
+
+// The "All" sentinel for the homepage pill row. Lives next to
+// CATEGORY_RAILS / PILLS so the filter helper and the chip renderer
+// reference the same literal instead of two copies that can drift.
+export const ALL_PILL = "All";
+
+/** Drop ids whose resolved story doesn't match the active pill category.
+ *  Pure helper used by both shells so the filter behaves identically on
+ *  mobile + desktop and so we can unit-test it without mounting JSX.
+ *
+ *  - `pill === ALL_PILL` returns the list unchanged.
+ *  - Ids that don't resolve (stale curation pointing at a deleted story)
+ *    are dropped — they would have been dropped at the rail layer anyway.
+ *  - The check uses `story.cat`, which liveRowToStory + the published.ts
+ *    overlay both populate from `stories.category`. So updating a story's
+ *    category in the DB and refreshing is enough for the pill filter to
+ *    pick it up; no rebake of published.ts required.
+ */
+export function filterIdsByPillCat(
+  ids: string[] | null | undefined,
+  pill: string,
+  resolveStory: (id: string) => Story | null,
+): string[] {
+  if (!ids || ids.length === 0) return [];
+  if (pill === ALL_PILL) return ids;
+  return ids.filter((id) => {
+    const s = resolveStory(id);
+    return s ? s.cat === pill : false;
+  });
+}

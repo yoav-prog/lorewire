@@ -20,13 +20,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
+  ALL_PILL,
   fallbackIdsForSurface,
+  filterIdsByPillCat,
   liveRowToStory,
   mergeStaticAndLive,
   useHomepageCuration,
   useHomepagePolls,
 } from "@/lib/homepage-rails";
-import { STORIES } from "@/lib/stories";
+import { STORIES, type Cat, type Story } from "@/lib/stories";
 import * as actions from "@/app/actions";
 import type {
   HomepageCuration,
@@ -110,6 +112,54 @@ describe("mergeStaticAndLive", () => {
     const merged = mergeStaticAndLive([]);
     expect(merged.array.length).toBe(STORIES.length);
     expect(merged.array[0].id).toBe(STORIES[0].id);
+  });
+});
+
+// Pill filter (_plans/2026-06-21-category-classifier-and-pills.md). The
+// helper is what powers the home pill row: pure id-list filter against
+// each id's resolved category.
+describe("filterIdsByPillCat", () => {
+  const stories: Record<string, Story> = {
+    a: { ...STORIES[0], id: "a", cat: "Drama" as Cat },
+    b: { ...STORIES[0], id: "b", cat: "Humor" as Cat },
+    c: { ...STORIES[0], id: "c", cat: "Humor" as Cat },
+    d: { ...STORIES[0], id: "d", cat: "Wholesome" as Cat },
+  };
+  const resolve = (id: string) => stories[id] ?? null;
+
+  it("returns the list unchanged when pill is All", () => {
+    const ids = ["a", "b", "c", "d"];
+    expect(filterIdsByPillCat(ids, ALL_PILL, resolve)).toEqual(ids);
+  });
+
+  it("keeps only ids whose resolved story matches the active pill", () => {
+    expect(filterIdsByPillCat(["a", "b", "c", "d"], "Humor", resolve)).toEqual([
+      "b",
+      "c",
+    ]);
+    expect(filterIdsByPillCat(["a", "b", "c", "d"], "Drama", resolve)).toEqual([
+      "a",
+    ]);
+  });
+
+  it("returns [] when nothing matches", () => {
+    expect(
+      filterIdsByPillCat(["a", "b", "c", "d"], "Dating", resolve),
+    ).toEqual([]);
+  });
+
+  it("drops ids that don't resolve to a story", () => {
+    const resolveWithGap = (id: string) =>
+      id === "missing" ? null : stories[id] ?? null;
+    expect(
+      filterIdsByPillCat(["a", "missing", "b"], "Humor", resolveWithGap),
+    ).toEqual(["b"]);
+  });
+
+  it("handles null / empty inputs", () => {
+    expect(filterIdsByPillCat(null, "Humor", resolve)).toEqual([]);
+    expect(filterIdsByPillCat(undefined, "Humor", resolve)).toEqual([]);
+    expect(filterIdsByPillCat([], "Humor", resolve)).toEqual([]);
   });
 });
 

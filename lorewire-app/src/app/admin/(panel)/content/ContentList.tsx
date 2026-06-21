@@ -19,9 +19,11 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   bulkUpdateContentAction,
   bulkDeleteContentAction,
+  bulkReclassifyStoriesAction,
   type BulkActionResult,
   type BulkContentItem,
   type BulkUpdateOp,
+  type ReclassifyResult,
 } from "@/app/admin/actions";
 import {
   ARTICLE_LANGUAGE_LABELS,
@@ -53,6 +55,28 @@ function statusesFor(kinds: { stories: number; articles: number }): readonly str
 }
 
 const UNDO_TIMEOUT_MS = 10_000;
+
+// Per-category chip tint, matched to the --color-cat-* design tokens.
+// Explicit strings (not dynamic Tailwind class generation) so the purge
+// step keeps the classes in the production bundle. Same mapping the
+// CategoryChipGroup in the story editor uses — keeping the two surfaces
+// visually consistent.
+type CategoryName = (typeof CATEGORIES)[number];
+const CATEGORY_CHIP_CLASS: Record<CategoryName, string> = {
+  Drama: "border-cat-drama/40 bg-cat-drama/15 text-cat-drama",
+  Entitled: "border-cat-entitled/40 bg-cat-entitled/15 text-cat-entitled",
+  Humor: "border-cat-humor/40 bg-cat-humor/15 text-cat-humor",
+  Wholesome: "border-cat-wholesome/40 bg-cat-wholesome/15 text-cat-wholesome",
+  Dating: "border-cat-dating/40 bg-cat-dating/15 text-cat-dating",
+  Roommate: "border-cat-roommate/40 bg-cat-roommate/15 text-cat-roommate",
+};
+function categoryChipClass(category: string | null | undefined): string {
+  if (!category) return "border-line bg-bg text-muted";
+  return (
+    CATEGORY_CHIP_CLASS[category as CategoryName] ??
+    "border-line bg-bg text-muted"
+  );
+}
 
 type Kind = "story" | "article";
 
@@ -109,6 +133,13 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   const [undo, setUndo] = useState<UndoState | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [query, setQuery] = useState("");
+  // 2026-06-21 reclassify result banner. Null = no banner; the banner
+  // renders the last LLM-classify run's counts and a button to clear it.
+  // Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+  const [reclassifyResult, setReclassifyResult] = useState<
+    ReclassifyResult | null
+  >(null);
+  const [reclassifyConfirmOpen, setReclassifyConfirmOpen] = useState(false);
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -314,6 +345,53 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     });
   }
 
+  // 2026-06-21: count the rows currently visible that are eligible for the
+  // LLM reclassify backfill (NULL or "Drama" categories). Used to label
+  // the button and the confirm dialog with a concrete number.
+  const reclassifyEligibleCount = useMemo(() => {
+    let n = 0;
+    for (const r of rows) {
+      if (r.kind !== "story") continue;
+      if (r.badge === null || r.badge === "Drama") n += 1;
+    }
+    return n;
+  }, [rows]);
+
+  function runReclassify() {
+    console.info("[content list reclassify submit]");
+    setReclassifyConfirmOpen(false);
+    startTransition(async () => {
+      try {
+        const result = await bulkReclassifyStoriesAction();
+        console.info("[content list reclassify result]", {
+          scanned: result.scanned,
+          reclassified: result.reclassified,
+          unchanged: result.unchanged,
+          failed: result.failed.length,
+        });
+        setReclassifyResult(result);
+        router.refresh();
+      } catch (err) {
+        console.error("[content list reclassify failed]", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        setReclassifyResult({
+          scanned: 0,
+          reclassified: 0,
+          unchanged: 0,
+          failed: [
+            {
+              id: "—",
+              title: "—",
+              reason: err instanceof Error ? err.message : String(err),
+            },
+          ],
+          changes: [],
+        });
+      }
+    });
+  }
+
   // --- render ---------------------------------------------------------------
 
   return (
@@ -358,6 +436,40 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
             );
           })}
         </ul>
+      )}
+
+      {reclassifyResult && (
+        <ReclassifyResultBanner
+          result={reclassifyResult}
+          onDismiss={() => setReclassifyResult(null)}
+        />
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-2">
+        <span className="font-mono text-[11px] text-muted">
+          <span className="text-ink">{reclassifyEligibleCount}</span> stor
+          {reclassifyEligibleCount === 1 ? "y" : "ies"} tagged Drama or
+          uncategorized.
+          {reclassifyEligibleCount === 0 ? " Backlog is clean." : ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => setReclassifyConfirmOpen(true)}
+          disabled={pending || reclassifyEligibleCount === 0}
+          title="Run the LLM classifier on every story tagged Drama or uncategorized. Manually-set non-Drama categories are not touched."
+          className="rounded-md border border-accent/50 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending ? "Working…" : "Reclassify Drama + uncategorized"}
+        </button>
+      </div>
+
+      {reclassifyConfirmOpen && (
+        <ReclassifyConfirmModal
+          eligibleCount={reclassifyEligibleCount}
+          pending={pending}
+          onCancel={() => setReclassifyConfirmOpen(false)}
+          onRun={runReclassify}
+        />
       )}
 
       <div className="relative">
@@ -433,7 +545,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   </label>
                   <Link
                     href={rowHref(r)}
-                    className="flex min-w-0 flex-1 items-center justify-between gap-3 py-3 pr-3"
+                    className="flex min-w-0 flex-1 items-center gap-3 py-3 pr-3"
                   >
                     <span className="flex min-w-0 items-center gap-3">
                       <span
@@ -453,22 +565,41 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                           {r.title || r.slug || r.id.slice(0, 8)}
                         </span>
                         <span className="font-mono text-[11px] text-muted">
-                          {r.badge ?? "—"}
-                          {r.language
+                          {r.kind === "article"
+                            ? r.badge ?? "—"
+                            : null}
+                          {r.kind === "article" && r.language
                             ? ` · ${ARTICLE_LANGUAGE_LABELS[r.language as keyof typeof ARTICLE_LANGUAGE_LABELS] ?? r.language}`
                             : ""}
-                          {r.updated_at ? ` · ${r.updated_at.slice(0, 10)}` : ""}
+                          {r.kind === "article" && r.updated_at
+                            ? ` · ${r.updated_at.slice(0, 10)}`
+                            : ""}
+                          {r.kind === "story" && r.updated_at
+                            ? `updated ${r.updated_at.slice(0, 10)}`
+                            : ""}
                         </span>
                       </span>
                     </span>
-                    <span
-                      className={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
-                        r.status,
-                      )}`}
-                    >
-                      {r.status ?? "draft"}
-                    </span>
                   </Link>
+                  {r.kind === "story" && (
+                    <RowCategoryChip
+                      currentCategory={r.badge}
+                      disabled={pending}
+                      onPick={(category) =>
+                        requestAction([{ kind: "story", id: r.id }], {
+                          type: "category",
+                          category,
+                        })
+                      }
+                    />
+                  )}
+                  <span
+                    className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
+                      r.status,
+                    )}`}
+                  >
+                    {r.status ?? "draft"}
+                  </span>
                   <RowMenu
                     row={r}
                     disabled={pending}
@@ -801,6 +932,84 @@ function RowMenuPicker({
   );
 }
 
+// 2026-06-21 inline category chip for the story rows. Visible at all
+// times so the current category is glanceable, and clickable to open a
+// 6-option dropdown that calls the existing single-item bulk-update
+// path. Articles don't render this — they have no writable category
+// column. Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+function RowCategoryChip({
+  currentCategory,
+  disabled,
+  onPick,
+}: {
+  currentCategory: string | null;
+  disabled: boolean;
+  onPick: (category: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const label = currentCategory ?? "uncategorized";
+  return (
+    <div ref={wrap} className="relative mr-2 flex shrink-0 items-center">
+      <button
+        type="button"
+        onClick={() => !disabled && setOpen((v) => !v)}
+        disabled={disabled}
+        aria-label={`Change category (currently ${label})`}
+        title="Change category"
+        className={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ${categoryChipClass(
+          currentCategory,
+        )}`}
+      >
+        {label}
+      </button>
+      {open && (
+        <ul className="absolute right-0 top-full z-20 mt-1 min-w-[140px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
+          {CATEGORIES.map((c) => (
+            <li key={c}>
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  if (c === currentCategory) return;
+                  onPick(c);
+                }}
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[11px] transition-colors hover:bg-surface2 ${
+                  c === currentCategory ? "text-muted" : "text-ink"
+                }`}
+              >
+                <span
+                  aria-hidden
+                  className={`inline-block h-2 w-2 rounded-full border ${categoryChipClass(c)}`}
+                />
+                {c}
+                {c === currentCategory ? (
+                  <span className="ml-auto text-muted">current</span>
+                ) : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // --- Confirm modal ----------------------------------------------------------
 
 function ConfirmModal({
@@ -915,6 +1124,138 @@ function ConfirmModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// --- Reclassify confirm modal + result banner -------------------------------
+// 2026-06-21. Same modal shape as ConfirmModal but scoped to the LLM
+// reclassify backfill. Body explains exactly what the action will do so
+// a lazy-user (rule 10) doesn't have to reverse-engineer the verb.
+// Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+
+function ReclassifyConfirmModal({
+  eligibleCount,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  eligibleCount: number;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reclassify-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="reclassify-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Reclassify {eligibleCount} stor{eligibleCount === 1 ? "y" : "ies"}?
+        </h3>
+        <p className="mt-2 text-[13px] text-muted">
+          The LLM will read each story&apos;s title + article body and pick
+          one of Drama / Entitled / Humor / Wholesome / Dating / Roommate.
+          Only stories tagged{" "}
+          <span className="text-ink font-semibold">Drama</span> or
+          <span className="text-ink font-semibold"> uncategorized</span> are
+          scanned. Manually-set non-Drama categories stay untouched.
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          One small LLM call per story. Capped at 200 per run.
+        </p>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending || eligibleCount === 0}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Working…" : "Reclassify"}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReclassifyResultBanner({
+  result,
+  onDismiss,
+}: {
+  result: ReclassifyResult;
+  onDismiss: () => void;
+}) {
+  const previewChanges = result.changes.slice(0, 6);
+  const overflow = result.changes.length - previewChanges.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          Scanned {result.scanned} · Reclassified{" "}
+          <span className="text-accent">{result.reclassified}</span> · Unchanged{" "}
+          {result.unchanged}
+          {result.failed.length > 0
+            ? ` · Failed ${result.failed.length}`
+            : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewChanges.length > 0 && (
+        <ul className="space-y-0.5 border-t border-accent/20 pt-2 text-muted">
+          {previewChanges.map((c) => (
+            <li key={c.id}>
+              <span className="text-ink">{c.title}</span>
+              <span className="opacity-70">
+                {" "}
+                — {c.prev ?? "uncategorized"} → {c.next}
+              </span>
+            </li>
+          ))}
+          {overflow > 0 && <li>…and {overflow} more</li>}
+        </ul>
+      )}
+      {result.failed.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {result.failed.slice(0, 5).map((f) => (
+            <li key={f.id}>
+              <span className="text-ink">{f.title}</span>
+              <span className="opacity-70"> — {f.reason}</span>
+            </li>
+          ))}
+          {result.failed.length > 5 && (
+            <li>…and {result.failed.length - 5} more</li>
+          )}
+        </ul>
+      )}
     </div>
   );
 }

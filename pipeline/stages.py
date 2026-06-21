@@ -43,7 +43,23 @@ DECODO_SCRAPE_URL = "https://scraper-api.decodo.com/v2/scrape"
 DECODO_GEO = "United States"
 REDDIT_BASE = "https://www.reddit.com/r"
 
+# Canonical category set, mirrored in src/lib/stories.ts `Cat` and
+# src/app/admin/ui.ts `CATEGORIES`. The classifier validates LLM output
+# against this set so a model returning "comedy" or worse "DROP TABLE"
+# can never become a stories.category value.
+STORY_CATEGORIES = (
+    "Drama",
+    "Entitled",
+    "Humor",
+    "Wholesome",
+    "Dating",
+    "Roommate",
+)
+
 # Rough subreddit -> LoreWire category. Editorial, so the admin can re-tag.
+# Used as the fast-path / fallback when the LLM classifier fails. The
+# classifier (`classify_category`) runs after the article body is written
+# and overrides this when it returns a confident match.
 SUBREDDIT_CATEGORY = {
     "amitheasshole": "Entitled",
     "entitledparents": "Entitled",
@@ -57,6 +73,60 @@ SUBREDDIT_CATEGORY = {
     "mademesmile": "Wholesome",
     "humansbeingbros": "Wholesome",
 }
+
+
+def classify_category(
+    title: str,
+    body: str,
+    fallback_category: str,
+    dry_run: bool = False,
+) -> str:
+    """LLM-classify a story into one of STORY_CATEGORIES.
+
+    Returns the fallback when the LLM call fails or returns something
+    outside the closed set, so the pipeline never writes a junk category
+    to the DB. The fallback is normally the subreddit-map value picked
+    by `_category_for` upstream — that way the worst case for a network
+    blip is "unchanged from the heuristic" instead of "everything is
+    Drama".
+
+    Dry-run path returns the fallback unchanged so the offline test
+    pipeline stays deterministic.
+
+    Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+    """
+    if dry_run:
+        return fallback_category
+    from pipeline import llm
+
+    options = ", ".join(STORY_CATEGORIES)
+    # Body is capped to keep the prompt small (every story is at most
+    # ~450 words from write_article; 2000 chars is comfortable headroom).
+    snippet = (body or "").strip()[:2000]
+    prompt = (
+        "You tag short retold-from-Reddit stories with one of these LoreWire "
+        f"categories: {options}.\n"
+        "Pick the ONE that best fits the story below. Reply with just the "
+        "category word, exactly as spelled, no punctuation, no explanation.\n\n"
+        f"Title: {title or '(no title)'}\n"
+        f"Story:\n{snippet}"
+    )
+    try:
+        raw = llm.chat(prompt, 20, model="openai/gpt-5-nano").strip()
+    except Exception as e:  # noqa: BLE001 — classifier is a quality lift, not load-bearing.
+        print(f"[classify_category] llm failed, using fallback: {e}")
+        return fallback_category
+    # Strip surrounding punctuation/quotes the model sometimes adds.
+    cleaned = raw.strip().strip(".,;:!?\"'`").split()[0] if raw.strip() else ""
+    # Closed-enum check (case-insensitive match, canonical-cased output).
+    for cat in STORY_CATEGORIES:
+        if cleaned.lower() == cat.lower():
+            return cat
+    print(
+        f"[classify_category] non-matching LLM response {raw!r}, using fallback "
+        f"{fallback_category!r}"
+    )
+    return fallback_category
 
 
 def _decodo_scrape(reddit_url: str) -> dict:

@@ -607,5 +607,65 @@ class ThumbnailPromptCharacterRefTests(unittest.TestCase):
         self.assertIn("(i2i)", i2i)
 
 
+class ClassifyCategoryTests(unittest.TestCase):
+    """LLM category classifier (_plans/2026-06-21-category-classifier-and-pills.md).
+    Stubs `pipeline.llm.chat` so we exercise the closed-enum guard, the
+    canonical-cased output, and the safe-fallback behavior without a real
+    network call."""
+
+    TITLE = "THE $800 ENVELOPE"
+    BODY = "A coworker collects cash for the boss's retirement gift, then the envelope quietly disappears."
+
+    def _patch_llm(self, response):
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+
+        def fake_chat(_prompt, _max_tokens, model=None):  # noqa: ARG001
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        pipeline_llm.chat = fake_chat
+
+    def tearDown(self):
+        from pipeline import llm as pipeline_llm
+        if hasattr(self, "_orig"):
+            pipeline_llm.chat = self._orig
+
+    def test_dry_run_returns_fallback(self):
+        out = stages.classify_category(self.TITLE, self.BODY, "Entitled", dry_run=True)
+        self.assertEqual(out, "Entitled")
+
+    def test_returns_canonical_cased_match(self):
+        self._patch_llm("entitled")
+        out = stages.classify_category(self.TITLE, self.BODY, "Drama")
+        self.assertEqual(out, "Entitled")
+
+    def test_strips_punctuation_around_answer(self):
+        self._patch_llm('"Humor".')
+        out = stages.classify_category(self.TITLE, self.BODY, "Drama")
+        self.assertEqual(out, "Humor")
+
+    def test_falls_back_on_unknown_response(self):
+        self._patch_llm("Politics")
+        out = stages.classify_category(self.TITLE, self.BODY, "Wholesome")
+        self.assertEqual(out, "Wholesome")
+
+    def test_falls_back_on_empty_response(self):
+        self._patch_llm("   ")
+        out = stages.classify_category(self.TITLE, self.BODY, "Roommate")
+        self.assertEqual(out, "Roommate")
+
+    def test_falls_back_when_llm_raises(self):
+        self._patch_llm(RuntimeError("LLM HTTP 500: boom"))
+        out = stages.classify_category(self.TITLE, self.BODY, "Dating")
+        self.assertEqual(out, "Dating")
+
+    def test_first_word_only_when_model_explains(self):
+        self._patch_llm("Humor — it reads like a sitcom beat.")
+        out = stages.classify_category(self.TITLE, self.BODY, "Drama")
+        self.assertEqual(out, "Humor")
+
+
 if __name__ == "__main__":
     unittest.main()

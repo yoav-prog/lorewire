@@ -9,9 +9,11 @@ import {
   type Story,
 } from "@/lib/stories";
 import {
+  ALL_PILL,
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
+  filterIdsByPillCat,
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
@@ -259,11 +261,21 @@ function Home({
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const featured = heroIds[0] ? resolveStory(heroIds[0]) : null;
 
-  const continueIds = resolveRailIds("continue", curation, behavior, catalog, {
+  const continueIdsAll = resolveRailIds("continue", curation, behavior, catalog, {
     continue: continueState.ids,
   });
-  const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
-  const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
+  const top10IdsAll = resolveRailIds("top10", curation, behavior, catalog);
+  const newRowIdsAll = resolveRailIds("new_row", curation, behavior, catalog);
+
+  // 2026-06-21 pill filter (_plans/2026-06-21-category-classifier-and-pills.md).
+  // When the user picks a category chip the rails narrow in place: each rail
+  // keeps only stories whose `cat` matches the active pill. Empty rails hide
+  // via the existing `length > 0` guards below. Hero/Billboard is curation-
+  // driven and stays put — pulling the hero out from under the user on a tag
+  // pick is jarring (Netflix doesn't do it either).
+  const continueIds = filterIdsByPillCat(continueIdsAll, pill, resolveStory);
+  const top10Ids = filterIdsByPillCat(top10IdsAll, pill, resolveStory);
+  const newRowIds = filterIdsByPillCat(newRowIdsAll, pill, resolveStory);
 
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
@@ -313,6 +325,9 @@ function Home({
       )}
 
       {CATEGORY_RAILS.map((rail) => {
+        // Pill filter: when a category is active, only show that one
+        // category rail — the rest would just be empty or distracting.
+        if (pill !== ALL_PILL && rail.cat !== pill) return null;
         const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
         if (!ids) return null;
         const items = ids
@@ -332,7 +347,14 @@ function Home({
       })}
 
       {POLL_RAIL_KINDS.map((kind) => {
-        const cards = pollRails[kind];
+        // Pill filter for poll rails: keep only cards whose story category
+        // matches. A null category means we don't know the link, so the
+        // card hides under any non-All pill (consistent with "filter in
+        // place — show only what we can prove is in this category").
+        const cards =
+          pill === ALL_PILL
+            ? pollRails[kind]
+            : pollRails[kind].filter((row) => row.category === pill);
         if (cards.length === 0) return null;
         return (
           <section key={`poll-${kind}`} className="mt-7">
@@ -358,6 +380,32 @@ function Home({
           </div>
         </section>
       )}
+
+      {pill !== ALL_PILL &&
+        continueIds.length === 0 &&
+        top10Ids.length === 0 &&
+        newRowIds.length === 0 &&
+        (() => {
+          // The matching category rail might still have content even when
+          // Continue/Top10/New are all empty after filtering, so only show
+          // the empty state when even the category rail is empty.
+          const matching = CATEGORY_RAILS.find((r) => r.cat === pill);
+          if (!matching) return null;
+          const ids =
+            resolveRailIds(matching.surface, curation, behavior, catalog) ?? [];
+          const items = ids
+            .map((id) => resolveStory(id))
+            .filter((s): s is Story => s !== null);
+          if (items.length > 0) return null;
+          return (
+            <p className="font-body text-muted mt-10 mb-6 px-4 text-center text-[13px]">
+              Nothing tagged{" "}
+              <span className="text-ink font-semibold">{pill}</span> yet. Tap{" "}
+              <span className="text-ink font-semibold">All</span> to see
+              everything.
+            </p>
+          );
+        })()}
     </div>
   );
 }
