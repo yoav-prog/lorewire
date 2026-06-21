@@ -712,6 +712,92 @@ def fetch_story(story_id: str) -> dict | None:
         return dict(row) if row else None
 
 
+def upsert_poll_if_absent(
+    story_id: str,
+    question: str,
+    option_a_text: str,
+    option_b_text: str,
+    *,
+    category: str | None = None,
+    article_id: str | None = None,
+) -> bool:
+    """Insert a poll for `story_id` only when no poll row exists for that
+    story yet. Returns True if a row was inserted, False if a poll already
+    exists (in any enabled state) or the inputs are unusable.
+
+    Used by the shorts pipeline's hook-first restructure
+    (_plans/2026-06-21-shorts-hook-first-restructure.md §5.3): the script
+    LLM drafts a poll alongside the narration, and the orchestrator plants
+    it on disk so the burnt-in card has something to render and the
+    article reader has something to show. "If absent" semantics protect a
+    poll the admin already saved by hand — we never silently clobber
+    edited content.
+
+    The polls table itself is authored by the TS schema
+    (lorewire-app/src/lib/schema.ts); we only write into it. Best-effort:
+    if the table does not exist (first-boot ordering against a freshly
+    migrated DB) the insert swallows the OperationalError and returns
+    False — caller can log it and the burnt-in card will sit out the
+    render rather than fail it.
+    """
+    sid = (story_id or "").strip()
+    q = (question or "").strip()
+    a = (option_a_text or "").strip()
+    b = (option_b_text or "").strip()
+    if not sid or not q or not a or not b:
+        return False
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    new_id = str(uuid.uuid4())
+
+    if _is_postgres():
+        try:
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM polls WHERE story_id = %s LIMIT 1",
+                        (sid,),
+                    )
+                    if cur.fetchone():
+                        return False
+                    cur.execute(
+                        "INSERT INTO polls (id, story_id, article_id, question, "
+                        "option_a_text, option_b_text, enabled, category, "
+                        "created_at, updated_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s, %s)",
+                        (
+                            new_id, sid, article_id, q, a, b,
+                            (category or "").strip() or None, now, now,
+                        ),
+                    )
+                    return True
+        except Exception as e:  # noqa: BLE001 — best-effort write
+            print(f"[poll draft] story={sid} pg insert FAILED: {e}")
+            return False
+    try:
+        with _sqlite_conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM polls WHERE story_id = ? LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if row:
+                return False
+            c.execute(
+                "INSERT INTO polls (id, story_id, article_id, question, "
+                "option_a_text, option_b_text, enabled, category, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                (
+                    new_id, sid, article_id, q, a, b,
+                    (category or "").strip() or None, now, now,
+                ),
+            )
+            return True
+    except sqlite3.OperationalError as e:
+        print(f"[poll draft] story={sid} sqlite insert FAILED: {e}")
+        return False
+
+
 def fetch_enabled_poll_for_story(story_id: str) -> dict | None:
     """Phase 3 of _plans/2026-06-17-engagement-polls.md. Returns the poll
     row for `story_id` only when one exists AND `enabled = 1`.

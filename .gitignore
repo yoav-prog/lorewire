@@ -19,6 +19,8 @@ __pycache__/
 .venv/
 *.pyc
 *.db
+*.db-shm
+*.db-wal
 
 # Build output
 .next/
@@ -37,3 +39,4 @@ build/
 npm-debug.log*
 .vscode/
 .idea/
+.claude/

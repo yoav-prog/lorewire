@@ -183,6 +183,35 @@ def build_short_props(
         print(f"[short id={safe_story}] generator returned no scenes; skipping")
         return None
 
+    # Plant the bundled poll draft from the narration pass (hook-first
+    # restructure, _plans/2026-06-21-shorts-hook-first-restructure.md §5.3).
+    # The script LLM produces a poll alongside the script so the cold-open
+    # phrasing, the CTA line and the on-page poll all reinforce one phrase.
+    # We only plant the draft when the story has no poll yet — an admin-saved
+    # poll (or a previous render's draft) is never silently clobbered. The
+    # burnt-in question card (_build_question_card below) picks the row up
+    # on the same render, so the user gets a working poll on the article
+    # AND in the video without any admin step.
+    poll_draft = assets.script.get("poll") if isinstance(assets.script.get("poll"), dict) else None
+    if poll_draft:
+        wrote = store.upsert_poll_if_absent(
+            safe_story,
+            poll_draft.get("question", ""),
+            poll_draft.get("option_a", ""),
+            poll_draft.get("option_b", ""),
+            category=row.get("category"),
+        )
+        if wrote:
+            print(
+                f"[shorts poll] drafted story={safe_story} "
+                f"question={poll_draft.get('question')!r}"
+            )
+        else:
+            print(
+                f"[shorts poll] skipped story={safe_story}: poll already exists "
+                "(admin-edited or earlier draft preserved)"
+            )
+
     safe_id = safe_story + SHORT_ID_SUFFIX
     if remote:
         # Vercel / Cloud Run filesystems are read-only except /tmp. In remote

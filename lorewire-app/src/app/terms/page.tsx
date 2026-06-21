@@ -20,7 +20,7 @@ export const metadata: Metadata = {
 const EFFECTIVE_DATE = "2026-06-16";
 // TODO Yoav: confirm or replace these before filing review applications.
 const LEGAL_ENTITY = "Flexelent (operator of LoreWire)";
-const CONTACT_EMAIL = "info@flexelent.com";
+const CONTACT_EMAIL = "info@lorewire.com";
 const GOVERNING_LAW =
   "the State of Israel" /* TODO Yoav: confirm — Israel courts, or somewhere else */;
 

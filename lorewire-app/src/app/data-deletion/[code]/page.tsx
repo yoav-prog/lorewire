@@ -66,10 +66,10 @@ export default async function DataDeletionStatusPage({
           <p>
             Questions about what data LoreWire held: email{" "}
             <a
-              href="mailto:info@flexelent.com"
+              href="mailto:info@lorewire.com"
               className="text-accent underline"
             >
-              info@flexelent.com
+              info@lorewire.com
             </a>{" "}
             with this confirmation code.
           </p>
@@ -83,10 +83,10 @@ export default async function DataDeletionStatusPage({
             If you reached this page from a link Meta gave you and the
             code shown above does not match, email{" "}
             <a
-              href="mailto:info@flexelent.com"
+              href="mailto:info@lorewire.com"
               className="text-accent underline"
             >
-              info@flexelent.com
+              info@lorewire.com
             </a>{" "}
             and we will investigate.
           </p>

@@ -26,7 +26,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
-from pipeline import images, llm, models, shorts_image_style as sis, shorts_narration
+from pipeline import (
+    images,
+    llm,
+    models,
+    shorts_image_style as sis,
+    shorts_narration,
+    shorts_safety,
+)
 
 # Same establishing-shot model for the base; gpt-image-2 i2i for every scene so
 # the character holds. Kept here (not hard-coded below) so the build can swap it.
@@ -111,6 +118,7 @@ def build_plan_prompt(
     captions: list[str],
     max_scenes: int,
     source: str = "",
+    cold_open_visual_brief: str = "",
 ) -> str:
     """Design ONE recurring main character + a small world bible + N varied
     scene frames. The same main character appears in every frame (identity
@@ -124,10 +132,33 @@ def build_plan_prompt(
     "diverse" archetype every story (Asian woman, chin-length dark hair with a
     gray streak, round glasses, teal button-up) which made every short look the
     same person.
+
+    `cold_open_visual_brief` is the one-sentence visual the narration writer
+    emitted for beat 1 (the climax frame). When present, the planner MUST
+    compose scene 1 from that brief and scene N as a return-to-climax echo of
+    it, so the rendered video opens AND lands on the same beat — the structure
+    that defines the hook-first short
+    (_plans/2026-06-21-shorts-hook-first-restructure.md §3, decision D1).
+    Empty string means the brief is missing (legacy callers, fixtures); the
+    planner falls back to its previous behaviour and the climax-frame tagging
+    is a no-op for that render.
     """
     n = max(1, min(max_scenes, len(captions)))
     cap_lines = "\n".join(f"[{i}] {c}" for i, c in enumerate(captions))
     last_cap_idx = max(0, len(captions) - 1)
+    brief = (cold_open_visual_brief or "").strip()
+    cold_open_block = (
+        "\nCOLD OPEN + RETURN-TO-CLIMAX (hook-first structure):\n"
+        f"Scene 0 (the FIRST scene) IS the climax frame. Compose it FROM this brief:\n"
+        f"  \"{brief}\"\n"
+        f"Scene {n - 1} (the LAST scene) is the RETURN to the climax. Same composition family — "
+        "same subjects, same location, same emotional beat — with a deliberate variation in "
+        "framing, camera distance or expression so the audience reads it as 'we are back here, "
+        "now with weight' rather than a copy of frame 0. Both scenes MUST set "
+        "\"is_climax_frame\": true in their JSON; every other scene sets it to false.\n"
+        if brief and n >= 2
+        else ""
+    )
     system = (
         "You are the art director for a vertical hand-drawn cartoon short. Design ONE recurring MAIN "
         "CHARACTER, a small WORLD BIBLE of the supporting cast / locations / items that recur, and a set "
@@ -165,6 +196,7 @@ def build_plan_prompt(
         "in the source, give it a descriptive name (\"older_brother\", \"diner_booth\"). Apply the "
         "same ANTI-DEFAULT rule to supporting characters — vary them, do not produce four versions of "
         "the main-character archetype.\n\n"
+        f"{cold_open_block}"
         f"SCENE FRAMES ({n} frames): each frame shows the SAME main character (identity unchanged) "
         "visualizing its caption beat, but in a DIFFERENT setting, body pose, facial expression and mood "
         "from the others — standing / sitting / crouching / walking / reacting, close-up vs wide, "
@@ -190,7 +222,8 @@ def build_plan_prompt(
         '      "scene": "<the main character in a new place/pose/mood for this beat>",\n'
         '      "characters": ["<names from supporting_characters that appear in this scene; if the scene is visually FRAMED on a supporting character, list THAT character FIRST>"],\n'
         '      "locations": ["<names from locations>"],\n'
-        '      "items": ["<names from items>"]\n'
+        '      "items": ["<names from items>"],\n'
+        '      "is_climax_frame": <true for scene 0 and the LAST scene when a cold-open brief was provided; false for every other scene>\n'
         "    }\n"
         "  ]\n"
         "}\n\n"
@@ -518,22 +551,61 @@ def generate_short_assets(
 
     progress("script")
     source = f"{title}\n\n{body}".strip()
+    print(
+        f"[shorts script] generating model={llm_model} "
+        f"target_seconds={length.target_seconds} elaborate={length.elaborate}"
+    )
+    base_prompt_for_script = shorts_narration.build_extraction_prompt(
+        narration.id, source, length.target_seconds, elaborate=length.elaborate,
+    )
     script = extract_json(
-        llm.chat(
-            shorts_narration.build_extraction_prompt(
-                narration.id, source, length.target_seconds, elaborate=length.elaborate
-            ),
-            max_tokens=4000,
-            model=llm_model,
+        llm.chat(base_prompt_for_script, max_tokens=4000, model=llm_model)
+    )
+    # Layer 2 of the brand-safety defense (plan §4). Fails closed — one retry
+    # with the validator's complaints fed back to the model so it can fix
+    # specifically what broke; if the retry still fails we raise rather than
+    # ship a bad script, and the queue surface marks the render errored.
+    result = shorts_safety.validate_script(script, length.target_seconds)
+    if not result.ok:
+        print(
+            f"[shorts script] rejected errors={result.errors} "
+            f"details={result.details}"
         )
+        retry_prompt = (
+            base_prompt_for_script
+            + "\n\nPREVIOUS ATTEMPT FAILED VALIDATION. Fix EVERY one of these issues "
+            "and try again — same JSON shape, same word budgets, same brand-safety rules:\n"
+            + "\n".join(f"  - {e}" for e in result.errors)
+            + "\nOutput corrected JSON only."
+        )
+        script = extract_json(
+            llm.chat(retry_prompt, max_tokens=4000, model=llm_model)
+        )
+        result = shorts_safety.validate_script(script, length.target_seconds)
+        if not result.ok:
+            print(
+                f"[shorts script] rejected_after_retry errors={result.errors} "
+                f"details={result.details}"
+            )
+            raise ValueError(
+                "shorts narration failed validation twice: "
+                + "; ".join(result.errors)
+            )
+    print(
+        f"[shorts script] validated hook_words={result.details.get('hook_words')} "
+        f"script_words={result.details.get('script_words')} "
+        f"tone_knob={script.get('tone_knob')!r}"
     )
 
     caps = chunk_for_planning(script["short_script"])
     progress("plan")
     plan = extract_json(
         llm.chat(
-            build_plan_prompt(script["short_script"], script.get("hook", ""), script.get("payoff", ""),
-                              caps, length.max_scenes, source=source),
+            build_plan_prompt(
+                script["short_script"], script.get("hook", ""), script.get("payoff", ""),
+                caps, length.max_scenes, source=source,
+                cold_open_visual_brief=script.get("cold_open_visual_brief", ""),
+            ),
             max_tokens=3600,
             model=llm_model,
         )
@@ -559,6 +631,29 @@ def generate_short_assets(
 
     planned = [s for s in plan.get("scenes", []) if (s.get("scene") or "").strip()]
     _redistribute_chunk_indices(planned, len(caps))
+
+    # Force the climax-frame tags so the renderer / thumbnail picker / future
+    # "hold longer on the cold open" treatments have a guaranteed signal. The
+    # planner prompt asks for these to be set, but the model occasionally
+    # drops the field on the LAST scene — we fix it deterministically here
+    # rather than rely on the LLM being perfect every render. Only fires when
+    # a cold-open brief was actually carried through; without one the cold-
+    # open structure doesn't apply and tagging would be misleading.
+    cold_open_brief = (script.get("cold_open_visual_brief") or "").strip()
+    if cold_open_brief and len(planned) >= 2:
+        for i, scene in enumerate(planned):
+            scene["is_climax_frame"] = i == 0 or i == len(planned) - 1
+        print(
+            f"[shorts scene] cold_open_marked first=0 last={len(planned) - 1} "
+            f"total={len(planned)}"
+        )
+    else:
+        # No brief or only one scene — explicitly mark every scene non-climax
+        # so a downstream reader can distinguish "no climax tagging this
+        # render" from "the LLM forgot the field". The empty-set case is
+        # rarer than a missing-field bug; making both safe is cheap.
+        for scene in planned:
+            scene["is_climax_frame"] = False
 
     progress("base")
     base_prompt = (
@@ -652,6 +747,10 @@ def generate_short_assets(
                 "url": url,
                 "image_prompt": prompt,
                 "image_input_urls": refs,
+                # Carried so the renderer / thumbnail picker / future
+                # hold-longer-on-climax treatments can read it without
+                # re-deriving from scene index.
+                "is_climax_frame": bool(s.get("is_climax_frame")),
             }
 
     scenes = [results[i] for i in sorted(results)]
