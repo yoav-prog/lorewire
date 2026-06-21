@@ -29,6 +29,7 @@ import {
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
+import { JumpToPoll, InlineJumpToPoll } from "@/components/JumpToPoll";
 import {
   useContinueReading,
   useRecentlyViewed,
@@ -543,23 +544,155 @@ function GenArticle({
           ))}
         </div>
       )}
+      <InlineJumpToPoll question={`What's your take on this one?`} />
       {redditTarget ? (
-        <div className="mt-8 max-w-[660px]">
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">From the original thread</p>
-          <RedditEmbed url={redditTarget.url} title={story.title} />
-        </div>
+        <RedditSourceCard
+          url={redditTarget.url}
+          title={story.title}
+          redditId={redditTarget.redditId}
+        />
       ) : (
-        <div className="mt-8 rounded-[10px] p-5" style={{ background: "#211F29", borderLeft: "3px solid #E8462B" }}>
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-2.5">From the original thread</p>
-          <div className="flex items-center gap-2 mt-3.5 font-mono text-[11.5px] text-muted flex-wrap">
-            <span className="text-ink/80">r/AmItheAsshole</span>
-            <span>&middot;</span>
-            <span>retold by LoreWire</span>
-            <span className="ml-auto text-accent/40 font-medium">View source &rarr;</span>
-          </div>
-        </div>
+        <RedditSourceStub />
       )}
     </article>
+  );
+}
+
+// Designed "From the original thread" card that wraps the Reddit embed
+// widget. Shared visual language with the mobile (AppShell) variant —
+// gradient surface, subreddit chip with the Reddit avatar mark, and a
+// clear "Open in Reddit" affordance that always works even if the
+// hydrated widget gets blocked by a content filter.
+function RedditSourceCard({
+  url,
+  title,
+  redditId,
+}: {
+  url: string;
+  title?: string;
+  redditId: string;
+}) {
+  return (
+    <section
+      className="mt-8 rounded-[16px] overflow-hidden p-6 max-w-[660px]"
+      style={{
+        background:
+          "linear-gradient(135deg, #1c1820 0%, #181620 65%, #221820 100%)",
+        border: "1px solid rgba(232,70,43,0.22)",
+        boxShadow: "0 14px 40px rgba(0,0,0,0.35)",
+      }}
+    >
+      <div className="flex items-center gap-3 mb-4">
+        <RedditMark />
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[12px] uppercase tracking-[.2em] text-muted leading-tight">
+            From the original thread
+          </p>
+          <p className="font-display font-bold text-ink leading-tight mt-0.5 truncate" style={{ fontSize: 18 }}>
+            r/AmItheAsshole
+          </p>
+        </div>
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="shrink-0 font-mono text-[10px] uppercase tracking-[.18em] px-3 py-1.5 rounded-full transition hover:scale-[1.02]"
+          style={{
+            background: "rgba(232,70,43,0.14)",
+            color: "#E8462B",
+            border: "1px solid rgba(232,70,43,0.32)",
+          }}
+        >
+          Open in Reddit &rarr;
+        </a>
+      </div>
+      <div
+        className="rounded-[12px] overflow-hidden"
+        style={{ background: "rgba(245,243,239,0.04)" }}
+      >
+        <RedditEmbed url={url} title={title} />
+      </div>
+      <p className="font-mono text-[10px] text-muted/70 mt-3" data-reddit-id={redditId}>
+        Embed loads from Reddit. Falls back to a direct link if the widget is blocked.
+      </p>
+    </section>
+  );
+}
+
+// Stub rendered when no real Reddit source URL resolves — invites the
+// reader to discover more in the subreddit instead of looking like a
+// half-broken embed placeholder.
+function RedditSourceStub() {
+  return (
+    <section
+      className="mt-8 rounded-[16px] p-6 max-w-[660px]"
+      style={{
+        background:
+          "linear-gradient(135deg, #181620 0%, #15141A 60%, #1c1822 100%)",
+        border: "1px solid rgba(245,243,239,0.08)",
+      }}
+    >
+      <div className="flex items-center gap-3">
+        <RedditMark muted />
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[12px] uppercase tracking-[.2em] text-muted leading-tight">
+            Retold by LoreWire
+          </p>
+          <p className="font-display font-bold text-ink/85 leading-tight mt-0.5" style={{ fontSize: 18 }}>
+            From r/AmItheAsshole
+          </p>
+        </div>
+      </div>
+      <p className="text-ink/65 text-[14px] leading-relaxed mt-3">
+        This piece is one of many we've adapted from the subreddit. Want more? Browse what's resonating right now.
+      </p>
+      <a
+        href="https://www.reddit.com/r/AmItheAsshole/hot/"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-2 mt-4 font-mono text-[11px] uppercase tracking-[.18em] px-3.5 py-2 rounded-full transition hover:scale-[1.02]"
+        style={{
+          background: "rgba(232,70,43,0.14)",
+          color: "#E8462B",
+          border: "1px solid rgba(232,70,43,0.32)",
+        }}
+      >
+        Browse r/AmItheAsshole <span aria-hidden>&rarr;</span>
+      </a>
+    </section>
+  );
+}
+
+// Reddit snoo avatar mark, inline SVG so we don't pull a third-party icon
+// set into the bundle. The `muted` variant desaturates for the stub card.
+function RedditMark({ muted = false }: { muted?: boolean }) {
+  const fill = muted ? "#3a3540" : "#E8462B";
+  return (
+    <span
+      aria-hidden
+      className="shrink-0"
+      style={{
+        width: 44,
+        height: 44,
+        borderRadius: 999,
+        background: fill,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        boxShadow: muted ? "none" : "0 4px 14px rgba(232,70,43,0.35)",
+      }}
+    >
+      <svg
+        width="26"
+        height="26"
+        viewBox="0 0 24 24"
+        fill="#0A0A0C"
+        aria-hidden
+      >
+        <circle cx="12" cy="12" r="10" fill="none" />
+        <path d="M21 12.3c0-1.1-.9-2-2-2-.5 0-1 .2-1.4.5-1.4-.9-3.3-1.5-5.4-1.6l1-3.5 3 .7c0 .8.6 1.4 1.4 1.4s1.4-.6 1.4-1.4-.6-1.4-1.4-1.4c-.5 0-1 .3-1.2.7l-3.4-.8c-.2 0-.3.1-.4.2L11 9.2c-2.2 0-4.1.7-5.5 1.6-.4-.3-.9-.5-1.4-.5-1.1 0-2 .9-2 2 0 .8.5 1.5 1.2 1.8 0 .2-.1.5-.1.7 0 2.6 3.1 4.8 6.8 4.8s6.8-2.1 6.8-4.8c0-.2 0-.4-.1-.6.8-.3 1.3-1 1.3-1.9zM7 13.4c0-.8.6-1.4 1.4-1.4s1.4.6 1.4 1.4-.6 1.4-1.4 1.4-1.4-.6-1.4-1.4zm7.5 3.3c-.7.7-1.9 1-2.5 1s-1.8-.3-2.5-1c-.1-.1-.1-.3 0-.4.1-.1.3-.1.4 0 .5.5 1.4.7 2.1.7s1.7-.2 2.1-.7c.1-.1.3-.1.4 0 .2.1.2.3 0 .4zm-.4-1.9c-.8 0-1.4-.6-1.4-1.4s.6-1.4 1.4-1.4 1.4.6 1.4 1.4-.6 1.4-1.4 1.4z" />
+      </svg>
+    </span>
   );
 }
 
@@ -937,7 +1070,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
             </div>
             {pollView && (
-              <section className="mt-10">
+              <section id="article-poll" className="mt-10 scroll-mt-24">
                 <PollWidget
                   pollId={pollView.pollId}
                   question={pollView.question}
@@ -948,6 +1081,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
                 />
               </section>
             )}
+            {pollView && <JumpToPoll label="Vote now" />}
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>
               <div className="grid grid-cols-3 gap-4">

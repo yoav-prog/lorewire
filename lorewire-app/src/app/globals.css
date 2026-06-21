@@ -143,3 +143,27 @@ button:not(:disabled),
 .ink-shadow {
   text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6);
 }
+/* Floating "jump to poll" CTA: fade + slide up on first appearance so the
+   button doesn't pop into the viewport. Component is in
+   src/components/JumpToPoll.tsx; this class only handles the entrance
+   animation — sizing/colors live inline so the button is portable. */
+@keyframes jumpToPollFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.jump-to-poll-cta {
+  animation: jumpToPollFadeIn 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.jump-to-poll-cta:hover {
+  box-shadow: 0 12px 32px rgba(232, 70, 43, 0.45), 0 4px 10px rgba(0, 0, 0, 0.5);
+}
+.jump-to-poll-cta:focus-visible {
+  outline: 2px solid #f5f3ef;
+  outline-offset: 3px;
+}
