@@ -16,6 +16,10 @@ export const GOOGLE_STATE_COOKIE = "lw_oauth_g_state";
 export const GOOGLE_VERIFIER_COOKIE = "lw_oauth_g_verifier";
 export const MICROSOFT_STATE_COOKIE = "lw_oauth_m_state";
 export const MICROSOFT_VERIFIER_COOKIE = "lw_oauth_m_verifier";
+/** Reddit doesn't use PKCE so there's no verifier cookie — state alone
+ *  defends the round-trip. Same TTL and HttpOnly + Secure + SameSite=Lax
+ *  posture as the other providers. */
+export const REDDIT_STATE_COOKIE = "lw_oauth_r_state";
 /** Where to redirect after a successful sign-in. Validated through
  *  sanitizeNext on intake so a callback can't open-redirect off-site. */
 export const NEXT_PATH_COOKIE = "lw_oauth_next";

@@ -15,10 +15,14 @@ interface SignInFormProps {
   next: string | undefined;
   googleEnabled: boolean;
   microsoftEnabled: boolean;
+  redditEnabled: boolean;
   magicLinkEnabled: boolean;
 }
 
-function buildStartUrl(provider: "google" | "microsoft", next?: string): string {
+function buildStartUrl(
+  provider: "google" | "microsoft" | "reddit",
+  next?: string,
+): string {
   const url = new URL(`/auth/${provider}/start`, window.location.origin);
   if (next) url.searchParams.set("next", next);
   return url.toString();
@@ -28,6 +32,7 @@ export default function SignInForm({
   next,
   googleEnabled,
   microsoftEnabled,
+  redditEnabled,
   magicLinkEnabled,
 }: SignInFormProps) {
   const [email, setEmail] = useState("");
@@ -79,6 +84,15 @@ export default function SignInForm({
         </a>
       ) : null}
 
+      {redditEnabled ? (
+        <a
+          href={buildStartUrl("reddit", next)}
+          className="block w-full rounded-md border border-line bg-bg px-4 py-2 text-center text-sm font-medium text-ink hover:border-ink"
+        >
+          Continue with Reddit
+        </a>
+      ) : null}
+
       {magicLinkEnabled ? (
         <div className="rounded-md border border-line bg-bg p-4">
           {sent ? (
@@ -119,7 +133,10 @@ export default function SignInForm({
         </div>
       ) : null}
 
-      {!googleEnabled && !microsoftEnabled && !magicLinkEnabled ? (
+      {!googleEnabled &&
+      !microsoftEnabled &&
+      !redditEnabled &&
+      !magicLinkEnabled ? (
         <p className="text-sm text-muted">
           Sign-in is not configured yet. Check back soon.
         </p>

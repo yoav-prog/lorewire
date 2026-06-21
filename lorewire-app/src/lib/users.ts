@@ -32,7 +32,7 @@ import { randomUUID } from "node:crypto";
 
 import { all, one, run } from "@/lib/db";
 
-export type UserProvider = "google" | "microsoft" | "magic_link";
+export type UserProvider = "google" | "microsoft" | "reddit" | "magic_link";
 
 export interface UserRow {
   id: string;

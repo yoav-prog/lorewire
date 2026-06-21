@@ -14,6 +14,7 @@ import { redirect } from "next/navigation";
 
 import { readGoogleConfig } from "@/lib/oauth-google";
 import { readMicrosoftConfig } from "@/lib/oauth-microsoft";
+import { readRedditConfig } from "@/lib/oauth-reddit";
 import { readUserSession } from "@/lib/user-session";
 import SignInForm from "./SignInForm";
 
@@ -35,6 +36,7 @@ export default async function SignInPage({ searchParams }: PageProps) {
   // button, get 503" experience.
   const googleEnabled = Boolean(readGoogleConfig());
   const microsoftEnabled = Boolean(readMicrosoftConfig());
+  const redditEnabled = Boolean(readRedditConfig());
   const magicLinkEnabled = Boolean(process.env.BREVO_API_KEY?.trim());
 
   return (
@@ -59,6 +61,7 @@ export default async function SignInPage({ searchParams }: PageProps) {
         next={next}
         googleEnabled={googleEnabled}
         microsoftEnabled={microsoftEnabled}
+        redditEnabled={redditEnabled}
         magicLinkEnabled={magicLinkEnabled}
       />
     </div>
