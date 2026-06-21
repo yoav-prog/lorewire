@@ -23,6 +23,8 @@ import { PollWidget } from "@/components/PollWidget";
 import DesktopShell from "@/components/DesktopShell";
 import ReelsFeed from "@/components/reels/ReelsFeed";
 import CookieConsent from "@/components/CookieConsent";
+import CrossDeviceNudge from "@/components/CrossDeviceNudge";
+import SignInChip from "@/components/SignInChip";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
@@ -1212,10 +1214,12 @@ function MyList({
   onOpen,
   list,
   resolveStory,
+  session,
 }: {
   onOpen: OpenFn;
   list: string[];
   resolveStory: (id: string) => Story | null;
+  session: HomepageInitial["session"];
 }) {
   // Resolve through the live+sample catalog, NOT byId — saved ids can be real
   // shorts the Reels feed saved that aren't in the baked sample catalog, and
@@ -1225,7 +1229,19 @@ function MyList({
     .filter((s): s is Story => s !== null);
   return (
     <div className="pt-14 px-4 pb-28">
-      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-5">My List</h1>
+      {/* Header row: title + sign-in chip. For anonymous users with at
+          least one save, the chip is the persistent "save across
+          devices" entry point — the nudge fires at most once per
+          snooze cycle, but this surface is always reachable. */}
+      <div className="mb-5 flex items-center justify-between gap-3">
+        <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px]">
+          My List
+        </h1>
+        <SignInChip
+          session={session}
+          tone={!session && items.length > 0 ? "prominent" : "subtle"}
+        />
+      </div>
       {items.length === 0 ? (
         <p className="font-body text-muted mt-10 text-center">Nothing saved yet. Tap <span className="text-ink">+ My List</span> on any story.</p>
       ) : (
@@ -1325,7 +1341,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
         )}
         {tab === "Search" && <Search onOpen={open} />}
         {tab === "New" && <NewScreen onOpen={open} />}
-        {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} />}
+        {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
 
       {/* Reels rides above the (now-empty) screen as a full-cover layer, like
@@ -1373,12 +1389,14 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
 // call so the first paint already shows the correct hero + rails. See
 // _plans/2026-06-18-homepage-no-flash-ssr.md.
 export default function AppShell({ initial }: { initial: HomepageInitial }) {
-  // CookieConsent mounts at the shell level so it's shared across the
-  // mobile and desktop adapters — one banner, one decision, one source
-  // of truth. Position is `fixed`, so it floats over whichever subview
-  // is rendered. The banner's own visibility logic handles SSR (renders
-  // nothing) and the grandfather branch (silent accept for existing
-  // users with prior persisted state). Plan:
+  // CookieConsent + CrossDeviceNudge both mount at the shell level so
+  // they're shared across the mobile and desktop adapters — one banner,
+  // one nudge, one decision, one source of truth. Both are fixed-position
+  // so they float over whichever subview is rendered. The banner's own
+  // visibility logic handles SSR (renders nothing) and the grandfather
+  // branch (silent accept for existing users with prior persisted state).
+  // The nudge's own visibility logic handles the first-save trigger,
+  // 7-day snooze, and signed-in skip. Plan:
   // _plans/2026-06-19-anonymous-first-auth.md.
   return (
     <>
@@ -1389,6 +1407,7 @@ export default function AppShell({ initial }: { initial: HomepageInitial }) {
         <DesktopShell initial={initial} />
       </div>
       <CookieConsent />
+      <CrossDeviceNudge session={initial.session} />
     </>
   );
 }

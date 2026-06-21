@@ -34,6 +34,8 @@ import {
   useRecentlyViewed,
   useSavedStories,
 } from "@/lib/engagement-store";
+import SignInChip from "@/components/SignInChip";
+import type { PublicSession } from "@/lib/homepage-data";
 
 // Centralised default when no live media has loaded yet — the modal
 // shows the baked story shape. Derived helpers below add the is_short
@@ -129,7 +131,7 @@ function NavLink({ label, active, onClick }: { label: string; active: boolean; o
   );
 }
 
-function TopNav({ view, setView, solid, query, setQuery }: { view: string; setView: (v: string) => void; solid: boolean; query: string; setQuery: (q: string) => void }) {
+function TopNav({ view, setView, solid, query, setQuery, session }: { view: string; setView: (v: string) => void; solid: boolean; query: string; setQuery: (q: string) => void; session: PublicSession | null }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const open = searchOpen || query !== "";
   return (
@@ -160,7 +162,7 @@ function TopNav({ view, setView, solid, query, setQuery }: { view: string; setVi
             <button onClick={() => { setSearchOpen((o) => !o); setView("Search"); }} className="w-[38px] h-[38px] flex items-center justify-center text-ink shrink-0"><SearchI size={19} /></button>
             <input value={query} onChange={(e) => { setQuery(e.target.value); setView("Search"); }} placeholder="Stories, categories..." className="bg-transparent outline-none font-body text-[13.5px] text-ink placeholder:text-muted pr-3 w-full" style={{ display: open ? "block" : "none" }} />
           </div>
-          <div className="w-9 h-9 rounded-md flex items-center justify-center font-display font-bold text-[14px] text-bg" style={{ background: "#E8462B" }}>L</div>
+          <SignInChip session={session} />
         </div>
       </div>
     </header>
@@ -1086,12 +1088,17 @@ function GridPage({
   ids,
   onOpen,
   resolveStory,
+  headerExtras,
 }: {
   title: string;
   sub?: string;
   ids: string[];
   onOpen: OpenFn;
   resolveStory: (id: string) => Story | null;
+  /** Optional slot rendered next to the title — used on the My List
+   *  page to surface the sign-in chip as the persistent "save across
+   *  devices" entry point. */
+  headerExtras?: React.ReactNode;
 }) {
   // Resolve through the live+sample catalog, NOT byId — saved ids can be
   // real shorts the Reels feed saved that aren't in the baked sample
@@ -1100,8 +1107,13 @@ function GridPage({
   const items = ids.map(resolveStory).filter((s): s is Story => s !== null);
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
-      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">{title}</h1>
-      {sub && <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">{sub}</p>}
+      <div className="flex items-end justify-between gap-6">
+        <div>
+          <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">{title}</h1>
+          {sub && <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">{sub}</p>}
+        </div>
+        {headerExtras ? <div className="shrink-0">{headerExtras}</div> : null}
+      </div>
       <div className="grid grid-cols-5 gap-5 mt-9">
         {items.map((s) => <div key={s.id} style={{ height: 296 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={296} /></div>)}
       </div>
@@ -1182,7 +1194,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
 
   return (
     <div className="min-h-screen bg-bg">
-      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setReelsStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} />
+      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setReelsStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} session={initial.session} />
 
       {view === "Home" && (
         <HomePage
@@ -1198,7 +1210,21 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
       {view === "Reels" && <ReelsDesktop onOpenInfo={open} paused={!!active} initialStoryId={reelsStoryId ?? undefined} />}
       {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} resolveStory={resolveStory} />}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} resolveStory={resolveStory} />}
-      {view === "My List" && <GridPage title="My List" sub={`${list.length} saved`} ids={list} onOpen={open} resolveStory={resolveStory} />}
+      {view === "My List" && (
+        <GridPage
+          title="My List"
+          sub={`${list.length} saved`}
+          ids={list}
+          onOpen={open}
+          resolveStory={resolveStory}
+          headerExtras={
+            <SignInChip
+              session={initial.session}
+              tone={!initial.session && list.length > 0 ? "prominent" : "subtle"}
+            />
+          }
+        />
+      )}
       {view === "Search" && <SearchPage onOpen={open} query={query} />}
 
       <footer className="border-t border-line mt-10">

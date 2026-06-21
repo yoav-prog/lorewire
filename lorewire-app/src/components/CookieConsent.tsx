@@ -37,6 +37,7 @@ type Copy = {
   body: string;
   accept: string;
   reject: string;
+  error: string;
   dir: "ltr" | "rtl";
 };
 
@@ -44,6 +45,7 @@ const COPY_EN: Copy = {
   body: "We save your activity (saved stories, progress) on this device so it's still here next time. No tracking, no third parties. Reject also clears anything we've saved so far on this device.",
   accept: "Accept",
   reject: "Reject",
+  error: "Couldn't save your choice. Try again in a moment.",
   dir: "ltr",
 };
 
@@ -51,6 +53,7 @@ const COPY_HE: Copy = {
   body: "אנחנו שומרים את הפעילות שלך (סיפורים שמורים, התקדמות) במכשיר הזה כדי שתישאר זמינה בפעם הבאה. בלי מעקב, בלי צד שלישי. דחייה גם תמחק כל מה ששמרנו עד עכשיו במכשיר הזה.",
   accept: "אישור",
   reject: "דחייה",
+  error: "לא הצלחנו לשמור את הבחירה. נסו שוב בעוד רגע.",
   dir: "rtl",
 };
 
@@ -64,6 +67,7 @@ export default function CookieConsent() {
   const consent = useConsent();
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [errored, setErrored] = useState(false);
   const [copy, setCopy] = useState<Copy>(COPY_EN);
   const acceptRef = useRef<HTMLButtonElement>(null);
 
@@ -100,13 +104,20 @@ export default function CookieConsent() {
   async function decide(value: "accepted" | "rejected") {
     if (busy) return;
     setBusy(true);
+    setErrored(false);
     const ok = await setConsentClient(value);
     setBusy(false);
     if (ok) {
       setVisible(false);
-    } else {
-      console.warn("[auth ui consent retry-needed]", { value });
+      return;
     }
+    // The POST round-trip failed (origin mismatch, network, or 500).
+    // Phase 1 silently swallowed this and the user had no signal —
+    // they'd hammer Accept hoping it'd take. Surface a single
+    // localized line; the button stays enabled so the next click
+    // retries.
+    console.warn("[auth ui consent retry-needed]", { value });
+    setErrored(true);
   }
 
   return (
@@ -120,6 +131,14 @@ export default function CookieConsent() {
       <p id="lw-consent-body" className="leading-relaxed text-muted">
         {copy.body}
       </p>
+      {errored ? (
+        <p
+          role="alert"
+          className="mt-2 rounded-md border border-red-400/40 bg-red-500/10 p-2 text-[12px] text-red-300"
+        >
+          {copy.error}
+        </p>
+      ) : null}
       <div className="mt-3 flex flex-wrap gap-2 sm:justify-end">
         <button
           type="button"

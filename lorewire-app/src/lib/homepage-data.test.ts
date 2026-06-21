@@ -22,6 +22,15 @@ vi.mock("@/lib/poll-cookie", () => ({
   readVoteToken: async () => null,
 }));
 
+// 2026-06-21 Phase 5: loadHomepageSSRData now reads lw_user via
+// readUserSession which wraps next/headers' cookies(); same scope-error
+// pattern as poll-cookie's readVoteToken. Default to "no signed-in
+// user" for every test — individual cases can override if they need
+// session presence.
+vi.mock("@/lib/user-session", () => ({
+  readUserSession: async () => null,
+}));
+
 afterEach(() => {
   // Reset module cache so each test gets a fresh import graph. Per-test
   // doMock overrides live until vi.doUnmock is called below; the top-of-

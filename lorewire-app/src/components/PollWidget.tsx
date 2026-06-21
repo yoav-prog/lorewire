@@ -97,14 +97,28 @@ export function PollWidget({
         if (!resp.ok || !data.ok || !data.result) {
           setVotedSide(prevSide);
           setResult(prevResult);
-          setError(data.error ?? `Vote failed (${resp.status})`);
+          // Server error strings ("forbidden origin", "rate limited",
+          // "poll not available") are operator-facing diagnostics, not
+          // user copy. Map to a single user-friendly line and log the
+          // raw text once for ops. The error label was previously
+          // rendering "forbidden origin" verbatim on prod when
+          // NEXT_PUBLIC_SITE_ORIGIN was unset on Vercel — the
+          // server-side cause is operator action, not user action.
+          console.warn("[polls vote ui error]", {
+            status: resp.status,
+            body_error: data.error,
+          });
+          setError("Couldn't record your vote. Try again in a moment.");
           return;
         }
         setResult(data.result);
       } catch (err) {
         setVotedSide(prevSide);
         setResult(prevResult);
-        setError(err instanceof Error ? err.message : String(err));
+        console.warn("[polls vote ui network-error]", {
+          err: String(err),
+        });
+        setError("Couldn't reach the server. Check your connection.");
       }
     });
   }

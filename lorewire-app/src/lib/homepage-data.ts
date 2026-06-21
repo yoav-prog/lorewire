@@ -32,6 +32,7 @@ import {
   type RailCardRow,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
+import { readUserSession } from "@/lib/user-session";
 import type {
   HomepageCuration,
   HomepageCurationBehavior,
@@ -217,12 +218,27 @@ export async function loadHomepagePolls(): Promise<HomepagePollRailsResult> {
 // empty poll rails) and the client renders against the static catalog as
 // it did before this change. That's the agreed "render with static
 // catalog" failure mode — better a degraded homepage than a broken one.
+/** Minimal public-user session shape passed to client shells. Mirrors
+ *  the lib/user-session.ts UserSessionData fields the UI needs — userId
+ *  for telemetry, email for the header avatar fallback. No tokens, no
+ *  PII beyond email which the user has already entrusted to us. Null
+ *  when the visitor is anonymous (no lw_user cookie). */
+export interface PublicSession {
+  userId: string;
+  email: string;
+}
+
 export interface HomepageInitial {
   curation: HomepageCuration | null;
   behavior: HomepageCurationBehavior;
   rawCurationCount: number;
   liveRows: LiveCatalogStory[];
   pollRails: HomepagePollRailsResult;
+  /** 2026-06-21 Phase 5: server-resolved sign-in state. SSR reads the
+   *  lw_user cookie once and passes the redacted shape to the shells so
+   *  the header chip + nudge can render correct state on first paint
+   *  without a client-side fetch. */
+  session: PublicSession | null;
 }
 
 const EMPTY_POLL_RAILS_RESULT: HomepagePollRailsResult = {
@@ -236,7 +252,7 @@ const DEFAULT_BEHAVIOR: HomepageCurationBehavior = {
   heroRequired: false,
 };
 
-type SsrSource = "curation" | "catalog" | "polls";
+type SsrSource = "curation" | "catalog" | "polls" | "session";
 
 async function safeLoad<T>(
   source: SsrSource,
@@ -254,27 +270,45 @@ async function safeLoad<T>(
   }
 }
 
+async function loadSession(): Promise<PublicSession | null> {
+  // Read the lw_user JWT cookie. The helper validates signature +
+  // expiry; a tampered or expired cookie returns null and the user is
+  // treated as anonymous. Wrapped in safeLoad so a USER_SESSION_SECRET
+  // misconfiguration on Vercel (the most likely root cause of a thrown
+  // error here) doesn't take down the whole homepage.
+  const data = await readUserSession();
+  if (!data) return null;
+  return { userId: data.userId, email: data.email };
+}
+
 export async function loadHomepageSSRData(): Promise<HomepageInitial> {
   const t0 = Date.now();
-  const [curationResult, catalogResult, pollsResult] = await Promise.all([
-    safeLoad<HomepageCurationResult | null>("curation", loadHomepageCuration, null),
-    safeLoad<LiveCatalogResult>(
-      "catalog",
-      () => loadLiveCatalog(),
-      { ok: false, stories: [] },
-    ),
-    safeLoad<HomepagePollRailsResult>(
-      "polls",
-      loadHomepagePolls,
-      EMPTY_POLL_RAILS_RESULT,
-    ),
-  ]);
+  const [curationResult, catalogResult, pollsResult, session] =
+    await Promise.all([
+      safeLoad<HomepageCurationResult | null>(
+        "curation",
+        loadHomepageCuration,
+        null,
+      ),
+      safeLoad<LiveCatalogResult>(
+        "catalog",
+        () => loadLiveCatalog(),
+        { ok: false, stories: [] },
+      ),
+      safeLoad<HomepagePollRailsResult>(
+        "polls",
+        loadHomepagePolls,
+        EMPTY_POLL_RAILS_RESULT,
+      ),
+      safeLoad<PublicSession | null>("session", loadSession, null),
+    ]);
   const initial: HomepageInitial = {
     curation: curationResult?.curation ?? null,
     behavior: curationResult?.behavior ?? DEFAULT_BEHAVIOR,
     rawCurationCount: curationResult?.raw_curation_count ?? 0,
     liveRows: catalogResult.stories,
     pollRails: pollsResult,
+    session,
   };
   console.info("[lorewire homepage ssr]", {
     curation_count: initial.rawCurationCount,
@@ -289,6 +323,7 @@ export async function loadHomepageSSRData(): Promise<HomepageInitial> {
       agreed: initial.pollRails.rails.agreed.length,
       unpopular: initial.pollRails.rails.unpopular.length,
     },
+    signed_in: initial.session !== null,
     ms: Date.now() - t0,
   });
   return initial;
