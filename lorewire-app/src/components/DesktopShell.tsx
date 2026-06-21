@@ -544,10 +544,9 @@ function GenArticle({
     : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
-    <article id="article-top" className="fade-in max-w-[660px] scroll-mt-24">
+    <article className="fade-in max-w-[660px]">
       <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
       <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>{story.title}</h1>
-      <TopArticleCTA question="Where do you land on this one?" />
       {paras.map((para, i) => (
         <React.Fragment key={i}>
           {i === 0 ? (
@@ -577,7 +576,6 @@ function GenArticle({
           ))}
         </div>
       )}
-      <InlineJumpToPoll question={`What's your take on this one?`} />
       {redditTarget ? (
         <RedditSourceCard
           url={redditTarget.url}
@@ -1071,7 +1069,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
   return (
     <div className="fixed inset-0 z-[60] overflow-y-auto scrim-in" style={{ background: "rgba(0,0,0,.82)" }} onClick={onClose}>
       <div className="min-h-full flex items-start justify-center py-10 px-4">
-        <div className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()}>
+        <div id="article-top" className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden scroll-mt-0" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()}>
           <div className="relative h-[400px]">
             <DetailModalHero story={story} />
 
@@ -1108,10 +1106,25 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
                 </button>
               ))}
             </div>
+            {/* Top-of-content vote teaser lives at the modal level (not
+                inside a single tab) so Watch, Read, and Read-along all
+                surface the shortcut. Auto-hides when no poll exists. */}
+            <div className="max-w-[660px] mt-5">
+              <TopArticleCTA
+                question={pollView?.question ?? "Where do you land on this one?"}
+              />
+            </div>
             <div className="pt-7">
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
+            </div>
+            {/* End-of-content "Cast your verdict" pill. Same reasoning as
+                the top CTA — modal-level so every tab gets it. */}
+            <div className="max-w-[660px]">
+              <InlineJumpToPoll
+                question={pollView?.question ?? "What's your take on this one?"}
+              />
             </div>
             {pollView && (
               <section id="article-poll" className="mt-10 scroll-mt-24">

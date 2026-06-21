@@ -634,10 +634,9 @@ function GenArticle({
     : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
-    <article id="article-top" className="fade-in scroll-mt-20">
+    <article className="fade-in">
       <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
       <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>{story.title}</h1>
-      <TopArticleCTA question="Where do you land on this one?" />
       {paras.map((para, i) => (
         <React.Fragment key={i}>
           {i === 0 ? (
@@ -667,7 +666,6 @@ function GenArticle({
           ))}
         </div>
       )}
-      <InlineJumpToPoll question={`What's your take on this one?`} />
       {redditTarget ? (
         <RedditSourceCard
           url={redditTarget.url}
@@ -1293,7 +1291,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
   const isHeaderLandscape = !!story.heroImageLandscape;
   const showHeaderHero = !!headerHeroSrc && headerHeroOk;
   return (
-    <div className="screen sheet-in z-40 noscroll" style={{ background: "#0A0A0C" }}>
+    <div id="article-top" className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }}>
       <div className="relative h-[300px]">
         <div className="absolute inset-0" style={{ background: c }}>
           {showHeaderHero && (
@@ -1360,11 +1358,20 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           ))}
         </div>
 
+        {/* Top-of-content vote teaser. Lives at the modal level (not inside
+            a tab) so Watch, Read, and Read-along all carry the same
+            shortcut. Auto-hides when no poll is on the page. */}
+        <TopArticleCTA question={pollView?.question ?? "Where do you land on this one?"} />
+
         <div className="-mx-4 mt-2">
           {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
           {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
           {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
         </div>
+
+        {/* End-of-content "Cast your verdict" pill. Same reasoning as the
+            top CTA — sits at the modal level so every tab gets it. */}
+        <InlineJumpToPoll question={pollView?.question ?? "What's your take on this one?"} />
 
         {pollView && (
           <section id="article-poll" className="mt-8 scroll-mt-20">
