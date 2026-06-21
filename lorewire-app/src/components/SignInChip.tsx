@@ -1,24 +1,27 @@
 "use client";
 
-// Header sign-in surface. Two visual states:
+// Header sign-in surface. Two visual states + a click-to-open menu:
 //
 //   - Anonymous: a small "Sign in" pill that navigates to /auth/signin
 //     with the current URL captured in ?next so the user lands back
 //     where they were after sign-in.
 //
-//   - Signed in: the user's email initial + a sign-out button. The full
-//     name / picture round-trip is Phase 6 polish; the initial is enough
-//     to communicate "this is who you are."
+//   - Signed in: the user's email initial as a circular avatar button.
+//     Click → dropdown with Account / Manage cookies / Sign out. The
+//     dropdown closes on outside-click or Escape, follows the page
+//     direction (no fixed orientation), and traps the active item via
+//     proper aria semantics so keyboard users can tab through.
 //
-// Why a pill and not a full button: the header is dense — Search,
-// Settings, the mobile tab bar. A pill stays light visually and reads
-// as "optional, not blocking" which matches the anonymous-first
+// Why a pill / avatar and not a full button: the header is dense — Search,
+// Settings, the mobile tab bar. A pill + avatar stays light visually and
+// reads as "optional, not blocking" which matches the anonymous-first
 // philosophy.
 //
 // Plan: _plans/2026-06-19-anonymous-first-auth.md §UI surfaces.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { clearSnooze } from "@/lib/nudge-client";
+import { dispatchReopenBanner } from "@/lib/consent-client";
 import type { PublicSession } from "@/lib/homepage-data";
 
 interface SignInChipProps {
@@ -46,7 +49,31 @@ export default function SignInChip({
   session,
   tone = "subtle",
 }: SignInChipProps) {
+  const [open, setOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const firstItemRef = useRef<HTMLAnchorElement>(null);
+
+  // Close on outside click / Escape. Wired only while the menu is open
+  // so we don't keep a global listener around for no reason.
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e: MouseEvent) {
+      if (!rootRef.current) return;
+      if (!rootRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    // Pull focus into the menu so keyboard navigation just works.
+    firstItemRef.current?.focus();
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
 
   async function onSignOut() {
     if (signingOut) return;
@@ -72,6 +99,13 @@ export default function SignInChip({
     }
   }
 
+  function onManageCookies() {
+    setOpen(false);
+    // Defer to the next tick so the menu close animation (if any) doesn't
+    // race with the banner mount.
+    setTimeout(() => dispatchReopenBanner(), 0);
+  }
+
   if (!session) {
     const className =
       tone === "prominent"
@@ -94,25 +128,72 @@ export default function SignInChip({
   }
 
   return (
-    <span
-      className="inline-flex items-center gap-2"
+    <div
+      ref={rootRef}
+      className="relative inline-flex"
       data-testid="signin-chip-user"
     >
-      <span
-        aria-hidden
-        className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-accent text-[12px] font-bold uppercase text-bg"
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Account menu"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-accent text-[13px] font-bold uppercase text-bg outline-none ring-offset-2 ring-offset-bg hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ink"
         title={session.email}
       >
         {initial(session.email)}
-      </span>
-      <button
-        type="button"
-        onClick={onSignOut}
-        disabled={signingOut}
-        className="rounded-full border border-line bg-bg/70 px-3 py-1 text-xs font-medium text-muted hover:border-ink hover:text-ink disabled:opacity-60"
-      >
-        {signingOut ? "Signing out…" : "Sign out"}
       </button>
-    </span>
+      {open ? (
+        <div
+          role="menu"
+          aria-label="Account menu"
+          className="absolute right-0 top-[calc(100%+8px)] z-50 w-56 overflow-hidden rounded-xl border border-line bg-bg shadow-xl"
+        >
+          {/* Email header: read-only signal of which account you're on. */}
+          <div className="border-b border-line px-3 py-2.5">
+            <p className="text-[10px] font-mono uppercase tracking-[.2em] text-muted">
+              Signed in as
+            </p>
+            <p className="truncate text-[13px] text-ink" title={session.email}>
+              {session.email}
+            </p>
+          </div>
+          <a
+            ref={firstItemRef}
+            href="/auth/account"
+            role="menuitem"
+            className="block px-3 py-2 text-sm text-ink hover:bg-ink/5 focus:bg-ink/5 focus:outline-none"
+          >
+            Account &amp; preferences
+          </a>
+          <a
+            href="/?tab=mylist"
+            role="menuitem"
+            className="block px-3 py-2 text-sm text-ink hover:bg-ink/5 focus:bg-ink/5 focus:outline-none"
+          >
+            My List
+          </a>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={onManageCookies}
+            className="block w-full text-left px-3 py-2 text-sm text-ink hover:bg-ink/5 focus:bg-ink/5 focus:outline-none"
+          >
+            Manage cookies
+          </button>
+          <div className="border-t border-line" />
+          <button
+            type="button"
+            role="menuitem"
+            onClick={onSignOut}
+            disabled={signingOut}
+            className="block w-full text-left px-3 py-2 text-sm text-muted hover:bg-ink/5 hover:text-ink focus:bg-ink/5 focus:outline-none disabled:opacity-60"
+          >
+            {signingOut ? "Signing out…" : "Sign out"}
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }

@@ -157,6 +157,91 @@ describe("upsertUserOnSignIn — identity resolution", () => {
   });
 });
 
+describe("updateUserProfile", () => {
+  beforeEach(async () => {
+    await clearUsers();
+  });
+
+  async function createTestUser(): Promise<string> {
+    const r = await upsertUserOnSignIn({
+      provider: "google",
+      providerSub: "google_sub_profile",
+      email: "profile@example.com",
+      name: "Original Name",
+      pictureUrl: "https://pic/orig",
+      anonymousId: null,
+    });
+    return r.user.id;
+  }
+
+  it("updates name + picture_url and returns the patched row", async () => {
+    const { updateUserProfile } = await import("./users");
+    const id = await createTestUser();
+    const updated = await updateUserProfile(id, {
+      name: "New Name",
+      pictureUrl: "https://pic/new",
+    });
+    expect(updated.name).toBe("New Name");
+    expect(updated.picture_url).toBe("https://pic/new");
+    expect(updated.email).toBe("profile@example.com");
+  });
+
+  it("treats an empty string as 'clear the field' (NULL)", async () => {
+    const { updateUserProfile } = await import("./users");
+    const id = await createTestUser();
+    const updated = await updateUserProfile(id, { name: "" });
+    expect(updated.name).toBeNull();
+  });
+
+  it("leaves omitted fields alone (no clobber)", async () => {
+    const { updateUserProfile } = await import("./users");
+    const id = await createTestUser();
+    const updated = await updateUserProfile(id, { name: "Just Name" });
+    expect(updated.name).toBe("Just Name");
+    // pictureUrl wasn't in the patch — original survives.
+    expect(updated.picture_url).toBe("https://pic/orig");
+  });
+
+  it("rejects a name longer than the limit", async () => {
+    const { updateUserProfile } = await import("./users");
+    const id = await createTestUser();
+    const tooLong = "x".repeat(100);
+    await expect(updateUserProfile(id, { name: tooLong })).rejects.toThrow(
+      /too long/,
+    );
+  });
+
+  it("rejects names with HTML / control characters", async () => {
+    const { updateUserProfile } = await import("./users");
+    const id = await createTestUser();
+    await expect(
+      updateUserProfile(id, { name: "<script>alert(1)</script>" }),
+    ).rejects.toThrow();
+  });
+
+  it("accepts Hebrew + Latin + spaces in names", async () => {
+    const { updateUserProfile } = await import("./users");
+    const id = await createTestUser();
+    const updated = await updateUserProfile(id, { name: "יואב Yoav" });
+    expect(updated.name).toBe("יואב Yoav");
+  });
+
+  it("rejects a picture URL without an http(s) scheme", async () => {
+    const { updateUserProfile } = await import("./users");
+    const id = await createTestUser();
+    await expect(
+      updateUserProfile(id, { pictureUrl: "javascript:alert(1)" }),
+    ).rejects.toThrow(/http/);
+  });
+
+  it("throws when the user row is missing", async () => {
+    const { updateUserProfile } = await import("./users");
+    await expect(
+      updateUserProfile("nonexistent", { name: "X" }),
+    ).rejects.toThrow(/not found/);
+  });
+});
+
 describe("users helpers", () => {
   it("hashForLog returns a stable 8-char identifier", () => {
     const h1 = hashForLog("user-001");

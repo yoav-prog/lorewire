@@ -208,6 +208,87 @@ async function touchLastSeen(userId: string): Promise<void> {
   ]);
 }
 
+/** Editable profile fields. Email is NOT editable here — it's the
+ *  identity anchor for OAuth + magic link and changing it would orphan
+ *  every existing sign-in path. A future "request email change" flow
+ *  (verify the new address before swapping) is the right way to do that,
+ *  out of scope for v1. */
+export interface ProfilePatch {
+  name?: string | null;
+  pictureUrl?: string | null;
+}
+
+const NAME_MAX_LEN = 64;
+const URL_MAX_LEN = 512;
+const URL_HTTP_RE = /^https?:\/\//i;
+
+/** Sanitize a profile patch and apply it. Returns the updated row.
+ *  Throws when the user doesn't exist. Validation lives here (not just
+ *  on the API route) so direct callers (tests, server actions) get
+ *  the same guarantees. */
+export async function updateUserProfile(
+  userId: string,
+  patch: ProfilePatch,
+): Promise<UserRow> {
+  if (!userId) throw new Error("updateUserProfile: userId required");
+  const existing = await getUserById(userId);
+  if (!existing) throw new Error("updateUserProfile: user not found");
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  if (Object.prototype.hasOwnProperty.call(patch, "name")) {
+    let name = patch.name;
+    if (typeof name === "string") {
+      name = name.trim();
+      if (name.length > NAME_MAX_LEN) {
+        throw new Error("Name is too long.");
+      }
+      // Allow letters, marks (covers Hebrew + Arabic + accents), digits,
+      // spaces, apostrophes, hyphens, periods. Anything else is rejected
+      // so we don't accept HTML or control characters that could be
+      // rendered downstream. The visual layer escapes too, but boundary
+      // validation is the defense in depth.
+      if (name && !/^[\p{L}\p{M}\d \-'.]+$/u.test(name)) {
+        throw new Error("Name contains characters that aren't allowed.");
+      }
+    }
+    sets.push("name = ?");
+    params.push(name && name.length > 0 ? name : null);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "pictureUrl")) {
+    let url = patch.pictureUrl;
+    if (typeof url === "string") {
+      url = url.trim();
+      if (url.length > URL_MAX_LEN) {
+        throw new Error("Picture URL is too long.");
+      }
+      if (url && !URL_HTTP_RE.test(url)) {
+        throw new Error("Picture URL must start with http:// or https://.");
+      }
+    }
+    sets.push("picture_url = ?");
+    params.push(url && url.length > 0 ? url : null);
+  }
+
+  if (sets.length === 0) return existing;
+
+  params.push(userId);
+  await run(
+    `UPDATE users SET ${sets.join(", ")} WHERE id = ?`,
+    params,
+  );
+
+  const updated = await getUserById(userId);
+  if (!updated) throw new Error("user vanished after profile update");
+  console.info("[auth users profile updated]", {
+    user_id_hash: hashForLog(userId),
+    fields: sets.map((s) => s.split(" ")[0]),
+  });
+  return updated;
+}
+
 /** First 8 hex chars of a one-way hash. Safe to log per rule 13 (no
  *  reversible PII). Stable across logs for the same user so support
  *  can correlate without exposing the raw id. */
