@@ -1360,8 +1360,14 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
 
         {/* Top-of-content vote teaser. Lives at the modal level (not inside
             a tab) so Watch, Read, and Read-along all carry the same
-            shortcut. Auto-hides when no poll is on the page. */}
-        <TopArticleCTA question={pollView?.question ?? "Where do you land on this one?"} />
+            shortcut. Visibility is prop-driven off pollView so the CTA
+            shows up the moment the async useStoryPoll hook resolves —
+            previously a DOM lookup at mount time stranded the CTA hidden
+            because the poll element hadn't rendered yet. */}
+        <TopArticleCTA
+          enabled={pollView !== null}
+          question={pollView?.question ?? "Where do you land on this one?"}
+        />
 
         <div className="-mx-4 mt-2">
           {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
@@ -1370,8 +1376,12 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         </div>
 
         {/* End-of-content "Cast your verdict" pill. Same reasoning as the
-            top CTA — sits at the modal level so every tab gets it. */}
-        <InlineJumpToPoll question={pollView?.question ?? "What's your take on this one?"} />
+            top CTA — sits at the modal level so every tab gets it, and
+            visibility tracks pollView so we don't hide on first paint. */}
+        <InlineJumpToPoll
+          enabled={pollView !== null}
+          question={pollView?.question ?? "What's your take on this one?"}
+        />
 
         {pollView && (
           <section id="article-poll" className="mt-8 scroll-mt-20">

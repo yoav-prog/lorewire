@@ -152,21 +152,33 @@ export function JumpToPoll({
 interface TopArticleCTAProps {
   targetId?: string;
   question?: string;
+  /** Set to false to hide the CTA. Prop-driven (not DOM-driven) so the
+   *  caller controls visibility based on its own state — important when
+   *  the poll element loads asynchronously (useStoryPoll). The previous
+   *  DOM-lookup approach hid the CTA permanently when the poll wasn't in
+   *  the tree at mount time, even after the async fetch landed and added
+   *  the #article-poll element. Default true so existing call sites that
+   *  haven't opted in still get the CTA. */
+  enabled?: boolean;
 }
 
 export function TopArticleCTA({
   targetId = DEFAULT_TARGET_ID,
   question,
+  enabled = true,
 }: TopArticleCTAProps) {
-  const [hasTarget, setHasTarget] = useState(false);
-  useEffect(() => {
-    setHasTarget(Boolean(document.getElementById(targetId)));
-  }, [targetId]);
-  if (!hasTarget) return null;
+  if (!enabled) return null;
 
   const onClick = () => {
+    // Lookup is deferred to click time so we don't depend on mount-order
+    // races between the CTA and the async-loaded poll element. By the
+    // time the user clicks the visible CTA, the poll has rendered.
     const el = document.getElementById(targetId);
-    if (!el) return;
+    if (!el) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[lorewire top article cta miss]", { targetId });
+      return;
+    }
     el.scrollIntoView({ behavior: "smooth", block: "start" });
     // eslint-disable-next-line no-console -- rule 14
     console.info("[lorewire top article cta jump]", { targetId });
@@ -298,15 +310,18 @@ export function BackToTop({
   targetId = "article-top",
   label = "Back to top",
 }: BackToTopProps) {
-  const [hasTarget, setHasTarget] = useState(false);
-  useEffect(() => {
-    setHasTarget(Boolean(document.getElementById(targetId)));
-  }, [targetId]);
-  if (!hasTarget) return null;
-
+  // Always renders. The #article-top anchor is on the outer modal
+  // container in both shells, so it's in the DOM on first paint — no
+  // race condition like TopArticleCTA had with the async-loaded poll.
+  // Defer the lookup to click time anyway so a stray remount doesn't
+  // strand the button with a stale element reference.
   const onClick = () => {
     const el = document.getElementById(targetId);
-    if (!el) return;
+    if (!el) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[lorewire back to top miss]", { targetId });
+      return;
+    }
     el.scrollIntoView({ behavior: "smooth", block: "start" });
     // eslint-disable-next-line no-console -- rule 14
     console.info("[lorewire back to top]", { targetId });
@@ -386,29 +401,33 @@ export function BackToTop({
 interface InlineProps {
   targetId?: string;
   question?: string;
+  /** Set to false to hide the CTA. Prop-driven (not DOM-driven) so the
+   *  caller controls visibility based on its own state — same reasoning
+   *  as TopArticleCTA.enabled above. Default true so existing call sites
+   *  that haven't opted in still get the CTA. */
+  enabled?: boolean;
 }
 
 /** Inline "Cast your verdict" CTA rendered AT the end of the article body
- *  (and optionally elsewhere). Less visually loud than the floating button
- *  because it lives inline with the reading flow — but still high-contrast
- *  enough to invite the click. Smooth-scrolls to the same target. Renders
- *  nothing when the target doesn't exist on the page so an article
- *  without a poll silently omits the section. */
+ *  (and optionally elsewhere). Less visually loud than the floating
+ *  button because it lives inline with the reading flow — but still
+ *  high-contrast enough to invite the click. Smooth-scrolls to the same
+ *  target. Hides when `enabled` is false so an article without a poll
+ *  silently omits the section. */
 export function InlineJumpToPoll({
   targetId = DEFAULT_TARGET_ID,
   question,
+  enabled = true,
 }: InlineProps) {
-  const [hasTarget, setHasTarget] = useState(false);
-
-  useEffect(() => {
-    setHasTarget(Boolean(document.getElementById(targetId)));
-  }, [targetId]);
-
-  if (!hasTarget) return null;
+  if (!enabled) return null;
 
   const onClick = () => {
     const el = document.getElementById(targetId);
-    if (!el) return;
+    if (!el) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[lorewire inline jump to poll miss]", { targetId });
+      return;
+    }
     el.scrollIntoView({ behavior: "smooth", block: "start" });
     // eslint-disable-next-line no-console -- rule 14
     console.info("[lorewire inline jump to poll]", { targetId });

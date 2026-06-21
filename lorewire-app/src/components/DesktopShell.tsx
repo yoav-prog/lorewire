@@ -1108,9 +1108,14 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
             </div>
             {/* Top-of-content vote teaser lives at the modal level (not
                 inside a single tab) so Watch, Read, and Read-along all
-                surface the shortcut. Auto-hides when no poll exists. */}
+                surface the shortcut. Visibility is prop-driven off
+                pollView so the CTA appears the moment the async
+                useStoryPoll hook resolves — the previous DOM-lookup
+                gate hid the CTA permanently when the poll element
+                wasn't in the tree at mount time. */}
             <div className="max-w-[660px] mt-5">
               <TopArticleCTA
+                enabled={pollView !== null}
                 question={pollView?.question ?? "Where do you land on this one?"}
               />
             </div>
@@ -1120,9 +1125,11 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
             </div>
             {/* End-of-content "Cast your verdict" pill. Same reasoning as
-                the top CTA — modal-level so every tab gets it. */}
+                the top CTA — modal-level so every tab gets it, and
+                visibility tracks pollView so we don't hide on first paint. */}
             <div className="max-w-[660px]">
               <InlineJumpToPoll
+                enabled={pollView !== null}
                 question={pollView?.question ?? "What's your take on this one?"}
               />
             </div>
