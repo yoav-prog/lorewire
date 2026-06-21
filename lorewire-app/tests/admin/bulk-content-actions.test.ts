@@ -64,11 +64,19 @@ async function seedStory(opts: {
   videoUrl?: string;
 }): Promise<string> {
   const id = opts.id ?? randomUUID();
+  // reddit_id + source_url are populated so the publish-time guard in
+  // setStatus (lib/repo.ts) doesn't reject the fixture as a dry-run row.
+  // The id-as-reddit_id pattern matches what the pipeline writes for
+  // real Reddit pulls (story_jobs_worker.py: id = idea["reddit_id"]).
+  // The hex prefix on the slug guarantees a digit so the strict reddit-
+  // post-id check passes too.
+  const redditId = `1${id.slice(0, 6).replace(/-/g, "0")}`;
   await run(
-    "INSERT INTO stories (id, slug, title, status, category, audio_url, video_url, body, created_at, updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z')",
+    "INSERT INTO stories (id, reddit_id, slug, title, status, category, audio_url, video_url, body, source_url, created_at, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '2026-06-19T00:00:00.000Z', '2026-06-19T00:00:00.000Z')",
     [
       id,
+      redditId,
       `story-${id.slice(0, 6)}`,
       opts.title ?? "Test story",
       opts.status ?? "ready",
@@ -78,6 +86,7 @@ async function seedStory(opts: {
       // <50 chars so the autodraft side-effect early-outs even without the
       // mock catching it.
       "short body",
+      `https://www.reddit.com/r/aita/comments/${redditId}/`,
     ],
   );
   return id;

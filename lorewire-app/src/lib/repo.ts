@@ -343,8 +343,62 @@ export async function updateStory(
   await run(`UPDATE stories SET ${sets.join(", ")} WHERE id = ?`, params);
 }
 
+// Promotion to public-facing statuses ("ready" / "published") refuses
+// stories whose Reddit identity is a dry-run fixture. The render path
+// already suppresses the embed when reddit_id / source_url disagree
+// (see lib/reddit-thread.ts), but a fixture row that reaches
+// status='published' still surfaces on rails as an article with no real
+// Reddit thread — which contradicts "every story is from Reddit".
+// Throwing here means the admin's publish click reports the failure
+// instead of silently shipping a dummy row.
+const FIXTURE_PLACEHOLDER_IDS = new Set([
+  "envelope",
+  "example",
+  "test",
+  "demo",
+  "sample",
+  "placeholder",
+]);
+const FIXTURE_DRY_RUN_BODY_MARKER = "[DRY RUN ARTICLE]";
+
+async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
+  const row = await one<{
+    reddit_id: string | null;
+    source_url: string | null;
+    body: string | null;
+  }>(
+    "SELECT reddit_id, source_url, body FROM stories WHERE id = ?",
+    [id],
+  );
+  if (!row) {
+    throw new Error(
+      `[stories repo] cannot publish missing story id=${id}`,
+    );
+  }
+  const redditId = row.reddit_id?.toLowerCase() ?? "";
+  if (!redditId || FIXTURE_PLACEHOLDER_IDS.has(redditId)) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: reddit_id is a fixture placeholder (${row.reddit_id ?? "null"})`,
+    );
+  }
+  const source = (row.source_url ?? "").toLowerCase();
+  if (source.includes("/comments/example/") || source.includes("/comments/test/")) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: source_url is a fixture placeholder (${row.source_url})`,
+    );
+  }
+  if (row.body && row.body.startsWith(FIXTURE_DRY_RUN_BODY_MARKER)) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: body is a dry-run fixture`,
+    );
+  }
+}
+
 export async function setStatus(id: string, status: StoryStatus): Promise<void> {
   const now = new Date().toISOString();
+  if (status === "ready" || status === "published") {
+    await assertStoryReadyForPublicStatus(id);
+  }
   if (status === "published") {
     await run(
       "UPDATE stories SET status = ?, published_at = ?, updated_at = ? WHERE id = ?",

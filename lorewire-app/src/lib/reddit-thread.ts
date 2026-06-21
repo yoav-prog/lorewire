@@ -1,25 +1,41 @@
 // Reddit-thread identity helpers for the article reader.
 //
 // Background: the modal Read tab renders an embed of the original Reddit
-// thread an article was sourced from. The URL the embed uses comes from
-// the story's `source_url` field, which is written by the pipeline at
-// ingest (`post.url` for the scraped Reddit post). Hand-edited catalog
-// rows + the static published.ts overlay can drift, though — a wrong
-// URL on a story silently shows the wrong thread under the article.
+// thread an article was sourced from. The URL the embed uses USED to come
+// from the story's `source_url` field — which is hand-editable in the
+// catalog overlay and was caught (June 2026) attaching the wrong thread
+// to the envelope story.
 //
-// This module exists so the render path can ASSERT the URL belongs to
-// the article it's attached to, instead of trusting whatever string is
-// in the field. The check is conservative on purpose: when in doubt,
-// suppress the embed. A missing embed is fine; a wrong embed mis-leads
-// the reader about what the article was based on.
+// The current design: `reddit_id` is the single source of truth. The
+// pipeline writes it at story creation from the scraped post's id (see
+// pipeline/story_jobs_worker.py); the render path constructs the canonical
+// Reddit URL from it (`https://www.reddit.com/comments/<id>/`) and lets
+// Reddit canonicalise to the full thread server-side. `source_url` is
+// kept for display attribution but is no longer load-bearing for the
+// embed — a hand-edited wrong URL can't override the constructed one.
+//
+// What counts as a "real" Reddit id:
+//  - Modern Reddit (post-2018) post ids are base36 (a-z0-9), 5-12 chars,
+//    and ALMOST ALWAYS contain at least one digit because they're encoded
+//    timestamps. Synthetic catalog ids ("envelope", "fence", "wifi") are
+//    pure English words and don't pass the digit check, so they don't
+//    get a constructed URL — Reddit would 404 on those.
+//  - Known fixture placeholders ("example", "test", "demo", "sample",
+//    "placeholder") are rejected outright.
 
-// A Reddit post id is base36 (0-9 + a-z), historically 5+ chars. The
-// pipeline normalises everything to lowercase, so the matcher does too.
+// Allowable id charset: Reddit's base36. Lowercased before matching so
+// callers don't have to normalise.
 const REDDIT_ID_RE = /^[a-z0-9]{5,}$/;
 
-// Placeholder strings that show up in fixtures + draft rows. Any URL or
-// id that's one of these is "not a real Reddit thread" and the embed
-// must not render — Reddit would 404 on the link anyway.
+// Modern Reddit post ids are timestamp-encoded base36 — at least one
+// digit is a near-universal signature. Synthetic English-word ids
+// ("envelope", "fence", "wifi", "birthday") never pass this. Used as
+// the strict signal for "we can trust this id as the truth and build a
+// canonical URL from it."
+const REDDIT_DIGIT_RE = /\d/;
+
+// Strings that recur in fixtures + dry-run rows. Treated as definitely-
+// not-a-real-Reddit-thread regardless of where they appear.
 const PLACEHOLDER_IDS = new Set([
   "example",
   "test",
@@ -28,9 +44,13 @@ const PLACEHOLDER_IDS = new Set([
   "sample",
 ]);
 
-/** True when `id` looks like a real Reddit post id (5+ base36 chars and
- *  not a known placeholder string). Lowercased before matching so the
- *  caller doesn't have to normalise. */
+/** Shape-checks an id against the Reddit charset + length and rejects
+ *  known placeholder strings. Use as the broad "looks roughly like a
+ *  Reddit id" gate — does NOT require a digit, so synthetic English-
+ *  word ids pass. Pair with `looksLikeRealRedditPostId` when you need
+ *  the stricter "this is genuinely a Reddit post id" guarantee.
+ *  Kept around because the legacy URL-only fallback path still
+ *  validates using this looser definition. */
 export function isRealRedditId(id: string | null | undefined): boolean {
   if (!id || typeof id !== "string") return false;
   const lower = id.toLowerCase();
@@ -38,10 +58,23 @@ export function isRealRedditId(id: string | null | undefined): boolean {
   return !PLACEHOLDER_IDS.has(lower);
 }
 
-/** Extract the Reddit post id from a thread URL.
- *  Returns the lowercased id or null when the URL isn't shaped like a
- *  Reddit post (no `/comments/<id>/` segment). The title slug after the
- *  id is ignored — Reddit treats it as decorative. */
+/** Strict variant of `isRealRedditId` — adds the digit-required check
+ *  that distinguishes genuine modern Reddit post ids from synthetic
+ *  English-word catalog ids. Used to gate the "build a canonical embed
+ *  URL from this id" path; without this stricter check we'd happily
+ *  construct `https://reddit.com/comments/envelope/` which Reddit
+ *  would 404 on. */
+export function looksLikeRealRedditPostId(
+  id: string | null | undefined,
+): boolean {
+  if (!isRealRedditId(id)) return false;
+  return REDDIT_DIGIT_RE.test(id!);
+}
+
+/** Extract the Reddit post id from a thread URL. Returns the lowercased
+ *  id or null when the URL isn't shaped like a Reddit post (no
+ *  `/comments/<id>/` segment). The title slug after the id is ignored —
+ *  Reddit treats it as decorative. */
 export function extractRedditId(
   url: string | null | undefined,
 ): string | null {
@@ -50,59 +83,83 @@ export function extractRedditId(
   return m ? m[1].toLowerCase() : null;
 }
 
+/** Build the canonical short-form Reddit URL for a post id. Reddit's web
+ *  layer 301-redirects this to the full `/r/<sub>/comments/<id>/<slug>/`
+ *  URL, and the embed widget at `embed.reddit.com/widgets.js` follows
+ *  the redirect to hydrate. Used as the embed target whenever we have
+ *  a trustworthy id — guarantees the URL points at the right thread
+ *  even if the stored `source_url` got hand-edited to something wrong. */
+export function buildRedditEmbedUrl(redditId: string): string {
+  return `https://www.reddit.com/comments/${redditId.toLowerCase()}/`;
+}
+
 export interface RedditEmbedTarget {
   /** The URL the `<RedditEmbed>` component should render. Either the
-   *  passed-in `sourceUrl` (when the URL matches the authoritative id)
-   *  or a canonical short URL synthesised from the authoritative id. */
+   *  caller's `sourceUrl` (when it agrees with the authoritative id —
+   *  preserves the post-title slug for display) or a canonical short
+   *  URL synthesised from the authoritative id. */
   url: string;
   /** The verified Reddit thread id. Always set when this target is
-   *  returned — callers can use it for logging. */
+   *  returned — callers can use it for logging + diagnostics. */
   redditId: string;
 }
 
 /**
  * Decide whether to render a Reddit embed for an article and which URL
- * the embed should point at.
+ * the embed should point at. The safety invariant: a mismatch between
+ * the stored URL and the authoritative id means SOMETHING is wrong with
+ * the data — refuse to embed rather than show the wrong thread.
  *
  * @param sourceUrl - The URL stored on the article (e.g. `story.source_url`).
- * @param authoritativeId - The article's authoritative Reddit thread id —
- *   for pipeline stories this is the `stories.reddit_id` column, which
- *   equals `stories.id`. Pass the story's own id when authoritativeId
- *   isn't separately tracked.
+ * @param authoritativeId - The article's authoritative Reddit thread id.
+ *   For pipeline rows this is `stories.reddit_id` which equals `stories.id`.
+ *   Pass the story's own id when authoritativeId isn't separately tracked.
  *
- * Decision rules (the safety invariant is the mismatch case):
- *  - authoritativeId is a real Reddit id + URL parses to the SAME id  → render with `sourceUrl`
- *  - authoritativeId is a real Reddit id + URL parses to a DIFFERENT id → NO embed (wrong thread)
- *  - authoritativeId is a real Reddit id + URL missing/unparseable    → NO embed (can't synthesise blindly)
- *  - authoritativeId not real id + URL parses to a real id            → render with `sourceUrl` (legacy fallback)
- *  - neither side has a real id                                       → NO embed
+ * Resolution branches (in order):
+ *  - authoritative id strong (passes `looksLikeRealRedditPostId`):
+ *    - URL parses to the SAME id  → use `sourceUrl` (keeps title slug)
+ *    - URL parses to a DIFFERENT id → NO embed (mismatch = wrong thread)
+ *    - URL missing / unparseable   → use CONSTRUCTED `buildRedditEmbedUrl(id)`
+ *  - authoritative id loose (passes `isRealRedditId` but no digit, e.g.
+ *    a synthetic catalog id like 'envelope'):
+ *    - URL parses to the SAME id  → use `sourceUrl`
+ *    - URL parses to a DIFFERENT id → NO embed
+ *    - URL missing → NO embed (refuses to construct from a synthetic id)
+ *  - authoritative id missing or fails even the loose check:
+ *    - URL parses to a real id → use `sourceUrl` (legacy fallback)
+ *    - otherwise              → NO embed
  *
- * The "URL missing → NO embed" branch is deliberately strict. Synthesising
- * a URL from a synthetic catalog id (like `envelope`) would link to a
- * non-existent thread, so we refuse instead.
+ * The "URL missing + strong id → construct" branch is the new robustness
+ * win: even if `source_url` got dropped or mangled in a future schema
+ * change, pipeline stories still get the correct embed because the
+ * URL is derived from the id at render time.
  */
 export function resolveRedditEmbedTarget(
   sourceUrl: string | null | undefined,
   authoritativeId: string | null | undefined,
 ): RedditEmbedTarget | null {
   const fromUrl = extractRedditId(sourceUrl);
-  const authReal = isRealRedditId(authoritativeId);
+  const authLoose = isRealRedditId(authoritativeId);
+  const authStrong = looksLikeRealRedditPostId(authoritativeId);
 
-  if (authReal) {
+  if (authLoose) {
     const auth = authoritativeId!.toLowerCase();
-    if (!fromUrl) {
-      // No parseable URL alongside a real authoritative id. We could
-      // synthesise `https://reddit.com/comments/<auth>/` but that risks
-      // pointing at a thread that doesn't exist when `auth` came from a
-      // synthetic catalog id. Safer to suppress.
-      return null;
+    if (fromUrl) {
+      if (fromUrl !== auth) {
+        // Stored URL points at a DIFFERENT thread than the article was
+        // sourced from. This is the envelope bug — refuse to embed.
+        return null;
+      }
+      return { url: sourceUrl!, redditId: auth };
     }
-    if (fromUrl !== auth) {
-      // The URL points at a different thread than the article was
-      // sourced from. This is the bug the module exists to prevent.
-      return null;
+    // No parseable URL alongside the authoritative id. Construct ONLY
+    // when the id has a strong reddit-id signature (digit). Synthetic
+    // catalog ids without a URL get null because the constructed link
+    // would 404 on Reddit.
+    if (authStrong) {
+      return { url: buildRedditEmbedUrl(auth), redditId: auth };
     }
-    return { url: sourceUrl!, redditId: auth };
+    return null;
   }
 
   // No authoritative id worth trusting. Fall back to URL-only validation
@@ -115,8 +172,8 @@ export function resolveRedditEmbedTarget(
 }
 
 /** Back-compat shim. Equivalent to passing a null authoritativeId — kept
- *  so older callers that only see a URL keep compiling while we port
- *  them to the stricter `resolveRedditEmbedTarget`. */
+ *  so callers that only see a URL keep compiling while everything else
+ *  migrates to the stricter `resolveRedditEmbedTarget`. */
 export function isRealRedditUrl(url: string | null | undefined): boolean {
   return resolveRedditEmbedTarget(url, null) !== null;
 }
