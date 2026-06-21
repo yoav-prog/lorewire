@@ -22,7 +22,12 @@ import {
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
-import { JumpToPoll, InlineJumpToPoll } from "@/components/JumpToPoll";
+import {
+  BackToTop,
+  InlineJumpToPoll,
+  JumpToPoll,
+  TopArticleCTA,
+} from "@/components/JumpToPoll";
 import DesktopShell from "@/components/DesktopShell";
 import ReelsFeed from "@/components/reels/ReelsFeed";
 import CookieConsent from "@/components/CookieConsent";
@@ -602,9 +607,10 @@ function GenArticle({
     : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
-    <article className="fade-in">
+    <article id="article-top" className="fade-in scroll-mt-20">
       <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
       <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 30 }}>{story.title}</h1>
+      <TopArticleCTA question="Where do you land on this one?" />
       {paras.map((para, i) => (
         <React.Fragment key={i}>
           {i === 0 ? (
@@ -1334,6 +1340,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
             />
           </section>
         )}
+        <BackToTop />
         {pollView && <JumpToPoll label="Vote" />}
 
         <section className="mt-8 -mx-4">

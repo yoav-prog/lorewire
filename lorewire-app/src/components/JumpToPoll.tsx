@@ -144,6 +144,245 @@ export function JumpToPoll({
   );
 }
 
+/** Slim "skip to the vote" banner rendered at the TOP of an article — sits
+ *  between the title block and the body so a reader who already knows they
+ *  want to vote can jump straight to the poll. Less visual weight than the
+ *  end-of-body InlineJumpToPoll (single line, smaller pill) because it's
+ *  the warm-up, not the close. */
+interface TopArticleCTAProps {
+  targetId?: string;
+  question?: string;
+}
+
+export function TopArticleCTA({
+  targetId = DEFAULT_TARGET_ID,
+  question,
+}: TopArticleCTAProps) {
+  const [hasTarget, setHasTarget] = useState(false);
+  useEffect(() => {
+    setHasTarget(Boolean(document.getElementById(targetId)));
+  }, [targetId]);
+  if (!hasTarget) return null;
+
+  const onClick = () => {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[lorewire top article cta jump]", { targetId });
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 16,
+        marginBottom: 4,
+        padding: "10px 14px",
+        borderRadius: 12,
+        background:
+          "linear-gradient(90deg, rgba(232,70,43,0.08) 0%, rgba(232,70,43,0) 100%)",
+        border: "1px solid rgba(232,70,43,0.22)",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}
+    >
+      <span
+        aria-hidden
+        className="lorewire-pulse-dot"
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 999,
+          background: "#E8462B",
+          flexShrink: 0,
+        }}
+      />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <p
+          style={{
+            margin: 0,
+            fontFamily: "var(--font-mono), monospace",
+            fontSize: 10,
+            letterSpacing: ".22em",
+            textTransform: "uppercase",
+            color: "#E8462B",
+            lineHeight: 1.2,
+          }}
+        >
+          Today's debate
+        </p>
+        <p
+          style={{
+            margin: "2px 0 0",
+            fontFamily: "var(--font-body), system-ui, sans-serif",
+            fontSize: 13.5,
+            color: "rgba(245,243,239,0.85)",
+            lineHeight: 1.35,
+            // Truncate so a long question never wraps to a third line and
+            // bloats the banner above the title's visual weight.
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}
+        >
+          {question || "Where do you land? Vote at the end."}
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label="Skip to vote"
+        style={{
+          background: "transparent",
+          color: "#E8462B",
+          padding: "6px 10px",
+          borderRadius: 999,
+          border: "1px solid rgba(232,70,43,0.4)",
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          fontFamily: "var(--font-display), system-ui, sans-serif",
+          fontWeight: 700,
+          fontSize: 11,
+          textTransform: "uppercase",
+          letterSpacing: ".08em",
+          flexShrink: 0,
+          transition: "background 120ms ease-out, transform 120ms ease-out",
+        }}
+        onMouseEnter={(e) =>
+          (e.currentTarget.style.background = "rgba(232,70,43,0.14)")
+        }
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.transform = "scale(1)";
+        }}
+        onMouseDown={(e) => (e.currentTarget.style.transform = "scale(.96)")}
+        onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+      >
+        <span>Vote</span>
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M12 5v14" />
+          <path d="m19 12-7 7-7-7" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+/** Inline "back to top" pill rendered AFTER the poll. Gives a clean way
+ *  to return to the article's start once the reader has voted — pairs
+ *  with TopArticleCTA / InlineJumpToPoll so the reading flow loops back
+ *  on itself without forcing the user to hand-scroll. Renders nothing
+ *  when the top anchor isn't on the page. */
+interface BackToTopProps {
+  /** DOM id of the article-top anchor. Default matches the
+   *  `id="article-top"` placed on the modal hero / article wrapper. */
+  targetId?: string;
+  label?: string;
+}
+
+export function BackToTop({
+  targetId = "article-top",
+  label = "Back to top",
+}: BackToTopProps) {
+  const [hasTarget, setHasTarget] = useState(false);
+  useEffect(() => {
+    setHasTarget(Boolean(document.getElementById(targetId)));
+  }, [targetId]);
+  if (!hasTarget) return null;
+
+  const onClick = () => {
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[lorewire back to top]", { targetId });
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 24,
+        display: "flex",
+        justifyContent: "center",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={label}
+        className="lorewire-back-to-top"
+        style={{
+          background: "rgba(245,243,239,0.04)",
+          color: "rgba(245,243,239,0.85)",
+          padding: "12px 22px",
+          borderRadius: 999,
+          border: "1px solid rgba(245,243,239,0.18)",
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 10,
+          fontFamily: "var(--font-display), system-ui, sans-serif",
+          fontWeight: 700,
+          fontSize: 13,
+          textTransform: "uppercase",
+          letterSpacing: ".09em",
+          backdropFilter: "blur(6px)",
+          WebkitBackdropFilter: "blur(6px)",
+          transition:
+            "background 160ms ease-out, color 160ms ease-out, transform 140ms ease-out, border-color 160ms ease-out, box-shadow 160ms ease-out",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "rgba(232,70,43,0.10)";
+          e.currentTarget.style.color = "#F5F3EF";
+          e.currentTarget.style.borderColor = "rgba(232,70,43,0.45)";
+          e.currentTarget.style.boxShadow =
+            "0 6px 22px rgba(232,70,43,0.18)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "rgba(245,243,239,0.04)";
+          e.currentTarget.style.color = "rgba(245,243,239,0.85)";
+          e.currentTarget.style.borderColor = "rgba(245,243,239,0.18)";
+          e.currentTarget.style.boxShadow = "none";
+          e.currentTarget.style.transform = "scale(1)";
+        }}
+        onMouseDown={(e) => (e.currentTarget.style.transform = "scale(.96)")}
+        onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+      >
+        <svg
+          className="lorewire-back-to-top__arrow"
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+        >
+          <path d="M12 19V5" />
+          <path d="m5 12 7-7 7 7" />
+        </svg>
+        <span>{label}</span>
+      </button>
+    </div>
+  );
+}
+
 interface InlineProps {
   targetId?: string;
   question?: string;

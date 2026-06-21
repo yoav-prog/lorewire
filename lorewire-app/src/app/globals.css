@@ -167,3 +167,39 @@ button:not(:disabled),
   outline: 2px solid #f5f3ef;
   outline-offset: 3px;
 }
+/* Soft, slow pulse on the "Today's debate" dot in TopArticleCTA. Communicates
+   liveness without becoming distracting — a single subtle breath at ~1.6s
+   intervals reads as a heartbeat, faster would feel anxious. */
+@keyframes lorewireDotPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgba(232, 70, 43, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(232, 70, 43, 0.06);
+  }
+}
+.lorewire-pulse-dot {
+  animation: lorewireDotPulse 1.6s ease-in-out infinite;
+}
+/* Back-to-top arrow gets a tiny lift on hover so the affordance is felt
+   rather than just seen. Pairs with the button's full hover state in
+   src/components/JumpToPoll.tsx. */
+@keyframes lorewireArrowLift {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+.lorewire-back-to-top:hover .lorewire-back-to-top__arrow {
+  animation: lorewireArrowLift 0.9s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lorewire-pulse-dot,
+  .lorewire-back-to-top:hover .lorewire-back-to-top__arrow {
+    animation: none;
+  }
+}

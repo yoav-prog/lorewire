@@ -29,7 +29,12 @@ import {
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
-import { JumpToPoll, InlineJumpToPoll } from "@/components/JumpToPoll";
+import {
+  BackToTop,
+  InlineJumpToPoll,
+  JumpToPoll,
+  TopArticleCTA,
+} from "@/components/JumpToPoll";
 import {
   useContinueReading,
   useRecentlyViewed,
@@ -512,9 +517,10 @@ function GenArticle({
     : { background: "#15141A", aspectRatio: sceneAspect };
 
   return (
-    <article className="fade-in max-w-[660px]">
+    <article id="article-top" className="fade-in max-w-[660px] scroll-mt-24">
       <p className="font-mono text-[10px] uppercase tracking-[.24em] text-accent mb-2">{story.cat} &middot; 6 min read</p>
       <h1 className="font-display font-black uppercase tracking-tightest leading-[.95] text-ink" style={{ fontSize: 40 }}>{story.title}</h1>
+      <TopArticleCTA question="Where do you land on this one?" />
       {paras.map((para, i) => (
         <React.Fragment key={i}>
           {i === 0 ? (
@@ -1081,6 +1087,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
                 />
               </section>
             )}
+            <BackToTop />
             {pollView && <JumpToPoll label="Vote now" />}
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>
