@@ -54,9 +54,14 @@ function parseValue(raw: unknown): ConsentValue | null {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!isAllowedOrigin(req)) {
+    // 2026-06-21: log the actual expected origin so a www-vs-apex or
+    // trailing-whitespace mismatch is visible in Vercel logs without
+    // requiring code edits to diagnose. Same logging shape as
+    // /api/polls/vote — the env var is NEXT_PUBLIC so it's not secret.
     console.warn("[consent origin-rejected]", {
-      origin: req.headers.get("origin"),
-      site_origin_set: Boolean(process.env.NEXT_PUBLIC_SITE_ORIGIN),
+      received_origin: req.headers.get("origin"),
+      expected_origin: process.env.NEXT_PUBLIC_SITE_ORIGIN ?? null,
+      node_env: process.env.NODE_ENV,
     });
     return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
   }

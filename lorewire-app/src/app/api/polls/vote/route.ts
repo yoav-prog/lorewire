@@ -101,9 +101,16 @@ function isAllowedOrigin(req: NextRequest): boolean {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!isAllowedOrigin(req)) {
+    // 2026-06-21: pivot from boolean "set / unset" to logging the actual
+    // expected value alongside the received one. Boolean alone hid
+    // mismatch bugs (www vs apex, trailing whitespace, http vs https)
+    // behind two checkmarks while production silently 403'd every vote.
+    // The env var is non-secret — it's NEXT_PUBLIC_ prefixed so it
+    // ships in the client bundle anyway — so logging it isn't a leak.
     console.warn("[polls vote origin-rejected]", {
-      origin: req.headers.get("origin"),
-      site_origin_set: Boolean(process.env.NEXT_PUBLIC_SITE_ORIGIN),
+      received_origin: req.headers.get("origin"),
+      expected_origin: process.env.NEXT_PUBLIC_SITE_ORIGIN ?? null,
+      node_env: process.env.NODE_ENV,
     });
     return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
   }
