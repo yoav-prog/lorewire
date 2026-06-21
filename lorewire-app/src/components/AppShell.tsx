@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
@@ -420,20 +420,47 @@ function Home({
 function WatchDoodle({
   story,
   liveMedia,
+  pendingPlay,
+  onPlayConsumed,
 }: {
   story: Story;
   liveMedia: LiveStoryMediaResult;
+  pendingPlay: boolean;
+  onPlayConsumed: () => void;
 }) {
   // Real generated video gets a native player with the hero as poster; the
   // hand-drawn doodle stays as the fallback so older stories without media
   // keep their illustrated look. Prefer the live URL so a freshly re-rendered
   // short shows up here instead of the stale baked `story.videoUrl`.
   const videoUrl = liveMedia.video_url ?? story.videoUrl;
+  const sectionRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // PLAY buttons in the title sheet ship a pending-play signal down here;
+  // without this they'd just call setTab("Watch") (already the default) and
+  // the user would see nothing happen, because the player sits below the
+  // synopsis + tab strip and is off-screen on first open.
+  useEffect(() => {
+    if (!pendingPlay) return;
+    const v = videoRef.current;
+    if (v) {
+      v.scrollIntoView({ behavior: "smooth", block: "center" });
+      const p = v.play();
+      if (p && typeof p.then === "function") {
+        p.catch((e) => console.warn("[lorewire title-sheet play err]", { storyId: story.id, e: String(e) }));
+      }
+    } else {
+      sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    onPlayConsumed();
+  }, [pendingPlay, onPlayConsumed, story.id]);
+
   if (videoUrl) {
     return (
-      <div className="px-4 pt-4 pb-2">
+      <div ref={sectionRef} className="px-4 pt-4 pb-2">
         <div className="relative rounded-[14px] overflow-hidden mx-auto bg-black" style={{ height: 430, width: "100%" }}>
           <video
+            ref={videoRef}
             src={videoUrl}
             poster={story.heroImage}
             controls
@@ -448,7 +475,7 @@ function WatchDoodle({
     );
   }
   return (
-    <div className="px-4 pt-4 pb-2">
+    <div ref={sectionRef} className="px-4 pt-4 pb-2">
       <div className="relative rounded-[14px] overflow-hidden mx-auto" style={{ background: "#FBFAF4", height: 430, width: "100%" }}>
         <div className="absolute inset-0" style={{ background: "repeating-linear-gradient(0deg, rgba(26,23,20,.035) 0 1px, transparent 1px 26px)" }}></div>
 
@@ -1187,6 +1214,17 @@ function FakeReadAlong() {
 /* ----------------------------- TITLE SHEET ----------------------------- */
 function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
+  // Both PLAY affordances (the hero circle and the big white button under the
+  // meta row) flip this to true. WatchDoodle's effect consumes it: scroll the
+  // player into view and start playback. Without this the buttons only set
+  // the tab to "Watch" — which is already the default — and the user sees
+  // nothing happen because the player sits below the fold on first open.
+  const [pendingPlay, setPendingPlay] = useState(false);
+  const onPlayClick = () => {
+    setTab("Watch");
+    setPendingPlay(true);
+  };
+  const onPlayConsumed = useCallback(() => setPendingPlay(false), []);
   // 2026-06-18 polls plan extension: per-story poll for the mobile
   // title sheet. Mirrors the DesktopShell DetailModal pattern; passing
   // `story` lets the server lazy-autodraft on first open when no poll
@@ -1278,7 +1316,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         <button onClick={onClose} className="absolute top-4 left-4 w-9 h-9 rounded-full flex items-center justify-center text-ink z-10" style={{ background: "rgba(0,0,0,.4)" }}>
           <ChevDown size={22} />
         </button>
-        <button onClick={() => setTab("Watch")} className="absolute left-1/2 top-[120px] -translate-x-1/2 w-16 h-16 rounded-full flex items-center justify-center text-bg active:scale-95 transition" style={{ background: "#F5F3EF", boxShadow: "0 10px 30px rgba(0,0,0,.4)" }}>
+        <button onClick={onPlayClick} aria-label="Play" className="absolute left-1/2 top-[120px] -translate-x-1/2 w-16 h-16 rounded-full flex items-center justify-center text-bg active:scale-95 transition" style={{ background: "#F5F3EF", boxShadow: "0 10px 30px rgba(0,0,0,.4)" }}>
           <PlayI size={28} />
         </button>
       </div>
@@ -1294,7 +1332,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ background: c, color: "#fff" }}>{story.cat}</span>
         </div>
 
-        <button onClick={() => setTab("Watch")} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition">
+        <button onClick={onPlayClick} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition">
           <PlayI /> Play
         </button>
 
@@ -1323,7 +1361,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
         </div>
 
         <div className="-mx-4 mt-2">
-          {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
+          {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
           {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
           {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
         </div>

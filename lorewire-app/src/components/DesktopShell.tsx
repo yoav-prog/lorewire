@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
@@ -305,20 +305,47 @@ function Top10Row({
 function WatchDoodle({
   story,
   liveMedia,
+  pendingPlay,
+  onPlayConsumed,
 }: {
   story: Story;
   liveMedia: LiveStoryMediaResult;
+  pendingPlay: boolean;
+  onPlayConsumed: () => void;
 }) {
   // liveMedia is lifted to DetailModal so the WATCH / READ / GALLERY
   // surfaces all share the same single fetch. Falls back to the baked
   // story.videoUrl when the live read missed (legacy sample-only entries
   // or before the fetch settled).
   const videoUrl = liveMedia.video_url ?? story.videoUrl;
+  const sectionRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Both PLAY affordances in DetailModal (the hero circle and the text Play
+  // button under the meta row) raise this signal. Without it they only set
+  // the tab to "Watch" — already the default — so a click does nothing
+  // visible when the player is already below the fold inside the modal.
+  useEffect(() => {
+    if (!pendingPlay) return;
+    const v = videoRef.current;
+    if (v) {
+      v.scrollIntoView({ behavior: "smooth", block: "center" });
+      const p = v.play();
+      if (p && typeof p.then === "function") {
+        p.catch((e) => console.warn("[lorewire detail-modal play err]", { storyId: story.id, e: String(e) }));
+      }
+    } else {
+      sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    onPlayConsumed();
+  }, [pendingPlay, onPlayConsumed, story.id]);
+
   if (videoUrl) {
     return (
-      <div>
+      <div ref={sectionRef}>
         <div className="relative rounded-[14px] overflow-hidden w-full bg-black" style={{ height: 540 }}>
           <video
+            ref={videoRef}
             src={videoUrl}
             poster={story.heroImage}
             controls
@@ -333,7 +360,7 @@ function WatchDoodle({
     );
   }
   return (
-    <div>
+    <div ref={sectionRef}>
       <div className="relative rounded-[14px] overflow-hidden w-full" style={{ background: "#FBFAF4", height: 440 }}>
         <div className="absolute inset-0" style={{ background: "repeating-linear-gradient(0deg, rgba(26,23,20,.035) 0 1px, transparent 1px 28px)" }}></div>
         <div className="absolute top-5 left-0 right-0 text-center font-hand font-bold text-doodle" style={{ fontSize: 32 }}>so about that office gift fund&hellip;</div>
@@ -959,6 +986,17 @@ function DetailModalHero({ story }: { story: Story }) {
 
 function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
   const [tab, setTab] = useState(initialTab || "Watch");
+  // Both PLAY affordances (the hero circle and the text Play button in the
+  // meta row) flip this to true. WatchDoodle's effect consumes it: scroll
+  // the player into view and start playback. Mirrors the mobile TitleSheet
+  // pattern — without this the buttons only set the tab to "Watch" (already
+  // the default), so a click does nothing visible.
+  const [pendingPlay, setPendingPlay] = useState(false);
+  const onPlayClick = () => {
+    setTab("Watch");
+    setPendingPlay(true);
+  };
+  const onPlayConsumed = useCallback(() => setPendingPlay(false), []);
   // 2026-06-18 polls plan extension: fetch the per-story poll for the
   // modal. Re-fires whenever the modal swaps stories (the hook keys
   // on story.id). Renders below the tab content (Watch / Read /
@@ -1039,7 +1077,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
 
             <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background: "linear-gradient(0deg,#15141A 4%, rgba(21,20,26,0) 100%)" }}></div>
             <button onClick={onClose} className="absolute top-5 right-5 w-10 h-10 rounded-full flex items-center justify-center text-ink z-10" style={{ background: "rgba(0,0,0,.5)" }}><XI size={22} /></button>
-            <button onClick={() => setTab("Watch")} className="absolute left-10 top-[150px] w-[72px] h-[72px] rounded-full flex items-center justify-center text-bg hover:scale-105 transition" style={{ background: "#F5F3EF", boxShadow: "0 12px 32px rgba(0,0,0,.45)" }}><PlayI size={32} /></button>
+            <button onClick={onPlayClick} aria-label="Play" className="absolute left-10 top-[150px] w-[72px] h-[72px] rounded-full flex items-center justify-center text-bg hover:scale-105 transition" style={{ background: "#F5F3EF", boxShadow: "0 12px 32px rgba(0,0,0,.45)" }}><PlayI size={32} /></button>
             <div className="absolute left-10 right-10 bottom-7">
               <h1 className="font-display font-black uppercase tracking-tightest leading-[.9] text-ink ink-shadow" style={{ fontSize: 54 }}>{story.title}</h1>
             </div>
@@ -1057,7 +1095,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
                 <p className="font-body text-[15.5px] leading-relaxed text-ink/85 max-w-[520px]">{story.syn}</p>
               </div>
               <div className="flex items-center gap-3 shrink-0 pt-1">
-                <button onClick={() => setTab("Watch")} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
+                <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
                 <button onClick={() => toggleList(story.id)} title="My List" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color: inList ? "#E8462B" : "#F5F3EF" }}>{inList ? <CheckI size={20} /> : <PlusI size={20} />}</button>
                 <button title="Rate" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><StarI size={19} /></button>
                 <button title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
@@ -1071,7 +1109,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               ))}
             </div>
             <div className="pt-7">
-              {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} />}
+              {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
             </div>
