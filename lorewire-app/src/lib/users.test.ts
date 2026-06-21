@@ -242,6 +242,151 @@ describe("updateUserProfile", () => {
   });
 });
 
+describe("email + password (Phase 5.3)", () => {
+  beforeEach(async () => {
+    await clearUsers();
+  });
+
+  it("createPasswordUser inserts a row with provider='email' and hashed password", async () => {
+    const { createPasswordUser } = await import("./users");
+    const row = await createPasswordUser({
+      email: "Alice@Example.com",
+      password: "super-secret-password",
+      anonymousId: null,
+    });
+    expect(row.email).toBe("alice@example.com");
+    expect(row.provider).toBe("email");
+    expect(row.role).toBe("user");
+    // Stored hash, not the raw value.
+    expect(row.password_hash).toMatch(/^scrypt\$[0-9a-f]+\$[0-9a-f]+$/);
+    expect(row.password_hash).not.toContain("super-secret");
+  });
+
+  it("createPasswordUser refuses a duplicate email", async () => {
+    const { createPasswordUser, PublicAuthError } = await import("./users");
+    await createPasswordUser({
+      email: "dup@example.com",
+      password: "first-password",
+      anonymousId: null,
+    });
+    await expect(
+      createPasswordUser({
+        email: "dup@example.com",
+        password: "second-password",
+        anonymousId: null,
+      }),
+    ).rejects.toBeInstanceOf(PublicAuthError);
+  });
+
+  it("createPasswordUser rejects short passwords", async () => {
+    const { createPasswordUser, PublicAuthError } = await import("./users");
+    await expect(
+      createPasswordUser({
+        email: "short@example.com",
+        password: "1234",
+        anonymousId: null,
+      }),
+    ).rejects.toBeInstanceOf(PublicAuthError);
+  });
+
+  it("createPasswordUser rejects malformed emails", async () => {
+    const { createPasswordUser, PublicAuthError } = await import("./users");
+    await expect(
+      createPasswordUser({
+        email: "not-an-email",
+        password: "valid-password-here",
+        anonymousId: null,
+      }),
+    ).rejects.toBeInstanceOf(PublicAuthError);
+  });
+
+  it("verifyPasswordLogin returns the user on a correct match", async () => {
+    const { createPasswordUser, verifyPasswordLogin } = await import("./users");
+    await createPasswordUser({
+      email: "verify@example.com",
+      password: "the-right-password",
+      anonymousId: null,
+    });
+    const user = await verifyPasswordLogin(
+      "verify@example.com",
+      "the-right-password",
+    );
+    expect(user.email).toBe("verify@example.com");
+  });
+
+  it("verifyPasswordLogin rejects a wrong password with bad_credentials", async () => {
+    const { createPasswordUser, verifyPasswordLogin, PublicAuthError } =
+      await import("./users");
+    await createPasswordUser({
+      email: "wrong@example.com",
+      password: "the-right-password",
+      anonymousId: null,
+    });
+    await expect(
+      verifyPasswordLogin("wrong@example.com", "the-wrong-password"),
+    ).rejects.toBeInstanceOf(PublicAuthError);
+  });
+
+  it("verifyPasswordLogin rejects an unknown email with the SAME error code (no enumeration)", async () => {
+    const { verifyPasswordLogin, PublicAuthError } = await import("./users");
+    try {
+      await verifyPasswordLogin("unknown@example.com", "anything");
+      throw new Error("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(PublicAuthError);
+      expect((err as InstanceType<typeof PublicAuthError>).code).toBe(
+        "bad_credentials",
+      );
+    }
+  });
+
+  it("squatter guard: refuses to LINK an OAuth identity to an email-password row", async () => {
+    const { createPasswordUser } = await import("./users");
+    // Squatter creates the row first with email they don't own.
+    await createPasswordUser({
+      email: "alice@example.com",
+      password: "squatter-password",
+      anonymousId: null,
+    });
+    // Real Alice signs in via Google with the same email.
+    await expect(
+      upsertUserOnSignIn({
+        provider: "google",
+        providerSub: "google_alice_real",
+        email: "alice@example.com",
+        anonymousId: null,
+      }),
+    ).rejects.toThrow();
+    // The original password row is untouched — Alice creates a separate
+    // account via Google instead. (Support can clean up the squatter
+    // row later.)
+    const stillThere = await getUserByEmail("alice@example.com");
+    expect(stillThere?.provider).toBe("email");
+  });
+
+  it("squatter guard does NOT block magic-link → magic-link or OAuth → magic-link", async () => {
+    // Magic-link rows prove email ownership at signup, so cross-linking
+    // INTO a magic-link row from Google is safe and should succeed.
+    const result = await upsertUserOnSignIn({
+      provider: "magic_link",
+      providerSub: "ml@example.com",
+      email: "ml@example.com",
+      anonymousId: null,
+    });
+    expect(result.user.provider).toBe("magic_link");
+    // Now Google sign-in on the same email — this should LINK (not
+    // refuse) because the magic-link row already proved email ownership.
+    const linked = await upsertUserOnSignIn({
+      provider: "google",
+      providerSub: "google_ml_owner",
+      email: "ml@example.com",
+      anonymousId: null,
+    });
+    expect(linked.linked).toBe(true);
+    expect(linked.user.id).toBe(result.user.id);
+  });
+});
+
 describe("users helpers", () => {
   it("hashForLog returns a stable 8-char identifier", () => {
     const h1 = hashForLog("user-001");

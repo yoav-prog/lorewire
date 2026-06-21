@@ -14,6 +14,7 @@
 //     "or use email" divider — no nested card boundary, which made the
 //     v1 layout feel like two unrelated surfaces.
 
+import Link from "next/link";
 import { useState } from "react";
 
 interface SignInFormProps {
@@ -174,12 +175,138 @@ export default function SignInForm({
         )
       ) : null}
 
+      {/* Password sign-in — email + password ("old fashion"). Always
+          available, doesn't require any provider config. Lives below the
+          magic-link form because magic-link is the recommended path
+          (no password to remember) but plenty of users prefer the
+          familiar pattern. */}
+      <PasswordSignIn next={next} />
+
+      <p className="pt-1 text-center text-[12px] text-muted">
+        New here?{" "}
+        <Link
+          href={
+            next ? `/auth/signup?next=${encodeURIComponent(next)}` : "/auth/signup"
+          }
+          className="text-ink underline-offset-2 hover:text-accent hover:underline"
+        >
+          Create an account
+        </Link>
+      </p>
+
       {nothingConfigured ? (
         <p className="rounded-md border border-line bg-surface p-4 text-[13px] text-muted">
           Sign-in is not configured yet. Check back soon.
         </p>
       ) : null}
     </div>
+  );
+}
+
+// Email + password sign-in panel. Collapsed by default to keep the
+// magic-link path as the visual primary; expands on click. Independent
+// email state from the magic-link form so toggling between flows
+// doesn't drop what the user typed.
+function PasswordSignIn({ next }: { next: string | undefined }) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (busy || !email || !password) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ email, password, next }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { ok?: boolean; error?: string; next?: string }
+        | null;
+      if (!res.ok || !data?.ok) {
+        setErr(data?.error ?? "Couldn't sign you in. Try again.");
+        setBusy(false);
+        return;
+      }
+      window.location.assign(data.next ?? "/");
+    } catch (e) {
+      console.warn("[auth login network]", { err: String(e) });
+      setErr("Network problem. Try again.");
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="block w-full rounded-md border border-line bg-transparent px-4 py-2.5 text-center text-[13px] font-medium text-muted hover:border-ink hover:text-ink"
+      >
+        Sign in with a password
+      </button>
+    );
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="space-y-3 rounded-md border border-line bg-surface p-4" noValidate>
+      <label htmlFor="lw-password-email" className="block">
+        <span className="block text-[12px] font-mono uppercase tracking-[.2em] text-muted">
+          Email
+        </span>
+        <input
+          id="lw-password-email"
+          type="email"
+          inputMode="email"
+          required
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          disabled={busy}
+          placeholder="you@example.com"
+          className="mt-1 block w-full rounded-md border border-line bg-surface2 px-3 py-2.5 text-[14px] text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
+        />
+      </label>
+      <label htmlFor="lw-password-pw" className="block">
+        <span className="block text-[12px] font-mono uppercase tracking-[.2em] text-muted">
+          Password
+        </span>
+        <input
+          id="lw-password-pw"
+          type="password"
+          required
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          disabled={busy}
+          className="mt-1 block w-full rounded-md border border-line bg-surface2 px-3 py-2.5 text-[14px] text-ink placeholder:text-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
+        />
+      </label>
+      <button
+        type="submit"
+        disabled={busy || !email || !password}
+        className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-4 py-3 text-[14px] font-semibold text-bg transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {busy ? "Signing in…" : "Sign in"}
+      </button>
+      {err ? (
+        <p
+          role="alert"
+          className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger"
+        >
+          {err}
+        </p>
+      ) : null}
+      <p className="text-center text-[11px] text-muted">
+        Forgot your password? Use the email sign-in link above for now.
+      </p>
+    </form>
   );
 }
 

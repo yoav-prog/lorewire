@@ -31,8 +31,19 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { all, one, run } from "@/lib/db";
+import { hashPassword, verifyPassword } from "@/lib/passwords";
 
-export type UserProvider = "google" | "microsoft" | "reddit" | "magic_link";
+export type UserProvider =
+  | "google"
+  | "microsoft"
+  | "reddit"
+  | "magic_link"
+  /** Email + password ("old fashion sign up"). Distinct from magic_link
+   *  because magic_link proves email ownership (the user clicked a link
+   *  sent to that inbox) while plain email/password does NOT — that
+   *  distinction drives the cross-provider link refusal in
+   *  upsertUserOnSignIn below (the squatter-guard). */
+  | "email";
 
 export interface UserRow {
   id: string;
@@ -147,6 +158,29 @@ export async function upsertUserOnSignIn(
       });
       throw new Error(
         "An account with this email already exists with a different role. Contact support.",
+      );
+    }
+    // Squatter guard (2026-06-21): an email+password row was created
+    // without proving the signer owns the email — anyone can type
+    // someone-elses@gmail.com into the signup form. If we let a Google
+    // OAuth identity for that same email LINK to the squatter's row,
+    // the squatter's password still works and they retain access to
+    // "the real user's" account.
+    //
+    // Refuse the link instead. The signing-in user gets a clear error;
+    // the right resolution is for the real owner to sign in via their
+    // OAuth provider, which creates a fresh row, and contact support
+    // if the abandoned squatter row needs cleanup. Magic-link rows
+    // DON'T trip this — clicking a magic link proves the same email
+    // ownership that an OAuth identity proves, so cross-linking
+    // between magic_link and OAuth is safe.
+    if (byEmail.provider === "email" && identity.provider !== "email") {
+      console.warn("[auth users link-refused-email-row]", {
+        user_id_hash: hashForLog(byEmail.id),
+        attempted_provider: identity.provider,
+      });
+      throw new Error(
+        "An account with this email already exists. Sign in with your password instead.",
       );
     }
     await run(
@@ -301,6 +335,142 @@ export function hashForLog(value: string): string {
     .update(value)
     .digest("hex")
     .slice(0, 8);
+}
+
+/* ----------------------------- email + password ----------------------------- */
+//
+// "Old fashion" sign-up: anyone can create an account with email + password.
+// No verification at this stage — that's deferred to a Phase 6 follow-up.
+// The squatter risk is handled by the cross-provider link refusal in
+// upsertUserOnSignIn above (an OAuth sign-in for the same email gets
+// rejected with a clear "sign in with password instead" message).
+//
+// Password rules: 8-128 chars. No complexity rules — NIST modern guidance
+// is that length beats character classes, and complexity rules push users
+// toward predictable substitutions ("Password1!" satisfies most "complex"
+// requirements). We just cap the length so a 10 MB password POST can't
+// burn a Vercel function.
+
+const PASSWORD_MIN = 8;
+const PASSWORD_MAX = 128;
+
+export class PublicAuthError extends Error {
+  constructor(
+    message: string,
+    public readonly code:
+      | "email_invalid"
+      | "password_too_short"
+      | "password_too_long"
+      | "email_taken"
+      | "bad_credentials",
+  ) {
+    super(message);
+    this.name = "PublicAuthError";
+  }
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function assertEmail(email: string): string {
+  const normalized = normalizeEmail(email);
+  if (!normalized || !EMAIL_RE.test(normalized)) {
+    throw new PublicAuthError(
+      "Enter a valid email address.",
+      "email_invalid",
+    );
+  }
+  return normalized;
+}
+
+function assertPassword(password: string): void {
+  if (typeof password !== "string" || password.length < PASSWORD_MIN) {
+    throw new PublicAuthError(
+      `Password must be at least ${PASSWORD_MIN} characters.`,
+      "password_too_short",
+    );
+  }
+  if (password.length > PASSWORD_MAX) {
+    throw new PublicAuthError(
+      "Password is too long.",
+      "password_too_long",
+    );
+  }
+}
+
+export interface PasswordSignupInput {
+  email: string;
+  password: string;
+  /** Optional. If the email is already in use as an OAuth/magic-link
+   *  identity, signup is REFUSED — the user should sign in with that
+   *  provider instead, then add a password from Account & preferences
+   *  (Phase 6+). */
+  anonymousId: string | null;
+}
+
+/** Create a new email+password user. Throws PublicAuthError on shape /
+ *  conflict failures; the route handler maps `code` to a friendly
+ *  message. Same error message for "email already taken" regardless of
+ *  underlying provider so we don't leak which providers the email is
+ *  registered against. */
+export async function createPasswordUser(
+  input: PasswordSignupInput,
+): Promise<UserRow> {
+  const email = assertEmail(input.email);
+  assertPassword(input.password);
+
+  const existing = await getUserByEmail(email);
+  if (existing) {
+    throw new PublicAuthError(
+      "An account with this email already exists.",
+      "email_taken",
+    );
+  }
+
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  const passwordHash = await hashPassword(input.password);
+  await run(
+    `INSERT INTO users
+        (id, email, role, password_hash, name, picture_url,
+         provider, provider_sub, anonymous_id, last_seen_at, created_at)
+      VALUES (?, ?, 'user', ?, NULL, NULL, 'email', ?, ?, ?, ?)`,
+    [id, email, passwordHash, email, input.anonymousId, now, now],
+  );
+  const created = await getUserById(id);
+  if (!created) throw new Error("user vanished after password insert");
+  console.info("[auth users password-created]", {
+    user_id_hash: hashForLog(id),
+    anon_present: input.anonymousId !== null,
+  });
+  return created;
+}
+
+/** Verify an email + password pair and return the user on success.
+ *  Throws PublicAuthError(code='bad_credentials') for any failure —
+ *  unknown email, wrong password, wrong provider type — so the
+ *  caller's response shape never leaks which one. */
+export async function verifyPasswordLogin(
+  email: string,
+  password: string,
+): Promise<UserRow> {
+  const normalized = assertEmail(email);
+  // Don't run assertPassword here — a too-short submitted password is
+  // a bad-credentials response, not a "your password is too short"
+  // lecture. Reveals information about the stored value otherwise.
+
+  const row = await getUserByEmail(normalized);
+  // Constant-ish timing: still run a dummy verifyPassword when the row
+  // is missing so the response time doesn't reveal user existence.
+  const stored = row?.password_hash ?? "scrypt$00$00";
+  const ok = await verifyPassword(password, stored);
+  if (!row || row.role !== "user" || !row.password_hash || !ok) {
+    throw new PublicAuthError(
+      "Email or password is incorrect.",
+      "bad_credentials",
+    );
+  }
+  await touchLastSeen(row.id);
+  return row;
 }
 
 /** List recent users — admin convenience for the future user-management
