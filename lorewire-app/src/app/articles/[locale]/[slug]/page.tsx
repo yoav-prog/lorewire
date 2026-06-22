@@ -41,6 +41,10 @@ import {
   type PollSide,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
+import { readCommentToken } from "@/lib/comment-cookie";
+import { readUserSession } from "@/lib/user-session";
+import { countPublishedComments, loadCommentThread } from "@/lib/comments-read";
+import { CommentsSection } from "@/components/CommentsSection";
 
 // Phase 2 + §15 (standalone-article polls) of
 // _plans/2026-06-17-engagement-polls.md.
@@ -263,6 +267,20 @@ export default async function ArticleReader({
   // being asked to take a side.
   const pollRender = await loadPollForArticle(article);
 
+  // Comment thread: first page server-rendered for SEO + no-flash, with the
+  // viewer resolved so they see their own held/rejected comments inline.
+  const commentSession = await readUserSession();
+  const commentToken = await readCommentToken();
+  const [commentThread, commentCount] = await Promise.all([
+    loadCommentThread({
+      articleId: article.id,
+      sort: "newest",
+      viewerUserId: commentSession?.userId ?? null,
+      viewerCookieToken: commentToken,
+    }),
+    countPublishedComments(article.id),
+  ]);
+
   console.info("[articles reader] render", {
     id: article.id,
     type,
@@ -382,6 +400,13 @@ export default async function ArticleReader({
           followUp={pollRender.followUp}
         />
       )}
+
+      <CommentsSection
+        articleId={article.id}
+        initial={commentThread}
+        initialCount={commentCount}
+        signedIn={commentSession !== null}
+      />
     </article>
   );
 }

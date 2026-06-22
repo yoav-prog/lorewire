@@ -18,10 +18,36 @@ import { isAllowedOrigin } from "@/lib/request-origin";
 import { ipUaHash } from "@/lib/poll-rate-limit";
 import { getOrIssueCommentToken } from "@/lib/comment-cookie";
 import { readUserSession } from "@/lib/user-session";
+import { readCommentToken } from "@/lib/comment-cookie";
 import { getUserById } from "@/lib/users";
 import { createComment, setCommentStatus, toPublicComment } from "@/lib/comments";
+import { loadCommentThread, type CommentSort } from "@/lib/comments-read";
 import { moderateComment } from "@/lib/comment-moderation";
 import { checkCommentVelocity } from "@/lib/comment-rate-limit";
+
+// Read a page of the thread (used by the client island for sort changes and
+// "load more"). Read-only, so no origin gate; visibility of the viewer's own
+// held comments is resolved from their session + lw_comment cookie.
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const url = new URL(req.url);
+  const articleId = url.searchParams.get("articleId")?.trim() ?? "";
+  if (!articleId) {
+    return NextResponse.json({ error: "articleId required" }, { status: 400 });
+  }
+  const sort: CommentSort =
+    url.searchParams.get("sort") === "top" ? "top" : "newest";
+  const cursor = url.searchParams.get("cursor");
+  const session = await readUserSession();
+  const cookieToken = await readCommentToken();
+  const page = await loadCommentThread({
+    articleId,
+    sort,
+    cursor,
+    viewerUserId: session?.userId ?? null,
+    viewerCookieToken: cookieToken,
+  });
+  return NextResponse.json(page);
+}
 
 interface CommentBody {
   articleId?: unknown;
