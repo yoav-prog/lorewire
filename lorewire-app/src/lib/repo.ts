@@ -1504,18 +1504,21 @@ export interface UserRow {
   // by the admin gates (dal.ts) and the login action so a suspended staff
   // member loses access on the next request.
   status: string | null;
+  // 2026-06-22 Phase 8: 1 = this staff account has opted into TOTP 2FA, so the
+  // login flow requires a second factor. NULL/0 = off (the default).
+  mfa_enabled: number | null;
 }
 
 export async function getUserByEmail(email: string): Promise<UserRow | null> {
   return one<UserRow>(
-    "SELECT id, email, password_hash, role, created_at, status FROM users WHERE email = ?",
+    "SELECT id, email, password_hash, role, created_at, status, mfa_enabled FROM users WHERE email = ?",
     [email.toLowerCase()],
   );
 }
 
 export async function getUserById(id: string): Promise<UserRow | null> {
   return one<UserRow>(
-    "SELECT id, email, password_hash, role, created_at, status FROM users WHERE id = ?",
+    "SELECT id, email, password_hash, role, created_at, status, mfa_enabled FROM users WHERE id = ?",
     [id],
   );
 }

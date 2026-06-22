@@ -12,6 +12,7 @@ import {
   loginAttemptKey,
   recordLoginFailure,
 } from "@/lib/rate-limit";
+import { verifyMfaForLogin } from "@/lib/users";
 import { randomUUID } from "node:crypto";
 import { CATEGORIES } from "@/app/admin/ui";
 import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
@@ -113,6 +114,9 @@ import {
 
 export interface LoginState {
   error?: string;
+  /** Set after a correct password when the account has 2FA on — the form then
+   *  reveals a code field and resubmits. */
+  needsMfa?: boolean;
 }
 
 export async function login(
@@ -153,6 +157,21 @@ export async function login(
     console.warn("[admin login] suspended account blocked");
     return { error: "This account is suspended. Contact an administrator." };
   }
+
+  // Opt-in 2FA: only accounts that enrolled require a second factor, so every
+  // other login is unchanged. The password is already verified at this point.
+  if (user.mfa_enabled) {
+    const code = String(formData.get("code") ?? "").trim();
+    if (!code) {
+      // First step passed — ask for the code (not an error state).
+      return { needsMfa: true };
+    }
+    if (!(await verifyMfaForLogin(user.id, code))) {
+      await recordLoginFailure(rlKey); // throttle code guessing too
+      return { needsMfa: true, error: "That code didn't match. Try again." };
+    }
+  }
+
   await clearLoginAttempts(rlKey);
   await createSession({ userId: user.id, email: user.email, role: user.role });
   redirect("/admin");

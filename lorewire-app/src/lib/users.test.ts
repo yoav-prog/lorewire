@@ -12,8 +12,12 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { all, run } from "@/lib/db";
+import { totpCodeAt } from "./totp";
 import {
+  confirmMfaSetup,
   countActiveAdmins,
+  disableMfa,
+  startMfaSetup,
   countMembers,
   getMemberActivity,
   getUserByEmail,
@@ -27,6 +31,7 @@ import {
   suspendUser,
   unsuspendUser,
   upsertUserOnSignIn,
+  verifyMfaForLogin,
   verifyStaffPassword,
 } from "./users";
 
@@ -701,6 +706,77 @@ describe("setUserRole", () => {
     await seedRole("a2", "admin");
     expect(await setUserRole("a1", "editor")).toBe("ok");
     expect((await getUserById("a1"))?.role).toBe("editor");
+  });
+});
+
+describe("staff 2FA (TOTP)", () => {
+  beforeEach(async () => {
+    await run("DELETE FROM users", []);
+  });
+
+  async function makeStaff(): Promise<string> {
+    const { createPasswordUser } = await import("./users");
+    const u = await createPasswordUser({
+      email: "mfa@example.com",
+      password: "a-good-password",
+      anonymousId: null,
+    });
+    return u.id;
+  }
+
+  it("enrolls: setup stores a secret (off), confirm enables + returns 10 backup codes", async () => {
+    const id = await makeStaff();
+    const info = await startMfaSetup(id);
+    if (!info) throw new Error("setup returned null");
+    expect(info.secret).toMatch(/^[A-Z2-7]+$/);
+    // Still off until a code is confirmed.
+    expect((await getUserById(id))?.mfa_enabled).toBeFalsy();
+
+    const res = await confirmMfaSetup(id, totpCodeAt(info.secret, Date.now()));
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error(res.error);
+    expect(res.backupCodes).toHaveLength(10);
+    expect((await getUserById(id))?.mfa_enabled).toBe(1);
+  });
+
+  it("confirm rejects a wrong code and stays off", async () => {
+    const id = await makeStaff();
+    await startMfaSetup(id);
+    const res = await confirmMfaSetup(id, "000000");
+    expect(res.ok).toBe(false);
+    expect((await getUserById(id))?.mfa_enabled).toBeFalsy();
+  });
+
+  it("verifyMfaForLogin accepts a current TOTP code, rejects a wrong one", async () => {
+    const id = await makeStaff();
+    const info = await startMfaSetup(id);
+    if (!info) throw new Error("setup returned null");
+    await confirmMfaSetup(id, totpCodeAt(info.secret, Date.now()));
+    expect(await verifyMfaForLogin(id, totpCodeAt(info.secret, Date.now()))).toBe(true);
+    expect(await verifyMfaForLogin(id, "000000")).toBe(false);
+  });
+
+  it("backup codes work once each (single-use)", async () => {
+    const id = await makeStaff();
+    const info = await startMfaSetup(id);
+    if (!info) throw new Error("setup returned null");
+    const res = await confirmMfaSetup(id, totpCodeAt(info.secret, Date.now()));
+    if (!res.ok) throw new Error(res.error);
+    const backup = res.backupCodes[0];
+    expect(await verifyMfaForLogin(id, backup)).toBe(true); // first use
+    expect(await verifyMfaForLogin(id, backup)).toBe(false); // consumed
+  });
+
+  it("disableMfa clears the secret and verification then fails", async () => {
+    const id = await makeStaff();
+    const info = await startMfaSetup(id);
+    if (!info) throw new Error("setup returned null");
+    await confirmMfaSetup(id, totpCodeAt(info.secret, Date.now()));
+    await disableMfa(id);
+    const u = await getUserById(id);
+    expect(u?.mfa_enabled).toBeFalsy();
+    expect(u?.totp_secret).toBeNull();
+    expect(await verifyMfaForLogin(id, totpCodeAt(info.secret, Date.now()))).toBe(false);
   });
 });
 

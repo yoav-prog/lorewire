@@ -28,11 +28,12 @@
 // Plan: _plans/2026-06-19-anonymous-first-auth.md §Sign-in flow.
 
 import "server-only";
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { all, one, run } from "@/lib/db";
 import { hashPassword, verifyPassword } from "@/lib/passwords";
 import { isStaffRole } from "@/lib/authz";
+import { generateTotpSecret, otpauthUri, verifyTotp } from "@/lib/totp";
 
 export type UserProvider =
   | "google"
@@ -64,6 +65,11 @@ export interface UserRow {
   status: string | null;
   suspended_at: string | null;
   suspended_reason: string | null;
+  // 2026-06-22 Phase 8 staff 2FA (opt-in). totp_secret = base32; mfa_enabled
+  // 1 = enforced at login; totp_backup_codes = JSON array of hashed codes.
+  totp_secret: string | null;
+  mfa_enabled: number | null;
+  totp_backup_codes: string | null;
 }
 
 export type UserStatus = "active" | "suspended";
@@ -766,4 +772,118 @@ export async function verifyStaffPassword(
   const user = await getUserById(userId);
   if (!user || !user.password_hash) return false;
   return verifyPassword(password, user.password_hash);
+}
+
+/* ----------------------------- staff 2FA (TOTP) ---------------------------- */
+// Opt-in two-factor for staff. Enrollment is two-step: startMfaSetup stores a
+// secret (MFA stays OFF), confirmMfaSetup verifies a code then flips it ON and
+// hands back one-time backup codes. Login enforces it only for mfa_enabled
+// accounts (verifyMfaForLogin). Plan: _plans/2026-06-22-admin-user-management.md.
+
+// Recovery codes are high-entropy, so a plain SHA-256 (not a slow KDF) is the
+// right hash; they're single-use and consumed on login.
+function canonicalCode(s: string): string {
+  return s.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+function hashBackupCode(code: string): string {
+  return createHash("sha256").update(canonicalCode(code)).digest("hex");
+}
+function makeBackupCodes(): { plain: string[]; hashed: string[] } {
+  const plain: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const raw = randomBytes(5).toString("hex"); // 10 hex chars
+    plain.push(`${raw.slice(0, 5)}-${raw.slice(5)}`);
+  }
+  return { plain, hashed: plain.map(hashBackupCode) };
+}
+function parseHashes(json: string | null): string[] {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json) as unknown;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export interface MfaSetupInfo {
+  secret: string;
+  otpauthUri: string;
+}
+
+// Begin enrollment: store a fresh secret. MFA stays OFF until confirmed, so an
+// abandoned setup never locks anyone out.
+export async function startMfaSetup(userId: string): Promise<MfaSetupInfo | null> {
+  const user = await getUserById(userId);
+  if (!user) return null;
+  const secret = generateTotpSecret();
+  await run(
+    "UPDATE users SET totp_secret = ?, mfa_enabled = 0 WHERE id = ?",
+    [secret, userId],
+  );
+  return { secret, otpauthUri: otpauthUri(secret, user.email) };
+}
+
+export type ConfirmMfaResult =
+  | { ok: true; backupCodes: string[] }
+  | { ok: false; error: string };
+
+// Confirm enrollment: verify a code against the pending secret, then enable MFA
+// and return one-time backup codes (shown once).
+export async function confirmMfaSetup(
+  userId: string,
+  code: string,
+): Promise<ConfirmMfaResult> {
+  const user = await getUserById(userId);
+  if (!user || !user.totp_secret) {
+    return { ok: false, error: "Start setup first." };
+  }
+  if (!verifyTotp(user.totp_secret, code)) {
+    return {
+      ok: false,
+      error: "That code didn't match. Check your authenticator and try again.",
+    };
+  }
+  const { plain, hashed } = makeBackupCodes();
+  await run(
+    "UPDATE users SET mfa_enabled = 1, totp_backup_codes = ? WHERE id = ?",
+    [JSON.stringify(hashed), userId],
+  );
+  console.info("[users] mfa enabled", { user_id_hash: hashForLog(userId) });
+  return { ok: true, backupCodes: plain };
+}
+
+// Turn MFA off and wipe the secret + backup codes.
+export async function disableMfa(userId: string): Promise<void> {
+  await run(
+    "UPDATE users SET mfa_enabled = 0, totp_secret = NULL, totp_backup_codes = NULL WHERE id = ?",
+    [userId],
+  );
+  console.info("[users] mfa disabled", { user_id_hash: hashForLog(userId) });
+}
+
+// Login-time check: accept a current TOTP code, or consume a one-time backup
+// code. Returns false unless the account actually has MFA on.
+export async function verifyMfaForLogin(
+  userId: string,
+  code: string,
+): Promise<boolean> {
+  const user = await getUserById(userId);
+  if (!user || !user.mfa_enabled || !user.totp_secret) return false;
+  const clean = (code || "").trim();
+  if (verifyTotp(user.totp_secret, clean)) return true;
+  // Backup-code path: match a stored hash, then consume it.
+  const hashes = parseHashes(user.totp_backup_codes);
+  const idx = hashes.indexOf(hashBackupCode(clean));
+  if (idx === -1) return false;
+  hashes.splice(idx, 1);
+  await run("UPDATE users SET totp_backup_codes = ? WHERE id = ?", [
+    JSON.stringify(hashes),
+    userId,
+  ]);
+  console.info("[users] mfa backup-code used", {
+    user_id_hash: hashForLog(userId),
+    remaining: hashes.length,
+  });
+  return true;
 }

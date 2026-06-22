@@ -187,6 +187,12 @@ export const USERS: Table = {
     { name: "status", type: "TEXT" },
     { name: "suspended_at", type: "TEXT" },
     { name: "suspended_reason", type: "TEXT" },
+    // 2026-06-22 Phase 8 staff 2FA (opt-in, default off). totp_secret is base32,
+    // set at enrollment and only enforced once mfa_enabled=1.
+    // totp_backup_codes is a JSON array of hashed single-use recovery codes.
+    { name: "totp_secret", type: "TEXT" },
+    { name: "mfa_enabled", type: "INTEGER" },
+    { name: "totp_backup_codes", type: "TEXT" },
   ],
 };
 

@@ -45,6 +45,25 @@ export default function LoginPage() {
             className="mb-5 w-full rounded-lg border border-line bg-bg px-3 py-2.5 text-ink outline-none focus:border-accent"
           />
 
+          {state?.needsMfa && (
+            <>
+              <label className="mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted">
+                Authentication code
+              </label>
+              <input
+                name="code"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                autoFocus
+                placeholder="6-digit code or a backup code"
+                className="mb-2 w-full rounded-lg border border-line bg-bg px-3 py-2.5 text-ink outline-none focus:border-accent"
+              />
+              <p className="mb-4 font-mono text-[10px] text-muted">
+                From your authenticator app — or use one of your backup codes.
+              </p>
+            </>
+          )}
+
           {state?.error && (
             <p className="mb-4 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2 text-[13px] text-ink">
               {state.error}
@@ -56,7 +75,11 @@ export default function LoginPage() {
             disabled={pending}
             className="w-full rounded-lg bg-accent py-2.5 font-semibold text-bg transition-opacity hover:opacity-90 disabled:opacity-60"
           >
-            {pending ? "Signing in..." : "Sign in"}
+            {pending
+              ? "Signing in..."
+              : state?.needsMfa
+                ? "Verify"
+                : "Sign in"}
           </button>
         </form>
       </div>
