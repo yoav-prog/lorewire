@@ -62,12 +62,14 @@ counsel, `[operator]` is an account/admin action.
 - [x] Self-serve data export endpoint (`/api/user/export`), Art. 15/20.
 - [x] The **24h IP+UA hash prune** is live (the `/api/polls/refresh` cron calls
       `pruneOldIpUaHashes`). Verified.
-- [ ] `[operator]` Wire the **magic-link token expiry prune** to a cron:
-      `pruneExpiredMagicLinks` exists in `src/lib/magic-link.ts` but is never
-      called, so expired tokens (which carry the user's email) accumulate.
-- [ ] `[operator]` Verify the **recently-viewed 50-row cap** is actually
-      enforced — the schema comments claim a periodic prune, but no server-side
-      prune query was found; the table may grow unbounded per user.
-- [ ] `[operator]` Have the deletion owner add **magic_link_tokens cleanup** to
-      `deleteUserCompletely` (it currently leaves the deleted user's email in
-      token rows until expiry).
+- [x] The **magic-link token expiry prune** is wired to an hourly cron
+      (`/api/prune_magic_links` calling `pruneExpiredMagicLinks`). Shipped.
+- [x] The **recently-viewed 50-row cap** needs no action today: the
+      `user_recently_viewed` table has no server-side write path yet
+      (recently-viewed is localStorage-only), so nothing accumulates. Implement
+      the cap when/if a server-side write lands.
+- [~] `[operator]` Largely covered: the hourly magic-link prune removes a
+      deleted account's leftover tokens within ~1 hour of their 15-minute
+      expiry. Adding an explicit `magic_link_tokens` wipe to
+      `deleteUserCompletely` would make erasure immediate (defense in depth) —
+      a small, optional improvement for the deletion owner.

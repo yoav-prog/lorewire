@@ -157,15 +157,17 @@ Outstanding (carried, not yet done):
   Flag to the deletion owner rather than editing their file.
 - Wire `ExportData` into the account page after the deletion work commits.
 
-### Phase 3 — Retention enforcement (scope corrected 2026-06-22)
+### Phase 3 — Retention enforcement (done 2026-06-22)
 - `poll_votes.ip_ua_hash` 24h prune: **already live** in `/api/polls/refresh`.
   No work needed.
-- Wire `pruneExpiredMagicLinks` to a cron (new tiny route + a `vercel.json`
-  entry). Touches the shared `vercel.json`, so coordinate with the active
-  session.
-- Verify / implement the `user_recently_viewed` 50-row cap (trace the
-  `recordView` write path first; it may belong to active reader work).
-- Optional hardening: reduce `lw_anon` / `lw_vote` TTL from 365d to 90d.
+- `pruneExpiredMagicLinks`: **wired** to an hourly cron `/api/prune_magic_links`
+  (commit 79d713f).
+- `user_recently_viewed` 50-row cap: **no action needed** — the table has no
+  server-side write path yet (recently-viewed is localStorage-only), so nothing
+  accumulates. Implement the cap if a server-side write lands.
+- `lw_anon` / `lw_vote` TTL: **considered and declined.** Both are HttpOnly,
+  first-party, non-tracking random nonces; shortening from 365d would weaken
+  poll vote integrity and anonymous device continuity for no real privacy gain.
 
 ### Phase 4 — Hardening
 Proxy/store OAuth avatars instead of hot-linking; finish Meta data-deletion
