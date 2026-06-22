@@ -143,18 +143,21 @@ export default async function SignInPage({ searchParams }: PageProps) {
             {/* Bottom benefits row. Pure typography, no extra chrome,
                 so it reads like a footnote rather than a feature list.
                 Helps hesitant users see "what do I get?" without
-                expanding the form's surface area. */}
+                expanding the form's surface area. justify-center on each
+                cell so the dot+label cluster sits centered in its column
+                — matches the page's centered alignment instead of
+                hugging the left edge of each grid track. */}
             <ul className="mt-5 grid grid-cols-2 gap-y-2 px-1 text-[11px] text-muted">
-              <li className="flex items-center gap-1.5">
+              <li className="flex items-center justify-center gap-1.5">
                 <BenefitDot /> Synced saves
               </li>
-              <li className="flex items-center gap-1.5">
+              <li className="flex items-center justify-center gap-1.5">
                 <BenefitDot /> No passwords
               </li>
-              <li className="flex items-center gap-1.5">
+              <li className="flex items-center justify-center gap-1.5">
                 <BenefitDot /> No inbox spam
               </li>
-              <li className="flex items-center gap-1.5">
+              <li className="flex items-center justify-center gap-1.5">
                 <BenefitDot /> Always free
               </li>
             </ul>
