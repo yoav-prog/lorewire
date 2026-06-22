@@ -17,17 +17,34 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from pipeline import config, google_auth, models, store
 
+# Chirp 3 HD pause tags ([pause], [pause short], [pause long]). They are only
+# honored in the Chirp markup field; every other engine (ElevenLabs, Gemini-TTS)
+# would read them aloud, so those paths strip them first.
+_PAUSE_MARKUP_RE = re.compile(r"\s*\[pause(?:\s+\w+)?\]\s*", re.IGNORECASE)
+
+
+def _strip_pause_markup(text: str) -> str:
+    """Remove Chirp pause tags, collapsing each to a single space, for engines
+    that don't support markup."""
+    return _PAUSE_MARKUP_RE.sub(" ", text).strip()
+
 ELEVEN_BASE = "https://api.elevenlabs.io/v1"
 ELEVEN_DEFAULT_MODEL = "eleven_turbo_v2_5"
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 GOOGLE_STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
-GOOGLE_DEFAULT_VOICE = "en-US-Chirp3-HD-Aoede"
+# Autonoe is the codified shorts narrator (warm, even-paced female Chirp 3 HD).
+# It is the default for every Chirp 3 HD render now that long-form is retired and
+# shorts are the only consumer; the shorts path also pins it explicitly so an
+# admin DB override can't silently change the house voice (see
+# shorts_narration.SHORTS_VOICE_NAME).
+GOOGLE_DEFAULT_VOICE = "en-US-Chirp3-HD-Autonoe"
 GOOGLE_DEFAULT_LANGUAGE = "en-US"
 
 # Gemini-TTS goes through the SAME text:synthesize endpoint with voice.model_name set
@@ -60,6 +77,9 @@ def synthesize(
     dest_audio: Path,
     override_provider: str | None = None,
     override_voice_id: str | None = None,
+    *,
+    speaking_rate: float | None = None,
+    use_markup: bool = False,
 ) -> dict:
     """Render narration to `dest_audio` and return word-level timings.
 
@@ -77,6 +97,13 @@ def synthesize(
     Both override args independently default to None so existing callers
     (fresh-pipeline path) keep the global-setting behaviour byte-for-byte.
     The Phase 4 regen action threads per-story values through here.
+
+    `speaking_rate` and `use_markup` are the shorts voice codification knobs
+    (Chirp 3 HD only). `speaking_rate` maps to audioConfig.speakingRate (pace,
+    0.25-2.0); `use_markup` routes the text through input.markup so pause tags
+    like `[pause long]` take effect. Both are ignored on the ElevenLabs path
+    (it has no equivalent here) and default to off, so other callers are
+    unaffected.
     """
     selected = override_provider or models.get_selected("voice")
     provider, _, _tier = selected.partition("/")
@@ -89,10 +116,14 @@ def synthesize(
         return _google_synthesize(
             text, dest_audio, selected,
             voice_id_override=override_voice_id,
+            speaking_rate=speaking_rate,
+            use_markup=use_markup,
         )
     if provider == "elevenlabs":
+        # ElevenLabs has no pause-markup field; drop any tags so they aren't
+        # read aloud (the rate/markup knobs are Chirp-only and no-op here).
         return _elevenlabs_synthesize(
-            text, dest_audio, voice_id_override=override_voice_id,
+            _strip_pause_markup(text), dest_audio, voice_id_override=override_voice_id,
         )
     raise NotImplementedError(
         f"voice provider {provider!r} (model {selected!r}) is in the registry but not wired."
@@ -188,12 +219,12 @@ def _elevenlabs_synthesize(
 # Google groups voices by name prefix. The selected model id picks the tier;
 # the specific voice name (e.g. en-US-Chirp3-HD-Aoede) lives in settings.
 _GOOGLE_TIER_FALLBACK_VOICE = {
-    "chirp3-hd": "en-US-Chirp3-HD-Aoede",
+    "chirp3-hd": "en-US-Chirp3-HD-Autonoe",
     "neural2": "en-US-Neural2-F",
     "standard": "en-US-Standard-F",
     # Gemini-TTS expects bare voice names (see _gemini_voice_name).
-    "gemini-25-flash-tts": "en-US-Chirp3-HD-Aoede",
-    "gemini-31-flash-tts": "en-US-Chirp3-HD-Aoede",
+    "gemini-25-flash-tts": "en-US-Chirp3-HD-Autonoe",
+    "gemini-31-flash-tts": "en-US-Chirp3-HD-Autonoe",
 }
 
 
@@ -235,7 +266,6 @@ def _gemini_voice_name(voice_name: str) -> str:
     through to the raw value when the pattern doesn't match so an admin who
     sets a bare name directly still works.
     """
-    import re
     match = re.search(r"Chirp3-HD-(.+)$", voice_name, re.IGNORECASE)
     return match.group(1) if match else voice_name
 
@@ -270,24 +300,30 @@ def _google_synthesize(
     dest_audio: Path,
     selected: str,
     voice_id_override: str | None = None,
+    *,
+    speaking_rate: float | None = None,
+    use_markup: bool = False,
 ) -> dict:
     voice_name_setting = _google_voice_name(selected, voice_id_override)
     language_code = _google_language_code(voice_name_setting)
     tier = _google_tier(selected)
 
     if _is_gemini_tier(tier):
-        payload = _build_gemini_payload(text, voice_name_setting, language_code, tier)
+        # Gemini-TTS has its own pace/style controls (input.prompt) and does not
+        # take speakingRate / markup the way Chirp 3 HD does, so the shorts knobs
+        # are a no-op here. Shorts pin the chirp3-hd tier (see shorts_narration)
+        # so this branch is reached only by a deliberate admin model switch.
+        # Drop pause tags so input.text doesn't get them read aloud.
+        payload = _build_gemini_payload(
+            _strip_pause_markup(text), voice_name_setting, language_code, tier,
+        )
         billed_chars = payload["_billed_chars"]
         payload.pop("_billed_chars")
     else:
-        # Google's synchronous text:synthesize endpoint accepts up to 5000 bytes for
-        # non-Gemini voices. Our articles top out around 2500 chars (~2.5 KB ASCII),
-        # so we render in one call and let the LLM rewrite keep us under the ceiling.
-        payload = {
-            "input": {"text": text},
-            "voice": {"languageCode": language_code, "name": voice_name_setting},
-            "audioConfig": {"audioEncoding": "MP3"},
-        }
+        payload = _build_chirp_payload(
+            text, voice_name_setting, language_code,
+            speaking_rate=speaking_rate, use_markup=use_markup,
+        )
         billed_chars = len(text)
 
     data = _google_post(GOOGLE_TTS_URL, payload)
@@ -304,6 +340,40 @@ def _google_synthesize(
     words = _google_align(audio_bytes, language_code)
 
     return {"audio": str(dest_audio), "words": words, "provider": "google"}
+
+
+def _build_chirp_payload(
+    text: str,
+    voice_name: str,
+    language_code: str,
+    *,
+    speaking_rate: float | None = None,
+    use_markup: bool = False,
+) -> dict:
+    """Synth payload for the non-Gemini Google tiers (Chirp 3 HD, Neural2,
+    Standard). Pure so the shorts codification is unit-testable without a TTS
+    call (mirrors _build_gemini_payload).
+
+    Two optional controls the shorts voice layer leans on:
+      - `speaking_rate` -> audioConfig.speakingRate (Chirp 3 HD pace, 0.25-2.0).
+        Omitted entirely when None or 1.0 so other callers keep the exact
+        legacy payload (no field added, no behaviour change).
+      - `use_markup` routes the text through input.markup instead of input.text.
+        Per Google's Chirp 3 HD docs, pause tags ([pause long] etc.) ONLY take
+        effect in the markup field; in the text field they are read aloud.
+
+    Google's synchronous text:synthesize endpoint accepts up to 5000 bytes for
+    these voices; a short script is well under that, so one call renders it.
+    """
+    audio_config: dict = {"audioEncoding": "MP3"}
+    if speaking_rate is not None and speaking_rate != 1.0:
+        audio_config["speakingRate"] = speaking_rate
+    input_field = {"markup": text} if use_markup else {"text": text}
+    return {
+        "input": input_field,
+        "voice": {"languageCode": language_code, "name": voice_name},
+        "audioConfig": audio_config,
+    }
 
 
 def _build_gemini_payload(

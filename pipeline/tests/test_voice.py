@@ -359,5 +359,60 @@ class VoiceOverrideResolutionTests(unittest.TestCase):
         self.assertIsNone(kwargs.get("voice_id_override"))
 
 
+class BuildChirpPayloadTests(unittest.TestCase):
+    """The shorts voice codification rides on this pure payload builder, so
+    pin its two new controls (speakingRate + markup) and the legacy default."""
+
+    def test_legacy_default_is_unchanged(self):
+        # No rate, no markup -> exactly the pre-codification payload, so other
+        # callers (and a rate of None) are byte-for-byte the same.
+        payload = voice._build_chirp_payload(
+            "Hello there.", "en-US-Chirp3-HD-Autonoe", "en-US",
+        )
+        self.assertEqual(payload["input"], {"text": "Hello there."})
+        self.assertEqual(payload["audioConfig"], {"audioEncoding": "MP3"})
+        self.assertNotIn("speakingRate", payload["audioConfig"])
+        self.assertEqual(payload["voice"]["name"], "en-US-Chirp3-HD-Autonoe")
+
+    def test_speaking_rate_added_when_set(self):
+        payload = voice._build_chirp_payload(
+            "Hi.", "en-US-Chirp3-HD-Autonoe", "en-US", speaking_rate=1.2,
+        )
+        self.assertEqual(payload["audioConfig"]["speakingRate"], 1.2)
+
+    def test_speaking_rate_of_one_is_omitted(self):
+        # 1.0 is a no-op pace; don't add the field (keeps the legacy payload).
+        payload = voice._build_chirp_payload(
+            "Hi.", "en-US-Chirp3-HD-Autonoe", "en-US", speaking_rate=1.0,
+        )
+        self.assertNotIn("speakingRate", payload["audioConfig"])
+
+    def test_markup_routes_text_to_markup_field(self):
+        # Pause tags only fire in input.markup; the text must NOT land in
+        # input.text or the engine reads "[pause long]" aloud.
+        payload = voice._build_chirp_payload(
+            "Hi. [pause long] There.", "en-US-Chirp3-HD-Autonoe", "en-US",
+            use_markup=True,
+        )
+        self.assertEqual(payload["input"], {"markup": "Hi. [pause long] There."})
+        self.assertNotIn("text", payload["input"])
+
+
+class StripPauseMarkupTests(unittest.TestCase):
+    """Engines without a markup field must never read a pause tag aloud."""
+
+    def test_strips_all_tag_variants(self):
+        for tag in ("[pause]", "[pause short]", "[pause long]", "[PAUSE LONG]"):
+            out = voice._strip_pause_markup(f"Hi {tag} there")
+            self.assertNotIn("pause", out.lower())
+            self.assertEqual(out, "Hi there")
+
+    def test_leaves_clean_text_untouched(self):
+        self.assertEqual(
+            voice._strip_pause_markup("Nothing to strip here."),
+            "Nothing to strip here.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

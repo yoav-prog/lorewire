@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from pipeline import gcs, narration, store, video, voice
+from pipeline import gcs, narration, shorts_narration, store, video, voice
 
 # Shared with shorts_render.SHORT_ID_SUFFIX so the staged files end up in the
 # same GCS prefix that the original short uses. Keeps Cloud Run's render
@@ -132,11 +132,18 @@ def build_short_props_lane_b(
     # `narration.render_narration` applies the normalize -> TTS ->
     # script-graft pipeline so Lane B's voice swap inherits the same
     # caption-accuracy fix as the baseline render.
+    # Same codified delivery as the full-generation path (1.2x pace + hook
+    # pause) so a voice re-render matches the original short's feel. The voice
+    # itself stays the editor's pick (provider/voice_id from lane_inputs);
+    # unset falls back to the global Autonoe default. No structured hook here,
+    # so the pause anchors on the first sentence (render_narration fallback).
     vres = narration.render_narration(
         script,
         audio_path,
         override_provider=provider,
         override_voice_id=voice_id,
+        speaking_rate=shorts_narration.SHORTS_SPEAKING_RATE,
+        hook_pause=shorts_narration.SHORTS_HOOK_PAUSE,
     )
     caption_chunks = video._chunk_alignment(vres.get("words") or [])
     if not caption_chunks:

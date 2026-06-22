@@ -199,8 +199,10 @@ async function listElevenLabs(): Promise<VoiceEntry[]> {
 
 // Curated set of Google Chirp 3 HD voices known to narrate well at
 // article-length text. The full Chirp 3 HD catalog is ~30 voices but
-// most are tuned for short-form (digital assistant) prompts — these 8
-// hold up across 2-3 minute narrations.
+// most are tuned for short-form (digital assistant) prompts — these nine
+// hold up across 2-3 minute narrations. Autonoe is first because it is
+// the codified house shorts narrator (pipeline/shorts_narration.py
+// SHORTS_VOICE_NAME).
 //
 // VERIFY-BEFORE-PHASE-3: each entry's voice_id MUST match a real Google
 // Chirp 3 HD voice name. Run a single TTS call against each id at deploy
@@ -211,6 +213,7 @@ const GOOGLE_CHIRP3_HD_VOICES: ReadonlyArray<{
   name: string;
   accent: string;
 }> = [
+  { voice_id: "en-US-Chirp3-HD-Autonoe", name: "Autonoe", accent: "Warm, even-paced (house voice)" },
   { voice_id: "en-US-Chirp3-HD-Aoede", name: "Aoede", accent: "Warm narrator" },
   { voice_id: "en-US-Chirp3-HD-Charon", name: "Charon", accent: "Deep, authoritative" },
   { voice_id: "en-US-Chirp3-HD-Fenrir", name: "Fenrir", accent: "Dramatic, low" },

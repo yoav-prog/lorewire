@@ -72,5 +72,71 @@ class RenderNarrationContractTests(unittest.TestCase):
         self.assertEqual(kwargs.get("override_voice_id"), "abc-123")
 
 
+class HookPauseInjectionTests(unittest.TestCase):
+    def test_pause_inserted_after_hook_prefix(self):
+        spoken = "She opened the box. Six days earlier, it began."
+        out = narration._inject_hook_pause(spoken, "She opened the box.")
+        self.assertEqual(
+            out, "She opened the box. [pause long] Six days earlier, it began."
+        )
+
+    def test_falls_back_to_first_sentence_when_hook_blank(self):
+        # Lane B has no structured hook; the pause anchors on the first
+        # sentence break instead.
+        spoken = "She opened the box. Six days earlier, it began."
+        out = narration._inject_hook_pause(spoken, "")
+        self.assertEqual(
+            out, "She opened the box. [pause long] Six days earlier, it began."
+        )
+
+    def test_unchanged_when_no_boundary(self):
+        # No hook match and no sentence terminator -> return as-is so a render
+        # is never blocked on a missing beat.
+        spoken = "no punctuation here just words"
+        self.assertEqual(narration._inject_hook_pause(spoken, "nope"), spoken)
+
+
+class RenderNarrationCodificationTests(unittest.TestCase):
+    def test_hook_pause_sends_markup_but_grafts_clean_script(self):
+        stt_words = [
+            {"word": "she", "start": 0.0, "end": 0.3},
+            {"word": "ran", "start": 1.3, "end": 1.6},  # gap = the pause
+        ]
+        with mock.patch(
+            "pipeline.voice.synthesize",
+            return_value={"audio": "a", "words": stt_words, "provider": "google"},
+        ) as mock_synth:
+            result = narration.render_narration(
+                "She ran.",
+                Path("/tmp/voice.mp3"),
+                speaking_rate=1.2,
+                hook_pause=True,
+                hook_text="She ran.",
+            )
+
+        kwargs = mock_synth.call_args.kwargs
+        # Rate threads through; markup turns on because a tag was injected.
+        self.assertEqual(kwargs.get("speaking_rate"), 1.2)
+        self.assertTrue(kwargs.get("use_markup"))
+        # The TTS text carries the pause tag...
+        tts_text = mock_synth.call_args.args[0]
+        self.assertIn("[pause long]", tts_text)
+        # ...but the grafted captions never show it (clean script tokens only).
+        caption_words = [w["word"] for w in result["words"]]
+        self.assertNotIn("[pause", " ".join(caption_words))
+        self.assertEqual(result["spoken_script"], "She ran.")
+
+    def test_no_hook_pause_keeps_text_field(self):
+        with mock.patch(
+            "pipeline.voice.synthesize",
+            return_value={"audio": "a", "words": [], "provider": "google"},
+        ) as mock_synth:
+            narration.render_narration("She ran.", Path("/tmp/voice.mp3"))
+        kwargs = mock_synth.call_args.kwargs
+        self.assertFalse(kwargs.get("use_markup"))
+        self.assertIsNone(kwargs.get("speaking_rate"))
+        self.assertNotIn("[pause", mock_synth.call_args.args[0])
+
+
 if __name__ == "__main__":
     unittest.main()

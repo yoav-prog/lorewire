@@ -55,6 +55,19 @@ def tone_to_voice_mood(tone_knob: str | None) -> str:
     )
 
 
+# --- Voice codification (locked in code, not DB settings) --------------------
+# The house shorts voice + delivery, pinned here so an admin's global
+# `voice.google_voice_name` setting can't silently change the sound of every
+# short. The full-generation path (shorts_render) passes these straight to
+# narration.render_narration; the editor's Lane B re-render still lets an admin
+# override the voice per-short. Chirp 3 HD only — the rate + pause map onto its
+# native speakingRate + markup controls (see pipeline/voice._build_chirp_payload).
+SHORTS_VOICE_PROVIDER = "google/chirp3-hd"
+SHORTS_VOICE_NAME = "en-US-Chirp3-HD-Autonoe"  # warm, even-paced female narrator
+SHORTS_SPEAKING_RATE = 1.2   # 20% faster than natural — punchier, retention-first
+SHORTS_HOOK_PAUSE = True     # a [pause long] beat after the cold-open hook lands
+
+
 @dataclass(frozen=True)
 class NarrationStyle:
     """One row in the picker. Kept as a dataclass (not a bare dict) so the
