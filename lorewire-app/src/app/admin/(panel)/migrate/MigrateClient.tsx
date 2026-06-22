@@ -63,6 +63,13 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+// File extension (lowercased) of an object key, for the composition breakdown.
+function extOf(key: string): string {
+  const base = key.split("/").pop() ?? key;
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(dot).toLowerCase() : "(none)";
+}
+
 export function MigrateClient() {
   const [running, setRunning] = useState(false);
   const [mode, setMode] = useState<"idle" | "dry" | "real">("idle");
@@ -73,6 +80,9 @@ export function MigrateClient() {
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [stopped, setStopped] = useState(false);
+  const [breakdown, setBreakdown] = useState<
+    Record<string, { count: number; bytes: number }>
+  >({});
 
   const stopRef = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -100,9 +110,11 @@ export function MigrateClient() {
     const acc: Totals = { ...ZERO };
     const fails: ItemResult[] = [];
     const bigs: ItemResult[] = [];
+    const bd: Record<string, { count: number; bytes: number }> = {};
     setTotals(acc);
     setFailures(fails);
     setTooLarge(bigs);
+    setBreakdown(bd);
 
     let cursor: string | null = null;
     try {
@@ -137,6 +149,11 @@ export function MigrateClient() {
         for (const it of data.items) {
           acc.seen += 1;
           acc.bytes += it.size;
+          const ext = extOf(it.key);
+          bd[ext] = {
+            count: (bd[ext]?.count ?? 0) + 1,
+            bytes: (bd[ext]?.bytes ?? 0) + it.size,
+          };
           if (it.status === "copied") {
             acc.copied += 1;
             acc.copyBytes += it.size;
@@ -156,6 +173,7 @@ export function MigrateClient() {
         setTotals({ ...acc });
         setFailures([...fails]);
         setTooLarge([...bigs]);
+        setBreakdown({ ...bd });
         cursor = data.nextCursor;
         if (data.done) {
           setDone(true);
@@ -259,6 +277,24 @@ export function MigrateClient() {
                   : "Stopped."}
           </p>
         </div>
+      )}
+
+      {Object.keys(breakdown).length > 0 && (
+        <details className="rounded-lg border border-line bg-surface p-3" open>
+          <summary className="cursor-pointer text-sm text-ink">
+            Breakdown by file type ({Object.keys(breakdown).length} types) — the
+            full bucket, including orphans
+          </summary>
+          <ul className="mt-2 grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono text-[12px] text-muted sm:grid-cols-3">
+            {Object.entries(breakdown)
+              .sort((a, b) => b[1].count - a[1].count)
+              .map(([ext, v]) => (
+                <li key={ext}>
+                  {ext}: {v.count} ({fmtBytes(v.bytes)})
+                </li>
+              ))}
+          </ul>
+        </details>
       )}
 
       {error && (
