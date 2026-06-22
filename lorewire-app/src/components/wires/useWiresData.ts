@@ -1,13 +1,13 @@
-// Shared data layer for both reels surfaces (mobile ReelsFeed + desktop
-// ReelsDesktop): fetch the first page of published shorts, then append pages
+// Shared data layer for both wires surfaces (mobile WiresFeed + desktop
+// WiresDesktop): fetch the first page of published shorts, then append pages
 // from the cursor on demand. Keeping this in one hook means the two surfaces
 // page identically and there's a single place that talks to listPublishedShorts.
 
 import { useCallback, useEffect, useState } from "react";
-import { listPublishedShorts, type LiveCatalogStory } from "@/app/actions";
+import { listPublishedShorts, type WireStory } from "@/app/actions";
 
-export interface ReelsData {
-  shorts: LiveCatalogStory[];
+export interface WiresData {
+  shorts: WireStory[];
   loading: boolean;
   loadingMore: boolean;
   reachedEnd: boolean;
@@ -17,8 +17,8 @@ export interface ReelsData {
   loadMore: () => void;
 }
 
-export function useReelsData(pageSize: number): ReelsData {
-  const [shorts, setShorts] = useState<LiveCatalogStory[]>([]);
+export function useWiresData(pageSize: number): WiresData {
+  const [shorts, setShorts] = useState<WireStory[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -36,7 +36,7 @@ export function useReelsData(pageSize: number): ReelsData {
       })
       .catch((e) => {
         if (cancelled) return;
-        console.warn("[reels feed load err]", String(e));
+        console.warn("[wires feed load err]", String(e));
         setReachedEnd(true);
       })
       .finally(() => {
@@ -61,7 +61,7 @@ export function useReelsData(pageSize: number): ReelsData {
         if (r.nextCursor === null) setReachedEnd(true);
       })
       .catch((e) => {
-        console.warn("[reels feed loadMore err]", String(e));
+        console.warn("[wires feed loadMore err]", String(e));
         setReachedEnd(true);
       })
       .finally(() => setLoadingMore(false));

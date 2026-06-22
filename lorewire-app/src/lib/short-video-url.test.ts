@@ -2,7 +2,7 @@
 // (listPublishedShorts) and the live-media reader (getLiveStoryMedia). The
 // suffix is the only signal distinguishing a short render from the long-form
 // path, so a regression here silently lets long-form videos leak into the
-// Reels feed (or hides real shorts) — pin it hard.
+// Wires feed (or hides real shorts) — pin it hard.
 
 import { describe, expect, it } from "vitest";
 

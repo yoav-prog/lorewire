@@ -3,7 +3,7 @@
 // Our own share UI — replaces the OS share panel (the Web Share API hands off
 // to the Windows share flyout on desktop, which is off-brand). A centered,
 // dark-themed sheet with the canonical link, a one-tap copy, and explicit
-// per-platform deep links. Used by both detail modals and the Reels card.
+// per-platform deep links. Used by both detail modals and the Wires card.
 //
 // Only ever fed the PUBLIC /v/[slug] URL (built by storyShareUrl) — never an
 // internal id or a signed media URL.
@@ -106,7 +106,7 @@ export default function ShareSheet({ url, title, onClose }: ShareSheetProps) {
   };
 
   // Portal to <body> so the overlay is always viewport-correct, even when the
-  // trigger lives inside a transformed ancestor (the scroll-snap Reels feed),
+  // trigger lives inside a transformed ancestor (the scroll-snap Wires feed),
   // where position:fixed would otherwise anchor to the transformed parent.
   if (typeof document === "undefined") return null;
 

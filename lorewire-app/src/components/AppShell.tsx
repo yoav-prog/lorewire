@@ -29,7 +29,7 @@ import {
   TopArticleCTA,
 } from "@/components/JumpToPoll";
 import DesktopShell from "@/components/DesktopShell";
-import ReelsFeed from "@/components/reels/ReelsFeed";
+import WiresFeed from "@/components/wires/WiresFeed";
 import CookieConsent from "@/components/CookieConsent";
 import CrossDeviceNudge from "@/components/CrossDeviceNudge";
 import SignInChip from "@/components/SignInChip";
@@ -105,7 +105,7 @@ const ShareI: IconCmp = (p) => <Ico {...p} d={<><circle cx="6" cy="12" r="2.3" /
 const ChevDown: IconCmp = (p) => <Ico {...p} d={<path d="m6 9 6 6 6-6" />} />;
 const ShuffleI: IconCmp = (p) => <Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5" /><path d="m18 5 2 2-2 2M18 15l2 2-2 2" /></>} />;
 const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /><path d="M12 11v5M12 8h.01" /></>} />;
-const ReelsI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
+const WiresI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
 
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; rounded?: boolean; showTitle?: boolean }) {
@@ -1510,7 +1510,7 @@ function MyList({
   session: HomepageInitial["session"];
 }) {
   // Resolve through the live+sample catalog, NOT byId — saved ids can be real
-  // shorts the Reels feed saved that aren't in the baked sample catalog, and
+  // shorts the Wires feed saved that aren't in the baked sample catalog, and
   // byId throws on an unknown id. Unresolved ids are skipped cleanly.
   const items = list
     .map(resolveStory)
@@ -1543,7 +1543,7 @@ function MyList({
 
 /* ----------------------------- TAB BAR ----------------------------- */
 function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
-  const items: [string, IconCmp][] = [["Home", HomeI], ["Reels", ReelsI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
+  const items: [string, IconCmp][] = [["Home", HomeI], ["Wires", WiresI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
   return (
     <div className="absolute bottom-0 left-0 right-0 z-50" style={{ background: "linear-gradient(0deg,#0A0A0C 70%, rgba(10,10,12,0))" }}>
       <div className="flex justify-around items-center pt-2.5 pb-7 px-2">
@@ -1566,14 +1566,14 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
-  const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
+  const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const screenRef = useRef<HTMLDivElement>(null);
 
-  // My List is the persisted saved-stories store, shared with the Reels feed's
+  // My List is the persisted saved-stories store, shared with the Wires feed's
   // Save button and the Title sheet so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
   // 2026-06-19 Phase 2: Recently viewed is recorded whenever the user
-  // opens a story (the detail sheet or a deep-link into Reels). LRU
+  // opens a story (the detail sheet or a deep-link into Wires). LRU
   // ordering means the most-recent open bubbles to the front; the
   // engagement-store caps the list at 50.
   const { recordView } = useRecentlyViewed();
@@ -1581,7 +1581,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   // Hoisted curation + live-catalog hook. Home receives the values as
   // props instead of calling the hook itself so MyList and the modal
   // mount site below share one `resolveStory` (real shorts saved through
-  // the Reels feed aren't in the baked STORIES catalog). One hook call
+  // the Wires feed aren't in the baked STORIES catalog). One hook call
   // drives every component on the shell that maps an id to a card. The
   // seed comes from src/app/page.tsx's SSR fetch so the first paint
   // already shows the live curation — no client-fetch flash.
@@ -1596,16 +1596,16 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     recordView(id);
   };
   const close = () => setActive(null);
-  // "Play Something" jumps straight into the Reels feed (Phase 7 deep-link). An
+  // "Play Something" jumps straight into the Wires feed (Phase 7 deep-link). An
   // id scrolls to that short if it's in the loaded pages; otherwise the feed
   // opens at the top.
-  const openReels = (id?: string) => {
+  const openWires = (id?: string) => {
     if (id) recordView(id);
-    setReelsStoryId(id ?? null);
+    setWiresStoryId(id ?? null);
     close();
-    setTab("Reels");
+    setTab("Wires");
   };
-  const shuffle = () => openReels();
+  const shuffle = () => openWires();
 
   useEffect(() => {
     if (screenRef.current) screenRef.current.scrollTop = 0;
@@ -1632,20 +1632,20 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
         {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
 
-      {/* Reels rides above the (now-empty) screen as a full-cover layer, like
+      {/* Wires rides above the (now-empty) screen as a full-cover layer, like
           the Title sheet does — it owns its own snap scroller and pauses
           whenever a sheet opens over it. */}
-      {tab === "Reels" && (
-        <ReelsFeed
+      {tab === "Wires" && (
+        <WiresFeed
           onOpenInfo={open}
           paused={!!active}
-          initialStoryId={reelsStoryId ?? undefined}
+          initialStoryId={wiresStoryId ?? undefined}
         />
       )}
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Reels feed (not in STORIES) still open the sheet.
+        // through the Wires feed (not in STORIES) still open the sheet.
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);
@@ -1661,9 +1661,9 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
         ) : null;
       })()}
 
-      {/* Switching tabs via the nav clears any Reels deep-link target so a plain
+      {/* Switching tabs via the nav clears any Wires deep-link target so a plain
           tab tap always opens the feed at the top. */}
-      <TabBar tab={tab} setTab={(t) => { close(); setReelsStoryId(null); setTab(t); }} />
+      <TabBar tab={tab} setTab={(t) => { close(); setWiresStoryId(null); setTab(t); }} />
     </div>
   );
 }

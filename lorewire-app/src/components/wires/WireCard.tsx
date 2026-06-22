@@ -1,10 +1,19 @@
 "use client";
 
-// One short in the Reels feed. The card is a vertical stack: the FULL 9:16 video
+// One wire in the Wires feed. The card is a vertical stack: the FULL 9:16 video
 // on top (object-contain, so nothing is cropped and the burned-in captions are
 // always visible) and a solid control bar BELOW it holding the title, the Read
 // CTA, and the like/save/share actions — deliberately off the video so no chrome
 // ever covers the frame or the captions.
+//
+// Player interaction (the "real reels" behaviors):
+//   - tap / click            → play-pause (deferred ~280ms so a double-tap is caught)
+//   - double-tap / dbl-click → like, with a heart-burst over the frame
+//   - press and hold         → pause while held, resume on release
+//   - hover (desktop)        → reveals the scrubber + time, then it slims back down
+//   - scrubber               → drag anywhere on the bar to seek
+//   - autoplay toggle        → a pinned switch; when off, a wire waits for a tap
+//   - buffering spinner       on stall; loop on end (the feed handles next-wire swipes)
 //
 // Off-window cards render a poster placeholder of the same height so the feed's
 // scroll/paging geometry stays correct without a live <video> per item.
@@ -13,21 +22,45 @@
 // muted PROPERTY is set imperatively before play() (React's muted attribute
 // doesn't reliably set the property, and muted-autoplay is blocked without it),
 // and we retry on `canplay` for when play() fired before the video was ready.
-// Under prefers-reduced-motion we never autoplay — a centre play button opts in.
+// Under prefers-reduced-motion (or with the autoplay toggle off) we never
+// autoplay — a centre play button opts in.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CAT, type Cat } from "@/lib/stories";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
-import type { LiveCatalogStory } from "@/app/actions";
+import type { WireStory } from "@/app/actions";
 
 type OpenFn = (id: string, tab?: string) => void;
+
+// Show the like number only once a wire crosses this many likes — below it,
+// just the heart. Keeps a zero-traffic catalog from showing "0 likes" on every
+// card; drop to 0 to show real counts always once engagement justifies it.
+const LIKE_COUNT_THRESHOLD = 3;
+
+// Max gap between two taps to count as a double-tap (like), and how long the
+// pointer must stay down to count as a press-and-hold (pause).
+const DOUBLE_TAP_MS = 280;
+const HOLD_MS = 350;
 
 // Live `category` is a free string from the DB; map it to the brand category
 // colour when it matches one of the six, else a neutral surface tone.
 function catColor(category: string | null): string {
   if (category && category in CAT) return CAT[category as Cat];
   return "var(--color-surface2)";
+}
+
+function formatTime(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(n);
 }
 
 const SpeakerOn = ({ size = 22 }: { size?: number }) => (
@@ -40,6 +73,17 @@ const SpeakerOff = ({ size = 22 }: { size?: number }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
     <path d="M4 9v6h4l5 4V5L8 9H4Z" />
     <path d="m16 9 5 6M21 9l-5 6" />
+  </svg>
+);
+// Looping-play glyph for the autoplay toggle; slashed when autoplay is off.
+const AutoplayGlyph = ({ on, size = 20 }: { on: boolean; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4.5 11a7.5 7.5 0 0 1 12.8-5.3L20 8" />
+    <path d="M20 4v4h-4" />
+    <path d="M19.5 13a7.5 7.5 0 0 1-12.8 5.3L4 16" />
+    <path d="M4 20v-4h4" />
+    <path d="M10.5 9.5v5l4-2.5z" fill="currentColor" stroke="none" />
+    {!on && <path d="M4 4 20 20" strokeWidth={2.2} />}
   </svg>
 );
 const PlayGlyph = ({ size = 30 }: { size?: number }) => (
@@ -62,14 +106,16 @@ const ShareUpIcon = ({ size = 22 }: { size?: number }) => (
   </svg>
 );
 
-export interface ReelCardProps {
-  short: LiveCatalogStory;
+export interface WireCardProps {
+  short: WireStory;
   /** This is the currently snapped card. */
   active: boolean;
   /** Within the feed's mount window — hold a live <video>. */
   mounted: boolean;
   /** Feed-level mute state (shared across cards). */
   muted: boolean;
+  /** Feed-level autoplay master toggle. When false, a wire waits for a tap. */
+  autoplay: boolean;
   /** prefers-reduced-motion — suppress autoplay, require an explicit tap. */
   reducedMotion: boolean;
   /** A modal (Title sheet) is open over the feed — keep playback paused. */
@@ -81,53 +127,81 @@ export interface ReelCardProps {
    *  mobile tab bar). Desktop passes a small value. */
   insetBottom?: number;
   onToggleMute: () => void;
+  onToggleAutoplay: () => void;
   onOpenInfo: OpenFn;
   /** Hint visibility is owned by the feed so it shows once, not per card. */
   showSoundHint: boolean;
   onDismissSoundHint: () => void;
-  /** Engagement (local, honest — no fabricated counts). */
+  /** Engagement. `liked`/`likeCount` come from the server-backed like store. */
   liked: boolean;
+  likeCount: number;
   saved: boolean;
   onToggleLike: (id: string) => void;
   onToggleSave: (id: string) => void;
   /** Playback progress callback. Fires as `<video>` time advances. The
    *  feed throttles + thresholds this for the Continue Watching store —
-   *  ReelCard just forwards the raw event so playback paths stay local. */
+   *  WireCard just forwards the raw event so playback paths stay local. */
   onTimeUpdate?: (currentTime: number, duration: number) => void;
 }
 
-export default function ReelCard({
+export default function WireCard({
   short,
   active,
   mounted,
   muted,
+  autoplay,
   reducedMotion,
   paused,
   eager = false,
   insetBottom = 16,
   onToggleMute,
+  onToggleAutoplay,
   onOpenInfo,
   showSoundHint,
   onDismissSoundHint,
   liked,
+  likeCount,
   saved,
   onToggleLike,
   onToggleSave,
   onTimeUpdate,
-}: ReelCardProps) {
+}: WireCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [posterOk, setPosterOk] = useState(true);
-  // Reduced-motion opt-in; explicit tap-pause; whether the browser blocked
-  // autoplay. These drive the centre play affordance.
+  // Reduced-motion / autoplay-off opt-in; explicit tap-pause; whether the
+  // browser blocked autoplay. These drive the centre play affordance.
   const [userStarted, setUserStarted] = useState(false);
   const [userPaused, setUserPaused] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  // Playback surface state for the scrubber + spinner.
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [buffering, setBuffering] = useState(false);
+  const [seeking, setSeeking] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [heartBurst, setHeartBurst] = useState(false);
   // Our own ShareSheet overlay (not the OS share panel).
   const [shareOpen, setShareOpen] = useState(false);
 
-  // Reset the transient playback flags the moment this card stops being active,
-  // so re-entry autoplays fresh. Done during render (the React 19 pattern the
-  // shell uses in TitleSheet) rather than inside an effect.
+  // Gesture bookkeeping (refs so handlers stay stable and read fresh values).
+  const seekingRef = useRef(false);
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const holdTimer = useRef<number | null>(null);
+  const holdFired = useRef(false);
+  const holdPaused = useRef(false);
+  const lastTap = useRef(0);
+  const singleTapTimer = useRef<number | null>(null);
+  const burstTimer = useRef<number | null>(null);
+
+  // Autoplay is suppressed by reduced-motion OR the feed-level toggle; in
+  // either case the user must opt in with a tap (tracked by userStarted).
+  const autoStart = autoplay && !reducedMotion;
+  const shouldPlay =
+    active && mounted && !paused && !userPaused && (autoStart || userStarted);
+
+  // Reset transient flags the moment this card stops being active so re-entry
+  // autoplays fresh. Done during render (the React 19 pattern the shell uses
+  // in TitleSheet) rather than inside an effect.
   const [prevActive, setPrevActive] = useState(active);
   if (prevActive !== active) {
     setPrevActive(active);
@@ -135,13 +209,15 @@ export default function ReelCard({
       setUserStarted(false);
       setUserPaused(false);
       setBlocked(false);
+      setBuffering(false);
+      setSeeking(false);
+      setCurrentTime(0);
     }
   }
 
   const videoUrl = short.video_url;
   const poster = short.hero_image && posterOk ? short.hero_image : null;
-  const shouldPlay =
-    active && mounted && !paused && !userPaused && (!reducedMotion || userStarted);
+  const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
 
   // Start playback reliably: set the muted PROPERTY right before play() and
   // record whether the browser blocked us (so we can surface a tap-to-play).
@@ -153,7 +229,7 @@ export default function ReelCard({
     if (p && typeof p.then === "function") {
       p.then(() => setBlocked(false)).catch((e) => {
         setBlocked(true);
-        console.warn("[reels play blocked]", { id: short.id, e: String(e) });
+        console.warn("[wires play blocked]", { id: short.id, e: String(e) });
       });
     }
   }, [muted, short.id]);
@@ -181,12 +257,21 @@ export default function ReelCard({
     if (videoRef.current) videoRef.current.muted = muted;
   }, [muted]);
 
-  // Tap the video: toggle play/pause. In reduced-motion mode the first tap opts
-  // in to start.
-  const onSurfaceTap = () => {
+  // Clear any pending gesture timers on unmount.
+  useEffect(() => {
+    return () => {
+      if (holdTimer.current) clearTimeout(holdTimer.current);
+      if (singleTapTimer.current) clearTimeout(singleTapTimer.current);
+      if (burstTimer.current) clearTimeout(burstTimer.current);
+    };
+  }, []);
+
+  // Play/pause from a single tap. In opt-in mode (reduced motion or autoplay
+  // off) the first tap starts; afterwards it toggles.
+  const togglePlayPause = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (reducedMotion && !userStarted) {
+    if (!autoStart && !userStarted) {
       setUserStarted(true);
       setUserPaused(false);
       return;
@@ -198,7 +283,155 @@ export default function ReelCard({
       setUserPaused(true);
       v.pause();
     }
-  };
+  }, [autoStart, userStarted, tryPlay]);
+
+  // Keyboard control for the active wire (desktop): space toggles play/pause,
+  // left/right seek 5s. Only the active card listens, and not while a field is
+  // focused or a modal is open over the feed.
+  useEffect(() => {
+    if (!active || paused) return;
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      const v = videoRef.current;
+      if (e.key === " ") {
+        e.preventDefault();
+        togglePlayPause();
+      } else if (e.key === "ArrowLeft" && v) {
+        e.preventDefault();
+        v.currentTime = Math.max(0, v.currentTime - 5);
+        setCurrentTime(v.currentTime);
+      } else if (e.key === "ArrowRight" && v && Number.isFinite(v.duration)) {
+        e.preventDefault();
+        v.currentTime = Math.min(v.duration, v.currentTime + 5);
+        setCurrentTime(v.currentTime);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [active, paused, togglePlayPause]);
+
+  const burstLike = useCallback(() => {
+    if (!liked) onToggleLike(short.id);
+    setHeartBurst(true);
+    if (burstTimer.current) clearTimeout(burstTimer.current);
+    burstTimer.current = window.setTimeout(() => setHeartBurst(false), 700);
+  }, [liked, onToggleLike, short.id]);
+
+  // Tap arbiter: a second tap within DOUBLE_TAP_MS likes (and cancels the
+  // pending single-tap play toggle); a lone tap toggles play after the window.
+  const handleTap = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTap.current < DOUBLE_TAP_MS) {
+      if (singleTapTimer.current) {
+        clearTimeout(singleTapTimer.current);
+        singleTapTimer.current = null;
+      }
+      lastTap.current = 0;
+      burstLike();
+      return;
+    }
+    lastTap.current = now;
+    singleTapTimer.current = window.setTimeout(() => {
+      singleTapTimer.current = null;
+      togglePlayPause();
+    }, DOUBLE_TAP_MS);
+  }, [burstLike, togglePlayPause]);
+
+  // Press-and-hold: pause while held, resume on release. Returns true when the
+  // pointer-up was consumed by a hold (so it isn't also treated as a tap).
+  const endHold = useCallback(
+    (resume: boolean): boolean => {
+      if (holdTimer.current) {
+        clearTimeout(holdTimer.current);
+        holdTimer.current = null;
+      }
+      if (holdFired.current) {
+        if (resume && holdPaused.current && shouldPlay) tryPlay();
+        holdPaused.current = false;
+        holdFired.current = false;
+        return true;
+      }
+      return false;
+    },
+    [shouldPlay, tryPlay],
+  );
+
+  const onStagePointerDown = useCallback(() => {
+    holdFired.current = false;
+    holdTimer.current = window.setTimeout(() => {
+      holdFired.current = true;
+      const v = videoRef.current;
+      if (v && !v.paused) {
+        v.pause();
+        holdPaused.current = true;
+      }
+    }, HOLD_MS);
+  }, []);
+
+  const onStagePointerUp = useCallback(() => {
+    if (!endHold(true)) handleTap();
+  }, [endHold, handleTap]);
+
+  const onStagePointerLeave = useCallback(() => {
+    endHold(true);
+  }, [endHold]);
+
+  // Scrubber: drag anywhere on the bar to seek. Pointer capture keeps the drag
+  // tracking even when the finger/cursor strays off the thin bar.
+  const seekToClientX = useCallback((clientX: number) => {
+    const track = trackRef.current;
+    const v = videoRef.current;
+    if (!track || !v || !Number.isFinite(v.duration) || v.duration <= 0) return;
+    const rect = track.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const t = frac * v.duration;
+    v.currentTime = t;
+    setCurrentTime(t);
+  }, []);
+
+  const onSeekDown = useCallback(
+    (e: React.PointerEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      seekingRef.current = true;
+      setSeeking(true);
+      try {
+        (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unsupported — drag still works while over the bar */
+      }
+      seekToClientX(e.clientX);
+    },
+    [seekToClientX],
+  );
+
+  const onSeekMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (!seekingRef.current) return;
+      seekToClientX(e.clientX);
+    },
+    [seekToClientX],
+  );
+
+  const onSeekUp = useCallback((e: React.PointerEvent) => {
+    if (!seekingRef.current) return;
+    e.stopPropagation();
+    seekingRef.current = false;
+    setSeeking(false);
+    try {
+      (e.currentTarget as Element).releasePointerCapture(e.pointerId);
+    } catch {
+      /* nothing captured — fine */
+    }
+  }, []);
 
   // Share opens our OWN ShareSheet with the PUBLIC canonical reader URL
   // (/v/[slug]) — never an internal id or a signed GCS URL.
@@ -208,12 +441,21 @@ export default function ReelCard({
   );
 
   const showPlayButton =
-    active && !paused && ((reducedMotion && !userStarted) || userPaused || blocked);
+    active &&
+    !paused &&
+    ((!autoStart && !userStarted) || userPaused || blocked);
+  const controlsExpanded = hovered || seeking;
+  const showCount = likeCount >= LIKE_COUNT_THRESHOLD;
 
   return (
     <div className="flex h-full w-full flex-col bg-black">
       {/* ── Video stage — full frame, never cropped or covered ── */}
-      <div className="relative min-h-0 flex-1">
+      <div
+        className="relative min-h-0 flex-1"
+        onMouseEnter={() => setHovered(true)}
+        onMouseMove={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
         {mounted && videoUrl ? (
           <video
             ref={videoRef}
@@ -223,24 +465,31 @@ export default function ReelCard({
             loop
             playsInline
             preload={eager ? "auto" : "metadata"}
-            className="absolute inset-0 h-full w-full object-contain"
-            onClick={onSurfaceTap}
+            className="absolute inset-0 h-full w-full touch-pan-y object-contain"
+            onPointerDown={onStagePointerDown}
+            onPointerUp={onStagePointerUp}
+            onPointerLeave={onStagePointerLeave}
+            onPointerCancel={onStagePointerLeave}
+            onLoadedMetadata={(e) => {
+              const v = e.currentTarget;
+              if (Number.isFinite(v.duration)) setDuration(v.duration);
+            }}
+            onWaiting={() => setBuffering(true)}
+            onPlaying={() => setBuffering(false)}
             onCanPlay={() => {
+              setBuffering(false);
               if (shouldPlay) tryPlay();
             }}
             onPlay={() => setBlocked(false)}
-            onTimeUpdate={
-              onTimeUpdate
-                ? (e) => {
-                    const v = e.currentTarget;
-                    if (Number.isFinite(v.duration) && v.duration > 0) {
-                      onTimeUpdate(v.currentTime, v.duration);
-                    }
-                  }
-                : undefined
-            }
+            onTimeUpdate={(e) => {
+              const v = e.currentTarget;
+              if (Number.isFinite(v.duration) && v.duration > 0) {
+                if (!seekingRef.current) setCurrentTime(v.currentTime);
+                onTimeUpdate?.(v.currentTime, v.duration);
+              }
+            }}
             onError={() =>
-              console.warn("[reels video err]", { id: short.id, src: videoUrl })
+              console.warn("[wires video err]", { id: short.id, src: videoUrl })
             }
           />
         ) : poster ? (
@@ -257,13 +506,13 @@ export default function ReelCard({
           </div>
         )}
 
-        {/* Subtle top scrim so the category + mute read over a bright frame. */}
+        {/* Subtle top scrim so the category + controls read over a bright frame. */}
         <div
           className="pointer-events-none absolute inset-x-0 top-0 h-20"
           style={{ background: "linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,0) 100%)" }}
         />
 
-        {/* Top row: category + duration (left), mute (right). */}
+        {/* Top row: category + duration (left), autoplay + mute (right). */}
         <div
           className="absolute inset-x-0 top-0 flex items-start justify-between px-4"
           style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 14px)" }}
@@ -283,18 +532,33 @@ export default function ReelCard({
               </span>
             )}
           </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleMute();
-              onDismissSoundHint();
-            }}
-            aria-label={muted ? "Unmute" : "Mute"}
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-            style={{ background: "rgba(0,0,0,.4)" }}
-          >
-            {muted ? <SpeakerOff size={20} /> : <SpeakerOn size={20} />}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleAutoplay();
+              }}
+              aria-label={autoplay ? "Turn autoplay off" : "Turn autoplay on"}
+              aria-pressed={autoplay}
+              title={autoplay ? "Autoplay on" : "Autoplay off"}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
+              style={{ background: "rgba(0,0,0,.4)", opacity: autoplay ? 1 : 0.7 }}
+            >
+              <AutoplayGlyph on={autoplay} size={19} />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleMute();
+                onDismissSoundHint();
+              }}
+              aria-label={muted ? "Unmute" : "Mute"}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
+              style={{ background: "rgba(0,0,0,.4)" }}
+            >
+              {muted ? <SpeakerOff size={20} /> : <SpeakerOn size={20} />}
+            </button>
+          </div>
         </div>
 
         {/* "Tap for sound" hint — shows once while muted. */}
@@ -312,10 +576,20 @@ export default function ReelCard({
           </button>
         )}
 
+        {/* Buffering spinner — only while actively trying to play. */}
+        {active && buffering && !showPlayButton && (
+          <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+            <span className="block h-10 w-10 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+          </div>
+        )}
+
         {/* Centre play affordance — only when genuinely paused/blocked/opt-in. */}
         {showPlayButton && (
           <button
-            onClick={onSurfaceTap}
+            onClick={(e) => {
+              e.stopPropagation();
+              togglePlayPause();
+            }}
             aria-label="Play"
             className="absolute left-1/2 top-1/2 grid h-[68px] w-[68px] -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full text-bg active:scale-95 transition"
             style={{ background: "rgba(245,243,239,.92)", boxShadow: "0 10px 30px rgba(0,0,0,.4)" }}
@@ -323,6 +597,67 @@ export default function ReelCard({
             <PlayGlyph />
           </button>
         )}
+
+        {/* Double-tap heart burst. */}
+        {heartBurst && (
+          <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center">
+            <span className="wire-heart-burst">
+              <HeartIcon filled size={132} />
+            </span>
+          </div>
+        )}
+
+        {/* Scrubber + time, pinned to the bottom of the video stage. The hit
+            zone is taller than the visible bar so it's easy to grab. */}
+        <div className="absolute inset-x-0 bottom-0 z-20 px-3 pb-1">
+          {(controlsExpanded || currentTime > 0) && (
+            <div className="mb-1 flex justify-end">
+              <span
+                className="rounded px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-ink/90 transition-opacity"
+                style={{ background: "rgba(0,0,0,.45)", opacity: controlsExpanded ? 1 : 0.65 }}
+              >
+                {formatTime(currentTime)} / {formatTime(duration)}
+              </span>
+            </div>
+          )}
+          <div
+            ref={trackRef}
+            onPointerDown={onSeekDown}
+            onPointerMove={onSeekMove}
+            onPointerUp={onSeekUp}
+            onPointerCancel={onSeekUp}
+            className="flex cursor-pointer touch-none items-center"
+            style={{ height: 18 }}
+            role="slider"
+            aria-label="Seek"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(duration) || 0}
+            aria-valuenow={Math.round(currentTime)}
+          >
+            <div
+              className="relative w-full rounded-full transition-all"
+              style={{
+                height: controlsExpanded ? 5 : 3,
+                background: "rgba(255,255,255,.28)",
+              }}
+            >
+              <div
+                className="absolute inset-y-0 left-0 rounded-full bg-accent"
+                style={{ width: `${progress * 100}%` }}
+              />
+              <div
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 rounded-full bg-accent transition-opacity"
+                style={{
+                  left: `${progress * 100}%`,
+                  width: 12,
+                  height: 12,
+                  opacity: controlsExpanded ? 1 : 0,
+                  boxShadow: "0 1px 4px rgba(0,0,0,.5)",
+                }}
+              />
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* ── Control bar BELOW the video — title, Read CTA, actions ── */}
@@ -346,8 +681,8 @@ export default function ReelCard({
             </button>
           </div>
 
-          {/* Engagement — local + honest: a heart with NO fabricated count, Save
-              that writes the real My List, Share to the public /v/[slug]. */}
+          {/* Engagement — Like is server-counted (shown past a threshold), Save
+              writes the real My List, Share to the public /v/[slug]. */}
           <div className="flex shrink-0 items-end gap-3.5 pb-0.5">
             <button
               onClick={(e) => {
@@ -359,7 +694,9 @@ export default function ReelCard({
               className="flex flex-col items-center gap-0.5 text-ink active:scale-90 transition"
             >
               <HeartIcon filled={liked} />
-              <span className="font-body text-[10px] font-semibold">Like</span>
+              <span className="font-body text-[10px] font-semibold tabular-nums" style={{ color: liked ? "var(--color-accent)" : undefined }}>
+                {showCount ? formatCount(likeCount) : "Like"}
+              </span>
             </button>
             <button
               onClick={(e) => {

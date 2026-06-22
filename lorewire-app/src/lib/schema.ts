@@ -178,6 +178,15 @@ export const USERS: Table = {
     { name: "anonymous_id", type: "TEXT" },
     { name: "last_seen_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
+    // 2026-06-22 admin user-management Phase 3. Account status for moderation.
+    // NULL or 'active' = normal; 'suspended' = sign-in/participation blocked
+    // (reversible). The per-request DB re-read in requireAdmin/currentUser/
+    // readActiveUserSession is what makes a status change take effect on the
+    // next request despite the 7-day JWT. Plan:
+    // _plans/2026-06-22-admin-user-management.md (Phase 3).
+    { name: "status", type: "TEXT" },
+    { name: "suspended_at", type: "TEXT" },
+    { name: "suspended_reason", type: "TEXT" },
   ],
 };
 
@@ -195,7 +204,7 @@ export const USER_SAVES: Table = {
   ],
 };
 
-// Public-user state: Likes. Parallel to USER_SAVES; reels feed Like button.
+// Public-user state: Likes. Parallel to USER_SAVES; wires feed Like button.
 export const USER_LIKES: Table = {
   name: "user_likes",
   columns: [
@@ -704,6 +713,28 @@ export const POLL_AGGREGATES: Table = {
   ],
 };
 
+// 2026-06-22 data-deletion audit log. One row per honored deletion request,
+// keyed by the confirmation_code we hand back (to Meta's data-deletion
+// callback, or generated for a self-serve delete). `source` is 'facebook'
+// (a Meta signed_request fired this) or 'self_serve' (the user clicked Delete
+// my account). `subject_hash` is hashForLog() of the Facebook app-scoped id
+// or the internal user id — NEVER the raw value, so the log carries no
+// reversible PII (rule 13). `deleted` is 1 when a matching account row was
+// found and wiped, 0 when the request resolved to no account (already gone /
+// never existed). The public status page at /data-deletion/[code] reads this
+// to answer "is my deletion done?" deterministically. Plan:
+// _plans/2026-06-22-facebook-login-and-data-deletion.md.
+export const DATA_DELETION_REQUESTS: Table = {
+  name: "data_deletion_requests",
+  columns: [
+    { name: "confirmation_code", type: "TEXT", pk: true },
+    { name: "source", type: "TEXT" },
+    { name: "subject_hash", type: "TEXT" },
+    { name: "deleted", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-16 homepage curation. One row per slot on the public homepage —
 // `surface` names the rail ('hero', 'top10', 'continue', '<category>_row',
 // 'new_row'), `position` is 0-based ordering within the surface, `story_id`
@@ -720,6 +751,55 @@ export const HOMEPAGE_CURATION: Table = {
     { name: "story_id", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
     { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 admin audit log. Append-only record of every sensitive admin
+// action (role change, suspend, delete, invite, impersonate) for the
+// user-management feature — "who did what to whom, and when". PII-free by
+// construction: actor and target are an opaque id plus a one-way hashed label
+// (lib/users.hashForLog), and `metadata` is a PII-free JSON blob the caller
+// controls. A row references nothing by foreign key (there are none) and
+// survives a GDPR deletion of its target with no dangling PII, because the
+// only trace left is the hash. App-owned (not mirrored in pipeline/store.py),
+// so the app owns its indexes in POST_TABLE_DDL too. There is intentionally no
+// update/delete path — append-only is the tamper-resistance at this scale.
+// Plan: _plans/2026-06-22-admin-user-management.md (Phase 1).
+export const ADMIN_AUDIT_LOG: Table = {
+  name: "admin_audit_log",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "actor_id", type: "TEXT" },
+    { name: "actor_label", type: "TEXT" },
+    { name: "action", type: "TEXT" },
+    { name: "target_type", type: "TEXT" },
+    { name: "target_id", type: "TEXT" },
+    { name: "target_label", type: "TEXT" },
+    { name: "metadata", type: "TEXT" },
+    { name: "ip_hash", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 admin user-management Phase 5. Email invites for new staff. The
+// raw one-time token lives ONLY in the emailed link; we store its SHA-256 hash
+// (same reasoning as magic_link_tokens / passwords — a DB leak can't be used to
+// accept an invite). `role` is bound here at invite time and is never taken
+// from the client at accept, so a leaked link can only ever grant the role the
+// inviter chose. Single-use via accepted_at; revocable via revoked_at; expires
+// ~72h. Plan: _plans/2026-06-22-admin-user-management.md (Phase 5).
+export const STAFF_INVITES: Table = {
+  name: "staff_invites",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "email", type: "TEXT" },
+    { name: "role", type: "TEXT" },
+    { name: "token_hash", type: "TEXT" },
+    { name: "invited_by", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+    { name: "accepted_at", type: "TEXT" },
+    { name: "revoked_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
   ],
 };
 
@@ -751,6 +831,9 @@ export const TABLES: Table[] = [
   POLLS,
   POLL_VOTES,
   POLL_AGGREGATES,
+  DATA_DELETION_REQUESTS,
+  ADMIN_AUDIT_LOG,
+  STAFF_INVITES,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -904,6 +987,12 @@ export const POST_TABLE_DDL: string[] = [
     "ON user_likes(user_id, story_id)",
   "CREATE INDEX IF NOT EXISTS idx_user_likes_user_created " +
     "ON user_likes(user_id, created_at DESC)",
+  // 2026-06-22 Wires likes. The public feed counts likes per story
+  // (COUNT(*) WHERE story_id = ?); the (user_id, story_id) index can't
+  // serve a story_id-leading lookup, so without this the count subquery
+  // table-scans user_likes on every feed page.
+  "CREATE INDEX IF NOT EXISTS idx_user_likes_story " +
+    "ON user_likes(story_id)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_fav_categories_user_cat " +
     "ON user_fav_categories(user_id, category)",
   // Recently-viewed: NOT unique on (user_id, story_id) — re-visits are
@@ -937,4 +1026,22 @@ export const POST_TABLE_DDL: string[] = [
     "ON magic_link_tokens(token_hash)",
   "CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expires " +
     "ON magic_link_tokens(expires_at)",
+  // 2026-06-22 admin audit log (app-owned, not in pipeline/store.py). The
+  // default view reads newest-first, so created_at DESC is the hot path; the
+  // per-user detail panel reads by (target_type, target_id); the by-actor and
+  // by-action filters each lead with their column then created_at.
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created " +
+    "ON admin_audit_log(created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_target " +
+    "ON admin_audit_log(target_type, target_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor " +
+    "ON admin_audit_log(actor_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_action " +
+    "ON admin_audit_log(action, created_at DESC)",
+  // 2026-06-22 staff invites. The accept path looks up by token_hash (hot);
+  // the pending-invites list reads newest-first.
+  "CREATE INDEX IF NOT EXISTS idx_staff_invites_token " +
+    "ON staff_invites(token_hash)",
+  "CREATE INDEX IF NOT EXISTS idx_staff_invites_created " +
+    "ON staff_invites(created_at DESC)",
 ];

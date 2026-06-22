@@ -1,5 +1,5 @@
 // Client-side share helpers — one source of truth for "share this public URL"
-// across the Reels feed (ReelCard) and the homepage detail modals (AppShell /
+// across the Wires feed (WireCard) and the homepage detail modals (AppShell /
 // DesktopShell). We deliberately do NOT use the Web Share API: on desktop it
 // hands off to the OS share panel (the Windows share flyout), which is off-brand
 // and inconsistent. Instead we render our own ShareSheet with explicit

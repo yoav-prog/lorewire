@@ -1,11 +1,11 @@
-// Local, honest engagement for the Reels feed + My List. No consumer accounts
+// Local, honest engagement for the Wires feed + My List. No consumer accounts
 // exist, so "liked" and "saved" live in THIS browser only (localStorage) — we
 // never show fabricated social counts. Saved stories ARE the My List: one
 // external store is shared by the feed's Save button, the My List tab, and the
 // Title sheet so every surface stays in sync and survives a refresh.
 //
 // When real accounts land, swap the localStorage read/write inside the store
-// for a server call; the component API (useSavedStories / useLikedReels) does
+// for a server call; the component API (useSavedStories / useLikedWires) does
 // not change. That's the "pre-instrument now" path from the plan.
 //
 // 2026-06-19 cookie consent gate: toggles only persist when consent has
@@ -153,8 +153,8 @@ export function useSavedStories() {
   };
 }
 
-/** Liked reels — a local heart, no fabricated count. */
-export function useLikedReels() {
+/** Liked wires — a local heart, no fabricated count. */
+export function useLikedWires() {
   const liked = useIdSet(likedStore);
   return {
     liked,
@@ -300,7 +300,7 @@ function createRatingStore(storageKey: string): RatingStore {
 const ratingStore = createRatingStore("lw.ratings.v1");
 
 /** Personal star ratings (story id -> 1-5). Local + consent-gated, mirroring
- *  useSavedStories / useLikedReels. `setRating` clamps to 1-5; `clearRating`
+ *  useSavedStories / useLikedWires. `setRating` clamps to 1-5; `clearRating`
  *  removes the rating entirely. */
 export function useStoryRatings() {
   const ratings = useSyncExternalStore(

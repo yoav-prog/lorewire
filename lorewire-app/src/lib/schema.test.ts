@@ -64,6 +64,13 @@ describe("POST_TABLE_DDL load-bearing partial unique indexes", () => {
     expect(joined).toContain("ON user_likes(user_id, story_id)");
   });
 
+  it("includes the user_likes (story_id) count index", () => {
+    expect(joined).toContain(
+      "CREATE INDEX IF NOT EXISTS idx_user_likes_story",
+    );
+    expect(joined).toContain("ON user_likes(story_id)");
+  });
+
   it("includes the user_fav_categories (user_id, category) unique index", () => {
     expect(joined).toContain(
       "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_fav_categories_user_cat",

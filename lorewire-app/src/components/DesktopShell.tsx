@@ -7,7 +7,7 @@ import {
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
-import ReelsDesktop from "@/components/reels/ReelsDesktop";
+import WiresDesktop from "@/components/wires/WiresDesktop";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
   placeArticleImages,
@@ -67,7 +67,7 @@ type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
 type IconCmp = (p: IconProps) => React.ReactElement;
 
-const NAV = ["Home", "Reels", "Browse", "New & Hot", "My List"];
+const NAV = ["Home", "Wires", "Browse", "New & Hot", "My List"];
 
 /* ----------------------------- ICONS ----------------------------- */
 const Ico = ({ d, fill, size = 24, stroke = 1.7 }: IconProps & { d: React.ReactNode }) => (
@@ -1333,7 +1333,7 @@ function GridPage({
   headerExtras?: React.ReactNode;
 }) {
   // Resolve through the live+sample catalog, NOT byId — saved ids can be
-  // real shorts the Reels feed saved that aren't in the baked sample
+  // real shorts the Wires feed saved that aren't in the baked sample
   // catalog, and byId throws on unknown ids. Unresolved ids are skipped
   // cleanly so a stale My List entry can't crash the page.
   const items = ids.map(resolveStory).filter((s): s is Story => s !== null);
@@ -1372,22 +1372,22 @@ function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
 export default function DesktopShell({ initial }: { initial: HomepageInitial }) {
   const [view, setView] = useState("Home");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
-  const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
+  const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const [solid, setSolid] = useState(false);
   const [query, setQuery] = useState("");
 
-  // My List is the persisted saved-stories store, shared with the Reels feed's
+  // My List is the persisted saved-stories store, shared with the Wires feed's
   // Save button and the detail modal so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
   // 2026-06-19 Phase 2: Recently viewed is recorded whenever the user
-  // opens a story (detail sheet or Reels deep-link). LRU ordered, capped
+  // opens a story (detail sheet or Wires deep-link). LRU ordered, capped
   // at 50 by the engagement-store.
   const { recordView } = useRecentlyViewed();
 
   // Hoisted curation + live-catalog hook. HomePage reads it through props
   // instead of calling the hook itself so every grid (Browse / New & Hot /
   // My List) can share resolveStory and resolve real-short ids saved
-  // through the Reels feed without throwing on byId. The seed comes from
+  // through the Wires feed without throwing on byId. The seed comes from
   // src/app/page.tsx's SSR fetch so the first paint already shows the
   // correct curation — no client-fetch flash. See
   // _plans/2026-06-18-homepage-no-flash-ssr.md.
@@ -1403,9 +1403,9 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     return () => window.removeEventListener("scroll", onS);
   }, []);
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
-  // Lock the page behind a modal AND while the Reels feed owns the viewport.
+  // Lock the page behind a modal AND while the Wires feed owns the viewport.
   useEffect(() => {
-    const lock = active !== null || view === "Reels";
+    const lock = active !== null || view === "Wires";
     document.body.style.overflow = lock ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
   }, [active, view]);
@@ -1415,18 +1415,18 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     recordView(id);
   };
   const close = () => setActive(null);
-  // "Play Something" jumps into the Reels feed (optionally at a story).
-  const openReels = (id?: string) => {
+  // "Play Something" jumps into the Wires feed (optionally at a story).
+  const openWires = (id?: string) => {
     if (id) recordView(id);
-    setReelsStoryId(id ?? null);
+    setWiresStoryId(id ?? null);
     close();
-    setView("Reels");
+    setView("Wires");
   };
-  const shuffle = () => openReels();
+  const shuffle = () => openWires();
 
   return (
     <div className="min-h-screen bg-bg">
-      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setReelsStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} session={initial.session} />
+      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setWiresStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} session={initial.session} />
 
       {view === "Home" && (
         <HomePage
@@ -1439,7 +1439,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           pollsInitial={initial.pollRails}
         />
       )}
-      {view === "Reels" && <ReelsDesktop onOpenInfo={open} paused={!!active} initialStoryId={reelsStoryId ?? undefined} />}
+      {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} initialStoryId={wiresStoryId ?? undefined} />}
       {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} resolveStory={resolveStory} />}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} resolveStory={resolveStory} />}
       {view === "My List" && (
@@ -1463,7 +1463,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Reels feed (not in STORIES) still open the modal.
+        // through the Wires feed (not in STORIES) still open the modal.
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);

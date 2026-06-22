@@ -1,4 +1,4 @@
-// Tests for the share helpers — the single share path behind the Reels feed and
+// Tests for the share helpers — the single share path behind the Wires feed and
 // the homepage detail modals. The contract that matters: build only public
 // /v/[slug] URLs, and produce correctly-encoded per-platform deep links (we
 // deliberately do NOT use the Web Share API / OS share panel).

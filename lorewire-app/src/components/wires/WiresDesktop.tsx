@@ -1,6 +1,6 @@
 "use client";
 
-// Desktop Reels: the same shorts and the same ReelCard as mobile, but a
+// Desktop Wires: the same shorts and the same WireCard as mobile, but a
 // DISCRETE pager instead of touch scroll-snap (the council's call — a mouse
 // wheel is continuous and scroll-snap feels mushy/overshoots under it).
 // Navigation is Arrow/Page/Space keys, a debounced wheel (one step per
@@ -9,9 +9,11 @@
 // instant next-step and to preload.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import ReelCard from "@/components/reels/ReelCard";
-import { useReelsData } from "@/components/reels/useReelsData";
-import { useSavedStories, useLikedReels } from "@/lib/engagement-store";
+import WireCard from "@/components/wires/WireCard";
+import { useWiresData } from "@/components/wires/useWiresData";
+import { useWireLikes } from "@/components/wires/useWireLikes";
+import { useWirePrefs } from "@/components/wires/useWirePrefs";
+import { useSavedStories } from "@/lib/engagement-store";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 
 type OpenFn = (id: string, tab?: string) => void;
@@ -39,7 +41,7 @@ const Chevron = ({ dir, size = 24 }: { dir: "up" | "down"; size?: number }) => (
   </svg>
 );
 
-export interface ReelsDesktopProps {
+export interface WiresDesktopProps {
   onOpenInfo: OpenFn;
   /** A modal (DetailModal) is open over the feed — pause + ignore navigation. */
   paused: boolean;
@@ -47,18 +49,22 @@ export interface ReelsDesktopProps {
   initialStoryId?: string;
 }
 
-export default function ReelsDesktop({
+export default function WiresDesktop({
   onOpenInfo,
   paused,
   initialStoryId,
-}: ReelsDesktopProps) {
-  const { shorts, loading, loadMore } = useReelsData(PAGE_SIZE);
+}: WiresDesktopProps) {
+  const { shorts, loading, loadMore } = useWiresData(PAGE_SIZE);
   const [activeIdx, setActiveIdx] = useState(0);
-  const [muted, setMuted] = useState(true);
   const [soundHintShown, setSoundHintShown] = useState(true);
   const reducedMotion = usePrefersReducedMotion();
+  // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
+  const { autoplay, muted, toggleAutoplay, toggleMuted } = useWirePrefs();
   const { isSaved, toggle: toggleSave } = useSavedStories();
-  const { isLiked, toggle: toggleLike } = useLikedReels();
+  const { seed: seedLikes, toggle: toggleLike, get: getLike } = useWireLikes();
+  useEffect(() => {
+    seedLikes(shorts);
+  }, [shorts, seedLikes]);
 
   // Refs so the stable key/wheel handlers read fresh values without re-binding.
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -109,7 +115,7 @@ export default function ReelsDesktop({
       if (pausedRef.current) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") {
+      if (e.key === "ArrowDown" || e.key === "PageDown") {
         e.preventDefault();
         go(1);
       } else if (e.key === "ArrowUp" || e.key === "PageUp") {
@@ -140,7 +146,6 @@ export default function ReelsDesktop({
     return () => el.removeEventListener("wheel", onWheel);
   }, [go]);
 
-  const toggleMute = useCallback(() => setMuted((m) => !m), []);
   const dismissSoundHint = useCallback(() => setSoundHintShown(false), []);
 
   // ── States ────────────────────────────────────────────────────────────────
@@ -156,7 +161,7 @@ export default function ReelsDesktop({
       <div className="fixed inset-x-0 bottom-0 top-[68px] z-30 grid place-items-center bg-black px-8 text-center">
         <div>
           <p className="font-display text-[26px] font-black uppercase tracking-tightest text-ink">
-            No reels yet
+            No wires yet
           </p>
           <p className="mt-2 font-body text-[15px] text-muted">
             New shorts show up here as soon as they&rsquo;re published.
@@ -194,20 +199,23 @@ export default function ReelsDesktop({
                 : "transform .35s cubic-bezier(.16,1,.3,1)",
             }}
           >
-            <ReelCard
+            <WireCard
               short={shorts[i]}
               active={i === activeIdx}
               mounted
               eager={i === activeIdx || i === activeIdx + 1}
               insetBottom={18}
               muted={muted}
+              autoplay={autoplay}
               reducedMotion={reducedMotion}
               paused={paused}
-              onToggleMute={toggleMute}
+              onToggleMute={toggleMuted}
+              onToggleAutoplay={toggleAutoplay}
               onOpenInfo={onOpenInfo}
               showSoundHint={i === activeIdx && soundHintShown}
               onDismissSoundHint={dismissSoundHint}
-              liked={isLiked(shorts[i].id)}
+              liked={getLike(shorts[i].id)?.liked ?? shorts[i].viewer_liked}
+              likeCount={getLike(shorts[i].id)?.count ?? shorts[i].like_count}
               saved={isSaved(shorts[i].id)}
               onToggleLike={toggleLike}
               onToggleSave={toggleSave}
@@ -221,7 +229,7 @@ export default function ReelsDesktop({
         <button
           onClick={() => go(-1)}
           disabled={atTop}
-          aria-label="Previous reel"
+          aria-label="Previous wire"
           className="grid h-12 w-12 place-items-center rounded-full text-ink transition hover:bg-white/20 disabled:opacity-30"
           style={{ background: "rgba(255,255,255,.12)" }}
         >
@@ -230,7 +238,7 @@ export default function ReelsDesktop({
         <button
           onClick={() => go(1)}
           disabled={atBottom}
-          aria-label="Next reel"
+          aria-label="Next wire"
           className="grid h-12 w-12 place-items-center rounded-full text-ink transition hover:bg-white/20 disabled:opacity-30"
           style={{ background: "rgba(255,255,255,.12)" }}
         >

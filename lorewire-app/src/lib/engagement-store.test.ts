@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   useContinueReading,
   useFavoriteCategories,
-  useLikedReels,
+  useLikedWires,
   useRecentlyViewed,
   useSavedStories,
   useStoryRatings,
@@ -26,7 +26,7 @@ describe("engagement-store module surface", () => {
     // just verify the exports exist and are callable. A typo or rename
     // in any of them would crash every consumer in the shells.
     expect(typeof useSavedStories).toBe("function");
-    expect(typeof useLikedReels).toBe("function");
+    expect(typeof useLikedWires).toBe("function");
     expect(typeof useFavoriteCategories).toBe("function");
     expect(typeof useRecentlyViewed).toBe("function");
     expect(typeof useContinueReading).toBe("function");
