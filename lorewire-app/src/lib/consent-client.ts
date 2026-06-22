@@ -22,8 +22,13 @@ const CONSENT_COOKIE = "lw_consent";
 /** Parse a single cookie value out of document.cookie. Returns null when
  *  the cookie is unset, empty, or the value isn't a known consent state.
  *  Defense: a malformed cookie shouldn't trip the client into thinking
- *  consent has been decided. */
-function readCookie(): ConsentValue | null {
+ *  consent has been decided.
+ *
+ *  Exported so the banner can read consent SYNCHRONOUSLY on mount: the
+ *  useConsent() store seeds its value in a subscribe effect, so it reports
+ *  null (unread) for one render before the real value lands, and trusting
+ *  that transient null left the banner stuck on screen after a reload. */
+export function readConsentCookie(): ConsentValue | null {
   if (typeof document === "undefined") return null;
   const cookies = document.cookie.split("; ");
   for (const pair of cookies) {
@@ -72,7 +77,7 @@ function createConsentStore(): ConsentStore {
   let started = false;
 
   const refresh = () => {
-    const next = readCookie();
+    const next = readConsentCookie();
     if (next !== cached) {
       cached = next;
       listeners.forEach((l) => l());
@@ -82,7 +87,7 @@ function createConsentStore(): ConsentStore {
   const start = () => {
     if (started || typeof window === "undefined") return;
     started = true;
-    cached = readCookie();
+    cached = readConsentCookie();
     // Other tabs setting consent → re-read here. document.cookie has no
     // change event, but localStorage events fire cross-tab so we mirror
     // a marker in localStorage on every server-acknowledged change.

@@ -29,6 +29,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   hasGrandfatherableState,
+  readConsentCookie,
   setConsentClient,
   useConsent,
 } from "@/lib/consent-client";
@@ -73,13 +74,24 @@ export default function CookieConsent() {
 
   useEffect(() => {
     setCopy(pickCopy());
-    if (consent !== null) {
-      console.info("[auth ui consent banner skip-decided]", { consent });
+    // Resolve consent synchronously: useConsent()'s store seeds its value in a
+    // subscribe effect, so on mount it can report null (unread) one render
+    // before the real value lands. Reading the cookie directly closes that gap
+    // — trusting the transient null is what showed the banner on every reload
+    // even seconds after the choice was already saved.
+    const decided = consent ?? readConsentCookie();
+    if (decided !== null) {
+      console.info("[auth ui consent banner skip-decided]", { consent: decided });
+      // Decided already — make sure the banner is hidden. The old code
+      // returned here without hiding, so a banner shown during the transient
+      // null phase stayed stuck on screen.
+      setVisible(false);
       return;
     }
     if (hasGrandfatherableState()) {
       console.info("[auth ui consent banner grandfather]");
       void setConsentClient("accepted");
+      setVisible(false);
       return;
     }
     console.info("[auth ui consent banner show]");
