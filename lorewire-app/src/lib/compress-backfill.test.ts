@@ -2,7 +2,7 @@
 // The DB + R2 + sharp halves are mocked; parseGcsUrl stays real so key
 // extraction is exercised for real.
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/db", () => ({ all: vi.fn(), run: vi.fn() }));
 vi.mock("@/lib/media-url", () => ({
@@ -25,8 +25,27 @@ vi.mock("@/lib/gcs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/gcs")>();
   return actual; // keep parseGcsUrl real
 });
+// sharp's re-encode is stubbed to a tiny fixed buffer; the batch tests assert
+// control flow (work budget, cursor, DB repoint), not the bytes it produces.
+vi.mock("sharp", () => {
+  const chain = {
+    rotate: () => chain,
+    webp: () => chain,
+    toBuffer: async () => Buffer.from("webp"),
+  };
+  return { default: () => chain };
+});
 
-import { imageUrlsIn, toWebpUrl, urlToKey } from "./compress-backfill";
+import { all, run } from "@/lib/db";
+import { getR2ObjectBytes, headR2Object, putR2Object } from "@/lib/r2";
+import {
+  compressBackfillBatch,
+  imageUrlsIn,
+  toWebpUrl,
+  urlToKey,
+} from "./compress-backfill";
+
+beforeEach(() => vi.clearAllMocks());
 
 const G = "https://storage.googleapis.com/bucket";
 const M = "https://media.lorewire.com";
@@ -74,5 +93,77 @@ describe("urlToKey", () => {
 
   it("returns null for an unrelated host", () => {
     expect(urlToKey("https://example.com/x.png")).toBeNull();
+  });
+});
+
+describe("compressBackfillBatch", () => {
+  it("compresses each image, repoints the DB, and finishes a short page", async () => {
+    vi.mocked(all).mockResolvedValue([
+      { id: "s1", hero_image: `${M}/s1/hero.png`, images: null, payload: null },
+      { id: "s2", hero_image: `${M}/s2/hero.png`, images: null, payload: null },
+    ]);
+    vi.mocked(headR2Object).mockResolvedValue(null); // .webp twin absent -> encode
+    vi.mocked(getR2ObjectBytes).mockResolvedValue(new ArrayBuffer(1000));
+    vi.mocked(putR2Object).mockResolvedValue(undefined);
+    vi.mocked(run).mockResolvedValue(undefined);
+
+    const res = await compressBackfillBatch({
+      table: "stories",
+      dryRun: false,
+      batchSize: 25,
+    });
+
+    expect(res.done).toBe(true);
+    expect(res.nextCursor).toBeNull();
+    expect(res.rows).toBe(2);
+    expect(res.compressed).toBe(2);
+    expect(res.failures).toEqual([]);
+    expect(vi.mocked(run)).toHaveBeenCalledTimes(2); // one repoint per row
+  });
+
+  it("stops at a row boundary when the work budget is hit and returns a cursor", async () => {
+    // 6 rows x 2 images = 2 encodes each; the live budget is 8, so it stops
+    // after the 4th row with rows 5-6 of the page left for the next request.
+    vi.mocked(all).mockResolvedValue(
+      Array.from({ length: 6 }, (_, i) => ({
+        id: `s${i + 1}`,
+        hero_image: `${M}/s${i + 1}/a.png`,
+        images: JSON.stringify([`${M}/s${i + 1}/b.png`]),
+        payload: null,
+      })),
+    );
+    vi.mocked(headR2Object).mockResolvedValue(null);
+    vi.mocked(getR2ObjectBytes).mockResolvedValue(new ArrayBuffer(500));
+    vi.mocked(putR2Object).mockResolvedValue(undefined);
+    vi.mocked(run).mockResolvedValue(undefined);
+
+    const res = await compressBackfillBatch({
+      table: "stories",
+      dryRun: false,
+      batchSize: 25,
+    });
+
+    expect(res.done).toBe(false);
+    expect(res.nextCursor).toBe("s4");
+    expect(res.compressed).toBe(8);
+  });
+
+  it("dry run counts what would compress without encoding or writing", async () => {
+    vi.mocked(all).mockResolvedValue([
+      { id: "s1", hero_image: `${M}/s1/hero.png`, images: null, payload: null },
+    ]);
+    vi.mocked(headR2Object).mockResolvedValue(null); // no webp twin yet -> would compress
+
+    const res = await compressBackfillBatch({
+      table: "stories",
+      dryRun: true,
+      batchSize: 25,
+    });
+
+    expect(res.compressed).toBe(1);
+    expect(res.done).toBe(true);
+    expect(vi.mocked(getR2ObjectBytes)).not.toHaveBeenCalled();
+    expect(vi.mocked(putR2Object)).not.toHaveBeenCalled();
+    expect(vi.mocked(run)).not.toHaveBeenCalled();
   });
 });

@@ -111,12 +111,45 @@ export interface CompressBatchResult {
   failures: Array<{ url: string; error: string }>;
 }
 
+// Bounded-concurrency map: run `fn` over `items`, at most `limit` in flight.
+// JS is single-threaded so the shared counters the callbacks mutate are safe;
+// only the awaited I/O overlaps — which is the whole point, since the per-image
+// download dominates, so a few in flight is several times faster than serial.
+async function mapPool<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let i = 0;
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (i < items.length) {
+        const idx = i++;
+        await fn(items[idx]);
+      }
+    },
+  );
+  await Promise.all(workers);
+}
+
 export async function compressBackfillBatch(
   opts: CompressBatchOpts,
 ): Promise<CompressBatchResult> {
   const spec = COMPRESS_TABLES.find((t) => t.table === opts.table);
   if (!spec) throw new Error(`unknown compress table: ${opts.table}`);
-  const batchSize = Math.min(Math.max(opts.batchSize ?? 10, 1), 50);
+  const batchSize = Math.min(Math.max(opts.batchSize ?? 25, 1), 50);
+  // Bound the WORK per request, not the row count. A single image-heavy row can
+  // reference dozens of multi-megabyte frames, so a flat 10-row batch ran for
+  // minutes and could blow past the 300 s serverless limit with no progress
+  // shown — which reads as "stuck". Instead we stop at the first row boundary
+  // once this request has done enough real encodes (or, in a dry run, examined
+  // enough images) and hand back a cursor so the client resumes cleanly. Skips
+  // and already-done images are cheap and don't count, so re-runs sail through
+  // many rows per request.
+  const WORK_BUDGET = opts.dryRun ? 120 : 8;
+  const CONCURRENCY = 4;
+
   const where = opts.cursor ? "WHERE id > ?" : "";
   const params = opts.cursor ? [opts.cursor] : [];
   const rows = await all<Record<string, string | null>>(
@@ -129,6 +162,8 @@ export async function compressBackfillBatch(
   let skipped = 0;
   let bytesBefore = 0;
   let bytesAfter = 0;
+  let work = 0;
+  let stoppedEarly = false;
   const failures: Array<{ url: string; error: string }> = [];
   let lastId: string | null = null;
 
@@ -141,32 +176,37 @@ export async function compressBackfillBatch(
     if (urls.size === 0) continue;
 
     const replace: Record<string, string> = {};
-    for (const url of urls) {
+    await mapPool([...urls], CONCURRENCY, async (url) => {
       const key = urlToKey(url);
       if (!key || /\.webp$/i.test(key)) {
         skipped += 1;
-        continue;
+        return;
       }
       try {
         if (opts.dryRun) {
           const exists = await headR2Object(mediaBucket(), toWebpUrl(key));
           if (exists === null) compressed += 1;
           else skipped += 1;
-          continue;
+          work += 1;
+          return;
         }
         const r = await ensureWebp(key);
         if (!r) {
           skipped += 1;
-          continue;
+          return;
         }
         replace[url] = toWebpUrl(url);
         compressed += 1;
         bytesBefore += r.oldSize;
         bytesAfter += r.newSize;
+        // Only an actual download + re-encode counts toward the budget; a row
+        // whose .webp twins already exist is cheap (HEAD only) and shouldn't
+        // shorten the request.
+        if (r.oldSize > 0) work += 1;
       } catch (e) {
         failures.push({ url, error: e instanceof Error ? e.message : String(e) });
       }
-    }
+    });
 
     if (!opts.dryRun && Object.keys(replace).length > 0) {
       const sets: string[] = [];
@@ -191,12 +231,21 @@ export async function compressBackfillBatch(
         await run(`UPDATE ${spec.table} SET ${sets.join(", ")} WHERE id = ?`, vals);
       }
     }
+
+    if (work >= WORK_BUDGET) {
+      stoppedEarly = true;
+      break;
+    }
   }
 
+  // Done only when we consumed the whole selected page AND weren't cut off early
+  // by the work budget. Otherwise hand back the last processed id so the next
+  // request resumes right after it (no row processed twice, none skipped).
+  const done = !stoppedEarly && rows.length < batchSize;
   return {
     table: opts.table,
-    nextCursor: rows.length < batchSize ? null : lastId,
-    done: rows.length < batchSize,
+    nextCursor: done ? null : lastId,
+    done,
     rows: rows.length,
     compressed,
     skipped,
