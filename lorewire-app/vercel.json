@@ -28,6 +28,10 @@
     {
       "path": "/api/polls/refresh",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/comments/drain_moderation",
+      "schedule": "*/1 * * * *"
     }
   ],
   "functions": {

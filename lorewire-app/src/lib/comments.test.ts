@@ -12,11 +12,13 @@ import { all, run } from "@/lib/db";
 import {
   createComment,
   getCommentById,
+  setCommentStatus,
   toPublicComment,
   type CommentRow,
 } from "./comments";
 
 async function clear(): Promise<void> {
+  await run("DELETE FROM comment_moderation_events", []);
   await run("DELETE FROM comments", []);
   await run("DELETE FROM articles", []);
 }
@@ -104,7 +106,7 @@ describe("createComment — validation", () => {
 describe("createComment — threading", () => {
   beforeEach(clear);
 
-  it("publishes a top-level comment and detects Hebrew", async () => {
+  it("inserts a top-level comment as held (pending moderation) and detects Hebrew", async () => {
     const articleId = await seedArticle("published");
     const r = await createComment({
       articleId,
@@ -114,36 +116,21 @@ describe("createComment — threading", () => {
     });
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.comment.status).toBe("published");
+      expect(r.comment.status).toBe("held");
+      expect(r.comment.moderation_source).toBe("pending");
       expect(r.comment.lang).toBe("he");
       expect(r.comment.parent_id).toBeNull();
+      expect(r.articleTitle).toBe("Test article");
     }
   });
 
-  it("increments the parent reply_count on a one-level reply", async () => {
-    const articleId = await seedArticle("published");
-    const parent = await createComment({ articleId, guestName: "A", body: "parent", ...base });
-    expect(parent.ok).toBe(true);
-    if (!parent.ok) return;
-
-    const reply = await createComment({
-      articleId,
-      parentId: parent.comment.id,
-      guestName: "B",
-      body: "reply",
-      ...base,
-    });
-    expect(reply.ok).toBe(true);
-    if (reply.ok) expect(reply.comment.parent_id).toBe(parent.comment.id);
-
-    const refreshed = await getCommentById(parent.comment.id);
-    expect(refreshed?.reply_count).toBe(1);
-  });
-
-  it("refuses a reply to a reply (one level deep)", async () => {
+  it("bumps the parent reply_count only when a reply is published", async () => {
     const articleId = await seedArticle("published");
     const parent = await createComment({ articleId, guestName: "A", body: "parent", ...base });
     if (!parent.ok) throw new Error("parent failed");
+    // A reply is only allowed once the parent is published — the route
+    // moderates the parent before anyone can see and reply to it.
+    await setCommentStatus(parent.comment.id, "published", { source: "tier2" }, "ai");
     const reply = await createComment({
       articleId,
       parentId: parent.comment.id,
@@ -152,6 +139,32 @@ describe("createComment — threading", () => {
       ...base,
     });
     if (!reply.ok) throw new Error("reply failed");
+    expect(reply.comment.parent_id).toBe(parent.comment.id);
+
+    // A held reply does not count yet.
+    expect((await getCommentById(parent.comment.id))?.reply_count).toBe(0);
+
+    // Publishing the reply bumps the parent; rejecting it back decrements.
+    await setCommentStatus(reply.comment.id, "published", { source: "tier2" }, "ai");
+    expect((await getCommentById(parent.comment.id))?.reply_count).toBe(1);
+    await setCommentStatus(reply.comment.id, "rejected", { source: "human" }, "admin-1");
+    expect((await getCommentById(parent.comment.id))?.reply_count).toBe(0);
+  });
+
+  it("refuses a reply to a reply (one level deep)", async () => {
+    const articleId = await seedArticle("published");
+    const parent = await createComment({ articleId, guestName: "A", body: "parent", ...base });
+    if (!parent.ok) throw new Error("parent failed");
+    await setCommentStatus(parent.comment.id, "published", { source: "tier2" }, "ai");
+    const reply = await createComment({
+      articleId,
+      parentId: parent.comment.id,
+      guestName: "B",
+      body: "reply",
+      ...base,
+    });
+    if (!reply.ok) throw new Error("reply failed");
+    await setCommentStatus(reply.comment.id, "published", { source: "tier2" }, "ai");
 
     const nested = await createComment({
       articleId,
@@ -177,6 +190,56 @@ describe("createComment — threading", () => {
       ...base,
     });
     expect(cross.ok).toBe(false);
+  });
+});
+
+describe("setCommentStatus — audit + signal preservation", () => {
+  beforeEach(clear);
+
+  it("writes an immutable audit row on each transition", async () => {
+    const articleId = await seedArticle("published");
+    const c = await createComment({ articleId, guestName: "A", body: "hi", ...base });
+    if (!c.ok) throw new Error("create failed");
+
+    await setCommentStatus(
+      c.comment.id,
+      "published",
+      { source: "tier2", category: "clean", reason: "looks fine", stance: "agree" },
+      "ai",
+    );
+    await setCommentStatus(c.comment.id, "rejected", { source: "human", reason: "changed my mind" }, "admin-1");
+
+    const events = await all<{ from_status: string; to_status: string; actor: string }>(
+      "SELECT from_status, to_status, actor FROM comment_moderation_events WHERE comment_id = ? ORDER BY created_at",
+      [c.comment.id],
+    );
+    expect(events.length).toBe(2);
+    expect(events[0].from_status).toBe("held");
+    expect(events[0].to_status).toBe("published");
+    expect(events[1].to_status).toBe("rejected");
+    expect(events[1].actor).toBe("admin-1");
+  });
+
+  it("preserves the judge's editorial signal across a human action", async () => {
+    const articleId = await seedArticle("published");
+    const c = await createComment({ articleId, guestName: "A", body: "hi", ...base });
+    if (!c.ok) throw new Error("create failed");
+
+    // Judge writes the signal...
+    await setCommentStatus(
+      c.comment.id,
+      "published",
+      { source: "tier2", stance: "disagree", sentiment: "negative", topicTag: "seat dispute" },
+      "ai",
+    );
+    // ...a later human reject passes no signal fields; they must survive.
+    await setCommentStatus(c.comment.id, "rejected", { source: "human", reason: "spam" }, "admin-1");
+
+    const row = await getCommentById(c.comment.id);
+    expect(row?.stance).toBe("disagree");
+    expect(row?.sentiment).toBe("negative");
+    expect(row?.topic_tag).toBe("seat dispute");
+    expect(row?.moderation_reason).toBe("spam");
   });
 });
 

@@ -33,6 +33,18 @@ interface ChatOpts {
   jsonMode?: boolean;
   /** 0–2, defaults to 0.7. Lower = more deterministic. */
   temperature?: number;
+  // ---- Reasoning-model (GPT-5 family) support. All optional; existing
+  // callers pass none of these and get the exact same request as before. ----
+  /** Strict Structured Outputs. Takes precedence over jsonMode. The model is
+   *  forced to return exactly this JSON Schema. */
+  jsonSchema?: { name: string; schema: Record<string, unknown> };
+  /** GPT-5 reasoning models expect `max_completion_tokens`, not `max_tokens`. */
+  maxCompletionTokens?: number;
+  /** GPT-5 reasoning effort. "minimal" is right for fast classification. */
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  /** Reasoning models reject a non-default temperature; set this to leave the
+   *  field off the request entirely. */
+  omitTemperature?: boolean;
 }
 
 export async function chatCompletion(opts: ChatOpts): Promise<ChatResult> {
@@ -107,9 +119,26 @@ async function openaiCompatibleChat(
     const body: Record<string, unknown> = {
       model: args.model,
       messages: args.opts.messages,
-      temperature: args.opts.temperature ?? 0.7,
     };
-    if (args.opts.jsonMode) {
+    if (!args.opts.omitTemperature) {
+      body.temperature = args.opts.temperature ?? 0.7;
+    }
+    if (args.opts.maxCompletionTokens) {
+      body.max_completion_tokens = args.opts.maxCompletionTokens;
+    }
+    if (args.opts.reasoningEffort) {
+      body.reasoning_effort = args.opts.reasoningEffort;
+    }
+    if (args.opts.jsonSchema) {
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: args.opts.jsonSchema.name,
+          strict: true,
+          schema: args.opts.jsonSchema.schema,
+        },
+      };
+    } else if (args.opts.jsonMode) {
       body.response_format = { type: "json_object" };
     }
     const url = `${args.base.replace(/\/$/, "")}/chat/completions`;

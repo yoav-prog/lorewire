@@ -1,9 +1,11 @@
 // Comments data layer. CRUD + read helpers over the `comments` table
-// (_plans/2026-06-22-article-comments-ai-moderation.md). Moderation lives in
-// src/lib/comment-moderation.ts (Step 4); this module only persists and reads.
+// (_plans/2026-06-22-article-comments-ai-moderation.md). Moderation decisions
+// live in src/lib/comment-moderation.ts; this module only persists and reads.
 //
-// Step 2 inserts publish immediately (moderation_source 'none'); Step 4 routes
-// the status through the two-tier moderator before the row becomes visible.
+// New comments are inserted as 'held' (pending). The write path then runs the
+// two-tier moderator and calls setCommentStatus, which is the single chokepoint
+// every status change (AI, admin, re-moderation) flows through — it maintains
+// the parent reply_count (published replies only) and writes the audit trail.
 
 import "server-only";
 import { randomUUID } from "node:crypto";
@@ -63,7 +65,14 @@ export interface CreateCommentInput {
 }
 
 export type CreateCommentResult =
-  | { ok: true; comment: CommentRow }
+  | {
+      ok: true;
+      comment: CommentRow;
+      /** Article context for the moderator, returned so the write path does
+       *  not re-fetch the article it just validated. */
+      articleTitle: string;
+      articleSummary: string;
+    }
   | { ok: false; error: string; httpStatus: number };
 
 /** Hebrew if the body contains any Hebrew-block codepoint, else the article's
@@ -122,6 +131,9 @@ export async function createComment(
   const now = new Date().toISOString();
   const lang = detectLang(body, article.language ?? "en");
 
+  // Insert as 'held'/'pending'. The write path moderates immediately and calls
+  // setCommentStatus to resolve the status; the parent reply_count is bumped
+  // there, only if/when the reply actually becomes published.
   await run(
     `INSERT INTO comments
        (id, article_id, parent_id, author_user_id, guest_name, body, lang,
@@ -136,8 +148,8 @@ export async function createComment(
       guestName,
       body,
       lang,
-      "published",
-      "none",
+      "held",
+      "pending",
       0,
       0,
       input.cookieToken,
@@ -146,16 +158,112 @@ export async function createComment(
     ],
   );
 
-  if (parentId) {
-    await run(
-      `UPDATE comments SET reply_count = reply_count + 1 WHERE id = ?`,
-      [parentId],
-    );
-  }
-
   const created = await getCommentById(id);
   if (!created) return { ok: false, error: "Could not save the comment.", httpStatus: 500 };
-  return { ok: true, comment: created };
+  return {
+    ok: true,
+    comment: created,
+    articleTitle: article.title ?? "",
+    articleSummary: article.summary ?? "",
+  };
+}
+
+export interface ModerationFields {
+  source?: string | null;
+  category?: string | null;
+  reason?: string | null;
+  confidence?: number | null;
+  stance?: string | null;
+  sentiment?: string | null;
+  topicTag?: string | null;
+}
+
+/** Transition a comment to a new status. The single chokepoint for every
+ *  status change (AI verdict, admin action, re-moderation on edit) so two
+ *  invariants can never drift: the parent reply_count counts published direct
+ *  replies only, and every transition leaves an immutable audit row. `actor` is
+ *  "ai" or an admin user id. Provided moderation fields overwrite; omitted ones
+ *  keep their prior value (so a human action doesn't wipe the judge's editorial
+ *  signal). */
+export async function setCommentStatus(
+  id: string,
+  toStatus: CommentStatus,
+  fields: ModerationFields,
+  actor: string,
+): Promise<CommentRow | null> {
+  const current = await getCommentById(id);
+  if (!current) return null;
+  const from = current.status;
+  const now = new Date().toISOString();
+
+  // Merge in JS (not SQL COALESCE) so we bind concrete column values — avoids
+  // Postgres "could not determine data type" on an untyped null inside COALESCE.
+  const next = {
+    source: fields.source ?? current.moderation_source,
+    category: fields.category ?? current.moderation_category,
+    reason: fields.reason ?? current.moderation_reason,
+    confidence: fields.confidence ?? current.moderation_confidence,
+    stance: fields.stance ?? current.stance,
+    sentiment: fields.sentiment ?? current.sentiment,
+    topicTag: fields.topicTag ?? current.topic_tag,
+  };
+
+  await run(
+    `UPDATE comments SET
+        status = ?, moderation_source = ?, moderation_category = ?,
+        moderation_reason = ?, moderation_confidence = ?, stance = ?,
+        sentiment = ?, topic_tag = ?
+      WHERE id = ?`,
+    [
+      toStatus,
+      next.source,
+      next.category,
+      next.reason,
+      next.confidence,
+      next.stance,
+      next.sentiment,
+      next.topicTag,
+      id,
+    ],
+  );
+
+  if (current.parent_id) {
+    if (from !== "published" && toStatus === "published") {
+      await run(
+        `UPDATE comments SET reply_count = reply_count + 1 WHERE id = ?`,
+        [current.parent_id],
+      );
+    } else if (from === "published" && toStatus !== "published") {
+      await run(
+        `UPDATE comments SET reply_count = reply_count - 1 WHERE id = ?`,
+        [current.parent_id],
+      );
+    }
+  }
+
+  await run(
+    `INSERT INTO comment_moderation_events
+       (id, comment_id, actor, from_status, to_status, category, reason, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [randomUUID(), id, actor, from, toStatus, next.category, next.reason, now],
+  );
+
+  return getCommentById(id);
+}
+
+/** Comments stuck pending or timed-out in moderation, for the cron retry net.
+ *  Excludes comments deliberately 'held' for a human (their source is a judge
+ *  verdict, not 'pending'/'timeout'). */
+export async function listStaleModerationComments(
+  limit: number,
+): Promise<CommentRow[]> {
+  return all<CommentRow>(
+    `SELECT ${COMMENT_COLS} FROM comments
+      WHERE status = 'held' AND moderation_source IN ('pending', 'timeout')
+      ORDER BY created_at ASC
+      LIMIT ?`,
+    [limit],
+  );
 }
 
 /** Created-at timestamps (ISO, newest first) for one rate-limit bucket since a

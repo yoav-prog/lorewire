@@ -19,7 +19,8 @@ import { ipUaHash } from "@/lib/poll-rate-limit";
 import { getOrIssueCommentToken } from "@/lib/comment-cookie";
 import { readUserSession } from "@/lib/user-session";
 import { getUserById } from "@/lib/users";
-import { createComment, toPublicComment } from "@/lib/comments";
+import { createComment, setCommentStatus, toPublicComment } from "@/lib/comments";
+import { moderateComment } from "@/lib/comment-moderation";
 import { checkCommentVelocity } from "@/lib/comment-rate-limit";
 
 interface CommentBody {
@@ -100,6 +101,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: result.error }, { status: result.httpStatus });
   }
 
+  // Moderate inline. moderateComment never throws; on timeout it returns a
+  // held verdict and the cron drain retries it. setCommentStatus resolves the
+  // status, maintains the parent reply_count, and writes the audit row.
+  const verdict = await moderateComment({
+    body: result.comment.body,
+    lang: result.comment.lang ?? "en",
+    articleTitle: result.articleTitle,
+    articleSummary: result.articleSummary,
+  });
+  const finalRow =
+    (await setCommentStatus(
+      result.comment.id,
+      verdict.status,
+      {
+        source: verdict.source,
+        category: verdict.category,
+        reason: verdict.reason,
+        confidence: verdict.confidence,
+        stance: verdict.stance,
+        sentiment: verdict.sentiment,
+        topicTag: verdict.topicTag,
+      },
+      "ai",
+    )) ?? result.comment;
+
   // Resolve the display name for the immediate optimistic render: guests use
   // their typed name; signed-in authors use their profile name (falling back
   // to the local-part of their email).
@@ -111,7 +137,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   return NextResponse.json({
     ok: true,
-    comment: toPublicComment(result.comment, authorName, {
+    comment: toPublicComment(finalRow, authorName, {
       viewerUserId: session?.userId ?? null,
       viewerCookieToken: cookieToken,
     }),
