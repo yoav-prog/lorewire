@@ -482,6 +482,8 @@ export interface PublicComment {
   status: CommentStatus;
   body: string;
   likeCount: number;
+  /** Whether the current viewer has already liked this comment. */
+  liked: boolean;
   replyCount: number;
   /** Statement of reasons, surfaced only to the comment's own author. */
   moderationReason: string | null;
@@ -501,6 +503,7 @@ export function toPublicComment(
   row: CommentRow,
   authorName: string,
   viewer: ViewerContext,
+  liked = false,
 ): PublicComment {
   const isOwn =
     (!!viewer.viewerUserId && row.author_user_id === viewer.viewerUserId) ||
@@ -514,6 +517,7 @@ export function toPublicComment(
     status: row.status as CommentStatus,
     body: row.body ?? "",
     likeCount: row.like_count ?? 0,
+    liked,
     replyCount: row.reply_count ?? 0,
     moderationReason: isOwn ? row.moderation_reason : null,
     createdAt: row.created_at,

@@ -251,10 +251,9 @@ function CommentItem({
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState(false);
   const [reported, setReported] = useState(false);
-  // Liked state is client-side for v1: the count is authoritative from the
-  // server, but on first load hearts show un-filled (we don't yet join the
-  // viewer's likes into the thread query).
-  const [like, setLike] = useState({ liked: false, count: comment.likeCount });
+  // Seeded from the server (the thread query joins the viewer's likes), then
+  // updated optimistically and reconciled against the like endpoint's response.
+  const [like, setLike] = useState({ liked: comment.liked, count: comment.likeCount });
   const isReply = !!comment.parentId;
 
   async function toggleLike(): Promise<void> {

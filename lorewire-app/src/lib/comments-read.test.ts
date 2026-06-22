@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { all, run } from "@/lib/db";
-import { createComment, setCommentStatus } from "./comments";
+import { createComment, setCommentStatus, toggleLike } from "./comments";
 import { countPublishedComments, loadCommentThread } from "./comments-read";
 
 async function clear(): Promise<void> {
@@ -164,6 +164,31 @@ describe("loadCommentThread — threading + sort", () => {
 
     const seen = [...p1.nodes, ...p2.nodes].map((n) => n.id).sort();
     expect(seen).toEqual([...ids].sort());
+  });
+});
+
+describe("loadCommentThread — liked state", () => {
+  it("reflects the viewer's own like, not anyone else's", async () => {
+    const id = await published("likeable", "author");
+    await toggleLike({ commentId: id, userId: null, cookieToken: "fan" });
+
+    const asFan = await loadCommentThread({
+      articleId,
+      sort: "newest",
+      viewerUserId: null,
+      viewerCookieToken: "fan",
+    });
+    const fanView = asFan.nodes.find((n) => n.id === id);
+    expect(fanView?.liked).toBe(true);
+    expect(fanView?.likeCount).toBe(1);
+
+    const asOther = await loadCommentThread({
+      articleId,
+      sort: "newest",
+      viewerUserId: null,
+      viewerCookieToken: "other",
+    });
+    expect(asOther.nodes.find((n) => n.id === id)?.liked).toBe(false);
   });
 });
 
