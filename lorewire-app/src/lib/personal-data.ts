@@ -19,8 +19,9 @@ export interface ExportSource {
   /** Table name in src/lib/schema.ts. */
   table: string;
   /** Column locating this user's rows: "id" for the users row itself,
-   *  "user_id" for the per-user satellite tables. */
-  column: "id" | "user_id";
+   *  "user_id" for the per-user satellite tables, or a comment table's own FK
+   *  name (author_user_id for authored comments, reporter_user_id for reports). */
+  column: "id" | "user_id" | "author_user_id" | "reporter_user_id";
   /** Plain-language label for the export summary UI. */
   description: string;
   /** Columns to include. Omit secrets (the password hash) and internal
@@ -76,6 +77,37 @@ export const EXPORT_SOURCES: ExportSource[] = [
     // Drop the internal anti-double-vote nonce and the rate-limit hash; export
     // only the meaningful answer.
     columns: ["poll_id", "story_id", "article_id", "category", "side", "created_at"],
+  },
+  {
+    table: "comments",
+    column: "author_user_id",
+    description: "Comments you posted",
+    // The content and where it sits. Drop the anti-double-like cookie nonce,
+    // the rate-limit fingerprint, and the internal AI moderation/editorial
+    // signals (those are processing metadata, not the user's own content).
+    columns: [
+      "id",
+      "article_id",
+      "parent_id",
+      "body",
+      "lang",
+      "status",
+      "edited_at",
+      "created_at",
+    ],
+  },
+  {
+    table: "comment_likes",
+    column: "user_id",
+    description: "Comment likes",
+    // Drop the anonymous cookie nonce; the like is just which comment.
+    columns: ["comment_id", "created_at"],
+  },
+  {
+    table: "comment_reports",
+    column: "reporter_user_id",
+    description: "Comments you reported",
+    columns: ["comment_id", "reason", "status", "created_at"],
   },
 ];
 

@@ -107,10 +107,11 @@ describe("buildGroups", () => {
   it("produces the top-level entries in stable order", () => {
     // The ungrouped block grew from the original three (Overview, Content,
     // Settings) as the studio added Reddit Sources (2026-06-14), Homepage
-    // curation (2026-06-16), Polls (2026-06-18), the one-time Migrate + Compress
-    // media tools (2026-06-22), and the Users area (2026-06-22, capability-gated,
-    // sits before Settings). With no caps passed, every item shows. This test
-    // pins both the membership and the order.
+    // curation (2026-06-16), Polls (2026-06-18), the Users area (2026-06-22,
+    // capability-gated), Comments (2026-06-22, gated under content.manage), and
+    // the one-time Migrate + Compress media tools (2026-06-22). Each insertion
+    // sits between Content and the trailing Settings / Migrate / Compress block.
+    // With no caps passed, every item shows. This test pins membership + order.
     for (const dev of [false, true]) {
       const groups = buildGroups(dev);
       expect(groups[0].label).toBeNull();
@@ -121,6 +122,7 @@ describe("buildGroups", () => {
         "Homepage",
         "Polls",
         "Users",
+        "Comments",
         "Settings",
         "Migrate",
         "Compress",
@@ -160,6 +162,7 @@ describe("buildGroups — capability filtering", () => {
     expect(labels).toContain("Reddit Sources");
     expect(labels).toContain("Homepage");
     expect(labels).toContain("Polls");
+    expect(labels).toContain("Comments");
     expect(labels).not.toContain("Users");
     expect(labels).not.toContain("Settings");
   });

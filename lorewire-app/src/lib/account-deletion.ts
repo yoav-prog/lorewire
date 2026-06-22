@@ -14,6 +14,11 @@
 // a deletion request — a privacy bug — so the list lives next to the function
 // that consumes it, not scattered across call sites.
 //
+// Tables whose user FK isn't literally `user_id` can't ride the
+// USER_DATA_TABLES loop and are handled explicitly in deleteUserCompletely:
+// comment_reports (reporter_user_id) is deleted, and the user's own comments
+// (author_user_id) are de-identified rather than deleted (see the step there).
+//
 // Plan: _plans/2026-06-22-facebook-login-and-data-deletion.md §B.
 
 import "server-only";
@@ -31,6 +36,9 @@ export const USER_DATA_TABLES = [
   "user_fav_categories",
   "user_recently_viewed",
   "user_continue",
+  // A like on a comment is a per-user satellite keyed by user_id, exactly like
+  // user_likes — remove it outright on erasure.
+  "comment_likes",
 ] as const;
 
 export interface DeleteResult {
@@ -74,7 +82,24 @@ export async function deleteUserCompletely(
     [userId],
   );
 
-  // 3. The identity row LAST (see crash-safety note above).
+  // 3. Comment data. A report the user filed is a private action — delete it
+  //    outright. The user's own comments carry downstream integrity (replies
+  //    point at them by parent_id), so mirror the poll_votes stance: keep the
+  //    row but strip every identifier (account link, guest name, the cookie
+  //    and rate-limit nonces) and flip status to 'deleted' so it leaves the
+  //    public thread. The body is de-identified public discourse, retained the
+  //    same way an anonymized vote is. (Prefer a hard wipe of authored
+  //    comments? Swap this UPDATE for a DELETE, but mind the orphaned replies.)
+  await run("DELETE FROM comment_reports WHERE reporter_user_id = ?", [userId]);
+  await run(
+    `UPDATE comments
+        SET author_user_id = NULL, guest_name = NULL, cookie_token = NULL,
+            ip_ua_hash = NULL, status = 'deleted'
+      WHERE author_user_id = ?`,
+    [userId],
+  );
+
+  // 4. The identity row LAST (see crash-safety note above).
   await run("DELETE FROM users WHERE id = ?", [userId]);
 
   console.info("[account-deletion wiped]", {

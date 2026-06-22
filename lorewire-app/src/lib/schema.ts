@@ -787,6 +787,56 @@ export const ADMIN_AUDIT_LOG: Table = {
   ],
 };
 
+// 2026-06-22 article comments + AI moderation
+// (_plans/2026-06-22-article-comments-ai-moderation.md). Reader comments on
+// articles, moderated by a two-tier pipeline (free OpenAI Moderation API then a
+// gpt-5-nano judge). `status` is a closed enum: 'published' (visible to all),
+// 'held' (awaiting human review, visible only to its own author),
+// 'rejected' (rule violation), 'quarantined' (the non-discretionary
+// CSAM/threats path — preserved, never silently deleted), 'deleted' (soft
+// delete by the author). `author_user_id` is NULL for guests, who carry a
+// `guest_name` only — we deliberately store no guest email (it bought nothing
+// but PII liability; abuse is handled by `ip_ua_hash` velocity + a CAPTCHA).
+// `cookie_token` is a 256-bit nonce (same primitive as poll_votes) that both
+// blocks double-likes and lets a guest see their own held/rejected comment.
+// `ip_ua_hash` is one-way and pruned on a retention sweep like poll_votes. The
+// stance/sentiment/topic_tag fields are the cheap editorial signal the judge
+// emits while it is already reading the comment (stored, not yet surfaced).
+// like_count / reply_count are denormalised so the public thread never runs
+// COUNT(*) per render.
+export const COMMENTS: Table = {
+  name: "comments",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "article_id", type: "TEXT" },
+    // NULL = top-level. A non-null parent_id points at another comment on the
+    // same article. v1 is one level deep; the write path refuses a reply whose
+    // parent already has a parent.
+    { name: "parent_id", type: "TEXT" },
+    { name: "author_user_id", type: "TEXT" },
+    { name: "guest_name", type: "TEXT" },
+    { name: "body", type: "TEXT" },
+    { name: "lang", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    // How the current status was reached: 'tier1' (Moderation API),
+    // 'tier2' / 'tier2_lowconf' (the judge), 'human' (admin), 'timeout'
+    // (failed closed to held). Audited in full in comment_moderation_events.
+    { name: "moderation_source", type: "TEXT" },
+    { name: "moderation_category", type: "TEXT" },
+    { name: "moderation_reason", type: "TEXT" },
+    { name: "moderation_confidence", type: "REAL" },
+    { name: "stance", type: "TEXT" },
+    { name: "sentiment", type: "TEXT" },
+    { name: "topic_tag", type: "TEXT" },
+    { name: "like_count", type: "INTEGER" },
+    { name: "reply_count", type: "INTEGER" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "ip_ua_hash", type: "TEXT" },
+    { name: "edited_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-22 admin user-management Phase 5. Email invites for new staff. The
 // raw one-time token lives ONLY in the emailed link; we store its SHA-256 hash
 // (same reasoning as magic_link_tokens / passwords — a DB leak can't be used to
@@ -809,6 +859,21 @@ export const STAFF_INVITES: Table = {
   ],
 };
 
+// One row per like. Anonymous likes are keyed by cookie_token, signed-in by
+// user_id; the two partial unique indexes in POST_TABLE_DDL are the
+// anti-double-like primitives (mirrors poll_votes). The like count is kept
+// denormalised on comments.like_count and reconciled from this log.
+export const COMMENT_LIKES: Table = {
+  name: "comment_likes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "user_id", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-22 admin user-management Phase 8. Per-source login throttle —
 // brute-force defense for the admin login. `key` is namespaced + hashed by the
 // caller (e.g. "admin-login:<ip hash>") so no raw IP is stored. attempts +
@@ -822,6 +887,40 @@ export const LOGIN_ATTEMPTS: Table = {
     { name: "attempts", type: "INTEGER" },
     { name: "first_at", type: "TEXT" },
     { name: "locked_until", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Reader reports. A report routes its comment back into the human queue.
+// `status` is 'open' | 'actioned' | 'dismissed'.
+export const COMMENT_REPORTS: Table = {
+  name: "comment_reports",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "reporter_user_id", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Append-only moderation audit trail. Every status change (AI or human) writes
+// a row. This is the DSA statement-of-reasons record and the basis for the
+// appeal flow; it is never updated or deleted. `actor` is 'ai' or an admin
+// user id.
+export const COMMENT_MODERATION_EVENTS: Table = {
+  name: "comment_moderation_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "actor", type: "TEXT" },
+    { name: "from_status", type: "TEXT" },
+    { name: "to_status", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
   ],
 };
 
@@ -857,6 +956,10 @@ export const TABLES: Table[] = [
   ADMIN_AUDIT_LOG,
   STAFF_INVITES,
   LOGIN_ATTEMPTS,
+  COMMENTS,
+  COMMENT_LIKES,
+  COMMENT_REPORTS,
+  COMMENT_MODERATION_EVENTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -1067,4 +1170,43 @@ export const POST_TABLE_DDL: string[] = [
     "ON staff_invites(token_hash)",
   "CREATE INDEX IF NOT EXISTS idx_staff_invites_created " +
     "ON staff_invites(created_at DESC)",
+  // 2026-06-22 article comments. The public thread read filters by
+  // (article_id, status='published') and paginates by created_at — keyset,
+  // never OFFSET — so the leading columns match the hot path.
+  "CREATE INDEX IF NOT EXISTS idx_comments_article_thread " +
+    "ON comments(article_id, status, created_at)",
+  // Reply fan-out under a top-level comment.
+  "CREATE INDEX IF NOT EXISTS idx_comments_parent " +
+    "ON comments(parent_id) WHERE parent_id IS NOT NULL",
+  // Admin review queue reads held/quarantined ordered oldest-first.
+  "CREATE INDEX IF NOT EXISTS idx_comments_status_created " +
+    "ON comments(status, created_at)",
+  // DB-backed guest velocity limit: count this bucket's recent comments in a
+  // window. In-memory per-instance limiting (poll-rate-limit.ts) is too weak
+  // for guest abuse on serverless, so the write path counts rows here instead.
+  "CREATE INDEX IF NOT EXISTS idx_comments_ipua_created " +
+    "ON comments(ip_ua_hash, created_at)",
+  // "My own comments" (lets a guest see their held/rejected comment) + the
+  // per-cookie velocity bucket.
+  "CREATE INDEX IF NOT EXISTS idx_comments_cookie_token " +
+    "ON comments(cookie_token)",
+  // Signed-in user's own comments + per-user velocity bucket.
+  "CREATE INDEX IF NOT EXISTS idx_comments_author " +
+    "ON comments(author_user_id) WHERE author_user_id IS NOT NULL",
+  // Anti-double-like primitives, mirroring poll_votes: cookie uniqueness is
+  // the always-on primitive; the user_id partial adds a second key for
+  // signed-in likes across devices. lib/comments.ts:toggleLike targets these
+  // via lookup-then-write, so the shape works identically on SQLite + Postgres.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_cookie " +
+    "ON comment_likes(comment_id, cookie_token)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_user " +
+    "ON comment_likes(comment_id, user_id) WHERE user_id IS NOT NULL",
+  // Open-reports queue (admin) + per-comment report lookup.
+  "CREATE INDEX IF NOT EXISTS idx_comment_reports_status " +
+    "ON comment_reports(status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_reports_comment " +
+    "ON comment_reports(comment_id)",
+  // Per-comment audit timeline (the statement-of-reasons / appeal record).
+  "CREATE INDEX IF NOT EXISTS idx_comment_moderation_events_comment " +
+    "ON comment_moderation_events(comment_id, created_at)",
 ];

@@ -50,6 +50,11 @@ async function seedUser(id: string): Promise<void> {
       VALUES (?, ?, 's1', 1000, NULL, ?)`,
     [randomUUID(), id, now],
   );
+  await run(
+    `INSERT INTO comment_likes (id, comment_id, user_id, cookie_token, created_at)
+      VALUES (?, 'c1', ?, NULL, ?)`,
+    [randomUUID(), id, now],
+  );
 }
 
 async function seedVote(
@@ -82,6 +87,8 @@ async function cleanup(): Promise<void> {
     }
     await run("DELETE FROM poll_votes WHERE user_id = ?", [id]);
     await run("DELETE FROM poll_votes WHERE poll_id IN ('pv_v', 'pv_b')", []);
+    await run("DELETE FROM comments WHERE article_id = 'a1'", []);
+    await run("DELETE FROM comment_reports WHERE comment_id = 'c-other'", []);
     await run("DELETE FROM users WHERE id = ?", [id]);
   }
 }
@@ -149,6 +156,53 @@ describe("deleteUserCompletely", () => {
     const second = await deleteUserCompletely(VICTIM);
     expect(first.deletedUser).toBe(true);
     expect(second.deletedUser).toBe(false);
+  });
+
+  it("erases comment data: reports deleted, authored comments de-identified", async () => {
+    await seedUser(VICTIM);
+    const now = new Date().toISOString();
+    const commentId = randomUUID();
+    await run(
+      `INSERT INTO comments
+          (id, article_id, parent_id, author_user_id, guest_name, body, lang,
+           status, cookie_token, ip_ua_hash, created_at)
+        VALUES (?, 'a1', NULL, ?, NULL, 'my words', 'en', 'published', 'nonce', 'iphash', ?)`,
+      [commentId, VICTIM, now],
+    );
+    const reportId = randomUUID();
+    await run(
+      `INSERT INTO comment_reports
+          (id, comment_id, reporter_user_id, cookie_token, reason, status, created_at)
+        VALUES (?, 'c-other', ?, NULL, 'spam', 'open', ?)`,
+      [reportId, VICTIM, now],
+    );
+
+    await deleteUserCompletely(VICTIM);
+
+    // The report (a private action) is gone.
+    expect(
+      await one("SELECT id FROM comment_reports WHERE id = ?", [reportId]),
+    ).toBeNull();
+
+    // The authored comment survives for thread integrity, fully de-identified
+    // and pulled from the public ('published') thread.
+    const c = await one<{
+      author_user_id: string | null;
+      guest_name: string | null;
+      cookie_token: string | null;
+      ip_ua_hash: string | null;
+      status: string;
+    }>(
+      `SELECT author_user_id, guest_name, cookie_token, ip_ua_hash, status
+         FROM comments WHERE id = ?`,
+      [commentId],
+    );
+    expect(c).not.toBeNull();
+    expect(c?.author_user_id).toBeNull();
+    expect(c?.guest_name).toBeNull();
+    expect(c?.cookie_token).toBeNull();
+    expect(c?.ip_ua_hash).toBeNull();
+    expect(c?.status).toBe("deleted");
   });
 
   it("rejects an empty user id", async () => {
