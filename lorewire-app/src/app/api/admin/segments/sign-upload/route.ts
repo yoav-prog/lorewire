@@ -116,5 +116,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     segId,
     sessionUri: session.sessionUri,
     sourceUrl: session.publicUrl,
+    // True when sessionUri is an R2 presigned URL — the browser PUTs the whole
+    // file in one request rather than chunking (GCS resumable).
+    single: session.single,
   });
 }

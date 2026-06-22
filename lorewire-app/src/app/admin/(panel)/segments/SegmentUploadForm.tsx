@@ -66,6 +66,9 @@ interface SignUploadResponse {
   segId: string;
   sessionUri: string;
   sourceUrl: string;
+  // True when sessionUri is an R2 presigned URL (single PUT); false for a GCS
+  // resumable session (chunked PUT). The server decides based on the cutover.
+  single: boolean;
 }
 
 interface ErrorResponse {
@@ -267,9 +270,15 @@ export function SegmentUploadForm({ kind, singular, uploadMode }: Props) {
     // so we always call finalize, which HEAD-checks GCS authoritatively.
     let putError: Error | null = null;
     try {
-      await putChunks(file, signed.sessionUri, contentType, (sent) => {
+      const onProgress = (sent: number) =>
         setProgressPct(Math.round((sent / file.size) * 100));
-      });
+      if (signed.single) {
+        // R2 presigned single PUT (no resumable session).
+        await putSingle(file, signed.sessionUri, contentType, onProgress);
+      } else {
+        // GCS resumable, chunked.
+        await putChunks(file, signed.sessionUri, contentType, onProgress);
+      }
       console.info(`[segment upload] PUT complete segId=${signed.segId}`);
     } catch (e) {
       putError = e instanceof Error ? e : new Error(String(e));
@@ -489,6 +498,28 @@ async function finalize(
     throw new Error(data.error || `HTTP ${resp.status}`);
   }
   return data;
+}
+
+// Single PUT for the R2 presigned-URL path (R2 has no resumable session). The
+// presigned URL carries auth in its query string; we PUT the whole file in one
+// request. Like the GCS path, the browser may not be able to read the
+// cross-origin PUT response, so finalize HEAD-checks the object regardless.
+async function putSingle(
+  file: File,
+  url: string,
+  contentType: string,
+  onProgress: (sentBytes: number) => void,
+): Promise<void> {
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": contentType },
+    body: file,
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  onProgress(file.size);
 }
 
 // PUT the file to `sessionUri` in `CHUNK_BYTES`-sized chunks. Each chunk

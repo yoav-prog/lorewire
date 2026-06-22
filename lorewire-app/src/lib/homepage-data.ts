@@ -14,6 +14,7 @@
 
 import "server-only";
 import { all } from "@/lib/db";
+import { resolveMediaUrl } from "@/lib/media-url";
 import { getSetting } from "@/lib/repo";
 import {
   HOMEPAGE_SURFACES,
@@ -59,7 +60,14 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
     count: rows.length,
     limit: safeLimit,
   });
-  return { ok: true, stories: rows };
+  // Resolve hero/video onto the delivery base (lib/media-url); passthrough when
+  // MEDIA_PUBLIC_BASE is unset.
+  const stories = rows.map((s) => ({
+    ...s,
+    hero_image: resolveMediaUrl(s.hero_image),
+    video_url: resolveMediaUrl(s.video_url),
+  }));
+  return { ok: true, stories };
 }
 
 // ─── curation ───────────────────────────────────────────────────────────────
