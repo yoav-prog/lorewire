@@ -121,6 +121,15 @@ const STATIC_GROUPS: SidebarGroup[] = [
         activePrefixes: ["/admin/migrate"],
         capability: "settings.manage",
       },
+      {
+        // One-time media compression tool: re-encode the existing images the
+        // DB references to WebP (what fixes slow media after the R2 cutover).
+        // Sibling of Migrate. Plan: _plans/2026-06-22-media-compression.md.
+        href: "/admin/compress",
+        label: "Compress",
+        activePrefixes: ["/admin/compress"],
+        capability: "settings.manage",
+      },
     ],
   },
 ];
