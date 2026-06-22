@@ -5,6 +5,7 @@ import {
   saveVoiceoverAction,
   previewVoiceoverConfigAction,
 } from "@/app/admin/actions";
+import VoiceCombobox from "./VoiceCombobox";
 
 // Local prop types — the source modules (voice-library, repo) are server-only,
 // so we can't import their types into a client component. These are structural
@@ -101,18 +102,10 @@ export default function VoiceoverEditor({
             ))}
           </select>
         </label>
-        <label className="grid gap-1">
+        <div className="grid gap-1">
           <span className={LABEL}>Voice</span>
-          <select name="voice_id" defaultValue={voiceId} className={FIELD}>
-            {voices.map((v) => (
-              <option key={v.voice_id} value={v.voice_id}>
-                {v.name}
-                {v.gender ? ` (${v.gender})` : ""}
-                {v.accent ? ` — ${v.accent}` : ""}
-              </option>
-            ))}
-          </select>
-        </label>
+          <VoiceCombobox name="voice_id" voices={voices} defaultValue={voiceId} />
+        </div>
         <label className="grid gap-1">
           <span className={LABEL}>Speaking rate (Chirp only, 0.25–2.0)</span>
           <input
