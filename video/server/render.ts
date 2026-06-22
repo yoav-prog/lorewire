@@ -167,6 +167,10 @@ export async function renderAndUploadStory(
     composition,
     serveUrl,
     codec: "h264",
+    // CRF 23 (high-quality web standard) instead of Remotion's default 18 —
+    // ~40% smaller, quality still excellent for the flat doodle art.
+    // See _plans/2026-06-22-media-compression.md.
+    crf: 23,
     outputLocation: tmpPath,
     inputProps: inputProps as Record<string, unknown>,
     chromiumOptions: {
