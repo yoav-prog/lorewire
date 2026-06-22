@@ -1,10 +1,11 @@
 "use client";
 
-// Persisted viewer preferences for the Wires feed: the autoplay master toggle
-// and the mute state. Both live in localStorage and are consent-gated the same
-// way the engagement stores are — a visitor who declined persistence still gets
-// the toggles in-session, but nothing is written to disk. Defaults: autoplay
-// ON, muted ON (muted is required for unattended autoplay to be allowed at all).
+// Persisted viewer preferences for the Wires feed: the autoplay master toggle,
+// the mute state, and the end-of-wire behavior (advance to the next wire vs.
+// loop the current one). All live in localStorage and are consent-gated the
+// same way the engagement stores are — a visitor who declined persistence still
+// gets the toggles in-session, but nothing is written to disk. Defaults:
+// autoplay ON, muted ON (required for unattended autoplay), advance ON.
 //
 // Implemented with useSyncExternalStore (the same pattern as engagement-store)
 // so SSR and the first client paint both see the defaults — the stored value
@@ -14,6 +15,7 @@ import { useSyncExternalStore } from "react";
 
 const AUTOPLAY_KEY = "lw.wires.autoplay.v1";
 const MUTED_KEY = "lw.wires.muted.v1";
+const ADVANCE_KEY = "lw.wires.advance.v1";
 
 type Listener = () => void;
 
@@ -96,14 +98,20 @@ function createBoolStore(storageKey: string, fallback: boolean): BoolStore {
 
 const autoplayStore = createBoolStore(AUTOPLAY_KEY, true);
 const mutedStore = createBoolStore(MUTED_KEY, true);
+// advance = true → move to the next wire when one ends; false → loop it.
+const advanceStore = createBoolStore(ADVANCE_KEY, true);
 
 export interface WirePrefs {
   autoplay: boolean;
   muted: boolean;
+  /** End-of-wire behavior: true = advance to the next wire, false = loop. */
+  advance: boolean;
   setAutoplay: (v: boolean) => void;
   toggleAutoplay: () => void;
   setMuted: (v: boolean) => void;
   toggleMuted: () => void;
+  setAdvance: (v: boolean) => void;
+  toggleAdvance: () => void;
 }
 
 export function useWirePrefs(): WirePrefs {
@@ -117,12 +125,20 @@ export function useWirePrefs(): WirePrefs {
     mutedStore.getSnapshot,
     mutedStore.getServerSnapshot,
   );
+  const advance = useSyncExternalStore(
+    advanceStore.subscribe,
+    advanceStore.getSnapshot,
+    advanceStore.getServerSnapshot,
+  );
   return {
     autoplay,
     muted,
+    advance,
     setAutoplay: autoplayStore.set,
     toggleAutoplay: () => autoplayStore.set(!autoplayStore.getSnapshot()),
     setMuted: mutedStore.set,
     toggleMuted: () => mutedStore.set(!mutedStore.getSnapshot()),
+    setAdvance: advanceStore.set,
+    toggleAdvance: () => advanceStore.set(!advanceStore.getSnapshot()),
   };
 }

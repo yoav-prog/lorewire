@@ -86,6 +86,31 @@ const AutoplayGlyph = ({ on, size = 20 }: { on: boolean; size?: number }) => (
     {!on && <path d="M4 4 20 20" strokeWidth={2.2} />}
   </svg>
 );
+const ShuffleIcon = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22" />
+    <path d="m18 2 4 4-4 4" />
+    <path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2" />
+    <path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8" />
+    <path d="m18 14 4 4-4 4" />
+  </svg>
+);
+// End-of-wire mode glyphs: down-arrow-to-bar = advance to next; repeat = loop.
+const AdvanceGlyph = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 4v10" />
+    <path d="m7 11 5 5 5-5" />
+    <path d="M5 20h14" />
+  </svg>
+);
+const LoopGlyph = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="m17 2 4 4-4 4" />
+    <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+    <path d="m7 22-4-4 4-4" />
+    <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+  </svg>
+);
 const PlayGlyph = ({ size = 30 }: { size?: number }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z" /></svg>
 );
@@ -116,6 +141,8 @@ export interface WireCardProps {
   muted: boolean;
   /** Feed-level autoplay master toggle. When false, a wire waits for a tap. */
   autoplay: boolean;
+  /** End-of-wire behavior: true = advance to the next wire, false = loop it. */
+  advance: boolean;
   /** prefers-reduced-motion — suppress autoplay, require an explicit tap. */
   reducedMotion: boolean;
   /** A modal (Title sheet) is open over the feed — keep playback paused. */
@@ -128,6 +155,10 @@ export interface WireCardProps {
   insetBottom?: number;
   onToggleMute: () => void;
   onToggleAutoplay: () => void;
+  /** Toggle end-of-wire behavior between advance and loop. */
+  onToggleAdvance: () => void;
+  /** Shuffle the feed order (feed-level). When omitted, the control hides. */
+  onShuffle?: () => void;
   onOpenInfo: OpenFn;
   /** Hint visibility is owned by the feed so it shows once, not per card. */
   showSoundHint: boolean;
@@ -142,6 +173,10 @@ export interface WireCardProps {
    *  feed throttles + thresholds this for the Continue Watching store —
    *  WireCard just forwards the raw event so playback paths stay local. */
   onTimeUpdate?: (currentTime: number, duration: number) => void;
+  /** Fired when the video finishes (only in autoplay mode, where it doesn't
+   *  loop). Returns true if the feed advanced to the next wire; false means
+   *  there was no next one, so the card replays in place. */
+  onWireEnded?: () => boolean;
 }
 
 export default function WireCard({
@@ -150,12 +185,15 @@ export default function WireCard({
   mounted,
   muted,
   autoplay,
+  advance,
   reducedMotion,
   paused,
   eager = false,
   insetBottom = 16,
   onToggleMute,
   onToggleAutoplay,
+  onToggleAdvance,
+  onShuffle,
   onOpenInfo,
   showSoundHint,
   onDismissSoundHint,
@@ -165,6 +203,7 @@ export default function WireCard({
   onToggleLike,
   onToggleSave,
   onTimeUpdate,
+  onWireEnded,
 }: WireCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [posterOk, setPosterOk] = useState(true);
@@ -462,7 +501,7 @@ export default function WireCard({
             src={videoUrl}
             poster={poster ?? undefined}
             muted={muted}
-            loop
+            loop={!advance}
             playsInline
             preload={eager ? "auto" : "metadata"}
             className="absolute inset-0 h-full w-full touch-pan-y object-contain"
@@ -481,6 +520,24 @@ export default function WireCard({
               if (shouldPlay) tryPlay();
             }}
             onPlay={() => setBlocked(false)}
+            onEnded={() => {
+              // In autoplay mode the video doesn't loop, so this fires once a
+              // wire finishes. Ask the feed to advance; if there's no next wire
+              // (end of the loaded list), replay this one in place so the frame
+              // never dead-stops.
+              const advanced = onWireEnded ? onWireEnded() : false;
+              if (!advanced) {
+                const v = videoRef.current;
+                if (v) {
+                  try {
+                    v.currentTime = 0;
+                  } catch {
+                    /* not seekable — harmless */
+                  }
+                  tryPlay();
+                }
+              }
+            }}
             onTimeUpdate={(e) => {
               const v = e.currentTarget;
               if (Number.isFinite(v.duration) && v.duration > 0) {
@@ -533,6 +590,20 @@ export default function WireCard({
             )}
           </div>
           <div className="flex items-center gap-2">
+            {onShuffle && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onShuffle();
+                }}
+                aria-label="Shuffle wires"
+                title="Shuffle"
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
+                style={{ background: "rgba(0,0,0,.4)" }}
+              >
+                <ShuffleIcon size={18} />
+              </button>
+            )}
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -545,6 +616,21 @@ export default function WireCard({
               style={{ background: "rgba(0,0,0,.4)", opacity: autoplay ? 1 : 0.7 }}
             >
               <AutoplayGlyph on={autoplay} size={19} />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleAdvance();
+              }}
+              aria-label={
+                advance ? "Auto-advance on; switch to loop" : "Loop on; switch to auto-advance"
+              }
+              aria-pressed={advance}
+              title={advance ? "Auto-advance" : "Loop"}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
+              style={{ background: "rgba(0,0,0,.4)" }}
+            >
+              {advance ? <AdvanceGlyph size={18} /> : <LoopGlyph size={18} />}
             </button>
             <button
               onClick={(e) => {

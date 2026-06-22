@@ -8,7 +8,7 @@
 // 9:16 frame; the immediate neighbours are mounted and slid in/out for an
 // instant next-step and to preload.
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WireCard from "@/components/wires/WireCard";
 import { useWiresData } from "@/components/wires/useWiresData";
 import { useWireLikes } from "@/components/wires/useWireLikes";
@@ -59,12 +59,28 @@ export default function WiresDesktop({
   const [soundHintShown, setSoundHintShown] = useState(true);
   const reducedMotion = usePrefersReducedMotion();
   // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
-  const { autoplay, muted, toggleAutoplay, toggleMuted } = useWirePrefs();
+  const { autoplay, muted, advance, toggleAutoplay, toggleMuted, toggleAdvance } =
+    useWirePrefs();
   const { isSaved, toggle: toggleSave } = useSavedStories();
   const { seed: seedLikes, toggle: toggleLike, get: getLike } = useWireLikes();
   useEffect(() => {
     seedLikes(shorts);
   }, [shorts, seedLikes]);
+
+  // Shuffle: a stored permutation of story ids (null = natural order). New
+  // pages append in server order after the shuffled ids.
+  const [order, setOrder] = useState<string[] | null>(null);
+  const displayShorts = useMemo(() => {
+    if (!order) return shorts;
+    const byId = new Map(shorts.map((s) => [s.id, s]));
+    const seen = new Set(order);
+    const ordered = order.flatMap((id) => {
+      const s = byId.get(id);
+      return s ? [s] : [];
+    });
+    const extras = shorts.filter((s) => !seen.has(s.id));
+    return [...ordered, ...extras];
+  }, [order, shorts]);
 
   // Refs so the stable key/wheel handlers read fresh values without re-binding.
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -77,8 +93,8 @@ export default function WiresDesktop({
     activeIdxRef.current = activeIdx;
   }, [activeIdx]);
   useEffect(() => {
-    shortsRef.current = shorts;
-  }, [shorts]);
+    shortsRef.current = displayShorts;
+  }, [displayShorts]);
   useEffect(() => {
     loadMoreRef.current = loadMore;
   }, [loadMore]);
@@ -104,7 +120,7 @@ export default function WiresDesktop({
   if (!appliedInitial && !loading && shorts.length > 0) {
     setAppliedInitial(true);
     if (initialStoryId) {
-      const idx = shorts.findIndex((s) => s.id === initialStoryId);
+      const idx = displayShorts.findIndex((s) => s.id === initialStoryId);
       if (idx > 0) setActiveIdx(idx);
     }
   }
@@ -148,6 +164,30 @@ export default function WiresDesktop({
 
   const dismissSoundHint = useCallback(() => setSoundHintShown(false), []);
 
+  // Shuffle the loaded wires into a random order and jump to the top.
+  const onShuffle = useCallback(() => {
+    const ids = shorts.map((s) => s.id);
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    setOrder(ids);
+    activeIdxRef.current = 0;
+    setActiveIdx(0);
+  }, [shorts]);
+
+  // Auto-advance to the next wire when one ends; false at the tail so the card
+  // replays in place (and we prefetch the next page).
+  const onWireEnded = useCallback((): boolean => {
+    const list = shortsRef.current;
+    if (activeIdxRef.current < list.length - 1) {
+      go(1);
+      return true;
+    }
+    loadMoreRef.current();
+    return false;
+  }, [go]);
+
   // ── States ────────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -172,9 +212,9 @@ export default function WiresDesktop({
   }
 
   const atTop = activeIdx <= 0;
-  const atBottom = activeIdx >= shorts.length - 1;
+  const atBottom = activeIdx >= displayShorts.length - 1;
   const lo = Math.max(0, activeIdx - MOUNT_RADIUS);
-  const hi = Math.min(shorts.length - 1, activeIdx + MOUNT_RADIUS);
+  const hi = Math.min(displayShorts.length - 1, activeIdx + MOUNT_RADIUS);
   const windowed: number[] = [];
   for (let i = lo; i <= hi; i++) windowed.push(i);
 
@@ -190,7 +230,7 @@ export default function WiresDesktop({
       <div className="relative aspect-[9/18] h-[calc(100vh-96px)] max-h-[940px] overflow-hidden rounded-2xl">
         {windowed.map((i) => (
           <div
-            key={shorts[i].id}
+            key={displayShorts[i].id}
             className="absolute inset-0"
             style={{
               transform: `translateY(${(i - activeIdx) * 100}%)`,
@@ -200,25 +240,29 @@ export default function WiresDesktop({
             }}
           >
             <WireCard
-              short={shorts[i]}
+              short={displayShorts[i]}
               active={i === activeIdx}
               mounted
               eager={i === activeIdx || i === activeIdx + 1}
               insetBottom={18}
               muted={muted}
               autoplay={autoplay}
+              advance={advance}
               reducedMotion={reducedMotion}
               paused={paused}
               onToggleMute={toggleMuted}
               onToggleAutoplay={toggleAutoplay}
+              onToggleAdvance={toggleAdvance}
+              onShuffle={onShuffle}
               onOpenInfo={onOpenInfo}
               showSoundHint={i === activeIdx && soundHintShown}
               onDismissSoundHint={dismissSoundHint}
-              liked={getLike(shorts[i].id)?.liked ?? shorts[i].viewer_liked}
-              likeCount={getLike(shorts[i].id)?.count ?? shorts[i].like_count}
-              saved={isSaved(shorts[i].id)}
+              liked={getLike(displayShorts[i].id)?.liked ?? displayShorts[i].viewer_liked}
+              likeCount={getLike(displayShorts[i].id)?.count ?? displayShorts[i].like_count}
+              saved={isSaved(displayShorts[i].id)}
               onToggleLike={toggleLike}
               onToggleSave={toggleSave}
+              onWireEnded={onWireEnded}
             />
           </div>
         ))}
