@@ -721,6 +721,108 @@ export async function deleteSegment(id: string): Promise<void> {
   await run("DELETE FROM video_segments WHERE id = ?", [id]);
 }
 
+// --- voiceovers (named TTS presets) -----------------------------------------
+// Mirrors the `voiceovers` table in pipeline/store.py. The shorts pipeline
+// resolves a preset per category (the `voiceovers.category.<Cat>` setting) then
+// the global default (`voiceovers.default`); see pipeline/voiceovers.py.
+
+export interface VoiceoverRow {
+  id: string;
+  name: string;
+  provider: string;
+  voice_id: string;
+  style_prompt: string | null;
+  speaking_rate: number | null;
+  hook_pause: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+const VOICEOVER_COLS =
+  "id, name, provider, voice_id, style_prompt, speaking_rate, hook_pause, " +
+  "created_at, updated_at";
+
+export async function listVoiceovers(): Promise<VoiceoverRow[]> {
+  return all<VoiceoverRow>(
+    `SELECT ${VOICEOVER_COLS} FROM voiceovers ORDER BY name`,
+    [],
+  );
+}
+
+export async function getVoiceover(id: string): Promise<VoiceoverRow | null> {
+  if (!id) return null;
+  return one<VoiceoverRow>(
+    `SELECT ${VOICEOVER_COLS} FROM voiceovers WHERE id = ?`,
+    [id],
+  );
+}
+
+export async function upsertVoiceover(v: {
+  id: string;
+  name: string;
+  provider: string;
+  voice_id: string;
+  style_prompt?: string | null;
+  speaking_rate?: number | null;
+  hook_pause?: number;
+}): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    `INSERT INTO voiceovers (id, name, provider, voice_id, style_prompt, speaking_rate, hook_pause, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       provider = excluded.provider,
+       voice_id = excluded.voice_id,
+       style_prompt = excluded.style_prompt,
+       speaking_rate = excluded.speaking_rate,
+       hook_pause = excluded.hook_pause,
+       updated_at = excluded.updated_at`,
+    [
+      v.id,
+      v.name,
+      v.provider,
+      v.voice_id,
+      v.style_prompt ?? null,
+      v.speaking_rate ?? null,
+      v.hook_pause ?? 1,
+      now,
+      now,
+    ],
+  );
+}
+
+export async function deleteVoiceover(id: string): Promise<void> {
+  await run("DELETE FROM voiceovers WHERE id = ?", [id]);
+}
+
+// Voiceover SELECTION lives in settings, mirroring the shorts.auto.category.*
+// pattern: `voiceovers.default` is the global pick; `voiceovers.category.<Cat>`
+// overrides it for a category ("" / missing = inherit the default).
+export async function getDefaultVoiceoverId(): Promise<string> {
+  return (await getSetting("voiceovers.default")) ?? "";
+}
+
+export async function setDefaultVoiceoverId(id: string): Promise<void> {
+  await setSetting("voiceovers.default", id);
+}
+
+export async function getCategoryVoiceoverIds(): Promise<Record<string, string>> {
+  const raw = await getSettingsByPrefix("voiceovers.category.");
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    out[k.replace("voiceovers.category.", "")] = v;
+  }
+  return out;
+}
+
+export async function setCategoryVoiceoverId(
+  category: string,
+  id: string,
+): Promise<void> {
+  await setSetting(`voiceovers.category.${category}`, id);
+}
+
 // Per-story override write. Allowed values for `pick`:
 //   "inherit" -> clear both the pinned id and the skip flag
 //   "skip"    -> set skip_<kind> = 1, clear pinned id

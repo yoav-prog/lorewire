@@ -88,6 +88,7 @@ const STATIC_GROUPS: SidebarGroup[] = [
         activePrefixes: [
           "/admin/settings",
           "/admin/models",
+          "/admin/voiceovers",
           "/admin/templates",
           "/admin/segments",
         ],

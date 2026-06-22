@@ -126,6 +126,25 @@ export const VOICE_RENDERS: Table = {
   ],
 };
 
+// Named voiceover presets the admin manages (model + voice + style prompt +
+// pace + hook pause). Mirrors `voiceovers` in pipeline/store.py. The shorts
+// pipeline resolves one per category -> global default -> code fallback (see
+// pipeline/voiceovers.py). speaking_rate is a no-op on the Gemini path.
+export const VOICEOVERS: Table = {
+  name: "voiceovers",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "name", type: "TEXT" },
+    { name: "provider", type: "TEXT" },
+    { name: "voice_id", type: "TEXT" },
+    { name: "style_prompt", type: "TEXT" },
+    { name: "speaking_rate", type: "REAL" },
+    { name: "hook_pause", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
 export const SETTINGS: Table = {
   name: "settings",
   columns: [
@@ -727,6 +746,7 @@ export const TABLES: Table[] = [
   STORY_JOBS,
   STORY_JOB_EVENTS,
   VOICE_RENDERS,
+  VOICEOVERS,
   HOMEPAGE_CURATION,
   POLLS,
   POLL_VOTES,
@@ -776,6 +796,9 @@ export const POST_TABLE_DDL: string[] = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_renders_one_active " +
     "ON voice_renders(story_id, text_hash, voice_provider, voice_id) " +
     "WHERE status IN ('queued', 'processing')",
+  // 2026-06-22 voiceover presets: names are the admin-facing handle, so keep
+  // them unique (mirror of idx_voiceovers_name in pipeline/store.py).
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_voiceovers_name ON voiceovers(name)",
   // 2026-06-15 article shorts: pipeline/store.py enqueue_short_render does
   // INSERT ... ON CONFLICT (story_id, config_hash). createTableSql emits no
   // UNIQUE, so when the TS app creates short_renders first on a fresh prod DB

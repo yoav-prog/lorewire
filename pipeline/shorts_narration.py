@@ -55,17 +55,27 @@ def tone_to_voice_mood(tone_knob: str | None) -> str:
     )
 
 
-# --- Voice codification (locked in code, not DB settings) --------------------
-# The house shorts voice + delivery, pinned here so an admin's global
-# `voice.google_voice_name` setting can't silently change the sound of every
-# short. The full-generation path (shorts_render) passes these straight to
-# narration.render_narration; the editor's Lane B re-render still lets an admin
-# override the voice per-short. Chirp 3 HD only — the rate + pause map onto its
-# native speakingRate + markup controls (see pipeline/voice._build_chirp_payload).
-SHORTS_VOICE_PROVIDER = "google/chirp3-hd"
-SHORTS_VOICE_NAME = "en-US-Chirp3-HD-Autonoe"  # warm, even-paced female narrator
-SHORTS_SPEAKING_RATE = 1.2   # 20% faster than natural — punchier, retention-first
-SHORTS_HOOK_PAUSE = True     # a [pause long] beat after the cold-open hook lands
+# --- Voice codification (code fallback for the shorts narrator) --------------
+# These are the CODE FALLBACK only. The live shorts voice is whatever the admin
+# selects in /admin/voiceovers (a per-category preset, then the global default);
+# the pipeline resolves that and only drops to these constants when no preset is
+# set (see pipeline/voiceovers.resolve_voiceover).
+#
+# Default is Gemini-2.5-flash-TTS (GA): unlike Chirp 3 HD's fixed character, the
+# delivery is steered by SHORTS_STYLE_PROMPT, which is how we get a lively
+# young-creator read instead of a flat narrator. On the Gemini path the pace is
+# carried by the prompt (Gemini ignores Chirp's speakingRate) and the hook pause
+# uses Gemini's `[long pause]` markup; SHORTS_SPEAKING_RATE only takes effect if a
+# preset uses a Chirp 3 HD provider.
+SHORTS_VOICE_PROVIDER = "google/gemini-25-flash-tts"
+SHORTS_VOICE_NAME = "en-US-Chirp3-HD-Leda"  # youthful female; Gemini reads the bare "Leda"
+SHORTS_SPEAKING_RATE = 1.2   # Chirp-only pace knob; no-op on the Gemini path
+SHORTS_HOOK_PAUSE = True      # a beat after the cold-open hook before the rewind
+SHORTS_STYLE_PROMPT = (
+    "You are a lively young social-media creator talking straight to camera. "
+    "Upbeat, expressive, fast-paced and casual, with natural emphasis and warmth. "
+    "Hook the viewer in the first second. Sound like a real person, not a narrator."
+)
 
 
 @dataclass(frozen=True)

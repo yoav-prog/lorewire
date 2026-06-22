@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from pipeline import gcs, narration, shorts_narration, store, video, voice
+from pipeline import gcs, narration, store, video, voice, voiceovers
 
 # Shared with shorts_render.SHORT_ID_SUFFIX so the staged files end up in the
 # same GCS prefix that the original short uses. Keeps Cloud Run's render
@@ -118,9 +118,15 @@ def build_short_props_lane_b(
         except Exception:
             pass
 
+    # Resolve the category voiceover so an editor re-render inherits the same
+    # delivery (pace, hook pause, style prompt) as the original short. The
+    # editor's explicit voice pick (lane_inputs.voice), if any, still wins for
+    # the provider + voice itself; otherwise it falls back to the preset's voice.
+    story = store.fetch_story(story_id)
+    voiceover = voiceovers.resolve_voiceover(story.get("category") if story else None)
     voice_override = inputs.get("voice") or {}
-    provider = voice_override.get("provider") or None
-    voice_id = voice_override.get("voice_id") or None
+    provider = voice_override.get("provider") or voiceover["provider"]
+    voice_id = voice_override.get("voice_id") or voiceover["voice_id"]
 
     if remote:
         work_dir = Path(tempfile.mkdtemp(prefix=f"{safe_id}-laneB-"))
@@ -129,21 +135,18 @@ def build_short_props_lane_b(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = work_dir / "voice.mp3"
-    # `narration.render_narration` applies the normalize -> TTS ->
-    # script-graft pipeline so Lane B's voice swap inherits the same
-    # caption-accuracy fix as the baseline render.
-    # Same codified delivery as the full-generation path (1.2x pace + hook
-    # pause) so a voice re-render matches the original short's feel. The voice
-    # itself stays the editor's pick (provider/voice_id from lane_inputs);
-    # unset falls back to the global Autonoe default. No structured hook here,
-    # so the pause anchors on the first sentence (render_narration fallback).
+    # `narration.render_narration` applies the normalize -> TTS -> script-graft
+    # pipeline so Lane B's voice swap inherits the same caption-accuracy fix as
+    # the baseline render. No structured hook here, so the pause anchors on the
+    # first sentence (render_narration fallback).
     vres = narration.render_narration(
         script,
         audio_path,
         override_provider=provider,
         override_voice_id=voice_id,
-        speaking_rate=shorts_narration.SHORTS_SPEAKING_RATE,
-        hook_pause=shorts_narration.SHORTS_HOOK_PAUSE,
+        speaking_rate=voiceover["speaking_rate"],
+        hook_pause=voiceover["hook_pause"],
+        style_prompt=voiceover["style_prompt"],
     )
     caption_chunks = video._chunk_alignment(vres.get("words") or [])
     if not caption_chunks:
@@ -188,8 +191,8 @@ def build_short_props_lane_b(
     # has any short_config.caption_style override, merge it onto the
     # baseline's caption_template so the render reflects the picked
     # colors / highlight / animation / position. Editor-side wires the same
-    # merge into Lane A; Lane C does it from a single helper too.
-    story = store.fetch_story(story_id)
+    # merge into Lane A; Lane C does it from a single helper too. (story was
+    # already fetched above for the voiceover resolution.)
     style_override = store.read_short_caption_style(story) if story else {}
     baseline_template = baseline_props.get("caption_template") or {}
     if not isinstance(baseline_template, dict):

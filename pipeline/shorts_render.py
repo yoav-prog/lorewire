@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from pipeline import gcs, images, media, narration, shorts, shorts_narration, store, video, voice
+from pipeline import gcs, images, media, narration, shorts, store, video, voice, voiceovers
 from pipeline.question_card import (
     QUESTION_CARD_MS,
     build_question_card,
@@ -232,18 +232,20 @@ def build_short_props(
         progress("voice")
         spoken = re.sub(r"\s+", " ", assets.script.get("short_script", "")).strip()
         audio_path = work_dir / "voice.mp3"
-        # Pin the codified house voice + delivery (Autonoe, 1.2x pace, hook
-        # pause). Passing the voice explicitly means the global DB voice setting
-        # can't change the shorts narrator; the editor's Lane B re-render is the
-        # per-short override path.
+        # Resolve the voiceover for this story's category (admin-managed preset
+        # -> global default -> code fallback). Passing it explicitly means the
+        # global DB voice setting can't change the shorts narrator out from under
+        # the chosen preset; the editor's Lane B re-render is the per-short path.
+        voiceover = voiceovers.resolve_voiceover(row.get("category"))
         vres = narration.render_narration(
             spoken,
             audio_path,
-            override_provider=shorts_narration.SHORTS_VOICE_PROVIDER,
-            override_voice_id=shorts_narration.SHORTS_VOICE_NAME,
-            speaking_rate=shorts_narration.SHORTS_SPEAKING_RATE,
-            hook_pause=shorts_narration.SHORTS_HOOK_PAUSE,
+            override_provider=voiceover["provider"],
+            override_voice_id=voiceover["voice_id"],
+            speaking_rate=voiceover["speaking_rate"],
+            hook_pause=voiceover["hook_pause"],
             hook_text=assets.script.get("hook"),
+            style_prompt=voiceover["style_prompt"],
         )
         caption_chunks = video._chunk_alignment(vres.get("words") or [])
         if not caption_chunks:

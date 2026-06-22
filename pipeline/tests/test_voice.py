@@ -398,13 +398,43 @@ class BuildChirpPayloadTests(unittest.TestCase):
         self.assertNotIn("text", payload["input"])
 
 
+class BuildGeminiPayloadTests(unittest.TestCase):
+    """The Gemini path carries the young-creator vibe via input.prompt and reads
+    inline markup from input.text — pin both."""
+
+    def test_style_prompt_param_goes_in_input_prompt(self):
+        p = voice._build_gemini_payload(
+            "Hello there.", "en-US-Chirp3-HD-Leda", "en-US",
+            "gemini-25-flash-tts", style_prompt="lively young creator",
+        )
+        self.assertEqual(p["input"]["prompt"], "lively young creator")
+        self.assertEqual(p["input"]["text"], "Hello there.")
+        # Gemini wants the BARE voice name + the resolved model name.
+        self.assertEqual(p["voice"]["name"], "Leda")
+        self.assertEqual(p["voice"]["modelName"], "gemini-2.5-flash-tts")
+
+    def test_inline_markup_preserved_in_text(self):
+        # Gemini reads [long pause] from input.text; the builder must NOT strip it.
+        p = voice._build_gemini_payload(
+            "Hi. [long pause] There.", "en-US-Chirp3-HD-Leda", "en-US",
+            "gemini-25-flash-tts", style_prompt="x",
+        )
+        self.assertIn("[long pause]", p["input"]["text"])
+
+
 class StripPauseMarkupTests(unittest.TestCase):
     """Engines without a markup field must never read a pause tag aloud."""
 
-    def test_strips_all_tag_variants(self):
+    def test_strips_chirp_tag_variants(self):
         for tag in ("[pause]", "[pause short]", "[pause long]", "[PAUSE LONG]"):
             out = voice._strip_pause_markup(f"Hi {tag} there")
             self.assertNotIn("pause", out.lower())
+            self.assertEqual(out, "Hi there")
+
+    def test_strips_gemini_tag_variants(self):
+        for tag in ("[long pause]", "[short pause]", "[extremely fast]"):
+            out = voice._strip_pause_markup(f"Hi {tag} there")
+            self.assertNotIn("[", out)
             self.assertEqual(out, "Hi there")
 
     def test_leaves_clean_text_untouched(self):

@@ -27,12 +27,18 @@ from pipeline import config, google_auth, models, store
 # Chirp 3 HD pause tags ([pause], [pause short], [pause long]). They are only
 # honored in the Chirp markup field; every other engine (ElevenLabs, Gemini-TTS)
 # would read them aloud, so those paths strip them first.
-_PAUSE_MARKUP_RE = re.compile(r"\s*\[pause(?:\s+\w+)?\]\s*", re.IGNORECASE)
+_PAUSE_MARKUP_RE = re.compile(
+    r"\s*\[(?:pause(?:\s+\w+)?|(?:short|medium|long)\s+pause|extremely\s+fast|"
+    r"whispering|laughing|sigh|sarcasm)\]\s*",
+    re.IGNORECASE,
+)
 
 
 def _strip_pause_markup(text: str) -> str:
-    """Remove Chirp pause tags, collapsing each to a single space, for engines
-    that don't support markup."""
+    """Remove TTS control tags (both the Chirp `[pause long]` and the Gemini
+    `[long pause]` / `[extremely fast]` families), collapsing each to a single
+    space, for engines that don't support markup (e.g. ElevenLabs would read
+    them aloud)."""
     return _PAUSE_MARKUP_RE.sub(" ", text).strip()
 
 ELEVEN_BASE = "https://api.elevenlabs.io/v1"
@@ -80,6 +86,7 @@ def synthesize(
     *,
     speaking_rate: float | None = None,
     use_markup: bool = False,
+    style_prompt: str | None = None,
 ) -> dict:
     """Render narration to `dest_audio` and return word-level timings.
 
@@ -98,12 +105,14 @@ def synthesize(
     (fresh-pipeline path) keep the global-setting behaviour byte-for-byte.
     The Phase 4 regen action threads per-story values through here.
 
-    `speaking_rate` and `use_markup` are the shorts voice codification knobs
-    (Chirp 3 HD only). `speaking_rate` maps to audioConfig.speakingRate (pace,
-    0.25-2.0); `use_markup` routes the text through input.markup so pause tags
-    like `[pause long]` take effect. Both are ignored on the ElevenLabs path
-    (it has no equivalent here) and default to off, so other callers are
-    unaffected.
+    `speaking_rate`, `use_markup`, and `style_prompt` are the shorts voice
+    knobs. `speaking_rate` -> audioConfig.speakingRate (Chirp 3 HD pace,
+    0.25-2.0). `use_markup` routes the text through Chirp's input.markup field so
+    `[pause long]` takes effect. `style_prompt` is the Gemini-TTS natural-language
+    delivery instruction (input.prompt) — this is what steers a young-creator
+    read; Gemini also reads inline markup (`[long pause]`, `[extremely fast]`)
+    straight from input.text. All three are ignored on the ElevenLabs path and
+    default to off/None, so other callers are unaffected.
     """
     selected = override_provider or models.get_selected("voice")
     provider, _, _tier = selected.partition("/")
@@ -118,6 +127,7 @@ def synthesize(
             voice_id_override=override_voice_id,
             speaking_rate=speaking_rate,
             use_markup=use_markup,
+            style_prompt=style_prompt,
         )
     if provider == "elevenlabs":
         # ElevenLabs has no pause-markup field; drop any tags so they aren't
@@ -303,19 +313,21 @@ def _google_synthesize(
     *,
     speaking_rate: float | None = None,
     use_markup: bool = False,
+    style_prompt: str | None = None,
 ) -> dict:
     voice_name_setting = _google_voice_name(selected, voice_id_override)
     language_code = _google_language_code(voice_name_setting)
     tier = _google_tier(selected)
 
     if _is_gemini_tier(tier):
-        # Gemini-TTS has its own pace/style controls (input.prompt) and does not
-        # take speakingRate / markup the way Chirp 3 HD does, so the shorts knobs
-        # are a no-op here. Shorts pin the chirp3-hd tier (see shorts_narration)
-        # so this branch is reached only by a deliberate admin model switch.
-        # Drop pause tags so input.text doesn't get them read aloud.
+        # Gemini-TTS steers delivery via a natural-language style prompt
+        # (input.prompt) and reads inline markup ([long pause], [extremely fast],
+        # ...) straight from input.text, so the text passes through untouched.
+        # speaking_rate is a Chirp/standard audioConfig knob and does not apply
+        # here — Gemini pace is carried by the style prompt.
         payload = _build_gemini_payload(
-            _strip_pause_markup(text), voice_name_setting, language_code, tier,
+            text, voice_name_setting, language_code, tier,
+            style_prompt=style_prompt,
         )
         billed_chars = payload["_billed_chars"]
         payload.pop("_billed_chars")
@@ -377,7 +389,8 @@ def _build_chirp_payload(
 
 
 def _build_gemini_payload(
-    text: str, voice_name_setting: str, language_code: str, tier: str
+    text: str, voice_name_setting: str, language_code: str, tier: str,
+    *, style_prompt: str | None = None,
 ) -> dict:
     """Construct the synth payload for a Gemini-TTS request.
 
@@ -392,10 +405,16 @@ def _build_gemini_payload(
          (text + prompt) cannot exceed 8000 bytes and each field is capped
          at 4000 bytes. Both fields count toward billing.
 
+    `style_prompt` is the per-call delivery instruction (e.g. the shorts
+    voiceover preset's prompt). When None it falls back to the global
+    `voice.google_style_prompt` setting so existing callers are unchanged.
+
     The function attaches a `_billed_chars` key the caller pops before
     POSTing — it's the combined char count that drives cost tracking.
     """
-    style_prompt = (store.get_setting("voice.google_style_prompt") or "").strip()
+    if style_prompt is None:
+        style_prompt = store.get_setting("voice.google_style_prompt") or ""
+    style_prompt = style_prompt.strip()
     text_bytes = len(text.encode("utf-8"))
     prompt_bytes = len(style_prompt.encode("utf-8")) if style_prompt else 0
     if text_bytes > GEMINI_TEXT_BYTE_LIMIT:

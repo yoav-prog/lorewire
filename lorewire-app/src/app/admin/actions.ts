@@ -5,7 +5,9 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
 import { randomUUID } from "node:crypto";
+import { CATEGORIES } from "@/app/admin/ui";
 import { requireAdmin, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
 import {
@@ -14,6 +16,11 @@ import {
   setStatus,
   setSetting,
   getSetting,
+  getVoiceover,
+  upsertVoiceover,
+  deleteVoiceover,
+  setDefaultVoiceoverId,
+  setCategoryVoiceoverId,
   getStoryConfigJson,
   setStoryConfigJson,
   getSegment,
@@ -790,6 +797,118 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
   // is read from /admin/videos/[id]). Revalidate the whole admin layout so
   // the next render anywhere under /admin reflects the new value.
   revalidatePath("/admin", "layout");
+}
+
+// --- Voiceover presets (/admin/voiceovers) ----------------------------------
+// CRUD for named TTS presets + the global-default / per-category selection.
+// All admin-gated; the pipeline reads the resulting voiceovers table + the
+// voiceovers.default / voiceovers.category.<Cat> settings via
+// pipeline/voiceovers.resolve_voiceover.
+
+export async function saveVoiceoverAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const name = String(formData.get("name") ?? "").trim();
+  const provider = String(formData.get("provider") ?? "").trim();
+  const voiceId = String(formData.get("voice_id") ?? "").trim();
+  if (!name || !provider || !voiceId) return;
+  const id = String(formData.get("id") ?? "").trim() || randomUUID();
+  const stylePrompt = String(formData.get("style_prompt") ?? "").trim();
+  const rateRaw = String(formData.get("speaking_rate") ?? "").trim();
+  const rate = rateRaw ? Number(rateRaw) : null;
+  await upsertVoiceover({
+    id,
+    name,
+    provider,
+    voice_id: voiceId,
+    style_prompt: stylePrompt || null,
+    speaking_rate: rate !== null && Number.isFinite(rate) ? rate : null,
+    hook_pause: String(formData.get("hook_pause") ?? "") === "1" ? 1 : 0,
+  });
+  console.info("[voiceover action] save", { id, name, provider, voiceId });
+  revalidatePath("/admin/voiceovers");
+}
+
+export async function deleteVoiceoverAction(formData: FormData): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "").trim();
+  if (!id) return;
+  await deleteVoiceover(id);
+  console.info("[voiceover action] delete", { id });
+  revalidatePath("/admin/voiceovers");
+}
+
+export async function setDefaultVoiceoverAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const id = String(formData.get("id") ?? "").trim();
+  await setDefaultVoiceoverId(id);
+  console.info("[voiceover action] set default", { id });
+  // The default feeds the shorts pipeline; revalidate the whole admin layout.
+  revalidatePath("/admin", "layout");
+}
+
+export async function setCategoryVoiceoverAction(
+  formData: FormData,
+): Promise<void> {
+  await requireAdmin();
+  const category = String(formData.get("category") ?? "").trim();
+  const id = String(formData.get("id") ?? "").trim();
+  if (!CATEGORIES.includes(category as (typeof CATEGORIES)[number])) return;
+  await setCategoryVoiceoverId(category, id);
+  console.info("[voiceover action] set category", { category, id });
+  revalidatePath("/admin/voiceovers");
+}
+
+// Synthesize a sample with a saved preset so the admin can hear it before
+// committing. Calls the Python preview endpoint (which has the Google creds)
+// with the shared CRON_SECRET; returns the MP3 as a data URL the client plays.
+// Preview only works where the Vercel Python runtime + creds exist (deploy),
+// not local `next dev`; the error path surfaces that cleanly.
+export async function previewVoiceoverAction(
+  id: string,
+): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
+  await requireAdmin();
+  const vo = await getVoiceover(id);
+  if (!vo) return { ok: false, error: "Voiceover not found." };
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    return { ok: false, error: "CRON_SECRET is not set, so preview is unavailable." };
+  }
+  const h = await headers();
+  const host = h.get("host");
+  if (!host) return { ok: false, error: "Could not resolve the app host for preview." };
+  const proto = h.get("x-forwarded-proto") ?? "https";
+  try {
+    const resp = await fetch(`${proto}://${host}/api/preview_voiceover`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({
+        provider: vo.provider,
+        voice_id: vo.voice_id,
+        style_prompt: vo.style_prompt,
+        speaking_rate: vo.speaking_rate,
+        hook_pause: !!vo.hook_pause,
+      }),
+    });
+    if (!resp.ok) {
+      const msg = (await resp.text()).slice(0, 200);
+      return { ok: false, error: `Preview failed (${resp.status}): ${msg}` };
+    }
+    const data = (await resp.json()) as {
+      audio_base64: string;
+      content_type: string;
+    };
+    return {
+      ok: true,
+      audio: `data:${data.content_type};base64,${data.audio_base64}`,
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 // Wave 3 Phase 1 + 2: save all 14 caption template fields for whatever scope

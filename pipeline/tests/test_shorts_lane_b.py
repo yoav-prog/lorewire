@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pipeline import shorts_lane_b, store
+from pipeline import shorts_lane_b, shorts_narration, store
 
 
 class _LaneBTestCase(unittest.TestCase):
@@ -332,12 +332,20 @@ class HappyPathTests(_LaneBTestCase):
                 claimed, Path(self._tmpdir.name), remote=True,
             )
 
-        # Voice was synthesized with the new script + no override.
+        # Voice was synthesized with the new script. With no editor voice
+        # override and no category on the story, Lane B inherits the resolved
+        # voiceover — the seeded House Voice default (shorts_narration constants).
         mock_synth.assert_called_once()
         call_args = mock_synth.call_args
         self.assertEqual(call_args.args[0], "Brand new narration text")
-        self.assertIsNone(call_args.kwargs.get("override_provider"))
-        self.assertIsNone(call_args.kwargs.get("override_voice_id"))
+        self.assertEqual(
+            call_args.kwargs.get("override_provider"),
+            shorts_narration.SHORTS_VOICE_PROVIDER,
+        )
+        self.assertEqual(
+            call_args.kwargs.get("override_voice_id"),
+            shorts_narration.SHORTS_VOICE_NAME,
+        )
 
         # Built props REUSE the baseline frames + meta, REPLACE voice +
         # captions + duration_ms.

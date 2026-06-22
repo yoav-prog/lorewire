@@ -431,6 +431,24 @@ SCHEMA_STATEMENTS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_renders_one_active "
     "ON voice_renders(story_id, text_hash, voice_provider, voice_id) "
     "WHERE status IN ('queued', 'processing')",
+    # Named voiceover presets the admin manages (model + voice + style prompt +
+    # pace + hook pause). The shorts pipeline resolves one per category, falling
+    # back to the global default and then the shorts_narration code constants.
+    # speaking_rate is a no-op on the Gemini path (Gemini steers pace via the
+    # style prompt); it applies on a Chirp 3 HD preset.
+    # Mirror in lorewire-app/src/lib/schema.ts.
+    """CREATE TABLE IF NOT EXISTS voiceovers (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        provider        TEXT NOT NULL,
+        voice_id        TEXT NOT NULL,
+        style_prompt    TEXT,
+        speaking_rate   REAL,
+        hook_pause      INTEGER NOT NULL DEFAULT 1,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_voiceovers_name ON voiceovers(name)",
 ]
 
 _COLUMNS = [
@@ -508,6 +526,7 @@ def init() -> None:
                     cur.execute(stmt)
             conn.commit()
         _seed_active_segment_aspect()
+        _seed_default_voiceover()
         return
     with _sqlite_conn() as c:
         for stmt in SCHEMA_STATEMENTS:
@@ -520,6 +539,7 @@ def init() -> None:
                     continue
                 raise
     _seed_active_segment_aspect()
+    _seed_default_voiceover()
 
 
 # Sentinel distinguishing "segment row absent" from "row present, aspect NULL"
@@ -590,6 +610,124 @@ def _seed_active_segment_aspect() -> None:
             )
         except Exception as e:
             print(f"[store] seed per-aspect active {kind} failed: {e!r}")
+
+
+# --- Voiceover presets -------------------------------------------------------
+
+_VOICEOVER_COLUMNS = [
+    "id", "name", "provider", "voice_id", "style_prompt",
+    "speaking_rate", "hook_pause", "created_at", "updated_at",
+]
+
+
+def _voiceover_from_row(row) -> dict:
+    d = dict(row)
+    d["hook_pause"] = bool(d.get("hook_pause"))
+    return d
+
+
+def list_voiceovers() -> list[dict]:
+    """All saved voiceover presets, alphabetical by name (admin list order)."""
+    cols = ", ".join(_VOICEOVER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {cols} FROM voiceovers ORDER BY name")
+                return [_voiceover_from_row(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        rows = c.execute(f"SELECT {cols} FROM voiceovers ORDER BY name").fetchall()
+        return [_voiceover_from_row(r) for r in rows]
+
+
+def get_voiceover(voiceover_id: str) -> dict | None:
+    cols = ", ".join(_VOICEOVER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {cols} FROM voiceovers WHERE id = %s", (voiceover_id,))
+                row = cur.fetchone()
+                return _voiceover_from_row(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM voiceovers WHERE id = ?", (voiceover_id,),
+        ).fetchone()
+        return _voiceover_from_row(row) if row else None
+
+
+def save_voiceover(vo: dict) -> str:
+    """Upsert a voiceover preset. Generates id + created_at when the incoming
+    dict has none (a create); preserves created_at on an edit. Returns the id."""
+    now = _now_iso()
+    vid = (vo.get("id") or "").strip() or uuid.uuid4().hex
+    rate = vo.get("speaking_rate")
+    row = (
+        vid,
+        (vo.get("name") or "").strip(),
+        (vo.get("provider") or "").strip(),
+        (vo.get("voice_id") or "").strip(),
+        ((vo.get("style_prompt") or "").strip() or None),
+        (float(rate) if rate not in (None, "") else None),
+        (1 if vo.get("hook_pause") else 0),
+        (vo.get("created_at") or now),
+        now,
+    )
+    insert = (
+        "INSERT INTO voiceovers "
+        "(id, name, provider, voice_id, style_prompt, speaking_rate, hook_pause, created_at, updated_at) "
+        "VALUES ({p}) "
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, provider=excluded.provider, "
+        "voice_id=excluded.voice_id, style_prompt=excluded.style_prompt, "
+        "speaking_rate=excluded.speaking_rate, hook_pause=excluded.hook_pause, "
+        "updated_at=excluded.updated_at"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(insert.format(p=", ".join(["%s"] * 9)), row)
+            conn.commit()
+        return vid
+    with _sqlite_conn() as c:
+        c.execute(insert.format(p=", ".join(["?"] * 9)), row)
+    return vid
+
+
+def delete_voiceover(voiceover_id: str) -> None:
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM voiceovers WHERE id = %s", (voiceover_id,))
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute("DELETE FROM voiceovers WHERE id = ?", (voiceover_id,))
+
+
+def _seed_default_voiceover() -> None:
+    """Idempotent one-shot: create the House Voice preset and point
+    `voiceovers.default` at it so the admin has an editable starting row and the
+    shorts pipeline resolves a preset out of the box. No-op once a default is set
+    (admin's pick is never overridden). Best-effort: a failure must not crash
+    startup — the resolver falls back to the shorts_narration code constants.
+    """
+    try:
+        if (get_setting("voiceovers.default") or "").strip():
+            return
+        if list_voiceovers():
+            return
+        from pipeline import shorts_narration as sn
+        vid = save_voiceover({
+            "id": "house-voice",
+            "name": "House Voice",
+            "provider": sn.SHORTS_VOICE_PROVIDER,
+            "voice_id": sn.SHORTS_VOICE_NAME,
+            "style_prompt": sn.SHORTS_STYLE_PROMPT,
+            "speaking_rate": sn.SHORTS_SPEAKING_RATE,
+            "hook_pause": sn.SHORTS_HOOK_PAUSE,
+        })
+        set_setting("voiceovers.default", vid)
+        print(f"[store] seeded default voiceover 'House Voice' -> {vid}")
+    except Exception as e:
+        print(f"[store] seed default voiceover failed: {e!r}")
 
 
 # Pulls `IF NOT EXISTS` out of ADD COLUMN clauses because SQLite doesn't
