@@ -42,6 +42,7 @@ import {
   useSavedStories,
 } from "@/lib/engagement-store";
 import SignInChip from "@/components/SignInChip";
+import SiteFooter from "@/components/SiteFooter";
 import type { PublicSession } from "@/lib/homepage-data";
 
 // Centralised default when no live media has loaded yet — the modal
@@ -1445,12 +1446,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
       )}
       {view === "Search" && <SearchPage onOpen={open} query={query} />}
 
-      <footer className="border-t border-line mt-10">
-        <div className="max-w-[1600px] mx-auto px-10 py-9 flex items-center gap-3">
-          <span className="font-display font-black text-[20px] tracking-tightest text-ink">LORE<span className="text-accent">WIRE</span></span>
-          <span className="font-mono text-[11px] uppercase tracking-[.2em] text-muted">True internet stories, hand-drawn.</span>
-        </div>
-      </footer>
+      <SiteFooter />
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved

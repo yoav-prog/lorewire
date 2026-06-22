@@ -33,6 +33,7 @@ import ReelsFeed from "@/components/reels/ReelsFeed";
 import CookieConsent from "@/components/CookieConsent";
 import CrossDeviceNudge from "@/components/CrossDeviceNudge";
 import SignInChip from "@/components/SignInChip";
+import SiteFooter from "@/components/SiteFooter";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
@@ -414,6 +415,8 @@ function Home({
             </p>
           );
         })()}
+
+      <SiteFooter />
     </div>
   );
 }
