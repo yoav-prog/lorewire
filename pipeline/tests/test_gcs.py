@@ -157,5 +157,39 @@ class R2UploadRoutingTests(unittest.TestCase):
         self.assertEqual(url, "https://media.lorewire.com/envelope/hero.png")
 
 
+class ImageCompressionTests(unittest.TestCase):
+    def test_png_is_recompressed_to_webp_smaller(self):
+        import tempfile
+        from PIL import Image
+
+        d = Path(tempfile.mkdtemp())
+        png = d / "hero.png"
+        # A flat-color 256x256 image — exactly the doodle profile, compresses huge.
+        Image.new("RGB", (256, 256), (200, 30, 60)).save(png)
+
+        out_path, out_key = gcs._maybe_compress_image(png, "envelope/hero.png")
+
+        self.assertEqual(out_key, "envelope/hero.webp")
+        self.assertEqual(out_path.suffix, ".webp")
+        self.assertTrue(out_path.exists())
+        self.assertLess(out_path.stat().st_size, png.stat().st_size)
+        with Image.open(out_path) as im:
+            self.assertEqual(im.format, "WEBP")
+
+    def test_non_image_passes_through_unchanged(self):
+        import tempfile
+
+        d = Path(tempfile.mkdtemp())
+        mp3 = d / "voice.mp3"
+        mp3.write_bytes(b"not really audio")
+        out_path, out_key = gcs._maybe_compress_image(mp3, "envelope/voice.mp3")
+        self.assertEqual(out_key, "envelope/voice.mp3")
+        self.assertEqual(out_path, mp3)
+
+    def test_swap_ext_handles_nested_keys(self):
+        self.assertEqual(gcs._swap_ext_to_webp("a/b/hero.png"), "a/b/hero.webp")
+        self.assertEqual(gcs._swap_ext_to_webp("hero.jpeg"), "hero.webp")
+
+
 if __name__ == "__main__":
     unittest.main()

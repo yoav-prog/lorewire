@@ -134,6 +134,42 @@ def _mime_for(name: str) -> str:
     return detected or "application/octet-stream"
 
 
+# Raster images we re-encode to WebP on the way out. WebP at q82/method6 is
+# visually lossless for flat-color doodle art and roughly 10-20x smaller than the
+# source PNG, which is the single biggest media-size win. Plan:
+# _plans/2026-06-22-media-compression.md.
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
+WEBP_QUALITY = 82
+
+
+def _swap_ext_to_webp(key: str) -> str:
+    """Replace the key's filename extension with `.webp`, leaving the path."""
+    slash = key.rfind("/")
+    name = key[slash + 1 :]
+    dot = name.rfind(".")
+    new_name = (name[:dot] if dot > 0 else name) + ".webp"
+    return (key[: slash + 1] + new_name) if slash >= 0 else new_name
+
+
+def _maybe_compress_image(local_path: Path, key: str) -> tuple[Path, str]:
+    """If `local_path` is a compressible raster image, re-encode it to WebP and
+    return the new (path, key) with a `.webp` extension. Non-images, or any
+    encode failure, pass through unchanged so a bad image never blocks a publish.
+    Already-WebP inputs are left alone."""
+    if local_path.suffix.lower() not in _IMAGE_EXTS:
+        return local_path, key
+    try:
+        from PIL import Image
+
+        out_path = local_path.with_suffix(".webp")
+        with Image.open(local_path) as im:
+            im.save(out_path, format="WEBP", quality=WEBP_QUALITY, method=6)
+        return out_path, _swap_ext_to_webp(key)
+    except Exception as e:  # never let compression block a publish
+        print(f"[gcs compress] {key}: {e}; uploading original")
+        return local_path, key
+
+
 # ── Cloudflare R2 (S3 API) target ──────────────────────────────────────────
 # The media migration moves viewer-facing media off GCS to R2 to kill egress
 # cost. R2 speaks the S3 API; we sign with boto3 (imported lazily so the
@@ -227,6 +263,10 @@ def upload(local_path: Path, key: str) -> str:
     """
     if not local_path.exists():
         raise FileNotFoundError(f"upload source missing: {local_path}")
+    # Compress raster images to WebP first (keeps quality, ~10-20x smaller for the
+    # doodle frames). Non-images / failures pass through unchanged. The returned
+    # URL therefore ends in .webp for images, and callers store that.
+    local_path, key = _maybe_compress_image(local_path, key)
     # Media migration: when R2 is the configured target (R2_* + MEDIA_PUBLIC_BASE
     # all set) new media goes to R2; otherwise we keep writing to GCS. Inert in
     # any environment that hasn't set MEDIA_PUBLIC_BASE.
