@@ -147,7 +147,17 @@ const RailHead = ({ children }: { children: React.ReactNode }) => (
 );
 
 /* ----------------------------- BILLBOARD ----------------------------- */
-function Billboard({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn; onShuffle: () => void }) {
+function Billboard({
+  story,
+  onOpen,
+  onShuffle,
+  session,
+}: {
+  story: Story;
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  session: HomepageInitial["session"];
+}) {
   const c = CAT[story.cat];
   const [heroOk, setHeroOk] = useState(true);
   // Mobile Billboard is taller than it is wide (500h x ~390-480w), so the
@@ -162,6 +172,15 @@ function Billboard({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn;
           <span className="absolute rounded-full bg-accent" style={{ top: 3, right: 4, width: 4, height: 4 }}></span>
         </span>
         <span className="font-display font-black tracking-tight text-ink ink-shadow" style={{ fontSize: 18 }}>LoreWire</span>
+      </div>
+      {/* Sign-in surface mirrors the LoreWire logo's top-anchor on the
+          opposite side so the hero frame stays visually balanced. The
+          'overlay' tone is a translucent glass pill tuned to read on any
+          hero image without competing with the PLAY button or the story
+          title. Signed-in users see the avatar dropdown instead (same
+          component, branches on `session`). */}
+      <div className="absolute right-4 z-30" style={{ top: "calc(env(safe-area-inset-top, 0px) + 10px)" }}>
+        <SignInChip session={session} tone="overlay" />
       </div>
       <div className="absolute inset-0 drift" style={{ background: c }}>
         {showHero && (
@@ -236,6 +255,7 @@ function Home({
   catalog,
   resolveStory,
   pollsInitial,
+  session,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -246,6 +266,7 @@ function Home({
   catalog: ReturnType<typeof useHomepageCuration>["catalog"];
   resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
   pollsInitial: HomepageInitial["pollRails"];
+  session: HomepageInitial["session"];
 }) {
   // Curation + live catalog are hoisted to MobileShell so MyList / TitleSheet
   // can share resolveStory (saved real shorts aren't in the baked STORIES
@@ -287,7 +308,12 @@ function Home({
   return (
     <div className="pb-28">
       {featured && (
-        <Billboard story={featured} onOpen={onOpen} onShuffle={onShuffle} />
+        <Billboard
+          story={featured}
+          onOpen={onOpen}
+          onShuffle={onShuffle}
+          session={session}
+        />
       )}
 
       <div className="flex gap-2 px-4 py-4 overflow-x-auto noscroll">
@@ -1590,6 +1616,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             catalog={catalog}
             resolveStory={resolveStory}
             pollsInitial={initial.pollRails}
+            session={initial.session}
           />
         )}
         {tab === "Search" && <Search onOpen={open} />}

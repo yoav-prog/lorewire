@@ -28,8 +28,10 @@ interface SignInChipProps {
   session: PublicSession | null;
   /** Tone variant: 'subtle' for in-line spots like the desktop top bar,
    *  'prominent' for the My List header where we deliberately want the
-   *  user to notice the offer. */
-  tone?: "subtle" | "prominent";
+   *  user to notice the offer, 'overlay' for placement on top of hero
+   *  imagery (mobile Billboard) — translucent glass pill that reads
+   *  cleanly against any image without competing with story typography. */
+  tone?: "subtle" | "prominent" | "overlay";
 }
 
 function buildSignInHref(): string {
@@ -110,7 +112,9 @@ export default function SignInChip({
     const className =
       tone === "prominent"
         ? "inline-flex items-center gap-1 rounded-full border border-ink bg-ink px-3 py-1 text-xs font-semibold uppercase tracking-wider text-bg hover:opacity-90"
-        : "inline-flex items-center gap-1 rounded-full border border-line bg-bg/70 px-3 py-1 text-xs font-medium text-ink hover:border-ink";
+        : tone === "overlay"
+          ? "inline-flex items-center gap-1 rounded-full border border-white/25 bg-black/35 px-3 py-1 text-xs font-medium text-white backdrop-blur-md hover:bg-black/55 hover:border-white/45 active:scale-[.97] transition"
+          : "inline-flex items-center gap-1 rounded-full border border-line bg-bg/70 px-3 py-1 text-xs font-medium text-ink hover:border-ink";
     return (
       <a
         href={buildSignInHref()}
@@ -118,6 +122,7 @@ export default function SignInChip({
           // Clear snooze: if the user is actively opting in, the nudge
           // shouldn't pop again on their next save while they're mid-flow.
           clearSnooze();
+          console.info("[auth ui signin-chip click]", { tone });
         }}
         className={className}
         data-testid="signin-chip-anon"
