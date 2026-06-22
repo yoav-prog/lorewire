@@ -115,28 +115,35 @@ export async function buildReferencedKeys(): Promise<Set<string>> {
     if (mk) keys.add(mk);
   };
 
+  // `payload` is scanned too (defensively) so any media URL stashed there —
+  // hero variants, og images, extra renders — is never under-copied. Over-
+  // including a stale URL is harmless; under-including would 404 after cutover.
   const stories = await all<{
     video_url: string | null;
     audio_url: string | null;
     hero_image: string | null;
     images: string | null;
-  }>("SELECT video_url, audio_url, hero_image, images FROM stories");
+    payload: string | null;
+  }>("SELECT video_url, audio_url, hero_image, images, payload FROM stories");
   for (const s of stories) {
     add(s.video_url);
     add(s.audio_url);
     add(s.hero_image);
     for (const u of collectUrlsFromJson(s.images)) add(u);
+    for (const u of collectUrlsFromJson(s.payload)) add(u);
   }
 
   const articles = await all<{
     hero_image: string | null;
     og_image: string | null;
     document: string | null;
-  }>("SELECT hero_image, og_image, document FROM articles");
+    payload: string | null;
+  }>("SELECT hero_image, og_image, document, payload FROM articles");
   for (const a of articles) {
     add(a.hero_image);
     add(a.og_image);
     for (const u of collectUrlsFromJson(a.document)) add(u);
+    for (const u of collectUrlsFromJson(a.payload)) add(u);
   }
 
   const segments = await all<{

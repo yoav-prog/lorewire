@@ -120,6 +120,7 @@ describe("buildReferencedKeys", () => {
           audio_url: null,
           hero_image: `${G}/s1/hero.png`,
           images: JSON.stringify([`${G}/s1/frame-01.png`]),
+          payload: JSON.stringify({ heroLandscape: `${G}/s1/hero-landscape.png` }),
         },
       ])
       .mockResolvedValueOnce([
@@ -145,6 +146,7 @@ describe("buildReferencedKeys", () => {
       [
         "a1/pic.png",
         "s1/frame-01.png",
+        "s1/hero-landscape.png",
         "s1/hero.png",
         "s1/video.mp4",
         "segments/seg.source.mp4",
