@@ -17,7 +17,7 @@ export const metadata: Metadata = {
   alternates: { canonical: "/terms" },
 };
 
-const EFFECTIVE_DATE = "2026-06-16";
+const EFFECTIVE_DATE = "2026-06-22";
 // TODO Yoav: confirm or replace these before filing review applications.
 const LEGAL_ENTITY = "Flexelent (operator of LoreWire)";
 const CONTACT_EMAIL = "info@lorewire.com";
@@ -60,8 +60,7 @@ export default function TermsPage() {
             Pick a strong password and keep it private.
           </li>
           <li>
-            You must be at least 13 years old, and the age of digital
-            consent in your country if higher.
+            You must be at least 16 years old to use LoreWire.
           </li>
           <li>
             One account per person. Sharing an account with another
@@ -148,8 +147,9 @@ export default function TermsPage() {
 
       <Section title="8. Suspension and termination">
         <p>
-          You can close your account at any time from the settings page.
-          We may suspend or terminate access if you breach these terms,
+          You can close your account at any time by emailing {CONTACT_EMAIL},
+          and we will action it within 30 days. We may suspend or terminate
+          access if you breach these terms,
           create legal risk for LoreWire or other users, or use the
           service in a way that violates the destination platforms&apos;
           rules. Where the breach is fixable we will tell you what to

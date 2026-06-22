@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   alternates: { canonical: "/privacy" },
 };
 
-const EFFECTIVE_DATE = "2026-06-16";
+const EFFECTIVE_DATE = "2026-06-22";
 // TODO Yoav: confirm or replace these before filing review applications.
 const LEGAL_ENTITY = "Flexelent (operator of LoreWire)";
 const CONTACT_EMAIL = "info@lorewire.com";
@@ -59,13 +59,49 @@ export default function PrivacyPolicyPage() {
       </Section>
 
       <Section title="2. Data we collect">
-        <p>Three categories.</p>
+        <p>
+          We collect the following categories of data, depending on how you use
+          LoreWire.
+        </p>
         <h3 className="mt-3 font-semibold">Account data</h3>
         <ul className="ml-5 list-disc">
-          <li>Email address and a salted, hashed password for sign-in.</li>
           <li>
-            A session cookie that keeps you signed in. The cookie holds only
-            an opaque session identifier, not personal data.
+            Your email address, and a salted, hashed password if you set one.
+          </li>
+          <li>
+            How you sign in. You can use an email and password, a one-time
+            email sign-in link, or a Google, Microsoft, or Reddit account. When
+            you sign in with one of those providers we store the account
+            identifier they return and the email tied to it, so we recognize
+            you next time. We never receive or store your password for those
+            providers.
+          </li>
+          <li>
+            A display name and profile picture, if you set one or a sign-in
+            provider supplies it.
+          </li>
+          <li>
+            A session cookie that keeps you signed in. The cookie holds only an
+            opaque session identifier, not personal data.
+          </li>
+        </ul>
+        <h3 className="mt-3 font-semibold">Reader activity</h3>
+        <ul className="ml-5 list-disc">
+          <li>
+            Stories you save, like, or mark as favorite categories; the stories
+            you have recently viewed; and how far you read or watched, so your
+            list and your place are still here next time.
+          </li>
+          <li>
+            Your answers to the optional engagement polls. A signed-in vote is
+            linked to your account; an anonymous vote is linked only to a random
+            cookie on your device.
+          </li>
+          <li>
+            A random identifier stored on your device (the{" "}
+            <code>lw_anon</code> cookie) that ties this device&apos;s activity
+            together before you sign in. Choosing Reject in the cookie banner
+            clears it.
           </li>
         </ul>
         <h3 className="mt-3 font-semibold">Content you create</h3>
@@ -109,6 +145,11 @@ export default function PrivacyPolicyPage() {
             IP address at the edge for abuse prevention. We do not retain
             it beyond standard hosting log retention windows.
           </li>
+          <li>
+            When you vote in a poll, a one-way hash of your IP address and
+            browser user-agent, used only to rate-limit voting and stop abuse.
+            It cannot be reversed back to your IP address.
+          </li>
         </ul>
       </Section>
 
@@ -117,15 +158,21 @@ export default function PrivacyPolicyPage() {
           LoreWire does not load third-party advertising scripts, ad
           retargeting pixels, or behavioral analytics SDKs on its pages.
           There is no Facebook Pixel, no Google Analytics tracking script,
-          no marketing automation tag. The site uses one session cookie and
-          one theme-preference cookie. That is the entire client-side
-          tracking surface.
+          no marketing automation tag. Every cookie LoreWire sets is
+          first-party and functional, such as keeping you signed in,
+          remembering your cookie choice, and stopping duplicate poll votes.
+          None of them track you across other websites. The Cookies section
+          below lists them.
         </p>
       </Section>
 
       <Section title="4. How we use your data">
         <ul className="ml-5 list-disc">
-          <li>To let you sign in and use the editor.</li>
+          <li>To let you sign in and use LoreWire.</li>
+          <li>
+            To show you stories, remember the list and reading position you
+            save, and run the optional polls you choose to answer.
+          </li>
           <li>
             To render and publish the content you create on the platforms
             you have connected.
@@ -210,6 +257,46 @@ export default function PrivacyPolicyPage() {
             .
           </li>
           <li>
+            <b>Sign-in providers (Google, Microsoft, Reddit)</b>: if you choose
+            to sign in with one of these, the provider authenticates you and
+            returns a basic account identifier and, where available, your
+            email. Reddit does not return an email, so we generate a stable
+            internal anchor instead. Privacy policies:{" "}
+            <a
+              href="https://policies.google.com/privacy"
+              className="text-accent underline"
+            >
+              Google
+            </a>
+            ,{" "}
+            <a
+              href="https://www.microsoft.com/en-us/privacy/privacystatement"
+              className="text-accent underline"
+            >
+              Microsoft
+            </a>
+            ,{" "}
+            <a
+              href="https://www.reddit.com/policies/privacy-policy"
+              className="text-accent underline"
+            >
+              Reddit
+            </a>
+            .
+          </li>
+          <li>
+            <b>Brevo</b> sends transactional email such as your one-time
+            sign-in link, and receives your email address to deliver it.
+            Privacy policy:{" "}
+            <a
+              href="https://www.brevo.com/legal/privacypolicy/"
+              className="text-accent underline"
+            >
+              brevo.com/legal/privacypolicy
+            </a>
+            .
+          </li>
+          <li>
             <b>Anthropic and OpenAI</b> run model inference for generated
             scripts and captions. Their privacy policies cover what they
             do with inputs sent for inference.
@@ -259,12 +346,39 @@ export default function PrivacyPolicyPage() {
 
       <Section title="7. Cookies">
         <p>
-          LoreWire sets exactly two cookies. A session cookie used to keep
-          you signed in (httpOnly, secure, SameSite=Lax). A theme
-          preference cookie that stores light/dark choice in
-          localStorage-equivalent storage. There are no advertising or
-          analytics cookies.
+          Every cookie LoreWire sets is first-party and functional. There are
+          no advertising or analytics cookies, and none are shared with or read
+          by another company. Unless noted, they are httpOnly, Secure, and
+          SameSite=Lax.
         </p>
+        <ul className="ml-5 list-disc">
+          <li>
+            <b>Sign-in cookies</b> keep you signed in (a session identifier for
+            readers, and a separate one for staff).
+          </li>
+          <li>
+            <b>Sign-in flow cookies</b> exist only for the few minutes of an
+            OAuth sign-in, to protect the exchange, then expire.
+          </li>
+          <li>
+            <b>Cookie-choice cookie</b> remembers whether you pressed Accept or
+            Reject. It is readable by the page so the banner knows your choice;
+            it stores nothing else.
+          </li>
+          <li>
+            <b>Anonymous-activity cookie</b> (<code>lw_anon</code>) ties this
+            device&apos;s saved stories and progress together before you sign
+            in. Reject clears it.
+          </li>
+          <li>
+            <b>Poll cookie</b> (<code>lw_vote</code>) stops the same browser
+            voting twice on a poll.
+          </li>
+          <li>
+            Your light/dark <b>theme preference</b> is kept in your browser&apos;s
+            local storage, not a cookie.
+          </li>
+        </ul>
       </Section>
 
       <Section title="8. Retention">
@@ -298,8 +412,8 @@ export default function PrivacyPolicyPage() {
             Correction: edit your profile in the editor, or email us.
           </li>
           <li>
-            Deletion: close your account from the settings page, or email
-            us. We honor the request within 30 days.
+            Deletion: email {CONTACT_EMAIL} to close your account and have the
+            data we hold about you erased. We honor the request within 30 days.
           </li>
           <li>
             Disconnect a social account: go to the social accounts page in
@@ -311,9 +425,9 @@ export default function PrivacyPolicyPage() {
 
       <Section title="10. Children">
         <p>
-          LoreWire is not directed at children under 13. We do not
-          knowingly collect personal data from children under 13. If you
-          believe a child has provided personal data, email{" "}
+          LoreWire is intended for adults and is not directed at anyone under
+          16. We do not knowingly collect personal data from anyone under 16.
+          If you believe someone under 16 has provided personal data, email{" "}
           {CONTACT_EMAIL} and we will delete it.
         </p>
       </Section>
