@@ -60,57 +60,66 @@ errors on the touched files (pre-existing repo lint/type debt untouched).
 
 ## Phase B — Personal star rating (NEXT, not started)
 
-### Chosen approach: collect server-side now, show personal-only
+### Chosen approach: localStorage now (revised by LLM council 2026-06-22)
 
-Store every rating server-side via the anonymous cookie token (reuse
-`poll-cookie`), but only ever DISPLAY the visitor's own rating until a community
-average is deliberately switched on. This is the codebase's "pre-instrument now"
-pattern: it builds the real dataset so the future community average does not
-start from zero, while staying honest today.
+Store the rating LOCALLY, reusing the existing `engagement-store.ts` pattern —
+one more id→stars map alongside likes/saves, already consent-gated, with the
+documented "swap to a server call later" seam. No backend, no new GDPR surface.
 
-- **B1 Schema** — new `story_ratings` table mirroring `poll_votes`:
-  `id, story_id, cookie_token, user_id (nullable), stars (1-5), created_at,
-  updated_at`. Unique index on `(story_id, cookie_token)`; partial unique on
-  `(story_id, user_id) WHERE user_id IS NOT NULL` — same two-index anti-dup
-  pattern the polls already use. Re-rating UPSERTs the existing row.
-- **B2 Server actions** — `rateStory(storyId, stars)` (validate `stars ∈ 1..5`,
-  validate the story is published, issue/read the cookie token, upsert) and
-  `getMyRating(storyId)` / a batched `getMyRatings(ids)` for the homepage.
-- **B3 UI** — the Rate star opens an inline 1-5 star row in both modals;
-  optimistic update; clear "Your rating ★4" state; obvious re-rate / clear.
-- **B4 Thumbnails** — thread the visitor's ratings into the homepage shells the
-  same way `useSavedStories` / `useLikedReels` are, and render a small
-  "★N" badge on cards the visitor has rated (mobile + desktop). The existing
-  card score stays as the always-present number until Phase C.
-- **B5** — tests + QA + the security items below.
+This REVERSES this plan's original "server-side now" recommendation. The council
+was near-unanimous (4 of 5 advisors + all peer reviewers): a server table to
+"pre-collect data for a future community average" is over-engineering for a
+zero-traffic product. Anonymous cookie-keyed ratings at this scale are
+statistically worthless and untrusted (cookie-clearing, no dedup) — you would
+recompute from scratch when real traffic arrives, so the dataset buys almost
+nothing while adding real GDPR plumbing on the exact branch paying down GDPR
+debt. Cross-device sync at near-zero signed-in users is a phantom requirement.
+
+The council's sharper point, upstream of storage: a personal-only rating that
+changes NOTHING visible won't get used (it duplicates "saved"/"liked"). So the
+rating must DO something. Decide that payoff before writing storage code.
+
+- **B0 (decide first)** — what does a rating DO for the user? Options: a "Your
+  ratings" / 5-star list surface to revisit; feed it into the existing
+  personalization; or sort/filter by it. Without a payoff, defer the whole star.
+- **B1 Store** — add a `ratingStore` (id→1-5) to `engagement-store.ts`, mirroring
+  `useSavedStories` / `useLikedReels`; consent-gated; `useStoryRatings()` hook.
+- **B2 UI** — the Rate star opens an inline 1-5 row in both modals; optimistic;
+  clear "Your rating ★4"; obvious re-rate / clear.
+- **B3 Thumbnails** — render a small "★N" badge on cards the visitor rated
+  (mobile + desktop), threaded like the saved/liked sets. Existing card score
+  stays as the always-present number.
+- **B4** — tests + QA. No new server/GDPR surface, so the security section below
+  shrinks to "localStorage + consent gate," same as likes/saves.
 
 ### Alternatives rejected
 
-- **localStorage-only personal rating** (simplest, mirrors like/save exactly,
-  zero backend). Rejected as the primary because it collects no data for the
-  future community average and never syncs across devices — we would be
-  throwing away every rating. Kept as the fallback if we decide ratings should
-  never aggregate.
+- **Server-side table now (the original plan choice).** Rejected by the council.
+  Buys only a low-trust dataset for an unbuilt feature + phantom sync, at real
+  GDPR cost. If a community average IS ever greenlit, that decision pays for the
+  table then — and the clean way to start collecting is the Contrarian's path:
+  persist server-side for SIGNED-IN users keyed by `user_id` only (no anonymous
+  cookie token), giving trustworthy identity-deduped data and real cross-device
+  sync, without an anonymous-PII swamp. The localStorage store's documented
+  swap-seam is where that lands.
 - **Community star average now (IMDb-style).** Rejected: cold-start trap on a
-  zero-traffic product + clashes with the no-fabricated-counts ethos. This is
-  Phase C, switched on once `story_ratings` holds real volume.
-- **Thumbs / % liked.** Rejected: the user chose 1-5 stars; also same
-  cold-start caveat as the community average.
+  zero-traffic product + clashes with the no-fabricated-counts ethos.
+- **Thumbs / % liked.** Rejected: the user chose 1-5 stars; same cold-start caveat.
 
-### Security (rule 13)
+### Security (rule 13) — localStorage path
 
-- Validate `stars` server-side (integer 1-5); reject anything else.
-- Validate `story_id` against a published story before writing.
-- Anti-double-rate: unique `(story_id, cookie_token)` + the signed-in partial
-  index. Anonymous users can clear cookies and re-rate — harmless for a
-  personal-only display; for the future community average add the same
-  user_id / heuristic dedup the polls already contemplate.
-- Rate-limit the write action.
-- **GDPR**: `story_ratings` is user data. Add it to the account-deletion sweep
-  (`account-deletion.ts`) and the data-deletion flow alongside `user_likes` etc.
-- **Consent**: cookie-keyed writes follow the same `lw_consent` gate the polls
-  use — confirm the poll path's exact behavior and match it.
-- No PII stored (random cookie token; user_id only when already signed in).
+With Option B the surface is the same as the existing likes/saves store, so the
+security story shrinks accordingly:
+
+- Clamp `stars` to an integer 1-5 in the store before persisting.
+- Reuse the existing `lw_consent` gate (the engagement store already skips the
+  localStorage write until consent is accepted).
+- No server write, no new cookie, no new GDPR/deletion surface — the rating
+  never leaves the browser. GDPR data-portability/erasure is covered by the
+  existing "clear local data" privacy control that already wipes the store.
+- If/when the server path lands (signed-in `user_id` only), THAT change owns
+  the validate-on-write, rate-limit, account-deletion + data-deletion sweeps,
+  and consent items the original server plan listed.
 
 ### Lazy-user walkthrough (rule 10)
 
@@ -127,9 +136,13 @@ the real average once volume justifies it. Retire the fabricated `match %`.
 
 ## Open questions
 
-1. "Keep a card score" — keep the fabricated `match %` indefinitely, relabel it,
+1. **B0 — what does the rating DO?** The council's load-bearing open question: a
+   personal-only star that changes nothing visible likely won't get used. Decide
+   the payoff (a "Your ratings" list, sort/filter, or feed personalization)
+   before building storage — or defer the star entirely.
+2. "Keep a card score" — keep the fabricated `match %` indefinitely, relabel it,
    or plan to replace it with the Phase C community average? The fake match% is
    a latent honesty issue regardless of ratings.
-2. Star picker placement — inline in the action bar, or a small popover?
-3. Run the storage-model decision (server cookie-keyed table vs localStorage-
-   only) through the LLM council before building Phase B, per rule 11.
+3. Star picker placement — inline in the action bar, or a small popover?
+4. Storage model — RESOLVED by the LLM council 2026-06-22: localStorage now,
+   server table deferred until a community average is actually greenlit.

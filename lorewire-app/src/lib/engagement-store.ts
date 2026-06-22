@@ -177,6 +177,145 @@ export function useFavoriteCategories() {
   };
 }
 
+/* ----------------------------- Ratings store ----------------------------- */
+//
+// Personal 1-5 star ratings, keyed by story id. Local + honest, exactly like
+// likes/saves: this is the visitor's OWN verdict, shown back to them as a badge
+// on rated thumbnails — never averaged into a fabricated community score on a
+// zero-traffic catalog (per the LLM-council verdict, _plans/2026-06-22-
+// ratings-and-share.md). Consent-gated like the other stores; a future server
+// sync swaps the read/write here without changing useStoryRatings.
+
+const EMPTY_RATINGS: Record<string, number> = {};
+
+interface RatingStore {
+  subscribe: (cb: Listener) => () => void;
+  getSnapshot: () => Record<string, number>;
+  getServerSnapshot: () => Record<string, number>;
+  set: (id: string, stars: number) => void;
+  remove: (id: string) => void;
+}
+
+/** Coerce an arbitrary value to a whole 1-5 star rating, or null if invalid. */
+function clampStars(n: unknown): number | null {
+  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+  const r = Math.round(n);
+  return r >= 1 && r <= 5 ? r : null;
+}
+
+function createRatingStore(storageKey: string): RatingStore {
+  let ratings: Record<string, number> = {};
+  // Cached snapshot so getSnapshot returns a stable reference between changes.
+  let snapshot: Record<string, number> = EMPTY_RATINGS;
+  const listeners = new Set<Listener>();
+  let started = false;
+
+  const readStorage = (): Record<string, number> => {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return {};
+      }
+      const out: Record<string, number> = {};
+      for (const [id, val] of Object.entries(parsed)) {
+        const stars = clampStars(val);
+        if (id && stars !== null) out[id] = stars;
+      }
+      return out;
+    } catch {
+      return {};
+    }
+  };
+
+  const refreshSnapshot = () => {
+    snapshot = { ...ratings };
+  };
+
+  const notify = () => listeners.forEach((l) => l());
+
+  const persist = () => {
+    if (!consentAccepted()) {
+      console.info("[auth ui engagement-store consent-gated]", {
+        storageKey,
+        op: "persist",
+      });
+      return;
+    }
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(ratings));
+    } catch {
+      /* private mode / quota — in-memory state still updates */
+    }
+  };
+
+  const start = () => {
+    if (started || typeof window === "undefined") return;
+    started = true;
+    ratings = readStorage();
+    refreshSnapshot();
+    window.addEventListener("storage", (e) => {
+      if (e.key !== storageKey) return;
+      ratings = readStorage();
+      refreshSnapshot();
+      notify();
+    });
+  };
+
+  return {
+    subscribe(cb) {
+      start();
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    getSnapshot() {
+      return snapshot;
+    },
+    getServerSnapshot() {
+      return EMPTY_RATINGS;
+    },
+    set(id, stars) {
+      start();
+      const clamped = clampStars(stars);
+      if (!id || clamped === null) return;
+      if (ratings[id] === clamped) return;
+      ratings = { ...ratings, [id]: clamped };
+      persist();
+      refreshSnapshot();
+      notify();
+    },
+    remove(id) {
+      start();
+      if (!(id in ratings)) return;
+      const next = { ...ratings };
+      delete next[id];
+      ratings = next;
+      persist();
+      refreshSnapshot();
+      notify();
+    },
+  };
+}
+
+const ratingStore = createRatingStore("lw.ratings.v1");
+
+/** Personal star ratings (story id -> 1-5). Local + consent-gated, mirroring
+ *  useSavedStories / useLikedReels. `setRating` clamps to 1-5; `clearRating`
+ *  removes the rating entirely. */
+export function useStoryRatings() {
+  const ratings = useSyncExternalStore(
+    ratingStore.subscribe,
+    ratingStore.getSnapshot,
+    ratingStore.getServerSnapshot,
+  );
+  return {
+    ratings,
+    getRating: (id: string): number | undefined => ratings[id],
+    setRating: ratingStore.set,
+    clearRating: ratingStore.remove,
+  };
+}
+
 /* ----------------------------- Ordered list store ----------------------------- */
 //
 // LRU-style ordered list of story ids the user has viewed. New entries

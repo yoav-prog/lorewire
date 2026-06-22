@@ -17,7 +17,8 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CAT, type Cat } from "@/lib/stories";
-import { shareOrCopy, storyShareUrl } from "@/lib/share";
+import { storyShareUrl } from "@/lib/share";
+import ShareSheet from "@/components/ShareSheet";
 import type { LiveCatalogStory } from "@/app/actions";
 
 type OpenFn = (id: string, tab?: string) => void;
@@ -121,8 +122,8 @@ export default function ReelCard({
   const [userStarted, setUserStarted] = useState(false);
   const [userPaused, setUserPaused] = useState(false);
   const [blocked, setBlocked] = useState(false);
-  // Transient "Link copied" confirmation after the clipboard-fallback share.
-  const [copied, setCopied] = useState(false);
+  // Our own ShareSheet overlay (not the OS share panel).
+  const [shareOpen, setShareOpen] = useState(false);
 
   // Reset the transient playback flags the moment this card stops being active,
   // so re-entry autoplays fresh. Done during render (the React 19 pattern the
@@ -199,18 +200,12 @@ export default function ReelCard({
     }
   };
 
-  // Share the PUBLIC canonical reader URL (/v/[slug]) — never an internal id or
-  // a signed GCS URL. Native share sheet first, clipboard as the fallback; the
-  // "Copied" confirmation shows only when the clipboard path actually ran.
-  const onShare = async () => {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const url = storyShareUrl(short.slug, origin);
-    const outcome = await shareOrCopy({ url, title: short.title ?? "LoreWire" });
-    if (outcome === "copied") {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    }
-  };
+  // Share opens our OWN ShareSheet with the PUBLIC canonical reader URL
+  // (/v/[slug]) — never an internal id or a signed GCS URL.
+  const shareUrl = storyShareUrl(
+    short.slug,
+    typeof window !== "undefined" ? window.location.origin : "",
+  );
 
   const showPlayButton =
     active && !paused && ((reducedMotion && !userStarted) || userPaused || blocked);
@@ -383,17 +378,25 @@ export default function ReelCard({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                onShare();
+                setShareOpen(true);
               }}
               aria-label="Share"
               className="flex flex-col items-center gap-0.5 text-ink active:scale-90 transition"
             >
               <ShareUpIcon />
-              <span className="font-body text-[10px] font-semibold">{copied ? "Copied" : "Share"}</span>
+              <span className="font-body text-[10px] font-semibold">Share</span>
             </button>
           </div>
         </div>
       </div>
+
+      {shareOpen && (
+        <ShareSheet
+          url={shareUrl}
+          title={short.title ?? "LoreWire"}
+          onClose={() => setShareOpen(false)}
+        />
+      )}
     </div>
   );
 }

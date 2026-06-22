@@ -17,7 +17,8 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
-import { shareOrCopy, storyShareUrl } from "@/lib/share";
+import { storyShareUrl } from "@/lib/share";
+import ShareSheet from "@/components/ShareSheet";
 import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
@@ -40,7 +41,9 @@ import {
   useContinueReading,
   useRecentlyViewed,
   useSavedStories,
+  useStoryRatings,
 } from "@/lib/engagement-store";
+import RatingStars, { RatingBadge } from "@/components/RatingStars";
 import SignInChip from "@/components/SignInChip";
 import SiteFooter from "@/components/SiteFooter";
 import type { PublicSession } from "@/lib/homepage-data";
@@ -256,10 +259,12 @@ function Rail({ title, children }: { title: string; children: React.ReactNode })
 }
 
 function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number; landscape?: boolean }) {
+  const { getRating } = useStoryRatings();
   return (
     <button onClick={() => onOpen(story.id)} className="relative shrink-0 transition-transform duration-200 hover:scale-[1.05] hover:z-10" style={{ width: w }}>
       <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}>
         <PosterArt story={story} showTitle={!landscape} />
+        <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 30 }} />
         {landscape && (
           <div className="absolute left-3.5 right-3.5 bottom-5">
             <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow text-ink" style={{ fontSize: 18 }}>{story.title}</h3>
@@ -1066,21 +1071,22 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
     };
   }, [story.id, story.videoUrl, story.images]);
 
-  // Share the PUBLIC canonical reader URL (/v/[slug]) for THIS story — never
-  // the internal id or a signed media URL. liveMedia.slug is non-null exactly
-  // when the story is published and reachable at /v/[slug]; otherwise we fall
-  // back to the site origin. Native share sheet first, clipboard otherwise; the
-  // icon flips to a check for ~2s when the clipboard path runs.
-  const [copied, setCopied] = useState(false);
-  const onShare = async () => {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const url = storyShareUrl(liveMedia.slug, origin);
-    const outcome = await shareOrCopy({ url, title: story.title });
-    if (outcome === "copied") {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
+  // Share opens our OWN ShareSheet (not the OS share panel). It carries the
+  // PUBLIC canonical reader URL (/v/[slug]) for THIS story — never the internal
+  // id or a signed media URL. liveMedia.slug is non-null exactly when the story
+  // is published and reachable at /v/[slug]; otherwise we fall back to origin.
+  const [shareOpen, setShareOpen] = useState(false);
+  const shareUrl = storyShareUrl(
+    liveMedia.slug,
+    typeof window !== "undefined" ? window.location.origin : "",
+  );
+
+  // Personal star rating — local + honest (see useStoryRatings). The star opens
+  // an inline picker; a set rating shows as a gold star here and a badge on the
+  // story's thumbnails.
+  const { getRating, setRating, clearRating } = useStoryRatings();
+  const myRating = getRating(story.id) ?? 0;
+  const [rateOpen, setRateOpen] = useState(false);
 
   const c = CAT[story.cat];
   let more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id);
@@ -1088,6 +1094,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
   more = more.slice(0, 6);
   return (
     <div className="fixed inset-0 z-[60] overflow-y-auto scrim-in" style={{ background: "rgba(0,0,0,.82)" }} onClick={onClose}>
+      {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
       <div className="min-h-full flex items-start justify-center py-10 px-4">
         <div id="article-top" className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden scroll-mt-0" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()}>
           <div className="relative h-[400px]">
@@ -1115,10 +1122,16 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               <div className="flex items-center gap-3 shrink-0 pt-1">
                 <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
                 <button onClick={() => toggleList(story.id)} title="My List" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color: inList ? "#E8462B" : "#F5F3EF" }}>{inList ? <CheckI size={20} /> : <PlusI size={20} />}</button>
-                <button title="Rate" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><StarI size={19} /></button>
-                <button onClick={onShare} aria-label={copied ? "Link copied" : "Share"} title={copied ? "Link copied" : "Share"} className="w-11 h-11 rounded-full border border-line flex items-center justify-center hover:border-ink/50 transition" style={{ color: copied ? "#E8462B" : "#F5F3EF" }}>{copied ? <CheckI size={20} /> : <ShareI size={19} />}</button>
+                <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} title={myRating > 0 ? `Your rating: ${myRating}` : "Rate"} className="w-11 h-11 rounded-full border flex items-center justify-center hover:border-ink/50 transition" style={{ borderColor: rateOpen ? "#F4B740" : "var(--color-line)", color: myRating > 0 ? "#F4B740" : "#F5F3EF" }}><StarI size={19} /></button>
+                <button onClick={() => setShareOpen(true)} aria-label="Share" title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
               </div>
             </div>
+            {rateOpen && (
+              <div className="flex items-center gap-3 mt-4">
+                <span className="font-body text-[13px] text-muted">{myRating > 0 ? "Your rating" : "Rate this story"}</span>
+                <RatingStars value={myRating} onRate={(n) => setRating(story.id, n)} onClear={() => clearRating(story.id)} size={26} />
+              </div>
+            )}
             <div className="flex gap-8 mt-8 border-b border-line">
               {["Watch", "Read", "Read-along"].map((t) => (
                 <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-display font-bold uppercase tracking-tight text-[15px] transition" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>

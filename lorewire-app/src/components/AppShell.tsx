@@ -44,12 +44,15 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
-import { shareOrCopy, storyShareUrl } from "@/lib/share";
+import { storyShareUrl } from "@/lib/share";
+import ShareSheet from "@/components/ShareSheet";
 import {
   useContinueReading,
   useRecentlyViewed,
   useSavedStories,
+  useStoryRatings,
 } from "@/lib/engagement-store";
+import RatingStars, { RatingBadge } from "@/components/RatingStars";
 
 // Mirror DesktopShell's NO_LIVE_MEDIA seed: until the live fetch resolves
 // (or on miss/error) every subview falls back to the baked story shape.
@@ -216,9 +219,11 @@ function Billboard({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn;
 
 /* ----------------------------- POSTER CARD (rail) ----------------------------- */
 function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number }) {
+  const { getRating } = useStoryRatings();
   return (
     <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w }}>
       <div style={{ height: h }}><PosterArt story={story} /></div>
+      <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 28 }} />
       {progress != null && (
         <div className="absolute left-1.5 right-1.5 bottom-1.5 h-[3px] rounded-full" style={{ background: "rgba(255,255,255,.25)" }}>
           <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }}></div>
@@ -1284,21 +1289,22 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
     };
   }, [story.id, story.videoUrl, story.images]);
 
-  // Share the PUBLIC canonical reader URL (/v/[slug]) for THIS story — never
-  // the internal id or a signed media URL. liveMedia.slug is non-null exactly
-  // when the story is published and reachable at /v/[slug]; otherwise we fall
-  // back to the site origin. Native share sheet first (the common case on
-  // mobile), clipboard otherwise; the label flips to "Copied" for ~2s.
-  const [copied, setCopied] = useState(false);
-  const onShare = async () => {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const url = storyShareUrl(liveMedia.slug, origin);
-    const outcome = await shareOrCopy({ url, title: story.title });
-    if (outcome === "copied") {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
+  // Share opens our OWN ShareSheet (not the OS share panel). It carries the
+  // PUBLIC canonical reader URL (/v/[slug]) for THIS story — never the internal
+  // id or a signed media URL. liveMedia.slug is non-null exactly when the story
+  // is published and reachable at /v/[slug]; otherwise we fall back to origin.
+  const [shareOpen, setShareOpen] = useState(false);
+  const shareUrl = storyShareUrl(
+    liveMedia.slug,
+    typeof window !== "undefined" ? window.location.origin : "",
+  );
+
+  // Personal star rating — local + honest (see useStoryRatings). The star opens
+  // an inline picker; a set rating shows as a gold star here and a badge on the
+  // story's thumbnails.
+  const { getRating, setRating, clearRating } = useStoryRatings();
+  const myRating = getRating(story.id) ?? 0;
+  const [rateOpen, setRateOpen] = useState(false);
 
   const c = CAT[story.cat];
   const more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
@@ -1313,6 +1319,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
   const showHeaderHero = !!headerHeroSrc && headerHeroOk;
   return (
     <div id="article-top" className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }}>
+      {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
       <div className="relative h-[300px]">
         <div className="absolute inset-0" style={{ background: c }}>
           {showHeaderHero && (
@@ -1360,14 +1367,20 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
             {inList ? <span className="text-accent"><Ico d={<path d="m5 12 5 5L20 7" />} size={22} /></span> : <PlusI size={22} />}
             <span className="font-body text-[11px]" style={{ color: inList ? "#E8462B" : undefined }}>My List</span>
           </button>
-          <button className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
-            <StarI size={22} /><span className="font-body text-[11px]">Rate</span>
+          <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition" style={{ color: myRating > 0 ? "#F4B740" : undefined }}>
+            <StarI size={22} /><span className="font-body text-[11px]">{myRating > 0 ? `Rated ${myRating}` : "Rate"}</span>
           </button>
-          <button onClick={onShare} aria-label="Share" className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
-            {copied ? <span className="text-accent"><Ico d={<path d="m5 12 5 5L20 7" />} size={22} /></span> : <ShareI size={22} />}
-            <span className="font-body text-[11px]" style={{ color: copied ? "#E8462B" : undefined }}>{copied ? "Copied" : "Share"}</span>
+          <button onClick={() => setShareOpen(true)} aria-label="Share" className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
+            <ShareI size={22} /><span className="font-body text-[11px]">Share</span>
           </button>
         </div>
+
+        {rateOpen && (
+          <div className="mt-3 flex flex-col items-center gap-1.5">
+            <span className="font-body text-[12px] text-muted">{myRating > 0 ? "Your rating" : "Tap to rate"}</span>
+            <RatingStars value={myRating} onRate={(n) => setRating(story.id, n)} onClear={() => clearRating(story.id)} size={32} />
+          </div>
+        )}
 
         <p className="font-body text-[14.5px] leading-relaxed text-ink/85 mt-4">{story.syn}</p>
 

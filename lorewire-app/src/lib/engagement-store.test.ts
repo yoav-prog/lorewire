@@ -17,10 +17,11 @@ import {
   useLikedReels,
   useRecentlyViewed,
   useSavedStories,
+  useStoryRatings,
 } from "./engagement-store";
 
 describe("engagement-store module surface", () => {
-  it("exposes the five documented hooks", () => {
+  it("exposes the six documented hooks", () => {
     // The hooks themselves aren't called here (no React renderer) — we
     // just verify the exports exist and are callable. A typo or rename
     // in any of them would crash every consumer in the shells.
@@ -29,5 +30,6 @@ describe("engagement-store module surface", () => {
     expect(typeof useFavoriteCategories).toBe("function");
     expect(typeof useRecentlyViewed).toBe("function");
     expect(typeof useContinueReading).toBe("function");
+    expect(typeof useStoryRatings).toBe("function");
   });
 });
