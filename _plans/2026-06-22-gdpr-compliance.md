@@ -123,18 +123,34 @@ column(s) (`user_id` / `email` / `cookie_token`), and per-table delete + export
 behavior (delete row vs. de-identify). Guard test fails the build if a schema
 table holding a known identifier column is missing from the registry.
 
-### Phase 2 — Self-serve DSAR (the real fix)
-On `/auth/account`:
-- **Export my data**: registry-driven read, returns JSON download + a readable
-  on-page summary.
-- **Delete my account**: registry-driven multi-table sweep in one transaction;
-  de-identify `poll_votes` (null `user_id`) rather than delete to preserve
-  aggregate integrity; delete `magic_link_tokens` by email. Re-auth gated
-  (password OR fresh magic-link for passwordless users), typed confirmation,
-  plain-language "this is permanent / here is exactly what is removed" copy,
-  success confirmation screen, and a visible "contact a human about your data"
-  link. Endpoint: POST only, origin-gated, rate-limited, scoped strictly to the
-  session user, never accepts a `user_id` from the body.
+### Phase 2 — Self-serve DSAR
+
+> **Reconciliation (2026-06-22).** Account DELETION was already designed, built,
+> and council-approved in parallel under
+> `_plans/2026-06-22-facebook-login-and-data-deletion.md`: `account-deletion.ts`
+> (`deleteUserCompletely` + `USER_DATA_TABLES`), `DeleteAccount.tsx`, the Meta
+> callback wiring, and the `data_deletion_requests` audit table. That is the
+> single canonical erasure path. To avoid a second, conflicting engine, this
+> plan's Phase 2 was reduced to the one piece that work defers to "future":
+> **data export**. The user directed: hands off all those files (another session
+> is active on them), keep my own export table list drift-tested against the
+> schema, ship the export backend now but leave the UI unwired.
+
+- **Export my data** (built): `src/lib/personal-data.ts` is now an export-only
+  reader over `EXPORT_SOURCES` (its own list, drift-tested so coverage can't
+  silently fall behind the schema); `POST /api/user/export` returns JSON +
+  drives a readable summary; `ExportData.tsx` is the UI, intentionally left
+  unwired (one line to mount on the hands-off `page.tsx` once deletion lands).
+  Origin-gated via the shared `request-origin.ts`, session-scoped, never takes a
+  user id from the request.
+- **Delete my account**: owned by the Facebook plan (`deleteUserCompletely`).
+  Not re-implemented here.
+
+Outstanding (carried, not yet done):
+- `magic_link_tokens` are not cleared by `deleteUserCompletely` (leaves the
+  deleted user's email in token rows until the 15-minute expiry / Phase 3 prune).
+  Flag to the deletion owner rather than editing their file.
+- Wire `ExportData` into the account page after the deletion work commits.
 
 ### Phase 3 — Retention enforcement
 Add Vercel crons: null `poll_votes.ip_ua_hash` older than 24h, prune expired
