@@ -60,9 +60,14 @@ counsel, `[operator]` is an account/admin action.
 - [x] Canonical erasure path with an audit trail (`account-deletion.ts`,
       `data_deletion_requests`) — owned by the data-deletion work.
 - [x] Self-serve data export endpoint (`/api/user/export`), Art. 15/20.
-- [ ] `[operator]` Confirm the **retention prune crons** ship (24h IP+UA hash,
-      magic-link expiry, recently-viewed cap) — GDPR Phase 3. Until they do, the
-      retention promises in `/privacy` §8 are not fully enforced.
+- [x] The **24h IP+UA hash prune** is live (the `/api/polls/refresh` cron calls
+      `pruneOldIpUaHashes`). Verified.
+- [ ] `[operator]` Wire the **magic-link token expiry prune** to a cron:
+      `pruneExpiredMagicLinks` exists in `src/lib/magic-link.ts` but is never
+      called, so expired tokens (which carry the user's email) accumulate.
+- [ ] `[operator]` Verify the **recently-viewed 50-row cap** is actually
+      enforced — the schema comments claim a periodic prune, but no server-side
+      prune query was found; the table may grow unbounded per user.
 - [ ] `[operator]` Have the deletion owner add **magic_link_tokens cleanup** to
       `deleteUserCompletely` (it currently leaves the deleted user's email in
       token rows until expiry).

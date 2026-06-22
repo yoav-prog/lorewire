@@ -63,9 +63,14 @@ closing.
    - Terms §8 repeats the false "close from settings page" deletion promise.
    - §10 references "under 13"; should be 16 (GDPR) and adults-only.
 2. **No self-serve data export** (Art. 15 access / Art. 20 portability).
-3. **Retention promises not enforced in code:** the 24h `ip_ua_hash` prune, the
-   expired `magic_link_tokens` prune, and the `user_recently_viewed` 50-row cap
-   have **no cron** in `vercel.json`.
+3. **Retention promises partially enforced.** CORRECTION (2026-06-22): an
+   earlier draft of this plan claimed the 24h `ip_ua_hash` prune did not exist —
+   that was wrong (it runs inside `/api/polls/refresh` via `pruneOldIpUaHashes`,
+   verified by reading the route, not just the cron names). Actual gaps: the
+   `pruneExpiredMagicLinks` function exists but is **never called** (no cron), so
+   expired magic-link tokens carrying emails accumulate; and the
+   `user_recently_viewed` 50-row cap is claimed in schema comments but no
+   server-side prune query was found.
 4. **No FK / cascade** → account deletion is a hand-written multi-table sweep.
    A missed table = certified-but-incomplete erasure (worse than no delete).
 5. Hardening: `lw_anon` / `lw_vote` 365-day TTL; OAuth avatar URLs hot-linked
@@ -152,11 +157,15 @@ Outstanding (carried, not yet done):
   Flag to the deletion owner rather than editing their file.
 - Wire `ExportData` into the account page after the deletion work commits.
 
-### Phase 3 — Retention enforcement
-Add Vercel crons: null `poll_votes.ip_ua_hash` older than 24h, prune expired
-`magic_link_tokens`, cap `user_recently_viewed` at 50/user. Reduce `lw_anon` /
-`lw_vote` TTL from 365d to 90d. Then tighten privacy §8 to match the now-enforced
-windows.
+### Phase 3 — Retention enforcement (scope corrected 2026-06-22)
+- `poll_votes.ip_ua_hash` 24h prune: **already live** in `/api/polls/refresh`.
+  No work needed.
+- Wire `pruneExpiredMagicLinks` to a cron (new tiny route + a `vercel.json`
+  entry). Touches the shared `vercel.json`, so coordinate with the active
+  session.
+- Verify / implement the `user_recently_viewed` 50-row cap (trace the
+  `recordView` write path first; it may belong to active reader work).
+- Optional hardening: reduce `lw_anon` / `lw_vote` TTL from 365d to 90d.
 
 ### Phase 4 — Hardening
 Proxy/store OAuth avatars instead of hot-linking; finish Meta data-deletion

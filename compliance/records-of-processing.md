@@ -63,10 +63,10 @@ Lawful bases referenced (GDPR Art. 6(1)): **(b) contract**, **(a) consent**,
   abuse prevention and is not reversible to an IP.
 - **Recipients:** Neon; Vercel (edge IP).
 - **Retention:** votes are retained as anonymous aggregate data; the IP+UA hash
-  is intended to be nulled after 24 hours (`TODO(operator)`: the prune cron is a
-  Phase 3 deliverable — until it ships, this retention promise is not enforced).
-  On account deletion the user id, cookie nonce, and IP+UA hash on that user's
-  votes are all nulled, leaving an anonymous tally.
+  is nulled after 24 hours by the `/api/polls/refresh` cron (verified in
+  `src/app/api/polls/refresh/route.ts`, `pruneOldIpUaHashes`). On account
+  deletion the user id, cookie nonce, and IP+UA hash on that user's votes are
+  all nulled, leaving an anonymous tally.
 - **Balancing test (Art. 6(1)(f)):** `TODO(legal)` record the legitimate-
   interests assessment; impact is low (no profiling, hashed identifiers,
   short retention) and supports a service the user engaged with.
