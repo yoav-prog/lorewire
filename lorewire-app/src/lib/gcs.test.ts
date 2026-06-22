@@ -11,9 +11,19 @@
 //
 // A null return is the contract callers rely on to "log and skip" — never
 // throw — so any new ambiguity must come back as null, not an exception.
+//
+// It also covers the upload-time WebP compression helpers (swapKeyExtToWebp and
+// maybeCompressImageBuffer), the Node mirror of pipeline/gcs.py: the pass-through
+// for non-images, the .webp key swap, and the graceful fallback when bytes do
+// not decode.
 
 import { describe, expect, it } from "vitest";
-import { parseGcsUrl } from "@/lib/gcs";
+import sharp from "sharp";
+import {
+  maybeCompressImageBuffer,
+  parseGcsUrl,
+  swapKeyExtToWebp,
+} from "@/lib/gcs";
 
 describe("parseGcsUrl", () => {
   it("parses a plain bucket+key URL", () => {
@@ -66,5 +76,68 @@ describe("parseGcsUrl", () => {
     expect(parseGcsUrl("")).toBeNull();
     expect(parseGcsUrl(null)).toBeNull();
     expect(parseGcsUrl(undefined)).toBeNull();
+  });
+});
+
+describe("swapKeyExtToWebp", () => {
+  it("swaps png / jpg / jpeg extensions to webp", () => {
+    expect(swapKeyExtToWebp("hero.png")).toBe("hero.webp");
+    expect(swapKeyExtToWebp("a/b/c.jpeg")).toBe("a/b/c.webp");
+    expect(swapKeyExtToWebp("articles/x/img.JPG")).toBe("articles/x/img.webp");
+  });
+
+  it("appends .webp when the filename has no extension", () => {
+    expect(swapKeyExtToWebp("articles/x/photo")).toBe("articles/x/photo.webp");
+  });
+
+  it("only rewrites the filename, never a directory dot", () => {
+    expect(swapKeyExtToWebp("v1.2/c.png")).toBe("v1.2/c.webp");
+  });
+});
+
+describe("maybeCompressImageBuffer", () => {
+  it("passes non-compressible content types through untouched", async () => {
+    const body = new Uint8Array([1, 2, 3, 4]);
+    expect(
+      await maybeCompressImageBuffer(body, "x/y.webp", "image/webp"),
+    ).toEqual({ body, key: "x/y.webp", contentType: "image/webp" });
+    expect(
+      await maybeCompressImageBuffer(body, "x/y.gif", "image/gif"),
+    ).toEqual({ body, key: "x/y.gif", contentType: "image/gif" });
+  });
+
+  it("re-encodes a PNG upload to WebP and swaps the key to .webp", async () => {
+    const png = await sharp({
+      create: {
+        width: 64,
+        height: 64,
+        channels: 3,
+        background: { r: 200, g: 30, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+
+    const out = await maybeCompressImageBuffer(
+      png,
+      "articles/abc/hero.png",
+      "image/png",
+    );
+
+    expect(out.contentType).toBe("image/webp");
+    expect(out.key).toBe("articles/abc/hero.webp");
+    const meta = await sharp(out.body as Uint8Array).metadata();
+    expect(meta.format).toBe("webp");
+  });
+
+  it("returns the original unchanged when the bytes are not a valid image", async () => {
+    const garbage = new Uint8Array([0, 1, 2, 3, 4, 5]);
+    expect(
+      await maybeCompressImageBuffer(garbage, "articles/abc/broken.png", "image/png"),
+    ).toEqual({
+      body: garbage,
+      key: "articles/abc/broken.png",
+      contentType: "image/png",
+    });
   });
 });

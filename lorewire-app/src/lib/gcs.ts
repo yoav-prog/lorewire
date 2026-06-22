@@ -172,6 +172,49 @@ export async function uploadFile(
 }
 
 // Upload an in-memory buffer to <bucket>/<key>. Returns the public URL.
+const WEBP_COMPRESSIBLE = new Set(["image/png", "image/jpeg", "image/jpg"]);
+
+/** Swap a key's filename extension to `.webp`. Node mirror of
+ *  pipeline/gcs.py `_swap_ext_to_webp`. */
+export function swapKeyExtToWebp(key: string): string {
+  const slash = key.lastIndexOf("/");
+  const name = key.slice(slash + 1);
+  const dot = name.lastIndexOf(".");
+  const newName = (dot > 0 ? name.slice(0, dot) : name) + ".webp";
+  return slash >= 0 ? key.slice(0, slash + 1) + newName : newName;
+}
+
+/** Re-encode a raster image upload to WebP (keeps quality, much smaller) — the
+ *  Node mirror of pipeline/gcs.py `_maybe_compress_image`. sharp is imported
+ *  lazily so it only loads when an image is actually uploaded. Non-compressible
+ *  types, or any encode failure, pass through unchanged so a bad image never
+ *  blocks an upload. */
+export async function maybeCompressImageBuffer(
+  body: ArrayBuffer | Uint8Array | Buffer,
+  key: string,
+  contentType: string,
+): Promise<{
+  body: ArrayBuffer | Uint8Array | Buffer;
+  key: string;
+  contentType: string;
+}> {
+  if (!WEBP_COMPRESSIBLE.has(contentType.toLowerCase())) {
+    return { body, key, contentType };
+  }
+  try {
+    const { default: sharp } = await import("sharp");
+    const input = body instanceof Uint8Array ? body : new Uint8Array(body);
+    const webp = await sharp(input)
+      .rotate()
+      .webp({ quality: 82, effort: 6 })
+      .toBuffer();
+    return { body: webp, key: swapKeyExtToWebp(key), contentType: "image/webp" };
+  } catch (e) {
+    console.warn("[gcs compress]", { key, error: String(e) });
+    return { body, key, contentType };
+  }
+}
+
 // Used by the article CMS image uploader — images are typically <5 MB so the
 // browser can POST multipart through a Vercel Function without hitting the
 // 4.5 MB body cap that forced the segments uploader to go direct-to-GCS.
@@ -181,6 +224,13 @@ export async function uploadBuffer(
   key: string,
   contentType: string,
 ): Promise<string> {
+  // Compress raster images to WebP before upload (keeps quality, much smaller),
+  // mirroring the pipeline. Swaps the key to .webp; non-images pass through.
+  ({ body, key, contentType } = await maybeCompressImageBuffer(
+    body,
+    key,
+    contentType,
+  ));
   // Media migration target — see uploadFile. Inert until the cutover flag.
   if (isR2MediaActive()) {
     await putR2Object(mediaBucket(), key, body, {
