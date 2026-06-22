@@ -12,7 +12,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireAdmin } from "@/lib/dal";
 import { isConfigured as isGcsConfigured } from "@/lib/gcs";
 import { isR2Configured } from "@/lib/r2";
-import { migrateBatch } from "@/lib/migrate-gcs-r2";
+import { getReferencedKeys, migrateBatch } from "@/lib/migrate-gcs-r2";
 
 // sharp/streaming aside, this is a Node route and a batch with a large-ish
 // object can take a while — give it headroom.
@@ -23,6 +23,8 @@ interface RunBody {
   cursor?: string | null;
   dryRun?: boolean;
   batchSize?: number;
+  /** Copy only objects the DB references (skip orphaned generation cruft). */
+  referencedOnly?: boolean;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -47,10 +49,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   try {
+    // Build the referenced-key set once per request (cached across batches on a
+    // warm instance) when filtering to live media only.
+    const referenced = body.referencedOnly ? await getReferencedKeys() : null;
     const result = await migrateBatch({
       cursor: body.cursor ?? null,
       dryRun: Boolean(body.dryRun),
       batchSize: typeof body.batchSize === "number" ? body.batchSize : undefined,
+      referenced,
     });
     return NextResponse.json(result);
   } catch (e) {

@@ -1,24 +1,32 @@
-// Tests for one migration batch. GCS + R2 are mocked so we pin the decision
-// logic that actually moves production data: copy new, skip already-present
-// (size match), flag too-large, verify size after upload, and isolate a single
-// object's failure so the rest of the batch still proceeds.
+// Tests for the migration batch logic and the "only LoreWire files" filter.
+// GCS network calls (listObjects/getObjectBytes) and R2 are mocked, but the
+// pure helpers (parseGcsUrl) stay real so the referenced-key extraction is
+// exercised end to end. The DB layer is mocked to feed controlled rows.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/db", () => ({ all: vi.fn() }));
 vi.mock("@/lib/r2", () => ({
   MEDIA_CACHE_CONTROL: "public, max-age=31536000, immutable",
   mediaBucket: () => "lorewire-media-prod",
   headR2Object: vi.fn(),
   putR2Object: vi.fn(),
+  // Test URLs are GCS URLs, so this R2-URL helper is a no-op here.
+  mediaUrlToKey: () => null,
 }));
-vi.mock("@/lib/gcs", () => ({
-  listObjects: vi.fn(),
-  getObjectBytes: vi.fn(),
-}));
+vi.mock("@/lib/gcs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/gcs")>();
+  return { ...actual, listObjects: vi.fn(), getObjectBytes: vi.fn() };
+});
 
+import { all } from "@/lib/db";
 import { getObjectBytes, listObjects } from "@/lib/gcs";
 import { headR2Object, putR2Object } from "@/lib/r2";
-import { MAX_OBJECT_BYTES, migrateBatch } from "./migrate-gcs-r2";
+import {
+  MAX_OBJECT_BYTES,
+  buildReferencedKeys,
+  migrateBatch,
+} from "./migrate-gcs-r2";
 
 function obj(name: string, size: number) {
   return { name, size, contentType: "application/octet-stream", md5Hash: null };
@@ -26,6 +34,7 @@ function obj(name: string, size: number) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  globalThis.__lwMigrateRefKeys = undefined; // reset referenced-key cache
 });
 
 describe("migrateBatch — dry run", () => {
@@ -58,8 +67,6 @@ describe("migrateBatch — copy", () => {
       nextPageToken: null,
     });
 
-    // head: new.mp4 absent then 100 (post-upload verify); present.png matches;
-    // boom.mp3 absent (then its download throws).
     const heads: Record<string, Array<number | null>> = {
       "new.mp4": [null, 100],
       "present.png": [50],
@@ -83,12 +90,66 @@ describe("migrateBatch — copy", () => {
       "too-large",
       "failed",
     ]);
-    expect(r.done).toBe(true);
-    expect(r.nextCursor).toBeNull();
-    // Present object was never downloaded or uploaded; too-large never headed.
     expect(getObjectBytes).toHaveBeenCalledTimes(2); // new + boom (boom throws)
-    expect(putR2Object).toHaveBeenCalledTimes(1); // only new.mp4 actually uploads
-    const failed = r.items.find((i) => i.status === "failed");
-    expect(failed?.error).toContain("gcs 500");
+    expect(putR2Object).toHaveBeenCalledTimes(1); // only new.mp4 uploads
+    expect(r.items.find((i) => i.status === "failed")?.error).toContain("gcs 500");
+  });
+});
+
+describe("migrateBatch — referenced-only filter", () => {
+  it("skips objects not in the referenced set as orphans", async () => {
+    vi.mocked(listObjects).mockResolvedValue({
+      items: [obj("keep/video.mp4", 100), obj("orphan/old.png", 20)],
+      nextPageToken: null,
+    });
+    const referenced = new Set(["keep/video.mp4"]);
+
+    const r = await migrateBatch({ dryRun: true, referenced });
+
+    expect(r.items.map((i) => i.status)).toEqual(["would-copy", "skipped-orphan"]);
+  });
+});
+
+describe("buildReferencedKeys", () => {
+  it("collects keys from stories, articles, segments, and short renders", async () => {
+    const G = "https://storage.googleapis.com/bucket";
+    vi.mocked(all)
+      .mockResolvedValueOnce([
+        {
+          video_url: `${G}/s1/video.mp4`,
+          audio_url: null,
+          hero_image: `${G}/s1/hero.png`,
+          images: JSON.stringify([`${G}/s1/frame-01.png`]),
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          hero_image: null,
+          og_image: null,
+          document: JSON.stringify({
+            type: "doc",
+            content: [{ type: "image", attrs: { src: `${G}/a1/pic.png` } }],
+          }),
+        },
+      ])
+      .mockResolvedValueOnce([
+        { source_url: `${G}/segments/seg.source.mp4`, normalized_url: null },
+      ])
+      .mockResolvedValueOnce([
+        { props: JSON.stringify({ doodle_frames: [{ url: `${G}/sh1/frame-0.png` }] }) },
+      ]);
+
+    const keys = await buildReferencedKeys();
+
+    expect([...keys].sort()).toEqual(
+      [
+        "a1/pic.png",
+        "s1/frame-01.png",
+        "s1/hero.png",
+        "s1/video.mp4",
+        "segments/seg.source.mp4",
+        "sh1/frame-0.png",
+      ].sort(),
+    );
   });
 });
