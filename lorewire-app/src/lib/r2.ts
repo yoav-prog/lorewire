@@ -120,6 +120,22 @@ export async function deleteR2Object(bucket: string, key: string): Promise<void>
   throw new Error(`R2 delete HTTP ${resp.status}: ${text.slice(0, 200)}`);
 }
 
+/** HEAD an object: returns its size in bytes, or null if it does not exist.
+ *  Used by the migration tool to skip objects already copied (size match) and
+ *  to verify an upload landed at the right size. */
+export async function headR2Object(
+  bucket: string,
+  key: string,
+): Promise<number | null> {
+  const resp = await client().fetch(objectUrl(bucket, key), { method: "HEAD" });
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    throw new Error(`R2 head HTTP ${resp.status}`);
+  }
+  const len = resp.headers.get("content-length");
+  return len === null ? 0 : Number(len);
+}
+
 /** Presign a single-PUT URL for a direct browser upload (query-string auth).
  *  Used by the segment uploader's R2 path: the browser PUTs the whole file to
  *  this URL, bypassing Vercel's body cap — the role the GCS resumable session

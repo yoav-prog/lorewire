@@ -418,3 +418,74 @@ export async function deleteStoryMedia(
   }
   return { attempted, skipped };
 }
+
+// ── Migration reads: list + download objects (GCS -> R2 admin tool) ─────────
+
+export interface GcsObjectMeta {
+  name: string;
+  size: number;
+  contentType: string;
+  md5Hash: string | null;
+}
+
+export interface GcsListPage {
+  items: GcsObjectMeta[];
+  nextPageToken: string | null;
+}
+
+/** List a page of objects in GCS_BUCKET via the JSON API (authenticated).
+ *  `maxResults` doubles as the migration batch size; the returned
+ *  `nextPageToken` is the cursor for the next batch (null when done). */
+export async function listObjects(
+  opts: { pageToken?: string | null; maxResults?: number; prefix?: string } = {},
+): Promise<GcsListPage> {
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) throw new Error("GCS_BUCKET is not set; cannot list.");
+  const token = await accessToken();
+  const params = new URLSearchParams({
+    maxResults: String(Math.min(Math.max(opts.maxResults ?? 100, 1), 1000)),
+  });
+  if (opts.prefix) params.set("prefix", opts.prefix);
+  if (opts.pageToken) params.set("pageToken", opts.pageToken);
+  const url = `${JSON_API_BASE}/b/${encodeURIComponent(bucket)}/o?${params.toString()}`;
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`GCS list HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  const data = (await resp.json()) as {
+    items?: Array<{
+      name: string;
+      size?: string;
+      contentType?: string;
+      md5Hash?: string;
+    }>;
+    nextPageToken?: string;
+  };
+  return {
+    items: (data.items ?? []).map((i) => ({
+      name: i.name,
+      size: Number(i.size ?? 0),
+      contentType: i.contentType ?? "application/octet-stream",
+      md5Hash: i.md5Hash ?? null,
+    })),
+    nextPageToken: data.nextPageToken ?? null,
+  };
+}
+
+/** Download an object's bytes via an authenticated media GET (works for
+ *  non-public objects too). */
+export async function getObjectBytes(key: string): Promise<ArrayBuffer> {
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) throw new Error("GCS_BUCKET is not set; cannot read.");
+  const token = await accessToken();
+  const url =
+    `${JSON_API_BASE}/b/${encodeURIComponent(bucket)}` +
+    `/o/${encodeURIComponent(key)}?alt=media`;
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`GCS get HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  return resp.arrayBuffer();
+}

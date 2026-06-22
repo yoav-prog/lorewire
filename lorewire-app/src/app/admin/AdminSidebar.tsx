@@ -93,6 +93,14 @@ const STATIC_GROUPS: SidebarGroup[] = [
           "/admin/segments",
         ],
       },
+      {
+        // One-time media migration tool: copy all media from the legacy GCS
+        // bucket to R2. Plan:
+        // _plans/2026-06-22-r2-media-migration-and-avatar-upload.md.
+        href: "/admin/migrate",
+        label: "Migrate",
+        activePrefixes: ["/admin/migrate"],
+      },
     ],
   },
 ];
