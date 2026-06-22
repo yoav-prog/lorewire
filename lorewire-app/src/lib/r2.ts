@@ -14,6 +14,7 @@
 // Plan: _plans/2026-06-22-r2-media-migration-and-avatar-upload.md.
 
 import "server-only";
+import { createHash } from "node:crypto";
 import { AwsClient } from "aws4fetch";
 
 function endpoint(): string {
@@ -69,21 +70,6 @@ function objectUrl(bucket: string, key: string): string {
   return `${endpoint()}/${encodeURIComponent(bucket)}/${encodedKey}`;
 }
 
-// Normalize a body to a BodyInit-clean value. Newer @types/node narrowed
-// BlobPart/BodyInit to exclude `Uint8Array<ArrayBufferLike>` (it could be
-// SharedArrayBuffer-backed), so a bare Uint8Array no longer satisfies fetch's
-// body type. Copying into a fresh ArrayBuffer buys a cast-free, robust path —
-// the same massage lib/gcs.ts does for its Blob.
-function toBodyInit(
-  body: Uint8Array | ArrayBuffer | string,
-): ArrayBuffer | string {
-  if (typeof body === "string") return body;
-  if (body instanceof ArrayBuffer) return body;
-  const ab = new ArrayBuffer(body.byteLength);
-  new Uint8Array(ab).set(body);
-  return ab;
-}
-
 export interface PutObjectOpts {
   contentType: string;
   /** Cache-Control stored on the object. The edge cache + a long immutable
@@ -98,12 +84,30 @@ export async function putR2Object(
   body: Uint8Array | ArrayBuffer | string,
   opts: PutObjectOpts,
 ): Promise<void> {
-  const headers: Record<string, string> = { "Content-Type": opts.contentType };
+  // Send a Blob with an explicit Content-Length header — the pattern lib/gcs.ts
+  // already uses in production. Under Next's patched fetch a bare ArrayBuffer /
+  // Uint8Array body gets NO Content-Length, and R2 rejects that with
+  // "411 MissingContentLength". The precomputed payload hash lets aws4fetch
+  // sign without re-reading the body.
+  const src =
+    typeof body === "string"
+      ? new TextEncoder().encode(body)
+      : body instanceof Uint8Array
+        ? body
+        : new Uint8Array(body);
+  const ab = new ArrayBuffer(src.byteLength);
+  new Uint8Array(ab).set(src);
+  const sha256 = createHash("sha256").update(new Uint8Array(ab)).digest("hex");
+  const headers: Record<string, string> = {
+    "Content-Type": opts.contentType,
+    "Content-Length": String(ab.byteLength),
+    "x-amz-content-sha256": sha256,
+  };
   if (opts.cacheControl) headers["Cache-Control"] = opts.cacheControl;
   const resp = await client().fetch(objectUrl(bucket, key), {
     method: "PUT",
     headers,
-    body: toBodyInit(body),
+    body: new Blob([ab]),
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
