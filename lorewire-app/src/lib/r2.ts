@@ -108,6 +108,8 @@ export async function putR2Object(
     method: "PUT",
     headers,
     body: new Blob([ab]),
+    // Fail a stalled upload fast so a batch can't hang forever.
+    signal: AbortSignal.timeout(60_000),
   });
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
@@ -131,7 +133,10 @@ export async function headR2Object(
   bucket: string,
   key: string,
 ): Promise<number | null> {
-  const resp = await client().fetch(objectUrl(bucket, key), { method: "HEAD" });
+  const resp = await client().fetch(objectUrl(bucket, key), {
+    method: "HEAD",
+    signal: AbortSignal.timeout(20_000),
+  });
   if (resp.status === 404) return null;
   if (!resp.ok) {
     throw new Error(`R2 head HTTP ${resp.status}`);

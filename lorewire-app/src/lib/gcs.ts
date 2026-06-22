@@ -448,7 +448,10 @@ export async function listObjects(
   if (opts.prefix) params.set("prefix", opts.prefix);
   if (opts.pageToken) params.set("pageToken", opts.pageToken);
   const url = `${JSON_API_BASE}/b/${encodeURIComponent(bucket)}/o?${params.toString()}`;
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(30_000),
+  });
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`GCS list HTTP ${resp.status}: ${text.slice(0, 200)}`);
@@ -482,7 +485,11 @@ export async function getObjectBytes(key: string): Promise<ArrayBuffer> {
   const url =
     `${JSON_API_BASE}/b/${encodeURIComponent(bucket)}` +
     `/o/${encodeURIComponent(key)}?alt=media`;
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    // Fail a stalled download fast so a batch can't hang forever.
+    signal: AbortSignal.timeout(60_000),
+  });
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`GCS get HTTP ${resp.status}: ${text.slice(0, 200)}`);

@@ -129,7 +129,7 @@ export function MigrateClient() {
             headers: { "Content-Type": "application/json" },
             credentials: "same-origin",
             signal: ctrl.signal,
-            body: JSON.stringify({ cursor, dryRun, referencedOnly, batchSize: 15 }),
+            body: JSON.stringify({ cursor, dryRun, referencedOnly, batchSize: 8 }),
           });
         } catch (e) {
           // A Stop aborts the in-flight fetch — that's expected, not an error.
