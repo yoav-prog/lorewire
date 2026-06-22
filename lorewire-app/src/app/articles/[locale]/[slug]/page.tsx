@@ -44,6 +44,7 @@ import { readVoteToken } from "@/lib/poll-cookie";
 import { readCommentToken } from "@/lib/comment-cookie";
 import { readUserSession } from "@/lib/user-session";
 import { countPublishedComments, loadCommentThread } from "@/lib/comments-read";
+import { commentsEnabledForArticle } from "@/lib/comments";
 import { CommentsSection } from "@/components/CommentsSection";
 
 // Phase 2 + §15 (standalone-article polls) of
@@ -271,7 +272,7 @@ export default async function ArticleReader({
   // viewer resolved so they see their own held/rejected comments inline.
   const commentSession = await readUserSession();
   const commentToken = await readCommentToken();
-  const [commentThread, commentCount] = await Promise.all([
+  const [commentThread, commentCount, commentsEnabled] = await Promise.all([
     loadCommentThread({
       articleId: article.id,
       sort: "newest",
@@ -279,6 +280,7 @@ export default async function ArticleReader({
       viewerCookieToken: commentToken,
     }),
     countPublishedComments(article.id),
+    commentsEnabledForArticle(article.id),
   ]);
 
   console.info("[articles reader] render", {
@@ -406,6 +408,7 @@ export default async function ArticleReader({
         initial={commentThread}
         initialCount={commentCount}
         signedIn={commentSession !== null}
+        enabled={commentsEnabled}
       />
     </article>
   );

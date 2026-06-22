@@ -9,8 +9,10 @@
 import Link from "next/link";
 import { requireAdmin } from "@/lib/dal";
 import Breadcrumb from "@/app/admin/Breadcrumb";
+import { getSetting } from "@/lib/repo";
 import { listModerationQueue, type ModerationQueueRow } from "@/lib/comments";
 import { ModerationActions } from "./ModerationActions";
+import { CommentsKillSwitch } from "./CommentsKillSwitch";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +35,7 @@ export default async function CommentsModerationPage() {
   const rows = await listModerationQueue(200);
   const held = rows.filter((r) => r.status === "held");
   const quarantined = rows.filter((r) => r.status === "quarantined");
+  const siteEnabled = (await getSetting("comments.enabled")) !== "0";
 
   return (
     <div className="space-y-5">
@@ -49,6 +52,8 @@ export default async function CommentsModerationPage() {
           down.
         </p>
       </header>
+
+      <CommentsKillSwitch enabled={siteEnabled} />
 
       {quarantined.length > 0 && (
         <section className="space-y-3">

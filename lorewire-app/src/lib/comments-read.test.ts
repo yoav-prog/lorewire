@@ -75,6 +75,19 @@ describe("loadCommentThread — visibility", () => {
     });
     expect(asOther.nodes.map((n) => n.id)).not.toContain(r.comment.id);
   });
+
+  it("hides a deleted comment even from its own author", async () => {
+    const id = await published("to be deleted", "mine");
+    await setCommentStatus(id, "deleted", { source: "human", reason: "by author" }, "author:guest");
+
+    const page = await loadCommentThread({
+      articleId,
+      sort: "newest",
+      viewerUserId: null,
+      viewerCookieToken: "mine",
+    });
+    expect(page.nodes.map((n) => n.id)).not.toContain(id);
+  });
 });
 
 describe("loadCommentThread — threading + sort", () => {

@@ -9,11 +9,14 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { all, run } from "@/lib/db";
+import { setSetting } from "@/lib/repo";
 import {
+  commentsEnabledForArticle,
   createComment,
   getCommentById,
   listModerationQueue,
   setCommentStatus,
+  toggleLike,
   toPublicComment,
   type CommentRow,
 } from "./comments";
@@ -277,6 +280,43 @@ describe("listModerationQueue", () => {
     const quarRow = queue.find((r) => r.id === quar.comment.id)!;
     expect(quarRow.status).toBe("quarantined");
     expect(quarRow.moderation_category).toBe("sexual/minors");
+  });
+});
+
+describe("toggleLike", () => {
+  beforeEach(clear);
+
+  it("toggles a like and keeps the count, counting distinct viewers", async () => {
+    const articleId = await seedArticle("published");
+    const c = await createComment({ articleId, guestName: "A", body: "hi", ...base });
+    if (!c.ok) throw new Error("create failed");
+    await setCommentStatus(c.comment.id, "published", { source: "tier2" }, "ai");
+
+    expect(await toggleLike({ commentId: c.comment.id, userId: null, cookieToken: "cook1" }))
+      .toEqual({ liked: true, likeCount: 1 });
+    expect(await toggleLike({ commentId: c.comment.id, userId: null, cookieToken: "cook1" }))
+      .toEqual({ liked: false, likeCount: 0 });
+
+    await toggleLike({ commentId: c.comment.id, userId: null, cookieToken: "cook1" });
+    const r = await toggleLike({ commentId: c.comment.id, userId: "user-9", cookieToken: "cook2" });
+    expect(r.likeCount).toBe(2);
+  });
+});
+
+describe("commentsEnabledForArticle", () => {
+  it("respects the site-wide and per-article switches", async () => {
+    const articleId = await seedArticle("published");
+    await setSetting("comments.enabled", "1");
+    expect(await commentsEnabledForArticle(articleId)).toBe(true);
+
+    await setSetting(`comments.article_off.${articleId}`, "1");
+    expect(await commentsEnabledForArticle(articleId)).toBe(false);
+    await setSetting(`comments.article_off.${articleId}`, "0");
+    expect(await commentsEnabledForArticle(articleId)).toBe(true);
+
+    await setSetting("comments.enabled", "0");
+    expect(await commentsEnabledForArticle(articleId)).toBe(false);
+    await setSetting("comments.enabled", "1"); // reset for other suites
   });
 });
 

@@ -9,6 +9,7 @@
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/dal";
 import { setCommentStatus } from "@/lib/comments";
+import { setSetting } from "@/lib/repo";
 
 export async function approveCommentAction(commentId: string): Promise<void> {
   const session = await requireAdmin();
@@ -29,5 +30,14 @@ export async function rejectCommentAction(commentId: string): Promise<void> {
     { source: "human", reason: "Rejected by a moderator." },
     session.userId,
   );
+  revalidatePath("/admin/comments");
+}
+
+/** Site-wide kill switch. Off closes commenting on every article at once
+ *  (existing comments stay visible). Per-article overrides live under
+ *  comments.article_off.<id>. */
+export async function setSiteCommentsEnabledAction(enabled: boolean): Promise<void> {
+  await requireAdmin();
+  await setSetting("comments.enabled", enabled ? "1" : "0");
   revalidatePath("/admin/comments");
 }

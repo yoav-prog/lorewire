@@ -45,11 +45,13 @@ export function CommentsSection({
   initial,
   initialCount,
   signedIn,
+  enabled,
 }: {
   articleId: string;
   initial: CommentThreadPage;
   initialCount: number;
   signedIn: boolean;
+  enabled: boolean;
 }) {
   const [nodes, setNodes] = useState<PublicCommentNode[]>(initial.nodes);
   const [cursor, setCursor] = useState<string | null>(initial.nextCursor);
@@ -119,6 +121,14 @@ export function CommentsSection({
     );
   }, []);
 
+  const removeComment = useCallback((id: string) => {
+    setNodes((prev) =>
+      prev
+        .filter((n) => n.id !== id)
+        .map((n) => ({ ...n, replies: n.replies.filter((r) => r.id !== id) })),
+    );
+  }, []);
+
   return (
     <section className="mt-10 border-t border-line pt-7">
       <div className="mb-5 flex items-baseline justify-between gap-3">
@@ -146,11 +156,13 @@ export function CommentsSection({
         </div>
       </div>
 
-      <Composer
-        articleId={articleId}
-        signedIn={signedIn}
-        onPosted={addTopLevel}
-      />
+      {enabled ? (
+        <Composer articleId={articleId} signedIn={signedIn} onPosted={addTopLevel} />
+      ) : (
+        <p className="rounded-md border border-line bg-surface px-3 py-2 text-[13px] text-muted">
+          Comments are closed for this article.
+        </p>
+      )}
 
       <ol className="mt-6 space-y-5">
         {nodes.map((node) => (
@@ -159,8 +171,10 @@ export function CommentsSection({
               comment={node}
               articleId={articleId}
               signedIn={signedIn}
+              enabled={enabled}
               onReply={(c) => addReply(node.id, c)}
               onChanged={replaceComment}
+              onDeleted={removeComment}
             />
             {node.replies.length > 0 && (
               <ol className="mt-4 space-y-4 border-s border-line ps-4">
@@ -170,7 +184,9 @@ export function CommentsSection({
                       comment={r}
                       articleId={articleId}
                       signedIn={signedIn}
+                      enabled={enabled}
                       onChanged={onChangedReply(setNodes, node.id)}
+                      onDeleted={removeComment}
                     />
                   </li>
                 ))}
@@ -219,17 +235,62 @@ function CommentItem({
   comment,
   articleId,
   signedIn,
+  enabled,
   onReply,
   onChanged,
+  onDeleted,
 }: {
   comment: PublicComment;
   articleId: string;
   signedIn: boolean;
+  enabled: boolean;
   onReply?: (c: PublicComment) => void;
   onChanged: (c: PublicComment) => void;
+  onDeleted: (id: string) => void;
 }) {
   const [replying, setReplying] = useState(false);
+  const [editing, setEditing] = useState(false);
+  // Liked state is client-side for v1: the count is authoritative from the
+  // server, but on first load hearts show un-filled (we don't yet join the
+  // viewer's likes into the thread query).
+  const [like, setLike] = useState({ liked: false, count: comment.likeCount });
   const isReply = !!comment.parentId;
+
+  async function toggleLike(): Promise<void> {
+    setLike((s) => ({ liked: !s.liked, count: s.count + (s.liked ? -1 : 1) }));
+    try {
+      const res = await fetch("/api/comments/like", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ commentId: comment.id }),
+      });
+      if (res.ok) {
+        const d = (await res.json()) as { liked: boolean; likeCount: number };
+        setLike({ liked: d.liked, count: d.likeCount });
+      }
+    } catch {
+      // keep the optimistic state; a reload reconciles
+    }
+  }
+
+  async function del(): Promise<void> {
+    if (!window.confirm("Delete this comment?")) return;
+    const res = await fetch(`/api/comments/${comment.id}`, { method: "DELETE" });
+    if (res.ok) onDeleted(comment.id);
+  }
+
+  if (editing) {
+    return (
+      <EditBox
+        comment={comment}
+        onCancel={() => setEditing(false)}
+        onSaved={(c) => {
+          onChanged(c);
+          setEditing(false);
+        }}
+      />
+    );
+  }
 
   return (
     <div>
@@ -248,9 +309,17 @@ function CommentItem({
       </p>
 
       {comment.status === "published" ? (
-        <div className="mt-1.5 flex items-center gap-4 font-mono text-[11px] text-muted">
-          <span aria-label="likes">♡ {comment.likeCount}</span>
-          {!isReply && onReply && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-4 font-mono text-[11px] text-muted">
+          <button
+            type="button"
+            onClick={toggleLike}
+            aria-pressed={like.liked}
+            aria-label={like.liked ? "Unlike" : "Like"}
+            className={`tabular-nums transition-colors hover:text-ink ${like.liked ? "text-accent" : ""}`}
+          >
+            {like.liked ? "♥" : "♡"} {like.count}
+          </button>
+          {enabled && !isReply && onReply && (
             <button
               type="button"
               onClick={() => setReplying((v) => !v)}
@@ -259,9 +328,38 @@ function CommentItem({
               {replying ? "Cancel" : "Reply"}
             </button>
           )}
+          {comment.isOwn && (
+            <>
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="uppercase tracking-wider hover:text-ink"
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                onClick={del}
+                className="uppercase tracking-wider hover:text-cat-entitled"
+              >
+                Delete
+              </button>
+            </>
+          )}
         </div>
       ) : (
-        <OwnStatusNote comment={comment} onChanged={onChanged} />
+        <div className="mt-1.5 space-y-1.5">
+          <OwnStatusNote comment={comment} onChanged={onChanged} />
+          {comment.isOwn && (
+            <button
+              type="button"
+              onClick={del}
+              className="font-mono text-[11px] uppercase tracking-wider text-muted hover:text-cat-entitled"
+            >
+              Delete
+            </button>
+          )}
+        </div>
       )}
 
       {replying && onReply && (
@@ -278,6 +376,85 @@ function CommentItem({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+function EditBox({
+  comment,
+  onCancel,
+  onSaved,
+}: {
+  comment: PublicComment;
+  onCancel: () => void;
+  onSaved: (c: PublicComment) => void;
+}) {
+  const [body, setBody] = useState(comment.body);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save(): Promise<void> {
+    const text = body.trim();
+    if (!text) {
+      setErr("Comment can't be empty.");
+      return;
+    }
+    setErr(null);
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/comments/${comment.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: text }),
+      });
+      const d = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        comment?: PublicComment;
+        error?: string;
+      };
+      if (!res.ok || !d.comment) {
+        setErr(d.error ?? "Couldn't save the edit.");
+        return;
+      }
+      onSaved(d.comment);
+    } catch {
+      setErr("Network error. Try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        rows={3}
+        maxLength={4000}
+        dir="auto"
+        className="w-full resize-y rounded-md border border-line bg-bg px-3 py-2 text-[15px] leading-relaxed text-ink outline-none focus:border-accent"
+      />
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className="rounded-md bg-accent px-3 py-1 text-[12px] font-semibold text-bg hover:opacity-90 disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="font-mono text-[11px] uppercase tracking-wider text-muted hover:text-ink"
+        >
+          Cancel
+        </button>
+        {err && <span className="font-mono text-[11px] text-cat-entitled">{err}</span>}
+      </div>
+      <p className="font-mono text-[10px] text-muted">
+        Edited comments are re-checked by the moderator.
+      </p>
     </div>
   );
 }

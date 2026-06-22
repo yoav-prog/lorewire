@@ -10,7 +10,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
-import { getArticle } from "@/lib/repo";
+import { getArticle, getSetting } from "@/lib/repo";
 
 export type CommentStatus =
   | "published"
@@ -264,6 +264,89 @@ export async function listStaleModerationComments(
       LIMIT ?`,
     [limit],
   );
+}
+
+// ---- Likes -------------------------------------------------------------
+
+export interface LikeResult {
+  liked: boolean;
+  likeCount: number;
+}
+
+/** Toggle the viewer's like on a comment and return the authoritative state.
+ *  Signed-in likes are keyed by user_id (cookie_token NULL); anonymous likes by
+ *  cookie_token (user_id NULL). The two partial/whole unique indexes make a
+ *  double-like a no-op; we lookup-then-write (matching the polls pattern) so the
+ *  same SQL runs on SQLite + Postgres. like_count is the denormalised counter
+ *  the public thread reads. */
+export async function toggleLike(opts: {
+  commentId: string;
+  userId: string | null;
+  cookieToken: string;
+}): Promise<LikeResult> {
+  const byUser = !!opts.userId;
+  const existing = byUser
+    ? await one<{ id: string }>(
+        "SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ?",
+        [opts.commentId, opts.userId],
+      )
+    : await one<{ id: string }>(
+        "SELECT id FROM comment_likes WHERE comment_id = ? AND cookie_token = ? AND user_id IS NULL",
+        [opts.commentId, opts.cookieToken],
+      );
+
+  if (existing) {
+    await run("DELETE FROM comment_likes WHERE id = ?", [existing.id]);
+    await run(
+      "UPDATE comments SET like_count = CASE WHEN like_count > 0 THEN like_count - 1 ELSE 0 END WHERE id = ?",
+      [opts.commentId],
+    );
+  } else {
+    await run(
+      "INSERT INTO comment_likes (id, comment_id, user_id, cookie_token, created_at) VALUES (?, ?, ?, ?, ?)",
+      [
+        randomUUID(),
+        opts.commentId,
+        byUser ? opts.userId : null,
+        byUser ? null : opts.cookieToken,
+        new Date().toISOString(),
+      ],
+    );
+    await run(
+      "UPDATE comments SET like_count = like_count + 1 WHERE id = ?",
+      [opts.commentId],
+    );
+  }
+
+  const row = await one<{ like_count: number }>(
+    "SELECT like_count FROM comments WHERE id = ?",
+    [opts.commentId],
+  );
+  return { liked: !existing, likeCount: Number(row?.like_count ?? 0) };
+}
+
+/** Replace a comment's body (an author edit) and stamp edited_at. The caller
+ *  re-moderates afterward via setCommentStatus — an edit can turn a clean
+ *  comment into a violation, so it must not skip the moderator (council
+ *  finding). */
+export async function setCommentBody(id: string, body: string): Promise<void> {
+  await run("UPDATE comments SET body = ?, edited_at = ? WHERE id = ?", [
+    body,
+    new Date().toISOString(),
+    id,
+  ]);
+}
+
+// ---- Kill switch -------------------------------------------------------
+
+/** Comments are open unless the site-wide switch is off, or this article is
+ *  individually closed. Both live in settings so an admin flips them without a
+ *  deploy. Default (unset) = open. */
+export async function commentsEnabledForArticle(
+  articleId: string,
+): Promise<boolean> {
+  if ((await getSetting("comments.enabled")) === "0") return false;
+  return (await getSetting(`comments.article_off.${articleId}`)) !== "1";
 }
 
 export interface ModerationQueueRow {

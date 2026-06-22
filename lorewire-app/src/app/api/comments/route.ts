@@ -20,7 +20,12 @@ import { getOrIssueCommentToken } from "@/lib/comment-cookie";
 import { readUserSession } from "@/lib/user-session";
 import { readCommentToken } from "@/lib/comment-cookie";
 import { getUserById } from "@/lib/users";
-import { createComment, setCommentStatus, toPublicComment } from "@/lib/comments";
+import {
+  commentsEnabledForArticle,
+  createComment,
+  setCommentStatus,
+  toPublicComment,
+} from "@/lib/comments";
 import { loadCommentThread, type CommentSort } from "@/lib/comments-read";
 import { moderateComment } from "@/lib/comment-moderation";
 import { checkCommentVelocity } from "@/lib/comment-rate-limit";
@@ -76,6 +81,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const articleId = typeof body.articleId === "string" ? body.articleId.trim() : "";
   if (!articleId) {
     return NextResponse.json({ error: "articleId required" }, { status: 400 });
+  }
+  if (!(await commentsEnabledForArticle(articleId))) {
+    return NextResponse.json(
+      { error: "Comments are closed for this article." },
+      { status: 403 },
+    );
   }
   const text = typeof body.body === "string" ? body.body : "";
   const parentId =
