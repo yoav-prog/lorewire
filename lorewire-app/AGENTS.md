@@ -37,6 +37,47 @@ R2 media work from production.
    check.** Short-lived branches I just created in the same session,
    off a known-fresh main, are the only exception.
 
+## The main = production invariant
+
+Vercel auto-deploys main. **The act of merging anything to main —
+including a markdown-only PR — triggers a production deploy of the
+whole post-merge main state.** The PR's diff being innocent does NOT
+mean the merge is innocent.
+
+This caused a SECOND production takedown on 2026-06-23, on top of the
+2026-06-22 stale-branch incident. PR #51 contained only `AGENTS.md` +
+a plan markdown — zero application code. When it merged to main, Vercel
+deployed main. Main was the stale `98fdb88` baseline (because
+production had been deploying from feature branches, so main never
+received feature merges). Production lost everything that was running
+from the feature-branch state. Identical user-facing symptom as
+incident #1, caused by the merge action rather than the push action.
+
+### Before recommending or executing ANY merge to main
+
+1. Identify the branch currently serving production (Vercel dashboard,
+   or ask the user). For lorewire this has been
+   `feat/r2-media-migration` after both rollbacks.
+
+2. Run the divergence check against that branch, not just main:
+   ```
+   git fetch origin
+   git log origin/main..origin/<production-source-branch> --oneline
+   ```
+
+3. **If that returns any commits, main is behind production. Refuse to
+   merge any PR to main, even a trivial one.** Tell the user
+   explicitly: "Main is behind production by N commits from branch X.
+   Merging this PR will replace production with stale main." Then
+   block until one of:
+   - main is brought current with production (merge the production-
+     source branch into main first, resolve any conflicts)
+   - Vercel Production Branch is changed off main, so main is no
+     longer the deploy trigger
+
+4. Only after main equals or exceeds production state is main safe to
+   merge into.
+
 ## Branch hygiene
 
 - **One source of truth:** `main` is the only branch production should
