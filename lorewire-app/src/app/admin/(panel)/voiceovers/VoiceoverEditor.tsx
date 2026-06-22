@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useTransition } from "react";
 import {
   saveVoiceoverAction,
   previewVoiceoverConfigAction,
@@ -48,6 +48,18 @@ export default function VoiceoverEditor({
   const [previewing, setPreviewing] = useState(false);
   const [audio, setAudio] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saving, startSave] = useTransition();
+  const [saved, setSaved] = useState(false);
+
+  // Save runs the server action in a transition so the button shows a live
+  // "Saving…" then a brief "Saved ✓" — the click never feels like a no-op.
+  function handleSave(fd: FormData) {
+    startSave(async () => {
+      await saveVoiceoverAction(fd);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    });
+  }
 
   async function onPreview() {
     const form = formRef.current;
@@ -79,7 +91,7 @@ export default function VoiceoverEditor({
   const voiceId = preset?.voice_id ?? voices[0]?.voice_id ?? "";
 
   return (
-    <form ref={formRef} action={saveVoiceoverAction} className="grid gap-3">
+    <form ref={formRef} action={handleSave} className="grid gap-3">
       {preset && <input type="hidden" name="id" value={preset.id} />}
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="grid gap-1">
@@ -142,8 +154,17 @@ export default function VoiceoverEditor({
         Pause after the cold-open hook
       </label>
       <div className="flex flex-wrap items-center gap-2">
-        <button className="rounded-lg bg-accent px-4 py-2 font-semibold text-bg transition-opacity hover:opacity-90">
-          {preset ? "Save changes" : "Create voiceover"}
+        <button
+          disabled={saving}
+          className="rounded-lg bg-accent px-4 py-2 font-semibold text-bg transition-opacity hover:opacity-90 disabled:opacity-60"
+        >
+          {saving
+            ? "Saving…"
+            : saved
+              ? "Saved ✓"
+              : preset
+                ? "Save changes"
+                : "Create voiceover"}
         </button>
         <button
           type="button"

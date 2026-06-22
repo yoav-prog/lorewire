@@ -871,6 +871,10 @@ export async function previewVoiceoverConfigAction(config: {
   style_prompt?: string | null;
   speaking_rate?: number | null;
   hook_pause?: boolean;
+  // Optional sample override. The quick per-row preview passes a short ~2-3s
+  // line so auditioning a voice is fast; the editor preview omits it for the
+  // fuller default sample.
+  text?: string | null;
 }): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
   await requireAdmin();
   if (!config.provider || !config.voice_id) {
@@ -882,6 +886,7 @@ export async function previewVoiceoverConfigAction(config: {
     style_prompt: config.style_prompt ?? null,
     speaking_rate: config.speaking_rate ?? null,
     hook_pause: !!config.hook_pause,
+    text: config.text ?? null,
   });
 }
 
@@ -894,6 +899,7 @@ async function runVoiceoverPreview(payload: {
   style_prompt: string | null;
   speaking_rate: number | null;
   hook_pause: boolean;
+  text: string | null;
 }): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
   const secret = process.env.CRON_SECRET;
   if (!secret) {
@@ -916,6 +922,7 @@ async function runVoiceoverPreview(payload: {
         style_prompt: payload.style_prompt,
         speaking_rate: payload.speaking_rate,
         hook_pause: payload.hook_pause,
+        ...(payload.text ? { text: payload.text } : {}),
       }),
     });
     if (!resp.ok) {
