@@ -126,6 +126,22 @@ export async function deleteR2Object(bucket: string, key: string): Promise<void>
   throw new Error(`R2 delete HTTP ${resp.status}: ${text.slice(0, 200)}`);
 }
 
+/** GET an object's bytes (authenticated S3 GET). Used by the compression
+ *  backfill to read an image out of R2, re-encode it, and write the WebP back. */
+export async function getR2ObjectBytes(
+  bucket: string,
+  key: string,
+): Promise<ArrayBuffer> {
+  const resp = await client().fetch(objectUrl(bucket, key), {
+    method: "GET",
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!resp.ok) {
+    throw new Error(`R2 get HTTP ${resp.status}`);
+  }
+  return resp.arrayBuffer();
+}
+
 /** HEAD an object: returns its size in bytes, or null if it does not exist.
  *  Used by the migration tool to skip objects already copied (size match) and
  *  to verify an upload landed at the right size. */
