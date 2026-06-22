@@ -16,7 +16,6 @@ import {
   setStatus,
   setSetting,
   getSetting,
-  getVoiceover,
   upsertVoiceover,
   deleteVoiceover,
   setDefaultVoiceoverId,
@@ -860,17 +859,42 @@ export async function setCategoryVoiceoverAction(
   revalidatePath("/admin/voiceovers");
 }
 
-// Synthesize a sample with a saved preset so the admin can hear it before
-// committing. Calls the Python preview endpoint (which has the Google creds)
-// with the shared CRON_SECRET; returns the MP3 as a data URL the client plays.
-// Preview only works where the Vercel Python runtime + creds exist (deploy),
-// not local `next dev`; the error path surfaces that cleanly.
-export async function previewVoiceoverAction(
-  id: string,
-): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
+// Synthesize a sample for an arbitrary (possibly unsaved) voiceover config so
+// the admin can hear a voice WHILE choosing it in the editor, before saving.
+// Calls the Python preview endpoint (which has the Google creds) with the shared
+// CRON_SECRET; returns the MP3 as a data URL the client plays. Preview only
+// works where the Vercel Python runtime + creds exist (deploy), not local
+// `next dev`; the error path surfaces that cleanly.
+export async function previewVoiceoverConfigAction(config: {
+  provider: string;
+  voice_id: string;
+  style_prompt?: string | null;
+  speaking_rate?: number | null;
+  hook_pause?: boolean;
+}): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
   await requireAdmin();
-  const vo = await getVoiceover(id);
-  if (!vo) return { ok: false, error: "Voiceover not found." };
+  if (!config.provider || !config.voice_id) {
+    return { ok: false, error: "Pick a model and a voice first." };
+  }
+  return runVoiceoverPreview({
+    provider: config.provider,
+    voice_id: config.voice_id,
+    style_prompt: config.style_prompt ?? null,
+    speaking_rate: config.speaking_rate ?? null,
+    hook_pause: !!config.hook_pause,
+  });
+}
+
+// Shared core: POST a config to the Python preview endpoint and return a data
+// URL. Kept separate so both the editor (config) and any saved-preset caller
+// can reuse it.
+async function runVoiceoverPreview(payload: {
+  provider: string;
+  voice_id: string;
+  style_prompt: string | null;
+  speaking_rate: number | null;
+  hook_pause: boolean;
+}): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
   const secret = process.env.CRON_SECRET;
   if (!secret) {
     return { ok: false, error: "CRON_SECRET is not set, so preview is unavailable." };
@@ -887,11 +911,11 @@ export async function previewVoiceoverAction(
         Authorization: `Bearer ${secret}`,
       },
       body: JSON.stringify({
-        provider: vo.provider,
-        voice_id: vo.voice_id,
-        style_prompt: vo.style_prompt,
-        speaking_rate: vo.speaking_rate,
-        hook_pause: !!vo.hook_pause,
+        provider: payload.provider,
+        voice_id: payload.voice_id,
+        style_prompt: payload.style_prompt,
+        speaking_rate: payload.speaking_rate,
+        hook_pause: payload.hook_pause,
       }),
     });
     if (!resp.ok) {

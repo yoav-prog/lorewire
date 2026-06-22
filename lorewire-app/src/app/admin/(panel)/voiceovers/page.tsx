@@ -3,119 +3,25 @@ import {
   listVoiceovers,
   getDefaultVoiceoverId,
   getCategoryVoiceoverIds,
-  type VoiceoverRow,
 } from "@/lib/repo";
-import { listVoices, type VoiceEntry } from "@/lib/voice-library";
+import { listVoices } from "@/lib/voice-library";
 import { options } from "@/lib/models";
 import { CATEGORIES } from "@/app/admin/ui";
 import {
-  saveVoiceoverAction,
   deleteVoiceoverAction,
   setDefaultVoiceoverAction,
   setCategoryVoiceoverAction,
 } from "@/app/admin/actions";
 import SettingsShell from "@/app/admin/SettingsShell";
-import VoiceoverPreviewButton from "./VoiceoverPreviewButton";
+import VoiceoverEditor from "./VoiceoverEditor";
 
 const FIELD =
   "rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
-const LABEL =
-  "font-mono text-[11px] uppercase tracking-wider text-muted";
+const LABEL = "font-mono text-[11px] uppercase tracking-wider text-muted";
 const BTN =
   "rounded-lg bg-accent px-4 py-2 font-semibold text-bg transition-opacity hover:opacity-90";
 const BTN_GHOST =
   "rounded-lg border border-line bg-surface px-3 py-2 text-[13px] text-muted transition-colors hover:text-ink";
-
-// The editor form, reused for the create row (preset=null) and each saved
-// preset. Plain HTML form posting to the server action — no client JS needed
-// here; only the preview button is interactive.
-function PresetForm({
-  preset,
-  models,
-  voices,
-}: {
-  preset: VoiceoverRow | null;
-  models: { id: string; label: string }[];
-  voices: VoiceEntry[];
-}) {
-  const provider = preset?.provider ?? "google/gemini-25-flash-tts";
-  const voiceId = preset?.voice_id ?? voices[0]?.voice_id ?? "";
-  return (
-    <form action={saveVoiceoverAction} className="grid gap-3">
-      {preset && <input type="hidden" name="id" value={preset.id} />}
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className="grid gap-1">
-          <span className={LABEL}>Name</span>
-          <input
-            name="name"
-            required
-            defaultValue={preset?.name ?? ""}
-            placeholder="House Voice"
-            className={FIELD}
-          />
-        </label>
-        <label className="grid gap-1">
-          <span className={LABEL}>Model</span>
-          <select name="provider" defaultValue={provider} className={FIELD}>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1">
-          <span className={LABEL}>Voice</span>
-          <select name="voice_id" defaultValue={voiceId} className={FIELD}>
-            {voices.map((v) => (
-              <option key={v.voice_id} value={v.voice_id}>
-                {v.name}
-                {v.accent ? ` — ${v.accent}` : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1">
-          <span className={LABEL}>Speaking rate (Chirp only, 0.25–2.0)</span>
-          <input
-            name="speaking_rate"
-            type="number"
-            step="0.05"
-            min="0.25"
-            max="2"
-            defaultValue={preset?.speaking_rate ?? 1.2}
-            className={FIELD}
-          />
-        </label>
-      </div>
-      <label className="grid gap-1">
-        <span className={LABEL}>
-          Style prompt (Gemini — how the voice should deliver)
-        </span>
-        <textarea
-          name="style_prompt"
-          rows={3}
-          defaultValue={preset?.style_prompt ?? ""}
-          placeholder="You are a lively young social-media creator talking straight to camera. Upbeat, expressive, fast and casual."
-          className={`${FIELD} resize-y`}
-        />
-      </label>
-      <label className="flex items-center gap-2 text-[13px] text-ink">
-        <input
-          type="checkbox"
-          name="hook_pause"
-          value="1"
-          defaultChecked={preset ? !!preset.hook_pause : true}
-          className="h-4 w-4 accent-[var(--accent,#000)]"
-        />
-        Pause after the cold-open hook
-      </label>
-      <div>
-        <button className={BTN}>{preset ? "Save changes" : "Create voiceover"}</button>
-      </div>
-    </form>
-  );
-}
 
 export default async function VoiceoversPage() {
   await requireAdmin();
@@ -137,7 +43,7 @@ export default async function VoiceoversPage() {
     <SettingsShell
       active="voiceovers"
       title="Voiceovers"
-      description="Save named narrator presets, pick the default for shorts, and assign a voice per category. The pipeline resolves per-category → default → built-in fallback."
+      description="Save named narrator presets, pick the default for shorts, and assign a voice per category. The pipeline resolves per-category → default → built-in fallback. Preview a voice from inside any preset before saving."
     >
       <div className="space-y-6">
         {/* Global default */}
@@ -214,9 +120,8 @@ export default async function VoiceoversPage() {
                   {v.provider} · {v.voice_id}
                 </span>
               </div>
-              <PresetForm preset={v} models={models} voices={voices} />
-              <div className="mt-3 flex items-center justify-between gap-3 border-t border-line pt-3">
-                <VoiceoverPreviewButton id={v.id} />
+              <VoiceoverEditor preset={v} models={models} voices={voices} />
+              <div className="mt-3 flex items-center justify-end border-t border-line pt-3">
                 <form action={deleteVoiceoverAction}>
                   <input type="hidden" name="id" value={v.id} />
                   <button className="text-[12px] text-muted transition-colors hover:text-red-400">
@@ -237,7 +142,7 @@ export default async function VoiceoversPage() {
               library configuration.
             </p>
           ) : (
-            <PresetForm preset={null} models={models} voices={voices} />
+            <VoiceoverEditor preset={null} models={models} voices={voices} />
           )}
         </section>
       </div>
