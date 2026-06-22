@@ -349,6 +349,56 @@ export async function commentsEnabledForArticle(
   return (await getSetting(`comments.article_off.${articleId}`)) !== "1";
 }
 
+// ---- Reader reports ----------------------------------------------------
+
+/** File a reader report. One OPEN report per viewer per comment (a single
+ *  reporter can't pile on), enforced in code since the table has no unique
+ *  index. A report does NOT hide the comment — that would let one person mute
+ *  anyone — it just surfaces it in the admin queue. */
+export async function reportComment(opts: {
+  commentId: string;
+  reporterUserId: string | null;
+  cookieToken: string;
+  reason: string | null;
+}): Promise<{ ok: boolean; already: boolean }> {
+  const existing = opts.reporterUserId
+    ? await one<{ id: string }>(
+        "SELECT id FROM comment_reports WHERE comment_id = ? AND reporter_user_id = ? AND status = 'open'",
+        [opts.commentId, opts.reporterUserId],
+      )
+    : await one<{ id: string }>(
+        "SELECT id FROM comment_reports WHERE comment_id = ? AND cookie_token = ? AND status = 'open'",
+        [opts.commentId, opts.cookieToken],
+      );
+  if (existing) return { ok: true, already: true };
+
+  await run(
+    "INSERT INTO comment_reports (id, comment_id, reporter_user_id, cookie_token, reason, status, created_at) " +
+      "VALUES (?, ?, ?, ?, ?, 'open', ?)",
+    [
+      randomUUID(),
+      opts.commentId,
+      opts.reporterUserId ?? null,
+      opts.cookieToken,
+      opts.reason ?? null,
+      new Date().toISOString(),
+    ],
+  );
+  return { ok: true, already: false };
+}
+
+/** Close out the open reports on a comment after a human acts: 'actioned' when
+ *  the comment was rejected, 'dismissed' when the reports were overruled. */
+export async function resolveReports(
+  commentId: string,
+  status: "actioned" | "dismissed",
+): Promise<void> {
+  await run(
+    "UPDATE comment_reports SET status = ? WHERE comment_id = ? AND status = 'open'",
+    [status, commentId],
+  );
+}
+
 export interface ModerationQueueRow {
   id: string;
   article_id: string;
@@ -392,6 +442,9 @@ export async function listModerationQueue(
       LEFT JOIN users u ON u.id = c.author_user_id
       LEFT JOIN articles a ON a.id = c.article_id
      WHERE c.status IN ('held', 'quarantined')
+        OR (c.status = 'published' AND EXISTS (
+              SELECT 1 FROM comment_reports r
+               WHERE r.comment_id = c.id AND r.status = 'open'))
      ORDER BY c.created_at ASC
      LIMIT ?`,
     [limit],

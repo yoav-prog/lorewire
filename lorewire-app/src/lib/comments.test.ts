@@ -15,6 +15,8 @@ import {
   createComment,
   getCommentById,
   listModerationQueue,
+  reportComment,
+  resolveReports,
   setCommentStatus,
   toggleLike,
   toPublicComment,
@@ -22,6 +24,7 @@ import {
 } from "./comments";
 
 async function clear(): Promise<void> {
+  await run("DELETE FROM comment_reports", []);
   await run("DELETE FROM comment_moderation_events", []);
   await run("DELETE FROM comments", []);
   await run("DELETE FROM articles", []);
@@ -317,6 +320,33 @@ describe("commentsEnabledForArticle", () => {
     await setSetting("comments.enabled", "0");
     expect(await commentsEnabledForArticle(articleId)).toBe(false);
     await setSetting("comments.enabled", "1"); // reset for other suites
+  });
+});
+
+describe("reports", () => {
+  beforeEach(clear);
+
+  it("files one open report per viewer, surfaces it in the queue, and clears on resolve", async () => {
+    const articleId = await seedArticle("published");
+    const c = await createComment({ articleId, guestName: "A", body: "hi", ...base });
+    if (!c.ok) throw new Error("create failed");
+    await setCommentStatus(c.comment.id, "published", { source: "tier2" }, "ai");
+
+    expect(
+      await reportComment({ commentId: c.comment.id, reporterUserId: null, cookieToken: "rep1", reason: "spam" }),
+    ).toEqual({ ok: true, already: false });
+    // same viewer can't pile on
+    expect(
+      (await reportComment({ commentId: c.comment.id, reporterUserId: null, cookieToken: "rep1", reason: null })).already,
+    ).toBe(true);
+
+    const queue = await listModerationQueue(100);
+    const row = queue.find((q) => q.id === c.comment.id);
+    expect(row).toBeTruthy();
+    expect(Number(row!.open_reports)).toBe(1);
+
+    await resolveReports(c.comment.id, "dismissed");
+    expect((await listModerationQueue(100)).find((q) => q.id === c.comment.id)).toBeFalsy();
   });
 });
 

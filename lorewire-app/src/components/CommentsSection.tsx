@@ -250,6 +250,7 @@ function CommentItem({
 }) {
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [reported, setReported] = useState(false);
   // Liked state is client-side for v1: the count is authoritative from the
   // server, but on first load hearts show un-filled (we don't yet join the
   // viewer's likes into the thread query).
@@ -277,6 +278,17 @@ function CommentItem({
     if (!window.confirm("Delete this comment?")) return;
     const res = await fetch(`/api/comments/${comment.id}`, { method: "DELETE" });
     if (res.ok) onDeleted(comment.id);
+  }
+
+  async function report(): Promise<void> {
+    if (reported) return;
+    if (!window.confirm("Report this comment to the moderators?")) return;
+    const res = await fetch("/api/comments/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commentId: comment.id }),
+    });
+    if (res.ok) setReported(true);
   }
 
   if (editing) {
@@ -346,6 +358,18 @@ function CommentItem({
               </button>
             </>
           )}
+          {!comment.isOwn &&
+            (reported ? (
+              <span className="uppercase tracking-wider text-muted">Reported</span>
+            ) : (
+              <button
+                type="button"
+                onClick={report}
+                className="uppercase tracking-wider hover:text-cat-entitled"
+              >
+                Report
+              </button>
+            ))}
         </div>
       ) : (
         <div className="mt-1.5 space-y-1.5">

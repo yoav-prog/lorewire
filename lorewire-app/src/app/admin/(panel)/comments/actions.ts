@@ -8,7 +8,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/dal";
-import { setCommentStatus } from "@/lib/comments";
+import { resolveReports, setCommentStatus } from "@/lib/comments";
 import { setSetting } from "@/lib/repo";
 
 export async function approveCommentAction(commentId: string): Promise<void> {
@@ -19,6 +19,8 @@ export async function approveCommentAction(commentId: string): Promise<void> {
     { source: "human", reason: "Approved by a moderator." },
     session.userId,
   );
+  // Approving overrules any open reports on it.
+  await resolveReports(commentId, "dismissed");
   revalidatePath("/admin/comments");
 }
 
@@ -30,6 +32,15 @@ export async function rejectCommentAction(commentId: string): Promise<void> {
     { source: "human", reason: "Rejected by a moderator." },
     session.userId,
   );
+  await resolveReports(commentId, "actioned");
+  revalidatePath("/admin/comments");
+}
+
+/** Keep a reported comment published and clear its reports (the reports were
+ *  overruled). No status change, so no setCommentStatus / audit transition. */
+export async function dismissReportsAction(commentId: string): Promise<void> {
+  await requireAdmin();
+  await resolveReports(commentId, "dismissed");
   revalidatePath("/admin/comments");
 }
 

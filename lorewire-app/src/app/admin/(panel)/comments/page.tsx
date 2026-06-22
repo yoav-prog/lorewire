@@ -35,6 +35,9 @@ export default async function CommentsModerationPage() {
   const rows = await listModerationQueue(200);
   const held = rows.filter((r) => r.status === "held");
   const quarantined = rows.filter((r) => r.status === "quarantined");
+  const reported = rows.filter(
+    (r) => r.status === "published" && Number(r.open_reports) > 0,
+  );
   const siteEnabled = (await getSetting("comments.enabled")) !== "0";
 
   return (
@@ -75,6 +78,21 @@ export default async function CommentsModerationPage() {
         </section>
       )}
 
+      {reported.length > 0 && (
+        <section className="space-y-3">
+          <h2 className={LABEL}>Reader-reported ({reported.length})</h2>
+          <p className="text-[12px] text-muted">
+            Published comments readers flagged. Keep to clear the reports, or
+            reject to take it down.
+          </p>
+          <div className="space-y-3">
+            {reported.map((row) => (
+              <QueueCard key={row.id} row={row} variant="reported" />
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="space-y-3">
         <h2 className={LABEL}>Needs review ({held.length})</h2>
         {held.length === 0 ? (
@@ -97,7 +115,13 @@ export default async function CommentsModerationPage() {
   );
 }
 
-function QueueCard({ row }: { row: ModerationQueueRow }) {
+function QueueCard({
+  row,
+  variant = "moderate",
+}: {
+  row: ModerationQueueRow;
+  variant?: "moderate" | "reported";
+}) {
   const confidencePct =
     typeof row.moderation_confidence === "number"
       ? `${Math.round(row.moderation_confidence * 100)}%`
@@ -171,7 +195,7 @@ function QueueCard({ row }: { row: ModerationQueueRow }) {
           )}
         </div>
 
-        <ModerationActions commentId={row.id} />
+        <ModerationActions commentId={row.id} variant={variant} />
       </div>
     </div>
   );

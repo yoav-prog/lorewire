@@ -6,9 +6,21 @@
 // drops out of the list on the next paint — no client list state to keep.
 
 import { useState, useTransition } from "react";
-import { approveCommentAction, rejectCommentAction } from "./actions";
+import {
+  approveCommentAction,
+  dismissReportsAction,
+  rejectCommentAction,
+} from "./actions";
 
-export function ModerationActions({ commentId }: { commentId: string }) {
+// "moderate" = a held/quarantined comment awaiting a decision (Approve/Reject).
+// "reported" = an already-published comment readers flagged (Keep/Reject).
+export function ModerationActions({
+  commentId,
+  variant = "moderate",
+}: {
+  commentId: string;
+  variant?: "moderate" | "reported";
+}) {
   const [running, start] = useTransition();
   const [err, setErr] = useState<string | null>(null);
 
@@ -23,16 +35,19 @@ export function ModerationActions({ commentId }: { commentId: string }) {
     });
   }
 
+  const keepAction = variant === "reported" ? dismissReportsAction : approveCommentAction;
+  const keepLabel = variant === "reported" ? "Keep" : "Approve";
+
   return (
     <div className="flex flex-col items-end gap-1.5">
       <div className="flex gap-2">
         <button
           type="button"
-          onClick={() => run(approveCommentAction)}
+          onClick={() => run(keepAction)}
           disabled={running}
           className="rounded-md border border-cat-wholesome/40 bg-cat-wholesome/10 px-3 py-1.5 text-[12px] font-semibold text-cat-wholesome transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
         >
-          Approve
+          {keepLabel}
         </button>
         <button
           type="button"
