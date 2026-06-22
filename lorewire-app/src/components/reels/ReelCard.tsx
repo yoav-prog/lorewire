@@ -17,6 +17,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { CAT, type Cat } from "@/lib/stories";
+import { shareOrCopy, storyShareUrl } from "@/lib/share";
 import type { LiveCatalogStory } from "@/app/actions";
 
 type OpenFn = (id: string, tab?: string) => void;
@@ -199,21 +200,15 @@ export default function ReelCard({
   };
 
   // Share the PUBLIC canonical reader URL (/v/[slug]) — never an internal id or
-  // a signed GCS URL. Native share sheet first, clipboard as the fallback.
+  // a signed GCS URL. Native share sheet first, clipboard as the fallback; the
+  // "Copied" confirmation shows only when the clipboard path actually ran.
   const onShare = async () => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const url = short.slug ? `${origin}/v/${short.slug}` : origin;
-    const title = short.title ?? "LoreWire";
-    try {
-      if (typeof navigator !== "undefined" && navigator.share) {
-        await navigator.share({ title, url });
-      } else if (typeof navigator !== "undefined" && navigator.clipboard) {
-        await navigator.clipboard.writeText(url);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1800);
-      }
-    } catch {
-      /* user dismissed the share sheet or denied clipboard — nothing to do */
+    const url = storyShareUrl(short.slug, origin);
+    const outcome = await shareOrCopy({ url, title: short.title ?? "LoreWire" });
+    if (outcome === "copied") {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
     }
   };
 

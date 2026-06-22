@@ -26,6 +26,11 @@ import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 
 export interface LiveStoryMediaResult {
   ok: boolean;
+  /** The story's public slug, for building the canonical /v/[slug] share URL.
+   *  Null when found=false (no published row) — callers fall back to the site
+   *  origin rather than minting a link that 404s. The published gate here is
+   *  identical to getPublishedStoryBySlug, so found=true ⟺ /v/[slug] resolves. */
+  slug: string | null;
   video_url: string | null;
   /** Scene images to render in the article body + gallery. When the story's
    *  video is the applied short, these come from short_renders.props
@@ -156,6 +161,7 @@ export async function getLiveStoryMedia(
 ): Promise<LiveStoryMediaResult> {
   const empty: LiveStoryMediaResult = {
     ok: true,
+    slug: null,
     video_url: null,
     images: [],
     body: null,
@@ -169,13 +175,14 @@ export async function getLiveStoryMedia(
   // Try by id first — handles new pipeline UUIDs and legacy ids ("envelope").
   let row = await one<{
     id: string;
+    slug: string | null;
     video_url: string | null;
     images: string | null;
     body: string | null;
     audio_url: string | null;
     alignment: string | null;
   }>(
-    "SELECT id, video_url, images, body, audio_url, alignment FROM stories " +
+    "SELECT id, slug, video_url, images, body, audio_url, alignment FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -186,6 +193,7 @@ export async function getLiveStoryMedia(
     if (bySlug) {
       row = {
         id: bySlug.id,
+        slug: bySlug.slug,
         video_url: bySlug.video_url,
         images: bySlug.images,
         body: bySlug.body,
@@ -216,6 +224,7 @@ export async function getLiveStoryMedia(
   // and the short is a different (condensed) script.
   return {
     ok: true,
+    slug: row.slug,
     video_url: row.video_url,
     images,
     body: row.body,

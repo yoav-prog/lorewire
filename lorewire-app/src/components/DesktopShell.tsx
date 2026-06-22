@@ -17,6 +17,7 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
+import { shareOrCopy, storyShareUrl } from "@/lib/share";
 import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
@@ -48,6 +49,7 @@ import type { PublicSession } from "@/lib/homepage-data";
 // flag + scene images once getLiveStoryMedia resolves.
 const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
+  slug: null,
   video_url: null,
   images: [],
   body: null,
@@ -1062,6 +1064,23 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
       cancelled = true;
     };
   }, [story.id, story.videoUrl, story.images]);
+
+  // Share the PUBLIC canonical reader URL (/v/[slug]) for THIS story — never
+  // the internal id or a signed media URL. liveMedia.slug is non-null exactly
+  // when the story is published and reachable at /v/[slug]; otherwise we fall
+  // back to the site origin. Native share sheet first, clipboard otherwise; the
+  // icon flips to a check for ~2s when the clipboard path runs.
+  const [copied, setCopied] = useState(false);
+  const onShare = async () => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const url = storyShareUrl(liveMedia.slug, origin);
+    const outcome = await shareOrCopy({ url, title: story.title });
+    if (outcome === "copied") {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
   const c = CAT[story.cat];
   let more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id);
   if (more.length < 6) more = more.concat(STORIES.filter((s) => s.id !== story.id && !more.includes(s)));
@@ -1096,7 +1115,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
                 <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
                 <button onClick={() => toggleList(story.id)} title="My List" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color: inList ? "#E8462B" : "#F5F3EF" }}>{inList ? <CheckI size={20} /> : <PlusI size={20} />}</button>
                 <button title="Rate" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><StarI size={19} /></button>
-                <button title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
+                <button onClick={onShare} aria-label={copied ? "Link copied" : "Share"} title={copied ? "Link copied" : "Share"} className="w-11 h-11 rounded-full border border-line flex items-center justify-center hover:border-ink/50 transition" style={{ color: copied ? "#E8462B" : "#F5F3EF" }}>{copied ? <CheckI size={20} /> : <ShareI size={19} />}</button>
               </div>
             </div>
             <div className="flex gap-8 mt-8 border-b border-line">

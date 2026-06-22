@@ -43,6 +43,7 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
+import { shareOrCopy, storyShareUrl } from "@/lib/share";
 import {
   useContinueReading,
   useRecentlyViewed,
@@ -53,6 +54,7 @@ import {
 // (or on miss/error) every subview falls back to the baked story shape.
 const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
+  slug: null,
   video_url: null,
   images: [],
   body: null,
@@ -1279,6 +1281,22 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
     };
   }, [story.id, story.videoUrl, story.images]);
 
+  // Share the PUBLIC canonical reader URL (/v/[slug]) for THIS story — never
+  // the internal id or a signed media URL. liveMedia.slug is non-null exactly
+  // when the story is published and reachable at /v/[slug]; otherwise we fall
+  // back to the site origin. Native share sheet first (the common case on
+  // mobile), clipboard otherwise; the label flips to "Copied" for ~2s.
+  const [copied, setCopied] = useState(false);
+  const onShare = async () => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const url = storyShareUrl(liveMedia.slug, origin);
+    const outcome = await shareOrCopy({ url, title: story.title });
+    if (outcome === "copied") {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
   const c = CAT[story.cat];
   const more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
   if (more.length < 3) more.push(...STORIES.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
@@ -1342,8 +1360,9 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           <button className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
             <StarI size={22} /><span className="font-body text-[11px]">Rate</span>
           </button>
-          <button className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
-            <ShareI size={22} /><span className="font-body text-[11px]">Share</span>
+          <button onClick={onShare} aria-label="Share" className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
+            {copied ? <span className="text-accent"><Ico d={<path d="m5 12 5 5L20 7" />} size={22} /></span> : <ShareI size={22} />}
+            <span className="font-body text-[11px]" style={{ color: copied ? "#E8462B" : undefined }}>{copied ? "Copied" : "Share"}</span>
           </button>
         </div>
 
