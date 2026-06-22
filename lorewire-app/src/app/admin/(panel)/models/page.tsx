@@ -1,10 +1,10 @@
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { STAGES, STAGE_LABEL, options, allSelected } from "@/lib/models";
 import { setModelAction } from "@/app/admin/actions";
 import SettingsShell from "@/app/admin/SettingsShell";
 
 export default async function ModelsPage() {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   // One settings query for every stage, then build the view model in sync.
   const currentByStage = await allSelected();

@@ -13,7 +13,7 @@
 // pipeline/segments_worker.py picks it up for ffmpeg normalize.
 
 import { NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { createResumableUploadSession } from "@/lib/gcs";
 import { upsertSegment } from "@/lib/repo";
 import {
@@ -40,7 +40,7 @@ function badRequest(error: string): NextResponse {
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   let payload: SignUploadRequest;
   try {

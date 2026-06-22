@@ -9,7 +9,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { isConfigured as isGcsConfigured } from "@/lib/gcs";
 import { isR2Configured } from "@/lib/r2";
 import { getReferencedKeys, migrateBatch } from "@/lib/migrate-gcs-r2";
@@ -28,7 +28,7 @@ interface RunBody {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   if (!isGcsConfigured() || !isR2Configured() || !process.env.R2_MEDIA_BUCKET) {
     return NextResponse.json(

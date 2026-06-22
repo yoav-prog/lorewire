@@ -13,7 +13,7 @@
 // Read-only Sheets scope; service-account auth lives in src/lib/sheets.ts.
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   previewSheetImportAction,
   commitSheetImportAction,
@@ -75,7 +75,7 @@ export default async function ImportSheetPage({
     error?: string;
   }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const sp = await searchParams;
 
   // Empty + error states render the same minimal landing surface — we want

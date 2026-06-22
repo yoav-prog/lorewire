@@ -15,7 +15,7 @@
 
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
-import { requireAdmin, currentUser } from "@/lib/dal";
+import { requireCapability, currentUser } from "@/lib/dal";
 import {
   appendRevision,
   getArticle,
@@ -34,7 +34,7 @@ export async function POST(
   req: Request,
   ctx: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id } = await ctx.params;
   if (!id) return badRequest("missing-id");
 

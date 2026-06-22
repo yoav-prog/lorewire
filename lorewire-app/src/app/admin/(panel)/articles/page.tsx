@@ -3,7 +3,7 @@
 // avoid painting unbounded rows. Filters compose: status + type + language.
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   listArticlesSlim,
   ARTICLE_STATUSES,
@@ -30,7 +30,7 @@ export default async function ArticlesPage({
     skipped?: string;
   }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { status, type, language, imported, skipped } = await searchParams;
   const rows = await listArticlesSlim({
     status,

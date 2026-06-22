@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   getStory,
   getSetting,
@@ -53,7 +53,7 @@ export default async function EditStory({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id } = await params;
   const s = await getStory(id);
   if (!s) notFound();

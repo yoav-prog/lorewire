@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // test — keeps the test surface "the handler logic, not the auth".
 vi.mock("@/lib/dal", () => ({
   requireAdmin: vi.fn(async () => ({ userId: "test-user" })),
+  requireCapability: vi.fn(async () => ({ userId: "test-user" })),
 }));
 
 vi.mock("@/lib/reddit-source", () => ({

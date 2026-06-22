@@ -10,10 +10,10 @@
 // home.
 
 import { logout } from "@/app/admin/actions";
-import { currentUser, requireAdmin } from "@/lib/dal";
+import { currentUser, requireStaff } from "@/lib/dal";
 
 export default async function AccountPage() {
-  await requireAdmin();
+  await requireStaff();
   const user = await currentUser();
 
   return (

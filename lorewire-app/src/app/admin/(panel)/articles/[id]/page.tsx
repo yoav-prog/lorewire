@@ -6,7 +6,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getArticle, getStory, listStoriesSlim } from "@/lib/repo";
 import type { ArticleType } from "@/lib/repo";
 import { getLinkedShortFrames } from "@/lib/article-shorts";
@@ -60,7 +60,7 @@ export default async function EditArticlePage({
     restored?: string;
   }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id } = await params;
   const {
     saved,

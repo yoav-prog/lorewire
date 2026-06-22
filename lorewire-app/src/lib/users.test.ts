@@ -13,11 +13,21 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { all, run } from "@/lib/db";
 import {
+  countActiveAdmins,
+  countMembers,
+  getMemberActivity,
   getUserByEmail,
   getUserById,
   getUserByProvider,
   hashForLog,
+  isSuspended,
+  listMemberProviders,
+  listMembers,
+  setUserRole,
+  suspendUser,
+  unsuspendUser,
   upsertUserOnSignIn,
+  verifyStaffPassword,
 } from "./users";
 
 async function clearUsers(): Promise<void> {
@@ -403,5 +413,325 @@ describe("users helpers", () => {
 
   it("getUserByProvider returns null for a never-seen provider_sub", async () => {
     expect(await getUserByProvider("google", "never")).toBeNull();
+  });
+});
+
+describe("admin members view", () => {
+  // These tests own the users + per-user tables, so wipe all of them before
+  // each case (the shared per-process test DB makes a full clear safe).
+  async function clearMembers(): Promise<void> {
+    for (const t of [
+      "users",
+      "user_saves",
+      "user_likes",
+      "user_fav_categories",
+      "user_recently_viewed",
+      "user_continue",
+      "poll_votes",
+    ]) {
+      await run(`DELETE FROM ${t}`, []);
+    }
+  }
+
+  async function seedMember(opts: {
+    id: string;
+    email: string;
+    name?: string | null;
+    provider: string;
+    created: string;
+    lastSeen?: string | null;
+  }): Promise<void> {
+    await run(
+      `INSERT INTO users
+         (id, email, password_hash, role, name, picture_url,
+          provider, provider_sub, anonymous_id, last_seen_at, created_at)
+       VALUES (?, ?, NULL, 'user', ?, NULL, ?, ?, NULL, ?, ?)`,
+      [
+        opts.id,
+        opts.email,
+        opts.name ?? null,
+        opts.provider,
+        `${opts.id}_sub`,
+        opts.lastSeen ?? null,
+        opts.created,
+      ],
+    );
+  }
+
+  beforeEach(clearMembers);
+
+  it("lists only public members and never staff", async () => {
+    await seedMember({
+      id: "m_alice",
+      email: "alice@example.com",
+      name: "Alice",
+      provider: "google",
+      created: "2026-06-01T00:00:00.000Z",
+    });
+    // An admin row must never surface in the Members list.
+    await run(
+      `INSERT INTO users (id, email, role, password_hash, provider, provider_sub, created_at)
+       VALUES ('m_admin', 'admin@example.com', 'admin', 'x', NULL, NULL, '2026-06-01T00:00:00.000Z')`,
+      [],
+    );
+
+    const rows = await listMembers();
+    expect(rows.map((r) => r.id)).toEqual(["m_alice"]);
+    expect(await countMembers()).toBe(1);
+  });
+
+  it("filters by search across email and name", async () => {
+    await seedMember({ id: "m_a", email: "alice@example.com", name: "Alice", provider: "google", created: "2026-06-01T00:00:00.000Z" });
+    await seedMember({ id: "m_b", email: "bob@elsewhere.com", name: "Bob Jones", provider: "facebook", created: "2026-06-02T00:00:00.000Z" });
+
+    expect((await listMembers({ search: "alice" })).map((r) => r.id)).toEqual(["m_a"]);
+    expect((await listMembers({ search: "jones" })).map((r) => r.id)).toEqual(["m_b"]);
+    // No match → empty, and the count agrees.
+    expect(await listMembers({ search: "zzz" })).toHaveLength(0);
+    expect(await countMembers({ search: "elsewhere" })).toBe(1);
+  });
+
+  it("filters by provider", async () => {
+    await seedMember({ id: "m_g", email: "g@example.com", provider: "google", created: "2026-06-01T00:00:00.000Z" });
+    await seedMember({ id: "m_f", email: "f@example.com", provider: "facebook", created: "2026-06-02T00:00:00.000Z" });
+
+    const facebook = await listMembers({ provider: "facebook" });
+    expect(facebook.map((r) => r.id)).toEqual(["m_f"]);
+    expect(await countMembers({ provider: "google" })).toBe(1);
+  });
+
+  it("sorts recent (last_seen) vs joined (created)", async () => {
+    // Alice joined first but Bob was active more recently.
+    await seedMember({ id: "m_a", email: "a@example.com", provider: "google", created: "2026-06-01T00:00:00.000Z", lastSeen: "2026-06-10T00:00:00.000Z" });
+    await seedMember({ id: "m_b", email: "b@example.com", provider: "google", created: "2026-06-05T00:00:00.000Z", lastSeen: "2026-06-20T00:00:00.000Z" });
+
+    expect((await listMembers({}, { sort: "recent" })).map((r) => r.id)).toEqual(["m_b", "m_a"]);
+    expect((await listMembers({}, { sort: "joined" })).map((r) => r.id)).toEqual(["m_b", "m_a"]);
+    // Make joined order diverge from recent: Carol joined last, seen long ago.
+    await seedMember({ id: "m_c", email: "c@example.com", provider: "google", created: "2026-06-30T00:00:00.000Z", lastSeen: "2026-06-02T00:00:00.000Z" });
+    expect((await listMembers({}, { sort: "joined" }))[0].id).toBe("m_c");
+    expect((await listMembers({}, { sort: "recent" }))[0].id).toBe("m_b");
+  });
+
+  it("paginates with limit + offset, no overlap", async () => {
+    for (let i = 0; i < 5; i++) {
+      await seedMember({ id: `m_p${i}`, email: `p${i}@example.com`, provider: "google", created: `2026-06-0${i + 1}T00:00:00.000Z` });
+    }
+    const first = await listMembers({}, { limit: 2, offset: 0, sort: "joined" });
+    const second = await listMembers({}, { limit: 2, offset: 2, sort: "joined" });
+    expect(first).toHaveLength(2);
+    expect(second).toHaveLength(2);
+    const firstIds = new Set(first.map((r) => r.id));
+    expect(second.some((r) => firstIds.has(r.id))).toBe(false);
+  });
+
+  it("listMemberProviders returns the distinct providers among members only", async () => {
+    await seedMember({ id: "m_g1", email: "g1@example.com", provider: "google", created: "2026-06-01T00:00:00.000Z" });
+    await seedMember({ id: "m_g2", email: "g2@example.com", provider: "google", created: "2026-06-02T00:00:00.000Z" });
+    await seedMember({ id: "m_f1", email: "f1@example.com", provider: "facebook", created: "2026-06-03T00:00:00.000Z" });
+    // Admin (provider NULL) must not leak into the provider list.
+    await run(
+      `INSERT INTO users (id, email, role, password_hash, provider, provider_sub, created_at)
+       VALUES ('m_admin2', 'admin2@example.com', 'admin', 'x', NULL, NULL, '2026-06-01T00:00:00.000Z')`,
+      [],
+    );
+    expect(await listMemberProviders()).toEqual(["facebook", "google"]);
+  });
+
+  it("getMemberActivity counts each user-keyed table", async () => {
+    await seedMember({ id: "m_act", email: "act@example.com", provider: "google", created: "2026-06-01T00:00:00.000Z" });
+    await run(`INSERT INTO user_saves (id, user_id, story_id, created_at) VALUES ('s1', 'm_act', 'st1', '2026-06-01T00:00:00.000Z')`, []);
+    await run(`INSERT INTO user_saves (id, user_id, story_id, created_at) VALUES ('s2', 'm_act', 'st2', '2026-06-01T00:00:00.000Z')`, []);
+    await run(`INSERT INTO user_likes (id, user_id, story_id, created_at) VALUES ('l1', 'm_act', 'st1', '2026-06-01T00:00:00.000Z')`, []);
+
+    const activity = await getMemberActivity("m_act");
+    expect(activity.saves).toBe(2);
+    expect(activity.likes).toBe(1);
+    expect(activity.favCategories).toBe(0);
+    expect(activity.recentlyViewed).toBe(0);
+  });
+
+  it("getMemberActivity returns all-zero for an empty id", async () => {
+    expect(await getMemberActivity("")).toEqual({
+      saves: 0,
+      likes: 0,
+      favCategories: 0,
+      recentlyViewed: 0,
+      continueItems: 0,
+      pollVotes: 0,
+    });
+  });
+
+  it("filters by status (active treats NULL as active)", async () => {
+    await seedMember({ id: "m_active", email: "active@example.com", provider: "google", created: "2026-06-01T00:00:00.000Z" });
+    await seedMember({ id: "m_susp", email: "susp@example.com", provider: "google", created: "2026-06-02T00:00:00.000Z" });
+    await suspendUser("m_susp", "spam");
+
+    expect((await listMembers({ status: "suspended" })).map((r) => r.id)).toEqual(["m_susp"]);
+    // 'active' includes the NULL-status legacy/normal row, excludes suspended.
+    expect((await listMembers({ status: "active" })).map((r) => r.id)).toEqual(["m_active"]);
+    expect(await countMembers({ status: "suspended" })).toBe(1);
+  });
+});
+
+describe("suspend / unsuspend", () => {
+  async function clearUsersOnly(): Promise<void> {
+    await run("DELETE FROM users", []);
+  }
+
+  async function seedRole(
+    id: string,
+    role: string,
+    status: string | null = null,
+  ): Promise<void> {
+    await run(
+      `INSERT INTO users (id, email, role, password_hash, provider, provider_sub, status, created_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)`,
+      [
+        id,
+        `${id}@example.com`,
+        role,
+        role === "admin" ? "x" : null,
+        status,
+        "2026-06-01T00:00:00.000Z",
+      ],
+    );
+  }
+
+  beforeEach(clearUsersOnly);
+
+  it("suspends a regular member and records reason + timestamp", async () => {
+    await seedRole("u1", "user");
+    expect(await suspendUser("u1", "  abuse  ")).toBe("suspended");
+    const row = await getUserById("u1");
+    expect(isSuspended(row?.status)).toBe(true);
+    expect(row?.suspended_reason).toBe("abuse"); // trimmed
+    expect(row?.suspended_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("returns not_found for a missing user", async () => {
+    expect(await suspendUser("ghost")).toBe("not_found");
+  });
+
+  it("REFUSES to suspend the last active admin (lockout guard)", async () => {
+    await seedRole("admin1", "admin");
+    expect(await suspendUser("admin1")).toBe("last_admin");
+    // The admin stays active.
+    expect(isSuspended((await getUserById("admin1"))?.status)).toBe(false);
+  });
+
+  it("allows suspending an admin when another active admin remains", async () => {
+    await seedRole("admin1", "admin");
+    await seedRole("admin2", "admin");
+    expect(await suspendUser("admin1")).toBe("suspended");
+    expect(isSuspended((await getUserById("admin1"))?.status)).toBe(true);
+    // ...but now admin2 is the last one and can't be suspended.
+    expect(await suspendUser("admin2")).toBe("last_admin");
+  });
+
+  it("counts only active admins (suspended ones don't count)", async () => {
+    await seedRole("admin1", "admin");
+    await seedRole("admin2", "admin", "suspended");
+    await seedRole("u1", "user");
+    expect(await countActiveAdmins()).toBe(1);
+  });
+
+  it("unsuspend clears the status, timestamp, and reason", async () => {
+    await seedRole("u1", "user");
+    await suspendUser("u1", "spam");
+    expect(await unsuspendUser("u1")).toBe(true);
+    const row = await getUserById("u1");
+    expect(row?.status).toBe("active");
+    expect(row?.suspended_at).toBeNull();
+    expect(row?.suspended_reason).toBeNull();
+  });
+});
+
+describe("isSuspended helper", () => {
+  it("treats only the literal 'suspended' as suspended", () => {
+    expect(isSuspended("suspended")).toBe(true);
+    expect(isSuspended("active")).toBe(false);
+    expect(isSuspended(null)).toBe(false);
+    expect(isSuspended(undefined)).toBe(false);
+  });
+});
+
+describe("setUserRole", () => {
+  async function clearUsersOnly(): Promise<void> {
+    await run("DELETE FROM users", []);
+  }
+  async function seedRole(id: string, role: string): Promise<void> {
+    await run(
+      `INSERT INTO users (id, email, role, password_hash, provider, provider_sub, created_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, '2026-06-01T00:00:00.000Z')`,
+      [id, `${id}@example.com`, role, role === "user" ? null : "x"],
+    );
+  }
+  beforeEach(clearUsersOnly);
+
+  it("promotes a member to a staff role", async () => {
+    await seedRole("u1", "user");
+    expect(await setUserRole("u1", "editor")).toBe("ok");
+    expect((await getUserById("u1"))?.role).toBe("editor");
+  });
+
+  it("rejects an unknown role", async () => {
+    await seedRole("u1", "user");
+    expect(await setUserRole("u1", "wizard")).toBe("invalid_role");
+    expect((await getUserById("u1"))?.role).toBe("user");
+  });
+
+  it("returns not_found for a missing user", async () => {
+    expect(await setUserRole("ghost", "admin")).toBe("not_found");
+  });
+
+  it("is a no-op (ok) when the role is unchanged", async () => {
+    await seedRole("u1", "user");
+    expect(await setUserRole("u1", "user")).toBe("ok");
+  });
+
+  it("REFUSES demoting the last active admin", async () => {
+    await seedRole("a1", "admin");
+    expect(await setUserRole("a1", "editor")).toBe("last_admin");
+    expect((await getUserById("a1"))?.role).toBe("admin");
+  });
+
+  it("allows demoting an admin when another active admin remains", async () => {
+    await seedRole("a1", "admin");
+    await seedRole("a2", "admin");
+    expect(await setUserRole("a1", "editor")).toBe("ok");
+    expect((await getUserById("a1"))?.role).toBe("editor");
+  });
+});
+
+describe("verifyStaffPassword (step-up re-auth)", () => {
+  beforeEach(async () => {
+    await run("DELETE FROM users", []);
+  });
+
+  it("returns true for the correct password, false for a wrong one", async () => {
+    const { createPasswordUser } = await import("./users");
+    const u = await createPasswordUser({
+      email: "reauth@example.com",
+      password: "correct-horse-battery",
+      anonymousId: null,
+    });
+    expect(await verifyStaffPassword(u.id, "correct-horse-battery")).toBe(true);
+    expect(await verifyStaffPassword(u.id, "wrong-password")).toBe(false);
+  });
+
+  it("fails closed for unknown user or empty input", async () => {
+    expect(await verifyStaffPassword("ghost", "x")).toBe(false);
+    expect(await verifyStaffPassword("", "x")).toBe(false);
+    expect(await verifyStaffPassword("ghost", "")).toBe(false);
+  });
+
+  it("returns false for a passwordless (OAuth) row", async () => {
+    await run(
+      `INSERT INTO users (id, email, role, password_hash, provider, provider_sub, created_at)
+       VALUES ('oauth1', 'o@example.com', 'user', NULL, 'google', 'g1', '2026-06-01T00:00:00.000Z')`,
+      [],
+    );
+    expect(await verifyStaffPassword("oauth1", "anything")).toBe(false);
   });
 });

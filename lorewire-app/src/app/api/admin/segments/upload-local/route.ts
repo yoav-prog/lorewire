@@ -18,7 +18,7 @@
 
 import { NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   getSegment,
   getSetting,
@@ -54,7 +54,7 @@ export async function POST(req: Request): Promise<NextResponse> {
       { status: 503 },
     );
   }
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   // Late import so the heavy ffmpeg/fs code never enters a function bundle
   // that doesn't actually need it. The web build tree-shakes this out of

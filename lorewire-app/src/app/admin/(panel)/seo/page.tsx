@@ -11,7 +11,7 @@
 // AI writes the metadata: site identity, social-card defaults, Schema.org
 // organization payload, and the two big-search-engine verification metas.
 
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import SettingsShell from "@/app/admin/SettingsShell";
 import {
@@ -65,7 +65,7 @@ const TITLE_TEMPLATE_PRESETS = [
 ];
 
 export default async function SeoPage() {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   const [
     siteName,

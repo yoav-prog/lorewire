@@ -1,4 +1,4 @@
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   listVoiceovers,
   getDefaultVoiceoverId,
@@ -15,7 +15,7 @@ import CreateVoiceover from "./CreateVoiceover";
 const LABEL = "font-mono text-[11px] uppercase tracking-wider text-muted";
 
 export default async function VoiceoversPage() {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   const [voiceovers, defaultId, categoryIds, allVoices] = await Promise.all([
     listVoiceovers(),

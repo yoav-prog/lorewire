@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting, listStories } from "@/lib/repo";
 import { saveCaptionTemplateAction } from "@/app/admin/actions";
 import { CaptionTemplatePreview } from "./preview";
@@ -261,7 +261,7 @@ interface PageProps {
 }
 
 export default async function TemplatesPage({ searchParams }: PageProps) {
-  await requireAdmin();
+  await requireCapability("settings.manage");
   const params = await searchParams;
   const requestedScope = params.scope === "cat" || params.scope === "story" ? params.scope : "global";
   const cat = params.cat;

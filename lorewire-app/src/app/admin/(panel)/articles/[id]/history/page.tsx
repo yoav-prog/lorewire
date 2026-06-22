@@ -7,7 +7,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getArticle, listRevisions } from "@/lib/repo";
 import { articleDirection } from "@/lib/articles";
 import { pruneRevisionsAction } from "@/app/admin/actions";
@@ -37,7 +37,7 @@ export default async function HistoryPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ pruned?: string; error?: string }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id } = await params;
   const { pruned, error } = await searchParams;
   const article = await getArticle(id);

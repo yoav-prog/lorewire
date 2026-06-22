@@ -1220,11 +1220,19 @@ export async function appendRevision(
     `SELECT ${REVISION_COLS} FROM article_revisions WHERE article_id = ? ORDER BY created_at DESC LIMIT 1`,
     [input.article_id],
   );
+  const latestMs =
+    latest?.created_at != null ? new Date(latest.created_at).getTime() : null;
+  const sinceLatestMs = latestMs !== null ? now.getTime() - latestMs : null;
+  // Coalesce only into a recent, still-unnamed revision — and never one stamped
+  // in the "future" relative to now (sinceLatestMs >= 0). A future stamp comes
+  // from the monotonic insert bump below (or clock skew); merging into it would
+  // be wrong. The guard also makes window=0 always insert, never coalesce.
   if (
     latest &&
     !latest.is_named &&
-    latest.created_at &&
-    now.getTime() - new Date(latest.created_at).getTime() < window * 1000
+    sinceLatestMs !== null &&
+    sinceLatestMs >= 0 &&
+    sinceLatestMs < window * 1000
   ) {
     await run(
       "UPDATE article_revisions SET document = ?, payload = ?, title = ?, status = ?, author_id = ?, created_at = ? WHERE id = ?",
@@ -1245,6 +1253,13 @@ export async function appendRevision(
     });
     return { revisionId: latest.id, coalesced: true };
   }
+  // Stamp created_at strictly after the latest revision so forced inserts (a
+  // restore fires two appends in one action) never tie — ordering and pruning
+  // are by created_at, and a tie made "newest" nondeterministic. Portable:
+  // there's no auto-increment column across SQLite + Postgres to break ties on.
+  let insertMs = now.getTime();
+  if (latestMs !== null && insertMs <= latestMs) insertMs = latestMs + 1;
+  const insertIso = new Date(insertMs).toISOString();
   await run(
     "INSERT INTO article_revisions (id, article_id, document, payload, title, status, is_named, author_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
@@ -1256,7 +1271,7 @@ export async function appendRevision(
       input.status,
       0,
       input.author_id,
-      nowIso,
+      insertIso,
     ],
   );
   console.info("[articles revisions] append", {
@@ -1485,18 +1500,22 @@ export interface UserRow {
   password_hash: string;
   role: string;
   created_at: string;
+  // 2026-06-22 Phase 3: NULL/'active' = normal, 'suspended' = locked out. Read
+  // by the admin gates (dal.ts) and the login action so a suspended staff
+  // member loses access on the next request.
+  status: string | null;
 }
 
 export async function getUserByEmail(email: string): Promise<UserRow | null> {
   return one<UserRow>(
-    "SELECT id, email, password_hash, role, created_at FROM users WHERE email = ?",
+    "SELECT id, email, password_hash, role, created_at, status FROM users WHERE email = ?",
     [email.toLowerCase()],
   );
 }
 
 export async function getUserById(id: string): Promise<UserRow | null> {
   return one<UserRow>(
-    "SELECT id, email, password_hash, role, created_at FROM users WHERE id = ?",
+    "SELECT id, email, password_hash, role, created_at, status FROM users WHERE id = ?",
     [id],
   );
 }

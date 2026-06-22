@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import { listGoogleVoices, listElevenLabsVoices } from "@/lib/voice-providers";
 import SettingsShell from "@/app/admin/SettingsShell";
@@ -81,7 +81,7 @@ function readToggle(raw: string | null, defaultOn = false): boolean {
 }
 
 export default async function SettingsPage() {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   // Pull every setting + voice catalog in parallel. The voice catalog fetchers
   // are cached server-side (1h TTL) so this isn't a fresh upstream call on

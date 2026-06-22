@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { listStoriesSlim } from "@/lib/repo";
 import { statusClass, STATUSES } from "@/app/admin/ui";
 
@@ -12,7 +12,7 @@ export default async function StoriesPage({
 }: {
   searchParams: Promise<{ status?: string }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { status } = await searchParams;
   const stories = await listStoriesSlim({ status, limit: LIST_LIMIT });
 

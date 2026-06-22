@@ -15,7 +15,7 @@
 
 import { NextResponse } from "next/server";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSegment, markSegmentUploading, setSegmentError } from "@/lib/repo";
 
 interface FinalizeRequest {
@@ -40,7 +40,7 @@ async function gcsSourcePresent(url: string): Promise<{ ok: boolean; size: numbe
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   let payload: FinalizeRequest;
   try {

@@ -13,7 +13,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getArticle, getRevision } from "@/lib/repo";
 import { renderArticleHtml } from "@/lib/article-html";
 import {
@@ -84,7 +84,7 @@ export default async function DiffPage({
     error?: string;
   }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id, revisionId } = await params;
   const { named, unnamed, error } = await searchParams;
   const [article, revision] = await Promise.all([

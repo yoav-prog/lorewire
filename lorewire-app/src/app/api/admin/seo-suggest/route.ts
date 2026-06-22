@@ -15,7 +15,7 @@
 // can't inject system instructions.
 
 import { NextRequest } from "next/server";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getArticle } from "@/lib/repo";
 import { selected } from "@/lib/models";
 import { chatCompletion } from "@/lib/llm";
@@ -29,7 +29,7 @@ interface Suggestions {
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   let body: { articleId?: string };
   try {
     body = (await req.json()) as { articleId?: string };

@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { readUserSession } from "@/lib/user-session";
+import { readActiveUserSession } from "@/lib/member-session";
 import { getUserById, updateUserProfile } from "@/lib/users";
 import { checkAndRecord } from "@/lib/poll-rate-limit";
 import {
@@ -64,7 +64,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
   }
 
-  const session = await readUserSession();
+  // readActiveUserSession: a suspended account can't upload a new avatar.
+  const session = await readActiveUserSession();
   if (!session) {
     return NextResponse.json({ error: "not signed in" }, { status: 401 });
   }

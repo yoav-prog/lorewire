@@ -12,6 +12,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { readFacebookConfig } from "@/lib/oauth-facebook";
 import { readGoogleConfig } from "@/lib/oauth-google";
 import { readMicrosoftConfig } from "@/lib/oauth-microsoft";
 import { readRedditConfig } from "@/lib/oauth-reddit";
@@ -37,6 +38,7 @@ export default async function SignInPage({ searchParams }: PageProps) {
   const googleEnabled = Boolean(readGoogleConfig());
   const microsoftEnabled = Boolean(readMicrosoftConfig());
   const redditEnabled = Boolean(readRedditConfig());
+  const facebookEnabled = Boolean(readFacebookConfig());
   const magicLinkEnabled = Boolean(process.env.BREVO_API_KEY?.trim());
 
   const backHref = next && next.startsWith("/") ? next : "/";
@@ -135,6 +137,7 @@ export default async function SignInPage({ searchParams }: PageProps) {
                   googleEnabled={googleEnabled}
                   microsoftEnabled={microsoftEnabled}
                   redditEnabled={redditEnabled}
+                  facebookEnabled={facebookEnabled}
                   magicLinkEnabled={magicLinkEnabled}
                 />
               </div>

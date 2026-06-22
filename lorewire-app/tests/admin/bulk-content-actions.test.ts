@@ -19,6 +19,8 @@ import { createArticle, setArticleStatus } from "@/lib/repo";
 // which throws inside test context.
 vi.mock("@/lib/dal", () => ({
   requireAdmin: vi.fn().mockResolvedValue(null),
+  requireCapability: vi.fn().mockResolvedValue(null),
+  requireStaff: vi.fn().mockResolvedValue(null),
   ensureSeedAdmin: vi.fn().mockResolvedValue(null),
   currentUser: vi.fn().mockResolvedValue(null),
 }));

@@ -13,13 +13,13 @@
 // (story_id, config_hash) means concurrent admin clicks at the same edit
 // state coalesce into one render.
 //
-// Security (rule 13): requireAdmin() on every entry point, validates the
+// Security (rule 13): requireCapability("content.manage") on every entry point, validates the
 // patch through parseVideoConfig() so a malformed input can't corrupt the
 // column. Lock paths are filtered against the patch keys to keep them in
 // sync.
 
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting, getStory, setStoryConfigJson } from "@/lib/repo";
 import {
   applyConfigPatch,
@@ -70,7 +70,7 @@ export async function saveVideoConfigPatch(
   lockPaths: string[],
   unlockPaths: string[] = [],
 ): Promise<PatchResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
 
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
@@ -157,7 +157,7 @@ export async function queueRender(
   storyId: string,
   opts: { force?: boolean } = {},
 ): Promise<QueueRenderResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
 
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
@@ -232,7 +232,7 @@ export async function queueRender(
 export async function listVideoRenderEventsAction(
   renderId: string,
 ): Promise<VideoRenderEventRow[]> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!renderId) return [];
   return listVideoRenderEvents(renderId);
 }
@@ -247,7 +247,7 @@ export async function logVideoRenderEventAction(
   event: string,
   message?: string,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!renderId || !event) return;
   await logVideoRenderEvent(renderId, event, { message });
 }
@@ -286,7 +286,7 @@ export async function queueShortRender(
     force?: boolean;
   } = {},
 ): Promise<QueueShortRenderResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
 
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
@@ -336,7 +336,7 @@ export async function queueShortRender(
 export async function getShortRenderStatusAction(
   renderId: string,
 ): Promise<ShortRenderRow | null> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!renderId) return null;
   return getShortRender(renderId);
 }
@@ -345,7 +345,7 @@ export async function getShortRenderStatusAction(
 export async function latestShortRenderAction(
   storyId: string,
 ): Promise<ShortRenderRow | null> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return null;
   return latestShortRenderForStory(storyId);
 }
@@ -357,7 +357,7 @@ export async function useShortAsStoryVideo(
   storyId: string,
   renderId: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const render = await getShortRender(renderId);
   if (!render || render.story_id !== storyId) {
     return { ok: false, error: "render-not-found" };
@@ -386,7 +386,7 @@ export async function useShortAsStoryVideo(
 export async function listShortRenderEventsAction(
   renderId: string,
 ): Promise<import("@/lib/short-render-queue").ShortRenderEventRow[]> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!renderId) return [];
   const { listShortRenderEvents } = await import("@/lib/short-render-queue");
   const events = await listShortRenderEvents(renderId);
@@ -401,7 +401,7 @@ export async function listShortRenderEventsAction(
 export async function cancelShortRenderAction(
   renderId: string,
 ): Promise<{ ok: boolean; error?: string; status?: string }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!renderId) return { ok: false, error: "missing render_id" };
   const { cancelShortRender } = await import("@/lib/short-render-queue");
   const after = await cancelShortRender(renderId);
@@ -465,7 +465,7 @@ export interface EditSessionResult {
 export async function claimEditSession(
   storyId: string,
 ): Promise<EditSessionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
 
@@ -542,7 +542,7 @@ export async function queueFrameImageRegen(
   frameId: string,
   newPrompt?: string,
 ): Promise<FrameRegenResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
 
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
@@ -703,7 +703,7 @@ export async function revertFrameImage(
   storyId: string,
   frameId: string,
 ): Promise<FrameRevertResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
 
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
@@ -741,7 +741,7 @@ export async function revertFrameImage(
 export async function heartbeatEditSession(
   storyId: string,
 ): Promise<EditSessionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
 

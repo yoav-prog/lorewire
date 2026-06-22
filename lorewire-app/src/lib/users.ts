@@ -32,11 +32,13 @@ import { randomUUID } from "node:crypto";
 
 import { all, one, run } from "@/lib/db";
 import { hashPassword, verifyPassword } from "@/lib/passwords";
+import { isStaffRole } from "@/lib/authz";
 
 export type UserProvider =
   | "google"
   | "microsoft"
   | "reddit"
+  | "facebook"
   | "magic_link"
   /** Email + password ("old fashion sign up"). Distinct from magic_link
    *  because magic_link proves email ownership (the user clicked a link
@@ -57,6 +59,18 @@ export interface UserRow {
   anonymous_id: string | null;
   last_seen_at: string | null;
   created_at: string | null;
+  // 2026-06-22 Phase 3 moderation. NULL/'active' = normal; 'suspended' =
+  // blocked. suspended_at/suspended_reason carry the audit context.
+  status: string | null;
+  suspended_at: string | null;
+  suspended_reason: string | null;
+}
+
+export type UserStatus = "active" | "suspended";
+
+/** Treat NULL (legacy rows, pre-Phase-3) the same as 'active'. */
+export function isSuspended(status: string | null | undefined): boolean {
+  return status === "suspended";
 }
 
 /** Normalize an email for storage + lookup. Email lookup compares the
@@ -473,15 +487,283 @@ export async function verifyPasswordLogin(
   return row;
 }
 
-/** List recent users — admin convenience for the future user-management
- *  surface. Bounded and ordered by last_seen_at so the most-active are
- *  the first hit. */
-export async function listRecentUsers(limit = 50): Promise<UserRow[]> {
-  return await all<UserRow>(
-    `SELECT * FROM users
-      WHERE role = 'user'
-      ORDER BY COALESCE(last_seen_at, created_at) DESC
-      LIMIT ?`,
-    [Math.max(1, Math.min(500, Math.floor(limit)))],
+/* --------------------------- admin: members view --------------------------- */
+// Read-only data for the admin Users area (Phase 2 of
+// _plans/2026-06-22-admin-user-management.md). "Members" are the public
+// sign-ups (role = 'user'); staff live behind the Team tab. Search + filter +
+// pagination are server-side so every view is shareable via the URL.
+
+export type MemberSort = "recent" | "joined";
+
+export interface MemberFilters {
+  /** Matches email or display name (case-insensitive; all tokens must hit). */
+  search?: string;
+  /** Restrict to one sign-in provider. */
+  provider?: UserProvider;
+  /** Restrict by moderation status. 'active' also matches legacy NULL rows. */
+  status?: UserStatus;
+}
+
+export interface ListMembersOpts {
+  limit?: number;
+  offset?: number;
+  sort?: MemberSort;
+}
+
+// Shared WHERE so list + count filter identically. Always scoped to public
+// users (role = 'user') — staff never appear in the Members list.
+function buildMemberWhere(filters: MemberFilters): {
+  clause: string;
+  params: unknown[];
+} {
+  const where: string[] = ["role = 'user'"];
+  const params: unknown[] = [];
+  if (filters.provider) {
+    where.push("provider = ?");
+    params.push(filters.provider);
+  }
+  if (filters.status === "suspended") {
+    where.push("status = 'suspended'");
+  } else if (filters.status === "active") {
+    // Legacy rows carry NULL status — treat them as active.
+    where.push("(status IS NULL OR status != 'suspended')");
+  }
+  if (filters.search && filters.search.trim()) {
+    const tokens = filters.search
+      .toLowerCase()
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    for (const token of tokens) {
+      where.push(
+        "(LOWER(COALESCE(email, '')) LIKE ? OR LOWER(COALESCE(name, '')) LIKE ?)",
+      );
+      const like = `%${token}%`;
+      params.push(like, like);
+    }
+  }
+  return { clause: `WHERE ${where.join(" AND ")}`, params };
+}
+
+// 'recent' = most-recently-active first; 'joined' = newest account first.
+function memberOrderBy(sort: MemberSort | undefined): string {
+  return sort === "joined"
+    ? "ORDER BY COALESCE(created_at, last_seen_at) DESC"
+    : "ORDER BY COALESCE(last_seen_at, created_at) DESC";
+}
+
+export async function listMembers(
+  filters: MemberFilters = {},
+  opts: ListMembersOpts = {},
+): Promise<UserRow[]> {
+  const { clause, params } = buildMemberWhere(filters);
+  const limit = Math.max(1, Math.min(500, Math.floor(opts.limit ?? 50)));
+  const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+  return all<UserRow>(
+    `SELECT * FROM users ${clause} ${memberOrderBy(opts.sort)} LIMIT ? OFFSET ?`,
+    [...params, limit, offset],
   );
+}
+
+export async function countMembers(
+  filters: MemberFilters = {},
+): Promise<number> {
+  const { clause, params } = buildMemberWhere(filters);
+  const row = await one<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM users ${clause}`,
+    params,
+  );
+  return Number(row?.n ?? 0);
+}
+
+// Distinct providers present among public users — populates the filter
+// dropdown so it only ever offers values that actually exist.
+export async function listMemberProviders(): Promise<string[]> {
+  const rows = await all<{ provider: string | null }>(
+    "SELECT DISTINCT provider FROM users WHERE role = 'user' AND provider IS NOT NULL ORDER BY provider",
+    [],
+  );
+  return rows.map((r) => r.provider).filter((p): p is string => Boolean(p));
+}
+
+export interface MemberActivity {
+  saves: number;
+  likes: number;
+  favCategories: number;
+  recentlyViewed: number;
+  continueItems: number;
+  pollVotes: number;
+}
+
+// Per-user activity counts for the member detail panel. One COUNT per
+// user-keyed table; each is an indexed user_id lookup, so this is cheap and
+// purely read-only.
+export async function getMemberActivity(
+  userId: string,
+): Promise<MemberActivity> {
+  const empty: MemberActivity = {
+    saves: 0,
+    likes: 0,
+    favCategories: 0,
+    recentlyViewed: 0,
+    continueItems: 0,
+    pollVotes: 0,
+  };
+  if (!userId) return empty;
+  // Table names are hard-coded literals (never user input), so interpolation
+  // here is safe; the user id is always parameter-bound.
+  const count = async (table: string): Promise<number> => {
+    const row = await one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM ${table} WHERE user_id = ?`,
+      [userId],
+    );
+    return Number(row?.n ?? 0);
+  };
+  const [saves, likes, favCategories, recentlyViewed, continueItems, pollVotes] =
+    await Promise.all([
+      count("user_saves"),
+      count("user_likes"),
+      count("user_fav_categories"),
+      count("user_recently_viewed"),
+      count("user_continue"),
+      count("poll_votes"),
+    ]);
+  return { saves, likes, favCategories, recentlyViewed, continueItems, pollVotes };
+}
+
+// Count admins who can still sign in (role 'admin', not suspended). Legacy
+// NULL status counts as active. Used by the UI to explain why suspending the
+// only admin is blocked; the authoritative guard is inside suspendUser below.
+export async function countActiveAdmins(): Promise<number> {
+  const row = await one<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND (status IS NULL OR status != 'suspended')",
+    [],
+  );
+  return Number(row?.n ?? 0);
+}
+
+export type SuspendResult = "suspended" | "last_admin" | "not_found";
+
+// Suspend a user. Refuses to suspend the LAST active admin — and that guard is
+// INSIDE the UPDATE (EXISTS another active admin) so two admins suspending each
+// other at the same moment can't both pass a pre-check and strand the app with
+// zero admins (council blind spot: do the check in the write, not before it).
+// Idempotent: re-suspending refreshes the reason. Callers still block
+// self-suspension and write the audit row at the action layer.
+export async function suspendUser(
+  userId: string,
+  reason?: string | null,
+): Promise<SuspendResult> {
+  if (!userId) return "not_found";
+  const target = await getUserById(userId);
+  if (!target) return "not_found";
+  const now = new Date().toISOString();
+  const cleanReason = reason?.trim() || null;
+  await run(
+    `UPDATE users
+        SET status = 'suspended', suspended_at = ?, suspended_reason = ?
+      WHERE id = ?
+        AND (
+          role != 'admin'
+          OR EXISTS (
+            SELECT 1 FROM users other
+             WHERE other.role = 'admin'
+               AND other.id != ?
+               AND (other.status IS NULL OR other.status != 'suspended')
+          )
+        )`,
+    [now, cleanReason, userId, userId],
+  );
+  const after = await getUserById(userId);
+  if (after && isSuspended(after.status)) {
+    console.info("[users] suspend", { user_id_hash: hashForLog(userId) });
+    return "suspended";
+  }
+  // The UPDATE matched no row: the only blocker is the last-admin guard.
+  return "last_admin";
+}
+
+// Lift a suspension. Plain status flip; no guard needed. Returns false when
+// there is no such user.
+export async function unsuspendUser(userId: string): Promise<boolean> {
+  if (!userId) return false;
+  const target = await getUserById(userId);
+  if (!target) return false;
+  await run(
+    "UPDATE users SET status = 'active', suspended_at = NULL, suspended_reason = NULL WHERE id = ?",
+    [userId],
+  );
+  console.info("[users] unsuspend", { user_id_hash: hashForLog(userId) });
+  return true;
+}
+
+// Staff = anyone who can sign into the admin (role != 'user'). Members are
+// excluded. Newest-active first. For the Team list.
+export async function listStaff(): Promise<UserRow[]> {
+  return all<UserRow>(
+    `SELECT * FROM users
+      WHERE role != 'user'
+      ORDER BY COALESCE(last_seen_at, created_at) DESC`,
+    [],
+  );
+}
+
+export type SetRoleResult = "ok" | "last_admin" | "not_found" | "invalid_role";
+
+// Change a user's role to any staff role or back to 'user'. Demoting an admin
+// is guarded INSIDE the UPDATE (EXISTS another active admin) so the last admin
+// can never be demoted out of existence — same race-safety as suspendUser.
+// Callers block self-role-change and write the audit row at the action layer.
+export async function setUserRole(
+  userId: string,
+  role: string,
+): Promise<SetRoleResult> {
+  if (!userId) return "not_found";
+  if (role !== "user" && !isStaffRole(role)) return "invalid_role";
+  const target = await getUserById(userId);
+  if (!target) return "not_found";
+  if (target.role === role) return "ok"; // no-op
+
+  const demotingAdmin = target.role === "admin" && role !== "admin";
+  if (demotingAdmin) {
+    await run(
+      `UPDATE users SET role = ?
+        WHERE id = ?
+          AND EXISTS (
+            SELECT 1 FROM users other
+             WHERE other.role = 'admin'
+               AND other.id != ?
+               AND (other.status IS NULL OR other.status != 'suspended')
+          )`,
+      [role, userId, userId],
+    );
+    const after = await getUserById(userId);
+    if (after && after.role === role) {
+      console.info("[users] role-change", { user_id_hash: hashForLog(userId), role });
+      return "ok";
+    }
+    return "last_admin";
+  }
+
+  await run("UPDATE users SET role = ? WHERE id = ?", [role, userId]);
+  console.info("[users] role-change", { user_id_hash: hashForLog(userId), role });
+  return "ok";
+}
+
+// Step-up re-auth (Phase 6): verify that the password belongs to `userId` —
+// the acting staff member re-confirming their own identity before a
+// destructive action (delete, role change, impersonate). Honest, stateless
+// re-check: we compare against the stored hash each time rather than minting a
+// short-lived "elevation" token that would itself need revoking. Returns false
+// for an unknown user or one with no password (e.g. a pure-OAuth row), so it
+// fails closed. verifyPassword is constant-time, so this leaks no timing.
+export async function verifyStaffPassword(
+  userId: string,
+  password: string,
+): Promise<boolean> {
+  if (!userId || !password) return false;
+  const user = await getUserById(userId);
+  if (!user || !user.password_hash) return false;
+  return verifyPassword(password, user.password_hash);
 }

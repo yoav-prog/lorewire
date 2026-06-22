@@ -14,6 +14,8 @@ import { redirect } from "next/navigation";
 import { getUserById } from "@/lib/users";
 import { readUserSession } from "@/lib/user-session";
 import AccountForm from "./AccountForm";
+import DeleteAccount from "./DeleteAccount";
+import ExportData from "./ExportData";
 
 export const dynamic = "force-dynamic";
 
@@ -52,6 +54,10 @@ export default async function AccountPage() {
         initialName={user.name}
         initialPictureUrl={user.picture_url}
       />
+
+      <ExportData />
+
+      <DeleteAccount />
     </div>
   );
 }

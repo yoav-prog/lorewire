@@ -8,7 +8,7 @@ import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
 import { randomUUID } from "node:crypto";
 import { CATEGORIES } from "@/app/admin/ui";
-import { requireAdmin, ensureSeedAdmin, currentUser } from "@/lib/dal";
+import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
 import {
   getUserByEmail,
@@ -124,6 +124,12 @@ export async function login(
   if (!user || !(await verifyPassword(password, user.password_hash))) {
     return { error: "Wrong email or password." };
   }
+  if (user.status === "suspended") {
+    // A suspended staff account must never receive a fresh session cookie —
+    // reject at the door rather than relying only on the per-request gate.
+    console.warn("[admin login] suspended account blocked");
+    return { error: "This account is suspended. Contact an administrator." };
+  }
   await createSession({ userId: user.id, email: user.email, role: user.role });
   redirect("/admin");
 }
@@ -134,7 +140,7 @@ export async function logout(): Promise<void> {
 }
 
 export async function saveStory(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) return;
   await updateStory(id, {
@@ -175,7 +181,7 @@ export async function saveStory(formData: FormData): Promise<void> {
 }
 
 export async function changeStatus(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "") as StoryStatus;
   if (!id || !status) return;
@@ -215,7 +221,7 @@ export async function changeStatus(formData: FormData): Promise<void> {
 export async function setStoryNoindexAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const noindex = String(formData.get("noindex") ?? "") === "1";
   if (!id) return;
@@ -240,7 +246,7 @@ export async function setStoryAspectAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const rawAspect = String(formData.get("aspect") ?? "");
   if (!id) return { ok: false, error: "missing id" };
@@ -284,7 +290,7 @@ export async function savePollAction(formData: FormData): Promise<{
   error?: string;
   created?: boolean;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const storyId = String(formData.get("story_id") ?? "");
   if (!storyId) return { ok: false, error: "missing story id" };
   const story = await getStoryRow(storyId);
@@ -338,7 +344,7 @@ export interface BackfillPollsResult {
 }
 
 export async function backfillPollsAction(): Promise<BackfillPollsResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const startedAt = Date.now();
   const result: BackfillPollsResult = {
     ok: true,
@@ -435,7 +441,7 @@ export async function saveArticlePollAction(formData: FormData): Promise<{
   error?: string;
   created?: boolean;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleId = String(formData.get("article_id") ?? "");
   if (!articleId) return { ok: false, error: "missing article id" };
   const article = await getArticle(articleId);
@@ -494,7 +500,7 @@ export async function enqueueImageRegenAction(opts: {
   ownerId: string;
   asset: string;
 }): Promise<EnqueueImageRegenResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { ownerKind, ownerId, asset } = opts;
   if (!ownerId || !asset) {
     return { ok: false, error: "missing owner/asset" };
@@ -585,7 +591,7 @@ export async function enqueueImageRegenAction(opts: {
 export async function listRenderEventsAction(
   renderId: string,
 ): Promise<RenderEventRow[]> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!renderId) return [];
   return listRenderEvents(renderId);
 }
@@ -608,7 +614,7 @@ export async function cancelImageRenderAction(opts: {
   renderId: string;
   reason?: string;
 }): Promise<CancelImageRenderResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { renderId } = opts;
   const reason = (opts.reason ?? "").trim() || "cancelled by admin";
   if (!renderId) return { ok: false, error: "missing render id" };
@@ -654,7 +660,7 @@ export async function cancelAllImageRendersAction(opts: {
   ownerId: string;
   reason?: string;
 }): Promise<CancelAllImageRendersResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { ownerKind, ownerId } = opts;
   const reason = (opts.reason ?? "").trim() || "stopped by admin (bulk)";
   if (!ownerId) return { ok: false, cancelled: 0, error: "missing owner" };
@@ -722,7 +728,7 @@ function revalidateOwnerPanels(
 }
 
 export async function setModelAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const stage = String(formData.get("stage") ?? "") as Stage;
   const model = String(formData.get("model") ?? "");
   if (!stage || !model) return;
@@ -776,7 +782,7 @@ const SETTING_VALUE_VALIDATORS: Record<
 };
 
 export async function saveSettingAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const key = String(formData.get("key") ?? "");
   if (!key) return;
   const rawValue = String(formData.get("value") ?? "");
@@ -805,7 +811,7 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
 // pipeline/voiceovers.resolve_voiceover.
 
 export async function saveVoiceoverAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const name = String(formData.get("name") ?? "").trim();
   const provider = String(formData.get("provider") ?? "").trim();
   const voiceId = String(formData.get("voice_id") ?? "").trim();
@@ -828,7 +834,7 @@ export async function saveVoiceoverAction(formData: FormData): Promise<void> {
 }
 
 export async function deleteVoiceoverAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "").trim();
   if (!id) return;
   await deleteVoiceover(id);
@@ -839,7 +845,7 @@ export async function deleteVoiceoverAction(formData: FormData): Promise<void> {
 export async function setDefaultVoiceoverAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "").trim();
   await setDefaultVoiceoverId(id);
   console.info("[voiceover action] set default", { id });
@@ -850,7 +856,7 @@ export async function setDefaultVoiceoverAction(
 export async function setCategoryVoiceoverAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const category = String(formData.get("category") ?? "").trim();
   const id = String(formData.get("id") ?? "").trim();
   if (!CATEGORIES.includes(category as (typeof CATEGORIES)[number])) return;
@@ -876,7 +882,7 @@ export async function previewVoiceoverConfigAction(config: {
   // fuller default sample.
   text?: string | null;
 }): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!config.provider || !config.voice_id) {
     return { ok: false, error: "Pick a model and a voice first." };
   }
@@ -999,7 +1005,7 @@ export async function saveStoryCaptionStyleAction(
   field: string,
   value: string,
 ): Promise<SaveStoryCaptionStyleResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing-story" };
   if (!CAPTION_STYLE_FIELDS_SET.has(field)) {
     return { ok: false, error: `unknown caption field "${field}"` };
@@ -1090,7 +1096,7 @@ export async function applyCaptionStylePresetAction(
   storyId: string,
   presetId: string,
 ): Promise<ApplyCaptionPresetResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing-story" };
   if (!presetId) return { ok: false, error: "missing-preset" };
 
@@ -1131,7 +1137,7 @@ export interface ClearCaptionOverridesResult {
 export async function clearStoryCaptionOverridesAction(
   storyId: string,
 ): Promise<ClearCaptionOverridesResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing-story" };
   for (const field of CAPTION_STYLE_FIELDS_SET) {
     await setSetting(`caption.story.${storyId}.${field}`, "");
@@ -1155,7 +1161,7 @@ export async function saveUserCaptionPresetAction(opts: {
   name: string;
   values: CaptionStyleValues;
 }): Promise<SaveUserCaptionPresetResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const name = opts.name.trim();
   if (name.length === 0) return { ok: false, error: "name-empty" };
   if (name.length > MAX_PRESET_NAME_LEN) {
@@ -1198,14 +1204,14 @@ export async function saveUserCaptionPresetAction(opts: {
 
 // Server-only read helper exposed for the page's RSC pass.
 export async function getUserCaptionPresetsForPage(): Promise<CaptionPreset[]> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   return listUserCaptionPresets();
 }
 
 export async function saveCaptionTemplateAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const rawScope = String(formData.get("__scope") ?? "global");
   const cat = String(formData.get("__cat") ?? "") || undefined;
   const story = String(formData.get("__story") ?? "") || undefined;
@@ -1282,7 +1288,7 @@ function redirectToSegments(params?: Record<string, string>): never {
 // normalize moved off-Vercel into pipeline/segments_worker.py.
 
 export async function setActiveSegmentAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const kind = parseKind(formData.get("kind"));
   if (!kind) redirectToSegments({ error: "missing-kind" });
   const id = String(formData.get("id") ?? "");
@@ -1305,7 +1311,7 @@ export async function setActiveSegmentAction(formData: FormData): Promise<void> 
 export async function setSegmentEnabledAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const enabled = String(formData.get("enabled") ?? "") === "1";
   if (!id) redirectToSegments({ error: "missing-id" });
@@ -1316,7 +1322,7 @@ export async function setSegmentEnabledAction(
 }
 
 export async function renameSegmentAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToSegments({ error: "missing-id" });
   const label = sanitizeLabel(String(formData.get("label") ?? ""));
@@ -1327,7 +1333,7 @@ export async function renameSegmentAction(formData: FormData): Promise<void> {
 }
 
 export async function deleteSegmentAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToSegments({ error: "missing-id" });
   const seg = await getSegment(id);
@@ -1372,7 +1378,7 @@ export async function deleteSegmentAction(formData: FormData): Promise<void> {
 export async function setStoryOverrideAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const storyId = String(formData.get("story_id") ?? "");
   const kind = parseKind(formData.get("kind"));
   const pick = String(formData.get("pick") ?? "inherit");
@@ -1397,7 +1403,7 @@ export async function setStoryVoiceAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const storyId = String(formData.get("story_id") ?? "");
   const rawProvider = String(formData.get("voice_provider") ?? "");
   const rawVoiceId = String(formData.get("voice_id") ?? "");
@@ -1457,7 +1463,7 @@ export async function regenerateVoiceoverAction(formData: FormData): Promise<{
   error?: string;
   renderId?: string;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const storyId = String(formData.get("story_id") ?? "");
   if (!storyId) {
     return { ok: false, error: "missing story_id" };
@@ -1538,7 +1544,7 @@ function redirectToArticle(id: string, params?: Record<string, string>): never {
 }
 
 export async function createArticleAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const user = await currentUser();
   const type = formData.get("type");
   const language = formData.get("language");
@@ -1591,7 +1597,7 @@ export async function createArticleAction(formData: FormData): Promise<void> {
 }
 
 export async function saveArticleAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const user = await currentUser();
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1672,7 +1678,7 @@ export async function saveArticleAction(formData: FormData): Promise<void> {
 export async function setArticleStatusAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "") as ArticleStatus;
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1719,7 +1725,7 @@ export async function setArticleStatusAction(
 export async function setArticleNoindexAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const noindex = String(formData.get("noindex") ?? "") === "1";
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1736,7 +1742,7 @@ export async function setArticleNoindexAction(
 export async function updateArticleSlugAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const slug = String(formData.get("slug") ?? "").trim();
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1764,7 +1770,7 @@ export async function updateArticleSlugAction(
 export async function updateArticlePayloadAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
   const article = await getArticle(id);
@@ -1867,7 +1873,7 @@ export async function updateArticlePayloadAction(
 export async function updateArticleSeoAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
   const article = await getArticle(id);
@@ -1939,7 +1945,7 @@ function redirectToImport(params?: Record<string, string>): never {
 export async function previewSheetImportAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!isSheetsConfigured()) {
     redirectToImport({ error: "sheets-not-configured" });
   }
@@ -1971,7 +1977,7 @@ interface CommitMapping {
 export async function commitSheetImportAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!isSheetsConfigured()) {
     redirectToImport({ error: "sheets-not-configured" });
   }
@@ -2118,7 +2124,7 @@ export async function commitSheetImportAction(
 export async function nameRevisionAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleId = String(formData.get("article_id") ?? "");
   const revisionId = String(formData.get("revision_id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -2142,7 +2148,7 @@ export async function nameRevisionAction(
 export async function unnameRevisionAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleId = String(formData.get("article_id") ?? "");
   const revisionId = String(formData.get("revision_id") ?? "");
   if (!articleId || !revisionId) {
@@ -2160,7 +2166,7 @@ export async function unnameRevisionAction(
 export async function restoreRevisionAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const user = await currentUser();
   const articleId = String(formData.get("article_id") ?? "");
   const revisionId = String(formData.get("revision_id") ?? "");
@@ -2231,7 +2237,7 @@ export async function restoreRevisionAction(
 export async function pruneRevisionsAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleId = String(formData.get("article_id") ?? "");
   if (!articleId) redirectToArticles({ error: "missing-id" });
   const removed = await pruneRevisions(articleId, 50);
@@ -2241,7 +2247,7 @@ export async function pruneRevisionsAction(
 }
 
 export async function deleteArticleAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
   const article = await getArticle(id);
@@ -2278,7 +2284,7 @@ export async function setArticleStoryIdAction(formData: FormData): Promise<{
   error?: string;
   previousStoryId?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const rawStoryId = String(formData.get("story_id") ?? "");
   const storyId = rawStoryId.trim() === "" ? null : rawStoryId.trim();
@@ -2308,7 +2314,7 @@ export async function setArticleHeroFromFrameAction(
   frameUrl?: string;
   previousUrl?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const frameId = String(formData.get("frame_id") ?? "");
   if (!id) return { ok: false, error: "missing id" };
@@ -2337,7 +2343,7 @@ export async function setArticleOgFromFrameAction(
   frameUrl?: string;
   previousUrl?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const frameId = String(formData.get("frame_id") ?? "");
   if (!id) return { ok: false, error: "missing id" };
@@ -2366,7 +2372,7 @@ export async function addArticleGalleryImageFromFrameAction(
   frameUrl?: string;
   previousDocument?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const frameId = String(formData.get("frame_id") ?? "");
   const rawAlt = String(formData.get("alt") ?? "").trim();
@@ -2414,7 +2420,7 @@ export async function revertArticleHeroAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const raw = formData.get("previous_url");
   if (!id) return { ok: false, error: "missing id" };
@@ -2435,7 +2441,7 @@ export async function revertArticleOgAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const raw = formData.get("previous_url");
   if (!id) return { ok: false, error: "missing id" };
@@ -2458,7 +2464,7 @@ export async function revertArticleDocumentAction(
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const previousDocument = formData.get("previous_document");
   if (!id) return { ok: false, error: "missing id" };
@@ -2515,7 +2521,7 @@ export async function syncRedditSourceCsvAction(
   _prev: RedditSyncResult | null,
   formData: FormData,
 ): Promise<RedditSyncResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
 
   const file = formData.get("csv");
   const dryRun = String(formData.get("dry_run") ?? "") === "1";
@@ -2586,7 +2592,7 @@ export async function syncRedditSourceCsvAction(
 export async function skipRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   const notes = String(formData.get("notes") ?? "").trim() || null;
   if (ids.length === 0) return;
@@ -2599,7 +2605,7 @@ export async function skipRedditSourcesAction(
 export async function reopenRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   if (ids.length === 0) return;
   const { bulkSetRedditSourceStatus } = await import("@/lib/reddit-source");
@@ -2616,7 +2622,7 @@ export async function reopenRedditSourcesAction(
 export async function setDailyBudgetCapAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const raw = String(formData.get("cap_usd") ?? "").trim();
   // Empty input → unset → unlimited.
   if (raw === "") {
@@ -2655,7 +2661,7 @@ export async function setDailyBudgetCapAction(
 export async function cancelActiveStoryJobsAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   if (ids.length === 0) {
     redirect("/admin/reddit-sources?error=no-selection");
@@ -2684,7 +2690,7 @@ export async function cancelActiveStoryJobsAction(
 export async function bulkReprocessRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   if (ids.length === 0) {
     redirect("/admin/reddit-sources?error=no-selection");
@@ -2728,7 +2734,7 @@ const REVIEW_ROUTE = (rid: string) => `/admin/reddit-sources/${rid}`;
 export async function publishReviewedStoryAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const redditId = String(formData.get("reddit_id") ?? "");
   if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
 
@@ -2773,7 +2779,7 @@ export async function publishReviewedStoryAction(
 export async function rejectReviewedStoryAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const redditId = String(formData.get("reddit_id") ?? "");
   if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
 
@@ -2799,7 +2805,7 @@ export async function rejectReviewedStoryAction(
 export async function reprocessRedditSourceAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const redditId = String(formData.get("reddit_id") ?? "");
   if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
 
@@ -2837,7 +2843,7 @@ export async function reprocessRedditSourceAction(
 export async function processRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   const withMedia = String(formData.get("with_media") ?? "1") === "1";
   if (ids.length === 0) {
@@ -2894,7 +2900,7 @@ export async function listStoryJobEventsForRedditAction(
     ReturnType<typeof import("@/lib/story-jobs").listStoryJobEventsForReddit>
   >
 > {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!redditId) return [];
   const { listStoryJobEventsForReddit } = await import("@/lib/story-jobs");
   return listStoryJobEventsForReddit(redditId);
@@ -2919,7 +2925,7 @@ export async function listStoryJobEventsForRedditAction(
 //       deleteArticle (cascades to revisions per the repo function).
 //
 // Both actions:
-//   - require admin via requireAdmin() at entry,
+//   - require admin via requireCapability("content.manage") at entry,
 //   - re-read each row from the database before mutating to defend against
 //     a client that lies about the `kind` of an id,
 //   - catch and record per-item errors so a batch keeps going past one
@@ -3024,7 +3030,7 @@ export async function bulkUpdateContentAction(
   itemsInput: BulkContentItem[],
   op: BulkUpdateOp,
 ): Promise<BulkActionResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const items = validateItems(itemsInput);
   if (!op || typeof op !== "object" || typeof op.type !== "string") {
     throw new Error("bulk-action: invalid op");
@@ -3185,7 +3191,7 @@ export async function bulkUpdateContentAction(
 export async function bulkDeleteContentAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkActionResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const items = validateItems(itemsInput);
 
   console.info("[content bulk action] start", {
@@ -3282,7 +3288,7 @@ export type {
 } from "@/lib/reclassify-stories";
 
 export async function bulkReclassifyStoriesAction() {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { reclassifyDramaAndNullStories } = await import(
     "@/lib/reclassify-stories"
   );

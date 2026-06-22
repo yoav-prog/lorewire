@@ -9,9 +9,15 @@
 // Plan: _plans/2026-06-18-homepage-no-flash-ssr.md.
 
 import AppShell from "@/components/AppShell";
+import ImpersonationBanner from "@/components/ImpersonationBanner";
 import { loadHomepageSSRData } from "@/lib/homepage-data";
 
 export default async function Page() {
   const initial = await loadHomepageSSRData();
-  return <AppShell initial={initial} />;
+  return (
+    <>
+      <ImpersonationBanner />
+      <AppShell initial={initial} />
+    </>
+  );
 }

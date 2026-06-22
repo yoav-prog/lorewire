@@ -5,7 +5,7 @@
 // approved plan; default type defaults to "feature".
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import { ARTICLE_TYPES, ARTICLE_LANGUAGES } from "@/lib/repo";
 import {
@@ -23,7 +23,7 @@ const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
 
 export default async function NewArticlePage() {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const [rawDefaultType, rawDefaultLang] = await Promise.all([
     getSetting("articles.default_type"),
     getSetting("articles.default_language"),
