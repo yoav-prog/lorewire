@@ -8,7 +8,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { readUserSession } from "@/lib/user-session";
+import { readActiveUserSession } from "@/lib/member-session";
 import { updateUserProfile } from "@/lib/users";
 
 let warnedAboutMissingSiteOriginInProd = false;
@@ -47,7 +47,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "forbidden origin" }, { status: 403 });
   }
 
-  const session = await readUserSession();
+  // readActiveUserSession (not raw readUserSession): a suspended account is
+  // treated as signed out here, so it can't edit its profile.
+  const session = await readActiveUserSession();
   if (!session) {
     return NextResponse.json({ error: "not signed in" }, { status: 401 });
   }

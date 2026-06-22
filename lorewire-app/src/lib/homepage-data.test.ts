@@ -31,6 +31,12 @@ vi.mock("@/lib/user-session", () => ({
   readUserSession: async () => null,
 }));
 
+// Phase 7: loadSession also consults impersonation (admin "view as"). Default
+// to "not impersonating" so these tests exercise the normal reader path.
+vi.mock("@/lib/impersonation", () => ({
+  resolveImpersonation: async () => null,
+}));
+
 afterEach(() => {
   // Reset module cache so each test gets a fresh import graph. Per-test
   // doMock overrides live until vi.doUnmock is called below; the top-of-

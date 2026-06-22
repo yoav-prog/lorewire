@@ -6,7 +6,7 @@
 // gives the user a clear destination from the sidebar.
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { listStoriesSlim } from "@/lib/repo";
 import { statusClass, STATUSES } from "@/app/admin/ui";
 
@@ -17,7 +17,7 @@ export default async function VideosPage({
 }: {
   searchParams: Promise<{ status?: string }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { status } = await searchParams;
   const rows = await listStoriesSlim({ status, limit: LIST_LIMIT });
 

@@ -23,8 +23,10 @@ export const TARGET_AUDIO_CHANNELS = 2;
  *  splice under ~10 s for a 2-minute output and quality is visually
  *  indistinguishable from `medium`. */
 export const H264_PRESET = "fast";
-/** Constant Rate Factor — visually lossless for short-form at 1080p. */
-export const H264_CRF = "20";
+/** Constant Rate Factor. 23 is the high-quality web standard — ~30-40% smaller
+ *  than the old 20 / Remotion's default 18, with quality still excellent for the
+ *  flat doodle art. See _plans/2026-06-22-media-compression.md. */
+export const H264_CRF = "23";
 /** AAC bitrate. 192 k stereo matches the body's audio encode. */
 export const AAC_BITRATE = "192k";
 

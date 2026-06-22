@@ -8,24 +8,37 @@
 // Response shape Meta requires:
 //   { url: "<public status URL>", confirmation_code: "<our internal id>" }
 //
-// LoreWire is owner-only today (Phase 0 of
-// _plans/2026-06-16-multi-platform-shorts-publisher.md), so deletion of
-// "user data" means: revoking the matching social_account row's tokens.
-// The social_accounts table doesn't exist yet — Phase 1 lands it. Until
-// then this endpoint:
-//   1. Verifies the signed_request (security boundary, regardless of state).
-//   2. Generates a confirmation code and persists a record of the request
-//      so the status page can answer "is this done?" deterministically.
-//   3. Returns Meta's required shape.
-// When Phase 1 lands, the TODO below revokes the matching social_account.
+// What "delete user data" means here:
+//   - Facebook LOGIN users (2026-06-22): the signed_request `user_id` is the
+//     Facebook app-scoped id, which is exactly the `provider_sub` we store at
+//     login. So we find that user and run deleteUserCompletely — the same
+//     wipe the self-serve "Delete my account" button uses. This is the live,
+//     load-bearing path now that people can sign in with Facebook.
+//   - PUBLISHER accounts: when the shorts publisher lands a social_accounts
+//     table, the TODO below also revokes the matching row's tokens. Not built
+//     yet (Phase 1 of _plans/2026-06-16-multi-platform-shorts-publisher.md).
 //
-// Why this exists in Phase 0 already: Meta requires the callback URL to be
-// live before submitting App Review. A missing or broken endpoint bounces
-// the submission on first read.
+// This endpoint always:
+//   1. Verifies the signed_request HMAC (security boundary, regardless of state).
+//   2. Deletes any matching account data.
+//   3. Records the request keyed by confirmation_code so the status page can
+//      answer "is this done?" deterministically.
+//   4. Returns Meta's required { url, confirmation_code } shape.
+//
+// A verified signature that matches NO account is logged as a warning, not a
+// silent success — that asymmetry is how a broken id-join (the one assumption
+// this whole path rests on) becomes visible instead of no-op'ing forever.
+//
+// Plan: _plans/2026-06-22-facebook-login-and-data-deletion.md §B.
 
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
+import {
+  deleteUserCompletely,
+  recordDeletionRequest,
+} from "@/lib/account-deletion";
 import { parseSignedRequest } from "@/lib/meta-signed-request";
+import { getUserByProvider, hashForLog } from "@/lib/users";
 
 export const runtime = "nodejs";
 
@@ -70,22 +83,55 @@ export async function POST(req: Request): Promise<NextResponse> {
     return NextResponse.json({ error: parsed.reason }, { status: 400 });
   }
 
-  const userId = parsed.payload.user_id;
+  // `user_id` is the Facebook app-scoped id. NEVER log it raw (rule 13) — the
+  // hashForLog digest is enough to correlate support requests.
+  const facebookUserId = parsed.payload.user_id;
   const confirmationCode = randomUUID();
 
-  // TODO Phase 1: revoke the matching social_accounts row.
-  //   await sql`
-  //     UPDATE social_accounts
-  //        SET status='revoked',
-  //            access_token_enc=NULL, refresh_token_enc=NULL,
-  //            updated_at=${new Date().toISOString()}
-  //      WHERE platform='facebook' AND external_id=${userId}
-  //   `;
-  // Until then, log the event so a Meta-side disconnect is visible.
+  // Login path: find the Facebook user this id belongs to and wipe them.
+  let deletedUser = false;
+  try {
+    const user = await getUserByProvider("facebook", facebookUserId);
+    if (user) {
+      await deleteUserCompletely(user.id);
+      deletedUser = true;
+    }
+  } catch (err) {
+    // A genuine deletion failure must NOT report success. Return 500 so Meta
+    // retries; deleteUserCompletely is idempotent so the retry is safe.
+    console.error("[social meta data-deletion] deletion failed", {
+      subject_hash: hashForLog(facebookUserId),
+      err: (err as Error).message,
+    });
+    return NextResponse.json({ error: "deletion-failed" }, { status: 500 });
+  }
 
-  console.info(
-    `[social meta data-deletion] verified userId=${userId} confirmationCode=${confirmationCode}`,
-  );
+  // TODO publisher phase: also revoke the matching social_accounts row's
+  // tokens once that table exists (Phase 1 of
+  // _plans/2026-06-16-multi-platform-shorts-publisher.md).
+
+  await recordDeletionRequest({
+    confirmationCode,
+    source: "facebook",
+    subject: facebookUserId,
+    deleted: deletedUser,
+  });
+
+  if (deletedUser) {
+    console.info("[social meta data-deletion] account deleted", {
+      subject_hash: hashForLog(facebookUserId),
+      confirmation_code: confirmationCode,
+    });
+  } else {
+    // Verified signature, no matching account. Could be legitimate (the user
+    // never signed in with Facebook, or was already deleted), but if it fires
+    // for real Facebook-login users it means the id-join is broken — surface
+    // it loudly rather than letting deletions silently no-op.
+    console.warn("[social meta data-deletion] verified but no matching user", {
+      subject_hash: hashForLog(facebookUserId),
+      confirmation_code: confirmationCode,
+    });
+  }
 
   return NextResponse.json({
     url: `${siteOrigin()}/data-deletion/${confirmationCode}`,

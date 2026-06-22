@@ -7,7 +7,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getStory, getUserById, listSegments } from "@/lib/repo";
 import { listVoices } from "@/lib/voice-library";
 import { readForeignSession } from "@/lib/short-edit-session";
@@ -29,7 +29,7 @@ export default async function ShortEditorPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { id } = await params;
   const story = await getStory(id);
   if (!story) notFound();

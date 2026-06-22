@@ -14,6 +14,7 @@ import {
   all,
   one,
 } from "@/lib/db";
+import { resolveMediaUrl } from "@/lib/media-url";
 import type {
   ArticleListRow,
   ArticleRow,
@@ -89,7 +90,14 @@ export async function listPublishedArticles(
     limit,
     cursor: opts.beforePublishedAt ?? null,
   });
-  return rows;
+  // Resolve hero/og onto the delivery base (lib/media-url); passthrough when
+  // MEDIA_PUBLIC_BASE is unset. Body images embedded in `document` are resolved
+  // at render time during the storage cutover — see the migration plan.
+  return rows.map((a) => ({
+    ...a,
+    hero_image: resolveMediaUrl(a.hero_image),
+    og_image: resolveMediaUrl(a.og_image),
+  }));
 }
 
 // Single article fetch, scoped to published. Returns null for drafts /
@@ -100,10 +108,18 @@ export async function getPublishedArticleBySlug(
   slug: string,
 ): Promise<ArticleRow | null> {
   if (!language || !slug) return null;
-  return one<ArticleRow>(
+  const row = await one<ArticleRow>(
     `SELECT ${PUBLIC_FULL_COLS} FROM articles WHERE language = ? AND slug = ? AND status = 'published'`,
     [language, slug],
   );
+  if (!row) return null;
+  // Resolve hero/og onto the delivery base; body images in `document` are
+  // resolved at render time during cutover (see the migration plan).
+  return {
+    ...row,
+    hero_image: resolveMediaUrl(row.hero_image),
+    og_image: resolveMediaUrl(row.og_image),
+  };
 }
 
 // Count of published articles for a language. Used by the RSS feed and the

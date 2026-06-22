@@ -20,6 +20,9 @@ export const MICROSOFT_VERIFIER_COOKIE = "lw_oauth_m_verifier";
  *  defends the round-trip. Same TTL and HttpOnly + Secure + SameSite=Lax
  *  posture as the other providers. */
 export const REDDIT_STATE_COOKIE = "lw_oauth_r_state";
+/** Facebook, like Reddit, doesn't use PKCE in arctic's client — state alone
+ *  defends the round-trip. */
+export const FACEBOOK_STATE_COOKIE = "lw_oauth_fb_state";
 /** Where to redirect after a successful sign-in. Validated through
  *  sanitizeNext on intake so a callback can't open-redirect off-site. */
 export const NEXT_PATH_COOKIE = "lw_oauth_next";

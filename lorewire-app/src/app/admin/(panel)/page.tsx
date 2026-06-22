@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireStaff } from "@/lib/dal";
 import { dashboardSummary, listStoriesSlim } from "@/lib/repo";
 import { allSelected, STAGES, STAGE_LABEL } from "@/lib/models";
 import { statusClass } from "@/app/admin/ui";
@@ -18,7 +18,7 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 }
 
 export default async function Dashboard() {
-  await requireAdmin();
+  await requireStaff();
   const [summary, recent, models] = await Promise.all([
     dashboardSummary(),
     listStoriesSlim({ limit: 8 }),

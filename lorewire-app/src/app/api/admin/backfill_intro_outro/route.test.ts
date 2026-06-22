@@ -41,12 +41,12 @@ function makeReq(url: string) {
 describe("/api/admin/backfill_intro_outro", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    // Default: admin auth resolves (the route's await requireAdmin()
-    // passes through). Individual tests can stub it to throw a
-    // NEXT_REDIRECT to simulate an unauthenticated caller.
-    vi.spyOn(dal, "requireAdmin").mockResolvedValue({
+    // Default: the capability check resolves (the route's await
+    // requireCapability("content.manage") passes through). Individual tests can
+    // stub it to throw a NEXT_REDIRECT to simulate an unauthorized caller.
+    vi.spyOn(dal, "requireCapability").mockResolvedValue({
       userId: "admin-1",
-    } as unknown as Awaited<ReturnType<typeof dal.requireAdmin>>);
+    } as unknown as Awaited<ReturnType<typeof dal.requireCapability>>);
   });
 
   it("GET without ?dry=1 returns 400 so a browser visit can't fire inserts", async () => {

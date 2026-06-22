@@ -14,7 +14,7 @@
 // in a transitional state, <SegmentsAutoRefresh> polls every 5s so the chip
 // transitions live in front of the admin.
 
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   getSetting,
   listSegments,
@@ -90,7 +90,7 @@ export default async function SegmentsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  await requireAdmin();
+  await requireCapability("settings.manage");
   const sp = await searchParams;
   const errorKey = typeof sp.error === "string" ? sp.error : "";
 

@@ -5,14 +5,14 @@
 // the row's existence and the output_url are sensitive admin metadata.
 
 import { NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getRender } from "@/lib/video-render-queue";
 
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id } = await params;
   const row = await getRender(id);
   if (!row) {

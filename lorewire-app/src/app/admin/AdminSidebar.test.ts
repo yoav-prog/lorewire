@@ -107,10 +107,11 @@ describe("buildGroups", () => {
   it("produces the top-level entries in stable order", () => {
     // The ungrouped block grew from the original three (Overview, Content,
     // Settings) as the studio added Reddit Sources (2026-06-14), Homepage
-    // curation (2026-06-16), and Polls (2026-06-18). Each insertion is
-    // intentional + sits between Content and Settings so Settings always
-    // anchors the bottom of the ungrouped block — this test pins both the
-    // membership and the position.
+    // curation (2026-06-16), Polls (2026-06-18), the Users area (2026-06-22,
+    // capability-gated), Comments (2026-06-22, gated under content.manage), and
+    // the one-time Migrate + Compress media tools (2026-06-22). Each insertion
+    // sits between Content and the trailing Settings / Migrate / Compress block.
+    // With no caps passed, every item shows. This test pins membership + order.
     for (const dev of [false, true]) {
       const groups = buildGroups(dev);
       expect(groups[0].label).toBeNull();
@@ -120,8 +121,59 @@ describe("buildGroups", () => {
         "Reddit Sources",
         "Homepage",
         "Polls",
+        "Users",
+        "Comments",
         "Settings",
+        "Migrate",
+        "Compress",
       ]);
     }
+  });
+});
+
+describe("buildGroups — capability filtering", () => {
+  it("shows every item when caps is undefined (back-compat)", () => {
+    const labels = buildGroups(false)[0].items.map((i) => i.label);
+    expect(labels).toContain("Users");
+  });
+
+  it("with no granted capabilities, only ungated items (Overview) show", () => {
+    // A signed-in staffer with zero capabilities sees just the always-on
+    // landing entry; every gated section is hidden.
+    const labels = buildGroups(false, [])[0].items.map((i) => i.label);
+    expect(labels).toEqual(["Overview"]);
+  });
+
+  it("users.view reveals the Users area but not content/settings", () => {
+    const labels = buildGroups(false, ["users.view"] as const)[0].items.map(
+      (i) => i.label,
+    );
+    expect(labels).toContain("Overview");
+    expect(labels).toContain("Users");
+    expect(labels).not.toContain("Content");
+    expect(labels).not.toContain("Settings");
+  });
+
+  it("content.manage reveals the content sections but not Users or Settings", () => {
+    const labels = buildGroups(false, ["content.manage"] as const)[0].items.map(
+      (i) => i.label,
+    );
+    expect(labels).toContain("Content");
+    expect(labels).toContain("Reddit Sources");
+    expect(labels).toContain("Homepage");
+    expect(labels).toContain("Polls");
+    expect(labels).toContain("Comments");
+    expect(labels).not.toContain("Users");
+    expect(labels).not.toContain("Settings");
+  });
+
+  it("settings.manage reveals Settings + Migrate + Compress", () => {
+    const labels = buildGroups(false, ["settings.manage"] as const)[0].items.map(
+      (i) => i.label,
+    );
+    expect(labels).toContain("Settings");
+    expect(labels).toContain("Migrate");
+    expect(labels).toContain("Compress");
+    expect(labels).not.toContain("Content");
   });
 });

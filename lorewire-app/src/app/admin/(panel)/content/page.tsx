@@ -10,7 +10,7 @@
 // _plans/2026-06-19-content-bulk-actions.md.
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   listContentSlim,
   CONTENT_SUBKINDS,
@@ -50,7 +50,7 @@ export default async function ContentPage({
     language?: string;
   }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const sp = await searchParams;
   const subKind = isSubKind(sp.kind) ? sp.kind : undefined;
   const status = sp.status || undefined;

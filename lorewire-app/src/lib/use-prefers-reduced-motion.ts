@@ -1,7 +1,7 @@
 // prefers-reduced-motion as an external store — the React-19-sanctioned way to
 // read a browser media query without setting state inside an effect. Returns
 // false during SSR so the first client paint matches the server. Shared by the
-// mobile (ReelsFeed) and desktop (ReelsDesktop) reels surfaces.
+// mobile (WiresFeed) and desktop (WiresDesktop) wires surfaces.
 
 import { useSyncExternalStore } from "react";
 

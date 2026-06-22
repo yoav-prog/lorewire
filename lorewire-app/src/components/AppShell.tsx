@@ -29,10 +29,11 @@ import {
   TopArticleCTA,
 } from "@/components/JumpToPoll";
 import DesktopShell from "@/components/DesktopShell";
-import ReelsFeed from "@/components/reels/ReelsFeed";
+import WiresFeed from "@/components/wires/WiresFeed";
 import CookieConsent from "@/components/CookieConsent";
 import CrossDeviceNudge from "@/components/CrossDeviceNudge";
 import SignInChip from "@/components/SignInChip";
+import SiteFooter from "@/components/SiteFooter";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
@@ -43,16 +44,21 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
+import { storyShareUrl } from "@/lib/share";
+import ShareSheet from "@/components/ShareSheet";
 import {
   useContinueReading,
   useRecentlyViewed,
   useSavedStories,
+  useStoryRatings,
 } from "@/lib/engagement-store";
+import RatingStars, { RatingBadge } from "@/components/RatingStars";
 
 // Mirror DesktopShell's NO_LIVE_MEDIA seed: until the live fetch resolves
 // (or on miss/error) every subview falls back to the baked story shape.
 const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
+  slug: null,
   video_url: null,
   images: [],
   body: null,
@@ -99,7 +105,7 @@ const ShareI: IconCmp = (p) => <Ico {...p} d={<><circle cx="6" cy="12" r="2.3" /
 const ChevDown: IconCmp = (p) => <Ico {...p} d={<path d="m6 9 6 6 6-6" />} />;
 const ShuffleI: IconCmp = (p) => <Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5" /><path d="m18 5 2 2-2 2M18 15l2 2-2 2" /></>} />;
 const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /><path d="M12 11v5M12 8h.01" /></>} />;
-const ReelsI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
+const WiresI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
 
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; rounded?: boolean; showTitle?: boolean }) {
@@ -232,9 +238,11 @@ function Billboard({
 
 /* ----------------------------- POSTER CARD (rail) ----------------------------- */
 function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number }) {
+  const { getRating } = useStoryRatings();
   return (
     <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w }}>
       <div style={{ height: h }}><PosterArt story={story} /></div>
+      <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 28 }} />
       {progress != null && (
         <div className="absolute left-1.5 right-1.5 bottom-1.5 h-[3px] rounded-full" style={{ background: "rgba(255,255,255,.25)" }}>
           <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }}></div>
@@ -438,6 +446,8 @@ function Home({
             </p>
           );
         })()}
+
+      <SiteFooter />
     </div>
   );
 }
@@ -1305,6 +1315,23 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
     };
   }, [story.id, story.videoUrl, story.images]);
 
+  // Share opens our OWN ShareSheet (not the OS share panel). It carries the
+  // PUBLIC canonical reader URL (/v/[slug]) for THIS story — never the internal
+  // id or a signed media URL. liveMedia.slug is non-null exactly when the story
+  // is published and reachable at /v/[slug]; otherwise we fall back to origin.
+  const [shareOpen, setShareOpen] = useState(false);
+  const shareUrl = storyShareUrl(
+    liveMedia.slug,
+    typeof window !== "undefined" ? window.location.origin : "",
+  );
+
+  // Personal star rating — local + honest (see useStoryRatings). The star opens
+  // an inline picker; a set rating shows as a gold star here and a badge on the
+  // story's thumbnails.
+  const { getRating, setRating, clearRating } = useStoryRatings();
+  const myRating = getRating(story.id) ?? 0;
+  const [rateOpen, setRateOpen] = useState(false);
+
   const c = CAT[story.cat];
   const more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
   if (more.length < 3) more.push(...STORIES.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
@@ -1318,6 +1345,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
   const showHeaderHero = !!headerHeroSrc && headerHeroOk;
   return (
     <div id="article-top" className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }}>
+      {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
       <div className="relative h-[300px]">
         <div className="absolute inset-0" style={{ background: c }}>
           {showHeaderHero && (
@@ -1365,13 +1393,20 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
             {inList ? <span className="text-accent"><Ico d={<path d="m5 12 5 5L20 7" />} size={22} /></span> : <PlusI size={22} />}
             <span className="font-body text-[11px]" style={{ color: inList ? "#E8462B" : undefined }}>My List</span>
           </button>
-          <button className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
-            <StarI size={22} /><span className="font-body text-[11px]">Rate</span>
+          <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition" style={{ color: myRating > 0 ? "#F4B740" : undefined }}>
+            <StarI size={22} /><span className="font-body text-[11px]">{myRating > 0 ? `Rated ${myRating}` : "Rate"}</span>
           </button>
-          <button className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
+          <button onClick={() => setShareOpen(true)} aria-label="Share" className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
             <ShareI size={22} /><span className="font-body text-[11px]">Share</span>
           </button>
         </div>
+
+        {rateOpen && (
+          <div className="mt-3 flex flex-col items-center gap-1.5">
+            <span className="font-body text-[12px] text-muted">{myRating > 0 ? "Your rating" : "Tap to rate"}</span>
+            <RatingStars value={myRating} onRate={(n) => setRating(story.id, n)} onClear={() => clearRating(story.id)} size={32} />
+          </div>
+        )}
 
         <p className="font-body text-[14.5px] leading-relaxed text-ink/85 mt-4">{story.syn}</p>
 
@@ -1501,7 +1536,7 @@ function MyList({
   session: HomepageInitial["session"];
 }) {
   // Resolve through the live+sample catalog, NOT byId — saved ids can be real
-  // shorts the Reels feed saved that aren't in the baked sample catalog, and
+  // shorts the Wires feed saved that aren't in the baked sample catalog, and
   // byId throws on an unknown id. Unresolved ids are skipped cleanly.
   const items = list
     .map(resolveStory)
@@ -1534,7 +1569,7 @@ function MyList({
 
 /* ----------------------------- TAB BAR ----------------------------- */
 function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
-  const items: [string, IconCmp][] = [["Home", HomeI], ["Reels", ReelsI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
+  const items: [string, IconCmp][] = [["Home", HomeI], ["Wires", WiresI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
   return (
     <div className="absolute bottom-0 left-0 right-0 z-50" style={{ background: "linear-gradient(0deg,#0A0A0C 70%, rgba(10,10,12,0))" }}>
       <div className="flex justify-around items-center pt-2.5 pb-7 px-2">
@@ -1557,14 +1592,14 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
-  const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
+  const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const screenRef = useRef<HTMLDivElement>(null);
 
-  // My List is the persisted saved-stories store, shared with the Reels feed's
+  // My List is the persisted saved-stories store, shared with the Wires feed's
   // Save button and the Title sheet so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
   // 2026-06-19 Phase 2: Recently viewed is recorded whenever the user
-  // opens a story (the detail sheet or a deep-link into Reels). LRU
+  // opens a story (the detail sheet or a deep-link into Wires). LRU
   // ordering means the most-recent open bubbles to the front; the
   // engagement-store caps the list at 50.
   const { recordView } = useRecentlyViewed();
@@ -1572,7 +1607,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   // Hoisted curation + live-catalog hook. Home receives the values as
   // props instead of calling the hook itself so MyList and the modal
   // mount site below share one `resolveStory` (real shorts saved through
-  // the Reels feed aren't in the baked STORIES catalog). One hook call
+  // the Wires feed aren't in the baked STORIES catalog). One hook call
   // drives every component on the shell that maps an id to a card. The
   // seed comes from src/app/page.tsx's SSR fetch so the first paint
   // already shows the live curation — no client-fetch flash.
@@ -1587,16 +1622,16 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     recordView(id);
   };
   const close = () => setActive(null);
-  // "Play Something" jumps straight into the Reels feed (Phase 7 deep-link). An
+  // "Play Something" jumps straight into the Wires feed (Phase 7 deep-link). An
   // id scrolls to that short if it's in the loaded pages; otherwise the feed
   // opens at the top.
-  const openReels = (id?: string) => {
+  const openWires = (id?: string) => {
     if (id) recordView(id);
-    setReelsStoryId(id ?? null);
+    setWiresStoryId(id ?? null);
     close();
-    setTab("Reels");
+    setTab("Wires");
   };
-  const shuffle = () => openReels();
+  const shuffle = () => openWires();
 
   useEffect(() => {
     if (screenRef.current) screenRef.current.scrollTop = 0;
@@ -1624,20 +1659,20 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
         {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
 
-      {/* Reels rides above the (now-empty) screen as a full-cover layer, like
+      {/* Wires rides above the (now-empty) screen as a full-cover layer, like
           the Title sheet does — it owns its own snap scroller and pauses
           whenever a sheet opens over it. */}
-      {tab === "Reels" && (
-        <ReelsFeed
+      {tab === "Wires" && (
+        <WiresFeed
           onOpenInfo={open}
           paused={!!active}
-          initialStoryId={reelsStoryId ?? undefined}
+          initialStoryId={wiresStoryId ?? undefined}
         />
       )}
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Reels feed (not in STORIES) still open the sheet.
+        // through the Wires feed (not in STORIES) still open the sheet.
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);
@@ -1653,9 +1688,9 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
         ) : null;
       })()}
 
-      {/* Switching tabs via the nav clears any Reels deep-link target so a plain
+      {/* Switching tabs via the nav clears any Wires deep-link target so a plain
           tab tap always opens the feed at the top. */}
-      <TabBar tab={tab} setTab={(t) => { close(); setReelsStoryId(null); setTab(t); }} />
+      <TabBar tab={tab} setTab={(t) => { close(); setWiresStoryId(null); setTab(t); }} />
     </div>
   );
 }

@@ -9,7 +9,7 @@
 // — lands in Phase 3 alongside the worker entry.
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   countRedditSources,
   listRedditSources,
@@ -106,7 +106,7 @@ export default async function RedditSourcesPage({
 }: {
   searchParams: Promise<SearchParams>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const sp = await searchParams;
 
   const statuses = parseStatuses(sp.status);

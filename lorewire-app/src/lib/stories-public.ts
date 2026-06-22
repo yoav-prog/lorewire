@@ -5,6 +5,7 @@
 
 import "server-only";
 import { all, one } from "@/lib/db";
+import { resolveMediaUrl } from "@/lib/media-url";
 import type { StoryRow } from "@/lib/repo";
 
 // Mirror the full StoryRow shape so callers don't get a partial type lie.
@@ -58,20 +59,38 @@ export async function listPublishedStories(
   }
   const clause = `WHERE ${where.join(" AND ")}`;
   const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
-  return all<PublicStoryListRow>(
+  const rows = await all<PublicStoryListRow>(
     `SELECT ${LIST_COLS} FROM stories ${clause} ORDER BY published_at DESC ${limit}`,
     params,
   );
+  // Resolve hero/video onto the delivery base (lib/media-url); passthrough when
+  // MEDIA_PUBLIC_BASE is unset.
+  return rows.map((s) => ({
+    ...s,
+    hero_image: resolveMediaUrl(s.hero_image),
+    video_url: resolveMediaUrl(s.video_url),
+  }));
 }
 
 export async function getPublishedStoryBySlug(
   slug: string,
 ): Promise<StoryRow | null> {
   if (!slug) return null;
-  return one<StoryRow>(
+  const row = await one<StoryRow>(
     `SELECT ${PUBLIC_COLS} FROM stories WHERE slug = ? AND status = 'published' AND published_at IS NOT NULL`,
     [slug],
   );
+  if (!row) return null;
+  // Resolve media onto the delivery base (lib/media-url); passthrough when
+  // MEDIA_PUBLIC_BASE is unset. source_url is the external Reddit link, NOT our
+  // media, so it is left untouched. getLiveStoryMedia may re-resolve these via
+  // its slug fallback; resolveMediaUrl is idempotent so that is safe.
+  return {
+    ...row,
+    video_url: resolveMediaUrl(row.video_url),
+    hero_image: resolveMediaUrl(row.hero_image),
+    audio_url: resolveMediaUrl(row.audio_url),
+  };
 }
 
 export async function countPublishedStories(): Promise<number> {

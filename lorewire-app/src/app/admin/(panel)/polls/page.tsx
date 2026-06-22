@@ -7,7 +7,7 @@
 // Sparkline + per-story vote series land in Phase 5.
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import {
   DEFAULT_PUBLIC_FLOOR,
@@ -22,7 +22,7 @@ const LABEL =
   "font-mono text-[11px] uppercase tracking-wider text-muted";
 
 export default async function PollsOverviewPage() {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const rows = await listPollOverview();
 
   return (

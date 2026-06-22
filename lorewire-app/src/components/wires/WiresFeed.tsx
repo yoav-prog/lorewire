@@ -1,6 +1,6 @@
 "use client";
 
-// The Reels surface: a full-screen vertical, snap-scrolling feed of 9:16 doodle
+// The Wires surface: a full-screen vertical, snap-scrolling feed of 9:16 doodle
 // shorts. One short per screen, the active one plays, the rest are paused — the
 // TikTok / Instagram-Reels interaction the user asked for.
 //
@@ -17,14 +17,12 @@
 // placeholder of the same height. That bounds memory and GCS egress so we
 // don't download shorts the user never reaches.
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import ReelCard from "@/components/reels/ReelCard";
-import { useReelsData } from "@/components/reels/useReelsData";
-import {
-  useContinueReading,
-  useLikedReels,
-  useSavedStories,
-} from "@/lib/engagement-store";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import WireCard from "@/components/wires/WireCard";
+import { useWiresData } from "@/components/wires/useWiresData";
+import { useWireLikes } from "@/components/wires/useWireLikes";
+import { useWirePrefs } from "@/components/wires/useWirePrefs";
+import { useContinueReading, useSavedStories } from "@/lib/engagement-store";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 
 type OpenFn = (id: string, tab?: string) => void;
@@ -36,7 +34,7 @@ const PREFETCH_WITHIN = 3;
 // Mount a live <video> for the active card +/- this many neighbours.
 const MOUNT_RADIUS = 1;
 
-export interface ReelsFeedProps {
+export interface WiresFeedProps {
   /** Opens the existing Title sheet (Watch / Read / Read-along) for a story. */
   onOpenInfo: OpenFn;
   /** True when a modal is open over the feed — pause playback underneath it. */
@@ -45,25 +43,53 @@ export interface ReelsFeedProps {
   initialStoryId?: string;
 }
 
-export default function ReelsFeed({
+export default function WiresFeed({
   onOpenInfo,
   paused,
   initialStoryId,
-}: ReelsFeedProps) {
+}: WiresFeedProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Array<HTMLElement | null>>([]);
 
-  const { shorts, loading, loadingMore, loadMore } = useReelsData(PAGE_SIZE);
+  const { shorts, loading, loadingMore, loadMore } = useWiresData(PAGE_SIZE);
   const [activeIdx, setActiveIdx] = useState(0);
-  const [muted, setMuted] = useState(true);
   const [soundHintShown, setSoundHintShown] = useState(true);
   const reducedMotion = usePrefersReducedMotion();
   const didInitialScroll = useRef(false);
+  // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
+  const { autoplay, muted, advance, toggleAutoplay, toggleMuted, toggleAdvance } =
+    useWirePrefs();
 
-  // Engagement is subscribed ONCE here (one source of truth shared with the My
-  // List tab + Title sheet) and the booleans are passed down per card.
+  // Shuffle: a stored permutation of story ids (null = natural order). New
+  // pages (loadMore) append in server order after the shuffled ids.
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [reorderNonce, setReorderNonce] = useState(0);
+  const displayShorts = useMemo(() => {
+    if (!order) return shorts;
+    const byId = new Map(shorts.map((s) => [s.id, s]));
+    const seen = new Set(order);
+    const ordered = order.flatMap((id) => {
+      const s = byId.get(id);
+      return s ? [s] : [];
+    });
+    const extras = shorts.filter((s) => !seen.has(s.id));
+    return [...ordered, ...extras];
+  }, [order, shorts]);
+
+  // activeIdx mirrored to a ref so auto-advance reads it without re-binding.
+  const activeIdxRef = useRef(0);
+  useEffect(() => {
+    activeIdxRef.current = activeIdx;
+  }, [activeIdx]);
+
+  // Saves stay in the local engagement store (the My List source of truth).
+  // Likes are server-counted: seed from the rows we fetched, then toggle
+  // optimistically against the action.
   const { isSaved, toggle: toggleSave } = useSavedStories();
-  const { isLiked, toggle: toggleLike } = useLikedReels();
+  const { seed: seedLikes, toggle: toggleLike, get: getLike } = useWireLikes();
+  useEffect(() => {
+    seedLikes(shorts);
+  }, [shorts, seedLikes]);
   // 2026-06-19 Phase 2: Continue Watching writes a progress entry per
   // story as playback advances. Thresholds keep the rail honest:
   //   - >= 5 s watched (filters out scrubbing past or accidental opens)
@@ -109,8 +135,8 @@ export default function ReelsFeed({
   // card nears the tail. Re-bound when the section count changes.
   useEffect(() => {
     const root = containerRef.current;
-    if (!root || shorts.length === 0) return;
-    const count = shorts.length;
+    if (!root || displayShorts.length === 0) return;
+    const count = displayShorts.length;
     const io = new IntersectionObserver(
       (entries) => {
         let bestIdx = -1;
@@ -132,13 +158,13 @@ export default function ReelsFeed({
     );
     for (const el of sectionRefs.current) if (el) io.observe(el);
     return () => io.disconnect();
-  }, [shorts.length]);
+  }, [displayShorts.length, reorderNonce]);
 
   // Deep-link: once the feed has rendered, jump to the requested story (no
   // smooth-scroll — we want it already there on first paint).
   useEffect(() => {
     if (didInitialScroll.current || loading || !initialStoryId) return;
-    const idx = shorts.findIndex((s) => s.id === initialStoryId);
+    const idx = displayShorts.findIndex((s) => s.id === initialStoryId);
     if (idx <= 0) {
       didInitialScroll.current = true; // 0 or not found: top is already correct
       return;
@@ -150,10 +176,38 @@ export default function ReelsFeed({
       el.scrollIntoView({ block: "start" });
       didInitialScroll.current = true;
     }
-  }, [loading, initialStoryId, shorts]);
+  }, [loading, initialStoryId, displayShorts]);
 
-  const toggleMute = useCallback(() => setMuted((m) => !m), []);
   const dismissSoundHint = useCallback(() => setSoundHintShown(false), []);
+
+  // Shuffle the loaded wires into a random order and jump back to the top.
+  const onShuffle = useCallback(() => {
+    const ids = shorts.map((s) => s.id);
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    setOrder(ids);
+    setActiveIdx(0);
+    setReorderNonce((n) => n + 1);
+    requestAnimationFrame(() => {
+      sectionRefs.current[0]?.scrollIntoView({ block: "start" });
+      if (containerRef.current) containerRef.current.scrollTop = 0;
+    });
+  }, [shorts]);
+
+  // Auto-advance: scroll the next wire into view when the current one ends.
+  // Returns false at the tail (so the card replays) and prefetches more.
+  const onWireEnded = useCallback((): boolean => {
+    const next = activeIdxRef.current + 1;
+    const el = sectionRefs.current[next];
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+      return true;
+    }
+    loadMoreRef.current();
+    return false;
+  }, []);
 
   // ── States ────────────────────────────────────────────────────────────────
   if (loading) {
@@ -161,7 +215,7 @@ export default function ReelsFeed({
       <div className="absolute inset-0 z-30 grid place-items-center bg-black">
         <div className="flex flex-col items-center gap-3 text-muted">
           <span className="h-7 w-7 animate-spin rounded-full border-2 border-line border-t-accent" />
-          <span className="font-mono text-[11px] uppercase tracking-[.2em]">Loading reels</span>
+          <span className="font-mono text-[11px] uppercase tracking-[.2em]">Loading wires</span>
         </div>
       </div>
     );
@@ -172,7 +226,7 @@ export default function ReelsFeed({
       <div className="absolute inset-0 z-30 grid place-items-center bg-black px-8 text-center">
         <div>
           <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
-            No reels yet
+            No wires yet
           </p>
           <p className="mt-2 font-body text-[14px] text-muted">
             New shorts show up here as soon as they&rsquo;re published. Check back soon.
@@ -188,7 +242,7 @@ export default function ReelsFeed({
       className="noscroll absolute inset-0 z-30 snap-y snap-mandatory overflow-y-scroll bg-black"
       style={{ overscrollBehavior: "contain", WebkitOverflowScrolling: "touch" }}
     >
-      {shorts.map((s, i) => (
+      {displayShorts.map((s, i) => (
         <section
           key={s.id}
           data-idx={i}
@@ -197,24 +251,31 @@ export default function ReelsFeed({
           }}
           className="relative h-full w-full snap-start snap-always"
         >
-          <ReelCard
+          <WireCard
             short={s}
             active={i === activeIdx}
             mounted={Math.abs(i - activeIdx) <= MOUNT_RADIUS}
             eager={i === activeIdx || i === activeIdx + 1}
             insetBottom={84}
             muted={muted}
+            autoplay={autoplay}
+            advance={advance}
             reducedMotion={reducedMotion}
             paused={paused}
-            onToggleMute={toggleMute}
+            onToggleMute={toggleMuted}
+            onToggleAutoplay={toggleAutoplay}
+            onToggleAdvance={toggleAdvance}
+            onShuffle={onShuffle}
             onOpenInfo={onOpenInfo}
             showSoundHint={i === activeIdx && soundHintShown}
             onDismissSoundHint={dismissSoundHint}
-            liked={isLiked(s.id)}
+            liked={getLike(s.id)?.liked ?? s.viewer_liked}
+            likeCount={getLike(s.id)?.count ?? s.like_count}
             saved={isSaved(s.id)}
             onToggleLike={toggleLike}
             onToggleSave={toggleSave}
             onTimeUpdate={(t, d) => onShortTimeUpdate(s.id, t, d)}
+            onWireEnded={onWireEnded}
           />
         </section>
       ))}

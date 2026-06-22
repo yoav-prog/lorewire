@@ -5,7 +5,12 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { readFacebookConfig } from "@/lib/oauth-facebook";
+import { readGoogleConfig } from "@/lib/oauth-google";
+import { readMicrosoftConfig } from "@/lib/oauth-microsoft";
+import { readRedditConfig } from "@/lib/oauth-reddit";
 import { readUserSession } from "@/lib/user-session";
+import OAuthButtons from "../_components/OAuthButtons";
 import SignupForm from "./SignupForm";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +30,17 @@ export default async function SignupPage({ searchParams }: PageProps) {
   const signInHref = next
     ? `/auth/signin?next=${encodeURIComponent(next)}`
     : "/auth/signin";
+
+  // OAuth signup is the same round-trip as OAuth sign-in (first time creates
+  // the account), so the same provider buttons belong here. Gate each on its
+  // config so a lazy user landing on "Create account" gets every option that
+  // sign-in offers, not just email + password.
+  const googleEnabled = Boolean(readGoogleConfig());
+  const microsoftEnabled = Boolean(readMicrosoftConfig());
+  const redditEnabled = Boolean(readRedditConfig());
+  const facebookEnabled = Boolean(readFacebookConfig());
+  const anyOAuth =
+    googleEnabled || microsoftEnabled || redditEnabled || facebookEnabled;
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -84,9 +100,29 @@ export default async function SignupPage({ searchParams }: PageProps) {
                 Create your account
               </h1>
               <p className="mt-1.5 text-[13px] leading-relaxed text-muted">
-                Email and password — no third party, no spam. Saves carry
-                across devices the moment you sign in.
+                Pick a provider, or create an account with email. Either way
+                your saves carry across devices the moment you sign in.
               </p>
+
+              {anyOAuth ? (
+                <div className="mt-5 space-y-4">
+                  <OAuthButtons
+                    next={next}
+                    googleEnabled={googleEnabled}
+                    microsoftEnabled={microsoftEnabled}
+                    redditEnabled={redditEnabled}
+                    facebookEnabled={facebookEnabled}
+                  />
+                  <div
+                    className="flex items-center gap-3 font-mono text-[10px] uppercase tracking-[.22em] text-muted"
+                    aria-hidden
+                  >
+                    <span className="h-px flex-1 bg-line" />
+                    <span>or use email</span>
+                    <span className="h-px flex-1 bg-line" />
+                  </div>
+                </div>
+              ) : null}
 
               <SignupForm next={next} />
 

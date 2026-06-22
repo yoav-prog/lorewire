@@ -93,12 +93,13 @@ NORMALIZE_AUDIO_FILTER = (
     f"aformat=sample_rates={TARGET_AUDIO_RATE}:channel_layouts=stereo"
 )
 
-# Re-encode settings. CRF 20 is "visually lossless" for short-form video at
-# this resolution. preset=fast keeps normalize under ~5s for a 4-second clip
-# on a modern laptop; concat is a similar order of magnitude per second of
-# combined output.
+# Re-encode settings. CRF 23 is the high-quality web standard — ~30-40% smaller
+# than the old 20 with quality still excellent for the flat doodle art.
+# preset=fast keeps normalize under ~5s for a 4-second clip on a modern laptop;
+# concat is a similar order of magnitude per second of combined output.
+# See _plans/2026-06-22-media-compression.md.
 H264_PRESET = "fast"
-H264_CRF = "20"
+H264_CRF = "23"
 AAC_BITRATE = "192k"
 
 # Cache for downloaded normalized segments so re-renders of different stories

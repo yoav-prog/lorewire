@@ -134,6 +134,126 @@ def _mime_for(name: str) -> str:
     return detected or "application/octet-stream"
 
 
+# Raster images we re-encode to WebP on the way out. WebP at q82/method6 is
+# visually lossless for flat-color doodle art and roughly 10-20x smaller than the
+# source PNG, which is the single biggest media-size win. Plan:
+# _plans/2026-06-22-media-compression.md.
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
+WEBP_QUALITY = 82
+
+
+def _swap_ext_to_webp(key: str) -> str:
+    """Replace the key's filename extension with `.webp`, leaving the path."""
+    slash = key.rfind("/")
+    name = key[slash + 1 :]
+    dot = name.rfind(".")
+    new_name = (name[:dot] if dot > 0 else name) + ".webp"
+    return (key[: slash + 1] + new_name) if slash >= 0 else new_name
+
+
+def _maybe_compress_image(local_path: Path, key: str) -> tuple[Path, str]:
+    """If `local_path` is a compressible raster image, re-encode it to WebP and
+    return the new (path, key) with a `.webp` extension. Non-images, or any
+    encode failure, pass through unchanged so a bad image never blocks a publish.
+    Already-WebP inputs are left alone."""
+    if local_path.suffix.lower() not in _IMAGE_EXTS:
+        return local_path, key
+    try:
+        from PIL import Image
+
+        out_path = local_path.with_suffix(".webp")
+        with Image.open(local_path) as im:
+            im.save(out_path, format="WEBP", quality=WEBP_QUALITY, method=6)
+        return out_path, _swap_ext_to_webp(key)
+    except Exception as e:  # never let compression block a publish
+        print(f"[gcs compress] {key}: {e}; uploading original")
+        return local_path, key
+
+
+# ── Cloudflare R2 (S3 API) target ──────────────────────────────────────────
+# The media migration moves viewer-facing media off GCS to R2 to kill egress
+# cost. R2 speaks the S3 API; we sign with boto3 (imported lazily so the
+# pipeline still imports cleanly before boto3 is installed). R2 is the upload
+# target ONLY when every R2_* var AND MEDIA_PUBLIC_BASE are set — the same flag
+# the Node read-resolver keys on — so it stays inert until the GCS->R2 copy has
+# run and the base is deliberately flipped.
+# Plan: _plans/2026-06-22-r2-media-migration-and-avatar-upload.md.
+
+_r2_cached: dict = {"client": None}
+
+
+def _r2_endpoint() -> str:
+    explicit = config.env("R2_ENDPOINT")
+    if explicit:
+        return explicit.rstrip("/")
+    account = config.env("R2_ACCOUNT_ID")
+    if not account:
+        raise RuntimeError("R2 is not configured: set R2_ACCOUNT_ID or R2_ENDPOINT.")
+    return f"https://{account}.r2.cloudflarestorage.com"
+
+
+def _r2_media_enabled() -> bool:
+    return (config.env("R2_MEDIA_WRITE_ENABLED") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _r2_configured() -> bool:
+    """True only when R2 is the ACTIVE media target: fully wired (credentials,
+    endpoint, media bucket, public base) AND explicitly switched on via
+    R2_MEDIA_WRITE_ENABLED. The explicit flag is the cutover switch — merely
+    having the R2 vars present (they're shared with the avatar path) must NOT
+    silently redirect pipeline media. Flip the flag on only AFTER the one-time
+    GCS->R2 copy, so new and existing media never split across backends."""
+    if not _r2_media_enabled():
+        return False
+    return bool(
+        config.env("R2_ACCESS_KEY_ID")
+        and config.env("R2_SECRET_ACCESS_KEY")
+        and (config.env("R2_ACCOUNT_ID") or config.env("R2_ENDPOINT"))
+        and config.env("R2_MEDIA_BUCKET")
+        and config.env("MEDIA_PUBLIC_BASE")
+    )
+
+
+def _r2_client():
+    if _r2_cached["client"] is not None:
+        return _r2_cached["client"]
+    import boto3  # lazy: keep the pipeline importable without boto3 until R2 is on
+    from botocore.config import Config as BotoConfig
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=_r2_endpoint(),
+        aws_access_key_id=config.env("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key=config.env("R2_SECRET_ACCESS_KEY"),
+        region_name="auto",
+        config=BotoConfig(signature_version="s3v4"),
+    )
+    _r2_cached["client"] = client
+    return client
+
+
+def _r2_upload(local_path: Path, key: str) -> str:
+    """Upload to the R2 media bucket and return the public delivery URL. The
+    long immutable Cache-Control means the edge cache (not the bucket) serves
+    the bytes — that caching is what makes R2 delivery essentially free."""
+    bucket = config.env("R2_MEDIA_BUCKET")
+    base = (config.env("MEDIA_PUBLIC_BASE") or "").rstrip("/")
+    with local_path.open("rb") as fh:
+        _r2_client().put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=fh,
+            ContentType=_mime_for(local_path.name),
+            CacheControl="public, max-age=31536000, immutable",
+        )
+    return f"{base}/{key}"
+
+
 def upload(local_path: Path, key: str) -> str:
     """Upload a local file to `<bucket>/<key>` and return the public URL.
 
@@ -141,11 +261,21 @@ def upload(local_path: Path, key: str) -> str:
     from `GCS_BUCKET`. The bucket is assumed to have `allUsers: objectViewer`
     set at the bucket level so the returned URL serves without signing.
     """
+    if not local_path.exists():
+        raise FileNotFoundError(f"upload source missing: {local_path}")
+    # Compress raster images to WebP first (keeps quality, ~10-20x smaller for the
+    # doodle frames). Non-images / failures pass through unchanged. The returned
+    # URL therefore ends in .webp for images, and callers store that.
+    local_path, key = _maybe_compress_image(local_path, key)
+    # Media migration: when R2 is the configured target (R2_* + MEDIA_PUBLIC_BASE
+    # all set) new media goes to R2; otherwise we keep writing to GCS. Inert in
+    # any environment that hasn't set MEDIA_PUBLIC_BASE.
+    if _r2_configured():
+        return _r2_upload(local_path, key)
+
     bucket = config.env("GCS_BUCKET")
     if not bucket:
         raise RuntimeError("GCS_BUCKET is not set; cannot upload.")
-    if not local_path.exists():
-        raise FileNotFoundError(f"GCS upload source missing: {local_path}")
 
     payload = local_path.read_bytes()
     mime = _mime_for(local_path.name)
@@ -185,7 +315,7 @@ def publish(local_path: Path, key: str, local_url: str) -> str:
     keeps the dev workflow unchanged while prod stories migrate to GCS without
     a code branch at every call site.
     """
-    if is_configured():
+    if is_configured() or _r2_configured():
         try:
             return upload(local_path, key)
         except Exception as e:
@@ -208,13 +338,17 @@ def exists(key: str) -> bool:
     caller re-uploads, which is the safe fallback (uploads overwrite
     cleanly on GCS).
     """
-    bucket = config.env("GCS_BUCKET")
-    if not bucket:
-        return False
-    url = (
-        f"{PUBLIC_BASE}/{urllib.parse.quote(bucket, safe='')}"
-        f"/{urllib.parse.quote(key, safe='/')}"
-    )
+    if _r2_configured():
+        base = (config.env("MEDIA_PUBLIC_BASE") or "").rstrip("/")
+        url = f"{base}/{urllib.parse.quote(key, safe='/')}"
+    else:
+        bucket = config.env("GCS_BUCKET")
+        if not bucket:
+            return False
+        url = (
+            f"{PUBLIC_BASE}/{urllib.parse.quote(bucket, safe='')}"
+            f"/{urllib.parse.quote(key, safe='/')}"
+        )
     req = urllib.request.Request(url, method="HEAD")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -228,3 +362,4 @@ def exists(key: str) -> bool:
 def _reset_cache_for_tests() -> None:
     _cached["token"] = None
     _cached["expires_at"] = 0.0
+    _r2_cached["client"] = None

@@ -11,7 +11,7 @@
 // surfaces yet — those land Day 6+.
 
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getStory, getSetting, getUserById } from "@/lib/repo";
 import {
   isVideoAspect,
@@ -49,7 +49,7 @@ export default async function VideoEditorPage({
   params: Promise<{ id: string }>;
 }) {
   // Server-side auth check, not just middleware (see plan §Security: rule 13).
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { id } = await params;
   const story = await getStory(id);
   if (!story) notFound();

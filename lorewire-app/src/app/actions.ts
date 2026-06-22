@@ -14,7 +14,7 @@
 // long-form 16:9 stills.
 
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
-import { all, one } from "@/lib/db";
+import { all, one, run } from "@/lib/db";
 import { type HomepageSurface } from "@/lib/homepage-curation";
 import {
   loadHomepageCuration,
@@ -23,9 +23,19 @@ import {
 } from "@/lib/homepage-data";
 import type { HomepagePollRails, PollRailKind } from "@/lib/polls";
 import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
+import { resolveMediaUrl } from "@/lib/media-url";
+import { randomUUID } from "node:crypto";
+import { currentUser } from "@/lib/dal";
+import { getOrIssueAnonToken, readAnonToken } from "@/lib/anon";
+import { readConsent } from "@/lib/consent";
 
 export interface LiveStoryMediaResult {
   ok: boolean;
+  /** The story's public slug, for building the canonical /v/[slug] share URL.
+   *  Null when found=false (no published row) — callers fall back to the site
+   *  origin rather than minting a link that 404s. The published gate here is
+   *  identical to getPublishedStoryBySlug, so found=true ⟺ /v/[slug] resolves. */
+  slug: string | null;
   video_url: string | null;
   /** Scene images to render in the article body + gallery. When the story's
    *  video is the applied short, these come from short_renders.props
@@ -156,6 +166,7 @@ export async function getLiveStoryMedia(
 ): Promise<LiveStoryMediaResult> {
   const empty: LiveStoryMediaResult = {
     ok: true,
+    slug: null,
     video_url: null,
     images: [],
     body: null,
@@ -169,13 +180,14 @@ export async function getLiveStoryMedia(
   // Try by id first — handles new pipeline UUIDs and legacy ids ("envelope").
   let row = await one<{
     id: string;
+    slug: string | null;
     video_url: string | null;
     images: string | null;
     body: string | null;
     audio_url: string | null;
     alignment: string | null;
   }>(
-    "SELECT id, video_url, images, body, audio_url, alignment FROM stories " +
+    "SELECT id, slug, video_url, images, body, audio_url, alignment FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -186,6 +198,7 @@ export async function getLiveStoryMedia(
     if (bySlug) {
       row = {
         id: bySlug.id,
+        slug: bySlug.slug,
         video_url: bySlug.video_url,
         images: bySlug.images,
         body: bySlug.body,
@@ -214,12 +227,17 @@ export async function getLiveStoryMedia(
   // "Regenerate voiceover" in the VoicePicker. Pointedly NOT pulled from
   // the short's voiceover_url: Read-along must follow the article text,
   // and the short is a different (condensed) script.
+  // Resolve media references onto the delivery base at read time
+  // (lib/media-url). With MEDIA_PUBLIC_BASE unset this is a passthrough no-op.
+  // `is_short` was computed above from the STORED value; resolution preserves
+  // the object-path suffix, so it stays correct.
   return {
     ok: true,
-    video_url: row.video_url,
-    images,
+    slug: row.slug,
+    video_url: resolveMediaUrl(row.video_url),
+    images: images.map((u) => resolveMediaUrl(u) ?? u),
     body: row.body,
-    audio_url: row.audio_url,
+    audio_url: resolveMediaUrl(row.audio_url),
     alignment: parseStoryAlignment(row.alignment),
     is_short: isShort,
     found: true,
@@ -303,6 +321,15 @@ export interface LiveCatalogStory {
   created_at: string | null;
 }
 
+// The Wires-feed row: a LiveCatalogStory plus its server-counted like state.
+// `viewer_liked` is this viewer's own like (signed-in user or anon cookie);
+// `like_count` is the public total. The client hides the number until it
+// crosses the display threshold (see WireCard).
+export interface WireStory extends LiveCatalogStory {
+  like_count: number;
+  viewer_liked: boolean;
+}
+
 export interface LiveCatalogResult {
   ok: boolean;
   stories: LiveCatalogStory[];
@@ -316,8 +343,8 @@ export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   return loadLiveCatalog(limit);
 }
 
-// ─── Reels feed: published shorts, cursor-paginated ──────────────────────────
-// The Reels surface streams ONLY 9:16 short renders (the doodle shorts), most
+// ─── Wires feed: published shorts, cursor-paginated ──────────────────────────
+// The Wires surface streams ONLY 9:16 short renders (the doodle shorts), most
 // recent first, one page at a time. A "short" is identified by its video_url
 // suffix (lib/short-video-url) — the long-form pipeline writes a different
 // path, so the same `stories` table serves both and this query filters in SQL
@@ -335,9 +362,10 @@ export interface ListShortsOpts {
 
 export interface ListShortsResult {
   ok: boolean;
-  /** One page of shorts, newest first. Same projection the homepage rails use
-   *  (LiveCatalogStory) so the Reels card and the catalog adapter share a shape. */
-  shorts: LiveCatalogStory[];
+  /** One page of shorts, newest first. The base projection mirrors the
+   *  homepage rails (LiveCatalogStory) so the catalog adapter shares a shape;
+   *  each row is enriched with server-counted like state for the Wires card. */
+  shorts: WireStory[];
   /** Cursor for the next page (the published_at of the last row), or null when
    *  this was the final page. */
   nextCursor: string | null;
@@ -349,7 +377,7 @@ export async function listPublishedShorts(
   const limit = Math.max(1, Math.min(opts.limit ?? 12, 50));
   // Match the loosened public-visibility gate from getLiveCatalog: any story
   // that's rendered (status ready or published) and has a slug surfaces.
-  // The previous strict gate dropped reels whose published_at was NULL
+  // The previous strict gate dropped shorts whose published_at was NULL
   // because the publish action hadn't backfilled the timestamp yet.
   const where: string[] = [
     "status IN ('ready', 'published')",
@@ -369,7 +397,7 @@ export async function listPublishedShorts(
   // across equal published_at values. Columns dropped vs feat/reels-feed:
   // hero_image_landscape and hero_has_baked_title don't exist on this
   // branch's schema yet (this branch never picked up that migration); the
-  // ReelCard treats them as optional so absent fields are harmless.
+  // WireCard treats them as optional so absent fields are harmless.
   const rows = await all<LiveCatalogStory>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "video_url, published_at, created_at FROM stories " +
@@ -382,15 +410,162 @@ export async function listPublishedShorts(
   const page = hasMore ? rows.slice(0, limit) : rows;
   // Belt and braces: the SQL LIKE already filters, but re-assert the exact
   // suffix in JS so a URL that merely contains the substring mid-path can't
-  // slip a non-short into the feed (the regex anchors it to the end).
-  const shorts = page.filter((s) => isShortVideoUrl(s.video_url));
+  // slip a non-short into the feed (the regex anchors it to the end). Filter on
+  // the STORED value to stay aligned with the SQL LIKE, then resolve the
+  // survivors' media onto the delivery base for the client (passthrough when
+  // MEDIA_PUBLIC_BASE is unset; suffix is preserved either way).
+  const shorts = page
+    .filter((s) => isShortVideoUrl(s.video_url))
+    .map((s) => ({
+      ...s,
+      hero_image: resolveMediaUrl(s.hero_image),
+      video_url: resolveMediaUrl(s.video_url),
+    }));
   // Cursor matches the SQL COALESCE order so a row with NULL published_at
   // still produces a usable next-page key (uses created_at instead).
   const last = page[page.length - 1];
   const nextCursor = hasMore
     ? last?.published_at ?? last?.created_at ?? null
     : null;
-  return { ok: true, shorts, nextCursor };
+  // Attach server-counted like state (count + this viewer's own like) so the
+  // feed paints real hearts on first byte instead of after a second fetch.
+  const withLikes = await attachLikeState(shorts);
+  return { ok: true, shorts: withLikes, nextCursor };
+}
+
+// ─── Wires likes: server-counted, one per viewer ─────────────────────────────
+// Replaces the local-only heart. The viewer is the signed-in user when there
+// is a session, else the anonymous identity cookie (lw_anon). Counts are read
+// in batch for the feed and recomputed on every toggle. Identity + persistence
+// follow the same consent gate the local stores use: anonymous likes only
+// persist once the cookie banner is accepted.
+
+/** The id a like is attributed to: the signed-in user, else the EXISTING anon
+ *  cookie. Read-only — never issues a cookie (used on feed reads). Null when
+ *  the browser has no identity yet. */
+async function viewerLikeId(): Promise<string | null> {
+  const user = await currentUser();
+  if (user) return user.id;
+  return readAnonToken();
+}
+
+/** Current public like count for one story. */
+async function storyLikeCount(storyId: string): Promise<number> {
+  const row = await one<{ c: number | string }>(
+    "SELECT COUNT(*) AS c FROM user_likes WHERE story_id = ?",
+    [storyId],
+  );
+  return Number(row?.c ?? 0);
+}
+
+/** Attach `like_count` + `viewer_liked` to a page of shorts with two small
+ *  batch queries (counts grouped by story, then the viewer's own likes) — one
+ *  pair per page, never per row. */
+async function attachLikeState(rows: LiveCatalogStory[]): Promise<WireStory[]> {
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const placeholders = ids.map(() => "?").join(", ");
+
+  const counts = await all<{ story_id: string; c: number | string }>(
+    "SELECT story_id, COUNT(*) AS c FROM user_likes " +
+      `WHERE story_id IN (${placeholders}) GROUP BY story_id`,
+    ids,
+  );
+  const countById = new Map(counts.map((r) => [r.story_id, Number(r.c)]));
+
+  let likedByViewer = new Set<string>();
+  const viewerId = await viewerLikeId();
+  if (viewerId) {
+    const mine = await all<{ story_id: string }>(
+      "SELECT story_id FROM user_likes " +
+        `WHERE user_id = ? AND story_id IN (${placeholders})`,
+      [viewerId, ...ids],
+    );
+    likedByViewer = new Set(mine.map((r) => r.story_id));
+  }
+
+  return rows.map((r) => ({
+    ...r,
+    like_count: countById.get(r.id) ?? 0,
+    viewer_liked: likedByViewer.has(r.id),
+  }));
+}
+
+export interface ToggleLikeResult {
+  ok: boolean;
+  /** This viewer's like state for the story after the toggle. */
+  liked: boolean;
+  /** The story's public like count after the toggle. */
+  count: number;
+  /** False when the like could not be persisted (no consent / no identity) —
+   *  the client keeps an optimistic local heart but the number does not move. */
+  persisted: boolean;
+}
+
+/** Set this viewer's like state for a story to `liked` (idempotent). Signed-in
+ *  users always persist; anonymous users persist only once consent is accepted,
+ *  at which point the lw_anon identity cookie is issued here. */
+export async function toggleLikeStory(
+  storyId: string,
+  liked: boolean,
+): Promise<ToggleLikeResult> {
+  if (typeof storyId !== "string" || storyId.length === 0) {
+    return { ok: false, liked: false, count: 0, persisted: false };
+  }
+  // Only public stories can be liked — no arbitrary or unpublished rows. The
+  // gate mirrors listPublishedShorts so a likeable id is always a visible one.
+  const story = await one<{ id: string }>(
+    "SELECT id FROM stories WHERE id = ? AND status IN ('ready', 'published') " +
+      "AND slug IS NOT NULL AND (noindex IS NULL OR noindex = 0)",
+    [storyId],
+  );
+  if (!story) {
+    return { ok: false, liked: false, count: 0, persisted: false };
+  }
+
+  // Resolve identity, honoring consent. Signed-in users have implicitly
+  // consented; anonymous users must have accepted the banner before we
+  // persist anything or mint the identity cookie.
+  const user = await currentUser();
+  let viewerId: string | null = null;
+  if (user) {
+    viewerId = user.id;
+  } else if ((await readConsent()) === "accepted") {
+    viewerId = await getOrIssueAnonToken();
+  }
+
+  if (!viewerId) {
+    // No identity we may persist — report the current count so the client can
+    // keep a local optimistic heart without moving the public number.
+    return {
+      ok: true,
+      liked,
+      count: await storyLikeCount(storyId),
+      persisted: false,
+    };
+  }
+
+  if (liked) {
+    // Unique (user_id, story_id) makes this idempotent — a double-tap can't
+    // inflate the count.
+    await run(
+      "INSERT INTO user_likes (id, user_id, story_id, created_at) " +
+        "VALUES (?, ?, ?, ?) ON CONFLICT (user_id, story_id) DO NOTHING",
+      [randomUUID(), viewerId, storyId, new Date().toISOString()],
+    );
+  } else {
+    await run("DELETE FROM user_likes WHERE user_id = ? AND story_id = ?", [
+      viewerId,
+      storyId,
+    ]);
+  }
+
+  return {
+    ok: true,
+    liked,
+    count: await storyLikeCount(storyId),
+    persisted: true,
+  };
 }
 
 // Public client entry: see getLiveCatalog comment. Body lives in

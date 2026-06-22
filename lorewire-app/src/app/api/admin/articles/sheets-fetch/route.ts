@@ -11,7 +11,7 @@
 // in place.
 
 import { NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   isConfigured as isSheetsConfigured,
   listTabs,
@@ -34,7 +34,7 @@ function badRequest(error: string): NextResponse {
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!isSheetsConfigured()) {
     return NextResponse.json(
       { error: "sheets-not-configured" },

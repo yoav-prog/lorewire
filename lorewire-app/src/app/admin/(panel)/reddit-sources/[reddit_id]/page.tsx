@@ -15,7 +15,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getStory } from "@/lib/repo";
 import {
   evaluatePublishReadiness,
@@ -49,7 +49,7 @@ export default async function RedditSourceReviewPage({
   params,
   searchParams,
 }: PageProps) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { reddit_id } = await params;
   const sp = await searchParams;
 

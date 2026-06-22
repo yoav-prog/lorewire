@@ -15,7 +15,7 @@
 // [short editor ...] per rule 14.
 
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   getArticle,
   getSetting,
@@ -134,7 +134,7 @@ export interface LoadShortEditorResult {
 export async function loadShortEditorState(
   storyId: string,
 ): Promise<LoadShortEditorResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -146,7 +146,7 @@ export async function saveShortConfigPatch(
   storyId: string,
   patch: Record<string, unknown>,
 ): Promise<{ ok: boolean; error?: string; config?: ShortConfig }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   if (!patch || typeof patch !== "object") {
     return { ok: false, error: "patch must be an object" };
@@ -187,7 +187,7 @@ export async function regenShortScene(
   frameId: string,
   newPrompt: string,
 ): Promise<RegenSceneResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   if (!frameId) return { ok: false, error: "missing frame_id" };
   const trimmed = (newPrompt ?? "").trim();
@@ -267,7 +267,7 @@ export async function setShortSegmentOverrideAction(
   kind: "intro" | "outro",
   pick: ShortSegmentPick,
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (kind !== "intro" && kind !== "outro") {
     return { ok: false, error: `invalid kind: ${kind}` };
   }
@@ -306,7 +306,7 @@ export async function setFrameIsPinned(
   frameId: string,
   pinned: boolean,
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const result = await saveShortConfigPatch(storyId, {
     [`doodle_frames.${frameId}.is_pinned`]: pinned,
   });
@@ -339,7 +339,7 @@ export interface ShortEditSessionResult {
 export async function claimShortEditSession(
   storyId: string,
 ): Promise<ShortEditSessionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -361,7 +361,7 @@ export async function claimShortEditSession(
 export async function heartbeatShortEditSession(
   storyId: string,
 ): Promise<ShortEditSessionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -494,7 +494,7 @@ export async function previewRenderPlan(storyId: string): Promise<{
   plan?: ShortRenderPlan;
   baselineRenderId?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -532,7 +532,7 @@ export async function renderShortLaneA(
   renderId?: string;
   plan?: ShortRenderPlan;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -743,7 +743,7 @@ export async function renderShortLaneB(
   renderId?: string;
   plan?: ShortRenderPlan;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -897,7 +897,7 @@ export async function renderShortLaneC(
   renderId?: string;
   plan?: ShortRenderPlan;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -1088,7 +1088,7 @@ export async function revertShortScene(
   storyId: string,
   frameId: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const current = await loadCurrentConfig(storyId);
   if (!current.ok) return { ok: false, error: current.error };
   const sessionGate = assertSessionMine(current.config, session.userId);
@@ -1134,7 +1134,7 @@ export async function applyLatestShortToStoryAction(storyId: string): Promise<{
   url?: string;
   slug?: string | null;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
@@ -1197,7 +1197,7 @@ export interface LinkedArticleSummary {
 export async function listArticlesLinkedToStoryAction(
   storyId: string,
 ): Promise<{ ok: boolean; error?: string; articles?: LinkedArticleSummary[] }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const rows = await all<LinkedArticleSummary>(
     "SELECT id, title, slug, language FROM articles WHERE story_id = ? " +
@@ -1252,7 +1252,7 @@ export async function promoteSceneToArticleHero(
   frameId: string,
   articleId: string,
 ): Promise<{ ok: boolean; error?: string; previousUrl?: string | null }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleRes = await resolveLinkedArticle(storyId, articleId);
   if (!articleRes.ok) return articleRes;
   const frameRes = await resolveFrameUrl(storyId, frameId);
@@ -1275,7 +1275,7 @@ export async function promoteSceneToArticleOg(
   frameId: string,
   articleId: string,
 ): Promise<{ ok: boolean; error?: string; previousUrl?: string | null }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleRes = await resolveLinkedArticle(storyId, articleId);
   if (!articleRes.ok) return articleRes;
   const frameRes = await resolveFrameUrl(storyId, frameId);
@@ -1299,7 +1299,7 @@ export async function addSceneToArticleGallery(
   articleId: string,
   alt: string = "",
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleRes = await resolveLinkedArticle(storyId, articleId);
   if (!articleRes.ok) return articleRes;
   const frameRes = await resolveFrameUrl(storyId, frameId);

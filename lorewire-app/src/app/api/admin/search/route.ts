@@ -4,7 +4,7 @@
 // the top 6 per entity.
 //
 // Security (rule 13):
-//   - requireAdmin() gates every request; no anonymous search surface.
+//   - requireCapability("content.manage") gates every request; no anonymous search surface.
 //   - q is capped at MAX_QUERY_LENGTH; tokens at MAX_TOKENS; candidates
 //     at 200 per entity; results at PER_ENTITY_LIMIT. Every multiplier is
 //     bounded so a crafted query cannot fan out into a DoS.
@@ -20,7 +20,7 @@
 // timing + result counts.
 
 import { NextRequest } from "next/server";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   buildSnippet,
   compareScored,
@@ -53,7 +53,7 @@ interface StoryHit {
 }
 
 export async function GET(req: NextRequest): Promise<Response> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const t0 = Date.now();
   const { searchParams } = new URL(req.url);
   const rawQ = (searchParams.get("q") ?? "").trim();

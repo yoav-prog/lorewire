@@ -7,6 +7,16 @@
 import "server-only";
 import { SignJWT, importPKCS8 } from "jose";
 import { readFile } from "node:fs/promises";
+import {
+  MEDIA_CACHE_CONTROL,
+  deleteR2Object,
+  isR2MediaActive,
+  mediaBucket,
+  mediaUrlToKey,
+  presignR2PutUrl,
+  putR2Object,
+} from "./r2";
+import { mediaPublicBase } from "./media-url";
 
 const TOKEN_URI = "https://oauth2.googleapis.com/token";
 const SCOPE = "https://www.googleapis.com/auth/devstorage.read_write";
@@ -123,6 +133,17 @@ export async function uploadFile(
   localPath: string,
   key: string,
 ): Promise<string> {
+  // Media migration: when R2 is the active target, write to the R2 media bucket
+  // and return its public URL. Gated + inert until the cutover (lib/r2
+  // isR2MediaActive); otherwise the GCS path below runs unchanged.
+  if (isR2MediaActive()) {
+    const r2Body = await readFile(localPath);
+    await putR2Object(mediaBucket(), key, r2Body, {
+      contentType: mimeFor(localPath),
+      cacheControl: MEDIA_CACHE_CONTROL,
+    });
+    return `${mediaPublicBase()}/${key}`;
+  }
   const bucket = process.env.GCS_BUCKET;
   if (!bucket) {
     throw new Error("GCS_BUCKET is not set; cannot upload.");
@@ -151,6 +172,49 @@ export async function uploadFile(
 }
 
 // Upload an in-memory buffer to <bucket>/<key>. Returns the public URL.
+const WEBP_COMPRESSIBLE = new Set(["image/png", "image/jpeg", "image/jpg"]);
+
+/** Swap a key's filename extension to `.webp`. Node mirror of
+ *  pipeline/gcs.py `_swap_ext_to_webp`. */
+export function swapKeyExtToWebp(key: string): string {
+  const slash = key.lastIndexOf("/");
+  const name = key.slice(slash + 1);
+  const dot = name.lastIndexOf(".");
+  const newName = (dot > 0 ? name.slice(0, dot) : name) + ".webp";
+  return slash >= 0 ? key.slice(0, slash + 1) + newName : newName;
+}
+
+/** Re-encode a raster image upload to WebP (keeps quality, much smaller) — the
+ *  Node mirror of pipeline/gcs.py `_maybe_compress_image`. sharp is imported
+ *  lazily so it only loads when an image is actually uploaded. Non-compressible
+ *  types, or any encode failure, pass through unchanged so a bad image never
+ *  blocks an upload. */
+export async function maybeCompressImageBuffer(
+  body: ArrayBuffer | Uint8Array | Buffer,
+  key: string,
+  contentType: string,
+): Promise<{
+  body: ArrayBuffer | Uint8Array | Buffer;
+  key: string;
+  contentType: string;
+}> {
+  if (!WEBP_COMPRESSIBLE.has(contentType.toLowerCase())) {
+    return { body, key, contentType };
+  }
+  try {
+    const { default: sharp } = await import("sharp");
+    const input = body instanceof Uint8Array ? body : new Uint8Array(body);
+    const webp = await sharp(input)
+      .rotate()
+      .webp({ quality: 82, effort: 6 })
+      .toBuffer();
+    return { body: webp, key: swapKeyExtToWebp(key), contentType: "image/webp" };
+  } catch (e) {
+    console.warn("[gcs compress]", { key, error: String(e) });
+    return { body, key, contentType };
+  }
+}
+
 // Used by the article CMS image uploader — images are typically <5 MB so the
 // browser can POST multipart through a Vercel Function without hitting the
 // 4.5 MB body cap that forced the segments uploader to go direct-to-GCS.
@@ -160,6 +224,21 @@ export async function uploadBuffer(
   key: string,
   contentType: string,
 ): Promise<string> {
+  // Compress raster images to WebP before upload (keeps quality, much smaller),
+  // mirroring the pipeline. Swaps the key to .webp; non-images pass through.
+  ({ body, key, contentType } = await maybeCompressImageBuffer(
+    body,
+    key,
+    contentType,
+  ));
+  // Media migration target — see uploadFile. Inert until the cutover flag.
+  if (isR2MediaActive()) {
+    await putR2Object(mediaBucket(), key, body, {
+      contentType,
+      cacheControl: MEDIA_CACHE_CONTROL,
+    });
+    return `${mediaPublicBase()}/${key}`;
+  }
   const bucket = process.env.GCS_BUCKET;
   if (!bucket) {
     throw new Error("GCS_BUCKET is not set; cannot upload.");
@@ -202,6 +281,10 @@ export async function uploadBuffer(
 export interface ResumableUploadSession {
   sessionUri: string;
   publicUrl: string;
+  /** True when `sessionUri` is a presigned single-PUT URL (R2) rather than a
+   *  GCS resumable session — the browser must PUT the whole file in one
+   *  request instead of chunking with Content-Range. */
+  single: boolean;
 }
 
 // Initiate a GCS JSON-API resumable upload and return the session URI plus
@@ -222,6 +305,18 @@ export async function createResumableUploadSession(
   key: string,
   contentType: string,
 ): Promise<ResumableUploadSession> {
+  // Media migration: presign a single-PUT URL to the R2 media bucket. R2 has no
+  // GCS-style resumable session — the browser PUTs the whole file to the URL in
+  // one request (the bucket needs CORS allowing PUT from the admin origin).
+  // Inert until the cutover flag (isR2MediaActive).
+  if (isR2MediaActive()) {
+    const sessionUri = await presignR2PutUrl(mediaBucket(), key);
+    return {
+      sessionUri,
+      publicUrl: `${mediaPublicBase()}/${key}`,
+      single: true,
+    };
+  }
   const bucket = process.env.GCS_BUCKET;
   if (!bucket) {
     throw new Error("GCS_BUCKET is not set; cannot initiate upload.");
@@ -261,6 +356,7 @@ export async function createResumableUploadSession(
   return {
     sessionUri,
     publicUrl: `${PUBLIC_BASE}/${bucket}/${key}`,
+    single: false,
   };
 }
 
@@ -342,6 +438,14 @@ export async function deleteStoryMedia(
   let skipped = 0;
   for (const candidate of [audioUrl, videoUrl]) {
     if (!candidate) continue;
+    // R2-hosted media (on the MEDIA_PUBLIC_BASE host) — reap from the R2 media
+    // bucket. deleteR2Object treats a 404 as a no-op, same as the GCS path.
+    const r2Key = mediaUrlToKey(candidate, mediaPublicBase());
+    if (r2Key) {
+      await deleteR2Object(mediaBucket(), r2Key);
+      attempted += 1;
+      continue;
+    }
     const parsed = parseGcsUrl(candidate);
     if (!parsed) {
       // eslint-disable-next-line no-console -- rule 14: observability from day one
@@ -363,4 +467,82 @@ export async function deleteStoryMedia(
     attempted += 1;
   }
   return { attempted, skipped };
+}
+
+// ── Migration reads: list + download objects (GCS -> R2 admin tool) ─────────
+
+export interface GcsObjectMeta {
+  name: string;
+  size: number;
+  contentType: string;
+  md5Hash: string | null;
+}
+
+export interface GcsListPage {
+  items: GcsObjectMeta[];
+  nextPageToken: string | null;
+}
+
+/** List a page of objects in GCS_BUCKET via the JSON API (authenticated).
+ *  `maxResults` doubles as the migration batch size; the returned
+ *  `nextPageToken` is the cursor for the next batch (null when done). */
+export async function listObjects(
+  opts: { pageToken?: string | null; maxResults?: number; prefix?: string } = {},
+): Promise<GcsListPage> {
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) throw new Error("GCS_BUCKET is not set; cannot list.");
+  const token = await accessToken();
+  const params = new URLSearchParams({
+    maxResults: String(Math.min(Math.max(opts.maxResults ?? 100, 1), 1000)),
+  });
+  if (opts.prefix) params.set("prefix", opts.prefix);
+  if (opts.pageToken) params.set("pageToken", opts.pageToken);
+  const url = `${JSON_API_BASE}/b/${encodeURIComponent(bucket)}/o?${params.toString()}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`GCS list HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  const data = (await resp.json()) as {
+    items?: Array<{
+      name: string;
+      size?: string;
+      contentType?: string;
+      md5Hash?: string;
+    }>;
+    nextPageToken?: string;
+  };
+  return {
+    items: (data.items ?? []).map((i) => ({
+      name: i.name,
+      size: Number(i.size ?? 0),
+      contentType: i.contentType ?? "application/octet-stream",
+      md5Hash: i.md5Hash ?? null,
+    })),
+    nextPageToken: data.nextPageToken ?? null,
+  };
+}
+
+/** Download an object's bytes via an authenticated media GET (works for
+ *  non-public objects too). */
+export async function getObjectBytes(key: string): Promise<ArrayBuffer> {
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) throw new Error("GCS_BUCKET is not set; cannot read.");
+  const token = await accessToken();
+  const url =
+    `${JSON_API_BASE}/b/${encodeURIComponent(bucket)}` +
+    `/o/${encodeURIComponent(key)}?alt=media`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    // Fail a stalled download fast so a batch can't hang forever.
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`GCS get HTTP ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  return resp.arrayBuffer();
 }

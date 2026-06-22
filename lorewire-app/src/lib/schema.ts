@@ -178,6 +178,21 @@ export const USERS: Table = {
     { name: "anonymous_id", type: "TEXT" },
     { name: "last_seen_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
+    // 2026-06-22 admin user-management Phase 3. Account status for moderation.
+    // NULL or 'active' = normal; 'suspended' = sign-in/participation blocked
+    // (reversible). The per-request DB re-read in requireAdmin/currentUser/
+    // readActiveUserSession is what makes a status change take effect on the
+    // next request despite the 7-day JWT. Plan:
+    // _plans/2026-06-22-admin-user-management.md (Phase 3).
+    { name: "status", type: "TEXT" },
+    { name: "suspended_at", type: "TEXT" },
+    { name: "suspended_reason", type: "TEXT" },
+    // 2026-06-22 Phase 8 staff 2FA (opt-in, default off). totp_secret is base32,
+    // set at enrollment and only enforced once mfa_enabled=1.
+    // totp_backup_codes is a JSON array of hashed single-use recovery codes.
+    { name: "totp_secret", type: "TEXT" },
+    { name: "mfa_enabled", type: "INTEGER" },
+    { name: "totp_backup_codes", type: "TEXT" },
   ],
 };
 
@@ -195,7 +210,7 @@ export const USER_SAVES: Table = {
   ],
 };
 
-// Public-user state: Likes. Parallel to USER_SAVES; reels feed Like button.
+// Public-user state: Likes. Parallel to USER_SAVES; wires feed Like button.
 export const USER_LIKES: Table = {
   name: "user_likes",
   columns: [
@@ -704,6 +719,28 @@ export const POLL_AGGREGATES: Table = {
   ],
 };
 
+// 2026-06-22 data-deletion audit log. One row per honored deletion request,
+// keyed by the confirmation_code we hand back (to Meta's data-deletion
+// callback, or generated for a self-serve delete). `source` is 'facebook'
+// (a Meta signed_request fired this) or 'self_serve' (the user clicked Delete
+// my account). `subject_hash` is hashForLog() of the Facebook app-scoped id
+// or the internal user id — NEVER the raw value, so the log carries no
+// reversible PII (rule 13). `deleted` is 1 when a matching account row was
+// found and wiped, 0 when the request resolved to no account (already gone /
+// never existed). The public status page at /data-deletion/[code] reads this
+// to answer "is my deletion done?" deterministically. Plan:
+// _plans/2026-06-22-facebook-login-and-data-deletion.md.
+export const DATA_DELETION_REQUESTS: Table = {
+  name: "data_deletion_requests",
+  columns: [
+    { name: "confirmation_code", type: "TEXT", pk: true },
+    { name: "source", type: "TEXT" },
+    { name: "subject_hash", type: "TEXT" },
+    { name: "deleted", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-16 homepage curation. One row per slot on the public homepage —
 // `surface` names the rail ('hero', 'top10', 'continue', '<category>_row',
 // 'new_row'), `position` is 0-based ordering within the surface, `story_id`
@@ -720,6 +757,170 @@ export const HOMEPAGE_CURATION: Table = {
     { name: "story_id", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
     { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 admin audit log. Append-only record of every sensitive admin
+// action (role change, suspend, delete, invite, impersonate) for the
+// user-management feature — "who did what to whom, and when". PII-free by
+// construction: actor and target are an opaque id plus a one-way hashed label
+// (lib/users.hashForLog), and `metadata` is a PII-free JSON blob the caller
+// controls. A row references nothing by foreign key (there are none) and
+// survives a GDPR deletion of its target with no dangling PII, because the
+// only trace left is the hash. App-owned (not mirrored in pipeline/store.py),
+// so the app owns its indexes in POST_TABLE_DDL too. There is intentionally no
+// update/delete path — append-only is the tamper-resistance at this scale.
+// Plan: _plans/2026-06-22-admin-user-management.md (Phase 1).
+export const ADMIN_AUDIT_LOG: Table = {
+  name: "admin_audit_log",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "actor_id", type: "TEXT" },
+    { name: "actor_label", type: "TEXT" },
+    { name: "action", type: "TEXT" },
+    { name: "target_type", type: "TEXT" },
+    { name: "target_id", type: "TEXT" },
+    { name: "target_label", type: "TEXT" },
+    { name: "metadata", type: "TEXT" },
+    { name: "ip_hash", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 article comments + AI moderation
+// (_plans/2026-06-22-article-comments-ai-moderation.md). Reader comments on
+// articles, moderated by a two-tier pipeline (free OpenAI Moderation API then a
+// gpt-5-nano judge). `status` is a closed enum: 'published' (visible to all),
+// 'held' (awaiting human review, visible only to its own author),
+// 'rejected' (rule violation), 'quarantined' (the non-discretionary
+// CSAM/threats path — preserved, never silently deleted), 'deleted' (soft
+// delete by the author). `author_user_id` is NULL for guests, who carry a
+// `guest_name` only — we deliberately store no guest email (it bought nothing
+// but PII liability; abuse is handled by `ip_ua_hash` velocity + a CAPTCHA).
+// `cookie_token` is a 256-bit nonce (same primitive as poll_votes) that both
+// blocks double-likes and lets a guest see their own held/rejected comment.
+// `ip_ua_hash` is one-way and pruned on a retention sweep like poll_votes. The
+// stance/sentiment/topic_tag fields are the cheap editorial signal the judge
+// emits while it is already reading the comment (stored, not yet surfaced).
+// like_count / reply_count are denormalised so the public thread never runs
+// COUNT(*) per render.
+export const COMMENTS: Table = {
+  name: "comments",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "article_id", type: "TEXT" },
+    // NULL = top-level. A non-null parent_id points at another comment on the
+    // same article. v1 is one level deep; the write path refuses a reply whose
+    // parent already has a parent.
+    { name: "parent_id", type: "TEXT" },
+    { name: "author_user_id", type: "TEXT" },
+    { name: "guest_name", type: "TEXT" },
+    { name: "body", type: "TEXT" },
+    { name: "lang", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    // How the current status was reached: 'tier1' (Moderation API),
+    // 'tier2' / 'tier2_lowconf' (the judge), 'human' (admin), 'timeout'
+    // (failed closed to held). Audited in full in comment_moderation_events.
+    { name: "moderation_source", type: "TEXT" },
+    { name: "moderation_category", type: "TEXT" },
+    { name: "moderation_reason", type: "TEXT" },
+    { name: "moderation_confidence", type: "REAL" },
+    { name: "stance", type: "TEXT" },
+    { name: "sentiment", type: "TEXT" },
+    { name: "topic_tag", type: "TEXT" },
+    { name: "like_count", type: "INTEGER" },
+    { name: "reply_count", type: "INTEGER" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "ip_ua_hash", type: "TEXT" },
+    { name: "edited_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 admin user-management Phase 5. Email invites for new staff. The
+// raw one-time token lives ONLY in the emailed link; we store its SHA-256 hash
+// (same reasoning as magic_link_tokens / passwords — a DB leak can't be used to
+// accept an invite). `role` is bound here at invite time and is never taken
+// from the client at accept, so a leaked link can only ever grant the role the
+// inviter chose. Single-use via accepted_at; revocable via revoked_at; expires
+// ~72h. Plan: _plans/2026-06-22-admin-user-management.md (Phase 5).
+export const STAFF_INVITES: Table = {
+  name: "staff_invites",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "email", type: "TEXT" },
+    { name: "role", type: "TEXT" },
+    { name: "token_hash", type: "TEXT" },
+    { name: "invited_by", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+    { name: "accepted_at", type: "TEXT" },
+    { name: "revoked_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// One row per like. Anonymous likes are keyed by cookie_token, signed-in by
+// user_id; the two partial unique indexes in POST_TABLE_DDL are the
+// anti-double-like primitives (mirrors poll_votes). The like count is kept
+// denormalised on comments.like_count and reconciled from this log.
+export const COMMENT_LIKES: Table = {
+  name: "comment_likes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "user_id", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 admin user-management Phase 8. Per-source login throttle —
+// brute-force defense for the admin login. `key` is namespaced + hashed by the
+// caller (e.g. "admin-login:<ip hash>") so no raw IP is stored. attempts +
+// first_at form the rolling window; locked_until is set once the threshold is
+// hit. DB-backed because the app is serverless (in-memory wouldn't survive
+// across instances). Plan: _plans/2026-06-22-admin-user-management.md (Phase 8).
+export const LOGIN_ATTEMPTS: Table = {
+  name: "login_attempts",
+  columns: [
+    { name: "key", type: "TEXT", pk: true },
+    { name: "attempts", type: "INTEGER" },
+    { name: "first_at", type: "TEXT" },
+    { name: "locked_until", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Reader reports. A report routes its comment back into the human queue.
+// `status` is 'open' | 'actioned' | 'dismissed'.
+export const COMMENT_REPORTS: Table = {
+  name: "comment_reports",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "reporter_user_id", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Append-only moderation audit trail. Every status change (AI or human) writes
+// a row. This is the DSA statement-of-reasons record and the basis for the
+// appeal flow; it is never updated or deleted. `actor` is 'ai' or an admin
+// user id.
+export const COMMENT_MODERATION_EVENTS: Table = {
+  name: "comment_moderation_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "actor", type: "TEXT" },
+    { name: "from_status", type: "TEXT" },
+    { name: "to_status", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
   ],
 };
 
@@ -751,6 +952,14 @@ export const TABLES: Table[] = [
   POLLS,
   POLL_VOTES,
   POLL_AGGREGATES,
+  DATA_DELETION_REQUESTS,
+  ADMIN_AUDIT_LOG,
+  STAFF_INVITES,
+  LOGIN_ATTEMPTS,
+  COMMENTS,
+  COMMENT_LIKES,
+  COMMENT_REPORTS,
+  COMMENT_MODERATION_EVENTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -904,6 +1113,12 @@ export const POST_TABLE_DDL: string[] = [
     "ON user_likes(user_id, story_id)",
   "CREATE INDEX IF NOT EXISTS idx_user_likes_user_created " +
     "ON user_likes(user_id, created_at DESC)",
+  // 2026-06-22 Wires likes. The public feed counts likes per story
+  // (COUNT(*) WHERE story_id = ?); the (user_id, story_id) index can't
+  // serve a story_id-leading lookup, so without this the count subquery
+  // table-scans user_likes on every feed page.
+  "CREATE INDEX IF NOT EXISTS idx_user_likes_story " +
+    "ON user_likes(story_id)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_fav_categories_user_cat " +
     "ON user_fav_categories(user_id, category)",
   // Recently-viewed: NOT unique on (user_id, story_id) — re-visits are
@@ -937,4 +1152,61 @@ export const POST_TABLE_DDL: string[] = [
     "ON magic_link_tokens(token_hash)",
   "CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expires " +
     "ON magic_link_tokens(expires_at)",
+  // 2026-06-22 admin audit log (app-owned, not in pipeline/store.py). The
+  // default view reads newest-first, so created_at DESC is the hot path; the
+  // per-user detail panel reads by (target_type, target_id); the by-actor and
+  // by-action filters each lead with their column then created_at.
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created " +
+    "ON admin_audit_log(created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_target " +
+    "ON admin_audit_log(target_type, target_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor " +
+    "ON admin_audit_log(actor_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_action " +
+    "ON admin_audit_log(action, created_at DESC)",
+  // 2026-06-22 staff invites. The accept path looks up by token_hash (hot);
+  // the pending-invites list reads newest-first.
+  "CREATE INDEX IF NOT EXISTS idx_staff_invites_token " +
+    "ON staff_invites(token_hash)",
+  "CREATE INDEX IF NOT EXISTS idx_staff_invites_created " +
+    "ON staff_invites(created_at DESC)",
+  // 2026-06-22 article comments. The public thread read filters by
+  // (article_id, status='published') and paginates by created_at — keyset,
+  // never OFFSET — so the leading columns match the hot path.
+  "CREATE INDEX IF NOT EXISTS idx_comments_article_thread " +
+    "ON comments(article_id, status, created_at)",
+  // Reply fan-out under a top-level comment.
+  "CREATE INDEX IF NOT EXISTS idx_comments_parent " +
+    "ON comments(parent_id) WHERE parent_id IS NOT NULL",
+  // Admin review queue reads held/quarantined ordered oldest-first.
+  "CREATE INDEX IF NOT EXISTS idx_comments_status_created " +
+    "ON comments(status, created_at)",
+  // DB-backed guest velocity limit: count this bucket's recent comments in a
+  // window. In-memory per-instance limiting (poll-rate-limit.ts) is too weak
+  // for guest abuse on serverless, so the write path counts rows here instead.
+  "CREATE INDEX IF NOT EXISTS idx_comments_ipua_created " +
+    "ON comments(ip_ua_hash, created_at)",
+  // "My own comments" (lets a guest see their held/rejected comment) + the
+  // per-cookie velocity bucket.
+  "CREATE INDEX IF NOT EXISTS idx_comments_cookie_token " +
+    "ON comments(cookie_token)",
+  // Signed-in user's own comments + per-user velocity bucket.
+  "CREATE INDEX IF NOT EXISTS idx_comments_author " +
+    "ON comments(author_user_id) WHERE author_user_id IS NOT NULL",
+  // Anti-double-like primitives, mirroring poll_votes: cookie uniqueness is
+  // the always-on primitive; the user_id partial adds a second key for
+  // signed-in likes across devices. lib/comments.ts:toggleLike targets these
+  // via lookup-then-write, so the shape works identically on SQLite + Postgres.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_cookie " +
+    "ON comment_likes(comment_id, cookie_token)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_user " +
+    "ON comment_likes(comment_id, user_id) WHERE user_id IS NOT NULL",
+  // Open-reports queue (admin) + per-comment report lookup.
+  "CREATE INDEX IF NOT EXISTS idx_comment_reports_status " +
+    "ON comment_reports(status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_reports_comment " +
+    "ON comment_reports(comment_id)",
+  // Per-comment audit timeline (the statement-of-reasons / appeal record).
+  "CREATE INDEX IF NOT EXISTS idx_comment_moderation_events_comment " +
+    "ON comment_moderation_events(comment_id, created_at)",
 ];

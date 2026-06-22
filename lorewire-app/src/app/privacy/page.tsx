@@ -412,8 +412,9 @@ export default function PrivacyPolicyPage() {
             Correction: edit your profile in the editor, or email us.
           </li>
           <li>
-            Deletion: email {CONTACT_EMAIL} to close your account and have the
-            data we hold about you erased. We honor the request within 30 days.
+            Deletion: delete your account yourself from your account page, or
+            email us. The Data deletion section below explains every option and
+            exactly what gets removed.
           </li>
           <li>
             Disconnect a social account: go to the social accounts page in
@@ -423,7 +424,50 @@ export default function PrivacyPolicyPage() {
         </ul>
       </Section>
 
-      <Section title="10. Children">
+      <Section id="data-deletion" title="10. Data deletion">
+        <p>
+          You can delete your LoreWire account and the data tied to it
+          whenever you want. There are three ways to do it, and they all
+          remove the same thing.
+        </p>
+        <ul className="ml-5 list-disc">
+          <li>
+            <b>Delete it yourself.</b> Open your{" "}
+            <Link href="/auth/account" className="text-accent underline">
+              account page
+            </Link>
+            , scroll to the Danger zone, and choose &quot;Delete my
+            account.&quot; You confirm by typing DELETE, and the account is
+            removed straight away. There is no undo.
+          </li>
+          <li>
+            <b>Ask us to.</b> Email{" "}
+            <a href={`mailto:${CONTACT_EMAIL}`} className="text-accent underline">
+              {CONTACT_EMAIL}
+            </a>{" "}
+            from the address on your account and we will delete it for you,
+            within 30 days at the latest.
+          </li>
+          <li>
+            <b>From Facebook.</b> If you signed in with Facebook, removing
+            LoreWire from your Facebook account&apos;s Apps and Websites
+            settings sends us a deletion request automatically, and we delete
+            your account when it arrives. Facebook gives you a link to a page
+            where you can check the status and see a confirmation code.
+          </li>
+        </ul>
+        <p className="mt-3">
+          However you ask, deleting your account erases your saved stories,
+          likes, favorite categories, reading and watching history, and your
+          profile name and picture. Poll votes you cast stay counted in the
+          anonymous poll totals but are no longer linked to you. If you only
+          want to disconnect a connected social account rather than delete
+          everything, use Disconnect on the social accounts page instead (see
+          Your rights above).
+        </p>
+      </Section>
+
+      <Section title="11. Children">
         <p>
           LoreWire is intended for adults and is not directed at anyone under
           16. We do not knowingly collect personal data from anyone under 16.
@@ -432,7 +476,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="11. International transfers">
+      <Section title="12. International transfers">
         <p>
           LoreWire&apos;s infrastructure runs in the United States and the
           European Union depending on the provider. By using the service
@@ -441,7 +485,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="12. Changes to this policy">
+      <Section title="13. Changes to this policy">
         <p>
           Material changes are posted here with an updated effective date,
           and existing users receive an email notice 30 days before the
@@ -449,7 +493,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="13. Contact">
+      <Section title="14. Contact">
         <p>
           Questions, requests, and complaints go to{" "}
           <a href={`mailto:${CONTACT_EMAIL}`} className="text-accent underline">
@@ -469,14 +513,16 @@ export default function PrivacyPolicyPage() {
 }
 
 function Section({
+  id,
   title,
   children,
 }: {
+  id?: string;
   title: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="mt-6">
+    <section id={id} className="mt-6 scroll-mt-24">
       <h2 className="text-lg font-semibold">{title}</h2>
       <div className="mt-2 space-y-2">{children}</div>
     </section>

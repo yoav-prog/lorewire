@@ -7,7 +7,7 @@ import {
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
-import ReelsDesktop from "@/components/reels/ReelsDesktop";
+import WiresDesktop from "@/components/wires/WiresDesktop";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
   placeArticleImages,
@@ -17,6 +17,8 @@ import {
   getLiveStoryMedia,
   type LiveStoryMediaResult,
 } from "@/app/actions";
+import { storyShareUrl } from "@/lib/share";
+import ShareSheet from "@/components/ShareSheet";
 import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
@@ -39,8 +41,11 @@ import {
   useContinueReading,
   useRecentlyViewed,
   useSavedStories,
+  useStoryRatings,
 } from "@/lib/engagement-store";
+import RatingStars, { RatingBadge } from "@/components/RatingStars";
 import SignInChip from "@/components/SignInChip";
+import SiteFooter from "@/components/SiteFooter";
 import type { PublicSession } from "@/lib/homepage-data";
 
 // Centralised default when no live media has loaded yet — the modal
@@ -48,6 +53,7 @@ import type { PublicSession } from "@/lib/homepage-data";
 // flag + scene images once getLiveStoryMedia resolves.
 const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   ok: true,
+  slug: null,
   video_url: null,
   images: [],
   body: null,
@@ -61,7 +67,7 @@ type OpenFn = (id: string, tab?: string) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
 type IconCmp = (p: IconProps) => React.ReactElement;
 
-const NAV = ["Home", "Reels", "Browse", "New & Hot", "My List"];
+const NAV = ["Home", "Wires", "Browse", "New & Hot", "My List"];
 
 /* ----------------------------- ICONS ----------------------------- */
 const Ico = ({ d, fill, size = 24, stroke = 1.7 }: IconProps & { d: React.ReactNode }) => (
@@ -253,10 +259,12 @@ function Rail({ title, children }: { title: string; children: React.ReactNode })
 }
 
 function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number; landscape?: boolean }) {
+  const { getRating } = useStoryRatings();
   return (
     <button onClick={() => onOpen(story.id)} className="relative shrink-0 transition-transform duration-200 hover:scale-[1.05] hover:z-10" style={{ width: w }}>
       <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}>
         <PosterArt story={story} showTitle={!landscape} />
+        <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 30 }} />
         {landscape && (
           <div className="absolute left-3.5 right-3.5 bottom-5">
             <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow text-ink" style={{ fontSize: 18 }}>{story.title}</h3>
@@ -1062,12 +1070,31 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
       cancelled = true;
     };
   }, [story.id, story.videoUrl, story.images]);
+
+  // Share opens our OWN ShareSheet (not the OS share panel). It carries the
+  // PUBLIC canonical reader URL (/v/[slug]) for THIS story — never the internal
+  // id or a signed media URL. liveMedia.slug is non-null exactly when the story
+  // is published and reachable at /v/[slug]; otherwise we fall back to origin.
+  const [shareOpen, setShareOpen] = useState(false);
+  const shareUrl = storyShareUrl(
+    liveMedia.slug,
+    typeof window !== "undefined" ? window.location.origin : "",
+  );
+
+  // Personal star rating — local + honest (see useStoryRatings). The star opens
+  // an inline picker; a set rating shows as a gold star here and a badge on the
+  // story's thumbnails.
+  const { getRating, setRating, clearRating } = useStoryRatings();
+  const myRating = getRating(story.id) ?? 0;
+  const [rateOpen, setRateOpen] = useState(false);
+
   const c = CAT[story.cat];
   let more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id);
   if (more.length < 6) more = more.concat(STORIES.filter((s) => s.id !== story.id && !more.includes(s)));
   more = more.slice(0, 6);
   return (
     <div className="fixed inset-0 z-[60] overflow-y-auto scrim-in" style={{ background: "rgba(0,0,0,.82)" }} onClick={onClose}>
+      {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
       <div className="min-h-full flex items-start justify-center py-10 px-4">
         <div id="article-top" className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden scroll-mt-0" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()}>
           <div className="relative h-[400px]">
@@ -1095,10 +1122,16 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               <div className="flex items-center gap-3 shrink-0 pt-1">
                 <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
                 <button onClick={() => toggleList(story.id)} title="My List" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color: inList ? "#E8462B" : "#F5F3EF" }}>{inList ? <CheckI size={20} /> : <PlusI size={20} />}</button>
-                <button title="Rate" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><StarI size={19} /></button>
-                <button title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
+                <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} title={myRating > 0 ? `Your rating: ${myRating}` : "Rate"} className="w-11 h-11 rounded-full border flex items-center justify-center hover:border-ink/50 transition" style={{ borderColor: rateOpen ? "#F4B740" : "var(--color-line)", color: myRating > 0 ? "#F4B740" : "#F5F3EF" }}><StarI size={19} /></button>
+                <button onClick={() => setShareOpen(true)} aria-label="Share" title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
               </div>
             </div>
+            {rateOpen && (
+              <div className="flex items-center gap-3 mt-4">
+                <span className="font-body text-[13px] text-muted">{myRating > 0 ? "Your rating" : "Rate this story"}</span>
+                <RatingStars value={myRating} onRate={(n) => setRating(story.id, n)} onClear={() => clearRating(story.id)} size={26} />
+              </div>
+            )}
             <div className="flex gap-8 mt-8 border-b border-line">
               {["Watch", "Read", "Read-along"].map((t) => (
                 <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-display font-bold uppercase tracking-tight text-[15px] transition" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
@@ -1300,7 +1333,7 @@ function GridPage({
   headerExtras?: React.ReactNode;
 }) {
   // Resolve through the live+sample catalog, NOT byId — saved ids can be
-  // real shorts the Reels feed saved that aren't in the baked sample
+  // real shorts the Wires feed saved that aren't in the baked sample
   // catalog, and byId throws on unknown ids. Unresolved ids are skipped
   // cleanly so a stale My List entry can't crash the page.
   const items = ids.map(resolveStory).filter((s): s is Story => s !== null);
@@ -1339,22 +1372,22 @@ function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
 export default function DesktopShell({ initial }: { initial: HomepageInitial }) {
   const [view, setView] = useState("Home");
   const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
-  const [reelsStoryId, setReelsStoryId] = useState<string | null>(null);
+  const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const [solid, setSolid] = useState(false);
   const [query, setQuery] = useState("");
 
-  // My List is the persisted saved-stories store, shared with the Reels feed's
+  // My List is the persisted saved-stories store, shared with the Wires feed's
   // Save button and the detail modal so a Save anywhere shows up everywhere.
   const { saved: list, toggle: toggleList } = useSavedStories();
   // 2026-06-19 Phase 2: Recently viewed is recorded whenever the user
-  // opens a story (detail sheet or Reels deep-link). LRU ordered, capped
+  // opens a story (detail sheet or Wires deep-link). LRU ordered, capped
   // at 50 by the engagement-store.
   const { recordView } = useRecentlyViewed();
 
   // Hoisted curation + live-catalog hook. HomePage reads it through props
   // instead of calling the hook itself so every grid (Browse / New & Hot /
   // My List) can share resolveStory and resolve real-short ids saved
-  // through the Reels feed without throwing on byId. The seed comes from
+  // through the Wires feed without throwing on byId. The seed comes from
   // src/app/page.tsx's SSR fetch so the first paint already shows the
   // correct curation — no client-fetch flash. See
   // _plans/2026-06-18-homepage-no-flash-ssr.md.
@@ -1370,9 +1403,9 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     return () => window.removeEventListener("scroll", onS);
   }, []);
   useEffect(() => { window.scrollTo(0, 0); }, [view]);
-  // Lock the page behind a modal AND while the Reels feed owns the viewport.
+  // Lock the page behind a modal AND while the Wires feed owns the viewport.
   useEffect(() => {
-    const lock = active !== null || view === "Reels";
+    const lock = active !== null || view === "Wires";
     document.body.style.overflow = lock ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
   }, [active, view]);
@@ -1382,18 +1415,18 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     recordView(id);
   };
   const close = () => setActive(null);
-  // "Play Something" jumps into the Reels feed (optionally at a story).
-  const openReels = (id?: string) => {
+  // "Play Something" jumps into the Wires feed (optionally at a story).
+  const openWires = (id?: string) => {
     if (id) recordView(id);
-    setReelsStoryId(id ?? null);
+    setWiresStoryId(id ?? null);
     close();
-    setView("Reels");
+    setView("Wires");
   };
-  const shuffle = () => openReels();
+  const shuffle = () => openWires();
 
   return (
     <div className="min-h-screen bg-bg">
-      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setReelsStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} session={initial.session} />
+      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setWiresStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} session={initial.session} />
 
       {view === "Home" && (
         <HomePage
@@ -1406,7 +1439,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           pollsInitial={initial.pollRails}
         />
       )}
-      {view === "Reels" && <ReelsDesktop onOpenInfo={open} paused={!!active} initialStoryId={reelsStoryId ?? undefined} />}
+      {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} initialStoryId={wiresStoryId ?? undefined} />}
       {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} resolveStory={resolveStory} />}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} resolveStory={resolveStory} />}
       {view === "My List" && (
@@ -1426,16 +1459,11 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
       )}
       {view === "Search" && <SearchPage onOpen={open} query={query} />}
 
-      <footer className="border-t border-line mt-10">
-        <div className="max-w-[1600px] mx-auto px-10 py-9 flex items-center gap-3">
-          <span className="font-display font-black text-[20px] tracking-tightest text-ink">LORE<span className="text-accent">WIRE</span></span>
-          <span className="font-mono text-[11px] uppercase tracking-[.2em] text-muted">True internet stories, hand-drawn.</span>
-        </div>
-      </footer>
+      <SiteFooter />
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Reels feed (not in STORIES) still open the modal.
+        // through the Wires feed (not in STORIES) still open the modal.
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);

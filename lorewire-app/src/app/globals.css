@@ -131,6 +131,30 @@ button:not(:disabled),
 .floaty {
   animation: floaty 4.5s ease-in-out infinite alternate;
 }
+/* Double-tap-to-like burst over a wire's frame. */
+@keyframes wireHeartBurst {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  18% {
+    transform: scale(1.15);
+    opacity: 0.95;
+  }
+  35% {
+    transform: scale(1);
+    opacity: 0.95;
+  }
+  100% {
+    transform: scale(1.25);
+    opacity: 0;
+  }
+}
+.wire-heart-burst {
+  display: inline-flex;
+  animation: wireHeartBurst 0.7s ease-out forwards;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.45));
+}
 .poster-vig {
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.28) 38%, rgba(0, 0, 0, 0) 62%);
 }

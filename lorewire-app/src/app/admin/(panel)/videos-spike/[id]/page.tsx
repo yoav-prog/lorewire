@@ -10,7 +10,7 @@
 
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getStory } from "@/lib/repo";
 import SpikeClient from "./SpikeClient";
 
@@ -19,7 +19,7 @@ export default async function VideoSpikePage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id } = await params;
   const story = await getStory(id);
   if (!story) notFound();

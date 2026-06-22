@@ -14,6 +14,7 @@
 
 import "server-only";
 import { all } from "@/lib/db";
+import { resolveMediaUrl } from "@/lib/media-url";
 import { getSetting } from "@/lib/repo";
 import {
   HOMEPAGE_SURFACES,
@@ -33,6 +34,8 @@ import {
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
 import { readUserSession } from "@/lib/user-session";
+import { resolveImpersonation } from "@/lib/impersonation";
+import { getUserById } from "@/lib/users";
 import type {
   HomepageCuration,
   HomepageCurationBehavior,
@@ -59,7 +62,14 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
     count: rows.length,
     limit: safeLimit,
   });
-  return { ok: true, stories: rows };
+  // Resolve hero/video onto the delivery base (lib/media-url); passthrough when
+  // MEDIA_PUBLIC_BASE is unset.
+  const stories = rows.map((s) => ({
+    ...s,
+    hero_image: resolveMediaUrl(s.hero_image),
+    video_url: resolveMediaUrl(s.video_url),
+  }));
+  return { ok: true, stories };
 }
 
 // ─── curation ───────────────────────────────────────────────────────────────
@@ -271,6 +281,22 @@ async function safeLoad<T>(
 }
 
 async function loadSession(): Promise<PublicSession | null> {
+  // Admin "view as" overlay: if an admin with users.impersonate is actively
+  // impersonating, the reader renders for the target member instead. This only
+  // affects the personalization READ — public writes use readActiveUserSession
+  // (the lw_user cookie, which the impersonating admin doesn't have), so this
+  // grants no write power. resolveImpersonation is bulletproof (returns null on
+  // any error), so it can't take down the homepage.
+  const imp = await resolveImpersonation();
+  if (imp) {
+    const target = await getUserById(imp.targetId);
+    // Only ever impersonate a public member, never a staff account.
+    if (target && target.role === "user") {
+      return { userId: target.id, email: target.email };
+    }
+    return null;
+  }
+
   // Read the lw_user JWT cookie. The helper validates signature +
   // expiry; a tampered or expired cookie returns null and the user is
   // treated as anonymous. Wrapped in safeLoad so a USER_SESSION_SECRET

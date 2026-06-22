@@ -1,6 +1,6 @@
 "use client";
 
-// Desktop Reels: the same shorts and the same ReelCard as mobile, but a
+// Desktop Wires: the same shorts and the same WireCard as mobile, but a
 // DISCRETE pager instead of touch scroll-snap (the council's call — a mouse
 // wheel is continuous and scroll-snap feels mushy/overshoots under it).
 // Navigation is Arrow/Page/Space keys, a debounced wheel (one step per
@@ -8,10 +8,12 @@
 // 9:16 frame; the immediate neighbours are mounted and slid in/out for an
 // instant next-step and to preload.
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import ReelCard from "@/components/reels/ReelCard";
-import { useReelsData } from "@/components/reels/useReelsData";
-import { useSavedStories, useLikedReels } from "@/lib/engagement-store";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import WireCard from "@/components/wires/WireCard";
+import { useWiresData } from "@/components/wires/useWiresData";
+import { useWireLikes } from "@/components/wires/useWireLikes";
+import { useWirePrefs } from "@/components/wires/useWirePrefs";
+import { useSavedStories } from "@/lib/engagement-store";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 
 type OpenFn = (id: string, tab?: string) => void;
@@ -39,7 +41,7 @@ const Chevron = ({ dir, size = 24 }: { dir: "up" | "down"; size?: number }) => (
   </svg>
 );
 
-export interface ReelsDesktopProps {
+export interface WiresDesktopProps {
   onOpenInfo: OpenFn;
   /** A modal (DetailModal) is open over the feed — pause + ignore navigation. */
   paused: boolean;
@@ -47,18 +49,38 @@ export interface ReelsDesktopProps {
   initialStoryId?: string;
 }
 
-export default function ReelsDesktop({
+export default function WiresDesktop({
   onOpenInfo,
   paused,
   initialStoryId,
-}: ReelsDesktopProps) {
-  const { shorts, loading, loadMore } = useReelsData(PAGE_SIZE);
+}: WiresDesktopProps) {
+  const { shorts, loading, loadMore } = useWiresData(PAGE_SIZE);
   const [activeIdx, setActiveIdx] = useState(0);
-  const [muted, setMuted] = useState(true);
   const [soundHintShown, setSoundHintShown] = useState(true);
   const reducedMotion = usePrefersReducedMotion();
+  // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
+  const { autoplay, muted, advance, toggleAutoplay, toggleMuted, toggleAdvance } =
+    useWirePrefs();
   const { isSaved, toggle: toggleSave } = useSavedStories();
-  const { isLiked, toggle: toggleLike } = useLikedReels();
+  const { seed: seedLikes, toggle: toggleLike, get: getLike } = useWireLikes();
+  useEffect(() => {
+    seedLikes(shorts);
+  }, [shorts, seedLikes]);
+
+  // Shuffle: a stored permutation of story ids (null = natural order). New
+  // pages append in server order after the shuffled ids.
+  const [order, setOrder] = useState<string[] | null>(null);
+  const displayShorts = useMemo(() => {
+    if (!order) return shorts;
+    const byId = new Map(shorts.map((s) => [s.id, s]));
+    const seen = new Set(order);
+    const ordered = order.flatMap((id) => {
+      const s = byId.get(id);
+      return s ? [s] : [];
+    });
+    const extras = shorts.filter((s) => !seen.has(s.id));
+    return [...ordered, ...extras];
+  }, [order, shorts]);
 
   // Refs so the stable key/wheel handlers read fresh values without re-binding.
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -71,8 +93,8 @@ export default function ReelsDesktop({
     activeIdxRef.current = activeIdx;
   }, [activeIdx]);
   useEffect(() => {
-    shortsRef.current = shorts;
-  }, [shorts]);
+    shortsRef.current = displayShorts;
+  }, [displayShorts]);
   useEffect(() => {
     loadMoreRef.current = loadMore;
   }, [loadMore]);
@@ -98,7 +120,7 @@ export default function ReelsDesktop({
   if (!appliedInitial && !loading && shorts.length > 0) {
     setAppliedInitial(true);
     if (initialStoryId) {
-      const idx = shorts.findIndex((s) => s.id === initialStoryId);
+      const idx = displayShorts.findIndex((s) => s.id === initialStoryId);
       if (idx > 0) setActiveIdx(idx);
     }
   }
@@ -109,7 +131,7 @@ export default function ReelsDesktop({
       if (pausedRef.current) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") {
+      if (e.key === "ArrowDown" || e.key === "PageDown") {
         e.preventDefault();
         go(1);
       } else if (e.key === "ArrowUp" || e.key === "PageUp") {
@@ -140,8 +162,31 @@ export default function ReelsDesktop({
     return () => el.removeEventListener("wheel", onWheel);
   }, [go]);
 
-  const toggleMute = useCallback(() => setMuted((m) => !m), []);
   const dismissSoundHint = useCallback(() => setSoundHintShown(false), []);
+
+  // Shuffle the loaded wires into a random order and jump to the top.
+  const onShuffle = useCallback(() => {
+    const ids = shorts.map((s) => s.id);
+    for (let i = ids.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+    }
+    setOrder(ids);
+    activeIdxRef.current = 0;
+    setActiveIdx(0);
+  }, [shorts]);
+
+  // Auto-advance to the next wire when one ends; false at the tail so the card
+  // replays in place (and we prefetch the next page).
+  const onWireEnded = useCallback((): boolean => {
+    const list = shortsRef.current;
+    if (activeIdxRef.current < list.length - 1) {
+      go(1);
+      return true;
+    }
+    loadMoreRef.current();
+    return false;
+  }, [go]);
 
   // ── States ────────────────────────────────────────────────────────────────
   if (loading) {
@@ -156,7 +201,7 @@ export default function ReelsDesktop({
       <div className="fixed inset-x-0 bottom-0 top-[68px] z-30 grid place-items-center bg-black px-8 text-center">
         <div>
           <p className="font-display text-[26px] font-black uppercase tracking-tightest text-ink">
-            No reels yet
+            No wires yet
           </p>
           <p className="mt-2 font-body text-[15px] text-muted">
             New shorts show up here as soon as they&rsquo;re published.
@@ -167,9 +212,9 @@ export default function ReelsDesktop({
   }
 
   const atTop = activeIdx <= 0;
-  const atBottom = activeIdx >= shorts.length - 1;
+  const atBottom = activeIdx >= displayShorts.length - 1;
   const lo = Math.max(0, activeIdx - MOUNT_RADIUS);
-  const hi = Math.min(shorts.length - 1, activeIdx + MOUNT_RADIUS);
+  const hi = Math.min(displayShorts.length - 1, activeIdx + MOUNT_RADIUS);
   const windowed: number[] = [];
   for (let i = lo; i <= hi; i++) windowed.push(i);
 
@@ -185,7 +230,7 @@ export default function ReelsDesktop({
       <div className="relative aspect-[9/18] h-[calc(100vh-96px)] max-h-[940px] overflow-hidden rounded-2xl">
         {windowed.map((i) => (
           <div
-            key={shorts[i].id}
+            key={displayShorts[i].id}
             className="absolute inset-0"
             style={{
               transform: `translateY(${(i - activeIdx) * 100}%)`,
@@ -194,23 +239,30 @@ export default function ReelsDesktop({
                 : "transform .35s cubic-bezier(.16,1,.3,1)",
             }}
           >
-            <ReelCard
-              short={shorts[i]}
+            <WireCard
+              short={displayShorts[i]}
               active={i === activeIdx}
               mounted
               eager={i === activeIdx || i === activeIdx + 1}
               insetBottom={18}
               muted={muted}
+              autoplay={autoplay}
+              advance={advance}
               reducedMotion={reducedMotion}
               paused={paused}
-              onToggleMute={toggleMute}
+              onToggleMute={toggleMuted}
+              onToggleAutoplay={toggleAutoplay}
+              onToggleAdvance={toggleAdvance}
+              onShuffle={onShuffle}
               onOpenInfo={onOpenInfo}
               showSoundHint={i === activeIdx && soundHintShown}
               onDismissSoundHint={dismissSoundHint}
-              liked={isLiked(shorts[i].id)}
-              saved={isSaved(shorts[i].id)}
+              liked={getLike(displayShorts[i].id)?.liked ?? displayShorts[i].viewer_liked}
+              likeCount={getLike(displayShorts[i].id)?.count ?? displayShorts[i].like_count}
+              saved={isSaved(displayShorts[i].id)}
               onToggleLike={toggleLike}
               onToggleSave={toggleSave}
+              onWireEnded={onWireEnded}
             />
           </div>
         ))}
@@ -221,7 +273,7 @@ export default function ReelsDesktop({
         <button
           onClick={() => go(-1)}
           disabled={atTop}
-          aria-label="Previous reel"
+          aria-label="Previous wire"
           className="grid h-12 w-12 place-items-center rounded-full text-ink transition hover:bg-white/20 disabled:opacity-30"
           style={{ background: "rgba(255,255,255,.12)" }}
         >
@@ -230,7 +282,7 @@ export default function ReelsDesktop({
         <button
           onClick={() => go(1)}
           disabled={atBottom}
-          aria-label="Next reel"
+          aria-label="Next wire"
           className="grid h-12 w-12 place-items-center rounded-full text-ink transition hover:bg-white/20 disabled:opacity-30"
           style={{ background: "rgba(255,255,255,.12)" }}
         >

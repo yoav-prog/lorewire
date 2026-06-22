@@ -32,6 +32,10 @@
     {
       "path": "/api/prune_magic_links",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/comments/drain_moderation",
+      "schedule": "*/1 * * * *"
     }
   ],
   "functions": {
