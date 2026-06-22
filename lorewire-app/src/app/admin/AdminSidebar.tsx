@@ -71,6 +71,13 @@ const STATIC_GROUPS: SidebarGroup[] = [
         activePrefixes: ["/admin/curation"],
       },
       {
+        // Comment moderation queue — the human side of the hybrid
+        // moderator. Plan: _plans/2026-06-22-article-comments-ai-moderation.md.
+        href: "/admin/comments",
+        label: "Comments",
+        activePrefixes: ["/admin/comments"],
+      },
+      {
         href: "/admin/settings",
         label: "Settings",
         // All four config URLs land on the Settings hub with the right
