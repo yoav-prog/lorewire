@@ -6,6 +6,12 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { headers } from "next/headers";
+import {
+  clearLoginAttempts,
+  isLoginBlocked,
+  loginAttemptKey,
+  recordLoginFailure,
+} from "@/lib/rate-limit";
 import { randomUUID } from "node:crypto";
 import { CATEGORIES } from "@/app/admin/ui";
 import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
@@ -118,10 +124,27 @@ export async function login(
   if (!email || !password) {
     return { error: "Enter your email and password." };
   }
+
+  // Brute-force throttle, keyed by source IP (hashed; no raw IP stored).
+  const reqHeaders = await headers();
+  const ip =
+    (reqHeaders.get("x-forwarded-for") ?? "").split(",")[0].trim() ||
+    reqHeaders.get("x-real-ip") ||
+    "unknown";
+  const rlKey = loginAttemptKey(ip);
+  const blocked = await isLoginBlocked(rlKey);
+  if (blocked.blocked) {
+    const mins = Math.max(1, Math.ceil(blocked.retryAfterSec / 60));
+    return {
+      error: `Too many attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`,
+    };
+  }
+
   // Bootstrap the first admin from env if the users table is still empty.
   await ensureSeedAdmin();
   const user = await getUserByEmail(email);
   if (!user || !(await verifyPassword(password, user.password_hash))) {
+    await recordLoginFailure(rlKey);
     return { error: "Wrong email or password." };
   }
   if (user.status === "suspended") {
@@ -130,6 +153,7 @@ export async function login(
     console.warn("[admin login] suspended account blocked");
     return { error: "This account is suspended. Contact an administrator." };
   }
+  await clearLoginAttempts(rlKey);
   await createSession({ userId: user.id, email: user.email, role: user.role });
   redirect("/admin");
 }

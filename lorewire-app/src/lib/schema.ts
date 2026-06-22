@@ -803,6 +803,22 @@ export const STAFF_INVITES: Table = {
   ],
 };
 
+// 2026-06-22 admin user-management Phase 8. Per-source login throttle —
+// brute-force defense for the admin login. `key` is namespaced + hashed by the
+// caller (e.g. "admin-login:<ip hash>") so no raw IP is stored. attempts +
+// first_at form the rolling window; locked_until is set once the threshold is
+// hit. DB-backed because the app is serverless (in-memory wouldn't survive
+// across instances). Plan: _plans/2026-06-22-admin-user-management.md (Phase 8).
+export const LOGIN_ATTEMPTS: Table = {
+  name: "login_attempts",
+  columns: [
+    { name: "key", type: "TEXT", pk: true },
+    { name: "attempts", type: "INTEGER" },
+    { name: "first_at", type: "TEXT" },
+    { name: "locked_until", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -834,6 +850,7 @@ export const TABLES: Table[] = [
   DATA_DELETION_REQUESTS,
   ADMIN_AUDIT_LOG,
   STAFF_INVITES,
+  LOGIN_ATTEMPTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.

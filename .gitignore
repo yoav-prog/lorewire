@@ -33,6 +33,10 @@ build/
 /video/.props/
 /video/out/
 
+# Local scratch + reference media (kept local, never committed)
+/_spike/
+/ref/
+
 # Misc
 .DS_Store
 *.log
