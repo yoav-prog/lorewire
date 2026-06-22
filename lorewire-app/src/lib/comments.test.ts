@@ -12,6 +12,7 @@ import { all, run } from "@/lib/db";
 import {
   createComment,
   getCommentById,
+  listModerationQueue,
   setCommentStatus,
   toPublicComment,
   type CommentRow,
@@ -240,6 +241,42 @@ describe("setCommentStatus — audit + signal preservation", () => {
     expect(row?.sentiment).toBe("negative");
     expect(row?.topic_tag).toBe("seat dispute");
     expect(row?.moderation_reason).toBe("spam");
+  });
+});
+
+describe("listModerationQueue", () => {
+  beforeEach(clear);
+
+  it("surfaces held + quarantined with author/article joined, excludes published", async () => {
+    const articleId = await seedArticle("published");
+    const held = await createComment({ articleId, guestName: "Held Guy", body: "borderline", ...base });
+    const quar = await createComment({ articleId, guestName: "Quar Guy", body: "severe", ...base });
+    const pub = await createComment({ articleId, guestName: "Pub Guy", body: "fine", ...base });
+    if (!held.ok || !quar.ok || !pub.ok) throw new Error("seed failed");
+
+    await setCommentStatus(
+      quar.comment.id,
+      "quarantined",
+      { source: "tier1", category: "sexual/minors", reason: "severe" },
+      "ai",
+    );
+    await setCommentStatus(pub.comment.id, "published", { source: "tier2" }, "ai");
+
+    const queue = await listModerationQueue(100);
+    const ids = queue.map((r) => r.id);
+    expect(ids).toContain(held.comment.id);
+    expect(ids).toContain(quar.comment.id);
+    expect(ids).not.toContain(pub.comment.id);
+
+    const heldRow = queue.find((r) => r.id === held.comment.id)!;
+    expect(heldRow.article_title).toBe("Test article");
+    expect(heldRow.author_name).toBe("Held Guy");
+    expect(Number(heldRow.is_guest)).toBe(1);
+    expect(Number(heldRow.open_reports)).toBe(0);
+
+    const quarRow = queue.find((r) => r.id === quar.comment.id)!;
+    expect(quarRow.status).toBe("quarantined");
+    expect(quarRow.moderation_category).toBe("sexual/minors");
   });
 });
 

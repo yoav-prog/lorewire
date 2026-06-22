@@ -266,6 +266,55 @@ export async function listStaleModerationComments(
   );
 }
 
+export interface ModerationQueueRow {
+  id: string;
+  article_id: string;
+  parent_id: string | null;
+  body: string;
+  lang: string | null;
+  status: string;
+  moderation_source: string | null;
+  moderation_category: string | null;
+  moderation_reason: string | null;
+  moderation_confidence: number | null;
+  created_at: string | null;
+  /** users.name for signed-in authors, else the guest_name. */
+  author_name: string | null;
+  /** True when this is a guest (no account), surfaced as a chip in the queue. */
+  is_guest: number;
+  article_title: string | null;
+  article_language: string | null;
+  article_slug: string | null;
+  open_reports: number;
+}
+
+/** The admin moderation queue: everything a human needs to action — held
+ *  (borderline or appealed) and quarantined (CSAM/threats, preserved) comments,
+ *  oldest first. Joins the author name and article so the page is one query. */
+export async function listModerationQueue(
+  limit: number,
+): Promise<ModerationQueueRow[]> {
+  return all<ModerationQueueRow>(
+    `SELECT
+        c.id, c.article_id, c.parent_id, c.body, c.lang, c.status,
+        c.moderation_source, c.moderation_category, c.moderation_reason,
+        c.moderation_confidence, c.created_at,
+        COALESCE(u.name, c.guest_name) AS author_name,
+        CASE WHEN c.author_user_id IS NULL THEN 1 ELSE 0 END AS is_guest,
+        a.title AS article_title, a.language AS article_language,
+        a.slug AS article_slug,
+        (SELECT COUNT(*) FROM comment_reports r
+          WHERE r.comment_id = c.id AND r.status = 'open') AS open_reports
+      FROM comments c
+      LEFT JOIN users u ON u.id = c.author_user_id
+      LEFT JOIN articles a ON a.id = c.article_id
+     WHERE c.status IN ('held', 'quarantined')
+     ORDER BY c.created_at ASC
+     LIMIT ?`,
+    [limit],
+  );
+}
+
 /** Created-at timestamps (ISO, newest first) for one rate-limit bucket since a
  *  cutoff. The caller derives per-window counts; one query covers minute/hour/
  *  day so the velocity check is a single round trip. */
