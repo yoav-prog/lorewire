@@ -255,6 +255,27 @@ STT_COST_PER_SECOND = 0.024 / 60.0
 IMAGE_POLL_TIMEOUT = 240
 
 
+# Sidechannel for the last `_generate_with_retry` failure message.
+# `_generate_with_retry` returns None on failure (legacy contract; many
+# callers expect that). To surface the upstream kie error into the admin
+# timeline (`kie_failed` events), we stash the text here and let the
+# caller read it immediately after a None return. Reset at the START of
+# every call so a previous success doesn't leak a stale message into a
+# later, unrelated failure. Single-threaded per drain tick, so a module
+# global is safe. Plan:
+# _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
+_LAST_KIE_ERROR: dict[str, str | None] = {"msg": None}
+
+
+def last_kie_error() -> str | None:
+    """Return the upstream exception text from the most recent
+    `_generate_with_retry` failure, or `None` when the last call
+    succeeded. Callers reading this MUST do so immediately after the
+    `_generate_with_retry` they care about — the value is overwritten on
+    every call."""
+    return _LAST_KIE_ERROR["msg"]
+
+
 def _generate_with_retry(
     prompt: str,
     label: str,
@@ -281,7 +302,13 @@ def _generate_with_retry(
     model just for this call. The scenes path uses it to pin
     nano-banana-2 (ref-image support) while leaving hero / props on the
     admin's global selection.
+
+    On failure the upstream exception text is also stashed on
+    `_LAST_KIE_ERROR` so callers can surface it into the admin timeline
+    via `last_kie_error()`. The legacy `return None` contract is
+    preserved so existing call sites need no change.
     """
+    _LAST_KIE_ERROR["msg"] = None
     last: Exception | None = None
     ref_count = len([u for u in (image_input or []) if u])
     for attempt in range(1, attempts + 1):
@@ -306,6 +333,7 @@ def _generate_with_retry(
         f"[media image] {label} refs={ref_count} model={model or 'global'} "
         f"FAILED after {attempts} attempts: {last}"
     )
+    _LAST_KIE_ERROR["msg"] = str(last) if last is not None else None
     return None
 
 
@@ -997,7 +1025,7 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
             "kie_failed",
             "Portrait generation returned no URL after retries",
             level="error",
-            payload={"variant": "portrait"},
+            payload={"variant": "portrait", "error": last_kie_error()},
         )
         raise RuntimeError("kie portrait hero generation returned no URL after retries")
     store.log_render_event(
@@ -1039,7 +1067,7 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
             "kie_failed",
             "Landscape failed; portrait still updated (partial success)",
             level="warn",
-            payload={"variant": "landscape"},
+            payload={"variant": "landscape", "error": last_kie_error()},
         )
         print(
             f"[image regen hero] id={safe_id} landscape FAILED; "
@@ -1190,7 +1218,7 @@ def _regen_hero_from_short(
             "kie_failed",
             "Portrait i2i generation returned no URL after retries",
             level="error",
-            payload={"variant": "portrait", "mode": "i2i"},
+            payload={"variant": "portrait", "mode": "i2i", "error": last_kie_error()},
         )
         raise RuntimeError("kie portrait hero (i2i) generation returned no URL after retries")
     store.log_render_event(
@@ -1237,7 +1265,7 @@ def _regen_hero_from_short(
             "kie_failed",
             "Landscape i2i failed; portrait still updated (partial success)",
             level="warn",
-            payload={"variant": "landscape", "mode": "i2i"},
+            payload={"variant": "landscape", "mode": "i2i", "error": last_kie_error()},
         )
         print(
             f"[image regen hero from-short] id={safe_id} landscape FAILED; "
@@ -1469,7 +1497,7 @@ def _build_hero_and_thumbnail_from_short(
                 "kie_failed",
                 f"{label} (hybrid i2i) returned no URL after retries",
                 level="warn",
-                payload={"variant": label},
+                payload={"variant": label, "error": last_kie_error()},
             )
             print(
                 f"[hero+thumb from-short] id={safe_id} {label} FAILED; "
@@ -1692,7 +1720,7 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
                 "kie_failed",
                 f"Scene {i + 1} failed; continuing",
                 level="warn",
-                payload={"index": i + 1},
+                payload={"index": i + 1, "error": last_kie_error()},
             )
             print(f"[image regen scenes] id={safe_id} {label} FAILED, skipping")
             continue

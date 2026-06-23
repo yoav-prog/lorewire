@@ -24,6 +24,12 @@ import {
 import { Storage } from "@google-cloud/storage";
 
 import { buildConcatArgv } from "./ffmpeg.js";
+import {
+  isR2MediaActive,
+  mediaBucket,
+  publicMediaUrl,
+  putR2Object,
+} from "./r2.js";
 
 const COMPOSITION_ID = "DoodleShort";
 
@@ -222,27 +228,48 @@ export async function renderAndUploadStory(
   });
 
   const key = `${sanitizeForFs(storyId)}/video.mp4`;
-  await storage.bucket(gcsBucket).upload(tmpPath, {
-    destination: key,
-    contentType: "video/mp4",
-    // Public read so the editor's <video> tag can play it without
-    // signed URLs — matches how the rest of the GCS pipeline
-    // (hero images, narration audio) already serves assets.
-    predefinedAcl: "publicRead",
-    // CRITICAL: every short re-render writes to the SAME GCS key (one
-    // canonical MP4 per story). GCS defaults public objects to
-    // Cache-Control: public, max-age=3600 — so the editor's <video>
-    // player would serve the cached OLD MP4 for up to an hour after a
-    // re-render finishes ("I edited captions, clicked Render, file at
-    // the URL is still the old one"). Force a revalidate-on-every-play
-    // policy so the player picks up the freshly-uploaded bytes the
-    // moment they land. The HEAD+ETag round-trip adds <100ms per play
-    // — trivial against the human-perception bar.
-    metadata: {
-      cacheControl: "no-cache, max-age=0, must-revalidate",
-    },
-  });
-  const publicUrl = `https://storage.googleapis.com/${gcsBucket}/${key}`;
+  // CRITICAL: every short re-render writes to the SAME key (one canonical
+  // MP4 per story). Force a revalidate-on-every-play Cache-Control so the
+  // editor's <video> player picks up the freshly-uploaded bytes the moment
+  // they land. The HEAD+ETag round-trip adds <100 ms per play — trivial
+  // against the human-perception bar. (On R2 this overrides the long
+  // immutable cache the media bucket uses by default; on GCS it overrides
+  // the public-read 1-hour default.) Plan:
+  // _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
+  const mp4CacheControl = "no-cache, max-age=0, must-revalidate";
+  let publicUrl: string;
+  if (isR2MediaActive()) {
+    // R2 writer: upload the MP4 bytes to the R2 media bucket and return the
+    // MEDIA_PUBLIC_BASE delivery URL. This branch fires only when ALL of
+    // R2_MEDIA_WRITE_ENABLED, R2 credentials, R2_MEDIA_BUCKET, and
+    // MEDIA_PUBLIC_BASE are set — same gate as the Python pipeline and the
+    // Next-app writer use, so the three writers cut over together.
+    const bytes = await fs.readFile(tmpPath);
+    await putR2Object(mediaBucket(), key, new Uint8Array(bytes), {
+      contentType: "video/mp4",
+      cacheControl: mp4CacheControl,
+    });
+    publicUrl = publicMediaUrl(key);
+    console.info(
+      "[cloud-run render upload]",
+      JSON.stringify({ target: "r2", key, url: publicUrl }),
+    );
+  } else {
+    // GCS writer (current default until the R2 flag flip): legacy behavior
+    // unchanged. The bucket grants `roles/storage.objectViewer` to
+    // `allUsers` so the public URL serves directly.
+    await storage.bucket(gcsBucket).upload(tmpPath, {
+      destination: key,
+      contentType: "video/mp4",
+      predefinedAcl: "publicRead",
+      metadata: { cacheControl: mp4CacheControl },
+    });
+    publicUrl = `https://storage.googleapis.com/${gcsBucket}/${key}`;
+    console.info(
+      "[cloud-run render upload]",
+      JSON.stringify({ target: "gcs", key, url: publicUrl }),
+    );
+  }
 
   // Cleanup. Best-effort: a leaked /tmp file is fixable on container
   // recycle (every 15 min by default) but logging it lets us catch

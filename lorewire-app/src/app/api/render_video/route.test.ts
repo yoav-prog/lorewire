@@ -206,6 +206,91 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     expect(failSpy).not.toHaveBeenCalled();
   });
 
+  it("rewrites legacy GCS URLs in inputProps onto MEDIA_PUBLIC_BASE before POSTing to Cloud Run", async () => {
+    // The load-bearing assertion for the 2026-06-23 outbound-URL fix:
+    // pre-migration GCS URLs persisted in video_config must arrive at
+    // Cloud Run already pointed at the R2 delivery host, otherwise
+    // Remotion's fetch 404s against GCS and the render fails.
+    vi.stubEnv("MEDIA_PUBLIC_BASE", "https://media.lorewire.com");
+    vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(
+        JSON.stringify({
+          title: "Envelope",
+          voiceover_url:
+            "https://storage.googleapis.com/aporia-unleash/envelope/voice.mp3",
+          hero_image:
+            "https://storage.googleapis.com/aporia-unleash/envelope/hero.png?v=abc",
+          scenes: [
+            {
+              url: "https://storage.googleapis.com/aporia-unleash/envelope/scene-00.png",
+            },
+          ],
+          caption: "Just prose, leave alone",
+        }),
+      ),
+    );
+    vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+    undiciFetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ url: "https://example/out.mp4" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await GET(makeReq({ auth: "Bearer test-secret" }));
+
+    expect(undiciFetchMock).toHaveBeenCalledTimes(1);
+    const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+    const sentBody = JSON.parse(callInit.body as string) as {
+      inputProps: {
+        voiceover_url: string;
+        hero_image: string;
+        scenes: { url: string }[];
+        caption: string;
+      };
+    };
+    expect(sentBody.inputProps.voiceover_url).toBe(
+      "https://media.lorewire.com/envelope/voice.mp3",
+    );
+    expect(sentBody.inputProps.hero_image).toBe(
+      "https://media.lorewire.com/envelope/hero.png?v=abc",
+    );
+    expect(sentBody.inputProps.scenes[0].url).toBe(
+      "https://media.lorewire.com/envelope/scene-00.png",
+    );
+    expect(sentBody.inputProps.caption).toBe("Just prose, leave alone");
+  });
+
+  it("leaves inputProps unchanged when MEDIA_PUBLIC_BASE is unset (dev / pre-cutover)", async () => {
+    vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(
+        JSON.stringify({
+          voiceover_url:
+            "https://storage.googleapis.com/aporia-unleash/envelope/voice.mp3",
+        }),
+      ),
+    );
+    vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+    undiciFetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ url: "https://example/out.mp4" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await GET(makeReq({ auth: "Bearer test-secret" }));
+
+    const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+    const sentBody = JSON.parse(callInit.body as string) as {
+      inputProps: { voiceover_url: string };
+    };
+    expect(sentBody.inputProps.voiceover_url).toBe(
+      "https://storage.googleapis.com/aporia-unleash/envelope/voice.mp3",
+    );
+  });
+
   it("fails the render when the story row is gone", async () => {
     vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
     vi.spyOn(repo, "getStory").mockResolvedValue(null);

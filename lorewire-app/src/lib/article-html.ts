@@ -18,7 +18,7 @@ import { ArticleEmbed } from "@/lib/tiptap-embed";
 import { PullQuote } from "@/lib/tiptap-pullquote";
 import { ArticleComparison } from "@/lib/tiptap-comparison";
 import { SheetsRef, stripSheetsRefs } from "@/lib/tiptap-sheets-ref";
-import { mediaPublicBase, rewriteStoredMediaUrl } from "@/lib/media-url";
+import { mediaPublicBase, rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
 
 // Extensions array. Pin the same set the editor registers so the renderer
 // understands every block the writer can author. Adding a new editor block
@@ -45,26 +45,6 @@ function emptyDoc(): { type: "doc"; content: { type: "paragraph" }[] } {
   return { type: "doc", content: [{ type: "paragraph" }] };
 }
 
-// Rewrite media URLs embedded anywhere in the document onto the delivery base
-// (media migration). Walks every string value; rewriteStoredMediaUrl only
-// touches legacy GCS URLs and leaves captions, prose, and external URLs alone.
-// Inert when MEDIA_PUBLIC_BASE is unset. Mutates in place — the document is
-// freshly parsed here and not shared.
-function rewriteDocMediaUrls(value: unknown, base: string | null): void {
-  if (Array.isArray(value)) {
-    for (const item of value) rewriteDocMediaUrls(item, base);
-    return;
-  }
-  if (value && typeof value === "object") {
-    const obj = value as Record<string, unknown>;
-    for (const k of Object.keys(obj)) {
-      const v = obj[k];
-      if (typeof v === "string") obj[k] = rewriteStoredMediaUrl(v, base);
-      else rewriteDocMediaUrls(v, base);
-    }
-  }
-}
-
 export function renderArticleHtml(raw: string | null | undefined): string {
   if (!raw) return generateHTML(emptyDoc(), EXTENSIONS);
   let json: unknown;
@@ -86,7 +66,7 @@ export function renderArticleHtml(raw: string | null | undefined): string {
     );
     // Flip embedded media URLs onto the delivery base (passthrough until the
     // cutover sets MEDIA_PUBLIC_BASE).
-    rewriteDocMediaUrls(cleaned, mediaPublicBase());
+    rewriteStoredMediaUrlsDeep(cleaned, mediaPublicBase());
     // generateHTML's signature is permissive on the JSON shape; if a stored
     // document carries an unknown node type the renderer either drops it or
     // throws, depending on the extension. Catch ensures the public page
