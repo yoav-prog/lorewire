@@ -60,13 +60,34 @@ def _peek(name: str) -> dict:
     }
 
 
+def _safe_call(fn_name: str) -> object:
+    """Call gcs.<fn_name>() but tolerate the helper not existing on the
+    deployed branch. The shape-fix observability commit (`7453d05`) added
+    `_chosen_publish_target` and `_r2_creds_present`; older deploys only have
+    `_r2_media_enabled` + `_r2_configured`. We want the diagnostic to still
+    work without those — they would otherwise raise AttributeError and the
+    whole report 500s."""
+    fn = getattr(gcs, fn_name, None)
+    if fn is None:
+        return "<missing in this build>"
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001 — diagnostic must never crash
+        return f"<error: {type(e).__name__}: {e}>"
+
+
 def _report() -> dict:
     return {
-        "target": gcs._chosen_publish_target(),
-        "_r2_media_enabled": gcs._r2_media_enabled(),
-        "_r2_configured": gcs._r2_configured(),
-        "_r2_creds_present": gcs._r2_creds_present(),
-        "_is_configured_gcs": gcs.is_configured(),
+        "target_inferred": (
+            "r2" if _safe_call("_r2_configured") is True
+            else "gcs" if _safe_call("is_configured") is True
+            else "local"
+        ),
+        "target_helper": _safe_call("_chosen_publish_target"),
+        "_r2_media_enabled": _safe_call("_r2_media_enabled"),
+        "_r2_configured": _safe_call("_r2_configured"),
+        "_r2_creds_present": _safe_call("_r2_creds_present"),
+        "_is_configured_gcs": _safe_call("is_configured"),
         "envs": {
             "R2_MEDIA_WRITE_ENABLED": _peek("R2_MEDIA_WRITE_ENABLED"),
             "R2_ACCESS_KEY_ID": _peek("R2_ACCESS_KEY_ID"),
