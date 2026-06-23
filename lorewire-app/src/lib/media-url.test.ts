@@ -6,7 +6,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { mediaPublicBase, resolveMediaUrl, rewriteStoredMediaUrl } from "./media-url";
+import {
+  mediaPublicBase,
+  resolveMediaUrl,
+  rewriteStoredMediaUrl,
+  rewriteStoredMediaUrlsDeep,
+} from "./media-url";
 
 const BASE = "https://media.lorewire.com";
 
@@ -121,5 +126,68 @@ describe("rewriteStoredMediaUrl (embedded document URLs)", () => {
     expect(
       rewriteStoredMediaUrl("https://storage.googleapis.com/b/abc/img.png", null),
     ).toBe("https://storage.googleapis.com/b/abc/img.png");
+  });
+});
+
+describe("rewriteStoredMediaUrlsDeep (Cloud Run inputProps / article body trees)", () => {
+  it("walks nested objects + arrays, rewriting every legacy GCS URL", () => {
+    const tree = {
+      character_base_url: "https://storage.googleapis.com/b/abc/character.png",
+      audio_url: "https://storage.googleapis.com/b/abc/voice.mp3",
+      scenes: [
+        { url: "https://storage.googleapis.com/b/abc/frame-00.webp?v=1" },
+        { url: "https://storage.googleapis.com/b/abc/frame-01.webp?v=1" },
+      ],
+      caption: "Just a caption, leave alone",
+      external: "https://api.dicebear.com/10.x/svg",
+      already: `${BASE}/keep/me.png`,
+    };
+    const rewrote = rewriteStoredMediaUrlsDeep(tree, BASE);
+    expect(rewrote).toBe(4);
+    expect(tree.character_base_url).toBe(`${BASE}/abc/character.png`);
+    expect(tree.audio_url).toBe(`${BASE}/abc/voice.mp3`);
+    expect(tree.scenes[0].url).toBe(`${BASE}/abc/frame-00.webp?v=1`);
+    expect(tree.scenes[1].url).toBe(`${BASE}/abc/frame-01.webp?v=1`);
+    expect(tree.caption).toBe("Just a caption, leave alone");
+    expect(tree.external).toBe("https://api.dicebear.com/10.x/svg");
+    expect(tree.already).toBe(`${BASE}/keep/me.png`);
+  });
+
+  it("is a no-op when the base is unset (dev / pre-cutover)", () => {
+    const tree = {
+      character_base_url: "https://storage.googleapis.com/b/abc/character.png",
+    };
+    const rewrote = rewriteStoredMediaUrlsDeep(tree, null);
+    expect(rewrote).toBe(0);
+    expect(tree.character_base_url).toBe(
+      "https://storage.googleapis.com/b/abc/character.png",
+    );
+  });
+
+  it("handles null + primitive leaves without throwing", () => {
+    const tree: Record<string, unknown> = {
+      maybe_url: null,
+      maybe_count: 7,
+      maybe_flag: true,
+      nested: { nope: null, num: 0 },
+    };
+    expect(() => rewriteStoredMediaUrlsDeep(tree, BASE)).not.toThrow();
+    expect(tree.maybe_url).toBeNull();
+    expect(tree.maybe_count).toBe(7);
+  });
+
+  it("handles arrays of strings directly (no object wrapper)", () => {
+    const tree = {
+      input_urls: [
+        "https://storage.googleapis.com/b/abc/character.png",
+        "https://storage.googleapis.com/b/abc/scene.webp",
+      ],
+    };
+    const rewrote = rewriteStoredMediaUrlsDeep(tree, BASE);
+    expect(rewrote).toBe(2);
+    expect(tree.input_urls).toEqual([
+      `${BASE}/abc/character.png`,
+      `${BASE}/abc/scene.webp`,
+    ]);
   });
 });

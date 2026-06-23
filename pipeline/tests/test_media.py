@@ -10,7 +10,7 @@ import os
 import unittest
 from unittest import mock
 
-from pipeline import media
+from pipeline import images, media
 
 
 class SanitizeIdTests(unittest.TestCase):
@@ -49,6 +49,50 @@ class ImageFilenameTests(unittest.TestCase):
     def test_higher_indexes_are_scenes(self):
         self.assertEqual(media._image_filename(1), "scene-1.png")
         self.assertEqual(media._image_filename(3), "scene-3.png")
+
+
+class GenerateWithRetryErrorSidechannelTests(unittest.TestCase):
+    """`_generate_with_retry` returns None on failure; the upstream exception
+    text is stashed on `_LAST_KIE_ERROR` so callers can include it in the
+    admin timeline's `kie_failed` event (read via `last_kie_error()`).
+
+    Plan: _plans/2026-06-23-pipeline-outbound-url-rewriter.md."""
+
+    def test_failure_stashes_exception_text(self):
+        with mock.patch.object(
+            images, "generate", side_effect=RuntimeError("kie task t-1 failed: bad URL")
+        ):
+            url = media._generate_with_retry("prompt", "id=x")
+        self.assertIsNone(url)
+        self.assertEqual(
+            media.last_kie_error(), "kie task t-1 failed: bad URL"
+        )
+
+    def test_success_clears_previous_error(self):
+        # First call fails — sidechannel carries the error.
+        with mock.patch.object(images, "generate", side_effect=RuntimeError("first")):
+            self.assertIsNone(media._generate_with_retry("p", "id=x"))
+        self.assertEqual(media.last_kie_error(), "first")
+
+        # Second call succeeds — sidechannel resets to None so a future
+        # caller can't read a stale error from a previous unrelated call.
+        with mock.patch.object(images, "generate", return_value="https://kie/out.png"):
+            self.assertEqual(
+                media._generate_with_retry("p", "id=x"),
+                "https://kie/out.png",
+            )
+        self.assertIsNone(media.last_kie_error())
+
+    def test_retry_reports_last_exception(self):
+        # Both attempts fail with different messages — the FINAL one is what
+        # the sidechannel carries (matches the human-readable log line).
+        with mock.patch.object(
+            images,
+            "generate",
+            side_effect=[RuntimeError("first"), RuntimeError("second")],
+        ):
+            self.assertIsNone(media._generate_with_retry("p", "id=x", attempts=2))
+        self.assertEqual(media.last_kie_error(), "second")
 
 
 class StoryCostCentsTests(unittest.TestCase):

@@ -28,6 +28,7 @@ import {
 import { getStory, setStoryShortConfigJson } from "@/lib/repo";
 import { resolveShortSegments } from "@/lib/short-segments";
 import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
+import { rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
 
 // A short runs kie image generation + Remotion render, the longest job in the
 // app, so override undici's 300s default timeouts. Vercel Pro's 800s cron cap is
@@ -215,6 +216,24 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // same as the long-form render (shorts are always 9:16). Body-only if none.
   const story = await getStory(claimed.story_id);
   const segments = await resolveShortSegmentsSafe(story);
+
+  // Walk inputProps + segments and rewrite any persisted legacy GCS URLs
+  // onto MEDIA_PUBLIC_BASE before they cross out to Cloud Run. Cloud Run's
+  // Remotion render fetches every URL via HTTP; if a row's props blob still
+  // carries pre-2026-06-22 `storage.googleapis.com` URLs and GCS public read
+  // is off, every fetch 404s. The rewriter is inert when the base is unset
+  // (dev / pre-cutover) and only touches scheme-prefixed legacy GCS URLs —
+  // captions, prose, and external assets pass through unchanged. Plan:
+  // _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
+  const propsRewrote = rewriteStoredMediaUrlsDeep(inputProps);
+  const segmentsRewrote = rewriteStoredMediaUrlsDeep(segments);
+  namespacedLog("rewrite", {
+    render_id: claimed.id,
+    props_rewrote: propsRewrote,
+    segments_rewrote: segmentsRewrote,
+    intro_present: Boolean(segments.intro),
+    outro_present: Boolean(segments.outro),
+  });
 
   // Cloud Run writes the MP4 to GCS key `<storyId>/video.mp4`. We must NOT pass
   // the bare story_id or the short would overwrite the long-form video at the

@@ -109,3 +109,53 @@ export function rewriteStoredMediaUrl(
   const key = gcsUrlToKeyWithQuery(value);
   return key === null ? value : `${base.replace(/\/+$/, "")}/${key}`;
 }
+
+/** Walk an arbitrary JSON-like tree IN PLACE and apply rewriteStoredMediaUrl
+ *  to every string value. Used by callers that pass a structured payload
+ *  outbound (Cloud Run inputProps, article body JSON, anywhere a tree of
+ *  values might carry legacy GCS URLs we never want to ship). Safe because
+ *  rewriteStoredMediaUrl only touches scheme-prefixed legacy GCS URLs and
+ *  leaves everything else (prose, captions, external URLs, on-base URLs)
+ *  alone. Inert when the base is unset. Mutates `value` — caller must pass
+ *  a freshly-parsed object that is not shared. */
+export function rewriteStoredMediaUrlsDeep(
+  value: unknown,
+  base: string | null = mediaPublicBase(),
+): number {
+  if (!base) return 0;
+  let rewrote = 0;
+  const walk = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      for (let i = 0; i < v.length; i += 1) {
+        const item = v[i];
+        if (typeof item === "string") {
+          const next = rewriteStoredMediaUrl(item, base);
+          if (next !== item) {
+            v[i] = next;
+            rewrote += 1;
+          }
+        } else {
+          walk(item);
+        }
+      }
+      return;
+    }
+    if (v && typeof v === "object") {
+      const obj = v as Record<string, unknown>;
+      for (const k of Object.keys(obj)) {
+        const item = obj[k];
+        if (typeof item === "string") {
+          const next = rewriteStoredMediaUrl(item, base);
+          if (next !== item) {
+            obj[k] = next;
+            rewrote += 1;
+          }
+        } else {
+          walk(item);
+        }
+      }
+    }
+  };
+  walk(value);
+  return rewrote;
+}
