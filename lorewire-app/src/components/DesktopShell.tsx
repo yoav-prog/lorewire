@@ -992,7 +992,7 @@ function DetailModalHero({ story }: { story: Story }) {
   );
 }
 
-function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
+function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the text Play button in the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll
@@ -1180,7 +1180,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList, s
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
-              {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={session !== null} />}
+              {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={session !== null} focusedCommentId={initialCommentId} />}
               <JumpToComments
                 count={commentInfo?.count ?? 0}
                 onJump={() => setTab("Comments")}
@@ -1401,7 +1401,26 @@ function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
 /* ----------------------------- DESKTOP SHELL ----------------------------- */
 export default function DesktopShell({ initial }: { initial: HomepageInitial }) {
   const [view, setView] = useState("Home");
-  const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
+  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string } | null>(null);
+
+  // Deep-link landing: `/?story=X&tab=Y&c=Z` opens the DetailModal at
+  // story X on tab Y (default Watch), and Z (when present) becomes the
+  // focused comment Id so the Comments tab scrolls into the discussion
+  // at that comment. Same shape as MobileShell's deep-link path.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    const id = sp.get("story")?.trim();
+    if (!id) return;
+    const tabParam = sp.get("tab")?.trim();
+    const knownTabs = new Set(["Watch", "Read", "Read-along", "Comments"]);
+    const tab = tabParam && knownTabs.has(tabParam) ? tabParam : "Watch";
+    const commentId = sp.get("c")?.trim() || undefined;
+    setActive({ id, tab, commentId });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[deep-link modal open]", { story_id: id, tab, comment_id: commentId ?? null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only
+  }, []);
   const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const [solid, setSolid] = useState(false);
   const [query, setQuery] = useState("");
@@ -1497,7 +1516,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);
-        return s ? <DetailModal story={s} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} /> : null;
+        return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} /> : null;
       })()}
     </div>
   );

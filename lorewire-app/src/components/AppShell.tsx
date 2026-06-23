@@ -1248,7 +1248,7 @@ function FakeReadAlong() {
 }
 
 /* ----------------------------- TITLE SHEET ----------------------------- */
-function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
+function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the big white button under the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll the
@@ -1459,7 +1459,11 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList, se
           {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
           {tab === "Comments" && (
             <div className="px-4">
-              <CommentsTab storyId={story.id} signedIn={session !== null} />
+              <CommentsTab
+                storyId={story.id}
+                signedIn={session !== null}
+                focusedCommentId={initialCommentId}
+              />
             </div>
           )}
         </div>
@@ -1632,7 +1636,29 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
 function MobileShell({ initial }: { initial: HomepageInitial }) {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
-  const [active, setActive] = useState<{ id: string; tab?: string } | null>(null);
+  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string } | null>(null);
+
+  // Deep-link landing: `/?story=X&tab=Y&c=Z` opens the modal at story X
+  // on tab Y (default Watch), and Z (when present) becomes the focused
+  // comment Id so the modal scrolls into the discussion at that comment.
+  // Powers permalink shares from the Comments tab's "Link" button.
+  // Runs ONCE on mount via the empty dep — subsequent navigation uses
+  // the in-app onOpen / close path.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sp = new URLSearchParams(window.location.search);
+    const id = sp.get("story")?.trim();
+    if (!id) return;
+    const tabParam = sp.get("tab")?.trim();
+    const knownTabs = new Set(["Watch", "Read", "Read-along", "Comments"]);
+    const tab = tabParam && knownTabs.has(tabParam) ? tabParam : "Watch";
+    const commentId = sp.get("c")?.trim() || undefined;
+    setActive({ id, tab, commentId });
+    recordView(id);
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[deep-link modal open]", { story_id: id, tab, comment_id: commentId ?? null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only
+  }, []);
   const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const screenRef = useRef<HTMLDivElement>(null);
 
@@ -1721,6 +1747,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
           <TitleSheet
             story={s}
             initialTab={active.tab}
+            initialCommentId={active.commentId}
             onClose={close}
             onOpen={open}
             inList={list.includes(active.id)}

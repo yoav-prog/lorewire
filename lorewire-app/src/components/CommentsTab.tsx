@@ -33,6 +33,11 @@ interface CommentsTabProps {
    *  identity row ("Posting as @name" vs the guest-name input). Comments
    *  API verifies the actual session cookie server-side regardless. */
   signedIn: boolean;
+  /** Deep-link target: when set, after the thread renders the matching
+   *  comment glows briefly and the viewport scrolls to it. Falls
+   *  through cleanly when the comment isn't on the first page (the
+   *  user can load more to find it). */
+  focusedCommentId?: string;
 }
 
 interface InitResponse {
@@ -44,7 +49,7 @@ interface InitResponse {
   enabled: boolean;
 }
 
-export function CommentsTab({ storyId, signedIn }: CommentsTabProps) {
+export function CommentsTab({ storyId, signedIn, focusedCommentId }: CommentsTabProps) {
   const [thread, setThread] = useState<CommentThreadPage | null>(null);
   const [meta, setMeta] = useState<InitResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -122,6 +127,8 @@ export function CommentsTab({ storyId, signedIn }: CommentsTabProps) {
       initialCount={meta.count}
       signedIn={signedIn}
       enabled={meta.enabled}
+      permalinkStoryId={storyId}
+      focusedCommentId={focusedCommentId}
     />
   );
 }
