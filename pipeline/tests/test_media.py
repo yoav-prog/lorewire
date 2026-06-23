@@ -94,6 +94,82 @@ class GenerateWithRetryErrorSidechannelTests(unittest.TestCase):
             self.assertIsNone(media._generate_with_retry("p", "id=x", attempts=2))
         self.assertEqual(media.last_kie_error(), "second")
 
+    def test_quota_error_short_circuits_retry(self):
+        """A kie.ai 433 daily-cap error is unrecoverable inside the same
+        tick — kie's points budget is wall-clock-bound and a second
+        createTask just burns another round-trip to confirm the same
+        rejection. `_generate_with_retry` must bail after the FIRST
+        attempt when the upstream error carries the 433 marker, not the
+        normal 2-attempt loop. Without this short-circuit a 5-variant
+        finisher (hero+thumbnail) wastes 5 extra API calls confirming
+        the same wall.
+        """
+        # Use a generator side_effect so we can assert exactly how many
+        # times images.generate was invoked — the second call should not
+        # happen on a quota error.
+        quota_err = RuntimeError(
+            "kie createTask failed: {'code': 433, 'msg': 'The current "
+            "number of points used by apiKey has exceeded the daily limit', "
+            "'data': None}"
+        )
+        with mock.patch.object(images, "generate") as gen:
+            gen.side_effect = quota_err
+            self.assertIsNone(media._generate_with_retry("p", "id=x", attempts=2))
+            # Only ONE call despite attempts=2 — the quota error short-
+            # circuited the retry.
+            self.assertEqual(gen.call_count, 1)
+        # Both the raw error AND the kind sidechannel are set so callers
+        # can either show the verbatim kie text or branch on `last_kie_error_kind`.
+        self.assertIn("code': 433", media.last_kie_error())
+        self.assertEqual(media.last_kie_error_kind(), "quota")
+
+    def test_quota_kind_drives_user_friendly_msg(self):
+        """`_kie_failed_msg` rewrites the event's user-facing text when
+        the upstream failure was a 433 cap, so the admin sees a quota
+        notice instead of the generic "returned no URL after retries"
+        that previously made the failure look transient.
+        """
+        quota_err = RuntimeError(
+            "kie createTask failed: {'code': 433, 'msg': 'exceeded the daily limit'}"
+        )
+        with mock.patch.object(images, "generate", side_effect=quota_err):
+            media._generate_with_retry("p", "id=x")
+        self.assertEqual(media.last_kie_error_kind(), "quota")
+        msg = media._kie_failed_msg("Portrait i2i generation")
+        self.assertIn("kie.ai daily points cap", msg)
+        self.assertIn("Portrait i2i generation", msg)
+
+    def test_generic_kind_keeps_legacy_msg(self):
+        """Non-quota failures keep the existing wording so existing log
+        searches / admin-eye patterns are not disturbed."""
+        with mock.patch.object(
+            images, "generate", side_effect=RuntimeError("connection reset")
+        ):
+            media._generate_with_retry("p", "id=x")
+        self.assertEqual(media.last_kie_error_kind(), "generic")
+        self.assertEqual(
+            media._kie_failed_msg("Portrait i2i generation"),
+            "Portrait i2i generation returned no URL after retries",
+        )
+
+    def test_quota_kind_resets_on_success(self):
+        """A successful call must clear `kind` along with `msg`, so a
+        later unrelated failure doesn't read as quota by mistake."""
+        with mock.patch.object(
+            images,
+            "generate",
+            side_effect=RuntimeError(
+                "kie createTask failed: {'code': 433, 'msg': 'exceeded the daily limit'}"
+            ),
+        ):
+            media._generate_with_retry("p", "id=x")
+        self.assertEqual(media.last_kie_error_kind(), "quota")
+
+        with mock.patch.object(images, "generate", return_value="https://kie/x.png"):
+            media._generate_with_retry("p", "id=x")
+        self.assertIsNone(media.last_kie_error())
+        self.assertIsNone(media.last_kie_error_kind())
+
 
 class StoryCostCentsTests(unittest.TestCase):
     def test_google_chirp_default_stack(self):
