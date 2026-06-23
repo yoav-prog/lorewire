@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
+  isPublishedStory,
   type Story,
 } from "@/lib/stories";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
@@ -30,6 +31,7 @@ import {
   useHomepagePolls,
   useStoryPoll,
   type HomepageInitial,
+  type MergedCatalog,
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
@@ -1384,11 +1386,22 @@ function GridPage({
   );
 }
 
-function SearchPage({ onOpen, query }: { onOpen: OpenFn; query: string }) {
-  const res = STORIES.filter((s) => (s.title + s.cat).toLowerCase().includes(query.toLowerCase()));
+// Browse / Search list only stories the pipeline has actually produced
+// real content for (hero, short render, narration, or article body).
+// The bare STORIES catalog includes 16 sample placeholders; without this
+// gate the public listings would advertise stories that open into empty
+// shells. The merged catalog (live DB rows + sample STORIES) is the
+// input so freshly-published shorts that haven't been baked back into
+// src/data/published.ts still surface.
+function SearchPage({ onOpen, query, catalog }: { onOpen: OpenFn; query: string; catalog: MergedCatalog }) {
+  const published = catalog.array.filter(isPublishedStory);
+  const q = query.trim().toLowerCase();
+  const res = q
+    ? published.filter((s) => (s.title + s.cat).toLowerCase().includes(q))
+    : published;
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
-      <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query ? `Results for "${query}"` : `Browse all · ${STORIES.length} stories`}</p>
+      <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query ? `Results for "${query}"` : `Browse all · ${published.length} stories`}</p>
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none mb-9">{query || "Search"}</h1>
       <div className="grid grid-cols-5 gap-5">
         {res.map((s) => <div key={s.id} style={{ height: 296 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={296} /></div>)}
@@ -1489,7 +1502,19 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} initialStoryId={wiresStoryId ?? undefined} />}
-      {view === "Browse" && <GridPage title="Browse" sub={`All true stories · ${STORIES.length} titles`} ids={STORIES.map((s) => s.id)} onOpen={open} resolveStory={resolveStory} />}
+      {view === "Browse" && (() => {
+        // Browse advertises the public catalog of real stories. The bare
+        // STORIES array carries 16 sample placeholders the design was
+        // built against; only entries with actual produced content
+        // (videoUrl / heroImage / audioUrl / body) belong in the grid.
+        // Source is the merged catalog so freshly-published live rows
+        // surface even before src/data/published.ts is rebaked.
+        const browseStories = catalog.array.filter(isPublishedStory);
+        const ids = browseStories.map((s) => s.id);
+        // eslint-disable-next-line no-console -- rule 14
+        console.info("[browse render]", { total_catalog: catalog.array.length, published_count: browseStories.length });
+        return <GridPage title="Browse" sub={`All true stories · ${ids.length} titles`} ids={ids} onOpen={open} resolveStory={resolveStory} />;
+      })()}
       {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} resolveStory={resolveStory} />}
       {view === "My List" && (
         <GridPage
@@ -1506,7 +1531,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           }
         />
       )}
-      {view === "Search" && <SearchPage onOpen={open} query={query} />}
+      {view === "Search" && <SearchPage onOpen={open} query={query} catalog={catalog} />}
 
       <SiteFooter />
 
