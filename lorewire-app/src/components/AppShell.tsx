@@ -34,6 +34,7 @@ import CookieConsent from "@/components/CookieConsent";
 import CrossDeviceNudge from "@/components/CrossDeviceNudge";
 import SignInChip from "@/components/SignInChip";
 import SiteFooter from "@/components/SiteFooter";
+import { CommentsTab } from "@/components/CommentsTab";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
@@ -1276,6 +1277,27 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
     setTab(initialTab || "Watch");
   }
 
+  // Comment count for the tab badge. Fetched lightly (count + kill-switch
+  // only, never the full thread) so the badge appears the moment the sheet
+  // opens. The full thread loads lazily when the user clicks the Comments
+  // tab — that's CommentsTab's job. Reset on story change so swapping
+  // sheets doesn't show the previous story's count for a frame.
+  const [commentInfo, setCommentInfo] = useState<{ count: number; enabled: boolean } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setCommentInfo(null);
+    fetch(`/api/comments/count?articleId=${encodeURIComponent(story.id)}`)
+      .then(async (r) => (r.ok ? ((await r.json()) as { count: number; enabled: boolean }) : null))
+      .then((info) => {
+        if (cancelled || !info) return;
+        setCommentInfo(info);
+      })
+      .catch(() => {
+        /* swallow — tab label falls back to "Comments" without a count */
+      });
+    return () => { cancelled = true; };
+  }, [story.id]);
+
   // One live media fetch per sheet open, mirroring DesktopShell.DetailModal so
   // mobile WATCH stays in sync with desktop. Without this, mobile keeps showing
   // the baked `story.videoUrl` and misses freshly rendered shorts.
@@ -1410,10 +1432,10 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
 
         <p className="font-body text-[14.5px] leading-relaxed text-ink/85 mt-4">{story.syn}</p>
 
-        <div className="flex gap-6 mt-6 border-b border-line">
-          {["Watch", "Read", "Read-along"].map((t) => (
-            <button key={t} onClick={() => setTab(t)} className="relative pb-2.5 font-display font-bold uppercase tracking-tight text-[14px] transition" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
-              {t}
+        <div className="flex gap-6 mt-6 border-b border-line overflow-x-auto noscroll">
+          {["Watch", "Read", "Read-along", "Comments"].map((t) => (
+            <button key={t} onClick={() => setTab(t)} className="relative pb-2.5 font-display font-bold uppercase tracking-tight text-[14px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
+              {t === "Comments" && commentInfo ? `${t} (${commentInfo.count})` : t}
               {tab === t && <span className="absolute left-0 right-0 -bottom-px h-[2.5px] bg-accent rounded-full"></span>}
             </button>
           ))}
@@ -1434,6 +1456,11 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
           {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
           {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
+          {tab === "Comments" && (
+            <div className="px-4">
+              <CommentsTab storyId={story.id} signedIn={false} />
+            </div>
+          )}
         </div>
 
         {/* End-of-content "Cast your verdict" pill. Same reasoning as the

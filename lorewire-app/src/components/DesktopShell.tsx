@@ -19,6 +19,7 @@ import {
 } from "@/app/actions";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
+import { CommentsTab } from "@/components/CommentsTab";
 import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
@@ -1027,6 +1028,28 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Comment count for the tab badge. Light fetch (count + kill-switch only)
+  // so the "COMMENTS (N)" tab label shows the count the moment the modal
+  // opens, without paying the full thread fetch. The thread itself loads
+  // lazily inside CommentsTab when the user clicks the tab. Reset on
+  // story change so swapping stories doesn't briefly show the previous
+  // count.
+  const [commentInfo, setCommentInfo] = useState<{ count: number; enabled: boolean } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setCommentInfo(null);
+    fetch(`/api/comments/count?articleId=${encodeURIComponent(story.id)}`)
+      .then(async (r) => (r.ok ? ((await r.json()) as { count: number; enabled: boolean }) : null))
+      .then((info) => {
+        if (cancelled || !info) return;
+        setCommentInfo(info);
+      })
+      .catch(() => {
+        /* swallow — tab falls back to "Comments" without a count */
+      });
+    return () => { cancelled = true; };
+  }, [story.id]);
+
   // One live fetch per modal open. Shared by WATCH, READ → Article, READ →
   // Gallery so opening the modal hits the DB once instead of three times
   // and every subview sees a consistent "is this the short?" answer.
@@ -1133,9 +1156,9 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               </div>
             )}
             <div className="flex gap-8 mt-8 border-b border-line">
-              {["Watch", "Read", "Read-along"].map((t) => (
-                <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-display font-bold uppercase tracking-tight text-[15px] transition" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
-                  {t}{tab === t && <span className="absolute left-0 right-0 -bottom-px h-[3px] bg-accent rounded-full"></span>}
+              {["Watch", "Read", "Read-along", "Comments"].map((t) => (
+                <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-display font-bold uppercase tracking-tight text-[15px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
+                  {t === "Comments" && commentInfo ? `${t} (${commentInfo.count})` : t}{tab === t && <span className="absolute left-0 right-0 -bottom-px h-[3px] bg-accent rounded-full"></span>}
                 </button>
               ))}
             </div>
@@ -1156,6 +1179,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
+              {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={false} />}
             </div>
             {/* End-of-content "Cast your verdict" pill. Same reasoning as
                 the top CTA — modal-level so every tab gets it, and
