@@ -252,27 +252,49 @@ def parse_ideas_csv(path: Path | str) -> tuple[list[IdeaRow], list[str]]:
     with _io.StringIO(raw, newline="") as f:
         reader = csv.DictReader(f)
         headers = reader.fieldnames or []
-        missing = [h for h in EXPECTED_HEADERS if h not in headers]
+        # Header matching is case-insensitive, whitespace-tolerant, and
+        # forgives a known typo ("Done Aleady?" → "Done Already?") that's
+        # baked into Yoav's actual Sheet. We build a map from canonical
+        # header → the real header string in this file, then read every
+        # row through that map so the rest of the parser stays clean.
+        header_alias = {
+            "done aleady?": "Done Already?",  # missing 'r' in the sheet
+        }
+
+        def _normalize(h: str) -> str:
+            return header_alias.get(h.strip().lower(), h.strip()).lower()
+
+        actual_by_canonical: dict[str, str] = {}
+        for h in headers:
+            canonical = _normalize(h or "")
+            for expected in EXPECTED_HEADERS:
+                if canonical == expected.lower():
+                    actual_by_canonical[expected] = h
+                    break
+        missing = [h for h in EXPECTED_HEADERS if h not in actual_by_canonical]
         if missing:
             raise ValueError(
                 f"IdeasDB CSV is missing required headers: {missing}. "
                 f"Got: {headers}"
             )
 
+        def _cell(raw_row: dict, expected: str) -> str:
+            return raw_row.get(actual_by_canonical[expected], "")
+
         for line_no, raw_row in enumerate(reader, start=2):  # +1 hdr, +1 1-idx
-            type_ = _norm_text(raw_row.get("Type", ""))
+            type_ = _norm_text(_cell(raw_row, "Type"))
             if not type_:
                 warnings.append(f"line {line_no}: blank Type, treated as 'Story'")
                 type_ = "Story"
-            headline = _norm_text(raw_row.get("Headline", ""))
+            headline = _norm_text(_cell(raw_row, "Headline"))
             if not headline:
                 warnings.append(f"line {line_no}: blank Headline; skipped")
                 continue
-            category = _norm_text(raw_row.get("Category", ""))
-            summary = _norm_text(raw_row.get("Summary", ""))
-            source_raw = _norm_text(raw_row.get("Source", ""))
+            category = _norm_text(_cell(raw_row, "Category"))
+            summary = _norm_text(_cell(raw_row, "Summary"))
+            source_raw = _norm_text(_cell(raw_row, "Source"))
             source_tokens = _parse_source_tokens(source_raw)
-            raw_strength = _norm_text(raw_row.get("Strength", ""))
+            raw_strength = _norm_text(_cell(raw_row, "Strength"))
             strength = _norm_strength(raw_strength)
             if not raw_strength:
                 warnings.append(
@@ -285,7 +307,7 @@ def parse_ideas_csv(path: Path | str) -> tuple[list[IdeaRow], list[str]]:
                     f"line {line_no}: unrecognised Strength {raw_strength!r}, "
                     "treated as 'medium'"
                 )
-            done = _norm_done(raw_row.get("Done Already?"))
+            done = _norm_done(_cell(raw_row, "Done Already?"))
             fingerprint = normalize_fingerprint(headline, category)
 
             rows.append(IdeaRow(
@@ -399,9 +421,23 @@ def _classify_match(
     ir: IdeaRow, seed: dict, secondary_flips: list[str]
 ) -> RowDiff:
     """Compute the diff verdict for an idea row that matched an existing
-    seed. Handles the four merge-contract cases (strength change, status
-    flip from Done, headline edit triggering re-expansion, status conflict
-    on used/processing)."""
+    seed.
+
+    Merge contract (post Yoav's 2026-06-23 clarification): priority is a
+    first-class editorial signal that travels with every matched row,
+    regardless of Done state. So ideas-owned columns (strength, category,
+    headline, source_hint, fingerprint) always update on match. Status
+    transitions layer on top:
+
+      - Done=Yes + seed.status in {imported}    → also flip status='skipped'
+      - Done=Yes + seed.status in {used, processing, skipped} → status untouched,
+            warning surfaced; priority still applies (the operator can filter
+            by Strong/Medium in the admin even on already-shipped rows).
+      - Done=No  + seed.status == 'skipped'     → restore status='imported'
+            (reversibility — the IdeasDB sheet can un-mark a row by clearing
+            its Done cell).
+      - Done=No  + any other status             → status untouched.
+    """
     diff = RowDiff(
         reddit_id=seed["reddit_id"],
         action="unchanged",
@@ -412,34 +448,10 @@ def _classify_match(
 
     before: dict[str, Any] = {}
     after: dict[str, Any] = {}
-    new_status = seed.get("status")
 
-    # ---- Done=Yes flipped on (the seed should be 'skipped'). --------------
-    if ir.done:
-        if seed.get("status") in ("used", "processing"):
-            diff.warnings.append(
-                f"Done=Yes but seed.status={seed.get('status')}; no-op"
-            )
-            diff.action = "skipped_done"
-            return diff
-        if seed.get("status") == "skipped":
-            # Already skipped — no change needed.
-            diff.action = "unchanged"
-            return diff
-        before["status"] = seed.get("status")
-        after["status"] = "skipped"
-        diff.before, diff.after = before, after
-        diff.action = "status_changed"
-        return diff
-
-    # ---- Done=No: full merge. ---------------------------------------------
-    # Step A: if seed was 'skipped' (Done flip-off case), restore to imported.
-    if seed.get("status") == "skipped":
-        before["status"] = "skipped"
-        after["status"] = "imported"
-        new_status = "imported"
-
-    # Step B: ideas-owned column updates.
+    # Step A — ideas-owned column updates. Apply unconditionally so the
+    # priority badge is filterable in the admin for every matched seed,
+    # including already-shipped ones (Yoav's explicit ask 2026-06-23).
     for col in ("strength", "category", "headline", "source_hint", "fingerprint"):
         old = seed.get(col)
         new = (
@@ -453,7 +465,30 @@ def _classify_match(
             before[col] = old
             after[col] = new
 
-    # Step C: headline edit → re-expansion trigger. Only fires on
+    # Step B — status transition based on Done. Skip-flip is the only
+    # destructive move so we guard it carefully; un-skip is symmetric to
+    # keep the sheet round-trippable.
+    if ir.done:
+        if seed.get("status") in ("used", "processing", "skipped"):
+            # Can't skip an in-flight or shipped row, but the strength
+            # update above still landed. Surface the warning so the
+            # operator knows the status didn't change.
+            diff.warnings.append(
+                f"Done=Yes but seed.status={seed.get('status')}; status "
+                "untouched (priority still applied)"
+            )
+        else:
+            before["status"] = seed.get("status")
+            after["status"] = "skipped"
+    else:
+        if seed.get("status") == "skipped":
+            # Done flip-off: restore to imported so the worker can pick
+            # it up again. Same defensive guard as above — never touch
+            # used/processing/imported status here.
+            before["status"] = "skipped"
+            after["status"] = "imported"
+
+    # Step C — headline edit → re-expansion trigger. Only fires on
     # idea-only seeds (subreddit='curated') because clobbering a real
     # reddit_source.full_text would lose data we can't regenerate. The
     # 0.30 ratio threshold catches "rewrote the angle" without firing
@@ -748,45 +783,64 @@ def _serialize_diff(summary: ImportSummary) -> str | None:
         "vanished_ids": summary.vanished_ids,
     }
     blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    if len(blob) > 1_000_000:
+    # 25 MB cap — comfortably fits 2k+ rows even with verbose warnings and
+    # leaves headroom for an angry sheet edit that touches every row. The
+    # original 1 MB cap blew on the first real import (1,695 rows landed
+    # at 4 MB+ of compact JSON). Postgres TEXT and SQLite TEXT both handle
+    # this size cleanly.
+    if len(blob) > 25_000_000:
         summary.notes.append(
-            f"diff_json truncated from {len(blob)} chars to first 1MB"
+            f"diff_json truncated from {len(blob)} chars to first 25MB"
         )
-        return blob[:1_000_000]
+        return blob[:25_000_000]
     return blob
 
 
 # ---------- CLI ---------------------------------------------------------------
 
+def _safe_print(line: str) -> None:
+    """print() that survives a non-UTF-8 Windows console (cp1255 for a
+    Hebrew locale). The CSV carries em-dashes, smart quotes, and the odd
+    Hebrew glyph in warning text; piping that through print() on a
+    Windows console raised UnicodeEncodeError mid-summary on the first
+    real import. Encoding via sys.stdout's encoding with errors='replace'
+    keeps the run going and renders unmappable chars as `?`."""
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        sys.stdout.write(line.encode(enc, errors="replace").decode(enc) + "\n")
+
+
 def _print_summary(summary: ImportSummary, *, dry_run: bool) -> None:
     """Human-readable summary for the CLI. Always prints, regardless of
     --apply. Counters first, then warnings, then vanished IDs."""
     label = "DRY-RUN" if dry_run else "APPLIED"
-    print(f"=== IdeasDB import {label} (run_id={summary.run_id}) ===")
-    print(f"  total rows parsed     : {summary.rows_total}")
-    print(f"  skipped (Type=List)   : {summary.rows_skipped_list}")
-    print(f"  skipped (Done=Yes)    : {summary.rows_skipped_done}")
-    print(f"  added (new ideas)     : {summary.rows_added}")
-    print(f"  updated               : {summary.rows_updated}")
-    print(f"  strength-only flips   : {summary.rows_strength_only}")
-    print(f"  status changes        : {summary.rows_status_changed}")
-    print(f"  unchanged             : {summary.rows_unchanged}")
-    print(f"  rows with warnings    : {summary.rows_warned}")
-    print(f"  seeds vanished from sheet: {summary.seeds_vanished}")
+    _safe_print(f"=== IdeasDB import {label} (run_id={summary.run_id}) ===")
+    _safe_print(f"  total rows parsed     : {summary.rows_total}")
+    _safe_print(f"  skipped (Type=List)   : {summary.rows_skipped_list}")
+    _safe_print(f"  skipped (Done=Yes)    : {summary.rows_skipped_done}")
+    _safe_print(f"  added (new ideas)     : {summary.rows_added}")
+    _safe_print(f"  updated               : {summary.rows_updated}")
+    _safe_print(f"  strength-only flips   : {summary.rows_strength_only}")
+    _safe_print(f"  status changes        : {summary.rows_status_changed}")
+    _safe_print(f"  unchanged             : {summary.rows_unchanged}")
+    _safe_print(f"  rows with warnings    : {summary.rows_warned}")
+    _safe_print(f"  seeds vanished from sheet: {summary.seeds_vanished}")
     if summary.seeds_vanished and summary.vanished_ids:
         sample = ", ".join(summary.vanished_ids[:5])
         more = "" if summary.seeds_vanished <= 5 else f", +{summary.seeds_vanished - 5} more"
-        print(f"    vanished sample        : {sample}{more}")
+        _safe_print(f"    vanished sample        : {sample}{more}")
     warn_diffs = [d for d in summary.diffs if d.warnings]
     if warn_diffs:
-        print(f"  warnings (first 10):")
+        _safe_print(f"  warnings (first 10):")
         for d in warn_diffs[:10]:
             for w in d.warnings:
-                print(f"    line {d.line_no} reddit_id={d.reddit_id}: {w}")
+                _safe_print(f"    line {d.line_no} reddit_id={d.reddit_id}: {w}")
     if summary.notes:
-        print(f"  notes:")
+        _safe_print(f"  notes:")
         for n in summary.notes:
-            print(f"    {n}")
+            _safe_print(f"    {n}")
 
 
 def main(argv: list[str] | None = None) -> int:

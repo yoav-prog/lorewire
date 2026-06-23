@@ -296,17 +296,27 @@ class DiffTests(_IsolatedDB):
         self.assertEqual(summary.rows_status_changed, 1)
         self.assertEqual(summary.diffs[0].after["status"], "skipped")
 
-    def test_done_yes_no_op_on_used_seed(self):
+    def test_done_yes_on_used_seed_still_applies_priority(self):
+        # Per Yoav's 2026-06-23 clarification: priority is editorial signal
+        # and travels with the row regardless of Done state. So Done=Yes on
+        # a used seed leaves status='used' (can't un-ship) but still flips
+        # strength so the priority badge is filterable in the admin.
         _seed_reddit(self.store, reddit_id="abc123", status="used")
         p = self._write_one(Headline="Match", Source="abc123",
                             Strength="Strong", **{"Done Already?": "Yes"})
         rows, _ = self.ideas.parse_ideas_csv(p)
         summary = self.ideas.compute_diff(rows, str(p))
-        self.assertEqual(summary.rows_skipped_done, 1)
+        # Status untouched, but strength + headline + category land.
         self.assertEqual(summary.rows_status_changed, 0)
-        # The seed's status stays 'used'.
-        self.assertEqual(summary.diffs[0].action, "skipped_done")
-        self.assertTrue(summary.diffs[0].warnings)
+        self.assertEqual(summary.rows_updated, 1)
+        diff = summary.diffs[0]
+        self.assertEqual(diff.action, "updated")
+        self.assertEqual(diff.after["strength"], "strong")
+        self.assertNotIn("status", diff.after)
+        # Warning surfaces so the operator can see the status stalemate.
+        self.assertTrue(any(
+            "Done=Yes but seed.status=used" in w for w in diff.warnings
+        ))
 
     def test_done_yes_then_no_restores_imported(self):
         _seed_reddit(self.store, reddit_id="abc123", status="imported")
