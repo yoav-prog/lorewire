@@ -330,6 +330,51 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_sub_len  ON reddit_source(subreddit, length_chars)",
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_comments ON reddit_source(comments)",
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_date     ON reddit_source(date_written)",
+    # 2026-06-23 IdeasDB priority import (see
+    # _plans/2026-06-23-ideasdb-priority-import.md).
+    # Curated story ideas from Yoav's IdeasDB sheet are imported into the
+    # same reddit_source pool — matched rows get a strength flip, unmatched
+    # rows insert as idea-only seeds with synthetic reddit_id (idea_<sha>).
+    # `strength` drives queue ordering: claim_next_story_job JOINs and
+    # ORDERs by strength DESC (no denormalization onto story_jobs — the
+    # join cost is zero at ~1 claim/min, the stale-write bug is real).
+    # `needs_expansion=1` tells the worker to run expand_seed_to_post
+    # before the existing stages (idea-only seeds start with full_text='').
+    # `fingerprint` is the secondary match key for re-imports when Source
+    # is missing or non-reddit, so light headline edits don't fork seeds.
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS strength        TEXT NOT NULL DEFAULT 'none'",
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS category        TEXT",
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS headline        TEXT",
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS source_hint     TEXT",
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS needs_expansion INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS fingerprint     TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_source_strength    ON reddit_source(strength)",
+    "CREATE INDEX IF NOT EXISTS idx_reddit_source_fingerprint ON reddit_source(fingerprint)",
+    # Audit log for every IdeasDB import run (dry-run included). One row
+    # per CLI invocation. `diff_json` holds the per-row diff envelope
+    # ({reddit_id, action, before, after, warnings} list) — compact JSON,
+    # truncated past ~1 MB with a notes warning. Lets us answer "what
+    # did this import actually change?" after the fact without rerunning.
+    """CREATE TABLE IF NOT EXISTS ideas_import_log (
+        run_id              TEXT PRIMARY KEY,
+        started_at          TEXT NOT NULL,
+        finished_at         TEXT,
+        csv_path            TEXT,
+        dry_run             INTEGER NOT NULL,
+        rows_total          INTEGER NOT NULL DEFAULT 0,
+        rows_skipped_list   INTEGER NOT NULL DEFAULT 0,
+        rows_skipped_done   INTEGER NOT NULL DEFAULT 0,
+        rows_added          INTEGER NOT NULL DEFAULT 0,
+        rows_updated        INTEGER NOT NULL DEFAULT 0,
+        rows_strength_only  INTEGER NOT NULL DEFAULT 0,
+        rows_status_changed INTEGER NOT NULL DEFAULT 0,
+        rows_unchanged      INTEGER NOT NULL DEFAULT 0,
+        rows_warned         INTEGER NOT NULL DEFAULT 0,
+        seeds_vanished      INTEGER NOT NULL DEFAULT 0,
+        notes               TEXT,
+        diff_json           TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_ideas_import_log_started ON ideas_import_log(started_at)",
     # 2026-06-14 Phase 3 of _plans/2026-06-14-reddit-db-sync.md.
     # Per-attempt queue: each "Process N" click in the admin inserts one row
     # per selected reddit_source, the local pipeline/story_jobs_worker.py
@@ -2527,13 +2572,29 @@ _REDDIT_SOURCE_COLUMNS = [
     "reddit_id", "subreddit", "date_written", "title", "full_text",
     "comments", "url", "summary", "length_chars", "status", "story_id",
     "notes", "first_synced", "last_synced",
+    # 2026-06-23 IdeasDB priority import (see
+    # _plans/2026-06-23-ideasdb-priority-import.md). Owned by the
+    # ideas importer (pipeline/ideas_import.py), NOT by the reddit
+    # CSV sync — that's why they're absent from _REDDIT_SOURCE_SYNC_REFRESH
+    # below. Reddit CSV re-syncs leave these alone.
+    "strength", "category", "headline", "source_hint",
+    "needs_expansion", "fingerprint",
 ]
 # Sync only refreshes content fields. Status/story_id/notes/first_synced
 # belong to the admin and to the row's first appearance — never overwritten.
+# IdeasDB-managed columns (strength, category, headline, source_hint,
+# needs_expansion, fingerprint) are also excluded — those are owned by
+# pipeline/ideas_import.py and would get clobbered by a reddit CSV re-sync.
 _REDDIT_SOURCE_SYNC_REFRESH = [
     "subreddit", "date_written", "title", "full_text", "comments",
     "url", "summary", "length_chars", "last_synced",
 ]
+# 2026-06-23 columns owned by the IdeasDB importer. update_ideas_fields()
+# accepts patches against this allow-list; nothing else can sneak through.
+_REDDIT_SOURCE_IDEAS_COLUMNS = frozenset({
+    "strength", "category", "headline", "source_hint",
+    "needs_expansion", "fingerprint",
+})
 # Allow-list for set_reddit_source_status patches. Mirrors the
 # set_segment_status pattern so a typo can't smuggle a write into the wrong
 # column.
@@ -2546,11 +2607,23 @@ def upsert_reddit_source(row: dict) -> str:
     refreshed (content actually changed), or 'unchanged' when the row was
     already identical.
 
-    `row` must carry every column in `_REDDIT_SOURCE_COLUMNS`; the parser
-    builds a complete dict so the caller never has to remember which fields
-    are mandatory.
+    `row` must carry every column in `_REDDIT_SOURCE_COLUMNS` EXCEPT the
+    IdeasDB-managed columns, which get default values here so legacy
+    callers (pipeline/reddit_db_sync.py from before 2026-06-23, tests that
+    build a row dict without ideas fields) don't need to know about them.
+    The defaults match "legacy reddit-sourced row" semantics: strength=none,
+    no headline/category/source_hint, needs_expansion=0, no fingerprint.
     """
     rid = row["reddit_id"]
+    # Defensive defaults: never raise from a missing IdeasDB-owned column.
+    # Mutating the input dict is acceptable here — every caller that cares
+    # about idempotency builds a fresh dict per upsert.
+    row.setdefault("strength", "none")
+    row.setdefault("category", None)
+    row.setdefault("headline", None)
+    row.setdefault("source_hint", None)
+    row.setdefault("needs_expansion", 0)
+    row.setdefault("fingerprint", None)
     existing = fetch_reddit_source(rid)
     if existing is None:
         cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
@@ -2786,6 +2859,138 @@ def set_reddit_source_status(
         c.execute(
             f"UPDATE reddit_source SET {assigns} WHERE reddit_id = :reddit_id",
             {**patch, "reddit_id": reddit_id},
+        )
+
+
+# 2026-06-23 IdeasDB priority import. Focused updater for the columns
+# the ideas importer owns. Mirrors set_reddit_source_status's
+# allow-list-and-patch shape so a typo can't smuggle a write into a
+# reddit-sync-managed column (title, full_text, etc.). See
+# _plans/2026-06-23-ideasdb-priority-import.md for the merge contract
+# this updater serves.
+def update_ideas_fields(reddit_id: str, **fields: Any) -> None:
+    """Patch the IdeasDB-owned columns on an existing reddit_source row.
+    Allowed: strength, category, headline, source_hint, needs_expansion,
+    fingerprint. Anything else raises — the reddit CSV sync owns the
+    rest of the row.
+    """
+    if not reddit_id:
+        raise ValueError("update_ideas_fields requires reddit_id")
+    if not fields:
+        return  # no-op when nothing to update
+    bad = set(fields) - _REDDIT_SOURCE_IDEAS_COLUMNS
+    if bad:
+        raise ValueError(
+            f"update_ideas_fields: unknown columns: {sorted(bad)}"
+        )
+    if _is_postgres():
+        assigns = ", ".join(f"{c} = %({c})s" for c in fields)
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE reddit_source SET {assigns} WHERE reddit_id = %(reddit_id)s",
+                    {**fields, "reddit_id": reddit_id},
+                )
+            conn.commit()
+        return
+    assigns = ", ".join(f"{c} = :{c}" for c in fields)
+    with _sqlite_conn() as c:
+        c.execute(
+            f"UPDATE reddit_source SET {assigns} WHERE reddit_id = :reddit_id",
+            {**fields, "reddit_id": reddit_id},
+        )
+
+
+def list_ideas_touched_seeds() -> list[dict]:
+    """Return every reddit_source row that the IdeasDB importer has touched
+    (i.e. `fingerprint IS NOT NULL`). The fingerprint is set unconditionally
+    by every ideas-importer write, including idea-only seeds whose `Source`
+    cell was blank (source_hint NULL), so it's the most reliable "touched"
+    signal.
+
+    Used by the vanish-detection pass: anything in this list that isn't in
+    the latest import is a seed that disappeared from the Sheet between
+    runs. Per the merge contract, vanish is a NO-OP — we just count and
+    surface it in the diff. The Sheet is a working document, so deletions
+    there don't authorize destructive action here.
+    """
+    cols = "reddit_id, headline, source_hint, fingerprint, strength, status"
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM reddit_source WHERE fingerprint IS NOT NULL"
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        return [
+            dict(r) for r in c.execute(
+                f"SELECT {cols} FROM reddit_source WHERE fingerprint IS NOT NULL"
+            ).fetchall()
+        ]
+
+
+def fetch_reddit_source_by_fingerprint(fingerprint: str) -> dict | None:
+    """Secondary match-key lookup for the IdeasDB importer. Returns the
+    first row whose `fingerprint` equals the argument, or None. Used when
+    a row's Source field doesn't carry a reddit_id we already have
+    (external_search_*, Supplemental Concept, multi-token gibberish);
+    the importer falls back to fingerprint match to avoid creating a
+    duplicate seed for a lightly-edited headline.
+
+    `fingerprint` collisions across truly distinct ideas are possible but
+    rare given headline-plus-category as the input. The dry-run diff
+    surfaces every fingerprint match so the operator can spot a wrong
+    merge before --apply.
+    """
+    if not fingerprint:
+        return None
+    cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM reddit_source WHERE fingerprint = %s LIMIT 1",
+                    (fingerprint,),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM reddit_source WHERE fingerprint = ? LIMIT 1",
+            (fingerprint,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def insert_ideas_import_log(log: dict) -> None:
+    """Persist one row to ideas_import_log. Called by both dry-run and
+    --apply paths so every CLI invocation leaves a forensic trail.
+    `log` carries all columns; the schema-side defaults handle anything
+    the caller forgot."""
+    cols = [
+        "run_id", "started_at", "finished_at", "csv_path", "dry_run",
+        "rows_total", "rows_skipped_list", "rows_skipped_done",
+        "rows_added", "rows_updated", "rows_strength_only",
+        "rows_status_changed", "rows_unchanged", "rows_warned",
+        "seeds_vanished", "notes", "diff_json",
+    ]
+    col_list = ", ".join(cols)
+    if _is_postgres():
+        placeholders = ", ".join(f"%({c})s" for c in cols)
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO ideas_import_log ({col_list}) VALUES ({placeholders})",
+                    log,
+                )
+            conn.commit()
+        return
+    placeholders = ", ".join(f":{c}" for c in cols)
+    with _sqlite_conn() as c:
+        c.execute(
+            f"INSERT INTO ideas_import_log ({col_list}) VALUES ({placeholders})",
+            log,
         )
 
 
@@ -3041,10 +3246,21 @@ def enqueue_story_job(
 
 
 def claim_next_story_job(text_only_only: bool = False) -> dict | None:
-    """Atomically claim the oldest queued story_job and flip it to
+    """Atomically claim the highest-priority queued story_job and flip it to
     'processing'. Returns the claimed row, or None when empty. Mirrors
     claim_next_render's FOR UPDATE SKIP LOCKED on Postgres and the
     conditional UPDATE on SQLite.
+
+    Ordering (2026-06-23, IdeasDB priority import — see
+    _plans/2026-06-23-ideasdb-priority-import.md):
+      1. reddit_source.strength DESC (strong > medium > none) — JOIN-based,
+         read live so a strength flip on the seed reorders the queue on the
+         next claim without re-enqueuing the job. No denormalization onto
+         story_jobs (the council called this out as a stale-write bug).
+      2. story_jobs.requested_at ASC — FIFO within each strength tier.
+
+    Postgres uses `FOR UPDATE OF sj SKIP LOCKED` so the lock applies only
+    to the story_jobs row (the LEFT JOIN to reddit_source is read-only).
 
     `text_only_only`: when True, only rows with `with_media=0` are
     eligible. Used by the Vercel cron drain whose runtime can't render
@@ -3057,18 +3273,30 @@ def claim_next_story_job(text_only_only: bool = False) -> dict | None:
     claim what it can't process; with_media=True rows wait patiently
     for the local worker.
     """
-    cols = ", ".join(_STORY_JOB_COLUMNS)
+    cols = ", ".join(f"sj.{c}" for c in _STORY_JOB_COLUMNS)
     now = _now_iso()
-    extra_where = " AND with_media = 0" if text_only_only else ""
+    extra_where = " AND sj.with_media = 0" if text_only_only else ""
+    # CASE-based weight is portable across SQLite (no FIELD()) and Postgres
+    # (no string-typed enum ordering). COALESCE because a job whose
+    # reddit_source row was deleted (shouldn't happen — there's no
+    # cascade — but defensive) still claims at the bottom tier.
+    strength_weight = (
+        "CASE COALESCE(rs.strength, 'none') "
+        "WHEN 'strong' THEN 2 WHEN 'medium' THEN 1 ELSE 0 END"
+    )
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
+                inner_extra = extra_where.replace("sj.", "sj2.")
                 cur.execute(
-                    f"UPDATE story_jobs SET status = 'processing', "
-                    "started_at = %s WHERE id = ("
-                    f"SELECT id FROM story_jobs WHERE status = 'queued'{extra_where} "
-                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
-                    f") RETURNING {cols}",
+                    "UPDATE story_jobs sj SET status = 'processing', "
+                    "started_at = %s WHERE sj.id = ("
+                    "SELECT sj2.id FROM story_jobs sj2 "
+                    "LEFT JOIN reddit_source rs ON rs.reddit_id = sj2.reddit_id "
+                    f"WHERE sj2.status = 'queued'{inner_extra} "
+                    f"ORDER BY {strength_weight} DESC, "
+                    "sj2.requested_at ASC LIMIT 1 FOR UPDATE OF sj2 SKIP LOCKED"
+                    f") RETURNING {', '.join(_STORY_JOB_COLUMNS)}",
                     (now,),
                 )
                 row = cur.fetchone()
@@ -3076,8 +3304,10 @@ def claim_next_story_job(text_only_only: bool = False) -> dict | None:
         return dict(row) if row else None
     with _sqlite_conn() as c:
         row = c.execute(
-            f"SELECT id FROM story_jobs WHERE status='queued'{extra_where} "
-            "ORDER BY requested_at ASC LIMIT 1"
+            "SELECT sj.id FROM story_jobs sj "
+            "LEFT JOIN reddit_source rs ON rs.reddit_id = sj.reddit_id "
+            f"WHERE sj.status='queued'{extra_where} "
+            f"ORDER BY {strength_weight} DESC, sj.requested_at ASC LIMIT 1"
         ).fetchone()
         if not row:
             return None
@@ -3088,8 +3318,9 @@ def claim_next_story_job(text_only_only: bool = False) -> dict | None:
         )
         if c.total_changes == 0:
             return None
+        cols_no_prefix = ", ".join(_STORY_JOB_COLUMNS)
         claimed = c.execute(
-            f"SELECT {cols} FROM story_jobs WHERE id=?", (row["id"],)
+            f"SELECT {cols_no_prefix} FROM story_jobs WHERE id=?", (row["id"],)
         ).fetchone()
         return dict(claimed) if claimed else None
 

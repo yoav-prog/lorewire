@@ -142,6 +142,101 @@ def make_idea(post: dict, dry_run: bool) -> dict:
     }
 
 
+# 2026-06-23 IdeasDB priority import (see
+# _plans/2026-06-23-ideasdb-priority-import.md).
+# Idea-only seeds (Yoav's IdeasDB rows with no matching reddit post)
+# arrive with `full_text=""` and `needs_expansion=1`. Before the existing
+# stages can run, we need a synthesized reddit-style narrative for the
+# `selftext` field. This stage takes (headline, summary, category,
+# strength) and asks the LLM to produce that narrative — a first-person
+# retelling that reads like a real reddit story so make_idea / research /
+# write_article downstream behave identically to a real-scrape path.
+#
+# Cost note (rule 8): one extra LLM call per idea-only seed. With the
+# active admin-selected model and ~600 output tokens per call, ballpark
+# per-call cost on a current cheap OpenAI-compatible model is on the
+# order of $0.001-$0.005 — but verify against the running admin
+# selection (`python -m pipeline.models get llm`) before draining a
+# 2000-seed backlog. The verify-with-20-samples discipline from the
+# council still applies: run a handful end-to-end, eyeball the output,
+# then commit to draining the rest.
+
+# Category hints that nudge the synthesized narrative toward the right
+# tone. Keys are lowercase, matched against the IdeasDB Category field.
+# Anything not in the map falls back to a neutral "personal story"
+# framing — better silent default than a wrong-tone forced match.
+_CATEGORY_TONE_HINTS: dict[str, str] = {
+    "medical shocking": "medical drama with stakes and a turning-point reveal",
+    "school/college drama": "social drama at school or college",
+    "entitled people": "an entitled-stranger confrontation that escalates",
+    "revenge stories": "a slow-burn revenge with a satisfying payoff",
+    "wedding money fights": "a wedding-budget conflict that exposes family lines",
+    "dating red flags": "a dating-disaster reveal partway through",
+    "wedding vendor nightmares": "a wedding-vendor disaster",
+    "wedding called off": "a wedding falling apart in real time",
+    "cheating & betrayal": "a betrayal discovery and the immediate fallout",
+    "toxic partner drama": "a toxic-relationship pattern that snaps",
+    "breakup revenge": "a breakup with a public-facing twist",
+    "family cut-off drama": "a family estrangement at a breaking point",
+    "adult child revenge": "an adult-child confronts a long-held parental wound",
+    "parents regret everything": "parental regret made explicit and irreversible",
+    "the family chose wrong": "a family rejection that backfires",
+    "ufo/uap": "an UFO / unexplained-sky-phenomenon account",
+}
+
+
+def expand_seed_to_post(
+    headline: str,
+    summary: str,
+    category: str | None,
+    strength: str,
+    dry_run: bool = False,
+) -> str:
+    """Synthesize a reddit-style `selftext` body for an idea-only seed.
+
+    Inputs are the IdeasDB columns. Output is plain-text first-person
+    narrative, ~250-500 words, suitable to flow into the existing
+    `reddit_source_to_post` → `make_idea` → `research` → `write_article`
+    pipeline. The caller persists this string into
+    `reddit_source.full_text` and flips `needs_expansion` to 0.
+
+    Returns a stub string under `dry_run` so end-to-end test paths can
+    exercise the worker without an LLM call.
+    """
+    if dry_run:
+        return (
+            f"[DRY RUN EXPANSION]\n\nHeadline: {headline}\n\n"
+            f"Summary: {summary}\n\nCategory: {category or 'n/a'}\n"
+            f"Strength: {strength}\n\n"
+            "(In a real run, the LLM expands this into a first-person "
+            "reddit-style narrative for the downstream stages.)"
+        )
+    from pipeline import llm
+
+    cat_key = (category or "").strip().lower()
+    tone_hint = _CATEGORY_TONE_HINTS.get(
+        cat_key, "a true-feeling personal story"
+    )
+    prompt = (
+        "You are simulating a Reddit user writing a true-story post in "
+        "first person. Take the headline and summary below and expand "
+        "them into a complete reddit-style selftext — the body of the "
+        f"post, not a reply. Aim for {tone_hint}. Target 300-500 words. "
+        "Open with the setup, walk the events in order, end with the "
+        "immediate aftermath. Do NOT include a title, do NOT moralize "
+        "or analyze, do NOT close with 'AITA?' or any meta-commentary. "
+        "Stay grounded in what the summary implies — invent only the "
+        "small connective tissue a real first-person teller would add "
+        "(specific dialogue, a small physical detail, an exact time of "
+        "day). Plain text only.\n\n"
+        f"HEADLINE: {headline}\n"
+        f"SUMMARY: {summary}\n"
+        f"CATEGORY: {category or 'general'}\n"
+    )
+    body = llm.chat(prompt, max_tokens=900)
+    return _clean_typography(body)
+
+
 def research(idea: dict, post: dict, dry_run: bool) -> dict:
     if dry_run:
         return {"rules": RESEARCH_RULES, "brief": post.get("selftext", "")[:400], "source": post.get("url", "")}

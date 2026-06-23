@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import logging
 import time
 import traceback
 from pathlib import Path
@@ -36,8 +37,14 @@ from typing import Callable
 
 from pipeline import llm, media, stages, store, video
 
+logger = logging.getLogger(__name__)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLL_SECONDS = 5
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 # Long enough that a normal media+video run (LLM + kie + ElevenLabs + Remotion
 # easily ~5-10 min on a healthy network) doesn't get reaped mid-flight, but
 # short enough to clean up a crashed worker within a useful window.
@@ -180,17 +187,81 @@ def reddit_source_to_post(row: dict) -> dict:
     real-scrape path and this queue-driven path go through identical
     downstream stages from make_idea onward — the only difference is the
     origin of the dict.
+
+    Dispatch for IdeasDB idea-only seeds (2026-06-23): when the row
+    arrives with `needs_expansion=1` (set by pipeline/ideas_import.py),
+    the seed has no real reddit body — we run stages.expand_seed_to_post
+    to synthesize a first-person narrative, persist it back into
+    reddit_source.full_text, flip needs_expansion to 0, then return the
+    post dict as usual. Idempotent: a re-run with needs_expansion=0
+    skips the LLM call and reads the cached body.
     """
+    full_text = row.get("full_text") or ""
+    if row.get("needs_expansion") == 1 and not full_text:
+        # Idea-only seed: synthesize the body once, persist, fall through
+        # into the normal path. We log at INFO so the cost shows up in
+        # the per-job timeline alongside research / write_article.
+        logger.info(
+            "[seeds-worker expand] reddit_id=%s headline=%r category=%r strength=%r",
+            row["reddit_id"], row.get("headline"), row.get("category"),
+            row.get("strength"),
+        )
+        full_text = stages.expand_seed_to_post(
+            headline=row.get("headline") or row.get("title") or "",
+            summary=row.get("summary") or "",
+            category=row.get("category"),
+            strength=row.get("strength") or "none",
+            dry_run=False,
+        )
+        # Persist the expanded body on the row in-DB so a downstream stage
+        # that re-reads the seed sees the synthesized text, and a future
+        # reaper-induced re-queue doesn't pay the LLM twice. The
+        # reddit-CSV importer is the only other writer of full_text, and
+        # idea-only seeds (subreddit='curated') are out of its scope, so
+        # this write is safe.
+        _persist_expanded_full_text(row["reddit_id"], full_text)
+        store.update_ideas_fields(row["reddit_id"], needs_expansion=0)
+        # Reflect the new state on the in-memory row so the post dict
+        # built below carries the expanded body and downstream stages
+        # don't see the empty placeholder.
+        row["full_text"] = full_text
+        row["needs_expansion"] = 0
     return {
         "id": row["reddit_id"],
         "category": _category_for(row["subreddit"]),
         "subreddit": row["subreddit"],
         "title": row["title"] or "",
-        "selftext": row["full_text"] or "",
+        "selftext": full_text,
         "score": 0,
         "num_comments": int(row.get("comments") or 0),
         "url": row.get("url") or "",
     }
+
+
+def _persist_expanded_full_text(reddit_id: str, full_text: str) -> None:
+    """Write the LLM-synthesized body back into reddit_source.full_text.
+    Lives next to reddit_source_to_post because it's the only caller and
+    the write is intentionally surgical: only `full_text` and
+    `last_synced` move. The IdeasDB-owned columns are written separately
+    via store.update_ideas_fields elsewhere in this stage."""
+    now = _now_iso()
+    if store._is_postgres():
+        with store._pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE reddit_source SET full_text = %s, "
+                    "last_synced = %s, length_chars = %s "
+                    "WHERE reddit_id = %s",
+                    (full_text, now, len(full_text), reddit_id),
+                )
+            conn.commit()
+        return
+    with store._sqlite_conn() as c:
+        c.execute(
+            "UPDATE reddit_source SET full_text = ?, last_synced = ?, "
+            "length_chars = ? WHERE reddit_id = ?",
+            (full_text, now, len(full_text), reddit_id),
+        )
 
 
 def _default_process(claimed_job: dict, reddit_row: dict) -> dict:

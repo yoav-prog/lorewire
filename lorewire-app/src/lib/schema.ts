@@ -388,6 +388,49 @@ export const REDDIT_SOURCE: Table = {
     { name: "notes", type: "TEXT" },
     { name: "first_synced", type: "TEXT" },
     { name: "last_synced", type: "TEXT" },
+    // 2026-06-23 IdeasDB priority import (see
+    // _plans/2026-06-23-ideasdb-priority-import.md). Mirror of the
+    // ALTER block in pipeline/store.py. `strength` drives queue
+    // ordering via JOIN in claim_next_story_job — no denormalization
+    // onto story_jobs. `needs_expansion=1` tells the worker to run
+    // expand_seed_to_post before the existing stages (idea-only seeds
+    // start with full_text=''). `fingerprint` is the re-import
+    // secondary match key when Source is missing or non-reddit.
+    { name: "strength", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "headline", type: "TEXT" },
+    { name: "source_hint", type: "TEXT" },
+    { name: "needs_expansion", type: "INTEGER" },
+    { name: "fingerprint", type: "TEXT" },
+  ],
+};
+
+// 2026-06-23 IdeasDB priority import (see
+// _plans/2026-06-23-ideasdb-priority-import.md). One row per CLI
+// invocation of scripts/import_ideas.py. `diff_json` carries the
+// per-row diff envelope; truncated past ~1 MB with a notes warning.
+// Lets us answer "what did this import actually change?" without
+// rerunning. Mirrors `ideas_import_log` in pipeline/store.py.
+export const IDEAS_IMPORT_LOG: Table = {
+  name: "ideas_import_log",
+  columns: [
+    { name: "run_id", type: "TEXT", pk: true },
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+    { name: "csv_path", type: "TEXT" },
+    { name: "dry_run", type: "INTEGER" },
+    { name: "rows_total", type: "INTEGER" },
+    { name: "rows_skipped_list", type: "INTEGER" },
+    { name: "rows_skipped_done", type: "INTEGER" },
+    { name: "rows_added", type: "INTEGER" },
+    { name: "rows_updated", type: "INTEGER" },
+    { name: "rows_strength_only", type: "INTEGER" },
+    { name: "rows_status_changed", type: "INTEGER" },
+    { name: "rows_unchanged", type: "INTEGER" },
+    { name: "rows_warned", type: "INTEGER" },
+    { name: "seeds_vanished", type: "INTEGER" },
+    { name: "notes", type: "TEXT" },
+    { name: "diff_json", type: "TEXT" },
   ],
 };
 
@@ -621,6 +664,7 @@ export const TABLES: Table[] = [
   ARTICLES,
   ARTICLE_REVISIONS,
   REDDIT_SOURCE,
+  IDEAS_IMPORT_LOG,
   STORY_JOBS,
   VOICE_RENDERS,
   HOMEPAGE_CURATION,

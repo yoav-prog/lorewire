@@ -23,6 +23,7 @@ import {
 import type {
   RedditSourceRow,
   RedditSourceStatus,
+  RedditSourceStrength,
 } from "@/lib/reddit-source";
 
 const STATUS_TONE: Record<RedditSourceStatus, string> = {
@@ -31,6 +32,23 @@ const STATUS_TONE: Record<RedditSourceStatus, string> = {
   processing: "border-accent/40 bg-accent/15 text-accent",
   used: "border-cat-ok/40 bg-cat-ok/10 text-cat-ok",
   skipped: "border-cat-entitled/40 bg-cat-entitled/10 text-cat-entitled",
+};
+
+// 2026-06-23 IdeasDB priority import (see
+// _plans/2026-06-23-ideasdb-priority-import.md). 'none' rows render no
+// badge — the legacy reddit pool would otherwise carry a row of muted
+// "None" chips that adds visual noise without telling the operator
+// anything new. Strong / Medium use the same warm-tone scale as
+// status='processing'/'queued' so the priority signal reads as
+// "this row matters" without inventing a new color identity.
+const STRENGTH_TONE: Record<Exclude<RedditSourceStrength, "none">, string> = {
+  strong: "border-accent/50 bg-accent/15 text-accent",
+  medium: "border-accent/30 bg-accent/5 text-accent/80",
+};
+
+const STRENGTH_LABEL: Record<Exclude<RedditSourceStrength, "none">, string> = {
+  strong: "Strong",
+  medium: "Medium",
 };
 
 export default function RedditSourceTable({
@@ -102,6 +120,7 @@ export default function RedditSourceTable({
               <Th className="text-right">Len</Th>
               <Th className="text-right">Comments</Th>
               <Th>Date</Th>
+              <Th>Priority</Th>
               <Th>Status</Th>
               <Th className="text-right">Source</Th>
             </tr>
@@ -135,6 +154,18 @@ export default function RedditSourceTable({
                     >
                       {r.title}
                     </Link>
+                    {/* When the IdeasDB importer set a curator's angle
+                        (headline) that differs from Reddit's original
+                        title, surface it on its own line so the operator
+                        can spot the editorial framing at a glance.
+                        Suppressed when they match (the common case for
+                        idea-only seeds, where title is duplicated from
+                        headline at insertion). */}
+                    {r.headline && r.headline !== r.title && (
+                      <span className="mt-0.5 block max-w-[420px] truncate text-[11px] text-accent/80">
+                        ↳ {r.headline}
+                      </span>
+                    )}
                     {r.summary && (
                       <span className="mt-0.5 block max-w-[420px] truncate font-mono text-[10px] text-muted">
                         {r.summary}
@@ -149,6 +180,12 @@ export default function RedditSourceTable({
                   </Td>
                   <Td className="whitespace-nowrap font-mono text-[11px] text-muted">
                     {formatDate(r.date_written)}
+                  </Td>
+                  <Td>
+                    <StrengthChip
+                      strength={r.strength}
+                      category={r.category}
+                    />
                   </Td>
                   <Td>
                     <StatusChip status={r.status} />
@@ -203,6 +240,37 @@ function StatusChip({ status }: { status: string }) {
       className={`inline-block rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${STATUS_TONE[safe]}`}
     >
       {status}
+    </span>
+  );
+}
+
+function StrengthChip({
+  strength,
+  category,
+}: {
+  strength: RedditSourceStrength;
+  category: string | null;
+}) {
+  // None rows render an em-dash, not a badge — strong / medium are the
+  // only states that carry signal. Showing "None" on every legacy reddit
+  // row would add visual noise without telling the operator anything.
+  if (strength === "none") {
+    return <span className="font-mono text-[10px] text-muted">—</span>;
+  }
+  const tone = STRENGTH_TONE[strength];
+  const label = STRENGTH_LABEL[strength];
+  return (
+    <span className="inline-flex flex-col items-start gap-0.5">
+      <span
+        className={`inline-block rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${tone}`}
+      >
+        {label}
+      </span>
+      {category && (
+        <span className="max-w-[140px] truncate font-mono text-[9px] text-muted">
+          {category}
+        </span>
+      )}
     </span>
   );
 }
