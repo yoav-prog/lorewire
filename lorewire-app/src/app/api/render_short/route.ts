@@ -219,8 +219,8 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   const story = await getStory(claimed.story_id);
   const segments = await resolveShortSegmentsSafe(story);
 
-  // Walk inputProps + segments and rewrite any persisted legacy GCS URLs
-  // onto MEDIA_PUBLIC_BASE before they cross out to Cloud Run. Cloud Run's
+  // Walk inputProps and rewrite any persisted legacy GCS URLs onto
+  // MEDIA_PUBLIC_BASE before they cross out to Cloud Run. Cloud Run's
   // Remotion render fetches every URL via HTTP; if a row's props blob still
   // carries pre-2026-06-22 `storage.googleapis.com` URLs and GCS public read
   // is off, every fetch 404s. The rewriter is inert when the base is unset
@@ -228,11 +228,24 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // captions, prose, and external assets pass through unchanged. Plan:
   // _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
   const propsRewrote = rewriteStoredMediaUrlsDeep(inputProps);
-  const segmentsRewrote = rewriteStoredMediaUrlsDeep(segments);
+  // Segments are deliberately NOT rewritten. Cloud Run downloads them via
+  // the authenticated GCS SDK (`video/server/render.ts:downloadSegment`,
+  // through `storage.bucket(bucket).file(key)`), so public-read state
+  // does not matter. Worse: `parseGcsSegmentUrl` on the Cloud Run side
+  // only accepts the legacy `storage.googleapis.com/<bucket>/<key>.mp4`
+  // shape and returns null for any other host. Rewriting to
+  // `media.lorewire.com/<key>` made every parse return null, which made
+  // `spliceWithSegments` log `reason: invalid-intro-url` and skip the
+  // splice entirely — that is the 2026-06-23 "intro and outro missing
+  // even after manual override" bug, traced to the consistency-rewrite
+  // added in 3855d5f. When the segments uploader eventually moves to R2,
+  // the durable fix is to extend `parseGcsSegmentUrl` to also recognise
+  // `MEDIA_PUBLIC_BASE/<key>` — until then, keep the legacy GCS shape
+  // intact end-to-end here.
   namespacedLog("rewrite", {
     render_id: claimed.id,
     props_rewrote: propsRewrote,
-    segments_rewrote: segmentsRewrote,
+    segments_rewrote: 0,
     intro_present: Boolean(segments.intro),
     outro_present: Boolean(segments.outro),
   });
