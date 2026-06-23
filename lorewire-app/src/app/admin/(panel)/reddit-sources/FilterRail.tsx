@@ -14,6 +14,7 @@ import { useMemo, useState } from "react";
 import type {
   RedditSourceOrderBy,
   RedditSourceStatus,
+  RedditSourceStrength,
 } from "@/lib/reddit-source";
 
 interface FilterRailProps {
@@ -27,10 +28,13 @@ interface FilterRailProps {
   };
   activeStatuses: RedditSourceStatus[];
   activeSubreddits: string[];
+  activeStrengths: RedditSourceStrength[];
   allSubreddits: string[];
   sort: RedditSourceOrderBy;
   validStatuses: ReadonlyArray<RedditSourceStatus>;
   statusLabel: Record<RedditSourceStatus, string>;
+  validStrengths: ReadonlyArray<RedditSourceStrength>;
+  strengthLabel: Record<RedditSourceStrength, string>;
   sortLabel: Record<RedditSourceOrderBy, string>;
 }
 
@@ -50,10 +54,13 @@ export default function FilterRail({
   searchParams,
   activeStatuses,
   activeSubreddits,
+  activeStrengths,
   allSubreddits,
   sort,
   validStatuses,
   statusLabel,
+  validStrengths,
+  strengthLabel,
   sortLabel,
 }: FilterRailProps) {
   return (
@@ -99,6 +106,44 @@ export default function FilterRail({
             );
           })}
         </div>
+      </fieldset>
+
+      {/* 2026-06-23 IdeasDB priority import (see
+          _plans/2026-06-23-ideasdb-priority-import.md). Strength rides on
+          reddit_source as a first-class signal so editorial priority is
+          filterable here, sortable via SORT_LABEL["strength DESC"] in
+          page.tsx, and respected by the worker queue (claim_next_story_job
+          ORDER BY strength weight DESC). Same auto-submit-on-click ergonomics
+          as Status. */}
+      <fieldset>
+        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
+          Priority
+        </legend>
+        <div className="grid grid-cols-3 gap-1">
+          {validStrengths.map((s) => {
+            const checked = activeStrengths.includes(s);
+            return (
+              <label
+                key={s}
+                className="flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors has-[input:checked]:border-accent has-[input:checked]:bg-surface2"
+              >
+                <input
+                  type="checkbox"
+                  name="strength"
+                  value={s}
+                  defaultChecked={checked}
+                  onChange={submitParentForm}
+                  className="accent-accent"
+                />
+                {strengthLabel[s]}
+              </label>
+            );
+          })}
+        </div>
+        <p className="mt-1 font-mono text-[9px] text-muted">
+          Set by the IdeasDB importer. Strong &gt; Medium &gt; None in the
+          worker queue.
+        </p>
       </fieldset>
 
       <SubredditFieldset

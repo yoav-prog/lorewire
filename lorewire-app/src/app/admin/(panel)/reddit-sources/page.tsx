@@ -17,6 +17,7 @@ import {
   type RedditSourceFilters,
   type RedditSourceOrderBy,
   type RedditSourceStatus,
+  type RedditSourceStrength,
 } from "@/lib/reddit-source";
 import {
   formatCents,
@@ -40,6 +41,7 @@ const STATUS_LABEL: Record<RedditSourceStatus, string> = {
 };
 
 const SORT_LABEL: Record<RedditSourceOrderBy, string> = {
+  "strength DESC": "Priority ↓",
   "comments DESC": "Comments ↓",
   "comments ASC": "Comments ↑",
   "length_chars DESC": "Length ↓",
@@ -49,10 +51,23 @@ const SORT_LABEL: Record<RedditSourceOrderBy, string> = {
   "subreddit ASC": "Subreddit A–Z",
 };
 
+// 2026-06-23 IdeasDB priority import. Mirror of the `strength` enum on
+// reddit_source. 'none' rows render without a badge in the table, so
+// listing it here is purely for the filter rail's "show only None"
+// option (rare, but useful to confirm what's NOT been curated).
+const STRENGTH_LABEL: Record<RedditSourceStrength, string> = {
+  strong: "Strong",
+  medium: "Medium",
+  none: "None",
+};
+
+const VALID_STRENGTHS: RedditSourceStrength[] = ["strong", "medium", "none"];
+
 interface SearchParams {
   q?: string;
   status?: string | string[];
   subreddits?: string | string[];
+  strength?: string | string[];
   length_min?: string;
   length_max?: string;
   comments_min?: string;
@@ -68,6 +83,15 @@ interface SearchParams {
   error?: string;
   // Phase 7 budget-cap flash.
   budget_cap?: string;
+}
+
+function parseStrengths(
+  v: string | string[] | undefined,
+): RedditSourceStrength[] {
+  const raw = toArray(v);
+  return raw.filter((s): s is RedditSourceStrength =>
+    (VALID_STRENGTHS as string[]).includes(s),
+  );
 }
 
 function toArray(v: string | string[] | undefined): string[] {
@@ -111,6 +135,7 @@ export default async function RedditSourcesPage({
 
   const statuses = parseStatuses(sp.status);
   const subreddits = toArray(sp.subreddits);
+  const strengths = parseStrengths(sp.strength);
   const sort = parseSort(sp.sort);
   const page = Math.max(intOrUndefined(sp.page) ?? 1, 1);
 
@@ -122,6 +147,7 @@ export default async function RedditSourcesPage({
   const filters: RedditSourceFilters = {
     status: effectiveStatuses,
     subreddits: subreddits.length > 0 ? subreddits : undefined,
+    strength: strengths.length > 0 ? strengths : undefined,
     length_min: intOrUndefined(sp.length_min),
     length_max: intOrUndefined(sp.length_max),
     comments_min: intOrUndefined(sp.comments_min),
@@ -173,10 +199,13 @@ export default async function RedditSourcesPage({
           searchParams={sp}
           activeStatuses={effectiveStatuses}
           activeSubreddits={subreddits}
+          activeStrengths={strengths}
           allSubreddits={allSubs}
           sort={sort}
           validStatuses={VALID_STATUSES}
           statusLabel={STATUS_LABEL}
+          validStrengths={VALID_STRENGTHS}
+          strengthLabel={STRENGTH_LABEL}
           sortLabel={SORT_LABEL}
         />
         <div className="space-y-3">
@@ -421,6 +450,7 @@ function buildPageHref(searchParams: SearchParams, page: number): string {
   append("q", searchParams.q);
   appendMany("status", searchParams.status);
   appendMany("subreddits", searchParams.subreddits);
+  appendMany("strength", searchParams.strength);
   append("length_min", searchParams.length_min);
   append("length_max", searchParams.length_max);
   append("comments_min", searchParams.comments_min);
