@@ -1248,7 +1248,7 @@ function FakeReadAlong() {
 }
 
 /* ----------------------------- TITLE SHEET ----------------------------- */
-function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
+function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"] }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the big white button under the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll the
@@ -1463,6 +1463,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
                 storyId={story.id}
                 signedIn={session !== null}
                 focusedCommentId={initialCommentId}
+                seed={seededModalComments}
               />
             </div>
           )}
@@ -1753,6 +1754,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             inList={list.includes(active.id)}
             toggleList={toggleList}
             session={initial.session}
+            seededModalComments={initial.seededModalComments}
           />
         ) : null;
       })()}

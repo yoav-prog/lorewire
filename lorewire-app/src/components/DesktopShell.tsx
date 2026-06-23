@@ -992,7 +992,7 @@ function DetailModalHero({ story }: { story: Story }) {
   );
 }
 
-function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
+function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"] }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the text Play button in the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll
@@ -1180,7 +1180,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
-              {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={session !== null} focusedCommentId={initialCommentId} />}
+              {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={session !== null} focusedCommentId={initialCommentId} seed={seededModalComments} />}
               <JumpToComments
                 count={commentInfo?.count ?? 0}
                 onJump={() => setTab("Comments")}
@@ -1516,7 +1516,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);
-        return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} /> : null;
+        return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} /> : null;
       })()}
     </div>
   );

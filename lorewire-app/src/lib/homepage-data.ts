@@ -36,6 +36,14 @@ import { readVoteToken } from "@/lib/poll-cookie";
 import { readUserSession } from "@/lib/user-session";
 import { resolveImpersonation } from "@/lib/impersonation";
 import { getUserById } from "@/lib/users";
+import { one } from "@/lib/db";
+import { commentsEnabledForArticle } from "@/lib/comments";
+import {
+  countPublishedComments,
+  loadCommentThread,
+  type CommentThreadPage,
+} from "@/lib/comments-read";
+import { readCommentToken } from "@/lib/comment-cookie";
 import type {
   HomepageCuration,
   HomepageCurationBehavior,
@@ -249,6 +257,13 @@ export interface HomepageInitial {
    *  the header chip + nudge can render correct state on first paint
    *  without a client-side fetch. */
   session: PublicSession | null;
+  /** When the homepage URL carried `?story=X`, this is the pre-fetched
+   *  Comments thread for that story (resolved through articles.story_id
+   *  if there's a linked published article). The shells thread it down
+   *  to CommentsTab, which skips its client-side fetch when the seed
+   *  matches the open story id. Null when no `?story=` was on the
+   *  request, or when the lookup failed. */
+  seededModalComments: SeededModalComments | null;
 }
 
 const EMPTY_POLL_RAILS_RESULT: HomepagePollRailsResult = {
@@ -262,7 +277,7 @@ const DEFAULT_BEHAVIOR: HomepageCurationBehavior = {
   heroRequired: false,
 };
 
-type SsrSource = "curation" | "catalog" | "polls" | "session";
+type SsrSource = "curation" | "catalog" | "polls" | "session" | "seededModalComments";
 
 async function safeLoad<T>(
   source: SsrSource,
@@ -307,9 +322,82 @@ async function loadSession(): Promise<PublicSession | null> {
   return { userId: data.userId, email: data.email };
 }
 
-export async function loadHomepageSSRData(): Promise<HomepageInitial> {
+// ─── seeded modal comments (deep-link SSR) ─────────────────────────────────
+//
+// When the homepage URL carries `?story=X` (a permalink shared from the
+// Comments tab's "Link" button), pre-fetch the comments thread + count
+// + kill-switch + resolved articleId on the server so the modal opens
+// with comments ALREADY in the DOM — no "Loading comments…" flash on
+// the URL the recipient just clicked. Falls through cleanly to null
+// when story is missing or the resolve / fetch errors.
+
+export interface SeededModalComments {
+  /** The original story id from the URL — used to match the seed to
+   *  the open modal client-side (don't apply this seed to a different
+   *  story even if both happened to load). */
+  storyId: string;
+  /** Resolved comments article_id (== article.id when articles.story_id
+   *  links to storyId; == storyId otherwise). */
+  articleId: string;
+  count: number;
+  enabled: boolean;
+  thread: CommentThreadPage;
+}
+
+async function resolveCommentArticleIdForStory(storyId: string): Promise<string> {
+  const row = await one<{ id: string }>(
+    "SELECT id FROM articles WHERE story_id = ? AND status = 'published' LIMIT 1",
+    [storyId],
+  );
+  return row?.id ?? storyId;
+}
+
+export async function loadSeededModalComments(
+  storyId: string,
+): Promise<SeededModalComments | null> {
+  if (!storyId) return null;
+  try {
+    const session = await readUserSession();
+    const cookieToken = await readCommentToken();
+    const articleId = await resolveCommentArticleIdForStory(storyId);
+    const [thread, count, enabled] = await Promise.all([
+      loadCommentThread({
+        articleId,
+        sort: "newest",
+        viewerUserId: session?.userId ?? null,
+        viewerCookieToken: cookieToken,
+      }),
+      countPublishedComments(articleId),
+      commentsEnabledForArticle(articleId),
+    ]);
+    console.info("[homepage seeded modal comments]", {
+      story_id: storyId,
+      resolved_article_id: articleId,
+      unified: articleId !== storyId,
+      count,
+      enabled,
+      page_nodes: thread.nodes.length,
+    });
+    return { storyId, articleId, count, enabled, thread };
+  } catch (err) {
+    console.warn("[homepage seeded modal comments fail]", {
+      story_id: storyId,
+      err: String(err),
+    });
+    return null;
+  }
+}
+
+export async function loadHomepageSSRData(opts?: {
+  /** When the request carried `?story=X`, pass it here so the SSR fetch
+   *  also pre-loads the Comments thread for that story (deep-link
+   *  permalink path). Omit for a normal homepage visit — the seed
+   *  comes back null and the modal Comments tab fetches client-side
+   *  when opened, same as before. */
+  seededModalStoryId?: string;
+}): Promise<HomepageInitial> {
   const t0 = Date.now();
-  const [curationResult, catalogResult, pollsResult, session] =
+  const [curationResult, catalogResult, pollsResult, session, seededModalComments] =
     await Promise.all([
       safeLoad<HomepageCurationResult | null>(
         "curation",
@@ -327,6 +415,13 @@ export async function loadHomepageSSRData(): Promise<HomepageInitial> {
         EMPTY_POLL_RAILS_RESULT,
       ),
       safeLoad<PublicSession | null>("session", loadSession, null),
+      opts?.seededModalStoryId
+        ? safeLoad<SeededModalComments | null>(
+            "seededModalComments",
+            () => loadSeededModalComments(opts.seededModalStoryId!),
+            null,
+          )
+        : Promise.resolve(null),
     ]);
   const initial: HomepageInitial = {
     curation: curationResult?.curation ?? null,
@@ -335,6 +430,7 @@ export async function loadHomepageSSRData(): Promise<HomepageInitial> {
     liveRows: catalogResult.stories,
     pollRails: pollsResult,
     session,
+    seededModalComments,
   };
   console.info("[lorewire homepage ssr]", {
     curation_count: initial.rawCurationCount,

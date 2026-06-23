@@ -38,6 +38,20 @@ interface CommentsTabProps {
    *  through cleanly when the comment isn't on the first page (the
    *  user can load more to find it). */
   focusedCommentId?: string;
+  /** SSR pre-fetched thread + count + enabled + resolved articleId for
+   *  this storyId. Set by the homepage Page when the request URL carried
+   *  `?story=<this id>`. When present, the tab paints with the seeded
+   *  data on first render and skips its own fetch (no "Loading…"
+   *  flash for permalink shares). The storyId check guards against
+   *  applying a seed from a previous deep-link to a different open
+   *  story — the seed is only used when storyIds match. */
+  seed?: {
+    storyId: string;
+    articleId: string;
+    count: number;
+    enabled: boolean;
+    thread: CommentThreadPage;
+  } | null;
 }
 
 interface InitResponse {
@@ -49,12 +63,39 @@ interface InitResponse {
   enabled: boolean;
 }
 
-export function CommentsTab({ storyId, signedIn, focusedCommentId }: CommentsTabProps) {
-  const [thread, setThread] = useState<CommentThreadPage | null>(null);
-  const [meta, setMeta] = useState<InitResponse | null>(null);
+export function CommentsTab({
+  storyId,
+  signedIn,
+  focusedCommentId,
+  seed,
+}: CommentsTabProps) {
+  // Apply the SSR seed only when it matches the open story id. The seed
+  // is captured at request time from `?story=X` so it ALWAYS matches
+  // first render of a deep-link visit, but a subsequent in-app modal
+  // open of a DIFFERENT story would still receive the same seed via
+  // prop — guard so we don't paint the wrong story's comments.
+  const seedApplies = seed != null && seed.storyId === storyId;
+  const [thread, setThread] = useState<CommentThreadPage | null>(
+    seedApplies ? seed.thread : null,
+  );
+  const [meta, setMeta] = useState<InitResponse | null>(
+    seedApplies
+      ? {
+          articleId: seed.articleId,
+          count: seed.count,
+          enabled: seed.enabled,
+        }
+      : null,
+  );
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
+    // Skip the client fetch when the SSR seed already covers this story.
+    // The seed is sized to the first page (limit=20 in loadCommentThread,
+    // same as the client's default), so sorting / load-more from the
+    // user still work normally — they go through CommentsSection's own
+    // /api/comments fetches with the resolved articleId in scope.
+    if (seedApplies) return;
     let cancelled = false;
     setThread(null);
     setMeta(null);
@@ -102,7 +143,7 @@ export function CommentsTab({ storyId, signedIn, focusedCommentId }: CommentsTab
     return () => {
       cancelled = true;
     };
-  }, [storyId]);
+  }, [storyId, seedApplies]);
 
   if (err) {
     return (
