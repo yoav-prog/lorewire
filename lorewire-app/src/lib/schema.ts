@@ -974,6 +974,53 @@ export const COMMENT_MODERATION_EVENTS: Table = {
   ],
 };
 
+// 2026-06-23 Facebook auto-publish for shorts
+// (_plans/2026-06-23-facebook-auto-publish.md). One row per attempt to
+// publish a rendered short to the LoreWire Facebook Page. Survives
+// re-renders (auto path dedups at story level in code) and stacks freely
+// for manual re-publishes (a 'manual' trigger row can sit next to
+// previously-posted 'auto' rows for the same story). status flows:
+//   pending -> posted (Facebook returned 200 with video id)
+//   pending -> failed (Facebook 4xx/5xx; retry cron picks it up)
+//   posted  -> deleted (manual flow with delete_previous=true succeeded)
+// The Page Access Token never lives here — env var only (rule 13). The
+// columns capture only what's safe to persist for audit + retry: page id
+// at post time, the GCS url we handed Facebook, the rendered caption
+// snapshot, and the Facebook video id on success. Only the TS app writes
+// this table today, so no Python mirror is needed yet.
+export const FACEBOOK_POSTS: Table = {
+  name: "facebook_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    // Nullable: manual re-publishes on an older short don't always
+    // reference a specific render_id (the admin clicked the button on
+    // the story, not on a specific render row).
+    { name: "render_id", type: "TEXT" },
+    { name: "page_id", type: "TEXT" },
+    // 'auto' (from the render route post-hook) or 'manual' (admin
+    // clicked Publish/Re-publish on the short editor). Distinguishes
+    // toggle-respecting attempts from explicit admin actions for both
+    // dedup and observability.
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "caption", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "fb_error_code", type: "INTEGER" },
+    { name: "fb_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    // ensureSchema's TS-side ADD COLUMN emits no DEFAULT, so a row
+    // created before this column existed reads back NULL — callers
+    // must COALESCE(attempts, 0). Mirrors the SHORT_RENDERS.attempts
+    // convention above.
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -1011,6 +1058,7 @@ export const TABLES: Table[] = [
   COMMENT_LIKES,
   COMMENT_REPORTS,
   COMMENT_MODERATION_EVENTS,
+  FACEBOOK_POSTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.

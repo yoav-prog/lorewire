@@ -33,6 +33,11 @@ import {
   pollHookSettingKey,
   PUBLISHER_PLATFORMS,
 } from "@/lib/publisher-poll-hook";
+import {
+  DEFAULT_CAPTION_TEMPLATE as FB_DEFAULT_CAPTION_TEMPLATE,
+  SETTING_AUTO_PUBLISH as FB_SETTING_AUTO_PUBLISH,
+  SETTING_CAPTION_TEMPLATE as FB_SETTING_CAPTION_TEMPLATE,
+} from "@/lib/publish-to-facebook";
 
 // Settings / General. Every field now uses the right control: toggles for
 // the booleans (previously stringy "0"/"1"), number inputs with min/max for
@@ -221,6 +226,22 @@ export default async function SettingsPage() {
     instagram: hookInstagram ?? "",
     facebook: hookFacebook ?? "",
   };
+
+  // Facebook auto-publish (Phase 1 of _plans/2026-06-23-facebook-auto-publish.md):
+  //   - publisher.facebook.auto_publish — master toggle, default off so
+  //     the feature ships dark until a smoke test on preview proves it.
+  //   - publisher.facebook.caption_template — text with {{hook}},
+  //     {{title}}, {{article_url}} substitution tokens. Empty falls
+  //     back to DEFAULT_CAPTION_TEMPLATE in lib/publish-to-facebook.
+  // The Page Access Token (FB_PAGE_ACCESS_TOKEN) and the page id
+  // (FB_PAGE_ID) intentionally do NOT live here — they're server env
+  // vars, never in the DB (rule 13).
+  const [fbAutoPublishRaw, fbCaptionTemplateRaw] = await Promise.all([
+    getSetting(FB_SETTING_AUTO_PUBLISH),
+    getSetting(FB_SETTING_CAPTION_TEMPLATE),
+  ]);
+  const fbPageIdDisplay = process.env.FB_PAGE_ID ?? "";
+  const fbTokenConfigured = Boolean(process.env.FB_PAGE_ACCESS_TOKEN);
   const SHORT_CATEGORIES = [
     "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
   ];
@@ -678,6 +699,39 @@ export default async function SettingsPage() {
               placeholder="Leave empty to use the platform default"
             />
           ))}
+        </Section>
+
+        <Section
+          title="Social publishing — Facebook"
+          description="Auto-publish every freshly rendered short to the LoreWire Facebook Page. Plan: _plans/2026-06-23-facebook-auto-publish.md."
+        >
+          <div className="rounded-md border border-rule bg-paper-soft px-3 py-2 text-[13px] leading-snug">
+            <div className="font-medium text-ink">
+              Target page:{" "}
+              <span className="font-mono">
+                {fbPageIdDisplay || "(FB_PAGE_ID env var not set)"}
+              </span>
+            </div>
+            <div className="mt-0.5 text-muted">
+              Page Access Token:{" "}
+              {fbTokenConfigured
+                ? "✓ configured (server env var)"
+                : "✗ FB_PAGE_ACCESS_TOKEN not set — publishing will skip until it lands in Vercel env vars"}
+            </div>
+          </div>
+          <SettingToggle
+            settingKey={FB_SETTING_AUTO_PUBLISH}
+            label="Auto-publish on render"
+            hint="When on, every short that finishes rendering is posted to the LoreWire Facebook Page. Story-level dedup prevents re-renders from creating duplicate posts. Manual publish from the short editor bypasses this toggle."
+            initialOn={readToggle(fbAutoPublishRaw, false)}
+          />
+          <SettingText
+            settingKey={FB_SETTING_CAPTION_TEMPLATE}
+            label="Caption template"
+            hint={`Tokens: {{hook}}, {{title}}, {{article_url}}. Empty falls back to the default: ${FB_DEFAULT_CAPTION_TEMPLATE.replace(/\n/g, "\\n")}`}
+            initial={fbCaptionTemplateRaw ?? ""}
+            placeholder="Leave empty to use the default template"
+          />
         </Section>
       </div>
     </SettingsShell>

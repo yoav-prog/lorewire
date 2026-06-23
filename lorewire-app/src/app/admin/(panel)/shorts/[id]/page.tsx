@@ -18,6 +18,7 @@ import {
   type VideoAspect,
 } from "@/lib/aspect";
 import {
+  getLatestFacebookPostForStoryAction,
   listArticlesLinkedToStoryAction,
   loadShortEditorState,
 } from "./actions";
@@ -38,7 +39,7 @@ export default async function ShortEditorPage({
   // costs ~1 ms after the first page load of the admin shell.
   // Linked articles: feed the per-scene "Use in article" promote actions
   // in ScenesTab. Empty list when no article points at this story.
-  const [state, voices, articlesResult] = await Promise.all([
+  const [state, voices, articlesResult, latestFacebookPost] = await Promise.all([
     loadShortEditorState(id),
     listVoices().catch((err) => {
       // eslint-disable-next-line no-console -- rule 14
@@ -51,6 +52,16 @@ export default async function ShortEditorPage({
         err: String(err),
       });
       return { ok: false, articles: [] } as const;
+    }),
+    // Latest facebook_posts row for the manual Publish-to-Facebook button.
+    // Best-effort: a lookup failure should not block the editor from
+    // rendering — the button just shows "no post yet" instead of state.
+    getLatestFacebookPostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest facebook post lookup failed", {
+        err: String(err),
+      });
+      return null;
     }),
   ]);
   const linkedArticles = articlesResult.ok
@@ -158,6 +169,7 @@ export default async function ShortEditorPage({
             session.userId,
           )}
           linkedArticles={linkedArticles}
+          initialFacebookPost={latestFacebookPost}
         />
       )}
     </div>
