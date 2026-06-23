@@ -53,3 +53,25 @@ export async function setSiteCommentsEnabledAction(enabled: boolean): Promise<vo
   await setSetting("comments.enabled", enabled ? "1" : "0");
   revalidatePath("/admin/comments");
 }
+
+/** Per-article close. Closing one article does NOT touch the site-wide
+ *  kill switch; the public guard is the AND of (site-wide enabled) AND
+ *  (NOT article-specific closed). `articleId` here is the RESOLVED
+ *  comments key — for stories that link to a published article this is
+ *  the article.id; for unlinked stories it's the story.id itself. The
+ *  caller (story edit page) does the resolution before invoking. */
+export async function setArticleCommentsClosedAction(
+  articleId: string,
+  closed: boolean,
+  /** Revalidation hint — pass the edit page path so the toggle's
+   *  state matches reality on the next render. */
+  revalidate?: string,
+): Promise<void> {
+  await requireCapability("content.manage");
+  if (!articleId) return;
+  // "1" = closed; clearing back to "0" / unset is the open state.
+  // We write "0" rather than deleting the row so the audit trail is
+  // explicit ("was once closed, now opened") instead of "set never set".
+  await setSetting(`comments.article_off.${articleId}`, closed ? "1" : "0");
+  if (revalidate) revalidatePath(revalidate);
+}

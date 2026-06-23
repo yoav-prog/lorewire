@@ -47,6 +47,8 @@ import {
 import { resolveSceneCount, readSceneCountMode } from "@/lib/scene-count";
 import { VoicePicker } from "@/components/voice-picker/VoicePicker";
 import { listVoices } from "@/lib/voice-library";
+import { one } from "@/lib/db";
+import StoryCommentsToggle from "./StoryCommentsToggle";
 
 const FIELD =
   "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
@@ -67,6 +69,22 @@ export default async function EditStory({
   // every pre-generated thumbnail URL) — one round trip drives the
   // picker render + the resolver caption below.
   const heroStyleSettings = await loadHeroStyleSettings();
+
+  // Comments state for the per-story toggle. The comments key for this
+  // story is article.id when there's a linked published article,
+  // else story.id — same resolution the public /api/comments/count and
+  // the SSR seed do, so the admin's toggle controls the EXACT thread
+  // the reader sees. siteWideEnabled is read so the toggle can
+  // surface the "kill switch is off" caveat when it's relevant.
+  const linkedArticleRow = await one<{ id: string }>(
+    "SELECT id FROM articles WHERE story_id = ? AND status = 'published' LIMIT 1",
+    [s.id],
+  );
+  const commentsArticleId = linkedArticleRow?.id ?? s.id;
+  const commentsClosed =
+    (await getSetting(`comments.article_off.${commentsArticleId}`)) === "1";
+  const siteCommentsEnabled =
+    (await getSetting("comments.enabled")) !== "0";
 
   let gallery: string[] = [];
   try {
@@ -445,6 +463,18 @@ export default async function EditStory({
               />
             );
           })()}
+
+          {/* Per-story comments open/closed toggle. The control lives
+              next to hero style because both are "how this story
+              behaves on the public surface" knobs. Site-wide kill
+              switch lives at /admin/comments and overrides this
+              setting — see the helper text inside the toggle. */}
+          <StoryCommentsToggle
+            resolvedArticleId={commentsArticleId}
+            closed={commentsClosed}
+            siteWideEnabled={siteCommentsEnabled}
+            revalidatePath={`/admin/stories/${id}`}
+          />
 
           {/* Bible lives in `stories.pipeline_cache` (split off
               video_config 2026-06-14 — see
