@@ -20,6 +20,7 @@ import {
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
 import { CommentsTab } from "@/components/CommentsTab";
+import { JumpToComments } from "@/components/JumpToComments";
 import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
@@ -1180,6 +1181,11 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList, s
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
               {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={session !== null} />}
+              <JumpToComments
+                count={commentInfo?.count ?? 0}
+                onJump={() => setTab("Comments")}
+                enabled={tab !== "Comments" && commentInfo !== null && commentInfo.enabled}
+              />
             </div>
             {/* End-of-content "Cast your verdict" pill. Same reasoning as
                 the top CTA — modal-level so every tab gets it, and

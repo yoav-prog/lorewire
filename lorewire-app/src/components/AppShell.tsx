@@ -35,6 +35,7 @@ import CrossDeviceNudge from "@/components/CrossDeviceNudge";
 import SignInChip from "@/components/SignInChip";
 import SiteFooter from "@/components/SiteFooter";
 import { CommentsTab } from "@/components/CommentsTab";
+import { JumpToComments } from "@/components/JumpToComments";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
@@ -1461,6 +1462,19 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList, se
               <CommentsTab storyId={story.id} signedIn={session !== null} />
             </div>
           )}
+        </div>
+
+        {/* End-of-tab nudge into the Comments tab. Hidden on Comments
+            itself (you're already there) and while commentInfo is loading
+            so we don't paint then re-paint a count. Visibility honors the
+            kill switch — enabled=false means commentsEnabled is off for
+            this article, no point inviting the click. */}
+        <div className="px-4">
+          <JumpToComments
+            count={commentInfo?.count ?? 0}
+            onJump={() => setTab("Comments")}
+            enabled={tab !== "Comments" && commentInfo !== null && commentInfo.enabled}
+          />
         </div>
 
         {/* End-of-content "Cast your verdict" pill. Same reasoning as the
