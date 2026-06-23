@@ -4,7 +4,6 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
-  byId,
   isPublishedStory,
   PILLS,
   type Story,
@@ -1552,17 +1551,27 @@ function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog })
 }
 
 /* ----------------------------- NEW ----------------------------- */
-function NewScreen({ onOpen }: { onOpen: OpenFn }) {
-  const list = ["stranger", "wifi", "wrongmom", "wrongnumber", "rules", "birthday"];
+// Same published-only gate as Search: only stories the pipeline has
+// actually produced content for (videoUrl / heroImage / audioUrl /
+// body) belong in this list. Reads off the merged live + sample
+// catalog and sorts by year DESC so the freshest produced content
+// leads (matches the homepage new_row fallback ordering and the
+// desktop New & Hot view).
+function NewScreen({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog }) {
+  const list = catalog.array
+    .filter(isPublishedStory)
+    .sort((a, b) => (b.year ?? 0) - (a.year ?? 0))
+    .slice(0, 10);
   return (
     <div className="pt-14 px-4 pb-28">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-1">New &amp; Hot</h1>
       <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-5">Fresh threads this week</p>
-      <div className="flex flex-col gap-3">
-        {list.map((id) => {
-          const s = byId(id);
-          return (
-            <button key={id} onClick={() => onOpen(id)} className="flex gap-3 items-stretch text-left active:scale-[.99] transition">
+      {list.length === 0 ? (
+        <p className="font-body text-muted text-center mt-10">Nothing fresh yet — check back soon.</p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {list.map((s) => (
+            <button key={s.id} onClick={() => onOpen(s.id)} className="flex gap-3 items-stretch text-left active:scale-[.99] transition">
               <div className="w-[110px] h-[68px] shrink-0"><PosterArt story={s} showTitle={false} /></div>
               <div className="flex-1 min-w-0 py-0.5">
                 <div className="flex items-center gap-2 mb-0.5">
@@ -1573,9 +1582,9 @@ function NewScreen({ onOpen }: { onOpen: OpenFn }) {
                 <p className="font-body text-[12.5px] text-muted leading-snug mt-1 line-clamp-2">{s.syn}</p>
               </div>
             </button>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1734,7 +1743,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
           />
         )}
         {tab === "Search" && <Search onOpen={open} catalog={catalog} />}
-        {tab === "New" && <NewScreen onOpen={open} />}
+        {tab === "New" && <NewScreen onOpen={open} catalog={catalog} />}
         {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
 

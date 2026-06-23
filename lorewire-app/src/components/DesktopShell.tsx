@@ -1515,7 +1515,22 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         console.info("[browse render]", { total_catalog: catalog.array.length, published_count: browseStories.length });
         return <GridPage title="Browse" sub={`All true stories · ${ids.length} titles`} ids={ids} onOpen={open} resolveStory={resolveStory} />;
       })()}
-      {view === "New & Hot" && <GridPage title="New & Hot" sub="Fresh threads this week" ids={["stranger", "wifi", "wrongmom", "wrongnumber", "replyall", "groupghost", "rules", "birthday", "seat", "parking"]} onOpen={open} resolveStory={resolveStory} />}
+      {view === "New & Hot" && (() => {
+        // Same published-only gate as Browse. New & Hot promises "fresh
+        // threads this week" — that promise breaks the moment a sample
+        // placeholder lands on the grid. Sort by year DESC so the
+        // freshest produced content leads (matches the homepage
+        // new_row fallback ordering), then cap at 10 to keep the page
+        // tight when the catalog scales.
+        const newHot = catalog.array
+          .filter(isPublishedStory)
+          .sort((a, b) => (b.year ?? 0) - (a.year ?? 0))
+          .slice(0, 10);
+        const ids = newHot.map((s) => s.id);
+        // eslint-disable-next-line no-console -- rule 14
+        console.info("[new-and-hot render]", { total_catalog: catalog.array.length, shown: ids.length });
+        return <GridPage title="New & Hot" sub="Fresh threads this week" ids={ids} onOpen={open} resolveStory={resolveStory} />;
+      })()}
       {view === "My List" && (
         <GridPage
           title="My List"
