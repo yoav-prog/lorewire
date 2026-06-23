@@ -12,11 +12,15 @@
 // the tab mounts and renders the regular CommentsSection with the
 // fetched data — same UX, same composer, same load-more / sort / reply.
 //
-// Story.id is used as articleId. Stories on the homepage and articles in
-// the reader are currently distinct rows; using story.id here means the
-// homepage thread is independent of the article reader's thread for the
-// same content. That tradeoff is noted in the plan; unifying them
-// requires a separate story→article join that we don't have today.
+// Story → article resolution happens server-side in /api/comments/count:
+// the caller passes `storyId`, the endpoint looks up the matching
+// published article via articles.story_id, and returns the RESOLVED
+// articleId. That id is then used for the thread fetch and as
+// CommentsSection's `articleId` prop. Net effect: the homepage thread
+// and the article reader thread are THE SAME thread for any story
+// that has a linked published article — readers see each other's
+// comments regardless of which surface they comment from. Stories
+// without a linked article fall through to a story-keyed thread.
 
 import { useEffect, useState } from "react";
 
@@ -32,6 +36,10 @@ interface CommentsTabProps {
 }
 
 interface InitResponse {
+  /** The resolved comments article_id (== article.id when there's a
+   *  linked published article; == storyId otherwise). All subsequent
+   *  comment calls for this thread use this id, not the storyId. */
+  articleId: string;
   count: number;
   enabled: boolean;
 }
@@ -46,26 +54,36 @@ export function CommentsTab({ storyId, signedIn }: CommentsTabProps) {
     setThread(null);
     setMeta(null);
     setErr(null);
-    const qs = `articleId=${encodeURIComponent(storyId)}`;
-    Promise.all([
-      fetch(`/api/comments?${qs}`).then(async (r) =>
-        r.ok ? ((await r.json()) as CommentThreadPage) : null,
-      ),
-      fetch(`/api/comments/count?${qs}`).then(async (r) =>
-        r.ok ? ((await r.json()) as InitResponse) : { count: 0, enabled: true },
-      ),
-    ])
-      .then(([page, info]) => {
+
+    // Step 1: resolve story → article + read count + kill-switch. One
+    // round trip; everything downstream keys off `info.articleId`.
+    fetch(`/api/comments/count?storyId=${encodeURIComponent(storyId)}`)
+      .then(async (r): Promise<InitResponse> => {
+        if (!r.ok) throw new Error(`count ${r.status}`);
+        return (await r.json()) as InitResponse;
+      })
+      .then(async (info) => {
+        if (cancelled) return;
+        // Step 2: fetch the first page of the resolved thread.
+        const page = await fetch(
+          `/api/comments?articleId=${encodeURIComponent(info.articleId)}`,
+        ).then(async (r) =>
+          r.ok
+            ? ((await r.json()) as CommentThreadPage)
+            : ({ nodes: [], nextCursor: null } as CommentThreadPage),
+        );
         if (cancelled) return;
         // eslint-disable-next-line no-console -- rule 14
         console.info("[comments tab loaded]", {
           story_id: storyId,
+          resolved_article_id: info.articleId,
+          unified: info.articleId !== storyId,
           count: info.count,
           enabled: info.enabled,
-          page_nodes: page?.nodes.length ?? 0,
+          page_nodes: page.nodes.length,
         });
-        setThread(page ?? { nodes: [], nextCursor: null });
         setMeta(info);
+        setThread(page);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -99,7 +117,7 @@ export function CommentsTab({ storyId, signedIn }: CommentsTabProps) {
 
   return (
     <CommentsSection
-      articleId={storyId}
+      articleId={meta.articleId}
       initial={thread}
       initialCount={meta.count}
       signedIn={signedIn}

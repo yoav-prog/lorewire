@@ -991,7 +991,7 @@ function DetailModalHero({ story }: { story: Story }) {
   );
 }
 
-function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
+function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the text Play button in the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll
@@ -1038,7 +1038,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
   useEffect(() => {
     let cancelled = false;
     setCommentInfo(null);
-    fetch(`/api/comments/count?articleId=${encodeURIComponent(story.id)}`)
+    fetch(`/api/comments/count?storyId=${encodeURIComponent(story.id)}`)
       .then(async (r) => (r.ok ? ((await r.json()) as { count: number; enabled: boolean }) : null))
       .then((info) => {
         if (cancelled || !info) return;
@@ -1179,7 +1179,7 @@ function DetailModal({ story, initialTab, onClose, onOpen, inList, toggleList }:
               {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
-              {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={false} />}
+              {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={session !== null} />}
             </div>
             {/* End-of-content "Cast your verdict" pill. Same reasoning as
                 the top CTA — modal-level so every tab gets it, and
@@ -1491,7 +1491,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);
-        return s ? <DetailModal story={s} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} /> : null;
+        return s ? <DetailModal story={s} initialTab={active.tab} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} /> : null;
       })()}
     </div>
   );

@@ -1247,7 +1247,7 @@ function FakeReadAlong() {
 }
 
 /* ----------------------------- TITLE SHEET ----------------------------- */
-function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void }) {
+function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList, session }: { story: Story; initialTab?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"] }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the big white button under the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll the
@@ -1286,7 +1286,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
   useEffect(() => {
     let cancelled = false;
     setCommentInfo(null);
-    fetch(`/api/comments/count?articleId=${encodeURIComponent(story.id)}`)
+    fetch(`/api/comments/count?storyId=${encodeURIComponent(story.id)}`)
       .then(async (r) => (r.ok ? ((await r.json()) as { count: number; enabled: boolean }) : null))
       .then((info) => {
         if (cancelled || !info) return;
@@ -1458,7 +1458,7 @@ function TitleSheet({ story, initialTab, onClose, onOpen, inList, toggleList }: 
           {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
           {tab === "Comments" && (
             <div className="px-4">
-              <CommentsTab storyId={story.id} signedIn={false} />
+              <CommentsTab storyId={story.id} signedIn={session !== null} />
             </div>
           )}
         </div>
@@ -1711,6 +1711,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             onOpen={open}
             inList={list.includes(active.id)}
             toggleList={toggleList}
+            session={initial.session}
           />
         ) : null;
       })()}
