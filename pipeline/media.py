@@ -255,16 +255,38 @@ STT_COST_PER_SECOND = 0.024 / 60.0
 IMAGE_POLL_TIMEOUT = 240
 
 
-# Sidechannel for the last `_generate_with_retry` failure message.
+# Sidechannel for the last `_generate_with_retry` failure message + kind.
 # `_generate_with_retry` returns None on failure (legacy contract; many
 # callers expect that). To surface the upstream kie error into the admin
 # timeline (`kie_failed` events), we stash the text here and let the
-# caller read it immediately after a None return. Reset at the START of
-# every call so a previous success doesn't leak a stale message into a
+# caller read it immediately after a None return. The `kind` field
+# distinguishes a hard kie.ai quota cap ("quota", body code 433) from any
+# other failure ("generic") so the timeline message can read as actionable
+# instead of looking like a transient retry exhaustion. Reset at the START
+# of every call so a previous success doesn't leak stale state into a
 # later, unrelated failure. Single-threaded per drain tick, so a module
 # global is safe. Plan:
 # _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
-_LAST_KIE_ERROR: dict[str, str | None] = {"msg": None}
+_LAST_KIE_ERROR: dict[str, str | None] = {"msg": None, "kind": None}
+
+# Substrings that appear in `images.generate`'s exception text when kie
+# returned the daily-points-cap error (`{'code': 433, 'msg': 'The current
+# number of points used by apiKey has exceeded the daily limit', ...}`).
+# Match both single- and double-quoted dict repr, since the raw repr can
+# come from either Python's default repr or a JSON-style re-serialisation.
+_KIE_QUOTA_MARKERS = (
+    "'code': 433",
+    '"code": 433',
+    "exceeded the daily limit",
+)
+
+
+def _is_kie_quota_error(msg: str) -> bool:
+    """True when `msg` is the kie.ai daily-quota cap error. The cap is a
+    hard wall — retrying inside the same tick can never succeed and just
+    burns another API round-trip, so callers branch on this to short-
+    circuit retries and surface an actionable timeline message."""
+    return any(m in msg for m in _KIE_QUOTA_MARKERS)
 
 
 def last_kie_error() -> str | None:
@@ -274,6 +296,31 @@ def last_kie_error() -> str | None:
     `_generate_with_retry` they care about — the value is overwritten on
     every call."""
     return _LAST_KIE_ERROR["msg"]
+
+
+def last_kie_error_kind() -> str | None:
+    """Return `"quota"` when the most recent `_generate_with_retry`
+    failure was kie's daily-points cap (body code 433), `"generic"` when
+    it failed for any other reason, or `None` when the last call
+    succeeded. Used by `_kie_failed_msg` to compose admin-facing text
+    that names the actual blocker instead of the misleading "returned
+    no URL after retries"."""
+    return _LAST_KIE_ERROR["kind"]
+
+
+def _kie_failed_msg(label: str) -> str:
+    """Compose the message for a `kie_failed` event based on the kind of
+    the most recent `_generate_with_retry` failure. Centralised here so
+    every `_build_*` callsite surfaces the same admin-facing wording,
+    AND so a 433 daily-cap error reads as "top up or wait" instead of
+    looking like a transient retry-exhaustion the admin should mash
+    "Regenerate" against."""
+    if _LAST_KIE_ERROR["kind"] == "quota":
+        return (
+            f"{label} — kie.ai daily points cap exceeded; "
+            "wait for the daily reset or top up the account"
+        )
+    return f"{label} returned no URL after retries"
 
 
 def _generate_with_retry(
@@ -307,8 +354,15 @@ def _generate_with_retry(
     `_LAST_KIE_ERROR` so callers can surface it into the admin timeline
     via `last_kie_error()`. The legacy `return None` contract is
     preserved so existing call sites need no change.
+
+    Hard kie.ai quota caps (body code 433) short-circuit the retry loop:
+    the daily points budget doesn't replenish between attempts and a
+    second createTask burns another API call to confirm the same 433.
+    The failure kind is stashed via `_LAST_KIE_ERROR["kind"] = "quota"`
+    so `_kie_failed_msg` can surface a clear admin-facing message.
     """
     _LAST_KIE_ERROR["msg"] = None
+    _LAST_KIE_ERROR["kind"] = None
     last: Exception | None = None
     ref_count = len([u for u in (image_input or []) if u])
     for attempt in range(1, attempts + 1):
@@ -323,6 +377,20 @@ def _generate_with_retry(
             )
         except Exception as e:
             last = e
+            if _is_kie_quota_error(str(e)):
+                # No retry on a hard quota cap. kie's daily points cap
+                # is wall-clock-bound; a retry inside the same tick can
+                # only fail the same way, and on a 5-variant finisher
+                # like hero+thumb the retry alone wastes 4-5 extra API
+                # round-trips before bottoming out.
+                print(
+                    f"[media image quota] {label} attempt {attempt} "
+                    f"refs={ref_count} model={model or 'global'} "
+                    "hit kie daily points cap; skipping retry"
+                )
+                _LAST_KIE_ERROR["msg"] = str(e)
+                _LAST_KIE_ERROR["kind"] = "quota"
+                return None
             if attempt < attempts:
                 print(
                     f"[media image retry] {label} attempt {attempt} "
@@ -334,6 +402,7 @@ def _generate_with_retry(
         f"FAILED after {attempts} attempts: {last}"
     )
     _LAST_KIE_ERROR["msg"] = str(last) if last is not None else None
+    _LAST_KIE_ERROR["kind"] = "generic" if last is not None else None
     return None
 
 
@@ -1023,9 +1092,13 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     if portrait_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Portrait generation returned no URL after retries",
+            _kie_failed_msg("Portrait generation"),
             level="error",
-            payload={"variant": "portrait", "error": last_kie_error()},
+            payload={
+                "variant": "portrait",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         raise RuntimeError("kie portrait hero generation returned no URL after retries")
     store.log_render_event(
@@ -1065,9 +1138,17 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     if landscape_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Landscape failed; portrait still updated (partial success)",
+            (
+                "Landscape: kie.ai daily points cap exceeded; portrait still updated (partial success)"
+                if last_kie_error_kind() == "quota"
+                else "Landscape failed; portrait still updated (partial success)"
+            ),
             level="warn",
-            payload={"variant": "landscape", "error": last_kie_error()},
+            payload={
+                "variant": "landscape",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         print(
             f"[image regen hero] id={safe_id} landscape FAILED; "
@@ -1216,9 +1297,14 @@ def _regen_hero_from_short(
     if portrait_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Portrait i2i generation returned no URL after retries",
+            _kie_failed_msg("Portrait i2i generation"),
             level="error",
-            payload={"variant": "portrait", "mode": "i2i", "error": last_kie_error()},
+            payload={
+                "variant": "portrait",
+                "mode": "i2i",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         raise RuntimeError("kie portrait hero (i2i) generation returned no URL after retries")
     store.log_render_event(
@@ -1263,9 +1349,18 @@ def _regen_hero_from_short(
     if landscape_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Landscape i2i failed; portrait still updated (partial success)",
+            (
+                "Landscape i2i: kie.ai daily points cap exceeded; portrait still updated (partial success)"
+                if last_kie_error_kind() == "quota"
+                else "Landscape i2i failed; portrait still updated (partial success)"
+            ),
             level="warn",
-            payload={"variant": "landscape", "mode": "i2i", "error": last_kie_error()},
+            payload={
+                "variant": "landscape",
+                "mode": "i2i",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         print(
             f"[image regen hero from-short] id={safe_id} landscape FAILED; "
@@ -1495,9 +1590,13 @@ def _build_hero_and_thumbnail_from_short(
         if kie_url is None:
             store.log_render_event(
                 "kie_failed",
-                f"{label} (hybrid i2i) returned no URL after retries",
+                _kie_failed_msg(f"{label} (hybrid i2i)"),
                 level="warn",
-                payload={"variant": label, "error": last_kie_error()},
+                payload={
+                    "variant": label,
+                    "error": last_kie_error(),
+                    "kind": last_kie_error_kind(),
+                },
             )
             print(
                 f"[hero+thumb from-short] id={safe_id} {label} FAILED; "
@@ -1718,9 +1817,17 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         if kie_url is None:
             store.log_render_event(
                 "kie_failed",
-                f"Scene {i + 1} failed; continuing",
+                (
+                    f"Scene {i + 1}: kie.ai daily points cap exceeded; continuing"
+                    if last_kie_error_kind() == "quota"
+                    else f"Scene {i + 1} failed; continuing"
+                ),
                 level="warn",
-                payload={"index": i + 1, "error": last_kie_error()},
+                payload={
+                    "index": i + 1,
+                    "error": last_kie_error(),
+                    "kind": last_kie_error_kind(),
+                },
             )
             print(f"[image regen scenes] id={safe_id} {label} FAILED, skipping")
             continue
