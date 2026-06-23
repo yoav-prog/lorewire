@@ -20,9 +20,11 @@ import { RenderStatusPanel } from "./RenderStatusPanel";
 import { ScenesTab } from "./ScenesTab";
 import { ScriptTab } from "./ScriptTab";
 import { UseShortAsVideoButton } from "./UseShortAsVideoButton";
+import { PublishToFacebookButton } from "./PublishToFacebookButton";
 import { ShortPreviewPlayer } from "./ShortPreviewPlayer";
 import { VoiceTab } from "./VoiceTab";
 import type { LinkedArticleSummary } from "./actions";
+import type { FacebookPostRow } from "@/lib/publish-to-facebook";
 import {
   claimShortEditSession,
   heartbeatShortEditSession,
@@ -64,6 +66,7 @@ export function ShortEditorClient({
   voices,
   foreignOwnerEmail,
   linkedArticles,
+  initialFacebookPost,
 }: {
   storyId: string;
   initialConfig: ShortConfig;
@@ -78,6 +81,10 @@ export function ShortEditorClient({
    *  the per-scene "Use in article" picker in ScenesTab. Empty list when
    *  no article is linked yet — Scenes tab surfaces a friendly hint. */
   linkedArticles: LinkedArticleSummary[];
+  /** Latest facebook_posts row for this story (any status), or null when
+   *  the story has never been published to Facebook. Drives the manual
+   *  publish button's adaptive text + the under-button status line. */
+  initialFacebookPost: FacebookPostRow | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabId>("scenes");
@@ -262,6 +269,15 @@ export function ShortEditorClient({
               initialRender.status !== "done" ||
               !initialRender.output_url
             }
+          />
+          <PublishToFacebookButton
+            storyId={storyId}
+            disabled={
+              initialRender === null ||
+              initialRender.status !== "done" ||
+              !initialRender.output_url
+            }
+            initialPost={initialFacebookPost}
           />
         </div>
 

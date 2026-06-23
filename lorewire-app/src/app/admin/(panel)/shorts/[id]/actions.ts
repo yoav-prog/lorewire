@@ -63,6 +63,11 @@ import {
   nextSessionFor,
   readForeignSession,
 } from "@/lib/short-edit-session";
+import {
+  deleteLatestPostedRowForStory,
+  publishShortToFacebook,
+  type FacebookPostRow,
+} from "@/lib/publish-to-facebook";
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -1352,4 +1357,167 @@ export async function addSceneToArticleGallery(
   });
   revalidatePath(`/admin/articles/${articleId}`);
   return { ok: true };
+}
+
+// ─── Facebook auto-publish: manual publish / re-publish ───────────────────────
+// Plan: _plans/2026-06-23-facebook-auto-publish.md.
+//
+// The render-route auto-publish hook is gated by the
+// `publisher.facebook.auto_publish` setting + a story-level dedup so
+// re-renders don't double-post. This action is the admin's escape hatch:
+//   - Story never auto-published? Manually publish it now (default flow).
+//   - Story already on the Page but admin wants a fresh post (typo fix,
+//     content takedown, A/B test)? Tick "delete previous" in the confirm
+//     modal and this action removes the prior post from the Page before
+//     publishing the new one.
+//
+// All FB calls land inside publishShortToFacebook / deleteLatestPostedRowForStory
+// — see lib/publish-to-facebook for the network surface + retry semantics.
+// The action's job is glue: auth, latest-render lookup, article URL,
+// invocation order (delete-first-then-publish, abort if delete fails),
+// and revalidating the editor path so the next paint shows fresh state.
+
+export interface ManualFacebookPublishOpts {
+  /** When true, the latest 'posted' row for this story is removed from
+   *  Facebook (DELETE /{video-id}) BEFORE the new publish runs. If the
+   *  delete fails we abort without publishing — surfaces the failure to
+   *  the admin so they can investigate rather than silently producing
+   *  a duplicate post. */
+  deletePrevious?: boolean;
+  /** Admin can override the rendered caption for this one publish. The
+   *  global caption template setting is unchanged. Empty/whitespace
+   *  falls back to the template-rendered caption. */
+  captionOverride?: string;
+}
+
+export interface ManualFacebookPublishResult {
+  ok: boolean;
+  error?: string;
+  /** Facebook video id of the new post on success. */
+  externalPostId?: string;
+  /** Facebook video id of the prior post that was deleted (only set when
+   *  deletePrevious=true and the delete succeeded). */
+  deletedPostId?: string;
+}
+
+/** Look up the article URL for a story, falling back to the lorewire
+ *  homepage when no published article is linked. Mirrors the same
+ *  helper inside render_short/route.ts so the manual flow produces an
+ *  identically-shaped caption. */
+async function resolveArticleUrlForStory(storyId: string): Promise<string> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  if (!article) return origin;
+  return `${origin}/articles/${article.language}/${article.slug}`;
+}
+
+export async function publishToFacebookAction(
+  storyId: string,
+  opts: ManualFacebookPublishOpts = {},
+): Promise<ManualFacebookPublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let deletedPostId: string | undefined;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor fb-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous Facebook post failed: ${del.error}`,
+      };
+    }
+    deletedPostId = del.externalPostId;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  const result = await publishShortToFacebook({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+    },
+    captionOverride:
+      opts.captionOverride && opts.captionOverride.trim().length > 0
+        ? opts.captionOverride
+        : null,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor fb-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    deleted_post_id: deletedPostId ?? null,
+    status: result.status,
+    external_post_id:
+      result.status === "posted" ? result.row.external_post_id : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalPostId: result.row.external_post_id ?? undefined,
+      deletedPostId,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "Facebook publish failed",
+      deletedPostId,
+    };
+  }
+  // 'skipped' for the manual path means missing env config (toggle off
+  // is auto-only; manual bypasses it). Surface a clean message.
+  return {
+    ok: false,
+    error: "publish skipped — server env vars FB_PAGE_ACCESS_TOKEN / FB_PAGE_ID may be missing",
+    deletedPostId,
+  };
+}
+
+/** Slim getter for the editor page: returns the most recent
+ *  facebook_posts row for a story (any status) so the button can
+ *  display "Posted on …" / "Last attempt failed …" beneath it. Returns
+ *  null when the story has no facebook_posts rows yet. */
+export async function getLatestFacebookPostForStoryAction(
+  storyId: string,
+): Promise<FacebookPostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<FacebookPostRow>(
+    `SELECT id, story_id, render_id, page_id, trigger, video_url, caption, status, external_post_id, fb_error_code, fb_error_subcode, error_message, attempts, created_at, posted_at, deleted_at
+     FROM facebook_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
 }
