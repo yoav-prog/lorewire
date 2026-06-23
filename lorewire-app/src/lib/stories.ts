@@ -85,6 +85,18 @@ export const tryById = (id: string): Story | null => {
   return STORIES.find((x) => x.id === id) ?? null;
 };
 
+// "Has the pipeline actually produced something for this story?" — true
+// when any real artefact has been generated (hero artwork, short render,
+// narration audio, or article body). The bare STORIES catalog ships with
+// 16 sample placeholders that only carry title / category / synopsis;
+// the CMS overlay at the bottom of this file fills the artefact fields
+// for stories the pipeline has finished. Browse and Search use this gate
+// so the public listing surfaces shows only stories with real content,
+// not the empty sample placeholders the design was built against.
+export function isPublishedStory(s: Story): boolean {
+  return Boolean(s.videoUrl || s.heroImage || s.audioUrl || s.body);
+}
+
 // CONTINUE / TOP10 / ENTITLED_ROW / NEW_ROW used to live here as
 // hardcoded ordered lists of story ids. Phase 5 of
 // _plans/2026-06-16-homepage-curation.md moved the source of truth onto

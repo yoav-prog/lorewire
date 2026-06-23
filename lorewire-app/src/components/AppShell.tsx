@@ -5,6 +5,7 @@ import {
   CAT,
   STORIES,
   byId,
+  isPublishedStory,
   PILLS,
   type Story,
 } from "@/lib/stories";
@@ -19,6 +20,7 @@ import {
   useHomepagePolls,
   useStoryPoll,
   type HomepageInitial,
+  type MergedCatalog,
 } from "@/lib/homepage-rails";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
@@ -1517,9 +1519,18 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
 }
 
 /* ----------------------------- SEARCH ----------------------------- */
-function Search({ onOpen }: { onOpen: OpenFn }) {
+// Mirrors DesktopShell's SearchPage: only stories the pipeline has
+// actually produced content for (hero, short render, narration, or
+// article body) belong in the public listing. Reads off the merged
+// live + sample catalog so freshly-published live rows surface without
+// waiting for src/data/published.ts to be rebaked.
+function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog }) {
   const [q, setQ] = useState("");
-  const res = STORIES.filter((s) => (s.title + s.cat).toLowerCase().includes(q.toLowerCase()));
+  const published = catalog.array.filter(isPublishedStory);
+  const query = q.trim().toLowerCase();
+  const res = query
+    ? published.filter((s) => (s.title + s.cat).toLowerCase().includes(query))
+    : published;
   return (
     <div className="pt-14 px-4 pb-28">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-3">Search</h1>
@@ -1528,7 +1539,7 @@ function Search({ onOpen }: { onOpen: OpenFn }) {
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Stories, categories, vibes..." className="bg-transparent outline-none flex-1 font-body text-[14px] text-ink placeholder:text-muted" />
       </div>
       {q === "" && (
-        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">Browse all &middot; {STORIES.length} stories</p>
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">Browse all &middot; {published.length} stories</p>
       )}
       <div className="grid grid-cols-2 gap-3">
         {res.map((s) => (
@@ -1722,7 +1733,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             session={initial.session}
           />
         )}
-        {tab === "Search" && <Search onOpen={open} />}
+        {tab === "Search" && <Search onOpen={open} catalog={catalog} />}
         {tab === "New" && <NewScreen onOpen={open} />}
         {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
