@@ -104,13 +104,16 @@ describe("buildGroups", () => {
     );
   });
 
-  it("produces the three top-level entries in stable order", () => {
+  it("produces the top-level entries in stable order", () => {
     for (const dev of [false, true]) {
       const groups = buildGroups(dev);
       expect(groups[0].label).toBeNull();
       expect(groups[0].items.map((i) => i.label)).toEqual([
         "Overview",
         "Content",
+        "Reddit Sources",
+        "Homepage",
+        "Comments",
         "Settings",
       ]);
     }

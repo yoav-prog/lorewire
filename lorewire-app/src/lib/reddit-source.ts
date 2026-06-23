@@ -36,6 +36,12 @@ export type RedditSourceStatus =
   | "used"
   | "skipped";
 
+// 2026-06-23 IdeasDB priority import (see
+// _plans/2026-06-23-ideasdb-priority-import.md). `strength` drives queue
+// ordering via JOIN in pipeline/store.py:claim_next_story_job. Legacy
+// reddit_source rows imported before the IdeasDB pass default to 'none'.
+export type RedditSourceStrength = "none" | "medium" | "strong";
+
 export interface RedditSourceRow {
   reddit_id: string;
   subreddit: string;
@@ -51,6 +57,19 @@ export interface RedditSourceRow {
   notes: string | null;
   first_synced: string;
   last_synced: string;
+  // 2026-06-23 IdeasDB priority import columns. All nullable on legacy
+  // rows; populated by scripts/import_ideas.py. `headline` is the
+  // curator's angle (distinct from `title` which is Reddit's original
+  // post title — preserved untouched on matched rows). `source_hint`
+  // stores the raw Source string for forensics, including the
+  // multi-token form. `needs_expansion=1` is the worker dispatch
+  // signal for idea-only seeds (full_text='').
+  strength: RedditSourceStrength;
+  category: string | null;
+  headline: string | null;
+  source_hint: string | null;
+  needs_expansion: number;
+  fingerprint: string | null;
 }
 
 const REFRESH_COLS = [
@@ -65,7 +84,7 @@ const REFRESH_COLS = [
 ] as const;
 
 const ALL_COLS =
-  "reddit_id, subreddit, date_written, title, full_text, comments, url, summary, length_chars, status, story_id, notes, first_synced, last_synced";
+  "reddit_id, subreddit, date_written, title, full_text, comments, url, summary, length_chars, status, story_id, notes, first_synced, last_synced, strength, category, headline, source_hint, needs_expansion, fingerprint";
 
 // ---------- CSV parse ----------
 
@@ -265,6 +284,10 @@ export interface RedditSourceFilters {
   date_from?: string;
   date_to?: string;
   search?: string;
+  // 2026-06-23 IdeasDB priority import filter (see
+  // _plans/2026-06-23-ideasdb-priority-import.md). Lets the admin focus on
+  // strong / medium priority rows that the IdeasDB sheet flagged.
+  strength?: RedditSourceStrength | RedditSourceStrength[];
 }
 
 export type RedditSourceOrderBy =
@@ -274,7 +297,17 @@ export type RedditSourceOrderBy =
   | "length_chars ASC"
   | "date_written DESC"
   | "date_written ASC"
-  | "subreddit ASC";
+  | "subreddit ASC"
+  // 2026-06-23 Strength-first sort. Tied to the same CASE weight the
+  // worker uses in claim_next_story_job so the admin's "what'll process
+  // next" view matches the worker's actual claim order.
+  | "strength DESC";
+
+// strength is a TEXT enum; CASE WHEN maps to a numeric weight so the
+// ORDER BY is portable across SQLite and Postgres without needing
+// FIELD()/array_position() or a string-typed enum ordering.
+const STRENGTH_WEIGHT_CASE =
+  "CASE strength WHEN 'strong' THEN 2 WHEN 'medium' THEN 1 ELSE 0 END";
 
 const ORDER_BY_SQL: Record<RedditSourceOrderBy, string> = {
   "comments DESC": "comments DESC",
@@ -284,6 +317,7 @@ const ORDER_BY_SQL: Record<RedditSourceOrderBy, string> = {
   "date_written DESC": "date_written DESC",
   "date_written ASC": "date_written ASC",
   "subreddit ASC": "subreddit ASC, comments DESC",
+  "strength DESC": `${STRENGTH_WEIGHT_CASE} DESC, comments DESC`,
 };
 
 // Build a (whereSql, params) pair from a filter object. Every value is
@@ -333,6 +367,16 @@ function buildWhere(
     parts.push("(LOWER(title) LIKE ? OR LOWER(summary) LIKE ?)");
     const q = `%${f.search.toLowerCase()}%`;
     params.push(q, q);
+  }
+  if (f.strength) {
+    const arr = Array.isArray(f.strength) ? f.strength : [f.strength];
+    if (arr.length > 0) {
+      // No COALESCE: the column has a NOT NULL DEFAULT 'none', so every
+      // row already carries a real strength value (the migration set
+      // legacy rows to 'none' explicitly).
+      parts.push(`strength IN (${arr.map(() => "?").join(", ")})`);
+      params.push(...arr);
+    }
   }
 
   return { where: parts.length ? parts.join(" AND ") : "1=1", params };

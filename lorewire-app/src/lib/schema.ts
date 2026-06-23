@@ -141,6 +141,23 @@ export const SETTINGS: Table = {
   ],
 };
 
+// `users` predates the public-side auth work — its original purpose was admin
+// staff with email + password_hash + role. The 2026-06-19 anonymous-first plan
+// adds public-side rows (role='user') created via OAuth, so the additive
+// columns below cover both worlds:
+//   - admin staff rows keep password_hash, leave provider/provider_sub NULL.
+//   - OAuth user rows leave password_hash NULL, fill provider + provider_sub.
+// `anonymous_id` is the prior `lw_anon` cookie value at first sign-in, the
+// stitch between the anonymous browser and the registered identity. It's only
+// set on creation; later sign-ins on other devices don't overwrite it. NULL
+// for admin rows and for users who registered without prior anonymous use.
+// Plan: _plans/2026-06-19-anonymous-first-auth.md.
+//
+// Today these columns sit ahead of the public-side auth surface itself —
+// they were brought in early so the Comments feature (which joins users.name
+// for the moderation queue) can land without waiting for the full auth port.
+// Once that auth surface ships, the new columns get populated; until then
+// they stay NULL on admin rows and Comments treats every viewer as a guest.
 export const USERS: Table = {
   name: "users",
   columns: [
@@ -148,6 +165,12 @@ export const USERS: Table = {
     { name: "email", type: "TEXT" },
     { name: "password_hash", type: "TEXT" },
     { name: "role", type: "TEXT" },
+    { name: "name", type: "TEXT" },
+    { name: "picture_url", type: "TEXT" },
+    { name: "provider", type: "TEXT" },
+    { name: "provider_sub", type: "TEXT" },
+    { name: "anonymous_id", type: "TEXT" },
+    { name: "last_seen_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
   ],
 };
@@ -365,6 +388,49 @@ export const REDDIT_SOURCE: Table = {
     { name: "notes", type: "TEXT" },
     { name: "first_synced", type: "TEXT" },
     { name: "last_synced", type: "TEXT" },
+    // 2026-06-23 IdeasDB priority import (see
+    // _plans/2026-06-23-ideasdb-priority-import.md). Mirror of the
+    // ALTER block in pipeline/store.py. `strength` drives queue
+    // ordering via JOIN in claim_next_story_job — no denormalization
+    // onto story_jobs. `needs_expansion=1` tells the worker to run
+    // expand_seed_to_post before the existing stages (idea-only seeds
+    // start with full_text=''). `fingerprint` is the re-import
+    // secondary match key when Source is missing or non-reddit.
+    { name: "strength", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "headline", type: "TEXT" },
+    { name: "source_hint", type: "TEXT" },
+    { name: "needs_expansion", type: "INTEGER" },
+    { name: "fingerprint", type: "TEXT" },
+  ],
+};
+
+// 2026-06-23 IdeasDB priority import (see
+// _plans/2026-06-23-ideasdb-priority-import.md). One row per CLI
+// invocation of scripts/import_ideas.py. `diff_json` carries the
+// per-row diff envelope; truncated past ~1 MB with a notes warning.
+// Lets us answer "what did this import actually change?" without
+// rerunning. Mirrors `ideas_import_log` in pipeline/store.py.
+export const IDEAS_IMPORT_LOG: Table = {
+  name: "ideas_import_log",
+  columns: [
+    { name: "run_id", type: "TEXT", pk: true },
+    { name: "started_at", type: "TEXT" },
+    { name: "finished_at", type: "TEXT" },
+    { name: "csv_path", type: "TEXT" },
+    { name: "dry_run", type: "INTEGER" },
+    { name: "rows_total", type: "INTEGER" },
+    { name: "rows_skipped_list", type: "INTEGER" },
+    { name: "rows_skipped_done", type: "INTEGER" },
+    { name: "rows_added", type: "INTEGER" },
+    { name: "rows_updated", type: "INTEGER" },
+    { name: "rows_strength_only", type: "INTEGER" },
+    { name: "rows_status_changed", type: "INTEGER" },
+    { name: "rows_unchanged", type: "INTEGER" },
+    { name: "rows_warned", type: "INTEGER" },
+    { name: "seeds_vanished", type: "INTEGER" },
+    { name: "notes", type: "TEXT" },
+    { name: "diff_json", type: "TEXT" },
   ],
 };
 
@@ -487,6 +553,103 @@ export const HOMEPAGE_CURATION: Table = {
   ],
 };
 
+// 2026-06-22 article comments + AI moderation
+// (_plans/2026-06-22-article-comments-ai-moderation.md). Reader comments on
+// articles, moderated by a two-tier pipeline (free OpenAI Moderation API then a
+// gpt-5-nano judge). `status` is a closed enum: 'published' (visible to all),
+// 'held' (awaiting human review, visible only to its own author),
+// 'rejected' (rule violation), 'quarantined' (the non-discretionary
+// CSAM/threats path — preserved, never silently deleted), 'deleted' (soft
+// delete by the author). `author_user_id` is NULL for guests, who carry a
+// `guest_name` only — we deliberately store no guest email (it bought nothing
+// but PII liability; abuse is handled by `ip_ua_hash` velocity + a CAPTCHA).
+// `cookie_token` is a 256-bit nonce that both blocks double-likes and lets a
+// guest see their own held/rejected comment. `ip_ua_hash` is one-way and
+// pruned on a retention sweep. The stance/sentiment/topic_tag fields are the
+// cheap editorial signal the judge emits while it is already reading the
+// comment (stored, not yet surfaced). like_count / reply_count are
+// denormalised so the public thread never runs COUNT(*) per render.
+export const COMMENTS: Table = {
+  name: "comments",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "article_id", type: "TEXT" },
+    // NULL = top-level. A non-null parent_id points at another comment on the
+    // same article. v1 is one level deep; the write path refuses a reply whose
+    // parent already has a parent.
+    { name: "parent_id", type: "TEXT" },
+    { name: "author_user_id", type: "TEXT" },
+    { name: "guest_name", type: "TEXT" },
+    { name: "body", type: "TEXT" },
+    { name: "lang", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    // How the current status was reached: 'tier1' (Moderation API),
+    // 'tier2' / 'tier2_lowconf' (the judge), 'human' (admin), 'timeout'
+    // (failed closed to held). Audited in full in comment_moderation_events.
+    { name: "moderation_source", type: "TEXT" },
+    { name: "moderation_category", type: "TEXT" },
+    { name: "moderation_reason", type: "TEXT" },
+    { name: "moderation_confidence", type: "REAL" },
+    { name: "stance", type: "TEXT" },
+    { name: "sentiment", type: "TEXT" },
+    { name: "topic_tag", type: "TEXT" },
+    { name: "like_count", type: "INTEGER" },
+    { name: "reply_count", type: "INTEGER" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "ip_ua_hash", type: "TEXT" },
+    { name: "edited_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// One row per like. Anonymous likes are keyed by cookie_token, signed-in by
+// user_id; the two partial unique indexes in POST_TABLE_DDL are the
+// anti-double-like primitives. The like count is kept denormalised on
+// comments.like_count and reconciled from this log.
+export const COMMENT_LIKES: Table = {
+  name: "comment_likes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "user_id", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Reader reports. A report routes its comment back into the human queue.
+// `status` is 'open' | 'actioned' | 'dismissed'.
+export const COMMENT_REPORTS: Table = {
+  name: "comment_reports",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "reporter_user_id", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Append-only moderation audit trail. Every status change (AI or human) writes
+// a row. This is the DSA statement-of-reasons record and the basis for the
+// appeal flow; it is never updated or deleted. `actor` is 'ai' or an admin
+// user id.
+export const COMMENT_MODERATION_EVENTS: Table = {
+  name: "comment_moderation_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "comment_id", type: "TEXT" },
+    { name: "actor", type: "TEXT" },
+    { name: "from_status", type: "TEXT" },
+    { name: "to_status", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -501,9 +664,14 @@ export const TABLES: Table[] = [
   ARTICLES,
   ARTICLE_REVISIONS,
   REDDIT_SOURCE,
+  IDEAS_IMPORT_LOG,
   STORY_JOBS,
   VOICE_RENDERS,
   HOMEPAGE_CURATION,
+  COMMENTS,
+  COMMENT_LIKES,
+  COMMENT_REPORTS,
+  COMMENT_MODERATION_EVENTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -567,4 +735,42 @@ export const POST_TABLE_DDL: string[] = [
   // hot read path (one query per rail) so the leading column matches.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_curation_surface_position " +
     "ON homepage_curation(surface, position)",
+  // 2026-06-22 article comments. The public thread read filters by
+  // (article_id, status='published') and orders by created_at, so the
+  // composite index is the hot path. Parent lookup for reply threading is
+  // separate.
+  "CREATE INDEX IF NOT EXISTS idx_comments_article_thread " +
+    "ON comments(article_id, status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comments_parent " +
+    "ON comments(parent_id) WHERE parent_id IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_comments_status_created " +
+    "ON comments(status, created_at)",
+  // DB-backed guest velocity limit: count this bucket's recent comments in a
+  // single window. lib/comment-rate-limit.ts:checkCommentVelocity targets
+  // this index.
+  "CREATE INDEX IF NOT EXISTS idx_comments_ipua_created " +
+    "ON comments(ip_ua_hash, created_at)",
+  // "My own comments" (lets a guest see their held/rejected comment) + the
+  // per-cookie velocity bucket.
+  "CREATE INDEX IF NOT EXISTS idx_comments_cookie_token " +
+    "ON comments(cookie_token)",
+  // Signed-in user's own comments + per-user velocity bucket.
+  "CREATE INDEX IF NOT EXISTS idx_comments_author " +
+    "ON comments(author_user_id) WHERE author_user_id IS NOT NULL",
+  // Anti-double-like: one like per (comment, cookie_token) for anonymous, and
+  // one per (comment, user_id) for signed-in. Partial index on user_id covers
+  // signed-in likes across devices. lib/comments.ts:toggleLike targets these
+  // indexes.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_cookie " +
+    "ON comment_likes(comment_id, cookie_token)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_user " +
+    "ON comment_likes(comment_id, user_id) WHERE user_id IS NOT NULL",
+  // Admin queue read: open reports first, then by report age.
+  "CREATE INDEX IF NOT EXISTS idx_comment_reports_status " +
+    "ON comment_reports(status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_comment_reports_comment " +
+    "ON comment_reports(comment_id)",
+  // Audit trail per comment, newest first for the appeal / admin history view.
+  "CREATE INDEX IF NOT EXISTS idx_comment_moderation_events_comment " +
+    "ON comment_moderation_events(comment_id, created_at)",
 ];

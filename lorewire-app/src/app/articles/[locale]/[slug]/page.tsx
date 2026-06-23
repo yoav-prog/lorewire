@@ -26,6 +26,11 @@ import {
 } from "@/lib/articles";
 import type { ArticleLanguage, ArticleRow, ArticleType } from "@/lib/repo";
 import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { readCommentToken } from "@/lib/comment-cookie";
+import { readUserSession } from "@/lib/user-session";
+import { countPublishedComments, loadCommentThread } from "@/lib/comments-read";
+import { commentsEnabledForArticle } from "@/lib/comments";
+import { CommentsSection } from "@/components/CommentsSection";
 
 function isLanguage(v: string): v is ArticleLanguage {
   return v === "he" || v === "en";
@@ -132,12 +137,32 @@ export default async function ArticleReader({
     siteName: seo.siteName,
   });
 
+  // Comment thread: first page server-rendered for SEO + no-flash, with the
+  // viewer resolved so they see their own held/rejected comments inline.
+  // readUserSession is a shim (always null) until the public-side auth surface
+  // ships — see src/lib/user-session.ts. Until then every viewer is treated
+  // as a guest keyed by the `lw_comment` cookie token.
+  const commentSession = await readUserSession();
+  const commentToken = await readCommentToken();
+  const [commentThread, commentCount, commentsEnabled] = await Promise.all([
+    loadCommentThread({
+      articleId: article.id,
+      sort: "newest",
+      viewerUserId: commentSession?.userId ?? null,
+      viewerCookieToken: commentToken,
+    }),
+    countPublishedComments(article.id),
+    commentsEnabledForArticle(article.id),
+  ]);
+
   console.info("[articles reader] render", {
     id: article.id,
     type,
     language,
     slug: article.slug,
     docLen: article.document?.length ?? 0,
+    comment_count: commentCount,
+    comments_enabled: commentsEnabled,
   });
 
   return (
@@ -237,6 +262,14 @@ export default async function ArticleReader({
       {/* Listicle items come AFTER the intro body — the writer's body is
           usually a short setup, then the numbered items carry the meat. */}
       {payload.type === "listicle" && <ListicleBlock payload={payload.payload} />}
+
+      <CommentsSection
+        articleId={article.id}
+        initial={commentThread}
+        initialCount={commentCount}
+        signedIn={commentSession !== null}
+        enabled={commentsEnabled}
+      />
     </article>
   );
 }

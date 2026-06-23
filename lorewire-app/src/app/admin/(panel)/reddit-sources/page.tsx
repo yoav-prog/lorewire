@@ -17,6 +17,7 @@ import {
   type RedditSourceFilters,
   type RedditSourceOrderBy,
   type RedditSourceStatus,
+  type RedditSourceStrength,
 } from "@/lib/reddit-source";
 import {
   formatCents,
@@ -39,6 +40,7 @@ const STATUS_LABEL: Record<RedditSourceStatus, string> = {
 };
 
 const SORT_LABEL: Record<RedditSourceOrderBy, string> = {
+  "strength DESC": "Priority ↓",
   "comments DESC": "Comments ↓",
   "comments ASC": "Comments ↑",
   "length_chars DESC": "Length ↓",
@@ -48,10 +50,23 @@ const SORT_LABEL: Record<RedditSourceOrderBy, string> = {
   "subreddit ASC": "Subreddit A–Z",
 };
 
+// 2026-06-23 IdeasDB priority (see
+// _plans/2026-06-23-ideasdb-priority-import.md). Same enum as the
+// reddit_source.strength column. UI labels and badge styling live in
+// RedditSourceTable.
+const STRENGTH_LABEL: Record<RedditSourceStrength, string> = {
+  strong: "Strong",
+  medium: "Medium",
+  none: "None",
+};
+
+const VALID_STRENGTHS: RedditSourceStrength[] = ["strong", "medium", "none"];
+
 interface SearchParams {
   q?: string;
   status?: string | string[];
   subreddits?: string | string[];
+  strength?: string | string[];
   length_min?: string;
   length_max?: string;
   comments_min?: string;
@@ -67,6 +82,15 @@ interface SearchParams {
   error?: string;
   // Phase 7 budget-cap flash.
   budget_cap?: string;
+}
+
+function parseStrengths(
+  v: string | string[] | undefined,
+): RedditSourceStrength[] {
+  const raw = toArray(v);
+  return raw.filter((s): s is RedditSourceStrength =>
+    (VALID_STRENGTHS as string[]).includes(s),
+  );
 }
 
 function toArray(v: string | string[] | undefined): string[] {
@@ -110,6 +134,7 @@ export default async function RedditSourcesPage({
 
   const statuses = parseStatuses(sp.status);
   const subreddits = toArray(sp.subreddits);
+  const strengths = parseStrengths(sp.strength);
   const sort = parseSort(sp.sort);
   const page = Math.max(intOrUndefined(sp.page) ?? 1, 1);
 
@@ -121,6 +146,7 @@ export default async function RedditSourcesPage({
   const filters: RedditSourceFilters = {
     status: effectiveStatuses,
     subreddits: subreddits.length > 0 ? subreddits : undefined,
+    strength: strengths.length > 0 ? strengths : undefined,
     length_min: intOrUndefined(sp.length_min),
     length_max: intOrUndefined(sp.length_max),
     comments_min: intOrUndefined(sp.comments_min),
@@ -172,6 +198,7 @@ export default async function RedditSourcesPage({
           searchParams={sp}
           activeStatuses={effectiveStatuses}
           activeSubreddits={subreddits}
+          activeStrengths={strengths}
           allSubreddits={allSubs}
           sort={sort}
         />
@@ -362,12 +389,14 @@ function FilterRail({
   searchParams,
   activeStatuses,
   activeSubreddits,
+  activeStrengths,
   allSubreddits,
   sort,
 }: {
   searchParams: SearchParams;
   activeStatuses: RedditSourceStatus[];
   activeSubreddits: string[];
+  activeStrengths: RedditSourceStrength[];
   allSubreddits: string[];
   sort: RedditSourceOrderBy;
 }) {
@@ -416,6 +445,36 @@ function FilterRail({
             );
           })}
         </div>
+      </fieldset>
+
+      <fieldset>
+        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
+          Priority
+        </legend>
+        <div className="grid grid-cols-3 gap-1">
+          {VALID_STRENGTHS.map((s) => {
+            const checked = activeStrengths.includes(s);
+            return (
+              <label
+                key={s}
+                className="flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors has-[input:checked]:border-accent has-[input:checked]:bg-surface2"
+              >
+                <input
+                  type="checkbox"
+                  name="strength"
+                  value={s}
+                  defaultChecked={checked}
+                  className="accent-accent"
+                />
+                {STRENGTH_LABEL[s]}
+              </label>
+            );
+          })}
+        </div>
+        <p className="mt-1 font-mono text-[9px] text-muted">
+          Set by the IdeasDB importer. Strong &gt; Medium &gt; None in the
+          worker queue.
+        </p>
       </fieldset>
 
       <fieldset>
@@ -579,6 +638,7 @@ function buildPageHref(searchParams: SearchParams, page: number): string {
   append("q", searchParams.q);
   appendMany("status", searchParams.status);
   appendMany("subreddits", searchParams.subreddits);
+  appendMany("strength", searchParams.strength);
   append("length_min", searchParams.length_min);
   append("length_max", searchParams.length_max);
   append("comments_min", searchParams.comments_min);

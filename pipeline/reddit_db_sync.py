@@ -199,6 +199,17 @@ def parse_csv(path: Path | str) -> tuple[list[dict], list[str]]:
                 "notes": None,
                 "first_synced": now,
                 "last_synced": now,
+                # 2026-06-23 IdeasDB priority import columns (see
+                # _plans/2026-06-23-ideasdb-priority-import.md). The
+                # reddit CSV doesn't carry these — defaults are the
+                # "legacy reddit-sourced row" baseline. The ideas
+                # importer flips them later via update_ideas_fields().
+                "strength": "none",
+                "category": None,
+                "headline": None,
+                "source_hint": None,
+                "needs_expansion": 0,
+                "fingerprint": None,
             })
 
     return rows, warnings
