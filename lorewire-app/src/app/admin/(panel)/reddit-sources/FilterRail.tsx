@@ -10,6 +10,7 @@
 // before submitting (search + the numeric ranges).
 
 import Link from "next/link";
+import { useMemo, useState } from "react";
 import type {
   RedditSourceOrderBy,
   RedditSourceStatus,
@@ -100,28 +101,10 @@ export default function FilterRail({
         </div>
       </fieldset>
 
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Subreddit
-        </legend>
-        <select
-          name="subreddits"
-          multiple
-          defaultValue={activeSubreddits}
-          size={8}
-          onChange={submitParentForm}
-          className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink outline-none focus:border-accent"
-        >
-          {allSubreddits.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <p className="mt-1 font-mono text-[9px] text-muted">
-          Ctrl/⌘-click to multi-select
-        </p>
-      </fieldset>
+      <SubredditFieldset
+        allSubreddits={allSubreddits}
+        activeSubreddits={activeSubreddits}
+      />
 
       <fieldset>
         <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
@@ -226,5 +209,103 @@ export default function FilterRail({
         </button>
       </div>
     </form>
+  );
+}
+
+// Subreddit fieldset with a type-ahead filter above the multi-select.
+// Typing narrows the visible options as you go; the currently-selected
+// subreddits are ALWAYS in the visible list (pinned above the filter
+// matches) so a query that excludes them doesn't make the active state
+// look like it vanished. Selection auto-submits the parent form via
+// the existing onChange path; the search input itself is local-only
+// (no form submission, no URL state) — it's a UI affordance, not a
+// query parameter, so a reload starts with the full list.
+function SubredditFieldset({
+  allSubreddits,
+  activeSubreddits,
+}: {
+  allSubreddits: string[];
+  activeSubreddits: string[];
+}) {
+  const [query, setQuery] = useState("");
+
+  const { visible, matchCount } = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const activeSet = new Set(activeSubreddits);
+    // Active subreddits sit at the top of the list whether or not they
+    // match the query — losing sight of the active selection while
+    // searching for the next addition would be disorienting.
+    const active = allSubreddits.filter((s) => activeSet.has(s));
+    const inactiveAll = allSubreddits.filter((s) => !activeSet.has(s));
+    const inactiveMatches = q
+      ? inactiveAll.filter((s) => s.toLowerCase().includes(q))
+      : inactiveAll;
+    return {
+      visible: [...active, ...inactiveMatches],
+      matchCount: inactiveMatches.length,
+    };
+  }, [allSubreddits, activeSubreddits, query]);
+
+  const showingFilteredOut = query.trim().length > 0;
+
+  return (
+    <fieldset>
+      <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
+        Subreddit
+      </legend>
+
+      {/* Type-ahead filter. Not a form field — local state only — so the
+          rail's GET form doesn't pick it up as a query param on submit.
+          Keystrokes never trigger a navigation; the user filters in
+          place, then clicks an option which auto-submits via the
+          existing onChange handler. */}
+      <div className="relative mb-1.5">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter subreddits…"
+          aria-label="Filter the subreddit list"
+          className="w-full rounded-md border border-line bg-bg px-2 py-1 pr-7 text-[12px] text-ink outline-none placeholder:text-muted focus:border-accent"
+        />
+        {query.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            aria-label="Clear filter"
+            className="absolute inset-y-0 right-1 my-auto flex h-5 w-5 items-center justify-center rounded-sm font-mono text-[12px] text-muted transition-colors hover:bg-surface2 hover:text-ink"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      <select
+        name="subreddits"
+        multiple
+        defaultValue={activeSubreddits}
+        size={8}
+        onChange={submitParentForm}
+        className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink outline-none focus:border-accent"
+      >
+        {visible.map((s) => (
+          <option key={s} value={s}>
+            {s}
+          </option>
+        ))}
+      </select>
+
+      <p className="mt-1 font-mono text-[9px] text-muted">
+        {showingFilteredOut ? (
+          <>
+            {matchCount} {matchCount === 1 ? "match" : "matches"}
+            {activeSubreddits.length > 0 ? " + active selection" : ""} ·
+            Ctrl/⌘-click to multi-select
+          </>
+        ) : (
+          <>Ctrl/⌘-click to multi-select</>
+        )}
+      </p>
+    </fieldset>
   );
 }
