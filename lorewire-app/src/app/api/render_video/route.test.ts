@@ -481,6 +481,82 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
       );
     });
 
+    it("does NOT rewrite intro/outro URLs to MEDIA_PUBLIC_BASE even when the rewriter is active for inputProps", async () => {
+      // Regression for the 2026-06-23 "intro and outro missing from rendered
+      // short even after manual override" bug. The dispatcher used to call
+      // `rewriteStoredMediaUrlsDeep(segments)` for consistency, which when
+      // MEDIA_PUBLIC_BASE was set rewrote each segment URL to
+      // `media.lorewire.com/<key>` — a host that
+      // `video/server/render.ts:parseGcsSegmentUrl` rejects, so the splice
+      // was silently skipped and the rendered MP4 came back body-only.
+      // Cloud Run downloads segments via the authenticated GCS SDK, so
+      // public-read state does not matter and the rewriter is not needed
+      // here. Assert the segments pass through verbatim even when
+      // MEDIA_PUBLIC_BASE is set (which would activate the rewriter for
+      // inputProps).
+      const prev = process.env.MEDIA_PUBLIC_BASE;
+      process.env.MEDIA_PUBLIC_BASE = "https://media.lorewire.com";
+      try {
+        vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+        vi.spyOn(repo, "getStory").mockResolvedValue({
+          ...makeStory(JSON.stringify({ aspect: "9:16" })),
+          intro_segment_id: "intro-1",
+          outro_segment_id: "outro-1",
+        } as unknown as repo.StoryRow);
+        vi.spyOn(repo, "getSetting").mockImplementation(async (k: string) => {
+          if (k === "video.default_aspect") return "9:16";
+          return null;
+        });
+        vi.spyOn(repo, "getSegment").mockImplementation(async (id: string) => {
+          if (id === "intro-1") {
+            return {
+              id: "intro-1",
+              kind: "intro",
+              normalized_url: "https://storage.googleapis.com/b/segments/i1.mp4",
+              enabled: 1,
+              aspect: "9:16",
+            } as unknown as repo.SegmentRow;
+          }
+          if (id === "outro-1") {
+            return {
+              id: "outro-1",
+              kind: "outro",
+              normalized_url: "https://storage.googleapis.com/b/segments/o1.mp4",
+              enabled: 1,
+              aspect: "9:16",
+            } as unknown as repo.SegmentRow;
+          }
+          return null;
+        });
+        vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+        undiciFetchMock.mockResolvedValue(
+          new Response(JSON.stringify({ url: "https://gcs/x.mp4" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+
+        await GET(makeReq({ auth: "Bearer test-secret" }));
+
+        const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+        const sent = JSON.parse(callInit.body as string) as {
+          segments: { intro: string | null; outro: string | null };
+        };
+        // Original storage.googleapis.com URLs must be preserved — anything
+        // else (notably the media.lorewire.com rewrite) makes Cloud Run skip
+        // the splice.
+        expect(sent.segments.intro).toBe(
+          "https://storage.googleapis.com/b/segments/i1.mp4",
+        );
+        expect(sent.segments.outro).toBe(
+          "https://storage.googleapis.com/b/segments/o1.mp4",
+        );
+      } finally {
+        if (prev === undefined) delete process.env.MEDIA_PUBLIC_BASE;
+        else process.env.MEDIA_PUBLIC_BASE = prev;
+      }
+    });
+
     it("sends {intro: null, outro: null} when the story opts out of both", async () => {
       vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
       vi.spyOn(repo, "getStory").mockResolvedValue({

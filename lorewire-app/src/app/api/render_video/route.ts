@@ -317,11 +317,16 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // base is unset. Plan:
   // _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
   const propsRewrote = rewriteStoredMediaUrlsDeep(inputProps);
-  const segmentsRewrote = rewriteStoredMediaUrlsDeep(segments);
+  // Segments are deliberately NOT rewritten — see the mirror comment on
+  // render_short/route.ts. Cloud Run downloads them via the authenticated
+  // GCS SDK so public-read state is irrelevant; rewriting them to
+  // `media.lorewire.com/<key>` makes `parseGcsSegmentUrl` return null and
+  // `spliceWithSegments` silently skip the splice, dropping the intro and
+  // outro from the final cut.
   namespacedLog("rewrite", {
     render_id: claimed.id,
     props_rewrote: propsRewrote,
-    segments_rewrote: segmentsRewrote,
+    segments_rewrote: 0,
   });
 
   await logVideoRenderEvent(claimed.id, "dispatch_start", {
