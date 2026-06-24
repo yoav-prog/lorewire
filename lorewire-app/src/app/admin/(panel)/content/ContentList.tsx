@@ -17,12 +17,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
+  bulkPublishToSocialsAction,
   bulkUpdateContentAction,
   bulkDeleteContentAction,
   bulkReclassifyStoriesAction,
   bulkRegenerateContentAction,
   type BulkActionResult,
   type BulkContentItem,
+  type BulkPublishResult,
   type BulkRegenResult,
   type BulkRegenTarget,
   type BulkUpdateOp,
@@ -33,7 +35,12 @@ import {
   ARTICLE_TYPE_LABELS,
   articleDirection,
 } from "@/lib/articles";
-import type { ContentRow, ContentSubKind } from "@/lib/repo";
+import type {
+  ContentRow,
+  ContentSubKind,
+  PublishedOn,
+  SocialPlatform,
+} from "@/lib/repo";
 import { CATEGORIES, STATUSES, statusClass } from "@/app/admin/ui";
 import { matchesContentSearch } from "@/lib/content-search";
 
@@ -140,6 +147,45 @@ function describeReason(reason: string): string {
   }
 }
 
+// 2026-06-24 per-platform metadata for the per-row icons + the bulk
+// publish-to-socials picker. Letter badges (F/I/Y/T) with brand colors
+// keep the bundle dependency-free; full logos require licensing care
+// and add weight for marginal admin-only value. Hover label surfaces
+// the platform name + "live on …" tooltip.
+const PLATFORM_META: Record<
+  SocialPlatform,
+  { label: string; letter: string; chipClass: string }
+> = {
+  facebook: {
+    label: "Facebook",
+    letter: "F",
+    chipClass: "border-[#1877F2]/60 bg-[#1877F2]/15 text-[#1877F2]",
+  },
+  instagram: {
+    label: "Instagram",
+    letter: "I",
+    chipClass:
+      "border-[#E1306C]/60 bg-gradient-to-br from-[#F58529]/15 via-[#DD2A7B]/15 to-[#8134AF]/15 text-[#E1306C]",
+  },
+  youtube: {
+    label: "YouTube",
+    letter: "Y",
+    chipClass: "border-[#FF0000]/60 bg-[#FF0000]/15 text-[#FF0000]",
+  },
+  tiktok: {
+    label: "TikTok",
+    letter: "T",
+    chipClass: "border-[#25F4EE]/60 bg-black/40 text-[#25F4EE]",
+  },
+};
+
+const PLATFORMS_ORDER: SocialPlatform[] = [
+  "facebook",
+  "instagram",
+  "youtube",
+  "tiktok",
+];
+
 // 2026-06-24 bulk regen targets surfaced under the Regenerate ▾ picker in the
 // bulk action bar. Each picks the same primitive the single-story editor
 // already uses; cost hints feed the confirm modal so a 30-story click that
@@ -207,6 +253,13 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     items: BulkContentItem[];
   } | null>(null);
   const [regenResult, setRegenResult] = useState<BulkRegenResult | null>(null);
+  // 2026-06-24 bulk publish-to-socials picker state. `pickedPlatforms`
+  // is the multi-select inside the dropdown; `publishResult` surfaces
+  // the post-run banner. Plan:
+  // _plans/2026-06-24-bulk-publish-from-content.md.
+  const [publishResult, setPublishResult] = useState<BulkPublishResult | null>(
+    null,
+  );
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -471,6 +524,47 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     });
   }
 
+  function runBulkPublish(platforms: SocialPlatform[]) {
+    // Stories-only at the request edge — server enforces too but trimming
+    // here keeps the result banner honest. Articles in the selection would
+    // otherwise land in the skipped bucket with N platforms each.
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0 || platforms.length === 0) return;
+    console.info("[content list bulk-publish request]", {
+      count: storyItems.length,
+      platforms,
+    });
+    setPublishResult(null);
+    startTransition(async () => {
+      let result: BulkPublishResult;
+      try {
+        result = await bulkPublishToSocialsAction(storyItems, platforms);
+      } catch (err) {
+        result = {
+          posted: [],
+          pending: [],
+          skipped: [],
+          failed: storyItems.flatMap((it) =>
+            platforms.map((p) => ({
+              ...it,
+              platform: p,
+              reason: err instanceof Error ? err.message : String(err),
+            })),
+          ),
+        };
+      }
+      console.info("[content list bulk-publish result]", {
+        posted: result.posted.length,
+        pending: result.pending.length,
+        failed: result.failed.length,
+        skipped: result.skipped.length,
+      });
+      setPublishResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   function runReclassify() {
     console.info("[content list reclassify submit]");
     setReclassifyConfirmOpen(false);
@@ -564,6 +658,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           result={regenResult}
           rowByKey={rowByKey}
           onDismiss={() => setRegenResult(null)}
+        />
+      )}
+
+      {publishResult && (
+        <BulkPublishResultBanner
+          result={publishResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setPublishResult(null)}
         />
       )}
 
@@ -715,6 +817,11 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                       }
                     />
                   )}
+                  {r.kind === "story" && (
+                    <PublishedOnStrip
+                      published={r.published_on}
+                    />
+                  )}
                   <span
                     className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
                       r.status,
@@ -742,6 +849,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           disabled={pending}
           onAction={(op) => requestAction(selectedItems, op)}
           onRegen={requestRegen}
+          onBulkPublish={runBulkPublish}
           onClear={clearSelection}
         />
       )}
@@ -779,12 +887,14 @@ function BulkActionBar({
   disabled,
   onAction,
   onRegen,
+  onBulkPublish,
   onClear,
 }: {
   counts: { total: number; stories: number; articles: number };
   disabled: boolean;
   onAction: (op: BulkUpdateOp | { type: "delete" }) => void;
   onRegen: (target: BulkRegenTarget) => void;
+  onBulkPublish: (platforms: SocialPlatform[]) => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
@@ -792,6 +902,7 @@ function BulkActionBar({
   // pipeline citizens, so the menu is dark when the selection is articles-
   // only. Mixed selections light up but the server filters to stories.
   const regenDisabled = counts.stories === 0;
+  const bulkPublishDisabled = counts.stories === 0;
   return (
     <div className="sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2 px-4 py-3 shadow-2xl">
       <span className="font-mono text-[11px] uppercase tracking-wider text-ink">
@@ -801,6 +912,16 @@ function BulkActionBar({
         </span>
       </span>
       <div className="ml-auto flex flex-wrap items-center gap-2">
+        <BulkPublishPicker
+          disabled={disabled || bulkPublishDisabled}
+          disabledHint={
+            bulkPublishDisabled
+              ? "Bulk publish-to-socials applies to video stories only"
+              : null
+          }
+          storyCount={counts.stories}
+          onConfirm={onBulkPublish}
+        />
         <BarButton
           label="Publish"
           disabled={disabled}
@@ -1564,6 +1685,221 @@ function RegenResultBanner({
             );
           })}
           {overflow > 0 && <li>…and {overflow} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// --- Per-row published-on icon strip ----------------------------------------
+// 2026-06-24. Renders one letter badge per platform the story is live on.
+// Empty render when nothing is published — keeps the row chrome quiet.
+
+function PublishedOnStrip({ published }: { published: PublishedOn }) {
+  const live = PLATFORMS_ORDER.filter((p) => published[p]);
+  if (live.length === 0) {
+    return (
+      <span
+        className="mr-2 shrink-0 self-center font-mono text-[9px] uppercase tracking-wider text-muted/60"
+        title="Not published on any social"
+      >
+        —
+      </span>
+    );
+  }
+  return (
+    <span className="mr-2 flex shrink-0 items-center gap-1">
+      {live.map((p) => {
+        const meta = PLATFORM_META[p];
+        return (
+          <span
+            key={p}
+            title={`Live on ${meta.label}`}
+            aria-label={`Live on ${meta.label}`}
+            className={`inline-flex h-5 w-5 items-center justify-center rounded-full border font-mono text-[10px] font-bold ${meta.chipClass}`}
+          >
+            {meta.letter}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+// --- Bulk publish-to-socials picker -----------------------------------------
+// 2026-06-24. Dropdown with one checkbox per platform + a confirm
+// button at the bottom that fires the bulk action with the selected
+// platforms. State is local to the picker — closes after confirm so
+// the next click starts from a clean slate.
+
+function BulkPublishPicker({
+  disabled,
+  disabledHint,
+  storyCount,
+  onConfirm,
+}: {
+  disabled: boolean;
+  disabledHint: string | null;
+  storyCount: number;
+  onConfirm: (platforms: SocialPlatform[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState<Set<SocialPlatform>>(new Set());
+  const wrap = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  function toggle(p: SocialPlatform) {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p);
+      else next.add(p);
+      return next;
+    });
+  }
+
+  function confirm() {
+    if (picked.size === 0) return;
+    setOpen(false);
+    const arr = PLATFORMS_ORDER.filter((p) => picked.has(p));
+    setPicked(new Set());
+    onConfirm(arr);
+  }
+
+  return (
+    <div ref={wrap} className="relative">
+      <button
+        type="button"
+        onClick={() => !disabled && setOpen((v) => !v)}
+        disabled={disabled}
+        title={disabled && disabledHint ? disabledHint : undefined}
+        className="rounded-md border border-accent/50 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        Publish to socials ▾
+      </button>
+      {open && (
+        <div className="absolute right-0 bottom-full z-20 mb-1 min-w-[220px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
+          <ul className="border-b border-line">
+            {PLATFORMS_ORDER.map((p) => {
+              const meta = PLATFORM_META[p];
+              const isPicked = picked.has(p);
+              return (
+                <li key={p}>
+                  <button
+                    type="button"
+                    onClick={() => toggle(p)}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[11px] text-ink transition-colors hover:bg-surface2"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isPicked}
+                      readOnly
+                      className="h-3.5 w-3.5 accent-accent"
+                    />
+                    <span
+                      aria-hidden
+                      className={`inline-flex h-4 w-4 items-center justify-center rounded-full border font-bold text-[9px] ${meta.chipClass}`}
+                    >
+                      {meta.letter}
+                    </span>
+                    {meta.label}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={picked.size === 0}
+            className="block w-full bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {picked.size === 0
+              ? "Pick at least one platform"
+              : `Publish ${storyCount} ${storyCount === 1 ? "story" : "stories"} to ${picked.size} ${picked.size === 1 ? "platform" : "platforms"}`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Bulk publish result banner --------------------------------------------
+// 2026-06-24. Same shape as RegenResultBanner. Surfaces per-bucket
+// counts (posted / pending / failed / skipped) and the first few
+// failure reasons. Pending bucket is highlighted as the
+// "TikTok-drafts or IG-async" case so the operator knows the retry
+// cron will finish the work.
+
+function BulkPublishResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkPublishResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const previewFailures = result.failed.slice(0, 6);
+  const overflowFailures = result.failed.length - previewFailures.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Bulk publish:</span> Posted{" "}
+          <span className="text-accent">{result.posted.length}</span>
+          {result.pending.length > 0 && (
+            <>
+              {" · "}Queued <span className="text-accent">{result.pending.length}</span>{" "}
+              <span className="text-muted">
+                (retry cron will finish in ~5 min)
+              </span>
+            </>
+          )}
+          {result.failed.length > 0 && ` · Failed ${result.failed.length}`}
+          {result.skipped.length > 0 && ` · Skipped ${result.skipped.length}`}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewFailures.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewFailures.map((f) => {
+            const r = rowByKey.get(`${f.kind}:${f.id}`);
+            const label = r?.title ?? r?.slug ?? f.id.slice(0, 8);
+            return (
+              <li key={`${f.kind}:${f.id}:${f.platform}`}>
+                <span className="text-ink">{label}</span>
+                <span className="opacity-70">
+                  {" "}
+                  · {PLATFORM_META[f.platform].label} — {f.reason ?? "unknown"}
+                </span>
+              </li>
+            );
+          })}
+          {overflowFailures > 0 && (
+            <li>…and {overflowFailures} more</li>
+          )}
         </ul>
       )}
     </div>

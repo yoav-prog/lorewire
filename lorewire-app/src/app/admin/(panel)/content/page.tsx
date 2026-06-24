@@ -15,7 +15,9 @@ import {
   listContentSlim,
   CONTENT_SUBKINDS,
   ARTICLE_LANGUAGES,
+  SOCIAL_PLATFORMS,
   type ContentSubKind,
+  type SocialPlatform,
 } from "@/lib/repo";
 import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
 import { CATEGORIES, STATUSES } from "@/app/admin/ui";
@@ -41,6 +43,44 @@ function isSubKind(v: string | undefined): v is ContentSubKind {
   );
 }
 
+const PLATFORM_FILTER_LABELS: Record<SocialPlatform, string> = {
+  facebook: "Facebook",
+  instagram: "Instagram",
+  youtube: "YouTube",
+  tiktok: "TikTok",
+};
+
+function parsePlatformList(raw: string | undefined): SocialPlatform[] {
+  if (!raw) return [];
+  const seen = new Set<SocialPlatform>();
+  for (const part of raw.split(",")) {
+    const v = part.trim().toLowerCase();
+    if (
+      v === "facebook" ||
+      v === "instagram" ||
+      v === "youtube" ||
+      v === "tiktok"
+    ) {
+      seen.add(v);
+    }
+  }
+  return Array.from(seen);
+}
+
+/** Pure: flip a single platform's presence in a comma-joined list.
+ *  Returns the new comma-joined string (or undefined when the list is
+ *  now empty so the URL drops the param entirely). */
+function togglePlatform(
+  current: SocialPlatform[],
+  platform: SocialPlatform,
+): string | undefined {
+  const has = current.includes(platform);
+  const next = has
+    ? current.filter((p) => p !== platform)
+    : [...current, platform];
+  return next.length === 0 ? undefined : next.join(",");
+}
+
 export default async function ContentPage({
   searchParams,
 }: {
@@ -49,6 +89,8 @@ export default async function ContentPage({
     status?: string;
     language?: string;
     category?: string;
+    publishedOn?: string;
+    publishedNotOn?: string;
   }>;
 }) {
   await requireCapability("content.manage");
@@ -62,11 +104,15 @@ export default async function ContentPage({
     sp.category && (CATEGORIES as readonly string[]).includes(sp.category)
       ? sp.category
       : undefined;
+  const publishedOn = parsePlatformList(sp.publishedOn);
+  const publishedNotOn = parsePlatformList(sp.publishedNotOn);
   const rows = await listContentSlim({
     subKind,
     status,
     language,
     category,
+    publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
+    publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
     limit: LIST_LIMIT,
   });
 
@@ -74,7 +120,16 @@ export default async function ContentPage({
   // author) only edits one function. Clearing a filter means dropping its key.
   const baseQs = (override: Partial<Record<string, string | undefined>>) => {
     const next = new URLSearchParams();
-    const merged = { kind: subKind, status, language, category, ...override };
+    const merged = {
+      kind: subKind,
+      status,
+      language,
+      category,
+      publishedOn: publishedOn.length > 0 ? publishedOn.join(",") : undefined,
+      publishedNotOn:
+        publishedNotOn.length > 0 ? publishedNotOn.join(",") : undefined,
+      ...override,
+    };
     for (const [k, v] of Object.entries(merged)) {
       if (v) next.set(k, v);
     }
@@ -191,6 +246,48 @@ export default async function ContentPage({
           )}
           <span className="font-mono text-[10px] text-muted">
             (articles only)
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Published on
+          </span>
+          {chip(
+            `/admin/content${baseQs({ publishedOn: undefined })}`,
+            "All",
+            publishedOn.length === 0,
+          )}
+          {SOCIAL_PLATFORMS.map((p) =>
+            chip(
+              `/admin/content${baseQs({ publishedOn: togglePlatform(publishedOn, p) })}`,
+              PLATFORM_FILTER_LABELS[p],
+              publishedOn.includes(p),
+            ),
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (video stories only · multi-select for "live on all selected")
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Not on
+          </span>
+          {chip(
+            `/admin/content${baseQs({ publishedNotOn: undefined })}`,
+            "All",
+            publishedNotOn.length === 0,
+          )}
+          {SOCIAL_PLATFORMS.map((p) =>
+            chip(
+              `/admin/content${baseQs({ publishedNotOn: togglePlatform(publishedNotOn, p) })}`,
+              PLATFORM_FILTER_LABELS[p],
+              publishedNotOn.includes(p),
+            ),
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (use to find stories MISSING from a platform)
           </span>
         </div>
       </div>
