@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
@@ -9,6 +9,11 @@ import {
 } from "@/lib/stories";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import WiresDesktop from "@/components/wires/WiresDesktop";
+import { StoriesRail } from "@/components/stories/StoriesRail";
+import { StoriesViewer } from "@/components/stories/StoriesViewer";
+import { resolveStoriesPlaylist } from "@/components/stories/stories-playlist";
+import { useStoriesUrlState } from "@/components/stories/use-stories-url-state";
+import { useViewedWires } from "@/components/stories/use-viewed-wires";
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
   placeArticleImages,
@@ -1396,6 +1401,9 @@ function HomePage({
   catalog,
   resolveStory,
   pollsInitial,
+  storiesPlaylist,
+  viewedWireIds,
+  onOpenWire,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -1405,6 +1413,10 @@ function HomePage({
   catalog: ReturnType<typeof useHomepageCuration>["catalog"];
   resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
   pollsInitial: HomepageInitial["pollRails"];
+  /** IG-style rail playlist — see _plans/2026-06-25-stories-rail-and-viewer.md. */
+  storiesPlaylist: Story[];
+  viewedWireIds: string[];
+  onOpenWire: (wireId: string) => void;
 }) {
   // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
   // New & Hot grids can share the same resolveStory (saved real shorts aren't
@@ -1460,6 +1472,15 @@ function HomePage({
 
   return (
     <div className="pb-20">
+      {/* IG-style Stories rail sits above the Hero so freshness leads
+          the page. Hides entirely when every wire is already viewed.
+          The pt-20 clears the fixed TopNav so the rail isn't covered. */}
+      <StoriesRail
+        playlist={storiesPlaylist}
+        viewedIds={viewedWireIds}
+        onOpen={onOpenWire}
+        className="pt-20"
+      />
       {heroPool.length > 0 && (
         <Hero
           pool={heroPool}
@@ -1646,6 +1667,16 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     liveRows: initial.liveRows,
   });
 
+  // 2026-06-25 stories plan: IG-style rail + viewer on desktop too,
+  // identical contract to MobileShell (one product, one viewer).
+  // Plan: _plans/2026-06-25-stories-rail-and-viewer.md.
+  const storiesPlaylist = useMemo(
+    () => resolveStoriesPlaylist(curation, catalog, resolveStory),
+    [curation, catalog, resolveStory],
+  );
+  const { viewed: viewedWireIds } = useViewedWires();
+  const { openWireId, openWire, closeWire } = useStoriesUrlState();
+
   useEffect(() => {
     const onS = () => setSolid(window.scrollY > 120);
     window.addEventListener("scroll", onS, { passive: true });
@@ -1714,6 +1745,9 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           catalog={catalog}
           resolveStory={resolveStory}
           pollsInitial={initial.pollRails}
+          storiesPlaylist={storiesPlaylist}
+          viewedWireIds={viewedWireIds}
+          onOpenWire={openWire}
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
@@ -1773,6 +1807,17 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         const s = resolveStory(active.id);
         return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} /> : null;
       })()}
+
+      {/* IG-style Stories viewer. Mounts at the shell level so a
+          `?wire=<id>` deep link works regardless of which view tab is
+          currently active. Plan: _plans/2026-06-25-stories-rail-and-viewer.md. */}
+      {openWireId && storiesPlaylist.length > 0 && (
+        <StoriesViewer
+          playlist={storiesPlaylist}
+          startId={openWireId}
+          onClose={closeWire}
+        />
+      )}
     </div>
   );
 }
