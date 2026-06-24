@@ -34,6 +34,7 @@ import { publishShortToFacebook } from "@/lib/publish-to-facebook";
 import { publishShortToInstagram } from "@/lib/publish-to-instagram";
 import { publishShortToYouTube } from "@/lib/publish-to-youtube";
 import { publishShortToTikTok } from "@/lib/publish-to-tiktok";
+import { ensureSeoMetadataForStory } from "@/lib/seo-metadata";
 
 // A short runs kie image generation + Remotion render, the longest job in the
 // app, so override undici's 300s default timeouts. Vercel Pro's 800s cron cap is
@@ -308,6 +309,22 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       err: String(err),
     });
   });
+  // Best-effort LLM-generated SEO metadata regeneration. Runs BEFORE
+  // the publishers so they can use the freshly-generated per-platform
+  // titles/descriptions/captions/tags instead of the template defaults.
+  // Idempotent: skips when the existing metadata is fresh (no story
+  // update since the last generation) and the auto-regenerate setting
+  // is on. A failure here NEVER blocks publishing — publishers fall
+  // through to templates on missing/stale metadata. Plan:
+  // _plans/2026-06-24-llm-seo-metadata.md.
+  await ensureSeoMetadataForRender(claimed.story_id).catch((err) => {
+    namespacedLog("seo_metadata_unhandled", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      err: String(err),
+    });
+  });
+
   // Best-effort auto-publish to the LoreWire Facebook Page. Gated by the
   // `publisher.facebook.auto_publish` setting (default off) and dedup'd
   // at story level in publishShortToFacebook. A failure lands in
@@ -479,6 +496,22 @@ async function publishShortToYouTubeForRender(
       category: story?.category ?? null,
     },
   });
+}
+
+/** Look up the article URL for the SEO metadata generator — same shape
+ *  as resolveArticleUrlForStory in the per-publisher helpers above, but
+ *  inlined here because seo-metadata.ts only needs the URL string. */
+async function ensureSeoMetadataForRender(storyId: string): Promise<void> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  const articleUrl = article
+    ? `${origin}/articles/${article.language}/${article.slug}`
+    : origin;
+  await ensureSeoMetadataForStory({ storyId, articleUrl });
 }
 
 /** TikTok mirror. The TT publisher runs the OAuth refresh → creator

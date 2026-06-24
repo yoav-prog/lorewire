@@ -33,6 +33,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
+import { loadSeoMetadata } from "@/lib/seo-metadata";
 
 // --- Types -----------------------------------------------------------------
 
@@ -1002,18 +1003,37 @@ export async function publishShortToYouTube(
   const uploadCaptions =
     ((await getSetting(SETTING_UPLOAD_CAPTIONS)) ?? "1") !== "0";
 
+  // Resolution chain: per-publish override > LLM-generated seo_metadata
+  // > settings template > DEFAULT_* constant. seo_metadata is the
+  // Phase 2 layer (per-story LLM-generated metadata) — when present,
+  // it slots between the admin's per-click overrides and the template
+  // fallback. See _plans/2026-06-24-llm-seo-metadata.md.
+  const seoMeta = await loadSeoMetadata(args.storyId);
+  const seoYouTube = seoMeta?.youtube;
   const titleResolved =
     args.titleOverride != null && args.titleOverride.length > 0
       ? trimWithEllipsis(args.titleOverride, YT_TITLE_LIMIT)
-      : renderTitle(titleTemplate, args.context, args.storyId);
+      : seoYouTube?.title
+        ? trimWithEllipsis(seoYouTube.title, YT_TITLE_LIMIT)
+        : renderTitle(titleTemplate, args.context, args.storyId);
   const descriptionResolved =
     args.descriptionOverride != null && args.descriptionOverride.length > 0
       ? trimWithEllipsis(args.descriptionOverride, YT_DESCRIPTION_LIMIT)
-      : renderDescription(descTemplate, args.context, args.storyId);
+      : seoYouTube?.description
+        ? trimWithEllipsis(seoYouTube.description, YT_DESCRIPTION_LIMIT)
+        : renderDescription(descTemplate, args.context, args.storyId);
   const tagsResolved =
     args.tagsOverride != null
       ? mergeTags(args.tagsOverride, [])
-      : mergeTags(parseTagList(tagsBaseRaw), parseTagList(tagsCatRaw));
+      : seoYouTube?.tags
+        ? mergeTags(seoYouTube.tags, [])
+        : mergeTags(parseTagList(tagsBaseRaw), parseTagList(tagsCatRaw));
+  const metadataSource: "override" | "seo_metadata" | "template" =
+    args.titleOverride || args.descriptionOverride || args.tagsOverride
+      ? "override"
+      : seoYouTube
+        ? "seo_metadata"
+        : "template";
 
   const row = await insertPendingRow({
     storyId: args.storyId,
@@ -1040,6 +1060,7 @@ export async function publishShortToYouTube(
     title_len: titleResolved.length,
     description_len: descriptionResolved.length,
     tag_count: tagsResolved.length,
+    metadata_source: metadataSource,
     privacy,
     made_for_kids: madeForKids,
     synthetic,

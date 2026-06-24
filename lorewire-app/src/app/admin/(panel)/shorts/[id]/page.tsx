@@ -22,6 +22,7 @@ import {
   getLatestInstagramPostForStoryAction,
   getLatestTikTokPostForStoryAction,
   getLatestYouTubePostForStoryAction,
+  getSeoMetadataForStoryAction,
   listArticlesLinkedToStoryAction,
   loadShortEditorState,
 } from "./actions";
@@ -99,6 +100,19 @@ export default async function ShortEditorPage({
       return null;
     }),
   ]);
+
+  // SEO metadata for the SEO card on the editor. Best-effort: a
+  // lookup failure should not block the editor — the card just shows
+  // "Not generated yet" and exposes the Generate button.
+  const initialSeoMetadata = await getSeoMetadataForStoryAction(id).catch(
+    (err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] seo metadata lookup failed", {
+        err: String(err),
+      });
+      return { metadata: null, generatedAt: null };
+    },
+  );
   const linkedArticles = articlesResult.ok
     ? (articlesResult.articles ?? [])
     : [];
@@ -208,6 +222,7 @@ export default async function ShortEditorPage({
           initialInstagramPost={latestInstagramPost}
           initialYouTubePost={latestYouTubePost}
           initialTikTokPost={latestTikTokPost}
+          initialSeoMetadata={initialSeoMetadata}
         />
       )}
     </div>

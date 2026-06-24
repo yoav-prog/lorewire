@@ -105,6 +105,19 @@ export const STORIES: Table = {
     // story's category whitelist. Admin override always wins; settings
     // changes never overwrite an existing row.
     { name: "hero_style_id", type: "TEXT" },
+    // 2026-06-24 LLM-generated SEO metadata
+    // (_plans/2026-06-24-llm-seo-metadata.md). Per-platform titles /
+    // descriptions / captions / hashtags / tags generated once per
+    // story from teleprompter + title + category via kie.ai's Gemini
+    // 3.5 Flash. Used by the FB/IG/YT/TT publishers in preference to
+    // the settings-level template. NULL = publisher falls through to
+    // the template (Phase 1 behavior). Shape validated by Zod in
+    // lib/seo-metadata.ts (SeoMetadataSchema).
+    { name: "seo_metadata_json", type: "TEXT" },
+    // ISO-8601 timestamp of the last metadata generation. Compared
+    // against stories.updated_at to decide whether to regenerate when
+    // a story's teleprompter has been edited since the last run.
+    { name: "seo_metadata_generated_at", type: "TEXT" },
   ],
 };
 

@@ -17,6 +17,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
+import { loadSeoMetadata } from "@/lib/seo-metadata";
 
 // --- Types -----------------------------------------------------------------
 
@@ -455,10 +456,19 @@ export async function publishShortToFacebook(
 
   const template =
     (await getSetting(SETTING_CAPTION_TEMPLATE)) ?? DEFAULT_CAPTION_TEMPLATE;
+  // Resolution chain: per-publish override > seo_metadata > template.
+  const seoMeta = await loadSeoMetadata(args.storyId);
+  const seoFbCaption = seoMeta?.facebook?.caption;
+  const metadataSource: "override" | "seo_metadata" | "template" =
+    args.captionOverride != null && args.captionOverride.length > 0
+      ? "override"
+      : seoFbCaption
+        ? "seo_metadata"
+        : "template";
   const caption =
     args.captionOverride != null && args.captionOverride.length > 0
       ? args.captionOverride
-      : renderCaption(template, args.context, args.storyId);
+      : (seoFbCaption ?? renderCaption(template, args.context, args.storyId));
 
   const row = await insertPendingRow({
     storyId: args.storyId,
@@ -477,6 +487,7 @@ export async function publishShortToFacebook(
     page_id: row.page_id,
     video_url_host: hostOf(row.video_url),
     caption_len: row.caption.length,
+    metadata_source: metadataSource,
     ...tokenFingerprint(),
   });
 

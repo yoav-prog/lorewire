@@ -31,6 +31,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
+import { loadSeoMetadata } from "@/lib/seo-metadata";
 
 // --- Types -----------------------------------------------------------------
 
@@ -884,14 +885,31 @@ export async function publishShortToTikTok(
   const postMode: TikTokPostMode =
     args.postModeOverride ?? postModeFromSettings;
 
-  const rendered =
-    args.captionOverride != null && args.captionOverride.length > 0
-      ? args.captionOverride
-      : renderCaption(captionTemplate, args.context, args.storyId);
-  const extras = [
-    ...parseHashtagList(baseHashtagsRaw),
-    ...parseHashtagList(catHashtagsRaw),
-  ];
+  // Resolution chain: per-publish override > seo_metadata > template.
+  // When seo_metadata.tiktok.caption is present, it already includes
+  // the LLM-curated hashtags inline so we skip the appendHashtags step
+  // for that source — adding more on top would push past TikTok's
+  // 3-5 hashtag sweet spot.
+  const seoMeta = await loadSeoMetadata(args.storyId);
+  const seoTikTokCaption = seoMeta?.tiktok?.caption;
+  let metadataSource: "override" | "seo_metadata" | "template" = "template";
+  let rendered: string;
+  let extras: readonly string[];
+  if (args.captionOverride != null && args.captionOverride.length > 0) {
+    rendered = args.captionOverride;
+    extras = [];
+    metadataSource = "override";
+  } else if (seoTikTokCaption) {
+    rendered = seoTikTokCaption;
+    extras = [];
+    metadataSource = "seo_metadata";
+  } else {
+    rendered = renderCaption(captionTemplate, args.context, args.storyId);
+    extras = [
+      ...parseHashtagList(baseHashtagsRaw),
+      ...parseHashtagList(catHashtagsRaw),
+    ];
+  }
   const { caption, truncated } = appendHashtags(rendered, extras);
 
   const row = await insertPendingRow({
@@ -918,6 +936,7 @@ export async function publishShortToTikTok(
     video_url_host: hostOf(row.video_url),
     caption_len: caption.length,
     caption_truncated: truncated,
+    metadata_source: metadataSource,
     post_mode: postMode,
     privacy_level: privacyDefault,
     is_aigc: isAigc,
