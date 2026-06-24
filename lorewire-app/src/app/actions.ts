@@ -722,3 +722,22 @@ export async function getPollForStoryView(
     return { ok: false, view: null };
   }
 }
+
+// 2026-06-25 Phase 1 of _plans/2026-06-25-top10-ranking.md. Public
+// server action wrapper around the story-events recorder. Client UIs
+// fire this fire-and-forget — they don't need the result, and the
+// recorder swallows every failure so the UI path never breaks.
+export async function recordStoryEventAction(
+  storyId: string,
+  type:
+    | "play_started"
+    | "play_completed"
+    | "save_added"
+    | "rating_submitted"
+    | "poll_vote"
+    | "share_initiated",
+): Promise<{ ok: boolean }> {
+  const { recordStoryEvent } = await import("@/lib/story-events");
+  const r = await recordStoryEvent({ storyId, type });
+  return { ok: r.ok };
+}

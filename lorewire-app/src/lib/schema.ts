@@ -1098,6 +1098,73 @@ export const INSTAGRAM_POSTS: Table = {
   ],
 };
 
+// 2026-06-25 Instagram Story cross-post for shorts
+// (_plans/2026-06-25-instagram-facebook-stories-cross-publish.md).
+// Mirrors INSTAGRAM_POSTS with the caption column dropped: the IG
+// /media endpoint with media_type=STORIES does NOT accept a caption
+// parameter (Story text overlays are creation-tool-only stickers).
+// The same `container_id` resume mechanic carries over — Story
+// publishing is the same 3-step async flow (POST /media → poll
+// status_code → POST /media_publish) modulo media_type=STORIES.
+// Cross-post is gated by `publisher.instagram.auto_publish_story`
+// (default off), independent from the Reel toggle. Reuses
+// FB_PAGE_ACCESS_TOKEN — no new env vars, no new App Review.
+export const INSTAGRAM_STORIES: Table = {
+  name: "instagram_stories",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "ig_account_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "container_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "ig_error_code", type: "INTEGER" },
+    { name: "ig_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-25 Facebook Page Story cross-post for shorts
+// (_plans/2026-06-25-instagram-facebook-stories-cross-publish.md).
+// Mirrors FACEBOOK_POSTS with two deltas:
+//   - No caption column. FB Page /video_stories does NOT accept a
+//     description on creation.
+//   - `upload_session_id` (the FB `video_id` returned from
+//     upload_phase=start). Survives across retries so a row that
+//     landed in `pending` after the rupload bytes step can resume at
+//     upload_phase=finish without re-uploading — same role
+//     INSTAGRAM_STORIES.container_id plays for IG.
+// Cross-post is gated by `publisher.facebook.auto_publish_story`
+// (default off), independent from the FB Reel toggle.
+export const FACEBOOK_STORIES: Table = {
+  name: "facebook_stories",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "page_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "upload_session_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "fb_error_code", type: "INTEGER" },
+    { name: "fb_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-24 YouTube auto-publish for shorts
 // (_plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md).
 // Mirrors FACEBOOK_POSTS / INSTAGRAM_POSTS with YT-specific deltas:
@@ -1198,6 +1265,27 @@ export const TIKTOK_POSTS: Table = {
   ],
 };
 
+// 2026-06-25 Phase 1 of _plans/2026-06-25-top10-ranking.md. Anonymous
+// engagement events keyed off the lw_anon cookie. The weight column is
+// baked at write time so future tuning of the weight table doesn't
+// retroactively rewrite history — today's Top 10 reflects today's
+// rules. Consent gate is enforced at the lib/story-events.ts layer
+// (rejected → no-op, not a database concern).
+export const STORY_EVENTS: Table = {
+  name: "story_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "event_type", type: "TEXT" },
+    // anon_id is the lw_anon cookie value; NULL when the writer didn't
+    // (or couldn't) read a cookie. Kept on the row for future per-user
+    // rate-limiting and de-duplication; not required to score the rail.
+    { name: "anon_id", type: "TEXT" },
+    { name: "occurred_at", type: "TEXT" },
+    { name: "weight", type: "REAL" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -1224,6 +1312,7 @@ export const TABLES: Table[] = [
   VOICE_RENDERS,
   VOICEOVERS,
   HOMEPAGE_CURATION,
+  STORY_EVENTS,
   POLLS,
   POLL_VOTES,
   POLL_AGGREGATES,
@@ -1237,6 +1326,8 @@ export const TABLES: Table[] = [
   COMMENT_MODERATION_EVENTS,
   FACEBOOK_POSTS,
   INSTAGRAM_POSTS,
+  INSTAGRAM_STORIES,
+  FACEBOOK_STORIES,
   YOUTUBE_POSTS,
   TIKTOK_POSTS,
 ];
@@ -1313,6 +1404,16 @@ export const POST_TABLE_DDL: string[] = [
   // hot read path (one query per rail) so the leading column matches.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_curation_surface_position " +
     "ON homepage_curation(surface, position)",
+  // 2026-06-25 Phase 1 of _plans/2026-06-25-top10-ranking.md. The
+  // scoring query in Phase 2 is a per-story aggregation over a recent
+  // time window — `(story_id, occurred_at)` is the exact lookup shape.
+  // The standalone `occurred_at` index supports the cutoff filter
+  // (WHERE occurred_at >= now() - INTERVAL '7 days') before the join
+  // back to stories.
+  "CREATE INDEX IF NOT EXISTS idx_story_events_story_time " +
+    "ON story_events(story_id, occurred_at)",
+  "CREATE INDEX IF NOT EXISTS idx_story_events_time " +
+    "ON story_events(occurred_at)",
   // 2026-06-18 engagement polls. Both per-subject uniqueness indexes
   // are PARTIAL — they only enforce uniqueness over the non-null
   // values. The schema invariant is "exactly one of (story_id,

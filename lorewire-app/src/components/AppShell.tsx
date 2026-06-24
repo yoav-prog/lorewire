@@ -28,6 +28,7 @@ import {
   pushShuffleRecent,
   readShuffleRecents,
 } from "@/lib/play-shuffle";
+import { useStoryPlayEvents } from "@/lib/use-story-play-events";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
 import {
@@ -506,6 +507,10 @@ function WatchDoodle({
   const videoUrl = liveMedia.video_url ?? story.videoUrl;
   const sectionRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Phase 1 of _plans/2026-06-25-top10-ranking.md: emit play_started +
+  // play_completed once each per story view (hook dedupes and applies
+  // the 90% completion threshold).
+  const playEvents = useStoryPlayEvents(story.id);
 
   // PLAY buttons in the title sheet ship a pending-play signal down here;
   // without this they'd just call setTab("Watch") (already the default) and
@@ -538,6 +543,8 @@ function WatchDoodle({
             preload="metadata"
             playsInline
             className="absolute inset-0 w-full h-full object-contain"
+            onPlay={playEvents.onPlay}
+            onTimeUpdate={playEvents.onTimeUpdate}
             onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
         </div>
@@ -1454,7 +1461,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
           <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition" style={{ color: myRating > 0 ? "#F4B740" : undefined }}>
             <StarI size={22} /><span className="font-body text-[11px]">{myRating > 0 ? `Rated ${myRating}` : "Rate"}</span>
           </button>
-          <button onClick={() => setShareOpen(true)} aria-label="Share" className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
+          <button onClick={() => { setShareOpen(true); import("@/app/actions").then((m) => m.recordStoryEventAction(story.id, "share_initiated")).catch(() => {}); }} aria-label="Share" className="flex flex-col items-center gap-1 py-2 text-muted active:text-ink transition">
             <ShareI size={22} /><span className="font-body text-[11px]">Share</span>
           </button>
         </div>
@@ -1534,6 +1541,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
               optionB={pollView.optionB}
               initialResult={pollView.result}
               initialVotedSide={pollView.votedSide}
+              storyId={story.id}
             />
           </section>
         )}
