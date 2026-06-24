@@ -110,6 +110,7 @@ import { publishShortToInstagram } from "@/lib/publish-to-instagram";
 import { publishShortToYouTube } from "@/lib/publish-to-youtube";
 import { publishShortToTikTok } from "@/lib/publish-to-tiktok";
 import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
+import { ensureSeoMetadataForStory } from "@/lib/seo-metadata";
 import {
   isConfigured as isSheetsConfigured,
   parseSheetRef,
@@ -3861,6 +3862,33 @@ export async function bulkPublishToSocialsAction(
       continue;
     }
     const articleUrl = await bulkResolveArticleUrl(item.id);
+
+    // Ensure per-platform SEO metadata exists BEFORE the publishers
+    // fire so they pick it up via their resolution chains instead of
+    // falling through to the template default. Idempotent: skips when
+    // metadata is fresh and the story hasn't been updated since.
+    // Best-effort: a generation failure is logged but doesn't block —
+    // publishers gracefully fall back to templates on missing metadata.
+    // This closes the gap where stories rendered BEFORE the SEO feature
+    // shipped never got LLM-generated captions on first publish.
+    try {
+      const seoResult = await ensureSeoMetadataForStory({
+        storyId: item.id,
+        articleUrl,
+      });
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[content bulk-publish seo ensure]", {
+        story_id: item.id,
+        status: seoResult.status,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[content bulk-publish seo ensure threw]", {
+        story_id: item.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     const context = {
       hook: null,
       title: story.title ?? null,
