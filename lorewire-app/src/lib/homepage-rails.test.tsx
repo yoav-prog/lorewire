@@ -359,22 +359,50 @@ describe("useHomepagePolls (seeded SSR path)", () => {
 });
 
 describe("fallbackIdsForSurface (merged catalog)", () => {
-  it("hero picks the first entry of the merged catalog", () => {
-    const merged = mergeStaticAndLive([liveRow({ id: "first" })]);
+  // After 2026-06-24 fix: every fallback path filters by isPublishedStory
+  // before slicing. Live rows must carry hero_image (or video_url) to
+  // qualify — a row that exists in the DB but hasn't had artwork rendered
+  // is not "published" by our definition and never appears in a rail.
+  it("hero picks the first published entry of the merged catalog", () => {
+    const merged = mergeStaticAndLive([
+      liveRow({ id: "first", hero_image: "https://cdn.test/first.jpg" }),
+    ]);
     expect(fallbackIdsForSurface("hero", merged.array)).toEqual(["first"]);
   });
 
-  it("category rails pick from the merged catalog, including live rows", () => {
-    const merged = mergeStaticAndLive([liveRow({ id: "live-humor", category: "Humor" })]);
+  it("category rails pick published live rows", () => {
+    const merged = mergeStaticAndLive([
+      liveRow({
+        id: "live-humor",
+        category: "Humor",
+        hero_image: "https://cdn.test/live-humor.jpg",
+      }),
+    ]);
     const ids = fallbackIdsForSurface("humor_row", merged.array);
     expect(ids).toContain("live-humor");
   });
 
   it("new_row sorts by year DESC so a 2026 live row outranks 2024 statics", () => {
     const merged = mergeStaticAndLive([
-      liveRow({ id: "fresh-2026", published_at: "2026-06-17T12:00:00Z" }),
+      liveRow({
+        id: "fresh-2026",
+        published_at: "2026-06-17T12:00:00Z",
+        hero_image: "https://cdn.test/fresh-2026.jpg",
+      }),
     ]);
     const ids = fallbackIdsForSurface("new_row", merged.array);
     expect(ids[0]).toBe("fresh-2026");
+  });
+
+  it("drops live rows without hero artwork (the 2026-06-24 regression case)", () => {
+    // A live row with hero_image: null is in the DB but its artwork
+    // hasn't rendered yet — it must NOT consume a rail slot, because
+    // the rail layer would drop it later for being unpublished and the
+    // user would see fewer items than the cap promised.
+    const merged = mergeStaticAndLive([
+      liveRow({ id: "no-art", category: "Drama", hero_image: null, video_url: null }),
+    ]);
+    const ids = fallbackIdsForSurface("drama_row", merged.array);
+    expect(ids).not.toContain("no-art");
   });
 });
