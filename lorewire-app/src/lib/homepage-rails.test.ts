@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   fallbackIdsForSurface,
+  liveRowToStory,
   pickHeroAtIndex,
   resolveHeroPool,
   resolveRailIds,
@@ -532,5 +533,47 @@ describe("resolveHeroPool / pickHeroAtIndex", () => {
     expect(pickHeroAtIndex(pool, -10)?.id).toBe("a");
     expect(pickHeroAtIndex(pool, 100)?.id).toBe("c");
     expect(pickHeroAtIndex(pool, 1)?.id).toBe("b");
+  });
+});
+
+// 2026-06-25 stories-reader-navigation plan: liveRowToStory and
+// mergeLiveOverStatic both need to carry the public slug onto the
+// Story so the Stories viewer can navigate to /v/[slug] without a
+// per-active-wire getLiveStoryMedia fetch. These tests pin the
+// propagation so a future field-list rename can't silently drop it.
+describe("liveRowToStory — slug propagation", () => {
+  // Minimal LiveCatalogStory shape — only the fields the helper reads.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const buildRow = (overrides: Record<string, unknown>): any => ({
+    id: "row-1",
+    slug: null,
+    title: "Row Title",
+    category: "Drama",
+    summary: null,
+    duration: null,
+    hero_image: null,
+    hero_image_landscape: null,
+    hero_has_baked_title: null,
+    video_url: null,
+    published_at: "2026-06-25T12:00:00Z",
+    created_at: null,
+    ...overrides,
+  });
+
+  it("copies slug onto Story when present", () => {
+    const story = liveRowToStory(buildRow({ slug: "my-real-slug" }));
+    expect(story.slug).toBe("my-real-slug");
+  });
+
+  it("omits slug from Story when the row's slug is null", () => {
+    const story = liveRowToStory(buildRow({ slug: null }));
+    expect(story.slug).toBeUndefined();
+  });
+
+  it("omits slug from Story when the row's slug is an empty string (falsy)", () => {
+    // Defensive: the DB column is nullable but we also guard against
+    // empty-string slugs leaking into /v/[slug] navigation.
+    const story = liveRowToStory(buildRow({ slug: "" }));
+    expect(story.slug).toBeUndefined();
   });
 });

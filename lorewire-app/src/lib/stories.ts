@@ -23,6 +23,12 @@ export interface Story {
   syn: string;
   body?: string;
   source_url?: string;
+  // Public canonical reader path slug — the story is reachable at
+  // /v/[slug] when present. Set by liveRowToStory for stories that
+  // came through the live DB (LiveCatalogStory carries this); absent
+  // on the seed STORIES catalog whose entries aren't reader-routable
+  // by slug. Consumers must gate `/v/${slug}` navigation on truthiness.
+  slug?: string;
   // Pipeline-generated media (3.1 + 3.2). All optional — UI components fall
   // back to their CSS treatments when these are unset.
   heroImage?: string;
