@@ -145,6 +145,13 @@ export const CATEGORY_RAILS: CategoryRailSpec[] = [
 // horizontally so the cap is a payload control, not a visual one.
 const FALLBACK_RAIL_CAP = 20;
 
+// Hero is special — it's a rotation pool with a fixed visual contract
+// (capacity 8 in SURFACE_CAPACITY, the carousel iterates the whole
+// list). Cap the hero fallback at the same capacity so an admin-empty
+// hero rail auto-rotates through 8 recent picks, matching the size
+// curation would have set.
+const HERO_FALLBACK_CAP = 8;
+
 // Derived fallbacks for each surface. With the hardcoded rail constants
 // gone from stories.ts, "fallback" no longer means "use that specific
 // list of ids" — it means "auto-derive a sensible default from the
@@ -167,7 +174,17 @@ export function fallbackIdsForSurface(
   const published = catalog.filter(isPublishedStory);
   switch (surface) {
     case "hero":
-      return published.length > 0 ? [published[0].id] : [];
+      // Up to HERO_FALLBACK_CAP most-recent published stories so the
+      // rotation carousel auto-fills without admin curation. Same sort
+      // shape as new_row (year DESC, ties keep merged catalog order so
+      // live entries beat sample placeholders). The earlier "first
+      // published only" behavior left an uncurated hero stuck on a
+      // single static slide — exactly the inverse of the rotation the
+      // feature was built for.
+      return [...published]
+        .sort((a, b) => (b.year ?? 0) - (a.year ?? 0))
+        .slice(0, HERO_FALLBACK_CAP)
+        .map((s) => s.id);
     case "top10":
       return published.slice(0, 10).map((s) => s.id);
     case "continue":
@@ -488,14 +505,16 @@ export interface RailUserOverrides {
 // those 2 lead the rail, not that the entire rail is exactly those 2."
 // Augmenting matches that intuition AND makes thin curations self-heal —
 // a forgotten 2-pick curation from months ago no longer silently shrinks
-// the rail to 2.
+// the rail to 2. Hero joined this set when the rotation carousel landed
+// (capacity 8): an uncurated hero now auto-fills with the most recent
+// published stories, and curated picks pin at the front so editorial
+// can feature specific stories without losing the rotation.
 //
-// `hero` keeps replace semantics — it's a single pick by definition; an
-// "augmented" hero rail makes no sense. `continue` also keeps its own
-// resolution chain (curation → user override → fallback, no mixing)
-// because the rail's promise is "your progress," not "editorial picks
-// mixed with your progress."
+// `continue` keeps its own resolution chain (curation → user override →
+// fallback, no mixing) because the rail's promise is "your progress,"
+// not "editorial picks mixed with your progress."
 const AUGMENTING_SURFACES = new Set<keyof HomepageCuration>([
+  "hero",
   "top10",
   "new_row",
   "entitled_row",
@@ -536,18 +555,10 @@ export function resolveRailIds(
     return fallbackIdsForSurface(surface, catalog.array);
   }
 
-  // Hero: single-pick contract. Augmenting makes no sense. Curated wins
-  // when present; otherwise fallback's first published; otherwise hide
-  // (when the admin explicitly opted into hide-when-empty).
-  if (surface === "hero") {
-    if (curated.length > 0) return curated;
-    if (curation && behavior.emptyRailBehavior === "hide") return null;
-    return fallbackIdsForSurface(surface, catalog.array);
-  }
-
-  // Discovery rails (top10 / new_row / category rails): curated ids pin
-  // at the front, fallback fills the rest. Empty + hide still wins so the
-  // admin's explicit "no fallback for this rail" setting is honored.
+  // Discovery rails — including hero now that it rotates — augment:
+  // curated ids pin at the front, fallback fills the rest. Empty + hide
+  // still wins so the admin's explicit "no fallback for this rail"
+  // setting is honored.
   if (
     AUGMENTING_SURFACES.has(surface) &&
     curated.length === 0 &&
@@ -584,10 +595,11 @@ export function resolveRailIds(
 }
 
 /** Resolve the full rotation pool for the homepage hero carousel. The pool
- *  is admin-curated (capacity 8) and falls back to a single auto-derived
- *  pick when curation is empty + behavior allows fallback. Each entry is
- *  guaranteed to be a published story — unpublished candidates are
- *  dropped so the carousel never paints a placeholder slide.
+ *  is admin-curated (curated picks pin at the front via the augmenting
+ *  resolver) and auto-fills with the most-recent published stories from
+ *  the catalog so an uncurated homepage still rotates instead of
+ *  freezing on a single static slide. Capped at HERO_FALLBACK_CAP so
+ *  the augmented set never exceeds the visual contract.
  *
  *  Returns [] when no published candidate exists (HomePage uses that as
  *  the signal to render the no-hero top-padded layout). */
@@ -602,6 +614,7 @@ export function resolveHeroPool(
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
   const pool: Story[] = [];
   for (const id of heroIds) {
+    if (pool.length >= HERO_FALLBACK_CAP) break;
     const candidate = resolveStory(id);
     if (candidate && isPublishedStory(candidate)) pool.push(candidate);
   }
