@@ -61,7 +61,7 @@ import {
 } from "@/lib/repo";
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
-import { run } from "@/lib/db";
+import { one, run } from "@/lib/db";
 import {
   canEnqueueImageRegen,
   cancelAllImageRendersForOwner,
@@ -104,7 +104,12 @@ import {
   ReviewPayloadSchema,
 } from "@/lib/article-payload";
 import { isValidSlugShape } from "@/lib/article-seo";
-import type { ArticleType } from "@/lib/repo";
+import type { ArticleType, SocialPlatform } from "@/lib/repo";
+import { publishShortToFacebook } from "@/lib/publish-to-facebook";
+import { publishShortToInstagram } from "@/lib/publish-to-instagram";
+import { publishShortToYouTube } from "@/lib/publish-to-youtube";
+import { publishShortToTikTok } from "@/lib/publish-to-tiktok";
+import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
 import {
   isConfigured as isSheetsConfigured,
   parseSheetRef,
@@ -3716,4 +3721,257 @@ export async function bulkRegenerateContentAction(
     failed: failed.length,
   });
   return { target, ok, failed };
+}
+
+// ─── Bulk publish to socials ────────────────────────────────────────────────
+// Plan: _plans/2026-06-24-bulk-publish-from-content.md.
+//
+// Push one or more selected video stories to one or more social
+// platforms (Facebook, Instagram, YouTube, TikTok) in a single click.
+// Loop is sequential per (story, platform) so a single rate-limit
+// hit on one platform doesn't stop the others; each call goes through
+// the same publisher functions the per-short editor uses, with
+// trigger='manual' so the auto-publish toggle setting doesn't gate.
+//
+// Returns aggregated counts split by terminal state. The client
+// surfaces a result banner with platform-level counts + first few
+// failure reasons.
+
+export interface BulkPublishItem {
+  kind: BulkContentKind;
+  id: string;
+  platform: SocialPlatform;
+  /** Set when the publisher returned `posted` with a platform-side id. */
+  externalId?: string | null;
+  /** Set when the publisher returned `failed` or `skipped`. */
+  reason?: string;
+}
+
+export interface BulkPublishResult {
+  posted: BulkPublishItem[];
+  /** TikTok inbox mode + IG async path can end at `pending` (the row
+   *  is created, the platform's async pipeline is still processing).
+   *  The retry cron drains these within ~5 minutes. */
+  pending: BulkPublishItem[];
+  failed: BulkPublishItem[];
+  skipped: BulkPublishItem[];
+}
+
+const SOCIAL_PLATFORMS_LIST = [
+  "facebook",
+  "instagram",
+  "youtube",
+  "tiktok",
+] as const;
+
+function isSocialPlatform(v: unknown): v is SocialPlatform {
+  return (
+    v === "facebook" || v === "instagram" || v === "youtube" || v === "tiktok"
+  );
+}
+
+function validatePlatforms(input: unknown): SocialPlatform[] {
+  if (!Array.isArray(input) || input.length === 0) {
+    throw new Error("bulk-publish: platforms is empty");
+  }
+  const out: SocialPlatform[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (!isSocialPlatform(raw)) {
+      throw new Error(`bulk-publish: invalid platform "${String(raw)}"`);
+    }
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
+  }
+  return out;
+}
+
+/** Resolve the article URL for the publisher's metadata context. Same
+ *  shape as the per-publisher *ForRender helpers — pulled inline so
+ *  this action doesn't depend on the render route's private helpers. */
+async function bulkResolveArticleUrl(storyId: string): Promise<string> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  return article
+    ? `${origin}/articles/${article.language}/${article.slug}`
+    : origin;
+}
+
+export async function bulkPublishToSocialsAction(
+  itemsInput: BulkContentItem[],
+  platformsInput: SocialPlatform[],
+): Promise<BulkPublishResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+  const platforms = validatePlatforms(platformsInput);
+
+  const t0 = Date.now();
+  console.info("[content bulk-publish] start", {
+    user_id: session.userId,
+    count: items.length,
+    platforms,
+  });
+
+  const posted: BulkPublishItem[] = [];
+  const pending: BulkPublishItem[] = [];
+  const failed: BulkPublishItem[] = [];
+  const skipped: BulkPublishItem[] = [];
+
+  for (const item of items) {
+    // Articles are not publishable to social — skip cleanly with one
+    // skipped entry per platform so the operator sees what happened.
+    if (item.kind !== "story") {
+      for (const platform of platforms) {
+        skipped.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: "articles cannot publish to social",
+        });
+      }
+      continue;
+    }
+    const story = await getStoryRow(item.id);
+    if (!story) {
+      for (const platform of platforms) {
+        skipped.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: "story not found",
+        });
+      }
+      continue;
+    }
+    const render = await latestDoneShortRenderForStory(item.id);
+    if (!render || render.status !== "done" || !render.output_url) {
+      for (const platform of platforms) {
+        skipped.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: "no completed short render",
+        });
+      }
+      continue;
+    }
+    const articleUrl = await bulkResolveArticleUrl(item.id);
+    const context = {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+      category: story.category ?? null,
+    };
+
+    for (const platform of platforms) {
+      try {
+        let result;
+        if (platform === "facebook") {
+          result = await publishShortToFacebook({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context: {
+              hook: context.hook,
+              title: context.title,
+              article_url: context.article_url,
+            },
+          });
+        } else if (platform === "instagram") {
+          result = await publishShortToInstagram({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context: {
+              hook: context.hook,
+              title: context.title,
+              article_url: context.article_url,
+            },
+          });
+        } else if (platform === "youtube") {
+          result = await publishShortToYouTube({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context,
+          });
+        } else {
+          // tiktok
+          result = await publishShortToTikTok({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context,
+          });
+        }
+
+        if (result.status === "posted") {
+          const externalId =
+            "external_post_id" in result.row
+              ? result.row.external_post_id
+              : "external_video_id" in result.row
+                ? (result.row as { external_video_id: string | null }).external_video_id
+                : null;
+          posted.push({
+            kind: item.kind,
+            id: item.id,
+            platform,
+            externalId,
+          });
+        } else if (result.status === "pending") {
+          pending.push({ kind: item.kind, id: item.id, platform });
+        } else if (result.status === "failed") {
+          failed.push({
+            kind: item.kind,
+            id: item.id,
+            platform,
+            reason: result.row.error_message ?? "unknown publisher error",
+          });
+        } else {
+          // skipped
+          skipped.push({
+            kind: item.kind,
+            id: item.id,
+            platform,
+            reason: result.reason,
+          });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("[content bulk-publish] threw", {
+          story_id: item.id,
+          platform,
+          message,
+        });
+        failed.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: message,
+        });
+      }
+    }
+  }
+
+  console.info("[content bulk-publish] done", {
+    user_id: session.userId,
+    posted: posted.length,
+    pending: pending.length,
+    failed: failed.length,
+    skipped: skipped.length,
+    latency_ms: Date.now() - t0,
+  });
+
+  revalidatePath("/admin/content");
+
+  return { posted, pending, failed, skipped };
 }
