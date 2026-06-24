@@ -88,12 +88,15 @@ const COLS =
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
 // that the list does not render — the full editor reads getStory() instead.
+// `reddit_id` is included so the Content inbox can batch-load the latest
+// story_jobs.status per row without a second per-row trip.
 const STORY_LIST_COLS =
-  "id, slug, category, title, status, cost_cents, created_at, updated_at";
+  "id, reddit_id, slug, category, title, status, cost_cents, created_at, updated_at";
 
 export type StoryListRow = Pick<
   StoryRow,
   | "id"
+  | "reddit_id"
   | "slug"
   | "category"
   | "title"
@@ -147,8 +150,20 @@ export async function listStories(
 // List-view variant: slim columns and a real LIMIT so the dashboard does not
 // pull every body/teleprompter on every render. The full editor still uses
 // listStories / getStory when it needs the heavy fields.
+//
+// 2026-06-24 last-updated filter (Content inbox). `updatedSince` and
+// `updatedUntil` accept ISO-8601 timestamps and compare against the same
+// `COALESCE(updated_at, created_at)` the ORDER BY uses, so the bucket
+// chips ("Last 7 days") and the range picker stay consistent with the
+// sort order operators see.
 export async function listStoriesSlim(
-  opts: { status?: string; category?: string; limit?: number } = {},
+  opts: {
+    status?: string;
+    category?: string;
+    updatedSince?: string;
+    updatedUntil?: string;
+    limit?: number;
+  } = {},
 ): Promise<StoryListRow[]> {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -159,6 +174,14 @@ export async function listStoriesSlim(
   if (opts.category) {
     where.push("category = ?");
     params.push(opts.category);
+  }
+  if (opts.updatedSince) {
+    where.push("COALESCE(updated_at, created_at) >= ?");
+    params.push(opts.updatedSince);
+  }
+  if (opts.updatedUntil) {
+    where.push("COALESCE(updated_at, created_at) < ?");
+    params.push(opts.updatedUntil);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
@@ -973,6 +996,8 @@ export async function listArticlesSlim(
     status?: string;
     type?: string;
     language?: string;
+    updatedSince?: string;
+    updatedUntil?: string;
     limit?: number;
   } = {},
 ): Promise<ArticleListRow[]> {
@@ -989,6 +1014,14 @@ export async function listArticlesSlim(
   if (opts.language) {
     where.push("language = ?");
     params.push(opts.language);
+  }
+  if (opts.updatedSince) {
+    where.push("COALESCE(updated_at, created_at) >= ?");
+    params.push(opts.updatedSince);
+  }
+  if (opts.updatedUntil) {
+    where.push("COALESCE(updated_at, created_at) < ?");
+    params.push(opts.updatedUntil);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
