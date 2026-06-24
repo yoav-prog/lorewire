@@ -20,8 +20,11 @@ import {
   bulkUpdateContentAction,
   bulkDeleteContentAction,
   bulkReclassifyStoriesAction,
+  bulkRegenerateContentAction,
   type BulkActionResult,
   type BulkContentItem,
+  type BulkRegenResult,
+  type BulkRegenTarget,
   type BulkUpdateOp,
   type ReclassifyResult,
 } from "@/app/admin/actions";
@@ -116,10 +119,66 @@ function describeReason(reason: string): string {
       return "this status is not valid for a video story";
     case "invalid-status-for-article":
       return "this status is not valid for an article";
+    case "not-a-story":
+      return "regenerate targets only apply to video stories";
+    case "daily-budget-exceeded":
+      return "today's image budget is spent — raise the cap in Settings or wait until tomorrow";
+    case "empty-body":
+      return "story has no body to synthesize";
+    case "race-loss":
+      return "already in flight (skipped)";
+    case "no-reddit-source":
+      return "story has no reddit_id — pipeline restart not available";
+    case "pipeline-already-running":
+      return "pipeline already running for this story";
+    case "reddit-source-locked":
+      return "reddit source is used or skipped — pipeline cannot re-run";
+    case "not-enqueued":
+      return "could not enqueue (no matching reddit source)";
     default:
       return reason;
   }
 }
+
+// 2026-06-24 bulk regen targets surfaced under the Regenerate ▾ picker in the
+// bulk action bar. Each picks the same primitive the single-story editor
+// already uses; cost hints feed the confirm modal so a 30-story click that
+// would queue 900 i2i calls is never a surprise.
+const REGEN_TARGET_META: Record<
+  BulkRegenTarget,
+  {
+    label: string;
+    verb: string;
+    perStoryHint: string;
+    body: string;
+  }
+> = {
+  hero: {
+    label: "Hero image",
+    verb: "Regenerate hero images",
+    perStoryHint: "~1 i2i call per story",
+    body: "Queues a hero re-render per story. Each story passes through the daily image-budget gate, so spend pauses once today's cap is reached.",
+  },
+  scenes: {
+    label: "All scene images",
+    verb: "Regenerate all scene images",
+    perStoryHint: "~30 i2i calls per story (varies by duration)",
+    body: "Queues a per-scene rebuild for each story. Largest bulk op. Each story passes through the daily image-budget gate.",
+  },
+  voice: {
+    label: "Voiceover",
+    verb: "Regenerate voiceovers",
+    perStoryHint:
+      "1 TTS run per story (~$0.04 ElevenLabs Flash, ~$0.38 Multilingual)",
+    body: "Queues a TTS re-synthesis per story using each story's voice override (provider + voice id). Already-in-flight stories are skipped, not double-charged.",
+  },
+  pipeline: {
+    label: "Restart entire pipeline",
+    verb: "Restart the entire pipeline",
+    perStoryHint: "≈ $0.50 per story (LLM + TTS + images + assembly)",
+    body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Only stories with a reddit_source can be re-run; pre-pipeline manual seeds are skipped.",
+  },
+};
 
 export function ContentList({ rows }: { rows: ContentRow[] }) {
   const router = useRouter();
@@ -140,6 +199,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     ReclassifyResult | null
   >(null);
   const [reclassifyConfirmOpen, setReclassifyConfirmOpen] = useState(false);
+  // 2026-06-24 bulk regen. `regenConfirm` opens the cost modal; `regenResult`
+  // surfaces the post-run "queued N, failed M" banner so the operator sees
+  // exactly what landed without scrolling to per-story render lines.
+  const [regenConfirm, setRegenConfirm] = useState<{
+    target: BulkRegenTarget;
+    items: BulkContentItem[];
+  } | null>(null);
+  const [regenResult, setRegenResult] = useState<BulkRegenResult | null>(null);
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -357,6 +424,53 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     return n;
   }, [rows]);
 
+  function requestRegen(target: BulkRegenTarget) {
+    // Filter to stories at the request edge — the server enforces this too
+    // (articles come back with reason "not-a-story") but stripping client-
+    // side keeps the modal's "0 articles will be skipped" copy honest.
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    console.info("[content list regen request]", {
+      target,
+      count: storyItems.length,
+    });
+    setRegenResult(null);
+    setRegenConfirm({ target, items: storyItems });
+  }
+
+  function runRegenConfirmed() {
+    if (!regenConfirm) return;
+    const { target, items } = regenConfirm;
+    console.info("[content list regen submit]", {
+      target,
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkRegenResult;
+      try {
+        result = await bulkRegenerateContentAction(items, target);
+      } catch (err) {
+        result = {
+          target,
+          ok: [],
+          failed: items.map((it) => ({
+            ...it,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list regen result]", {
+        target,
+        ok: result.ok.length,
+        failed: result.failed.length,
+      });
+      setRegenConfirm(null);
+      setRegenResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   function runReclassify() {
     console.info("[content list reclassify submit]");
     setReclassifyConfirmOpen(false);
@@ -442,6 +556,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         <ReclassifyResultBanner
           result={reclassifyResult}
           onDismiss={() => setReclassifyResult(null)}
+        />
+      )}
+
+      {regenResult && (
+        <RegenResultBanner
+          result={regenResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setRegenResult(null)}
         />
       )}
 
@@ -619,6 +741,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           counts={counts}
           disabled={pending}
           onAction={(op) => requestAction(selectedItems, op)}
+          onRegen={requestRegen}
           onClear={clearSelection}
         />
       )}
@@ -634,6 +757,17 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           onRun={runConfirmed}
         />
       )}
+
+      {regenConfirm && (
+        <RegenConfirmModal
+          target={regenConfirm.target}
+          items={regenConfirm.items}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setRegenConfirm(null)}
+          onRun={runRegenConfirmed}
+        />
+      )}
     </>
   );
 }
@@ -644,14 +778,20 @@ function BulkActionBar({
   counts,
   disabled,
   onAction,
+  onRegen,
   onClear,
 }: {
   counts: { total: number; stories: number; articles: number };
   disabled: boolean;
   onAction: (op: BulkUpdateOp | { type: "delete" }) => void;
+  onRegen: (target: BulkRegenTarget) => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
+  // Regen targets fan out to story-pipeline primitives — articles are not
+  // pipeline citizens, so the menu is dark when the selection is articles-
+  // only. Mixed selections light up but the server filters to stories.
+  const regenDisabled = counts.stories === 0;
   return (
     <div className="sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2 px-4 py-3 shadow-2xl">
       <span className="font-mono text-[11px] uppercase tracking-wider text-ink">
@@ -671,20 +811,42 @@ function BulkActionBar({
           disabled={disabled}
           onClick={() => onAction({ type: "status", status: "draft" })}
         />
+        {/* direction="up" keeps the menus from clipping below the sticky
+            bar — the bar lives at the bottom of the viewport, so a downward
+            menu always rendered off-screen (the original bug). */}
         <Picker
           label="Status ▾"
+          direction="up"
           disabled={disabled}
           options={statusesFor(counts).map((s) => ({ value: s, label: s }))}
           onPick={(value) => onAction({ type: "status", status: value })}
         />
         <Picker
           label="Category ▾"
+          direction="up"
           disabled={disabled || categoryDisabled}
           disabledHint={
             categoryDisabled ? "Category applies to video stories only" : null
           }
           options={CATEGORIES.map((c) => ({ value: c, label: c }))}
           onPick={(value) => onAction({ type: "category", category: value })}
+        />
+        <Picker
+          label="Regenerate ▾"
+          direction="up"
+          disabled={disabled || regenDisabled}
+          disabledHint={
+            regenDisabled
+              ? "Regenerate targets only apply to video stories"
+              : null
+          }
+          options={(Object.keys(REGEN_TARGET_META) as BulkRegenTarget[]).map(
+            (t) => ({
+              value: t,
+              label: REGEN_TARGET_META[t].label,
+            }),
+          )}
+          onPick={(value) => onRegen(value as BulkRegenTarget)}
         />
         <BarButton
           label="Delete"
@@ -740,12 +902,17 @@ function Picker({
   onPick,
   disabled,
   disabledHint,
+  direction = "down",
 }: {
   label: string;
   options: { value: string; label: string }[];
   onPick: (value: string) => void;
   disabled: boolean;
   disabledHint?: string | null;
+  /** "up" drops the menu above the button instead of below. Used by the
+   *  sticky bulk-action bar so menus don't clip off the bottom of the
+   *  viewport. */
+  direction?: "up" | "down";
 }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
@@ -757,6 +924,8 @@ function Picker({
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
+  const menuPos =
+    direction === "up" ? "bottom-full mb-1" : "top-full mt-1";
   return (
     <div ref={wrap} className="relative">
       <button
@@ -769,7 +938,9 @@ function Picker({
         {label}
       </button>
       {open && (
-        <ul className="absolute right-0 z-20 mt-1 min-w-[140px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
+        <ul
+          className={`absolute right-0 z-20 ${menuPos} min-w-[180px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl`}
+        >
           {options.map((o) => (
             <li key={o.value}>
               <button
@@ -1254,6 +1425,145 @@ function ReclassifyResultBanner({
           {result.failed.length > 5 && (
             <li>…and {result.failed.length - 5} more</li>
           )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// --- Bulk regen confirm modal + result banner -------------------------------
+// 2026-06-24. Same modal shape as ConfirmModal / ReclassifyConfirmModal. The
+// body is target-specific (cost hint + plain-English explanation of what
+// will be queued) so a 30-story click is not a surprise.
+
+function RegenConfirmModal({
+  target,
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  target: BulkRegenTarget;
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const meta = REGEN_TARGET_META[target];
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="regen-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="regen-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          {meta.verb} for {items.length}{" "}
+          {items.length === 1 ? "story" : "stories"}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          {meta.body}
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          Estimate: {meta.perStoryHint} × {items.length} stor
+          {items.length === 1 ? "y" : "ies"}.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Queueing…" : `Queue ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RegenResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkRegenResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const meta = REGEN_TARGET_META[result.target];
+  const previewFailures = result.failed.slice(0, 6);
+  const overflow = result.failed.length - previewFailures.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">{meta.label}:</span> Queued{" "}
+          <span className="text-accent">{result.ok.length}</span>
+          {result.failed.length > 0
+            ? ` · Failed ${result.failed.length}`
+            : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewFailures.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewFailures.map((f) => {
+            const r = rowByKey.get(`${f.kind}:${f.id}`);
+            const label = r?.title ?? r?.slug ?? f.id.slice(0, 8);
+            return (
+              <li key={`${f.kind}:${f.id}`}>
+                <span className="text-ink">{label}</span>
+                <span className="opacity-70"> — {describeReason(f.reason)}</span>
+              </li>
+            );
+          })}
+          {overflow > 0 && <li>…and {overflow} more</li>}
         </ul>
       )}
     </div>

@@ -190,4 +190,31 @@ describe("listContentSlim / filters", () => {
     expect(rows.every((r) => r.kind === "story")).toBe(true);
     expect(rows.some((r) => r.id === storyId)).toBe(true);
   });
+
+  it("category filter narrows to matching stories and excludes articles", async () => {
+    const humorId = await insertStory({
+      title: "Humor story",
+      category: "Humor",
+    });
+    const dramaId = await insertStory({
+      title: "Drama story",
+      category: "Drama",
+    });
+    const articleId = randomUUID();
+    await createArticle({
+      id: articleId,
+      type: "feature",
+      language: "en",
+      slug: `cat-${articleId.slice(0, 6)}`,
+      title: "An article (no category)",
+      author_id: null,
+    });
+    const rows = await listContentSlim({ category: "Humor", limit: 50 });
+    // Stories with category=Humor only; articles excluded entirely because
+    // they carry no category column.
+    expect(rows.every((r) => r.kind === "story")).toBe(true);
+    expect(rows.some((r) => r.id === humorId)).toBe(true);
+    expect(rows.some((r) => r.id === dramaId)).toBe(false);
+    expect(rows.some((r) => r.id === articleId)).toBe(false);
+  });
 });

@@ -1402,6 +1402,30 @@ export const CONTENT_SUBKINDS: ContentSubKind[] = [
   ...ARTICLE_TYPES,
 ];
 
+/** Per-platform "is this story already live on platform X?" flags. A
+ *  story is "published_on" a platform when at least one row in that
+ *  platform's *_posts table has status='posted'. Articles always have
+ *  all-false flags (they're not publishable to social). Plan:
+ *  _plans/2026-06-24-bulk-publish-from-content.md. */
+export interface PublishedOn {
+  facebook: boolean;
+  instagram: boolean;
+  youtube: boolean;
+  tiktok: boolean;
+}
+
+export const SOCIAL_PLATFORMS = ["facebook", "instagram", "youtube", "tiktok"] as const;
+export type SocialPlatform = (typeof SOCIAL_PLATFORMS)[number];
+
+/** Default all-false published_on for articles and for stories that
+ *  have never been published anywhere. */
+export const DEFAULT_PUBLISHED_ON: PublishedOn = {
+  facebook: false,
+  instagram: false,
+  youtube: false,
+  tiktok: false,
+};
+
 export interface ContentRow {
   kind: ContentKind;
   subKind: ContentSubKind;
@@ -1418,13 +1442,69 @@ export interface ContentRow {
   updated_at: string | null;
   created_at: string | null;
   published_at: string | null;
+  /** Per-platform live-status. Articles always all-false. */
+  published_on: PublishedOn;
 }
 
 export interface ListContentOpts {
   subKind?: ContentSubKind;
   status?: string;
   language?: string; // narrows to articles
+  // Stories only — articles carry no category column. When set, the
+  // article half of the union is skipped entirely.
+  category?: string;
+  /** AND-filter: only rows that ARE published on every listed platform. */
+  publishedOn?: SocialPlatform[];
+  /** AND-filter: only rows that ARE NOT published on every listed platform. */
+  publishedNotOn?: SocialPlatform[];
   limit?: number;
+}
+
+/** Aggregate "which platforms is each story live on?" across all four
+ *  publisher tables in a single batch. One small query per platform
+ *  (DISTINCT story_id WHERE status='posted'), then a Map<story_id,
+ *  PublishedOn>. Articles are not included — the caller fills them
+ *  in with DEFAULT_PUBLISHED_ON.
+ *
+ *  Empty input → empty map (no queries fired).
+ *
+ *  Plan: _plans/2026-06-24-bulk-publish-from-content.md. */
+export async function loadPublishedOnByStoryIds(
+  storyIds: readonly string[],
+): Promise<Map<string, PublishedOn>> {
+  const out = new Map<string, PublishedOn>();
+  if (storyIds.length === 0) return out;
+  for (const id of storyIds) {
+    out.set(id, { ...DEFAULT_PUBLISHED_ON });
+  }
+  // Build a single "?, ?, ?, …" placeholder string for the IN list.
+  // The same shape works in SQLite and Postgres.
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const params = [...storyIds];
+  const tables: { table: string; key: SocialPlatform }[] = [
+    { table: "facebook_posts", key: "facebook" },
+    { table: "instagram_posts", key: "instagram" },
+    { table: "youtube_posts", key: "youtube" },
+    { table: "tiktok_posts", key: "tiktok" },
+  ];
+  // Run all four in parallel. Each returns at most storyIds.length rows.
+  const results = await Promise.all(
+    tables.map(async ({ table }) =>
+      all<{ story_id: string }>(
+        `SELECT DISTINCT story_id FROM ${table}
+         WHERE story_id IN (${placeholders}) AND status = 'posted'`,
+        params,
+      ),
+    ),
+  );
+  for (let i = 0; i < tables.length; i++) {
+    const platform = tables[i].key;
+    for (const row of results[i]) {
+      const flags = out.get(row.story_id);
+      if (flags) flags[platform] = true;
+    }
+  }
+  return out;
 }
 
 export async function listContentSlim(
@@ -1435,6 +1515,7 @@ export async function listContentSlim(
   // - subKind="video" or language set -> articles or stories only
   // - subKind=any article type -> stories not needed
   // - status that exists only on stories (scripted/rendering/ready) -> articles not needed
+  // - category set -> articles skipped (no category column)
   const isArticleSubKind =
     opts.subKind && opts.subKind !== "video"
       ? ARTICLE_TYPES.includes(opts.subKind as ArticleType)
@@ -1448,13 +1529,19 @@ export async function listContentSlim(
     !isArticleSubKind &&
     (opts.subKind === undefined || opts.subKind === "video");
   const wantArticles =
-    !isStoryOnlyStatus && (opts.subKind === undefined || isArticleSubKind);
+    !isStoryOnlyStatus &&
+    !opts.category &&
+    (opts.subKind === undefined || isArticleSubKind);
 
   const articleType = isArticleSubKind ? (opts.subKind as ArticleType) : undefined;
 
   const [stories, articles] = await Promise.all([
     wantStories
-      ? listStoriesSlim({ status: opts.status, limit })
+      ? listStoriesSlim({
+          status: opts.status,
+          category: opts.category,
+          limit,
+        })
       : Promise.resolve([] as StoryListRow[]),
     wantArticles
       ? listArticlesSlim({
@@ -1465,6 +1552,12 @@ export async function listContentSlim(
         })
       : Promise.resolve([] as ArticleListRow[]),
   ]);
+
+  // Aggregate published_on flags for the stories in this slice. One
+  // batched call (4 queries) before the merge so each row carries its
+  // own per-platform live-status. Articles get DEFAULT_PUBLISHED_ON.
+  const storyIds = stories.map((s) => s.id);
+  const publishedOnByStory = await loadPublishedOnByStoryIds(storyIds);
 
   const merged: ContentRow[] = [
     ...stories.map<ContentRow>((s) => ({
@@ -1480,6 +1573,8 @@ export async function listContentSlim(
       updated_at: s.updated_at,
       created_at: s.created_at,
       published_at: null, // slim story projection drops this
+      published_on:
+        publishedOnByStory.get(s.id) ?? { ...DEFAULT_PUBLISHED_ON },
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -1494,6 +1589,7 @@ export async function listContentSlim(
       updated_at: a.updated_at,
       created_at: a.created_at,
       published_at: a.published_at,
+      published_on: { ...DEFAULT_PUBLISHED_ON },
     })),
   ];
 
@@ -1505,7 +1601,32 @@ export async function listContentSlim(
     return bT.localeCompare(aT);
   });
 
-  const out = merged.slice(0, limit);
+  // Apply the published-on AND-filters AFTER aggregation so the SQL
+  // stays simple. The slim list caps at 200 stories anyway, so an
+  // in-memory filter is cheap.
+  const publishedOn = opts.publishedOn ?? [];
+  const publishedNotOn = opts.publishedNotOn ?? [];
+  const filteredByPublish =
+    publishedOn.length === 0 && publishedNotOn.length === 0
+      ? merged
+      : merged.filter((row) => {
+          // Articles are never published-on-social. If any
+          // publishedOn filter is set, articles fall out. If only
+          // publishedNotOn is set, articles pass (they're not on
+          // anything).
+          if (row.kind !== "story") {
+            return publishedOn.length === 0;
+          }
+          for (const p of publishedOn) {
+            if (!row.published_on[p]) return false;
+          }
+          for (const p of publishedNotOn) {
+            if (row.published_on[p]) return false;
+          }
+          return true;
+        });
+
+  const out = filteredByPublish.slice(0, limit);
   console.info("[content repo] list", {
     count: out.length,
     storyCount: stories.length,
@@ -1513,6 +1634,9 @@ export async function listContentSlim(
     subKind: opts.subKind ?? null,
     status: opts.status ?? null,
     language: opts.language ?? null,
+    category: opts.category ?? null,
+    publishedOn: publishedOn.length > 0 ? publishedOn : null,
+    publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : null,
   });
   return out;
 }

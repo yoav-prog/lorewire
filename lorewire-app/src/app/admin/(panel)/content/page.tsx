@@ -18,7 +18,7 @@ import {
   type ContentSubKind,
 } from "@/lib/repo";
 import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
-import { STATUSES } from "@/app/admin/ui";
+import { CATEGORIES, STATUSES } from "@/app/admin/ui";
 import { ContentList } from "./ContentList";
 
 const LIST_LIMIT = 200;
@@ -48,6 +48,7 @@ export default async function ContentPage({
     kind?: string;
     status?: string;
     language?: string;
+    category?: string;
   }>;
 }) {
   await requireCapability("content.manage");
@@ -55,10 +56,17 @@ export default async function ContentPage({
   const subKind = isSubKind(sp.kind) ? sp.kind : undefined;
   const status = sp.status || undefined;
   const language = sp.language || undefined;
+  // Closed-enum guard so a hand-edited URL with `?category=Foo` collapses
+  // to "All" instead of producing an empty SQL clause.
+  const category =
+    sp.category && (CATEGORIES as readonly string[]).includes(sp.category)
+      ? sp.category
+      : undefined;
   const rows = await listContentSlim({
     subKind,
     status,
     language,
+    category,
     limit: LIST_LIMIT,
   });
 
@@ -66,7 +74,7 @@ export default async function ContentPage({
   // author) only edits one function. Clearing a filter means dropping its key.
   const baseQs = (override: Partial<Record<string, string | undefined>>) => {
     const next = new URLSearchParams();
-    const merged = { kind: subKind, status, language, ...override };
+    const merged = { kind: subKind, status, language, category, ...override };
     for (const [k, v] of Object.entries(merged)) {
       if (v) next.set(k, v);
     }
@@ -142,6 +150,27 @@ export default async function ContentPage({
           {STATUSES.map((s) =>
             chip(`/admin/content${baseQs({ status: s })}`, s, status === s),
           )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Category
+          </span>
+          {chip(
+            `/admin/content${baseQs({ category: undefined })}`,
+            "All",
+            !category,
+          )}
+          {CATEGORIES.map((c) =>
+            chip(
+              `/admin/content${baseQs({ category: c })}`,
+              c,
+              category === c,
+            ),
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (video stories only)
+          </span>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
