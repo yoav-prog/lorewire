@@ -14,6 +14,7 @@ import {
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
   filterIdsByPillCat,
+  filterIdsByPublished,
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
@@ -297,7 +298,14 @@ function Home({
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
-  const featured = heroIds[0] ? resolveStory(heroIds[0]) : null;
+  // Same isPublishedStory gate Browse / Search / New & Hot use: if the
+  // resolved hero is a sample placeholder, drop it so the Billboard
+  // doesn't lead with a glyph poster the pipeline hasn't produced for.
+  const featuredCandidate = heroIds[0] ? resolveStory(heroIds[0]) : null;
+  const featured =
+    featuredCandidate && isPublishedStory(featuredCandidate)
+      ? featuredCandidate
+      : null;
 
   const continueIdsAll = resolveRailIds("continue", curation, behavior, catalog, {
     continue: continueState.ids,
@@ -311,9 +319,31 @@ function Home({
   // via the existing `length > 0` guards below. Hero/Billboard is curation-
   // driven and stays put — pulling the hero out from under the user on a tag
   // pick is jarring (Netflix doesn't do it either).
-  const continueIds = filterIdsByPillCat(continueIdsAll, pill, resolveStory);
-  const top10Ids = filterIdsByPillCat(top10IdsAll, pill, resolveStory);
-  const newRowIds = filterIdsByPillCat(newRowIdsAll, pill, resolveStory);
+  // After the pill filter, drop ids whose story has no produced content
+  // so a curated rail can't surface a placeholder card.
+  const continueIds = filterIdsByPublished(
+    filterIdsByPillCat(continueIdsAll, pill, resolveStory),
+    resolveStory,
+  );
+  const top10Ids = filterIdsByPublished(
+    filterIdsByPillCat(top10IdsAll, pill, resolveStory),
+    resolveStory,
+  );
+  const newRowIds = filterIdsByPublished(
+    filterIdsByPillCat(newRowIdsAll, pill, resolveStory),
+    resolveStory,
+  );
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[home render]", {
+    shell: "mobile",
+    total_catalog: catalog.array.length,
+    pill,
+    hero: featured ? 1 : 0,
+    continue: continueIds.length,
+    top10: top10Ids.length,
+    new_row: newRowIds.length,
+  });
 
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
@@ -373,9 +403,11 @@ function Home({
         if (pill !== ALL_PILL && rail.cat !== pill) return null;
         const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
         if (!ids) return null;
+        // Skip rails that resolve to no displayable stories at all (no
+        // curation + no fallback hits, or only sample placeholders).
         const items = ids
           .map((id) => resolveStory(id))
-          .filter((s): s is Story => s !== null);
+          .filter((s): s is Story => s !== null && isPublishedStory(s));
         if (items.length === 0) return null;
         return (
           <section key={rail.surface} className="mt-7">
@@ -438,7 +470,7 @@ function Home({
             resolveRailIds(matching.surface, curation, behavior, catalog) ?? [];
           const items = ids
             .map((id) => resolveStory(id))
-            .filter((s): s is Story => s !== null);
+            .filter((s): s is Story => s !== null && isPublishedStory(s));
           if (items.length > 0) return null;
           return (
             <p className="font-body text-muted mt-10 mb-6 px-4 text-center text-[13px]">
