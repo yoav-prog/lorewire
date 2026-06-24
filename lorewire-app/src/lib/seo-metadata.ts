@@ -65,7 +65,16 @@ export type SeoMetadata = z.infer<typeof SeoMetadataSchema>;
 
 export const SETTING_AUTO_REGENERATE = "publisher.seo.auto_regenerate_on_render";
 export const SETTING_KIE_MODEL = "publisher.seo.kie_model";
-export const DEFAULT_MODEL = "kie/gemini-3-5-flash";
+// Switched 2026-06-24 from kie/gemini-3-5-flash to kie/gemini-3-pro:
+// kie.ai's gemini-3-5-flash model only exposes Google's native
+// streamGenerateContent endpoint, NOT the OpenAI-compatible chat
+// completions endpoint our lib/llm.ts client speaks. Trying to call
+// it 404s. gemini-3-pro IS exposed on chat completions (verified at
+// https://api.kie.ai/gemini-3-pro/v1/chat/completions) and produces
+// similar-quality structured JSON output for the SEO use case at
+// marginal cost difference. The operator can switch via
+// publisher.seo.kie_model setting.
+export const DEFAULT_MODEL = "kie/gemini-3-pro";
 
 // --- Observability ---------------------------------------------------------
 
