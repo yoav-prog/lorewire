@@ -120,6 +120,17 @@ button:not(:disabled),
 .fade-in {
   animation: fadeIn 0.5s ease both;
 }
+/* Mobile hero carousel progress dot: fills the active dot left-to-right
+   over one rotation interval, restarting via React key on each slide
+   change. Paused/reduced-motion paths skip the animation entirely. */
+@keyframes heroProgress {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}
 @keyframes floaty {
   0% {
     transform: translateY(0) rotate(-1deg);

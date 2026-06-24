@@ -15,7 +15,8 @@ import {
   POLL_RAIL_TITLES,
   filterIdsByPillCat,
   filterIdsByPublished,
-  resolveHeroStory,
+  pickHeroAtIndex,
+  resolveHeroPool,
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
@@ -29,6 +30,7 @@ import {
   readShuffleRecents,
 } from "@/lib/play-shuffle";
 import { useStoryPlayEvents } from "@/lib/use-story-play-events";
+import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
 import {
@@ -166,25 +168,139 @@ const RailHead = ({ children }: { children: React.ReactNode }) => (
 );
 
 /* ----------------------------- BILLBOARD ----------------------------- */
+// 7-second auto-advance cadence; matches the desktop Hero. The
+// progress-fill animation on the active dot is keyed off this same
+// constant via inline animationDuration so the visual and the timer
+// stay in lockstep.
+const BILLBOARD_ROTATION_INTERVAL_MS = 7000;
+// Below this gesture distance the touchend is treated as a tap, not a
+// swipe. Tuned for finger-on-glass — small enough that a deliberate
+// swipe always trips, big enough that an accidental drift on a Play
+// tap doesn't.
+const BILLBOARD_SWIPE_THRESHOLD_PX = 50;
+
 function Billboard({
-  story,
+  pool,
   onOpen,
   onShuffle,
+  onActiveChange,
   session,
 }: {
-  story: Story;
+  pool: Story[];
   onOpen: OpenFn;
   onShuffle: () => void;
+  /** Fires when the visible slide changes. The outer shell tracks the
+   *  value via a ref so the carousel's 7s tick doesn't re-render
+   *  AppShell, and so "Play Something" excludes the slide actually on
+   *  screen. */
+  onActiveChange?: (heroId: string) => void;
   session: HomepageInitial["session"];
 }) {
-  const c = CAT[story.cat];
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [touching, setTouching] = useState(false);
+  const [tabHidden, setTabHidden] = useState(false);
   const [heroOk, setHeroOk] = useState(true);
-  // Mobile Billboard is taller than it is wide (500h x ~390-480w), so the
-  // portrait hero composes better here than the landscape variant.
+  const reducedMotion = usePrefersReducedMotion();
+  // Touch state: keep the start point so we can classify the gesture on
+  // touchend (horizontal swipe vs vertical scroll vs tap).
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
+
+  // Reset the per-slide image-ok flag so a previous failure doesn't
+  // permanently strip artwork from later slides.
+  useEffect(() => {
+    setHeroOk(true);
+  }, [activeIndex]);
+
+  // Pause auto-advance when the tab is hidden so we don't burn the
+  // rotation on a backgrounded page.
+  useEffect(() => {
+    const onVis = () => setTabHidden(document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // Auto-advance. Paused on touch (so a user examining a slide isn't
+  // yanked away mid-look), when the tab is hidden, when the OS reports
+  // reduced-motion, or when there's only one slide.
+  const isPaused = touching || tabHidden || reducedMotion || pool.length < 2;
+  useEffect(() => {
+    if (isPaused) return;
+    const id = window.setInterval(() => {
+      setActiveIndex((i) => (i + 1) % pool.length);
+    }, BILLBOARD_ROTATION_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [isPaused, pool.length]);
+
+  // Expose the active id to the parent so the shuffle exclusion tracks
+  // the visible slide, not pool[0].
+  useEffect(() => {
+    const active = pool[Math.min(activeIndex, pool.length - 1)];
+    if (active) onActiveChange?.(active.id);
+  }, [activeIndex, pool, onActiveChange]);
+
+  // Preload BOTH neighbors so swipes feel instant in either direction.
+  useEffect(() => {
+    if (pool.length < 2 || typeof window === "undefined") return;
+    for (const offset of [-1, 1]) {
+      const neighbor = pool[(activeIndex + offset + pool.length) % pool.length];
+      const src = neighbor.heroImage;
+      if (!src) continue;
+      const img = new window.Image();
+      img.src = src;
+    }
+  }, [activeIndex, pool]);
+
+  const story = pool[Math.min(activeIndex, pool.length - 1)];
+  if (!story) return null;
+  const c = CAT[story.cat];
   const heroSrc = story.heroImage;
   const showHero = !!heroSrc && heroOk;
+  const hasRotation = pool.length > 1;
+
+  // Touch handlers. Only on the swipe-zone div (the upper hero artwork
+  // area), NOT on the action buttons — wrapping the whole hero would
+  // make a deliberate Play tap occasionally register as a swipe and
+  // navigate the user away from their pick.
+  const onTouchStart = (e: React.TouchEvent) => {
+    if (!hasRotation) return;
+    const t = e.touches[0];
+    touchStart.current = { x: t.clientX, y: t.clientY };
+    setTouching(true);
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    if (!hasRotation) {
+      setTouching(false);
+      return;
+    }
+    const start = touchStart.current;
+    touchStart.current = null;
+    if (!start) {
+      setTouching(false);
+      return;
+    }
+    const t = e.changedTouches[0];
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    // Vertical-dominant gesture is a page-scroll attempt, not a swipe.
+    if (Math.abs(dy) > Math.abs(dx)) {
+      setTouching(false);
+      return;
+    }
+    if (Math.abs(dx) >= BILLBOARD_SWIPE_THRESHOLD_PX) {
+      const dir = dx < 0 ? 1 : -1;
+      setActiveIndex((i) => (i + dir + pool.length) % pool.length);
+    }
+    // Brief resume delay so a user who swipes once doesn't get
+    // auto-advanced again immediately — feels less aggressive.
+    setTimeout(() => setTouching(false), 800);
+  };
+
   return (
-    <div className="relative h-[500px] w-full overflow-hidden">
+    <section
+      className="relative h-[500px] w-full overflow-hidden"
+      aria-roledescription={hasRotation ? "carousel" : undefined}
+      aria-label={hasRotation ? "Featured stories" : undefined}
+    >
       <div className="absolute left-5 z-30 flex items-center gap-2" style={{ top: "calc(env(safe-area-inset-top, 0px) + 14px)" }}>
         <span className="relative grid place-items-center bg-ink text-bg font-display font-black rounded-[7px]" style={{ width: 26, height: 26, fontSize: 11, letterSpacing: "-.04em" }}>
           LW
@@ -192,34 +308,44 @@ function Billboard({
         </span>
         <span className="font-display font-black tracking-tight text-ink ink-shadow" style={{ fontSize: 18 }}>LoreWire</span>
       </div>
-      {/* Sign-in surface mirrors the LoreWire logo's top-anchor on the
-          opposite side so the hero frame stays visually balanced. The
-          'overlay' tone is a translucent glass pill tuned to read on any
-          hero image without competing with the PLAY button or the story
-          title. Signed-in users see the avatar dropdown instead (same
-          component, branches on `session`). */}
       <div className="absolute right-4 z-30" style={{ top: "calc(env(safe-area-inset-top, 0px) + 10px)" }}>
         <SignInChip session={session} tone="overlay" />
       </div>
-      <div className="absolute inset-0 drift" style={{ background: c }}>
-        {showHero && (
-          <img
-            src={heroSrc}
-            alt=""
-            className="absolute inset-0 w-full h-full object-cover"
-            onError={() => {
-              setHeroOk(false);
-              console.warn("[lorewire billboard err]", { storyId: story.id, src: heroSrc });
-            }}
-          />
-        )}
-        <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(180deg, rgba(0,0,0,.15) 0%, rgba(0,0,0,.45) 70%, rgba(10,10,12,.85) 100%)" : "radial-gradient(120% 90% at 70% 20%, rgba(255,255,255,.18), rgba(0,0,0,.45) 72%)" }}></div>
-        {!showHero && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
-        {!showHero && <div className="absolute -right-6 top-6 font-display font-black leading-none select-none" style={{ fontSize: 320, color: "rgba(255,255,255,.09)" }}>{story.glyph}</div>}
-      </div>
-      <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background: "linear-gradient(0deg,#0A0A0C 6%, rgba(10,10,12,.55) 45%, rgba(10,10,12,0) 100%)" }}></div>
 
-      <div className="absolute left-0 right-0 bottom-5 px-5">
+      {/* Slide content — keyed so each transition fades the new slide in
+          via the existing fade-in keyframe. The touch handlers live on
+          the OUTER wrapper (the artwork half) so a deliberate Play tap
+          on the action row below can't accidentally trip a swipe. */}
+      <div
+        key={story.id}
+        className="absolute inset-0 fade-in"
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+      >
+        <div className="absolute inset-0 drift" style={{ background: c }}>
+          {showHero && (
+            <img
+              src={heroSrc}
+              alt=""
+              className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
+              draggable={false}
+              onError={() => {
+                setHeroOk(false);
+                console.warn("[lorewire billboard err]", { storyId: story.id, src: heroSrc });
+              }}
+            />
+          )}
+          <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(180deg, rgba(0,0,0,.15) 0%, rgba(0,0,0,.45) 70%, rgba(10,10,12,.85) 100%)" : "radial-gradient(120% 90% at 70% 20%, rgba(255,255,255,.18), rgba(0,0,0,.45) 72%)" }}></div>
+          {!showHero && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
+          {!showHero && <div className="absolute -right-6 top-6 font-display font-black leading-none select-none" style={{ fontSize: 320, color: "rgba(255,255,255,.09)" }}>{story.glyph}</div>}
+        </div>
+        <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background: "linear-gradient(0deg,#0A0A0C 6%, rgba(10,10,12,.55) 45%, rgba(10,10,12,0) 100%)" }}></div>
+      </div>
+
+      {/* Action row sits ABOVE the touch layer (relative z-20 vs the
+          fade-in's absolute inset). Buttons stay tappable, swipe stays
+          contained to the artwork half — no gesture conflict. */}
+      <div className="absolute left-0 right-0 bottom-5 px-5 z-20" aria-live="polite">
         <div className="flex items-center gap-2 mb-2.5">
           <span className="w-[3px] h-3.5 bg-accent rounded-full"></span>
           <span className="font-mono text-[10px] uppercase tracking-[.34em] text-ink/90">LW Original</span>
@@ -244,8 +370,62 @@ function Billboard({
         <button onClick={onShuffle} className="mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-[10px] border border-line font-mono text-[11px] uppercase tracking-[.2em] text-ink/80 active:scale-[.98] transition">
           <ShuffleI size={15} /> Play Something
         </button>
+
+        {/* Progress dots — Apple TV+ style. Inactive dots are 6px circles;
+            the active one widens to a 24px pill with a left-to-right
+            fill animation that runs the full rotation interval. The
+            fill restarts via React key on slide change, and pauses
+            (no animation at all) when the user is touching, the tab
+            is hidden, or reduced-motion is on. */}
+        {hasRotation && (
+          <div className="mt-4 flex items-center justify-center gap-1.5" role="tablist" aria-label="Featured stories">
+            {pool.map((s, i) => {
+              const active = i === activeIndex;
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => setActiveIndex(i)}
+                  role="tab"
+                  aria-selected={active}
+                  aria-label={`Show featured story ${i + 1} of ${pool.length}`}
+                  // Generous tap target (32px) with a 6px visual dot for
+                  // inactives / 24px pill for active. The transparent
+                  // padding doubles as the touch zone so a thumb tap
+                  // doesn't have to land precisely on the pixels.
+                  className="relative grid place-items-center"
+                  style={{ width: active ? 32 : 16, height: 16 }}
+                >
+                  <span
+                    className="relative block rounded-full overflow-hidden transition-[width] duration-200"
+                    style={{
+                      width: active ? 24 : 6,
+                      height: 6,
+                      background: active ? "rgba(255,255,255,.32)" : "rgba(255,255,255,.42)",
+                    }}
+                  >
+                    {active && (
+                      <span
+                        // Key by activeIndex so React remounts the fill
+                        // on every slide change — the CSS animation
+                        // restarts from 0% cleanly.
+                        key={`fill-${activeIndex}`}
+                        className="absolute inset-y-0 left-0 bg-white"
+                        style={{
+                          width: isPaused ? "0%" : "100%",
+                          animation: isPaused
+                            ? "none"
+                            : `heroProgress ${BILLBOARD_ROTATION_INTERVAL_MS}ms linear forwards`,
+                        }}
+                      />
+                    )}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -269,6 +449,7 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
 function Home({
   onOpen,
   onShuffle,
+  onHeroActiveChange,
   pill,
   setPill,
   curation,
@@ -280,6 +461,7 @@ function Home({
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
+  onHeroActiveChange?: (heroId: string) => void;
   pill: string;
   setPill: (p: string) => void;
   curation: ReturnType<typeof useHomepageCuration>["curation"];
@@ -304,9 +486,12 @@ function Home({
   // beat the admin's "first-4-from-catalog" fallback (and lose to a
   // hand-curated continue list — admin override stays authoritative).
   const continueState = useContinueReading();
-  // Hero resolution lives in lib/homepage-rails so the outer shell's
-  // shuffle reads the same answer and excludes the current marquee.
-  const featured = resolveHeroStory(curation, behavior, catalog, resolveStory);
+  // Hero rotation pool (capacity 8). Billboard handles the carousel
+  // mechanics; the shell uses heroPool.length for its [home render]
+  // log and onHeroActiveChange to keep the shuffle exclusion tracking
+  // the visible slide.
+  const heroPool = resolveHeroPool(curation, behavior, catalog, resolveStory);
+  const featured = pickHeroAtIndex(heroPool, 0);
 
   const continueIdsAll = resolveRailIds("continue", curation, behavior, catalog, {
     continue: continueState.ids,
@@ -340,7 +525,7 @@ function Home({
     shell: "mobile",
     total_catalog: catalog.array.length,
     pill,
-    hero: featured ? 1 : 0,
+    hero_pool: heroPool.length,
     continue: continueIds.length,
     top10: top10Ids.length,
     new_row: newRowIds.length,
@@ -349,11 +534,12 @@ function Home({
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
     <div className="pb-28">
-      {featured && (
+      {heroPool.length > 0 && (
         <Billboard
-          story={featured}
+          pool={heroPool}
           onOpen={onOpen}
           onShuffle={onShuffle}
+          onActiveChange={onHeroActiveChange}
           session={session}
         />
       )}
@@ -1735,6 +1921,15 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   // engagement-store caps the list at 50.
   const { recordView } = useRecentlyViewed();
 
+  // Tracks the Billboard's currently-visible slide. The carousel rotates
+  // through pool ids; shuffle reads this ref to exclude the on-screen
+  // slide (not just pool[0]). Ref instead of state so the 7s tick stays
+  // contained to the Billboard and doesn't re-render the outer shell.
+  const heroActiveIdRef = useRef<string | null>(null);
+  const onHeroActiveChange = useCallback((heroId: string) => {
+    heroActiveIdRef.current = heroId;
+  }, []);
+
   // Hoisted curation + live-catalog hook. Home receives the values as
   // props instead of calling the hook itself so MyList and the modal
   // mount site below share one `resolveStory` (real shorts saved through
@@ -1759,8 +1954,16 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   // click never replays what the user is already looking at; sessionStorage
   // recents soften repeats when inventory is thin.
   const shuffle = () => {
+    // Prefer the Billboard's currently-visible slide (set via
+    // onHeroActiveChange). Fall back to pool[0] before the carousel
+    // mounts on first paint.
     const heroId =
-      resolveHeroStory(curation, behavior, catalog, resolveStory)?.id ?? null;
+      heroActiveIdRef.current ??
+      pickHeroAtIndex(
+        resolveHeroPool(curation, behavior, catalog, resolveStory),
+        0,
+      )?.id ??
+      null;
     const recents = readShuffleRecents();
     const pickedId = pickRandomPlayable({
       catalog: catalog.array,
@@ -1792,6 +1995,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
           <Home
             onOpen={open}
             onShuffle={shuffle}
+            onHeroActiveChange={onHeroActiveChange}
             pill={pill}
             setPill={setPill}
             curation={curation}
