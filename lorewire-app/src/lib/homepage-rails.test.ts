@@ -243,3 +243,143 @@ describe("fallbackIdsForSurface — filter-before-slice (2026-06-24 fix)", () =>
     expect(result).toEqual(["p_2026", "p_2025", "p_2024"]);
   });
 });
+
+// 2026-06-24 user feedback: a tiny "Pure Drama" curation (2 picks) was
+// silently shrinking the rail to those 2 items because resolveRailIds
+// treated curation as the FULL list. New semantics: curated ids pin at
+// the front, fallback fills the rest. Applies to discovery rails only —
+// hero stays single-pick, continue keeps its personalized chain.
+describe("resolveRailIds — curation augments fallback (discovery rails)", () => {
+  const drama = (id: string) => ({ id, cat: "Drama", heroImage: "x" });
+  const fatDramaCatalog = {
+    array: [
+      drama("d1"),
+      drama("d2"),
+      drama("d3"),
+      drama("d4"),
+      drama("d5"),
+    ],
+    map: new Map(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+  const emptyOtherSurfaces = {
+    hero: [],
+    top10: [],
+    continue: [],
+    new_row: [],
+    entitled_row: [],
+    humor_row: [],
+    wholesome_row: [],
+    dating_row: [],
+    roommate_row: [],
+  };
+
+  it("pins curated ids at the front and appends fallback", () => {
+    const curation = {
+      ...emptyOtherSurfaces,
+      drama_row: ["d3"], // admin pinned d3
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = resolveRailIds(
+      "drama_row",
+      curation,
+      BEHAVIOR_FALLBACK,
+      fatDramaCatalog,
+    );
+    // d3 leads, then the other Dramas in catalog order (d3 not duplicated)
+    expect(result).toEqual(["d3", "d1", "d2", "d4", "d5"]);
+  });
+
+  it("preserves curated order at the front", () => {
+    const curation = {
+      ...emptyOtherSurfaces,
+      drama_row: ["d4", "d2", "d5"],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = resolveRailIds(
+      "drama_row",
+      curation,
+      BEHAVIOR_FALLBACK,
+      fatDramaCatalog,
+    );
+    expect(result).toEqual(["d4", "d2", "d5", "d1", "d3"]);
+  });
+
+  it("deduplicates so a curated id never repeats in the fallback tail", () => {
+    const curation = {
+      ...emptyOtherSurfaces,
+      drama_row: ["d1", "d2", "d3", "d4", "d5"],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = resolveRailIds(
+      "drama_row",
+      curation,
+      BEHAVIOR_FALLBACK,
+      fatDramaCatalog,
+    );
+    // Every Drama is in curation already — augmentation adds nothing.
+    expect(result).toEqual(["d1", "d2", "d3", "d4", "d5"]);
+  });
+
+  it("empty curation + fallback behavior returns the full fallback (unchanged)", () => {
+    const curation = {
+      ...emptyOtherSurfaces,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = resolveRailIds(
+      "drama_row",
+      curation,
+      BEHAVIOR_FALLBACK,
+      fatDramaCatalog,
+    );
+    expect(result).toEqual(["d1", "d2", "d3", "d4", "d5"]);
+  });
+
+  it("empty curation + hide behavior still hides the rail (unchanged)", () => {
+    const curation = {
+      ...emptyOtherSurfaces,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = resolveRailIds(
+      "drama_row",
+      curation,
+      BEHAVIOR_HIDE,
+      fatDramaCatalog,
+    );
+    expect(result).toBeNull();
+  });
+
+  it("non-empty curation + hide behavior augments anyway (hide only fires on empty curated)", () => {
+    // The "hide" behavior is the admin's "no fallback for this rail"
+    // setting. With a non-empty curation it's irrelevant — they curated,
+    // so the rail clearly has content the admin wants shown. Hide only
+    // applies when curation is the empty signal.
+    const curation = {
+      ...emptyOtherSurfaces,
+      drama_row: ["d3"],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = resolveRailIds(
+      "drama_row",
+      curation,
+      BEHAVIOR_HIDE,
+      fatDramaCatalog,
+    );
+    expect(result).toEqual(["d3", "d1", "d2", "d4", "d5"]);
+  });
+
+  it("hero stays single-pick (no augmentation)", () => {
+    const curation = {
+      ...emptyOtherSurfaces,
+      hero: ["d3"],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const result = resolveRailIds(
+      "hero",
+      curation,
+      BEHAVIOR_FALLBACK,
+      fatDramaCatalog,
+    );
+    expect(result).toEqual(["d3"]);
+  });
+});
