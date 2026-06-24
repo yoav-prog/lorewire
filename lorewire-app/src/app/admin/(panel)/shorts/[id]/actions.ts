@@ -68,6 +68,11 @@ import {
   publishShortToFacebook,
   type FacebookPostRow,
 } from "@/lib/publish-to-facebook";
+import {
+  deleteLatestPostedRowForStory as deleteLatestPostedIgRowForStory,
+  publishShortToInstagram,
+  type InstagramPostRow,
+} from "@/lib/publish-to-instagram";
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -1517,6 +1522,153 @@ export async function getLatestFacebookPostForStoryAction(
   return one<FacebookPostRow>(
     `SELECT id, story_id, render_id, page_id, trigger, video_url, caption, status, external_post_id, fb_error_code, fb_error_subcode, error_message, attempts, created_at, posted_at, deleted_at
      FROM facebook_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
+// ─── Instagram auto-publish: manual publish / re-publish ──────────────────────
+// Plan: _plans/2026-06-24-instagram-auto-publish.md.
+//
+// Mirror of the Facebook manual publish action above. Same shape, same
+// safety properties (delete-previous aborts on failure, never silently
+// publishes a duplicate). The IG-specific 2-step flow + container poll
+// happens inside publishShortToInstagram — this action is glue: auth,
+// latest-render lookup, article URL resolution, delete-previous orderly
+// dispatch.
+//
+// Note: publishShortToInstagram can return status='pending' (container
+// created but still IN_PROGRESS after the inline 30s budget). Surface
+// that to the admin as "queued — the retry cron will publish it in the
+// next few minutes" rather than a failure.
+
+export interface ManualInstagramPublishOpts {
+  deletePrevious?: boolean;
+  captionOverride?: string;
+}
+
+export interface ManualInstagramPublishResult {
+  ok: boolean;
+  /** True when the row landed in 'pending' (container created but still
+   *  processing on IG's side after our inline budget). The retry cron
+   *  will publish it. UI should treat this as success-ish, not failure. */
+  pending?: boolean;
+  error?: string;
+  externalPostId?: string;
+  deletedPostId?: string;
+}
+
+export async function publishToInstagramAction(
+  storyId: string,
+  opts: ManualInstagramPublishOpts = {},
+): Promise<ManualInstagramPublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let deletedPostId: string | undefined;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedIgRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor ig-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous Instagram post failed: ${del.error}`,
+      };
+    }
+    deletedPostId = del.externalPostId;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  const result = await publishShortToInstagram({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+    },
+    captionOverride:
+      opts.captionOverride && opts.captionOverride.trim().length > 0
+        ? opts.captionOverride
+        : null,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor ig-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    deleted_post_id: deletedPostId ?? null,
+    status: result.status,
+    external_post_id:
+      result.status === "posted" ? result.row.external_post_id : null,
+    container_id:
+      result.status === "pending" || result.status === "posted" || result.status === "failed"
+        ? result.row.container_id
+        : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalPostId: result.row.external_post_id ?? undefined,
+      deletedPostId,
+    };
+  }
+  if (result.status === "pending") {
+    // Container created OK but still processing on IG side. Retry cron
+    // will publish it. Surface as success-with-caveat to the admin.
+    return {
+      ok: true,
+      pending: true,
+      deletedPostId,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "Instagram publish failed",
+      deletedPostId,
+    };
+  }
+  return {
+    ok: false,
+    error:
+      "publish skipped — server env vars IG_BUSINESS_ACCOUNT_ID / FB_PAGE_ACCESS_TOKEN may be missing",
+    deletedPostId,
+  };
+}
+
+/** Mirror of getLatestFacebookPostForStoryAction for the IG button. */
+export async function getLatestInstagramPostForStoryAction(
+  storyId: string,
+): Promise<InstagramPostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<InstagramPostRow>(
+    `SELECT id, story_id, render_id, ig_account_id, trigger, video_url, caption, container_id, status, external_post_id, ig_error_code, ig_error_subcode, error_message, attempts, created_at, posted_at, deleted_at
+     FROM instagram_posts WHERE story_id = ?
      ORDER BY created_at DESC LIMIT 1`,
     [storyId],
   );

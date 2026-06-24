@@ -42,6 +42,10 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/retry_instagram_publishes",
+      "schedule": "*/5 * * * *"
+    },
+    {
       "path": "/api/auto_publish_full_pipeline",
       "schedule": "*/2 * * * *"
     },
@@ -70,6 +74,9 @@
       "maxDuration": 800
     },
     "src/app/api/retry_facebook_publishes/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_instagram_publishes/route.ts": {
       "maxDuration": 300
     },
     "src/app/api/auto_publish_full_pipeline/route.ts": {

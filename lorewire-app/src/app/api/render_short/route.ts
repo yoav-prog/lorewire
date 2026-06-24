@@ -31,6 +31,7 @@ import { resolveShortSegments } from "@/lib/short-segments";
 import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
 import { rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
 import { publishShortToFacebook } from "@/lib/publish-to-facebook";
+import { publishShortToInstagram } from "@/lib/publish-to-instagram";
 
 // A short runs kie image generation + Remotion render, the longest job in the
 // app, so override undici's 300s default timeouts. Vercel Pro's 800s cron cap is
@@ -320,6 +321,21 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       });
     },
   );
+  // Best-effort auto-publish as an Instagram Reel. Same shape as the FB
+  // hook above (gated by its own toggle, dedup'd at story level, failures
+  // land in instagram_posts for the retry cron). Runs SEQUENTIALLY after
+  // FB — chose sequential over parallel for log readability + simpler
+  // incident triage. Plan:
+  // _plans/2026-06-24-instagram-auto-publish.md.
+  await publishShortToInstagramForRender(claimed.story_id, claimed.id, result.url, story).catch(
+    (err) => {
+      namespacedLog("instagram_publish_unhandled", {
+        render_id: claimed.id,
+        story_id: claimed.story_id,
+        err: String(err),
+      });
+    },
+  );
   return NextResponse.json({
     drained: 1,
     render_id: claimed.id,
@@ -349,6 +365,38 @@ async function publishShortToFacebookForRender(
     ? `${origin}/articles/${article.language}/${article.slug}`
     : origin;
   await publishShortToFacebook({
+    storyId,
+    renderId,
+    videoUrl,
+    trigger: "auto",
+    context: {
+      hook: null,
+      title: story?.title ?? null,
+      article_url: articleUrl,
+    },
+  });
+}
+
+/** IG mirror of publishShortToFacebookForRender. Same caption-context
+ *  construction; dispatches to publishShortToInstagram which runs the
+ *  2-step create-container/poll/publish flow. Plan:
+ *  _plans/2026-06-24-instagram-auto-publish.md. */
+async function publishShortToInstagramForRender(
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+  story: Awaited<ReturnType<typeof getStory>>,
+): Promise<void> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  const articleUrl = article
+    ? `${origin}/articles/${article.language}/${article.slug}`
+    : origin;
+  await publishShortToInstagram({
     storyId,
     renderId,
     videoUrl,

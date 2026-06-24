@@ -38,6 +38,11 @@ import {
   SETTING_AUTO_PUBLISH as FB_SETTING_AUTO_PUBLISH,
   SETTING_CAPTION_TEMPLATE as FB_SETTING_CAPTION_TEMPLATE,
 } from "@/lib/publish-to-facebook";
+import {
+  DEFAULT_CAPTION_TEMPLATE as IG_DEFAULT_CAPTION_TEMPLATE,
+  SETTING_AUTO_PUBLISH as IG_SETTING_AUTO_PUBLISH,
+  SETTING_CAPTION_TEMPLATE as IG_SETTING_CAPTION_TEMPLATE,
+} from "@/lib/publish-to-instagram";
 
 // Settings / General. Every field now uses the right control: toggles for
 // the booleans (previously stringy "0"/"1"), number inputs with min/max for
@@ -242,6 +247,18 @@ export default async function SettingsPage() {
   ]);
   const fbPageIdDisplay = process.env.FB_PAGE_ID ?? "";
   const fbTokenConfigured = Boolean(process.env.FB_PAGE_ACCESS_TOKEN);
+
+  // Instagram auto-publish (mirror of FB block — separate toggle, separate
+  // caption template so admin can diverge them later without coupling.
+  // Plan: _plans/2026-06-24-instagram-auto-publish.md).
+  const [igAutoPublishRaw, igCaptionTemplateRaw] = await Promise.all([
+    getSetting(IG_SETTING_AUTO_PUBLISH),
+    getSetting(IG_SETTING_CAPTION_TEMPLATE),
+  ]);
+  const igAccountIdDisplay = process.env.IG_BUSINESS_ACCOUNT_ID ?? "";
+  // IG reuses FB_PAGE_ACCESS_TOKEN (no separate token) since the IG
+  // account is linked to the FB Page in Meta Business Suite.
+  const igTokenConfigured = fbTokenConfigured;
   const SHORT_CATEGORIES = [
     "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
   ];
@@ -730,6 +747,39 @@ export default async function SettingsPage() {
             label="Caption template"
             hint={`Tokens: {{hook}}, {{title}}, {{article_url}}. Empty falls back to the default: ${FB_DEFAULT_CAPTION_TEMPLATE.replace(/\n/g, "\\n")}`}
             initial={fbCaptionTemplateRaw ?? ""}
+            placeholder="Leave empty to use the default template"
+          />
+        </Section>
+
+        <Section
+          title="Social publishing — Instagram"
+          description="Auto-publish every freshly rendered short to the LoreWire Instagram account as a Reel. Reuses the Facebook Page Access Token (IG is linked to the Page). Plan: _plans/2026-06-24-instagram-auto-publish.md."
+        >
+          <div className="rounded-md border border-rule bg-paper-soft px-3 py-2 text-[13px] leading-snug">
+            <div className="font-medium text-ink">
+              Target IG account:{" "}
+              <span className="font-mono">
+                {igAccountIdDisplay || "(IG_BUSINESS_ACCOUNT_ID env var not set)"}
+              </span>
+            </div>
+            <div className="mt-0.5 text-muted">
+              Page Access Token (shared with Facebook):{" "}
+              {igTokenConfigured
+                ? "✓ configured (server env var)"
+                : "✗ FB_PAGE_ACCESS_TOKEN not set — publishing will skip until it lands in Vercel env vars"}
+            </div>
+          </div>
+          <SettingToggle
+            settingKey={IG_SETTING_AUTO_PUBLISH}
+            label="Auto-publish on render"
+            hint="When on, every short that finishes rendering is posted as a Reel to the LoreWire Instagram account. Independent from the Facebook toggle — you can have one on and the other off. Story-level dedup prevents re-renders from creating duplicate Reels. Manual publish from the short editor bypasses this toggle."
+            initialOn={readToggle(igAutoPublishRaw, false)}
+          />
+          <SettingText
+            settingKey={IG_SETTING_CAPTION_TEMPLATE}
+            label="Caption template (Instagram-specific)"
+            hint={`Tokens: {{hook}}, {{title}}, {{article_url}}. Empty falls back to the default: ${IG_DEFAULT_CAPTION_TEMPLATE.replace(/\n/g, "\\n")}. Instagram caps captions at 2200 characters — anything longer gets truncated with an ellipsis automatically.`}
+            initial={igCaptionTemplateRaw ?? ""}
             placeholder="Leave empty to use the default template"
           />
         </Section>

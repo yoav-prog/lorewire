@@ -1043,6 +1043,48 @@ export const FACEBOOK_POSTS: Table = {
   ],
 };
 
+// 2026-06-24 Instagram auto-publish for shorts
+// (_plans/2026-06-24-instagram-auto-publish.md). Mirrors FACEBOOK_POSTS
+// with two IG-specific deltas:
+//   - `container_id` column: IG publishing is a two-step async flow
+//     (POST /media → poll status_code → POST /media_publish). If the
+//     inline publish times out between create and publish, we persist
+//     the container_id so the retry cron can resume from step 2/3 without
+//     re-creating (re-creating would waste the 100/24h post quota and
+//     create orphan containers).
+//   - `ig_account_id` instead of `page_id` — the post is scoped to the
+//     IG Business Account, not the Page directly (even though the same
+//     Page Access Token authorises both, since the IG account is linked
+//     to the Page).
+// The Page Access Token never lives here — env var only (rule 13). Only
+// the TS app writes this table today, so no Python mirror is needed.
+export const INSTAGRAM_POSTS: Table = {
+  name: "instagram_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "ig_account_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "caption", type: "TEXT" },
+    // IG-specific. Populated after step 1 succeeds; survives across
+    // retries so a row that landed in `pending` with a container_id can
+    // resume from step 2 (poll) or step 3 (publish), skipping the
+    // already-completed step 1.
+    { name: "container_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "ig_error_code", type: "INTEGER" },
+    { name: "ig_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -1081,6 +1123,7 @@ export const TABLES: Table[] = [
   COMMENT_REPORTS,
   COMMENT_MODERATION_EVENTS,
   FACEBOOK_POSTS,
+  INSTAGRAM_POSTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
