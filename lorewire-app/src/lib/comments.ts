@@ -108,8 +108,13 @@ export async function createComment(
     }
   }
 
+  // Match the public reader's single source of truth (status='published').
+  // published_at is informational (RSS dateline, JSON-LD datePublished) — older
+  // rows can have status='published' with a null published_at, and gating the
+  // composer on it would let the UI show "Post" while the write path always
+  // rejects.
   const article = await getArticle(input.articleId);
-  if (!article || article.status !== "published" || !article.published_at) {
+  if (!article || article.status !== "published") {
     return { ok: false, error: "This article isn't open for comments.", httpStatus: 404 };
   }
 
