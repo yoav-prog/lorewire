@@ -141,14 +141,52 @@ describe("reduceGesture — hold-to-pause", () => {
     expect(state.kind).toBe("draggingV");
   });
 
-  it("paused state does not promote to draggingV on move (v1 limitation)", () => {
+  it("paused → vertical move past threshold promotes to draggingV + emits resume (drag-after-hold)", () => {
+    // 2026-06-25 gesture-improvements plan: hold-to-pause used to
+    // swallow subsequent moves, forcing the user to release first
+    // before swiping. Now a vertical move past moveStartThreshold
+    // while paused promotes to draggingV AND emits a synthetic resume
+    // so the viewer un-pauses (the user is no longer holding to
+    // pause — they're dragging to dismiss / open-reader). Matches IG.
     const { actions, state } = runSequence([
       { kind: "pointer-down", x: 180, y: 400, t: 0 },
       { kind: "hold-elapsed", t: 150 },
       { kind: "pointer-move", x: 180, y: 600, t: 300 },
     ]);
+    expect(actions).toEqual([{ kind: "pause" }, { kind: "resume" }]);
+    expect(state.kind).toBe("draggingV");
+  });
+
+  it("paused → sub-threshold move stays paused (drag-after-hold boundary)", () => {
+    // 7px vertical move — below the 8px moveStartThreshold — stays
+    // paused. Protects against jittery thumb micro-movements while
+    // holding triggering an accidental promote.
+    const { actions, state } = runSequence([
+      { kind: "pointer-down", x: 180, y: 400, t: 0 },
+      { kind: "hold-elapsed", t: 150 },
+      { kind: "pointer-move", x: 180, y: 407, t: 300 },
+    ]);
     expect(actions).toEqual([{ kind: "pause" }]);
     expect(state.kind).toBe("paused");
+  });
+
+  it("paused → drag past threshold → pointer-up past dismissThreshold → dismiss", () => {
+    // Full drag-after-hold flow: hold to pause, drag down past the
+    // moveStartThreshold (promotes + resume), continue dragging past
+    // dismissThreshold, release → emits dismiss. Symmetric with the
+    // existing draggingV-from-pressing flow.
+    const { actions, state } = runSequence([
+      { kind: "pointer-down", x: 180, y: 400, t: 0 },
+      { kind: "hold-elapsed", t: 150 },
+      { kind: "pointer-move", x: 180, y: 450, t: 300 }, // dy 50 ≥ 8 → promotes
+      { kind: "pointer-up", x: 180, y: 500, t: 500 }, // dy 100 > 80 → dismiss
+    ]);
+    expect(actions).toEqual([
+      { kind: "pause" },
+      { kind: "resume" },
+      { kind: "dismiss" },
+    ]);
+    expect(state.kind).toBe("idle");
   });
 });
 
