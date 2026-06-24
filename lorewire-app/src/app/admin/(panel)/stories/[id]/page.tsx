@@ -103,9 +103,34 @@ export default async function EditStory({
   // share the same chrome (RenderAfterEditsBanner / RenderStatusPanel /
   // EditSessionBanner / preview player), so the load fires for any of
   // them. Overview pays zero short-related round trips.
-  const shortLoad = isShortClientTab(activeTab)
-    ? await loadShortClientTabState(id, session.userId)
-    : null;
+  //
+  // Defensive try/catch around the loader: if anything inside the
+  // composite load (loadShortEditorState + voices + linked articles +
+  // platform posts + SEO + foreign-session resolution) throws, the
+  // whole page server-renders a 500 and the user can't get past the
+  // tab click. After 2026-06-25 production hot fix, an uncaught throw
+  // degrades to a NoShortYetCard with the actual error message so the
+  // editor stays reachable AND the failure is visible inline.
+  type ShortLoadResult = Awaited<
+    ReturnType<typeof loadShortClientTabState>
+  >;
+  let shortLoad: ShortLoadResult | null = null;
+  if (isShortClientTab(activeTab)) {
+    try {
+      shortLoad = await loadShortClientTabState(id, session.userId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      // eslint-disable-next-line no-console -- rule 14 (must surface root cause)
+      console.error("[unified editor page] loadShortClientTabState threw", {
+        storyId: id,
+        activeTab,
+        message,
+        stack,
+      });
+      shortLoad = { ok: false, error: `editor-load-threw: ${message}` };
+    }
+  }
 
   // Hero style snapshot (global default + every per-category default +
   // every pre-generated thumbnail URL) — one round trip drives the
