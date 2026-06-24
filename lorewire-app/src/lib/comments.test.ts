@@ -28,6 +28,7 @@ async function clear(): Promise<void> {
   await run("DELETE FROM comment_moderation_events", []);
   await run("DELETE FROM comments", []);
   await run("DELETE FROM articles", []);
+  await run("DELETE FROM stories", []);
 }
 
 async function seedArticle(
@@ -43,6 +44,27 @@ async function seedArticle(
       language,
       `slug-${id.slice(0, 8)}`,
       "Test article",
+      status,
+      status === "published" ? new Date().toISOString() : null,
+      new Date().toISOString(),
+    ],
+  );
+  return id;
+}
+
+// Seed a story so createComment can fall back to it when no article matches.
+// Mirrors the homepage modal flow for ideas-imported stories (slug == id,
+// no linked article).
+async function seedStory(status: string): Promise<string> {
+  const id = `idea_${randomUUID().slice(0, 12)}`;
+  await run(
+    `INSERT INTO stories (id, slug, title, summary, status, published_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      id,
+      "Test story",
+      "Test summary",
       status,
       status === "published" ? new Date().toISOString() : null,
       new Date().toISOString(),
@@ -131,6 +153,30 @@ describe("createComment — validation", () => {
       ...base,
     });
     expect(r.ok).toBe(false);
+  });
+
+  it("accepts a comment keyed on a published story when no article links to it", async () => {
+    // Regression: the homepage modal mounts a CommentsTab keyed on storyId;
+    // /api/comments/count returns the storyId verbatim as the comments key
+    // when no published article links. createComment must accept that key —
+    // otherwise the UI shows a working composer that always 404s. Affects
+    // every ideas-imported story (idea_* prefix) until it gets a linked
+    // article.
+    const storyId = await seedStory("published");
+    const r = await createComment({ articleId: storyId, guestName: "Sam", body: "hi", ...base });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.comment.article_id).toBe(storyId);
+      expect(r.articleTitle).toBe("Test story");
+      expect(r.articleSummary).toBe("Test summary");
+    }
+  });
+
+  it("refuses a comment on an unpublished story (no article fallback)", async () => {
+    const storyId = await seedStory("draft");
+    const r = await createComment({ articleId: storyId, guestName: "Sam", body: "hi", ...base });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.httpStatus).toBe(404);
   });
 });
 
