@@ -116,10 +116,17 @@ export function useStoriesGestures(
     if (!el) return;
 
     const onPointerDown = (e: PointerEvent) => {
-      // Touch and mouse only. Ignore pen for v1 (no clear use case in a
-      // story viewer; a stylus user can still tap, but precision-drag
-      // becomes a separate problem space).
-      if (e.pointerType !== "mouse" && e.pointerType !== "touch") return;
+      // Accept mouse, touch, and pen — pen events flow through the
+      // same PointerEvent shape and the gesture machine doesn't care
+      // about pointer type. Surface / iPad-with-pen users can drive
+      // the viewer the same way a finger does.
+      if (
+        e.pointerType !== "mouse" &&
+        e.pointerType !== "touch" &&
+        e.pointerType !== "pen"
+      ) {
+        return;
+      }
       // Capture so we still get pointer-up if the user lifts off the
       // element. Without this, fast vertical drags leave the machine
       // stuck in draggingV.

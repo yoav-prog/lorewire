@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
@@ -9,11 +9,11 @@ import {
 } from "@/lib/stories";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import WiresDesktop from "@/components/wires/WiresDesktop";
-import { StoriesRail } from "@/components/stories/StoriesRail";
-import { StoriesViewer } from "@/components/stories/StoriesViewer";
-import { resolveStoriesPlaylist } from "@/components/stories/stories-playlist";
-import { useStoriesUrlState } from "@/components/stories/use-stories-url-state";
-import { useViewedWires } from "@/components/stories/use-viewed-wires";
+// Stories rail + viewer intentionally NOT mounted on desktop — final
+// product call after the layout iteration (PR #82) still didn't read
+// right against the hero composition. Desktop discovery happens
+// through the existing rails (Continue Watching, Top 10, category
+// rails). Mobile keeps the rail; see AppShell.tsx for the mount.
 import { alignScriptToWords } from "@/lib/script-graft";
 import {
   placeArticleImages,
@@ -1401,9 +1401,6 @@ function HomePage({
   catalog,
   resolveStory,
   pollsInitial,
-  storiesPlaylist,
-  viewedWireIds,
-  onOpenWire,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -1413,10 +1410,6 @@ function HomePage({
   catalog: ReturnType<typeof useHomepageCuration>["catalog"];
   resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
   pollsInitial: HomepageInitial["pollRails"];
-  /** IG-style rail playlist — see _plans/2026-06-25-stories-rail-and-viewer.md. */
-  storiesPlaylist: Story[];
-  viewedWireIds: string[];
-  onOpenWire: (wireId: string) => void;
 }) {
   // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
   // New & Hot grids can share the same resolveStory (saved real shorts aren't
@@ -1481,17 +1474,6 @@ function HomePage({
         />
       )}
       <div className={heroPool.length > 0 ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
-        {/* IG-style Stories rail. On desktop it lives inside the
-            content area (so the Hero stays full-bleed) and uses the
-            page's section/title shell so it lines up with the poster
-            rails below. Hides entirely when every wire is already
-            viewed. Plan: _plans/2026-06-25-stories-desktop-layout.md. */}
-        <StoriesRail
-          playlist={storiesPlaylist}
-          viewedIds={viewedWireIds}
-          onOpen={onOpenWire}
-          title="Stories"
-        />
         {continueIds.length > 0 && (
           <Rail title="Continue Watching">
             {continueIds.map((id) => {
@@ -1669,16 +1651,6 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     liveRows: initial.liveRows,
   });
 
-  // 2026-06-25 stories plan: IG-style rail + viewer on desktop too,
-  // identical contract to MobileShell (one product, one viewer).
-  // Plan: _plans/2026-06-25-stories-rail-and-viewer.md.
-  const storiesPlaylist = useMemo(
-    () => resolveStoriesPlaylist(curation, catalog, resolveStory),
-    [curation, catalog, resolveStory],
-  );
-  const { viewed: viewedWireIds } = useViewedWires();
-  const { openWireId, openWire, closeWire } = useStoriesUrlState();
-
   useEffect(() => {
     const onS = () => setSolid(window.scrollY > 120);
     window.addEventListener("scroll", onS, { passive: true });
@@ -1747,9 +1719,6 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           catalog={catalog}
           resolveStory={resolveStory}
           pollsInitial={initial.pollRails}
-          storiesPlaylist={storiesPlaylist}
-          viewedWireIds={viewedWireIds}
-          onOpenWire={openWire}
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
@@ -1809,17 +1778,6 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         const s = resolveStory(active.id);
         return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} /> : null;
       })()}
-
-      {/* IG-style Stories viewer. Mounts at the shell level so a
-          `?wire=<id>` deep link works regardless of which view tab is
-          currently active. Plan: _plans/2026-06-25-stories-rail-and-viewer.md. */}
-      {openWireId && storiesPlaylist.length > 0 && (
-        <StoriesViewer
-          playlist={storiesPlaylist}
-          startId={openWireId}
-          onClose={closeWire}
-        />
-      )}
     </div>
   );
 }

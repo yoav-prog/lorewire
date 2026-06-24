@@ -15,7 +15,10 @@
 //   - "pressing"     — pointer is down; we're still deciding whether this
 //                      becomes a tap, a hold (pause), or a vertical drag.
 //   - "paused"       — hold detected. We pause the timer; on pointer-up we
-//                      resume.
+//                      resume. If the user then drags vertically past
+//                      moveStartThreshold without releasing, we promote
+//                      to draggingV + emit a synthetic resume (drag-
+//                      after-hold).
 //   - "draggingV"    — vertical move crossed the move-start threshold; we
 //                      track currentY so the viewer can apply a parallax
 //                      and we resolve to dismiss / open-reader / snap-back
@@ -25,7 +28,9 @@
 //   - Left third of the frame  → prev
 //   - Right two-thirds         → next   (matches IG; middle is "next")
 //
-// Plan: _plans/2026-06-25-stories-rail-and-viewer.md.
+// Plans:
+//   - _plans/2026-06-25-stories-rail-and-viewer.md (v1)
+//   - _plans/2026-06-25-stories-gesture-improvements.md (drag-after-hold)
 
 /** All inputs the machine can consume. `t` is a monotonically increasing
  *  millisecond timestamp (performance.now() in the React glue, anything
@@ -91,7 +96,12 @@ export type GestureState =
       currentY: number;
       currentT: number;
     }
-  | { kind: "paused"; startT: number }
+  | {
+      kind: "paused";
+      startX: number;
+      startY: number;
+      startT: number;
+    }
   | {
       kind: "draggingV";
       startX: number;
@@ -131,12 +141,19 @@ export function reduceGesture(
 
     case "hold-elapsed": {
       // Hold timer can only escalate from `pressing`. If we're already
-      // paused, dragging, or idle, swallow it.
+      // paused, dragging, or idle, swallow it. Carry startX/Y/T into
+      // the paused state so a subsequent pointer-move can promote to
+      // draggingV (drag-after-hold) without losing the gesture origin.
       if (state.kind !== "pressing") {
         return { state, action: null };
       }
       return {
-        state: { kind: "paused", startT: state.startT },
+        state: {
+          kind: "paused",
+          startX: state.startX,
+          startY: state.startY,
+          startT: state.startT,
+        },
         action: { kind: "pause" },
       };
     }
@@ -144,10 +161,25 @@ export function reduceGesture(
     case "pointer-move": {
       if (state.kind === "idle") return { state, action: null };
       if (state.kind === "paused") {
-        // v1 limitation: dragging after a hold (without first releasing)
-        // does not promote to draggingV. The hold-to-pause UX promise
-        // is "pause while held"; users who want to dismiss during a
-        // paused frame can release, then swipe.
+        // Drag-after-hold: a vertical move past the threshold while
+        // paused promotes to draggingV AND emits a synthetic resume
+        // so the viewer un-pauses (the user is no longer holding to
+        // pause, they're now dragging to dismiss / open-reader).
+        // Matches IG's behavior. Sub-threshold moves stay paused.
+        const dy = event.y - state.startY;
+        if (Math.abs(dy) >= config.moveStartThreshold) {
+          return {
+            state: {
+              kind: "draggingV",
+              startX: state.startX,
+              startY: state.startY,
+              startT: state.startT,
+              currentY: event.y,
+              currentT: event.t,
+            },
+            action: { kind: "resume" },
+          };
+        }
         return { state, action: null };
       }
       if (state.kind === "pressing") {
