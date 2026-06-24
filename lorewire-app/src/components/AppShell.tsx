@@ -15,6 +15,7 @@ import {
   POLL_RAIL_TITLES,
   filterIdsByPillCat,
   filterIdsByPublished,
+  hasEnoughForPublicRail,
   resolveHeroStory,
   resolveRailIds,
   useHomepageCuration,
@@ -403,12 +404,12 @@ function Home({
         if (pill !== ALL_PILL && rail.cat !== pill) return null;
         const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
         if (!ids) return null;
-        // Skip rails that resolve to no displayable stories at all (no
-        // curation + no fallback hits, or only sample placeholders).
+        // Public discovery rails hide below MIN_PUBLIC_RAIL_SIZE — a rail
+        // with one or two posters reads as a half-built product.
         const items = ids
           .map((id) => resolveStory(id))
           .filter((s): s is Story => s !== null && isPublishedStory(s));
-        if (items.length === 0) return null;
+        if (!hasEnoughForPublicRail(items.length)) return null;
         return (
           <section key={rail.surface} className="mt-7">
             <RailHead>{rail.title}</RailHead>
@@ -443,7 +444,7 @@ function Home({
         );
       })}
 
-      {newRowIds && newRowIds.length > 0 && (
+      {hasEnoughForPublicRail(newRowIds.length) && (
         <section className="mt-7">
           <RailHead>New on LoreWire</RailHead>
           <div className={railClass}>
@@ -459,7 +460,7 @@ function Home({
       {pill !== ALL_PILL &&
         continueIds.length === 0 &&
         top10Ids.length === 0 &&
-        newRowIds.length === 0 &&
+        !hasEnoughForPublicRail(newRowIds.length) &&
         (() => {
           // The matching category rail might still have content even when
           // Continue/Top10/New are all empty after filtering, so only show
@@ -471,7 +472,11 @@ function Home({
           const items = ids
             .map((id) => resolveStory(id))
             .filter((s): s is Story => s !== null && isPublishedStory(s));
-          if (items.length > 0) return null;
+          // Mirror the threshold the rail itself applies — if the category
+          // rail clears MIN_PUBLIC_RAIL_SIZE the user sees real content and
+          // doesn't need the empty-state hint. If it's below threshold the
+          // rail is hidden, so the empty-state explains the blank page.
+          if (hasEnoughForPublicRail(items.length)) return null;
           return (
             <p className="font-body text-muted mt-10 mb-6 px-4 text-center text-[13px]">
               Nothing tagged{" "}

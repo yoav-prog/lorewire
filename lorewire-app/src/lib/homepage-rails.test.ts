@@ -6,7 +6,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import { resolveRailIds } from "./homepage-rails";
+import {
+  MIN_PUBLIC_RAIL_SIZE,
+  hasEnoughForPublicRail,
+  resolveRailIds,
+} from "./homepage-rails";
 
 const BEHAVIOR_FALLBACK = {
   emptyRailBehavior: "fallback" as const,
@@ -157,5 +161,26 @@ describe("resolveRailIds — continue rail resolution order", () => {
       { continue: ["s_user_1"] },
     );
     expect(result).not.toContain("s_user_1");
+  });
+});
+
+describe("hasEnoughForPublicRail — homepage discovery threshold", () => {
+  it("rejects an empty rail", () => {
+    expect(hasEnoughForPublicRail(0)).toBe(false);
+  });
+
+  it("rejects rails below MIN_PUBLIC_RAIL_SIZE", () => {
+    for (let n = 1; n < MIN_PUBLIC_RAIL_SIZE; n += 1) {
+      expect(hasEnoughForPublicRail(n)).toBe(false);
+    }
+  });
+
+  it("accepts rails at exactly MIN_PUBLIC_RAIL_SIZE", () => {
+    expect(hasEnoughForPublicRail(MIN_PUBLIC_RAIL_SIZE)).toBe(true);
+  });
+
+  it("accepts rails larger than the threshold", () => {
+    expect(hasEnoughForPublicRail(MIN_PUBLIC_RAIL_SIZE + 1)).toBe(true);
+    expect(hasEnoughForPublicRail(100)).toBe(true);
   });
 });
