@@ -232,15 +232,29 @@ export default function WireCard({
   const singleTapTimer = useRef<number | null>(null);
   const burstTimer = useRef<number | null>(null);
 
+  // Generation counter for tryPlay() calls. Bumped on every tryPlay AND on
+  // every pause in the shouldPlay effect. The then/catch handlers ignore
+  // results from a stale generation, so a pending play() that the user
+  // swiped past can't strand `blocked = true` on a card that should now be
+  // happily playing. Without this, fast swipes lose the play/pause race
+  // and the centre Play overlay sticks until tap.
+  const playGenRef = useRef(0);
+
   // Autoplay is suppressed by reduced-motion OR the feed-level toggle; in
   // either case the user must opt in with a tap (tracked by userStarted).
   const autoStart = autoplay && !reducedMotion;
   const shouldPlay =
     active && mounted && !paused && !userPaused && (autoStart || userStarted);
 
-  // Reset transient flags the moment this card stops being active so re-entry
-  // autoplays fresh. Done during render (the React 19 pattern the shell uses
-  // in TitleSheet) rather than inside an effect.
+  // Reset transient flags around the active transition so re-entry autoplays
+  // fresh. Done during render (the React 19 pattern the shell uses in
+  // TitleSheet) rather than inside an effect.
+  //
+  // active → inactive: full reset (next time the user lands here it starts
+  // from frame 0 with no carried-over user-paused or blocked state).
+  // inactive → active: clear `blocked` and `userPaused` defensively, because
+  // a stale rejection from a prior tryPlay (lost play/pause race during a
+  // fast swipe) could otherwise leave `blocked = true` until the user taps.
   const [prevActive, setPrevActive] = useState(active);
   if (prevActive !== active) {
     setPrevActive(active);
@@ -251,6 +265,9 @@ export default function WireCard({
       setBuffering(false);
       setSeeking(false);
       setCurrentTime(0);
+    } else {
+      setBlocked(false);
+      setUserPaused(false);
     }
   }
 
@@ -259,27 +276,53 @@ export default function WireCard({
   const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
 
   // Start playback reliably: set the muted PROPERTY right before play() and
-  // record whether the browser blocked us (so we can surface a tap-to-play).
+  // record whether the browser ACTUALLY blocked us (NotAllowedError = real
+  // autoplay-policy block; AbortError = pause() interrupted a pending play,
+  // a benign race when the user is swiping between cards).
+  //
+  // The generation guard prevents a stale rejection from a play() call the
+  // user has already swiped past from clobbering state on the now-current
+  // card. Without it, fast swipes leave `blocked = true` stranded and the
+  // centre Play overlay sticks until the user taps it.
   const tryPlay = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
+    const gen = ++playGenRef.current;
     v.muted = muted;
     const p = v.play();
     if (p && typeof p.then === "function") {
-      p.then(() => setBlocked(false)).catch((e) => {
-        setBlocked(true);
-        console.warn("[wires play blocked]", { id: short.id, e: String(e) });
+      p.then(() => {
+        if (gen !== playGenRef.current) return;
+        setBlocked(false);
+      }).catch((e: unknown) => {
+        if (gen !== playGenRef.current) return;
+        const name =
+          e && typeof e === "object" && "name" in e
+            ? String((e as { name: unknown }).name)
+            : "";
+        if (name === "NotAllowedError") {
+          setBlocked(true);
+          console.warn("[wires play blocked]", { id: short.id, name, e: String(e) });
+        } else {
+          // AbortError (most common) or any other transient. Don't surface a
+          // tap-to-play overlay — the next shouldPlay-driven tryPlay will
+          // recover automatically when the card settles.
+          console.info("[wires play interrupted]", { id: short.id, name, e: String(e) });
+        }
       });
     }
   }, [muted, short.id]);
 
-  // Drive play/pause off the derived shouldPlay flag.
+  // Drive play/pause off the derived shouldPlay flag. Bumping the generation
+  // counter on pause invalidates any in-flight play() Promise so its
+  // rejection becomes a no-op (see tryPlay above).
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     if (shouldPlay) {
       tryPlay();
     } else {
+      playGenRef.current++;
       v.pause();
       if (!active) {
         try {
