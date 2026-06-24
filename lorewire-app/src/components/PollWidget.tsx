@@ -54,6 +54,12 @@ interface PollWidgetProps {
    *  link. The pair captures "after voting X, I clicked Y" — the
    *  raw signal V3 personalization will eventually consume. */
   followUp?: { href: string; title: string } | null;
+  /** Phase 1 of _plans/2026-06-25-top10-ranking.md. When the poll is
+   *  attached to a story (the common case in the home detail modal),
+   *  passing the story id wires the post-vote success path to emit a
+   *  `poll_vote` event so the Top 10 ranking can credit the story.
+   *  Article-only polls leave this undefined. */
+  storyId?: string;
 }
 
 type VotedSide = PollSide | null;
@@ -66,6 +72,7 @@ export function PollWidget({
   initialResult,
   initialVotedSide,
   followUp = null,
+  storyId,
 }: PollWidgetProps) {
   const [votedSide, setVotedSide] = useState<VotedSide>(initialVotedSide);
   const [result, setResult] = useState<PollResultView | null>(initialResult);
@@ -112,6 +119,16 @@ export function PollWidget({
           return;
         }
         setResult(data.result);
+        // Top 10 ranking signal (Phase 1 of
+        // _plans/2026-06-25-top10-ranking.md). Story polls credit the
+        // story; article-only polls have no storyId and skip the emit.
+        if (storyId && data.inserted) {
+          import("@/app/actions")
+            .then((m) => m.recordStoryEventAction(storyId, "poll_vote"))
+            .catch(() => {
+              /* event emit is best-effort */
+            });
+        }
       } catch (err) {
         setVotedSide(prevSide);
         setResult(prevResult);

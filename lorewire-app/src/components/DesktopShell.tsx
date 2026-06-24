@@ -37,6 +37,7 @@ import {
   type MergedCatalog,
 } from "@/lib/homepage-rails";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
+import { useStoryPlayEvents } from "@/lib/use-story-play-events";
 import {
   pickRandomPlayable,
   pushShuffleRecent,
@@ -466,6 +467,10 @@ function WatchDoodle({
   const videoUrl = liveMedia.video_url ?? story.videoUrl;
   const sectionRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // Phase 1 of _plans/2026-06-25-top10-ranking.md: emit play_started +
+  // play_completed once each per story view. The hook handles dedupe
+  // and the 90% completion threshold.
+  const playEvents = useStoryPlayEvents(story.id);
 
   // Both PLAY affordances in DetailModal (the hero circle and the text Play
   // button under the meta row) raise this signal. Without it they only set
@@ -498,6 +503,8 @@ function WatchDoodle({
             preload="metadata"
             playsInline
             className="absolute inset-0 w-full h-full object-contain"
+            onPlay={playEvents.onPlay}
+            onTimeUpdate={playEvents.onTimeUpdate}
             onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
         </div>
@@ -1285,7 +1292,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                 <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
                 <button onClick={() => toggleList(story.id)} title="My List" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color: inList ? "#E8462B" : "#F5F3EF" }}>{inList ? <CheckI size={20} /> : <PlusI size={20} />}</button>
                 <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} title={myRating > 0 ? `Your rating: ${myRating}` : "Rate"} className="w-11 h-11 rounded-full border flex items-center justify-center hover:border-ink/50 transition" style={{ borderColor: rateOpen ? "#F4B740" : "var(--color-line)", color: myRating > 0 ? "#F4B740" : "#F5F3EF" }}><StarI size={19} /></button>
-                <button onClick={() => setShareOpen(true)} aria-label="Share" title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
+                <button onClick={() => { setShareOpen(true); import("@/app/actions").then((m) => m.recordStoryEventAction(story.id, "share_initiated")).catch(() => {}); }} aria-label="Share" title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
               </div>
             </div>
             {rateOpen && (
@@ -1343,6 +1350,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                   optionB={pollView.optionB}
                   initialResult={pollView.result}
                   initialVotedSide={pollView.votedSide}
+                  storyId={story.id}
                 />
               </section>
             )}

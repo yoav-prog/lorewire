@@ -17,7 +17,7 @@
 // is invisible to anyone with prior persisted state.
 // Plan: _plans/2026-06-19-anonymous-first-auth.md.
 
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 type Listener = () => void;
 
@@ -143,13 +143,34 @@ function useIdSet(store: IdSetStore): string[] {
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getServerSnapshot);
 }
 
-/** My List — the persisted set of saved story ids, shared across the shell. */
+/** My List — the persisted set of saved story ids, shared across the shell.
+ *  toggle is wrapped to fire-and-forget a `save_added` story event when the
+ *  story transitions from unsaved → saved (Phase 1 of
+ *  _plans/2026-06-25-top10-ranking.md). Removals don't emit; the Top 10
+ *  signal we want is "this story was worth adding to my list," not the
+ *  inverse. */
 export function useSavedStories() {
   const saved = useIdSet(savedStore);
+  const toggle = useCallback(
+    (id: string) => {
+      const wasSaved = savedStore.has(id);
+      savedStore.toggle(id);
+      if (!wasSaved) {
+        // Dynamic import keeps the server action's import graph out of the
+        // client bundle's static analysis path.
+        import("@/app/actions")
+          .then((m) => m.recordStoryEventAction(id, "save_added"))
+          .catch(() => {
+            /* event emit is best-effort; UI doesn't care */
+          });
+      }
+    },
+    [],
+  );
   return {
     saved,
     isSaved: (id: string) => saved.includes(id),
-    toggle: savedStore.toggle,
+    toggle,
   };
 }
 
@@ -300,18 +321,29 @@ function createRatingStore(storageKey: string): RatingStore {
 const ratingStore = createRatingStore("lw.ratings.v1");
 
 /** Personal star ratings (story id -> 1-5). Local + consent-gated, mirroring
- *  useSavedStories / useLikedWires. `setRating` clamps to 1-5; `clearRating`
- *  removes the rating entirely. */
+ *  useSavedStories / useLikedWires. `setRating` clamps to 1-5 AND emits a
+ *  `rating_submitted` story event (Phase 1 of
+ *  _plans/2026-06-25-top10-ranking.md). `clearRating` removes the rating
+ *  entirely with no event — the Top 10 signal is "this story was worth
+ *  rating," not "this story was rated and unrated." */
 export function useStoryRatings() {
   const ratings = useSyncExternalStore(
     ratingStore.subscribe,
     ratingStore.getSnapshot,
     ratingStore.getServerSnapshot,
   );
+  const setRating = useCallback((id: string, stars: number) => {
+    ratingStore.set(id, stars);
+    import("@/app/actions")
+      .then((m) => m.recordStoryEventAction(id, "rating_submitted"))
+      .catch(() => {
+        /* event emit is best-effort */
+      });
+  }, []);
   return {
     ratings,
     getRating: (id: string): number | undefined => ratings[id],
-    setRating: ratingStore.set,
+    setRating,
     clearRating: ratingStore.remove,
   };
 }
@@ -664,3 +696,148 @@ export function useContinueReading() {
     clear: continueStore.clear,
   };
 }
+
+/* --------------------------- VIEWED-WIRES STORE -------------------------- */
+//
+// Stories-mode "seen" tracking. Distinct from useRecentlyViewed (which
+// records every OPEN regardless of completion) and useContinueReading
+// (per-story progress for resume). `viewed` answers exactly one
+// question: did the user finish (or genuinely dwell on) this wire in
+// the IG-style viewer? The Stories rail filters its playlist through
+// this set so already-consumed wires drop out of "what's new."
+//
+// Shape choices:
+//   - mark() is idempotent (add-only). Viewing isn't a toggle — a
+//     second mark for the same id is a no-op. clear() is the only
+//     way out, surfaced as a user privacy control.
+//   - Consent-gated like the rest of the engagement stores: in-memory
+//     state still updates without consent so the rail's unseen-ring
+//     reflects the most recent session, but a refresh wipes anything
+//     written while consent was declined.
+//   - When real accounts land, swap the localStorage read/write here
+//     for a server call; useViewedWires's surface does not change.
+//     The Set is an additive shape, so per-account sync is a union on
+//     conflict (no last-writer-wins risk).
+// Plan: _plans/2026-06-24-stories-rail-and-viewer.md.
+
+interface MarkOnceStore {
+  subscribe: (cb: Listener) => () => void;
+  getSnapshot: () => string[];
+  getServerSnapshot: () => string[];
+  mark: (id: string) => void;
+  has: (id: string) => boolean;
+  clear: () => void;
+}
+
+function createMarkOnceStore(storageKey: string): MarkOnceStore {
+  let ids = new Set<string>();
+  // Cached array so getSnapshot returns a stable reference between changes.
+  let snapshot: string[] = EMPTY;
+  const listeners = new Set<Listener>();
+  let started = false;
+
+  const readStorage = (): Set<string> => {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      const arr = raw ? JSON.parse(raw) : [];
+      return new Set(
+        Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [],
+      );
+    } catch {
+      return new Set();
+    }
+  };
+
+  const refreshSnapshot = () => {
+    snapshot = Array.from(ids);
+  };
+
+  const notify = () => listeners.forEach((l) => l());
+
+  const persist = () => {
+    if (!consentAccepted()) {
+      console.info("[auth ui engagement-store consent-gated]", {
+        storageKey,
+        op: "persist",
+      });
+      return;
+    }
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(Array.from(ids)));
+    } catch {
+      /* private mode / quota — in-memory state still updates */
+    }
+  };
+
+  const start = () => {
+    if (started || typeof window === "undefined") return;
+    started = true;
+    ids = readStorage();
+    refreshSnapshot();
+    window.addEventListener("storage", (e) => {
+      if (e.key !== storageKey) return;
+      ids = readStorage();
+      refreshSnapshot();
+      notify();
+    });
+  };
+
+  return {
+    subscribe(cb) {
+      start();
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    },
+    getSnapshot() {
+      return snapshot;
+    },
+    getServerSnapshot() {
+      return EMPTY;
+    },
+    mark(id) {
+      start();
+      if (!id || ids.has(id)) return;
+      ids.add(id);
+      persist();
+      refreshSnapshot();
+      notify();
+    },
+    has(id) {
+      return ids.has(id);
+    },
+    clear() {
+      start();
+      if (ids.size === 0) return;
+      ids = new Set();
+      persist();
+      refreshSnapshot();
+      notify();
+    },
+  };
+}
+
+const viewedWiresStore = createMarkOnceStore("lw.viewed_wires.v1");
+
+/** Stories-mode "seen" set — story ids the user has consumed in the IG-
+ *  style viewer. Drives the Stories rail's unread ring and the
+ *  resolveStoriesPlaylist "drop seen" filter. */
+export function useViewedWires() {
+  const viewed = useSyncExternalStore(
+    viewedWiresStore.subscribe,
+    viewedWiresStore.getSnapshot,
+    viewedWiresStore.getServerSnapshot,
+  );
+  return {
+    viewed,
+    isViewed: (id: string) => viewed.includes(id),
+    markViewed: viewedWiresStore.mark,
+    clearViewed: viewedWiresStore.clear,
+  };
+}
+
+/** Test-only escape hatch: exposes the raw viewed-wires store so unit
+ *  tests can exercise mark/clear/subscribe without spinning up a React
+ *  renderer (no @testing-library set up in this codebase — same pattern
+ *  the rest of engagement-store relies on). Not part of the runtime
+ *  surface; consumers should always go through useViewedWires(). */
+export const __viewedWiresStoreForTests = viewedWiresStore;
