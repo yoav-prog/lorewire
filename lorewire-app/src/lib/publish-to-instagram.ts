@@ -258,8 +258,15 @@ async function markDeleted(id: string, deletedAt: string): Promise<void> {
 
 // --- Instagram Graph API ---------------------------------------------------
 
-// IG uses graph.instagram.com (NOT graph.facebook.com or graph-video).
-const IG_BASE = "https://graph.instagram.com/v22.0";
+// IG publishing for accounts linked via a FB Page uses graph.facebook.com
+// — NOT graph.instagram.com (which is for Instagram-direct OAuth tokens
+// from the separate Instagram Login flow). Sending a FB Page Access
+// Token to graph.instagram.com returns "Cannot parse access token"
+// because that subdomain expects Instagram-direct user tokens.
+// graph.facebook.com is the correct endpoint when the IG Business Account
+// is linked via Meta Business Suite to a FB Page (our setup). Verified
+// 2026-06-24 against the live LoreWire IG account.
+const IG_BASE = "https://graph.facebook.com/v22.0";
 
 // Inline polling budget. After this, the row stays `pending` with
 // `container_id` set; the retry cron resumes polling.
