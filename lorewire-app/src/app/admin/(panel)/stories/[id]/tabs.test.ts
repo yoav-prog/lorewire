@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_STORY_TAB,
+  isShortConfigTab,
   resolveStoryTab,
   STORY_TABS,
 } from "./tabs";
@@ -33,5 +34,21 @@ describe("resolveStoryTab", () => {
     for (const tab of STORY_TABS) {
       expect(resolveStoryTab(tab.id)).toBe(tab.id);
     }
+  });
+});
+
+describe("isShortConfigTab", () => {
+  it("returns true for the 5 ShortConfig-driven tabs", () => {
+    expect(isShortConfigTab("scenes")).toBe(true);
+    expect(isShortConfigTab("captions")).toBe(true);
+    expect(isShortConfigTab("style")).toBe(true);
+    expect(isShortConfigTab("script")).toBe(true);
+    expect(isShortConfigTab("voice")).toBe(true);
+  });
+
+  it("returns false for the metadata + publish + render tabs", () => {
+    expect(isShortConfigTab("overview")).toBe(false);
+    expect(isShortConfigTab("publish")).toBe(false);
+    expect(isShortConfigTab("render")).toBe(false);
   });
 });

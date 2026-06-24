@@ -31,3 +31,19 @@ export function resolveStoryTab(raw: unknown): StoryTabId {
   const match = STORY_TABS.find((t) => t.id === candidate);
   return match ? match.id : DEFAULT_STORY_TAB;
 }
+
+/** Tabs that read/write the per-short ShortConfig blob. These need the
+ *  client-side state wrapper (StoryShortTabsClient) and the server-side
+ *  short-state loaders to run. The other tabs (overview, publish, render)
+ *  use their own loaders and can render standalone. */
+const SHORT_CONFIG_TABS = new Set<StoryTabId>([
+  "scenes",
+  "captions",
+  "style",
+  "script",
+  "voice",
+]);
+
+export function isShortConfigTab(tab: StoryTabId): boolean {
+  return SHORT_CONFIG_TABS.has(tab);
+}
