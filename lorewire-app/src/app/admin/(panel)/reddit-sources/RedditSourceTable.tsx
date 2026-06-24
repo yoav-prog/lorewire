@@ -533,13 +533,16 @@ function BulkFooter({
 function Th({
   children,
   className = "",
+  title,
 }: {
   children: React.ReactNode;
   className?: string;
+  title?: string;
 }) {
   return (
     <th
       className={`px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-muted ${className}`}
+      title={title}
     >
       {children}
     </th>
