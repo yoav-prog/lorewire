@@ -1472,15 +1472,6 @@ function HomePage({
 
   return (
     <div className="pb-20">
-      {/* IG-style Stories rail sits above the Hero so freshness leads
-          the page. Hides entirely when every wire is already viewed.
-          The pt-20 clears the fixed TopNav so the rail isn't covered. */}
-      <StoriesRail
-        playlist={storiesPlaylist}
-        viewedIds={viewedWireIds}
-        onOpen={onOpenWire}
-        className="pt-20"
-      />
       {heroPool.length > 0 && (
         <Hero
           pool={heroPool}
@@ -1490,6 +1481,17 @@ function HomePage({
         />
       )}
       <div className={heroPool.length > 0 ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
+        {/* IG-style Stories rail. On desktop it lives inside the
+            content area (so the Hero stays full-bleed) and uses the
+            page's section/title shell so it lines up with the poster
+            rails below. Hides entirely when every wire is already
+            viewed. Plan: _plans/2026-06-25-stories-desktop-layout.md. */}
+        <StoriesRail
+          playlist={storiesPlaylist}
+          viewedIds={viewedWireIds}
+          onOpen={onOpenWire}
+          title="Stories"
+        />
         {continueIds.length > 0 && (
           <Rail title="Continue Watching">
             {continueIds.map((id) => {
