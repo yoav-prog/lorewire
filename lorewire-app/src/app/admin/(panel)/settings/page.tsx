@@ -28,21 +28,11 @@ import {
   POLL_RAIL_KINDS,
   railEnabledSettingKey,
 } from "@/lib/polls";
-import {
-  DEFAULT_POLL_HOOK_TEMPLATES,
-  pollHookSettingKey,
-  PUBLISHER_PLATFORMS,
-} from "@/lib/publisher-poll-hook";
-import {
-  DEFAULT_CAPTION_TEMPLATE as FB_DEFAULT_CAPTION_TEMPLATE,
-  SETTING_AUTO_PUBLISH as FB_SETTING_AUTO_PUBLISH,
-  SETTING_CAPTION_TEMPLATE as FB_SETTING_CAPTION_TEMPLATE,
-} from "@/lib/publish-to-facebook";
-import {
-  DEFAULT_CAPTION_TEMPLATE as IG_DEFAULT_CAPTION_TEMPLATE,
-  SETTING_AUTO_PUBLISH as IG_SETTING_AUTO_PUBLISH,
-  SETTING_CAPTION_TEMPLATE as IG_SETTING_CAPTION_TEMPLATE,
-} from "@/lib/publish-to-instagram";
+// Per-platform social-publishing settings (Facebook, Instagram, YouTube,
+// TikTok) and the publisher-poll-hook caption suffixes live under
+// /admin/settings/socials — see socials/page.tsx. Imports from those
+// modules used to land here; they were removed in the 2026-06-24 Socials
+// reorganization.
 
 // Settings / General. Every field now uses the right control: toggles for
 // the booleans (previously stringy "0"/"1"), number inputs with min/max for
@@ -198,9 +188,9 @@ export default async function SettingsPage() {
   //   - polls.public_floor read by resolvePublicFloor — controls when
   //     percentages reveal on the on-site widget.
   //   - publisher.caption.<platform>.poll_hook_template — per-platform
-  //     caption-suffix override consumed by lib/publisher-poll-hook
-  //     when the publisher integrates (Phase 1 of the publisher plan).
-  //     Default templates ship per §F4; admin can override per platform.
+  //     caption-suffix override. Moved to /admin/settings/socials in the
+  //     2026-06-24 Socials reorganization; this page no longer reads
+  //     those keys.
   const [
     railDivisive,
     railAgreed,
@@ -208,10 +198,6 @@ export default async function SettingsPage() {
     publicFloorRaw,
     endcardEnabled,
     endcardDurationRaw,
-    hookYoutube,
-    hookTiktok,
-    hookInstagram,
-    hookFacebook,
   ] = await Promise.all([
     getSetting(railEnabledSettingKey("divisive")),
     getSetting(railEnabledSettingKey("agreed")),
@@ -219,46 +205,7 @@ export default async function SettingsPage() {
     getSetting("polls.public_floor"),
     getSetting("polls.endcard.enabled"),
     getSetting("polls.endcard.duration_ms"),
-    getSetting(pollHookSettingKey("youtube")),
-    getSetting(pollHookSettingKey("tiktok")),
-    getSetting(pollHookSettingKey("instagram")),
-    getSetting(pollHookSettingKey("facebook")),
   ]);
-  // Bundle so the section render below stays tidy.
-  const pollHookOverrides: Record<(typeof PUBLISHER_PLATFORMS)[number], string> = {
-    youtube: hookYoutube ?? "",
-    tiktok: hookTiktok ?? "",
-    instagram: hookInstagram ?? "",
-    facebook: hookFacebook ?? "",
-  };
-
-  // Facebook auto-publish (Phase 1 of _plans/2026-06-23-facebook-auto-publish.md):
-  //   - publisher.facebook.auto_publish — master toggle, default off so
-  //     the feature ships dark until a smoke test on preview proves it.
-  //   - publisher.facebook.caption_template — text with {{hook}},
-  //     {{title}}, {{article_url}} substitution tokens. Empty falls
-  //     back to DEFAULT_CAPTION_TEMPLATE in lib/publish-to-facebook.
-  // The Page Access Token (FB_PAGE_ACCESS_TOKEN) and the page id
-  // (FB_PAGE_ID) intentionally do NOT live here — they're server env
-  // vars, never in the DB (rule 13).
-  const [fbAutoPublishRaw, fbCaptionTemplateRaw] = await Promise.all([
-    getSetting(FB_SETTING_AUTO_PUBLISH),
-    getSetting(FB_SETTING_CAPTION_TEMPLATE),
-  ]);
-  const fbPageIdDisplay = process.env.FB_PAGE_ID ?? "";
-  const fbTokenConfigured = Boolean(process.env.FB_PAGE_ACCESS_TOKEN);
-
-  // Instagram auto-publish (mirror of FB block — separate toggle, separate
-  // caption template so admin can diverge them later without coupling.
-  // Plan: _plans/2026-06-24-instagram-auto-publish.md).
-  const [igAutoPublishRaw, igCaptionTemplateRaw] = await Promise.all([
-    getSetting(IG_SETTING_AUTO_PUBLISH),
-    getSetting(IG_SETTING_CAPTION_TEMPLATE),
-  ]);
-  const igAccountIdDisplay = process.env.IG_BUSINESS_ACCOUNT_ID ?? "";
-  // IG reuses FB_PAGE_ACCESS_TOKEN (no separate token) since the IG
-  // account is linked to the FB Page in Meta Business Suite.
-  const igTokenConfigured = fbTokenConfigured;
   const SHORT_CATEGORIES = [
     "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
   ];
@@ -702,86 +649,25 @@ export default async function SettingsPage() {
           />
         </Section>
 
+        {/* Per-platform social publishing config (Facebook, Instagram,
+            YouTube, TikTok) and the publisher poll-hook caption suffixes
+            live under Settings / Socials. Cross-link so admin lands
+            there from a familiar starting point. */}
         <Section
-          title="Engagement — Publisher caption hooks"
-          description="Per-platform caption suffix appended when a short with an enabled poll is published. Empty = use the default for that platform. Substitution tokens: {question} and {slug}."
+          title="Social publishing"
+          description="Per-platform auto-publish defaults — toggles, caption / title templates, privacy, and category overrides — moved to their own home so they stay together."
         >
-          {PUBLISHER_PLATFORMS.map((platform) => (
-            <SettingText
-              key={platform}
-              settingKey={pollHookSettingKey(platform)}
-              label={`${platform[0].toUpperCase()}${platform.slice(1)} caption hook`}
-              hint={`Default: ${DEFAULT_POLL_HOOK_TEMPLATES[platform].replace(/\n/g, "\\n")}`}
-              initial={pollHookOverrides[platform]}
-              placeholder="Leave empty to use the platform default"
-            />
-          ))}
-        </Section>
-
-        <Section
-          title="Social publishing — Facebook"
-          description="Auto-publish every freshly rendered short to the LoreWire Facebook Page. Plan: _plans/2026-06-23-facebook-auto-publish.md."
-        >
-          <div className="rounded-md border border-rule bg-paper-soft px-3 py-2 text-[13px] leading-snug">
-            <div className="font-medium text-ink">
-              Target page:{" "}
-              <span className="font-mono">
-                {fbPageIdDisplay || "(FB_PAGE_ID env var not set)"}
-              </span>
-            </div>
-            <div className="mt-0.5 text-muted">
-              Page Access Token:{" "}
-              {fbTokenConfigured
-                ? "✓ configured (server env var)"
-                : "✗ FB_PAGE_ACCESS_TOKEN not set — publishing will skip until it lands in Vercel env vars"}
-            </div>
-          </div>
-          <SettingToggle
-            settingKey={FB_SETTING_AUTO_PUBLISH}
-            label="Auto-publish on render"
-            hint="When on, every short that finishes rendering is posted to the LoreWire Facebook Page. Story-level dedup prevents re-renders from creating duplicate posts. Manual publish from the short editor bypasses this toggle."
-            initialOn={readToggle(fbAutoPublishRaw, false)}
-          />
-          <SettingText
-            settingKey={FB_SETTING_CAPTION_TEMPLATE}
-            label="Caption template"
-            hint={`Tokens: {{hook}}, {{title}}, {{article_url}}. Empty falls back to the default: ${FB_DEFAULT_CAPTION_TEMPLATE.replace(/\n/g, "\\n")}`}
-            initial={fbCaptionTemplateRaw ?? ""}
-            placeholder="Leave empty to use the default template"
-          />
-        </Section>
-
-        <Section
-          title="Social publishing — Instagram"
-          description="Auto-publish every freshly rendered short to the LoreWire Instagram account as a Reel. Reuses the Facebook Page Access Token (IG is linked to the Page). Plan: _plans/2026-06-24-instagram-auto-publish.md."
-        >
-          <div className="rounded-md border border-rule bg-paper-soft px-3 py-2 text-[13px] leading-snug">
-            <div className="font-medium text-ink">
-              Target IG account:{" "}
-              <span className="font-mono">
-                {igAccountIdDisplay || "(IG_BUSINESS_ACCOUNT_ID env var not set)"}
-              </span>
-            </div>
-            <div className="mt-0.5 text-muted">
-              Page Access Token (shared with Facebook):{" "}
-              {igTokenConfigured
-                ? "✓ configured (server env var)"
-                : "✗ FB_PAGE_ACCESS_TOKEN not set — publishing will skip until it lands in Vercel env vars"}
-            </div>
-          </div>
-          <SettingToggle
-            settingKey={IG_SETTING_AUTO_PUBLISH}
-            label="Auto-publish on render"
-            hint="When on, every short that finishes rendering is posted as a Reel to the LoreWire Instagram account. Independent from the Facebook toggle — you can have one on and the other off. Story-level dedup prevents re-renders from creating duplicate Reels. Manual publish from the short editor bypasses this toggle."
-            initialOn={readToggle(igAutoPublishRaw, false)}
-          />
-          <SettingText
-            settingKey={IG_SETTING_CAPTION_TEMPLATE}
-            label="Caption template (Instagram-specific)"
-            hint={`Tokens: {{hook}}, {{title}}, {{article_url}}. Empty falls back to the default: ${IG_DEFAULT_CAPTION_TEMPLATE.replace(/\n/g, "\\n")}. Instagram caps captions at 2200 characters — anything longer gets truncated with an ellipsis automatically.`}
-            initial={igCaptionTemplateRaw ?? ""}
-            placeholder="Leave empty to use the default template"
-          />
+          <p className="text-[13px] text-muted">
+            Open{" "}
+            <a
+              href="/admin/settings/socials"
+              className="text-accent underline"
+            >
+              Settings / Socials
+            </a>{" "}
+            to configure Facebook, Instagram, YouTube, TikTok, and the
+            cross-platform poll-hook caption suffixes.
+          </p>
         </Section>
       </div>
     </SettingsShell>

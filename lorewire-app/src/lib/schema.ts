@@ -1085,6 +1085,106 @@ export const INSTAGRAM_POSTS: Table = {
   ],
 };
 
+// 2026-06-24 YouTube auto-publish for shorts
+// (_plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md).
+// Mirrors FACEBOOK_POSTS / INSTAGRAM_POSTS with YT-specific deltas:
+//   - The metadata is wider than IG/FB: the YT video carries a title,
+//     description, tags, category, MFK + synthetic-media flags. We
+//     snapshot each at post time so an audit row reflects what was
+//     actually uploaded (an admin editing the global default later
+//     doesn't rewrite history).
+//   - `channel_id` instead of page_id / ig_account_id. The OAuth
+//     refresh token authorises the LoreWire channel; the channel id
+//     is snapshotted from env for audit + the defense-in-depth check
+//     in publish-to-youtube.ts that refuses to upload to a different
+//     channel than configured.
+//   - `yt_error_reason` is TEXT (not INTEGER): the Data API returns
+//     stringly reason codes ("quotaExceeded", "uploadLimitExceeded",
+//     "youtubeSignupRequired"), not numeric codes the way Meta does.
+// The OAuth refresh token + client secret live in env, never in this
+// table or in logs (rule 13).
+export const YOUTUBE_POSTS: Table = {
+  name: "youtube_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "channel_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "description", type: "TEXT" },
+    // JSON array of strings. Stored as TEXT for portability across
+    // SQLite + Postgres. publish-to-youtube serializes on write,
+    // parses on read.
+    { name: "tags_json", type: "TEXT" },
+    { name: "category_id", type: "TEXT" },
+    { name: "made_for_kids", type: "INTEGER" },
+    // 0/1 → maps to status.containsSyntheticMedia in the Data API
+    // (the "AI-generated / altered content" flag).
+    { name: "synthetic", type: "INTEGER" },
+    { name: "privacy", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_video_id", type: "TEXT" },
+    { name: "yt_error_reason", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-24 TikTok auto-publish for shorts
+// (_plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md).
+// Mirrors INSTAGRAM_POSTS' async-pipeline shape since TikTok's Content
+// Posting API is also two-step: POST init → poll status → terminal.
+//   - `publish_id`: the async id returned by /v2/post/publish/.../init/.
+//     Persisted so the retry cron can resume polling without re-uploading.
+//   - `open_id` instead of page_id / channel_id — TikTok's stable user
+//     id for the LoreWire account. Defense-in-depth check refuses to
+//     publish if the id refreshed from the refresh token doesn't match.
+//   - `post_mode`: 'inbox' (drafts; works without app audit) vs
+//     'direct' (live post; requires app audit). The audit-gate switch
+//     ships as a settings toggle, not as code branches.
+//   - `is_aigc`: 0/1 → maps to post_info.is_aigc, surfaces TikTok's
+//     "Creator labeled as AI-generated" tag.
+//   - The disable_duet / disable_stitch / disable_comment booleans
+//     are snapshotted at post time so the audit row reflects what
+//     was actually requested.
+// OAuth refresh token + client secret live in env, never in this
+// table or in logs (rule 13).
+export const TIKTOK_POSTS: Table = {
+  name: "tiktok_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "open_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    // Caption with inline hashtags + mentions. TikTok doesn't have
+    // a separate hashtags field — hashtags live inside title at the
+    // API level.
+    { name: "caption", type: "TEXT" },
+    { name: "privacy_level", type: "TEXT" },
+    { name: "post_mode", type: "TEXT" },
+    { name: "is_aigc", type: "INTEGER" },
+    { name: "disable_duet", type: "INTEGER" },
+    { name: "disable_stitch", type: "INTEGER" },
+    { name: "disable_comment", type: "INTEGER" },
+    { name: "publish_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "tt_error_code", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -1124,6 +1224,8 @@ export const TABLES: Table[] = [
   COMMENT_MODERATION_EVENTS,
   FACEBOOK_POSTS,
   INSTAGRAM_POSTS,
+  YOUTUBE_POSTS,
+  TIKTOK_POSTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.

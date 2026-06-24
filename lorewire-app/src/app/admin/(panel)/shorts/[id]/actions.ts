@@ -73,6 +73,16 @@ import {
   publishShortToInstagram,
   type InstagramPostRow,
 } from "@/lib/publish-to-instagram";
+import {
+  deleteLatestPostedRowForStory as deleteLatestPostedYtRowForStory,
+  publishShortToYouTube,
+  type YouTubePostRow,
+} from "@/lib/publish-to-youtube";
+import {
+  deleteLatestPostedRowForStory as deleteLatestPostedTtRowForStory,
+  publishShortToTikTok,
+  type TikTokPostRow,
+} from "@/lib/publish-to-tiktok";
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -1669,6 +1679,289 @@ export async function getLatestInstagramPostForStoryAction(
   return one<InstagramPostRow>(
     `SELECT id, story_id, render_id, ig_account_id, trigger, video_url, caption, container_id, status, external_post_id, ig_error_code, ig_error_subcode, error_message, attempts, created_at, posted_at, deleted_at
      FROM instagram_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
+// ─── YouTube auto-publish: manual publish / re-publish ───────────────────────
+// Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
+//
+// Mirror of the Facebook + Instagram manual publish actions above. The
+// YouTube-specific OAuth refresh + channel-id verify + resumable upload
+// + captions sidecar all live inside publishShortToYouTube; this action
+// is the glue: auth, latest-render lookup, article URL resolution,
+// optional per-publish overrides (title / description / tags), and
+// optional delete-previous-then-republish.
+
+export interface ManualYouTubePublishOpts {
+  deletePrevious?: boolean;
+  titleOverride?: string;
+  descriptionOverride?: string;
+  /** Comma-separated tag override. When set (even to ""), wins over the
+   *  template-rendered tags. */
+  tagsOverride?: string;
+}
+
+export interface ManualYouTubePublishResult {
+  ok: boolean;
+  error?: string;
+  externalVideoId?: string;
+  deletedVideoId?: string;
+}
+
+export async function publishToYouTubeAction(
+  storyId: string,
+  opts: ManualYouTubePublishOpts = {},
+): Promise<ManualYouTubePublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let deletedVideoId: string | undefined;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedYtRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor yt-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous YouTube video failed: ${del.error}`,
+      };
+    }
+    deletedVideoId = del.externalVideoId;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  const tagsOverrideArray =
+    opts.tagsOverride != null
+      ? opts.tagsOverride
+          .split(",")
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0)
+      : null;
+  const result = await publishShortToYouTube({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+      category: story.category ?? null,
+    },
+    titleOverride:
+      opts.titleOverride && opts.titleOverride.trim().length > 0
+        ? opts.titleOverride
+        : null,
+    descriptionOverride:
+      opts.descriptionOverride && opts.descriptionOverride.trim().length > 0
+        ? opts.descriptionOverride
+        : null,
+    tagsOverride: tagsOverrideArray,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor yt-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    deleted_video_id: deletedVideoId ?? null,
+    status: result.status,
+    external_video_id:
+      result.status === "posted" ? result.row.external_video_id : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalVideoId: result.row.external_video_id ?? undefined,
+      deletedVideoId,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "YouTube publish failed",
+      deletedVideoId,
+    };
+  }
+  return {
+    ok: false,
+    error:
+      "publish skipped — server env vars YOUTUBE_REFRESH_TOKEN / YOUTUBE_CHANNEL_ID may be missing",
+    deletedVideoId,
+  };
+}
+
+/** Mirror of getLatestFacebookPostForStoryAction for the YouTube button. */
+export async function getLatestYouTubePostForStoryAction(
+  storyId: string,
+): Promise<YouTubePostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<YouTubePostRow>(
+    `SELECT id, story_id, render_id, channel_id, trigger, video_url, title, description, tags_json, category_id, made_for_kids, synthetic, privacy, status, external_video_id, yt_error_reason, error_message, attempts, created_at, posted_at, deleted_at
+     FROM youtube_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
+// ─── TikTok auto-publish: manual publish / re-publish ────────────────────────
+// Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
+//
+// Mirror of the YouTube manual action above. TikTok's two-mode shape
+// (inbox vs direct) is controlled by the settings toggle; admin can
+// override per-publish via opts.postModeOverride. Like Instagram, the
+// publisher can return 'pending' (publish_id created but TikTok still
+// processing after the inline 30s poll budget) — surface that to the
+// admin as "queued" so they don't refresh and re-publish.
+
+export interface ManualTikTokPublishOpts {
+  deletePrevious?: boolean;
+  captionOverride?: string;
+  postModeOverride?: "inbox" | "direct";
+}
+
+export interface ManualTikTokPublishResult {
+  ok: boolean;
+  pending?: boolean;
+  error?: string;
+  /** TikTok external post id (only present in direct mode after the
+   *  status poll terminates at PUBLISH_COMPLETE). Drafts mode never
+   *  exposes an external id until the user publishes from the app. */
+  externalPostId?: string | null;
+  /** TikTok has no delete endpoint; the manual flow only marks the
+   *  local row as deleted (so a fresh publish has a clean state to
+   *  insert into). The actual TikTok post must be removed in the app. */
+  localRowMarkedDeleted?: boolean;
+}
+
+export async function publishToTikTokAction(
+  storyId: string,
+  opts: ManualTikTokPublishOpts = {},
+): Promise<ManualTikTokPublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let localRowMarkedDeleted = false;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedTtRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor tt-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous TikTok row failed: ${del.error}`,
+      };
+    }
+    localRowMarkedDeleted = true;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  const result = await publishShortToTikTok({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+      category: story.category ?? null,
+    },
+    captionOverride:
+      opts.captionOverride && opts.captionOverride.trim().length > 0
+        ? opts.captionOverride
+        : null,
+    postModeOverride: opts.postModeOverride ?? null,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor tt-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    status: result.status,
+    external_post_id:
+      result.status === "posted" ? result.row.external_post_id : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalPostId: result.row.external_post_id,
+      localRowMarkedDeleted,
+    };
+  }
+  if (result.status === "pending") {
+    return {
+      ok: true,
+      pending: true,
+      localRowMarkedDeleted,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "TikTok publish failed",
+      localRowMarkedDeleted,
+    };
+  }
+  return {
+    ok: false,
+    error:
+      "publish skipped — server env vars TIKTOK_REFRESH_TOKEN / TIKTOK_OPEN_ID may be missing",
+    localRowMarkedDeleted,
+  };
+}
+
+/** Mirror of getLatestFacebookPostForStoryAction for the TikTok button. */
+export async function getLatestTikTokPostForStoryAction(
+  storyId: string,
+): Promise<TikTokPostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<TikTokPostRow>(
+    `SELECT id, story_id, render_id, open_id, trigger, video_url, caption, privacy_level, post_mode, is_aigc, disable_duet, disable_stitch, disable_comment, publish_id, status, external_post_id, tt_error_code, error_message, attempts, created_at, posted_at, deleted_at
+     FROM tiktok_posts WHERE story_id = ?
      ORDER BY created_at DESC LIMIT 1`,
     [storyId],
   );
