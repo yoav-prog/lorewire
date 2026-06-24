@@ -207,14 +207,22 @@ export async function generateSeoMetadata(
     category: args.category ?? "(none)",
   });
 
-  if (!args.teleprompter || args.teleprompter.trim().length < 20) {
-    log("skip_short_input", {
+  // Hard floor: truly empty input can't produce useful metadata. Set
+  // the threshold low (1 char of trimmed content) so even a near-empty
+  // short still gets an attempt — the LLM can compose from the title +
+  // category alone if the script is sparse. The earlier 20-char guard
+  // was over-strict and refused legitimate stories whose narration
+  // was stored in short_config.script (and never landed in the
+  // teleprompter column we were reading from).
+  if (!args.teleprompter || args.teleprompter.trim().length < 1) {
+    log("skip_no_narration", {
       story_id: args.storyId,
       teleprompter_chars: args.teleprompter?.length ?? 0,
     });
     return {
       ok: false,
-      error: "teleprompter too short to generate metadata",
+      error:
+        "no narration script found on this story (short_config.script, teleprompter, and body are all empty)",
       stage: "settings",
     };
   }
@@ -302,10 +310,52 @@ interface StorySeoRow {
   id: string;
   title: string | null;
   category: string | null;
+  /** Legacy long-form pipeline narration. NULL on every story produced
+   *  by the modern shorts-only pipeline. */
   teleprompter: string | null;
+  /** Modern shorts narration lives here as JSON. Parse + extract the
+   *  `script` field. See lib/short-config.ts. */
+  short_config: string | null;
+  /** Last-resort fallback for stories with no script at all. */
+  body: string | null;
   updated_at: string | null;
   seo_metadata_json: string | null;
   seo_metadata_generated_at: string | null;
+}
+
+/** Pull the narration script for SEO generation. Modern shorts store
+ *  it in stories.short_config.script (JSON). Legacy long-form rows
+ *  stored it in stories.teleprompter. Fall through to body as a
+ *  last resort so a story with at least SOME text still gets metadata
+ *  rather than the "teleprompter too short" refusal. Exported for
+ *  unit tests. */
+export function resolveNarrationForSeo(row: {
+  short_config: string | null;
+  teleprompter: string | null;
+  body: string | null;
+}): string {
+  // 1. Modern shorts: short_config.script
+  if (row.short_config) {
+    try {
+      const parsed = JSON.parse(row.short_config) as { script?: unknown };
+      if (typeof parsed.script === "string" && parsed.script.trim().length > 0) {
+        return parsed.script;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  // 2. Legacy long-form: teleprompter
+  if (row.teleprompter && row.teleprompter.trim().length > 0) {
+    return row.teleprompter;
+  }
+  // 3. Last resort: article body. Better than refusing the request —
+  //    the LLM can still produce reasonable metadata from a story
+  //    summary.
+  if (row.body && row.body.trim().length > 0) {
+    return row.body;
+  }
+  return "";
 }
 
 export async function loadSeoMetadata(
@@ -381,7 +431,7 @@ export async function ensureSeoMetadataForStory(
   args: EnsureArgs,
 ): Promise<EnsureResult> {
   const rows = await all<StorySeoRow>(
-    `SELECT id, title, category, teleprompter, updated_at,
+    `SELECT id, title, category, teleprompter, short_config, body, updated_at,
             seo_metadata_json, seo_metadata_generated_at
        FROM stories
       WHERE id = ?`,
@@ -410,11 +460,22 @@ export async function ensureSeoMetadataForStory(
     }
   }
 
+  // Pull the narration script from wherever it actually lives for this
+  // story. Shorts use short_config.script, legacy long-form used the
+  // teleprompter column, and body is the last-resort fallback for
+  // stories with no script. Lets the LLM produce metadata for any
+  // story with at least some narrative text.
+  const narration = resolveNarrationForSeo({
+    short_config: row.short_config,
+    teleprompter: row.teleprompter,
+    body: row.body,
+  });
+
   const result = await generateSeoMetadata({
     storyId: args.storyId,
     title: row.title ?? args.storyId,
     category: row.category,
-    teleprompter: row.teleprompter ?? "",
+    teleprompter: narration,
     articleUrl: args.articleUrl,
   });
 
