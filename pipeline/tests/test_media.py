@@ -494,6 +494,49 @@ class GenerateMediaSkipFlagsTests(unittest.TestCase):
         # JSON list.
         self.assertNotIn("images", out)
 
+    def test_skip_long_form_motion_beats_short_circuits_props_even_when_enabled(self):
+        # 2026-06-24: even with the global prop_slide setting ON, the new
+        # flag must short-circuit the prop block. Production was hitting
+        # Vercel's 800s timeout because one prop's kie task took 306s by
+        # itself; the Reddit-source worker now passes this flag because
+        # the long-form video those motion beats compose into isn't
+        # rendered for these jobs anyway.
+        with mock.patch.object(media, "_prop_slide_enabled", return_value=True), \
+             mock.patch.object(media.stages, "make_prop_plan") as plan_mock:
+            self._call(
+                skip_hero=True,
+                skip_long_form_scenes=True,
+                skip_long_form_motion_beats=True,
+            )
+            # The fast guard fires BEFORE make_prop_plan, so it must not
+            # have been called even once. Without the guard, the prop
+            # loop would burn ~60s per prop on kie.
+            plan_mock.assert_not_called()
+
+    def test_skip_long_form_motion_beats_short_circuits_mouth_swap_even_when_enabled(self):
+        # Same shape for the mouth_swap block.
+        with mock.patch.object(media, "_mouth_swap_enabled", return_value=True), \
+             mock.patch.object(media.stages, "make_character_prompt") as char_mock, \
+             mock.patch.object(media, "_mouth_swap_block") as swap_mock:
+            self._call(
+                skip_hero=True,
+                skip_long_form_scenes=True,
+                skip_long_form_motion_beats=True,
+            )
+            char_mock.assert_not_called()
+            swap_mock.assert_not_called()
+
+    def test_motion_beats_default_off_still_runs_when_settings_are_off(self):
+        # The flag is opt-in. When it's NOT passed (long-form callers),
+        # the existing setting toggle still decides whether prop_slide /
+        # mouth_swap fire. With both disabled (the test default), the
+        # blocks stay skipped — but via the original gate, not the new
+        # one. This pins the regression-shape so a future refactor can't
+        # silently make the new flag the only off-switch.
+        with mock.patch.object(media.stages, "make_prop_plan") as plan_mock:
+            self._call(skip_hero=True, skip_long_form_scenes=True)
+            plan_mock.assert_not_called()  # because _prop_slide_enabled=False (default mock)
+
 
 if __name__ == "__main__":
     unittest.main()

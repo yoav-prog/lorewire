@@ -371,6 +371,15 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         # (~$1.35-1.55/story); the finisher writes the short's own scenes into
         # stories.images so the article reader still has inline illustrations.
         # Net: -$1.43/story average vs. the pre-2026-06-19 worker path.
+        # 2026-06-24: skip_long_form_motion_beats=True silences the
+        # PropSlideIn (~5x kie calls @ 60s each) and MouthSwap (~2x kie
+        # calls) blocks. Both feed the long-form video composition, which
+        # Reddit jobs no longer render (per 2026-06-19 plan). Production
+        # was hitting Vercel's 800s ceiling because one prop's kie task
+        # timed out at 240s and the retry took 306s on its own, before
+        # even reaching the short handoff. Skipping shaves ~6-7 minutes
+        # off a typical media run and keeps the Vercel drain comfortably
+        # under the deadline.
         media_cols = media.generate_media(
             idea["reddit_id"],
             idea,
@@ -380,6 +389,7 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             repo_root=REPO_ROOT,
             skip_hero=True,
             skip_long_form_scenes=True,
+            skip_long_form_motion_beats=True,
         )
         row.update(media_cols)
         row["tokens"] = llm.totals["total_tokens"] - before_tokens

@@ -578,6 +578,7 @@ def generate_media(
     *,
     skip_hero: bool = False,
     skip_long_form_scenes: bool = False,
+    skip_long_form_motion_beats: bool = False,
 ) -> dict:
     """Generate images + narration for one story and return DB columns.
 
@@ -609,6 +610,18 @@ def generate_media(
     run; only the image-generation loop is skipped, and `images` is left
     out of the returned dict so the caller's downstream write isn't fooled
     into overwriting with an empty list.
+
+    `skip_long_form_motion_beats=True` ALSO skips the `prop_slide` cutouts
+    and the `mouth_swap` character bust + mouth-removed edit. Both motion
+    beats exist for the long-form video composition (PropSlideIn overlay,
+    SVG mouth swap on a still bust) — they were dead weight on Reddit
+    jobs after the 2026-06-19 cut of long-form video, and on a slow kie
+    day they push the Vercel drain past its 800s timeout (production
+    incident 2026-06-24: one prop with a 240s kie task timeout + retry
+    used 306s by itself, then prop-3 hit OpenAI's content policy and
+    burned 2x retries on top — total media run blew past 800s before
+    even reaching the short handoff). The flag is purely opt-in here so
+    long-form callers keep the existing behaviour unchanged.
     """
     safe_id = _sanitize_id(story_id)
     out: dict = {}
@@ -782,7 +795,15 @@ def generate_media(
     # Wave 3 Phase 3 PropSlideIn: generate a small library of prop cutouts when
     # the admin has the prop_slide motion beat enabled. Off by default so this
     # step (and its kie cost) is opt-in. Per-prop cost: ~$0.05 at gpt-image-2.
-    if not dry_run and _prop_slide_enabled():
+    # 2026-06-24: `skip_long_form_motion_beats=True` shortcuts this whole
+    # block — see the docstring above. The setting toggle still wins over
+    # the long-form path; this just means Reddit jobs ignore it.
+    if skip_long_form_motion_beats:
+        print(
+            f"[media id={safe_id} props] skipped — caller opted out of "
+            "long-form motion beats (Reddit-source pipeline)"
+        )
+    elif not dry_run and _prop_slide_enabled():
         prop_count = _prop_count()
         plan = stages.make_prop_plan(idea, body, prop_count, dry_run=False)
         print(f"[media id={safe_id} props] planning {len(plan)} prop(s)")
@@ -820,7 +841,14 @@ def generate_media(
     # and a mouth-removed copy. The composition overlays SVG mouth shapes on
     # the mouth-removed version at a fixed anchor (cx=0.50, cy=0.62). Two
     # kie calls per story (~$0.10) so this is opt-in via video.mouth_swap.
-    if not dry_run and _mouth_swap_enabled():
+    # 2026-06-24: short-circuited when the caller opted out of long-form
+    # motion beats — see the prop_slide branch above.
+    if skip_long_form_motion_beats:
+        print(
+            f"[media id={safe_id} mouth_swap] skipped — caller opted out of "
+            "long-form motion beats (Reddit-source pipeline)"
+        )
+    elif not dry_run and _mouth_swap_enabled():
         char_prompt = stages.make_character_prompt(idea, body, dry_run=False)
         char_url, char_removed_url = _mouth_swap_block(
             char_prompt, safe_id, out_dir, url_prefix
