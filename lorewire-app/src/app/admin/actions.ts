@@ -3540,3 +3540,180 @@ export async function bulkReclassifyStoriesAction() {
   revalidatePath("/");
   return result;
 }
+
+// --- Bulk regenerate (2026-06-24) -------------------------------------------
+// Inbox-level fan-out of the per-story regen buttons that already live on the
+// story editor. Lets the operator tick N rows and re-run hero / scenes /
+// voiceover / the entire pipeline in one gesture.
+//
+// Each target reuses the same primitive the single-story button calls, so the
+// daily budget gate, the queue rows, and the panel polling all "just work":
+//   hero     -> enqueueImageRegen("hero")               via canEnqueueImageRegen
+//   scenes   -> enqueueScenesBulk()                     per-scene rows
+//   voice    -> enqueueVoiceRender(body, provider, id)  ON-CONFLICT skip
+//   pipeline -> bulkEnqueueStoryJobs([reddit_id])       reddit_source gate
+//
+// Articles in the selection are not story-pipeline citizens; they're rejected
+// with reason "not-a-story" so the per-row failure list stays specific. The
+// loop is sequential so the per-story budget gate sees the running total —
+// parallel would race on the cap (same reasoning as RebuildAllButton).
+
+export type BulkRegenTarget = "hero" | "scenes" | "voice" | "pipeline";
+
+const BULK_REGEN_TARGETS: ReadonlySet<BulkRegenTarget> = new Set([
+  "hero",
+  "scenes",
+  "voice",
+  "pipeline",
+]);
+
+export interface BulkRegenResult {
+  target: BulkRegenTarget;
+  ok: BulkContentItem[];
+  failed: BulkActionFailure[];
+}
+
+export async function bulkRegenerateContentAction(
+  itemsInput: BulkContentItem[],
+  target: BulkRegenTarget,
+): Promise<BulkRegenResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+  if (!BULK_REGEN_TARGETS.has(target)) {
+    throw new Error("bulk-regen: invalid target");
+  }
+
+  console.info("[content bulk regen] start", {
+    target,
+    count: items.length,
+  });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+
+  // Lazy imports keep the action surface light when no regen is in flight.
+  const { enqueueImageRegen, enqueueScenesBulk, canEnqueueImageRegen } =
+    await import("@/lib/image-render-queue");
+  const { enqueueVoiceRender } = await import("@/lib/voice-render-queue");
+
+  for (const item of items) {
+    if (item.kind === "article") {
+      failed.push({ ...item, reason: "not-a-story" });
+      continue;
+    }
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        failed.push({ ...item, reason: "not-found" });
+        continue;
+      }
+
+      if (target === "hero") {
+        const pre = await canEnqueueImageRegen("hero");
+        if (!pre.ok) {
+          failed.push({ ...item, reason: "daily-budget-exceeded" });
+          continue;
+        }
+        await enqueueImageRegen({
+          ownerKind: "story",
+          ownerId: item.id,
+          asset: "hero",
+          promptHash: null,
+          requestedBy: session.userId,
+        });
+        revalidateOwnerPanels("story", item.id);
+      } else if (target === "scenes") {
+        const bulk = await enqueueScenesBulk({
+          ownerKind: "story",
+          ownerId: item.id,
+          requestedBy: session.userId,
+          storyBody: story.body,
+          storyDuration: story.duration,
+        });
+        if (!bulk.ok) {
+          failed.push({
+            ...item,
+            reason: bulk.error ?? "scenes-enqueue-failed",
+          });
+          continue;
+        }
+        revalidateOwnerPanels("story", item.id);
+      } else if (target === "voice") {
+        const body = (story.body ?? "").trim();
+        if (!body) {
+          failed.push({ ...item, reason: "empty-body" });
+          continue;
+        }
+        const r = await enqueueVoiceRender({
+          storyId: item.id,
+          body,
+          voiceProvider: story.voice_provider,
+          voiceId: story.voice_id,
+          requestedBy: session.userId,
+        });
+        if (!r.ok) {
+          // "race-loss" = already in-flight for the same voice/body. Counts as
+          // a no-op success from the operator's perspective (something IS in
+          // flight) — surface it as a soft skip rather than a hard failure so
+          // bulk re-ticks don't flood the failure list.
+          failed.push({ ...item, reason: r.error });
+          continue;
+        }
+        revalidatePath(`/admin/stories/${item.id}`);
+        revalidatePath(`/admin/videos/${item.id}`);
+      } else {
+        // pipeline — needs reddit_id to enqueue a story_jobs row. Stories
+        // imported pre-pipeline (manual seeds, legacy migrations) may not
+        // have one; we surface that explicitly instead of failing silently.
+        const redditId = story.reddit_id;
+        if (!redditId) {
+          failed.push({ ...item, reason: "no-reddit-source" });
+          continue;
+        }
+        const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+        const r = await bulkEnqueueStoryJobs([redditId], {
+          with_media: true,
+          requested_by: session.email,
+        });
+        if (r.enqueued === 0) {
+          // bulkEnqueueStoryJobs has its own gates: source row in the wrong
+          // status (already used/skipped), or an active job already running.
+          // Map the most likely cause to a single short reason — the per-row
+          // failure list shows the count so the operator can re-check.
+          const reason =
+            r.skipped_active > 0
+              ? "pipeline-already-running"
+              : r.skipped_status > 0
+                ? "reddit-source-locked"
+                : "not-enqueued";
+          failed.push({ ...item, reason });
+          continue;
+        }
+        revalidatePath("/admin/reddit-sources");
+      }
+
+      ok.push(item);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content bulk regen] failed", {
+        id: item.id,
+        kind: item.kind,
+        target,
+        error: reason,
+      });
+    }
+  }
+
+  // Inbox refresh so updated_at-driven re-sort lands on the operator's next
+  // paint. The per-target revalidates above cover the editor surfaces; this
+  // one covers the list they just came from.
+  revalidatePath("/admin/content");
+
+  console.info("[content bulk regen] done", {
+    target,
+    ok: ok.length,
+    failed: failed.length,
+  });
+  return { target, ok, failed };
+}
