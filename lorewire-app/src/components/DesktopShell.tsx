@@ -1140,7 +1140,7 @@ function DetailModalHero({ story }: { story: Story }) {
   );
 }
 
-function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"] }) {
+function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the text Play button in the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll
@@ -1261,8 +1261,13 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
   const [rateOpen, setRateOpen] = useState(false);
 
   const c = CAT[story.cat];
-  let more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id);
-  if (more.length < 6) more = more.concat(STORIES.filter((s) => s.id !== story.id && !more.includes(s)));
+  // "More Like This" mirrors Search / browse rails: only stories the pipeline
+  // has actually produced content for. The old STORIES-based list let empty
+  // sample placeholders into the rail, so cards opened to nothing. Pull from
+  // the merged live catalog and filter through isPublishedStory.
+  const published = catalog.array.filter(isPublishedStory);
+  let more = published.filter((s) => s.cat === story.cat && s.id !== story.id);
+  if (more.length < 6) more = more.concat(published.filter((s) => s.id !== story.id && !more.includes(s)));
   more = more.slice(0, 6);
   return (
     <div className="fixed inset-0 z-[60] overflow-y-auto scrim-in" style={{ background: "rgba(0,0,0,.82)" }} onClick={onClose}>
@@ -1805,7 +1810,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         // Stale id -> render nothing; close button still works because
         // `active` is set.
         const s = resolveStory(active.id);
-        return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} /> : null;
+        return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} catalog={catalog} /> : null;
       })()}
 
       {/* IG-style Stories viewer. Mounts at the shell level so a

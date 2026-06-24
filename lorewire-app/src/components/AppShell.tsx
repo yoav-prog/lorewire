@@ -1498,7 +1498,7 @@ function FakeReadAlong() {
 }
 
 /* ----------------------------- TITLE SHEET ----------------------------- */
-function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"] }) {
+function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the big white button under the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll the
@@ -1606,8 +1606,15 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   const [rateOpen, setRateOpen] = useState(false);
 
   const c = CAT[story.cat];
-  const more = STORIES.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
-  if (more.length < 3) more.push(...STORIES.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
+  // "More Like This" must only surface stories the pipeline has actually
+  // produced content for — same bar as Search / New / homepage rails. The
+  // old STORIES-based list pulled in empty sample placeholders and showed
+  // poster cards that opened to nothing. Pull from the merged live catalog
+  // and filter through isPublishedStory so the rail mirrors what the user
+  // can actually browse elsewhere in the app.
+  const published = catalog.array.filter(isPublishedStory);
+  const more = published.filter((s) => s.cat === story.cat && s.id !== story.id).slice(0, 6);
+  if (more.length < 3) more.push(...published.filter((s) => s.id !== story.id && !more.includes(s)).slice(0, 3));
 
   const [headerHeroOk, setHeaderHeroOk] = useState(true);
   // TitleSheet header is wider than it is tall (300h vs full-screen width on
@@ -2073,6 +2080,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             toggleList={toggleList}
             session={initial.session}
             seededModalComments={initial.seededModalComments}
+            catalog={catalog}
           />
         ) : null;
       })()}
