@@ -2369,6 +2369,16 @@ def use_render_context(render_id: str) -> _RenderContext:
     return _RenderContext(render_id)
 
 
+def current_render_id() -> str | None:
+    """Public read of the bound render id (or None when no context is
+    active). Lets regen helpers in `pipeline.media` recover prior-tick
+    state from `image_render_events` after a Vercel function kill —
+    without reaching into the private contextvar. Returns None on the
+    local pipeline path (no queue context), which callers should
+    treat as "no resumable state available, run fresh."""
+    return _current_render_id.get()
+
+
 def log_render_event(
     event: str,
     message: str | None = None,
@@ -2436,6 +2446,34 @@ def list_render_events(render_id: str, limit: int = 200) -> list[dict]:
         return [
             dict(r) for r in c.execute(sql_sqlite, (render_id, limit)).fetchall()
         ]
+
+
+def first_render_event(render_id: str, event: str) -> dict | None:
+    """Return the oldest event of the given type for a render row, or
+    None when no such event exists. Used by resumable regen paths to
+    recover decisions a prior tick made (e.g. the hero+thumb finisher
+    re-uses the picker's scene choice across kill-and-reclaim cycles
+    so all five i2i variants share the same seed). Targeted query so
+    it stays bounded as events accumulate across many reclaims."""
+    sql_pg = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = %s AND event = %s "
+        "ORDER BY ts ASC LIMIT 1"
+    )
+    sql_sqlite = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = ? AND event = ? "
+        "ORDER BY ts ASC LIMIT 1"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_pg, (render_id, event))
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(sql_sqlite, (render_id, event)).fetchone()
+        return dict(row) if row else None
 
 
 def update_story_hero(story_id: str, hero_url: str) -> None:

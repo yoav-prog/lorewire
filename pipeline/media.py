@@ -1521,7 +1521,53 @@ def _build_hero_and_thumbnail_from_short(
             f"stories.video_url={short_output_url}"
         )
 
-    pick = stages.pick_hero_and_thumbnail_scenes(title, body, scenes, dry_run=False)
+    # 2026-06-24 resumability: when a Vercel function kill caused this
+    # image_renders row to be reclaimed, the previous tick already
+    # logged its picker choice to `image_render_events`. Reuse it so
+    # every tick targets the same seed scenes and we don't end up with
+    # variants that were i2i'd against different scene composites. No-op
+    # outside the queue path (no render context, no prior event → run
+    # the LLM picker fresh). See
+    # `_plans/2026-06-24-hero-thumb-finisher-resumable.md`.
+    render_id = store.current_render_id()
+    prior_pick: dict | None = None
+    if render_id:
+        prior = store.first_render_event(render_id, "scenes_picked")
+        if prior and prior.get("payload"):
+            try:
+                payload = json.loads(prior["payload"])
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            if (
+                isinstance(payload, dict)
+                and "hero_index" in payload
+                and "thumbnail_index" in payload
+            ):
+                prior_pick = payload
+    if prior_pick is not None:
+        pick = {
+            "hero_index": prior_pick["hero_index"],
+            "thumbnail_index": prior_pick["thumbnail_index"],
+            "picker_reasoning": prior_pick.get("picker_reasoning") or "",
+        }
+        print(
+            f"[hero+thumb from-short] id={safe_id} resumed picker "
+            f"hero=#{pick['hero_index']} thumb=#{pick['thumbnail_index']}"
+        )
+        store.log_render_event(
+            "picker_resumed",
+            (
+                f"Reusing prior pick hero=#{pick['hero_index']} "
+                f"thumb=#{pick['thumbnail_index']} after function kill"
+            ),
+            payload={
+                "hero_index": pick["hero_index"],
+                "thumbnail_index": pick["thumbnail_index"],
+                "picker_reasoning": pick["picker_reasoning"],
+            },
+        )
+    else:
+        pick = stages.pick_hero_and_thumbnail_scenes(title, body, scenes, dry_run=False)
     hero_idx = pick["hero_index"]
     thumb_idx = pick["thumbnail_index"]
     hero_scene_url = scenes[hero_idx].get("url") or ""
@@ -1532,32 +1578,50 @@ def _build_hero_and_thumbnail_from_short(
             f"(hero={hero_idx}, thumb={thumb_idx})"
         )
 
-    print(
-        f"[hero+thumb from-short] id={safe_id} title={title[:60]!r} "
-        f"character={character_base_url[:80]}... "
-        f"hero_scene=#{hero_idx} thumb_scene=#{thumb_idx} "
-        f"reason={pick['picker_reasoning'][:120]!r}"
-    )
-    store.log_render_event(
-        "scenes_picked",
-        f"Picker chose hero=#{hero_idx} thumb=#{thumb_idx}",
-        payload={
-            "hero_index": hero_idx,
-            "thumbnail_index": thumb_idx,
-            "hero_scene_url": hero_scene_url,
-            "thumbnail_scene_url": thumb_scene_url,
-            "picker_reasoning": pick["picker_reasoning"],
-        },
-    )
+    # On a resumed run the original `scenes_picked` event is already in
+    # the timeline (it's what we just read back); the new `picker_resumed`
+    # event above marks this iteration. Skip the verbose print + the
+    # duplicate `scenes_picked` log so the timeline stays single-source
+    # for the audit trail.
+    if prior_pick is None:
+        print(
+            f"[hero+thumb from-short] id={safe_id} title={title[:60]!r} "
+            f"character={character_base_url[:80]}... "
+            f"hero_scene=#{hero_idx} thumb_scene=#{thumb_idx} "
+            f"reason={pick['picker_reasoning'][:120]!r}"
+        )
+        store.log_render_event(
+            "scenes_picked",
+            f"Picker chose hero=#{hero_idx} thumb=#{thumb_idx}",
+            payload={
+                "hero_index": hero_idx,
+                "thumbnail_index": thumb_idx,
+                "hero_scene_url": hero_scene_url,
+                "thumbnail_scene_url": thumb_scene_url,
+                "picker_reasoning": pick["picker_reasoning"],
+            },
+        )
 
     per_image_cents = _per_image_cost_cents()
     seed_to_scene = {"hero": hero_scene_url, "thumbnail": thumb_scene_url}
+    # Re-fetch the story so a partial-success from a prior reclaim is
+    # visible. Each successful i2i in the loop below already commits
+    # its URL to the relevant `stories` column (see
+    # `_HERO_THUMB_COLUMN_WRITERS`), so the column read here is the
+    # authoritative "what's already done" signal even when the previous
+    # tick died before reaching `finish_image_render`. Skipping variants
+    # we already have stops re-burning kie credits on each reclaim.
+    fresh = store.fetch_story(story["id"]) or story
+    existing = {
+        col: (fresh.get(col) or "").strip()
+        for _seed, _aspect, _filename, _label, col in _HERO_THUMB_VARIANTS
+    }
     result: dict = {
-        "hero_image": None,
-        "hero_image_landscape": None,
-        "thumbnail_image": None,
-        "thumbnail_image_landscape": None,
-        "thumbnail_image_square": None,
+        "hero_image": existing["hero_image"] or None,
+        "hero_image_landscape": existing["hero_image_landscape"] or None,
+        "thumbnail_image": existing["thumbnail_image"] or None,
+        "thumbnail_image_landscape": existing["thumbnail_image_landscape"] or None,
+        "thumbnail_image_square": existing["thumbnail_image_square"] or None,
         "cost_cents": 0,
         "hero_index": hero_idx,
         "thumbnail_index": thumb_idx,
@@ -1565,6 +1629,21 @@ def _build_hero_and_thumbnail_from_short(
     }
 
     for seed, aspect, filename, label, column in _HERO_THUMB_VARIANTS:
+        if existing[column]:
+            store.log_render_event(
+                "variant_resumed",
+                f"{label} already persisted — skipping i2i",
+                payload={
+                    "variant": label,
+                    "url": existing[column],
+                    "resumed": True,
+                },
+            )
+            print(
+                f"[hero+thumb from-short] id={safe_id} {label} "
+                f"already persisted, skipping"
+            )
+            continue
         scene_url = seed_to_scene[seed]
         prompt = stages.make_thumbnail_prompt(
             title, category, body, aspect_ratio=aspect, dry_run=False,

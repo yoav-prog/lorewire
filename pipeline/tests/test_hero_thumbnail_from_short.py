@@ -386,5 +386,262 @@ class RegenWrapperTests(unittest.TestCase):
                 )
 
 
+class ResumabilityTests(unittest.TestCase):
+    """When the image_renders cron's Vercel function gets killed mid-run
+    (5 sequential hybrid i2i calls don't fit in maxDuration=300s),
+    `reap_stale_image_render_claims` puts the row back to queued and the
+    next tick reclaims it. Without these guards the finisher would
+    re-pick scenes AND re-run every i2i call from scratch, burning kie
+    credits forever. See
+    `_plans/2026-06-24-hero-thumb-finisher-resumable.md`.
+    """
+
+    def test_resumes_picker_choice_from_prior_scenes_picked_event(self):
+        # Render context is bound and an older `scenes_picked` event is
+        # already in the timeline → the LLM picker must NOT be called
+        # again, and every i2i call must use the recovered indices.
+        prior_payload = json.dumps({
+            "hero_index": 2,
+            "thumbnail_index": 4,
+            "picker_reasoning": "from prior tick",
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(
+                self,
+                current_render_id=mock.patch.object(
+                    media.store, "current_render_id", return_value="render-1",
+                ),
+                first_render_event=mock.patch.object(
+                    media.store, "first_render_event",
+                    return_value={"payload": prior_payload},
+                ),
+            )
+            result = media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        mocks["picker"].assert_not_called()
+        calls = mocks["generate_with_retry"].call_args_list
+        self.assertEqual(len(calls), 5)
+        # First two variants (hero portrait + landscape) seed from scenes[2];
+        # last three (thumb portrait + landscape + square) seed from scenes[4].
+        self.assertEqual(calls[0].kwargs["image_input"][1], SCENES[2]["url"])
+        self.assertEqual(calls[1].kwargs["image_input"][1], SCENES[2]["url"])
+        self.assertEqual(calls[2].kwargs["image_input"][1], SCENES[4]["url"])
+        self.assertEqual(calls[3].kwargs["image_input"][1], SCENES[4]["url"])
+        self.assertEqual(calls[4].kwargs["image_input"][1], SCENES[4]["url"])
+        self.assertEqual(result["hero_index"], 2)
+        self.assertEqual(result["thumbnail_index"], 4)
+        self.assertEqual(result["picker_reasoning"], "from prior tick")
+
+    def test_skips_variants_whose_story_columns_are_already_populated(self):
+        # Story row already has hero_image + hero_image_landscape from a
+        # prior tick's partial success. Variant loop must skip those two,
+        # leave the carried-over URLs in place, and only fire the three
+        # thumbnail i2i calls.
+        partial_story = dict(STORY)
+        partial_story["hero_image"] = "https://prev/hero.png"
+        partial_story["hero_image_landscape"] = "https://prev/hero-landscape.png"
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(
+                self,
+                fetch_story=mock.patch.object(
+                    media.store, "fetch_story", return_value=partial_story,
+                ),
+            )
+            result = media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        # Three i2i calls (the three thumbnail variants), not five.
+        self.assertEqual(len(mocks["generate_with_retry"].call_args_list), 3)
+        # No fresh writes to the already-populated hero columns.
+        mocks["update_hero"].assert_not_called()
+        mocks["update_hero_landscape"].assert_not_called()
+        # Thumbnail columns still get written (all three fresh).
+        mocks["update_thumb"].assert_called_once()
+        mocks["update_thumb_landscape"].assert_called_once()
+        mocks["update_thumb_square"].assert_called_once()
+        # Carried-over URLs surface on the result dict so the queue
+        # wrapper's first-URL sample sees them.
+        self.assertEqual(result["hero_image"], "https://prev/hero.png")
+        self.assertEqual(
+            result["hero_image_landscape"], "https://prev/hero-landscape.png"
+        )
+        # cost_cents reflects only THIS tick's actual kie spend.
+        self.assertEqual(result["cost_cents"], 15)
+
+    def test_no_render_context_runs_full_picker_and_all_variants(self):
+        # The story-jobs path runs without an image_renders row id bound,
+        # so `current_render_id()` returns None and the resume branch
+        # short-circuits. Picker MUST run, all 5 i2i calls MUST fire.
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(
+                self,
+                current_render_id=mock.patch.object(
+                    media.store, "current_render_id", return_value=None,
+                ),
+            )
+            media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        mocks["picker"].assert_called_once()
+        self.assertEqual(len(mocks["generate_with_retry"].call_args_list), 5)
+
+    def test_second_cycle_only_retries_variants_whose_columns_are_empty(self):
+        # The exact production bug, rolled into one test. Cycle 1 lands 3
+        # of 5 variants; cycle 2 reclaims the same row. The picker must
+        # NOT be called again and cycle 2's i2i attempts must be exactly
+        # the 2 variants that didn't land in cycle 1 — not all 5 like
+        # the unfixed code did. Note: cycle 1 itself still attempts all
+        # 5 variants because nothing is pre-existing when it starts;
+        # the resumability win shows up in cycle 2's smaller call count.
+
+        # Story state shared across cycles. Column writers mutate it so
+        # cycle 2's fresh fetch sees what cycle 1 persisted.
+        story_state = dict(STORY)
+
+        # The scenes_picked event log accumulates across ticks just like
+        # the real `image_render_events` table. `first_render_event`
+        # returns the oldest match (or None when empty).
+        scenes_picked_payloads: list[dict] = []
+
+        def fake_first_render_event(_render_id, event):
+            if event != "scenes_picked":
+                return None
+            if not scenes_picked_payloads:
+                return None
+            return {"payload": json.dumps(scenes_picked_payloads[0])}
+
+        def fake_log_render_event(
+            event, message=None, *, level="info",
+            payload=None, render_id=None,
+        ):
+            if event == "scenes_picked" and payload is not None:
+                scenes_picked_payloads.append(dict(payload))
+
+        # Track picker invocations so we can assert exactly one across
+        # both cycles.
+        picker_calls = []
+        def fake_picker(*a, **k):
+            picker_calls.append(1)
+            return {
+                "hero_index": 0,
+                "thumbnail_index": 3,
+                "picker_reasoning": "calm vs dramatic",
+            }
+
+        # _generate_with_retry: cycle 1 lands variants 1-3, "fails"
+        # variants 4-5 by returning None. Cycle 2 lands the remaining
+        # 2. After both cycles, generate_with_retry has been called
+        # 5 times total — not 10.
+        cycle1_results = iter([
+            "https://kie/c1-hero.png",          # hero portrait
+            "https://kie/c1-hero-landscape.png", # hero landscape
+            "https://kie/c1-thumb.png",          # thumb portrait
+            None,                                # thumb landscape FAILS
+            None,                                # thumb square FAILS
+        ])
+        cycle2_results = iter([
+            "https://kie/c2-thumb-landscape.png",
+            "https://kie/c2-thumb-square.png",
+        ])
+        active = iter([])  # swapped per cycle
+
+        def fake_generate(*a, **k):
+            return next(active)
+
+        # Column writers persist into story_state so cycle 2's
+        # `fetch_story` sees the partial state.
+        def make_writer(column):
+            def writer(sid, url):
+                story_state[column] = url
+            return writer
+
+        common = {
+            "fetch_story": mock.patch.object(
+                media.store, "fetch_story",
+                side_effect=lambda sid: dict(story_state),
+            ),
+            "current_render_id": mock.patch.object(
+                media.store, "current_render_id", return_value="render-loop-1",
+            ),
+            "first_render_event": mock.patch.object(
+                media.store, "first_render_event",
+                side_effect=fake_first_render_event,
+            ),
+            "log_render_event": mock.patch.object(
+                media.store, "log_render_event",
+                side_effect=fake_log_render_event,
+            ),
+            "picker": mock.patch.object(
+                media.stages, "pick_hero_and_thumbnail_scenes",
+                side_effect=fake_picker,
+            ),
+            "generate_with_retry": mock.patch.object(
+                media, "_generate_with_retry", side_effect=fake_generate,
+            ),
+            "update_hero": mock.patch.object(
+                media.store, "update_story_hero",
+                side_effect=make_writer("hero_image"),
+            ),
+            "update_hero_landscape": mock.patch.object(
+                media.store, "update_story_hero_landscape",
+                side_effect=make_writer("hero_image_landscape"),
+            ),
+            "update_thumb": mock.patch.object(
+                media.store, "update_story_thumbnail",
+                side_effect=make_writer("thumbnail_image"),
+            ),
+            "update_thumb_landscape": mock.patch.object(
+                media.store, "update_story_thumbnail_landscape",
+                side_effect=make_writer("thumbnail_image_landscape"),
+            ),
+            "update_thumb_square": mock.patch.object(
+                media.store, "update_story_thumbnail_square",
+                side_effect=make_writer("thumbnail_image_square"),
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self, **common)
+
+            # Cycle 1 — fresh picker, attempts all 5 variants (story
+            # starts empty so nothing is skipped). 3 land, 2 "fail"
+            # (kie returns None — stand-in for any non-persisting
+            # outcome, including a Vercel function kill mid-call).
+            active = cycle1_results
+            media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
+            calls_after_cycle_1 = len(
+                mocks["generate_with_retry"].call_args_list
+            )
+            self.assertEqual(calls_after_cycle_1, 5)
+            self.assertTrue(story_state.get("hero_image"))
+            self.assertTrue(story_state.get("hero_image_landscape"))
+            self.assertTrue(story_state.get("thumbnail_image"))
+            self.assertFalse(story_state.get("thumbnail_image_landscape"))
+            self.assertFalse(story_state.get("thumbnail_image_square"))
+            self.assertEqual(len(picker_calls), 1)
+
+            # Cycle 2 — reclaim. Picker MUST NOT fire again. Only the
+            # 2 unfinished variants should re-enter i2i; the 3 already
+            # persisted to the story row are skipped at the top of the
+            # loop. If the resumability guard regresses, cycle 2's
+            # delta would be 5 (the original bug's footprint).
+            active = cycle2_results
+            media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
+
+        cycle_2_delta = (
+            len(mocks["generate_with_retry"].call_args_list)
+            - calls_after_cycle_1
+        )
+        self.assertEqual(cycle_2_delta, 2)
+        self.assertEqual(len(picker_calls), 1)
+        # All five columns are now populated end-to-end.
+        self.assertTrue(story_state["hero_image"])
+        self.assertTrue(story_state["hero_image_landscape"])
+        self.assertTrue(story_state["thumbnail_image"])
+        self.assertTrue(story_state["thumbnail_image_landscape"])
+        self.assertTrue(story_state["thumbnail_image_square"])
+
+
 if __name__ == "__main__":
     unittest.main()
