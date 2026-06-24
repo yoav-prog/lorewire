@@ -15,7 +15,8 @@
 // Plan: _plans/2026-06-25-stories-rail-and-viewer.md.
 
 import { isPublishedStory, type Story } from "@/lib/stories";
-import type { HomepageCuration, MergedCatalog } from "@/lib/homepage-rails";
+import type { HomepageCuration } from "@/app/actions";
+import type { MergedCatalog } from "@/lib/homepage-rails";
 
 export const STORIES_PLAYLIST_CAP = 10;
 

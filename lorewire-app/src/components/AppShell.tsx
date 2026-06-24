@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
@@ -41,6 +41,11 @@ import {
 } from "@/components/JumpToPoll";
 import DesktopShell from "@/components/DesktopShell";
 import WiresFeed from "@/components/wires/WiresFeed";
+import { StoriesRail } from "@/components/stories/StoriesRail";
+import { StoriesViewer } from "@/components/stories/StoriesViewer";
+import { resolveStoriesPlaylist } from "@/components/stories/stories-playlist";
+import { useStoriesUrlState } from "@/components/stories/use-stories-url-state";
+import { useViewedWires } from "@/components/stories/use-viewed-wires";
 import CookieConsent from "@/components/CookieConsent";
 import CrossDeviceNudge from "@/components/CrossDeviceNudge";
 import SignInChip from "@/components/SignInChip";
@@ -458,6 +463,9 @@ function Home({
   resolveStory,
   pollsInitial,
   session,
+  storiesPlaylist,
+  viewedWireIds,
+  onOpenWire,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -470,6 +478,14 @@ function Home({
   resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
   pollsInitial: HomepageInitial["pollRails"];
   session: HomepageInitial["session"];
+  /** IG-style rail playlist — already resolved + capped at the shell
+   *  level so a tab switch back to Home doesn't recompute. */
+  storiesPlaylist: Story[];
+  /** Story ids the user has consumed in the Stories viewer; drives
+   *  the rail's unseen-ring + hide-when-all-seen logic. */
+  viewedWireIds: string[];
+  /** Open the Stories viewer at a wire (pushes `?wire=<id>`). */
+  onOpenWire: (wireId: string) => void;
 }) {
   // Curation + live catalog are hoisted to MobileShell so MyList / TitleSheet
   // can share resolveStory (saved real shorts aren't in the baked STORIES
@@ -534,6 +550,14 @@ function Home({
   const railClass = "flex gap-3 px-4 overflow-x-auto noscroll pb-1";
   return (
     <div className="pb-28">
+      {/* IG-style Stories rail sits above the Billboard so freshness is
+          the very first thing on the homepage. Hides entirely when
+          every wire in the playlist is already viewed. */}
+      <StoriesRail
+        playlist={storiesPlaylist}
+        viewedIds={viewedWireIds}
+        onOpen={onOpenWire}
+      />
       {heroPool.length > 0 && (
         <Billboard
           pool={heroPool}
@@ -1943,6 +1967,19 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     liveRows: initial.liveRows,
   });
 
+  // 2026-06-25 stories plan: IG-style rail + viewer riding on the same
+  // catalog as the homepage rails. Playlist is computed once per
+  // catalog/curation change; rail filters by useViewedWires's unseen
+  // set so the rail hides cleanly when there's nothing new. The viewer
+  // opens via `?wire=<id>` (distinct from `?story=`, which is the
+  // Comments deep-link). Plan: _plans/2026-06-25-stories-rail-and-viewer.md.
+  const storiesPlaylist = useMemo(
+    () => resolveStoriesPlaylist(curation, catalog, resolveStory),
+    [curation, catalog, resolveStory],
+  );
+  const { viewed: viewedWireIds } = useViewedWires();
+  const { openWireId, openWire, closeWire } = useStoriesUrlState();
+
   const open: OpenFn = (id, t) => {
     setActive({ id, tab: t });
     recordView(id);
@@ -2004,6 +2041,9 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             resolveStory={resolveStory}
             pollsInitial={initial.pollRails}
             session={initial.session}
+            storiesPlaylist={storiesPlaylist}
+            viewedWireIds={viewedWireIds}
+            onOpenWire={openWire}
           />
         )}
         {tab === "Search" && <Search onOpen={open} catalog={catalog} />}
@@ -2038,6 +2078,20 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
       })()}
 
       <TabBar tab={tab} setTab={(t) => { close(); setTab(t); }} />
+
+      {/* IG-style Stories viewer. Opens when `?wire=<id>` is set
+          (either via the rail tap or a shared deep link). Sits above
+          every other layer so it overlays the Wires feed and the
+          TitleSheet alike. Mounting it at the shell level (not inside
+          Home) means a deep link works regardless of which tab is
+          currently active. Plan: _plans/2026-06-25-stories-rail-and-viewer.md. */}
+      {openWireId && storiesPlaylist.length > 0 && (
+        <StoriesViewer
+          playlist={storiesPlaylist}
+          startId={openWireId}
+          onClose={closeWire}
+        />
+      )}
     </div>
   );
 }

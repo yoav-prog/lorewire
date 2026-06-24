@@ -32,7 +32,7 @@ import {
   useState,
 } from "react";
 
-import { copyToClipboard, storyShareUrl } from "@/lib/share";
+import { copyToClipboard } from "@/lib/share";
 import { type Story } from "@/lib/stories";
 import { useWirePrefs } from "@/components/wires/useWirePrefs";
 
@@ -185,6 +185,12 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
 
   // Keyboard nav. Only when the viewer is mounted, so we don't fight
   // the rest of the page for keystrokes.
+  //
+  // v1 does NOT wire ArrowUp / Enter → "open full reader" because the
+  // Story type doesn't carry a slug (the existing reader page lives at
+  // /v/[slug] and the slug is only available via a per-story
+  // getLiveStoryMedia fetch). A v2 plan can either extend the Story
+  // shape with slug or add the per-active-wire fetch.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -196,15 +202,11 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
       } else if (e.key === " " || e.key === "Spacebar") {
         e.preventDefault();
         setPaused((p) => !p);
-      } else if (e.key === "Enter" || e.key === "ArrowUp") {
-        if (active?.slug) {
-          window.location.href = `/v/${active.slug}`;
-        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [advanceNext, advancePrev, onClose, active?.slug]);
+  }, [advanceNext, advancePrev, onClose]);
 
   const { ref: gestureRef } = useStoriesGestures({
     onAction: (action) => {
@@ -231,10 +233,11 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
           onClose();
           return;
         case "open-reader":
+          // v1 limitation: the Story type doesn't carry slug, and the
+          // reader path /v/[slug] needs one. Treat swipe-up as a no-op
+          // for now (the gesture still resolves the same; the action
+          // just doesn't navigate). A v2 plan adds slug resolution.
           maybeMarkViewed("dwell-advance");
-          if (active?.slug) {
-            window.location.href = `/v/${active.slug}`;
-          }
           return;
         case "snap-back":
           return;
@@ -388,25 +391,19 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
               {active.syn}
             </div>
           ) : null}
+          {/* v1 ships title + synopsis only. "Read full" + Share are
+              gated on the public slug which isn't on the Story shape
+              today (it lives behind the per-story getLiveStoryMedia
+              fetch). The Share button copies the current URL — the
+              `?wire=<id>` deep-link the viewer is already on — so the
+              recipient lands in the same viewer at the same wire. */}
           <div className="mt-3 flex items-center gap-2">
-            {active.slug ? (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  maybeMarkViewed("dwell-advance");
-                  window.location.href = `/v/${active.slug}`;
-                }}
-                className="font-body font-semibold text-[13px] px-3.5 py-1.5 rounded-full bg-white text-black active:scale-[.97] transition"
-              >
-                Read full →
-              </button>
-            ) : null}
             <button
               type="button"
               onClick={async (e) => {
                 e.stopPropagation();
-                const url = storyShareUrl(active.slug ?? null, window.location.origin);
+                const url =
+                  typeof window !== "undefined" ? window.location.href : "";
                 const ok = await copyToClipboard(url);
                 // eslint-disable-next-line no-console -- rule 14
                 console.info("[stories viewer share]", {
