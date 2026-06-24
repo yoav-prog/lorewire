@@ -548,10 +548,18 @@ def _run_short_and_finisher(row: dict, job_id: str, reddit_id: str) -> None:
         return
 
     # Roll the finisher's spend into the story's cost column. The image
-    # columns were already written by the finisher's per-variant store
-    # helpers; we update the in-memory row dict so any caller that reads
-    # from it later sees a truthful view, and update cost_cents in the DB
-    # so the daily budget bar doesn't underreport.
+    # columns (hero_image, hero_image_landscape, thumbnail_image and the
+    # two thumbnail variants) AND stories.video_url were already written
+    # by the finisher's per-variant store helpers directly, so we must
+    # NOT do a full upsert here — the in-memory `row` dict is stale on
+    # all of those (it never saw video_url; the auto-applied short URL
+    # would be clobbered back to NULL). 2026-06-24 incident: the second
+    # upsert silently reverted the worker's [auto-applied short as
+    # stories.video_url=...] write, so the article on the public site
+    # had no short and the admin saw a "Use as article video" button
+    # that should have been a no-op. Fix is a targeted cost_cents-only
+    # update; the image columns we mirror back into the row dict are
+    # for any in-process caller that reads `row` later.
     extra_cents = int(result.get("cost_cents") or 0)
     row["cost_cents"] = (row.get("cost_cents") or 0) + extra_cents
     for col in (
@@ -560,7 +568,7 @@ def _run_short_and_finisher(row: dict, job_id: str, reddit_id: str) -> None:
     ):
         if result.get(col):
             row[col] = result[col]
-    store.upsert_story(row)
+    store.update_story_cost_cents(story_id, row["cost_cents"])
     store.log_story_job_event(
         job_id, reddit_id, "hero_thumbnail_built",
         message=(

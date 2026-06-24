@@ -148,6 +148,16 @@ class RunShortAndFinisherTests(unittest.TestCase):
         p_upsert = mock.patch.object(story_jobs_worker.store, "upsert_story")
         self.mock_upsert = p_upsert.start()
         self.addCleanup(p_upsert.stop)
+        # 2026-06-24 fix: the finisher writes video_url / images /
+        # thumbnail columns DIRECTLY via dedicated store helpers, so the
+        # worker must NOT do a full upsert here (it would clobber
+        # video_url back to NULL — the row dict never saw it). We
+        # now do a targeted cost_cents-only update instead.
+        p_cost = mock.patch.object(
+            story_jobs_worker.store, "update_story_cost_cents",
+        )
+        self.mock_cost = p_cost.start()
+        self.addCleanup(p_cost.stop)
 
     def test_force_true_passed_to_enqueue(self):
         row = dict(self.ROW)
@@ -166,8 +176,13 @@ class RunShortAndFinisherTests(unittest.TestCase):
         # All five image URLs land on the row dict for downstream consumers.
         self.assertEqual(row["hero_image"], "https://gcs/hero.png")
         self.assertEqual(row["thumbnail_image_square"], "https://gcs/thumb-s.png")
-        # The row is upserted once more to capture the URLs + cost.
-        self.mock_upsert.assert_called_once_with(row)
+        # 2026-06-24 fix: the worker must NOT do a full upsert here —
+        # the finisher already wrote video_url + images + thumbnail
+        # columns directly. A full upsert would re-clobber video_url
+        # back to NULL because the row dict never saw it. Only the
+        # cost_cents column is updated.
+        self.mock_upsert.assert_not_called()
+        self.mock_cost.assert_called_once_with("story1", 12 + 25)
         # Timeline event with the build metadata.
         events = [c.args[2] for c in self._log.call_args_list]
         self.assertIn("hero_thumbnail_built", events)

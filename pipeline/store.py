@@ -2521,6 +2521,35 @@ def update_story_hero_landscape(story_id: str, hero_url: str) -> None:
         )
 
 
+def update_story_cost_cents(story_id: str, cents: int) -> None:
+    """Patch stories.cost_cents alone, leaving every other column intact.
+
+    Used by the story-jobs worker after the hero+thumbnail finisher
+    completes, so the per-story spend bar reflects the finisher's i2i
+    cost without doing a full upsert. The full upsert would CLOBBER
+    columns the finisher already wrote directly (video_url, images,
+    thumbnail_image, etc.) — the worker's in-memory row dict is stale
+    on those by design. Plan:
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md.
+    """
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET cost_cents = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (int(cents), now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET cost_cents = ?, updated_at = ? WHERE id = ?",
+            (int(cents), now, story_id),
+        )
+
+
 def update_story_video_url(story_id: str, url: str) -> None:
     """Point stories.video_url at a URL. Mirror of the TS
     `applyShortToStory` helper at lib/short-render-queue.ts:303 —
