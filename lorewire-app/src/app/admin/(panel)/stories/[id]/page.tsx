@@ -25,12 +25,10 @@ import {
   loadHeroStyleSettings,
   saveStoryHeroStyleAction,
   setStoryOverrideAction,
-  setStoryNoindexAction,
 } from "@/app/admin/actions";
 import { HeroStylePicker } from "@/app/admin/(panel)/_components/HeroStylePicker";
 import { resolveHeroStyleFromContext } from "@/lib/hero-styles-resolver";
 import { heroStyleSourceLabel } from "@/lib/hero-styles";
-import { statusClass } from "@/app/admin/ui";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import {
   MediaRegenPanel,
@@ -41,7 +39,6 @@ import {
   type GranularItem,
 } from "@/app/admin/(panel)/_components/GranularRegenGrid";
 import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel";
-import { StatusStepIndicator } from "./StatusStepIndicator";
 import { PollEditor } from "./PollEditor";
 import {
   getPollByStoryId,
@@ -59,7 +56,9 @@ import { VoicePicker } from "@/components/voice-picker/VoicePicker";
 import { listVoices } from "@/lib/voice-library";
 import { one } from "@/lib/db";
 import StoryCommentsToggle from "./StoryCommentsToggle";
+import { latestShortRenderForStory } from "@/lib/short-render-queue";
 import { OverviewTab } from "./OverviewTab";
+import { StoryActionBar } from "./StoryActionBar";
 import { StoryTabBar } from "./StoryTabBar";
 import {
   asShortClientTab,
@@ -85,6 +84,19 @@ export default async function EditStory({
 
   // eslint-disable-next-line no-console -- rule 14 (observability)
   console.info("[unified editor mount]", { storyId: s.id, activeTab });
+
+  // Latest short render — loaded on every tab so the StoryActionBar can
+  // surface "is a render in progress?" + last-rendered-at regardless of
+  // which tab is active. Cheap: one indexed query. When isShortClientTab
+  // is true, loadShortClientTabState reuses this value rather than
+  // re-fetching it.
+  const latestRender = await latestShortRenderForStory(id).catch((err) => {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[unified editor page] latestShortRenderForStory failed", {
+      err: String(err),
+    });
+    return null;
+  });
 
   // Lazy-load short editor state only when the active tab needs it. The
   // 7 non-overview tabs all render through StoryShortTabsClient and
@@ -311,17 +323,15 @@ export default async function EditStory({
       : null;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
-      <div className="flex items-center justify-end gap-3">
-        <span
-          className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
-            s.status,
-          )}`}
-        >
-          {s.status ?? "draft"}
-        </span>
-      </div>
+
+      <StoryActionBar
+        storyId={s.id}
+        initialStatus={s.status}
+        initialRender={latestRender}
+        initialNoindex={Boolean(s.noindex)}
+      />
 
       <StoryTabBar storyId={s.id} activeTab={activeTab} />
 
@@ -363,14 +373,9 @@ export default async function EditStory({
             ))}
         </div>
 
-        {/* Sidebar — constant across all tabs (the right rail keeps the
-            per-story controls available no matter which tab is open). */}
+        {/* Sidebar — constant across all tabs. Status + Search visibility
+            moved into the StoryActionBar above (single source of truth). */}
         <aside className="space-y-4">
-          <div className="rounded-xl border border-line bg-surface p-4">
-            <div className={`${LABEL} mb-3`}>Status</div>
-            <StatusStepIndicator storyId={s.id} currentStatus={s.status} />
-          </div>
-
           <PollEditor
             storyId={s.id}
             storyCategory={s.category as StoryCategory | string | null}
@@ -379,26 +384,6 @@ export default async function EditStory({
             presetOptionA={pollPreset.optionA}
             presetOptionB={pollPreset.optionB}
           />
-
-          <div className="rounded-xl border border-line bg-surface p-4">
-            <div className={LABEL}>Search visibility</div>
-            <p className="mb-2 text-[12px] text-muted">
-              {s.noindex
-                ? "Hidden from search engines. /v/${slug} emits noindex,nofollow."
-                : "Indexable. /v/${slug} can be crawled and ranked."}
-            </p>
-            <form action={setStoryNoindexAction}>
-              <input type="hidden" name="id" value={s.id} />
-              <input
-                type="hidden"
-                name="noindex"
-                value={s.noindex ? "0" : "1"}
-              />
-              <button className="rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
-                {s.noindex ? "Show in search engines" : "Hide from search engines"}
-              </button>
-            </form>
-          </div>
 
           <MediaRegenPanel
             ownerKind="story"

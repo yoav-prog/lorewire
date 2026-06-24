@@ -1127,6 +1127,45 @@ export async function renderShortLaneC(
   return { ok: true, renderId, plan };
 }
 
+// Single-call "smart re-render" used by the story page's Action Bar.
+// Picks the cheapest lane that covers the user's pending edits (same
+// logic as previewRenderPlan), then queues it. Lets the bar offer one
+// "Re-render" button that does the right thing on every tab without
+// the user having to think about lane A/B/C.
+//
+// Lane A handles both lane="A" and lane="noop" baselines, so this
+// dispatcher never falls into a dead branch — a noop render becomes a
+// forced Lane A assembly with the current state.
+//
+// Plan: _plans/2026-06-25-story-action-bar-and-rail-restructure.md.
+export async function smartRerenderShort(storyId: string): Promise<{
+  ok: boolean;
+  error?: string;
+  renderId?: string;
+  lane?: ShortRenderPlan["lane"];
+}> {
+  await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const planned = await previewRenderPlan(storyId);
+  if (!planned.ok || !planned.plan) {
+    return { ok: false, error: planned.error ?? "could not plan re-render" };
+  }
+  const lane = planned.plan.lane;
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[action bar smart re-render]", { story_id: storyId, lane });
+  if (lane === "C") {
+    const r = await renderShortLaneC(storyId);
+    return { ok: r.ok, error: r.error, renderId: r.renderId, lane };
+  }
+  if (lane === "B") {
+    const r = await renderShortLaneB(storyId);
+    return { ok: r.ok, error: r.error, renderId: r.renderId, lane };
+  }
+  // lane === "A" or "noop" — both route through Lane A.
+  const r = await renderShortLaneA(storyId);
+  return { ok: r.ok, error: r.error, renderId: r.renderId, lane };
+}
+
 export async function revertShortScene(
   storyId: string,
   frameId: string,
