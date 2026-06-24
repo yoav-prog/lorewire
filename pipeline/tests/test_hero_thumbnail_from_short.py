@@ -48,6 +48,7 @@ DONE_SHORT = {
     "props": json.dumps({
         "character_base_url": CHARACTER_URL,
         "scenes": SCENES,
+        "duration_ms": 47_000,
     }),
 }
 
@@ -99,6 +100,9 @@ def _patch_stack(stack: unittest.TestCase, **overrides):
         ),
         "update_video_url": mock.patch.object(
             media.store, "update_story_video_url",
+        ),
+        "update_duration": mock.patch.object(
+            media.store, "update_story_duration",
         ),
     }
     base.update(overrides)
@@ -242,6 +246,49 @@ class HappyPathTests(unittest.TestCase):
                 "abc123", Path(tmp),
             )
         mocks["update_video_url"].assert_not_called()
+        # No video_url write -> no duration write either. stories.duration's
+        # contract is "duration of the currently-applied video"; a skipped
+        # apply must leave both columns untouched.
+        mocks["update_duration"].assert_not_called()
+
+    def test_auto_applies_short_duration_alongside_video_url(self):
+        # The DONE_SHORT fixture carries duration_ms=47000 in its props
+        # blob. After the finisher applies the short as the story's video,
+        # stories.duration must land as the formatted "0:47" so the public
+        # rail thumbnail badge stops painting the legacy "2:00".
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self)
+            media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        mocks["update_duration"].assert_called_once_with("abc123", "0:47")
+
+    def test_skips_duration_apply_when_props_lacks_duration_ms(self):
+        # Older short_renders rows written before duration_ms was added to
+        # the props schema. The video_url apply still runs (it doesn't
+        # depend on duration_ms), but the duration write must be silently
+        # skipped so we don't overwrite the column with an empty / "0:00"
+        # value.
+        short_without_duration = {
+            "status": "done",
+            "output_url": SHORT_OUTPUT_URL,
+            "props": json.dumps({
+                "character_base_url": CHARACTER_URL,
+                "scenes": SCENES,
+            }),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self, latest_short=mock.patch.object(
+                media.store, "latest_short_render_for_story",
+                return_value=short_without_duration,
+            ))
+            media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        mocks["update_video_url"].assert_called_once_with(
+            "abc123", SHORT_OUTPUT_URL,
+        )
+        mocks["update_duration"].assert_not_called()
 
 
 class PartialFailureTests(unittest.TestCase):

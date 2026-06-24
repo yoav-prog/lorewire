@@ -142,7 +142,10 @@ for (const p of PUBLISHED) {
       id: p.id,
       title: p.title || p.id,
       cat,
-      dur: p.dur || "2:00",
+      // Empty string when the export omitted duration — display sites gate
+      // the badge on truthiness so it stays hidden rather than falling back
+      // to the legacy long-form "2:00".
+      dur: p.dur || "",
       match: 90,
       year: p.year || 2026,
       glyph: GLYPH[cat],

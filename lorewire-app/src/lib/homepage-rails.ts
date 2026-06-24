@@ -207,7 +207,11 @@ export function liveRowToStory(row: LiveCatalogStory): Story {
     id: row.id,
     title: (row.title ?? row.id).toUpperCase(),
     cat,
-    dur: row.duration ?? "2:00",
+    // Empty string when unknown — display sites gate the badge on truthiness
+    // so a missing duration shows nothing rather than the historical "2:00"
+    // long-form default. loadLiveCatalog backfills from short_renders when
+    // stories.duration is NULL, so this lands populated for finished shorts.
+    dur: row.duration ?? "",
     match: 90,
     year,
     glyph: GLYPH_BY_CAT[cat],

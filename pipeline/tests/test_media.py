@@ -217,6 +217,53 @@ class MouthSwapEnabledTests(unittest.TestCase):
             get.assert_called_with("video.mouth_swap")
 
 
+class FormatDurationMsTests(unittest.TestCase):
+    def test_sub_minute_pads_seconds_to_two_digits(self):
+        self.assertEqual(media._format_duration_ms(28_400), "0:28")
+        self.assertEqual(media._format_duration_ms(5_000), "0:05")
+
+    def test_multi_minute(self):
+        self.assertEqual(media._format_duration_ms(75_000), "1:15")
+        self.assertEqual(media._format_duration_ms(134_000), "2:14")
+
+    def test_rounds_up_at_minute_boundary(self):
+        # 59.6s rounds the seconds to 60; the helper must roll that into
+        # the minute count instead of emitting a malformed "0:60".
+        self.assertEqual(media._format_duration_ms(59_600), "1:00")
+        self.assertEqual(media._format_duration_ms(119_600), "2:00")
+
+    def test_returns_none_for_zero_negative_or_non_numeric(self):
+        self.assertIsNone(media._format_duration_ms(0))
+        self.assertIsNone(media._format_duration_ms(-1))
+        self.assertIsNone(media._format_duration_ms(None))
+        self.assertIsNone(media._format_duration_ms("nope"))
+
+
+class ShortDurationFromPropsTests(unittest.TestCase):
+    def test_pulls_duration_from_json_string(self):
+        props = '{"duration_ms": 47000}'
+        self.assertEqual(media._short_duration_from_props(props), "0:47")
+
+    def test_pulls_duration_from_already_decoded_dict(self):
+        # Some Postgres adapters auto-decode JSON columns; we accept the
+        # dict form so the caller doesn't need to know which driver is
+        # active.
+        self.assertEqual(
+            media._short_duration_from_props({"duration_ms": 30_000}),
+            "0:30",
+        )
+
+    def test_missing_duration_ms_returns_none(self):
+        self.assertIsNone(media._short_duration_from_props('{"other": 1}'))
+        self.assertIsNone(media._short_duration_from_props("{}"))
+
+    def test_unparseable_or_wrong_shape_returns_none(self):
+        self.assertIsNone(media._short_duration_from_props(None))
+        self.assertIsNone(media._short_duration_from_props("{not json}"))
+        self.assertIsNone(media._short_duration_from_props(42))
+        self.assertIsNone(media._short_duration_from_props("[1, 2, 3]"))
+
+
 class ParseDurationTests(unittest.TestCase):
     def test_minute_second_format(self):
         self.assertEqual(media._parse_duration_to_seconds("2:14"), 134.0)

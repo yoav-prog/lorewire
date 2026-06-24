@@ -15,6 +15,7 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
+import { shortDurationFromPropsJson } from "@/lib/duration";
 
 export type ShortRenderStatus =
   | "queued"
@@ -300,15 +301,33 @@ export async function failShortRender(
 // the 9:16 short instead of the long-form video. The long-form MP4 still exists
 // at its own GCS key (<story>/video.mp4 vs <story>-short/video.mp4), so this is
 // just a pointer swap and is reversible by re-rendering the long-form video.
+//
+// Also writes stories.duration (M:SS) from the render's props.duration_ms when
+// it can be parsed — the rail thumbnail badge reads this directly, and keeping
+// it in lockstep with video_url means a re-rendered short with a different
+// length doesn't display a stale duration. Overwrites unconditionally for the
+// same reason video_url overwrites: stories.duration's contract is "duration
+// of whatever currently plays at video_url", not "admin's free-form note".
+// Pass `null` for `propsJson` to skip the duration write entirely.
 export async function applyShortToStory(
   storyId: string,
   outputUrl: string,
+  propsJson: string | null = null,
 ): Promise<void> {
-  await run(`UPDATE stories SET video_url = ?, updated_at = ? WHERE id = ?`, [
-    outputUrl,
-    new Date().toISOString(),
-    storyId,
-  ]);
+  const now = new Date().toISOString();
+  const duration = shortDurationFromPropsJson(propsJson);
+  if (duration) {
+    await run(
+      `UPDATE stories SET video_url = ?, duration = ?, updated_at = ? WHERE id = ?`,
+      [outputUrl, duration, now, storyId],
+    );
+  } else {
+    await run(`UPDATE stories SET video_url = ?, updated_at = ? WHERE id = ?`, [
+      outputUrl,
+      now,
+      storyId,
+    ]);
+  }
 }
 
 // ─── per-row event timeline (2026-06-15 progress log + Stop / Restart) ───────

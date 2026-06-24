@@ -142,7 +142,9 @@ function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; 
       <div className="absolute left-2.5 top-2.5">
         <span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.32)" }}>{story.cat}</span>
       </div>
-      <div className="absolute right-2 top-2 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
+      {story.dur && (
+        <div className="absolute right-2 top-2 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
+      )}
       {renderCssTitle && (
         <div className="absolute left-3 right-3 bottom-3">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 22, color: "#F5F3EF" }}>{story.title}</h3>
@@ -1435,7 +1437,9 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
         <div className="flex items-center gap-2 mt-3 flex-wrap font-body text-[12.5px]">
           <span className="font-semibold" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
           <span className="text-muted">{story.year}</span>
-          <span className="px-1.5 py-0.5 rounded border border-line text-ink/80 font-mono text-[10px]">{story.dur}</span>
+          {story.dur && (
+            <span className="px-1.5 py-0.5 rounded border border-line text-ink/80 font-mono text-[10px]">{story.dur}</span>
+          )}
           <span className="px-1.5 py-0.5 rounded font-mono text-[10px] uppercase tracking-wider" style={{ background: "rgba(232,70,43,.16)", color: "#E8462B" }}>True</span>
           <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ background: c, color: "#fff" }}>{story.cat}</span>
         </div>
@@ -1608,7 +1612,9 @@ function NewScreen({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog
               <div className="flex-1 min-w-0 py-0.5">
                 <div className="flex items-center gap-2 mb-0.5">
                   <span className="font-mono text-[9px] uppercase tracking-[.16em] px-1.5 py-0.5 rounded" style={{ background: CAT[s.cat], color: "#fff" }}>{s.cat}</span>
-                  <span className="font-mono text-[10px] text-muted">{s.dur}</span>
+                  {s.dur && (
+                    <span className="font-mono text-[10px] text-muted">{s.dur}</span>
+                  )}
                 </div>
                 <h3 className="font-display font-bold uppercase tracking-tightest text-ink text-[15px] leading-[.98] truncate">{s.title}</h3>
                 <p className="font-body text-[12.5px] text-muted leading-snug mt-1 line-clamp-2">{s.syn}</p>
