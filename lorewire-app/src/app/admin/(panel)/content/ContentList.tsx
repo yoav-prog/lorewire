@@ -1856,6 +1856,16 @@ function BulkPublishResultBanner({
 }) {
   const previewFailures = result.failed.slice(0, 6);
   const overflowFailures = result.failed.length - previewFailures.length;
+  // Skipped items carry the same {kind, id, platform, reason?} shape as
+  // failures — surface them too so "Skipped 2" with no detail (the
+  // original UX bug) never wastes operator time. Examples:
+  //   - "no completed short render"
+  //   - "missing YOUTUBE_CHANNEL_ID or YOUTUBE_REFRESH_TOKEN"
+  //   - "missing TIKTOK_OPEN_ID or TIKTOK_REFRESH_TOKEN"
+  //   - "missing env config" (FB / IG when env vars are blank)
+  //   - "articles cannot publish to social"
+  const previewSkipped = result.skipped.slice(0, 6);
+  const overflowSkipped = result.skipped.length - previewSkipped.length;
   return (
     <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
       <div className="flex items-center justify-between gap-3">
@@ -1900,6 +1910,27 @@ function BulkPublishResultBanner({
           {overflowFailures > 0 && (
             <li>…and {overflowFailures} more</li>
           )}
+        </ul>
+      )}
+      {previewSkipped.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Skipped (publisher never tried)
+          </li>
+          {previewSkipped.map((s) => {
+            const r = rowByKey.get(`${s.kind}:${s.id}`);
+            const label = r?.title ?? r?.slug ?? s.id.slice(0, 8);
+            return (
+              <li key={`${s.kind}:${s.id}:${s.platform}`}>
+                <span className="text-ink">{label}</span>
+                <span className="opacity-70">
+                  {" "}
+                  · {PLATFORM_META[s.platform].label} — {s.reason ?? "no reason given"}
+                </span>
+              </li>
+            );
+          })}
+          {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
         </ul>
       )}
     </div>
