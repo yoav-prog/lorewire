@@ -201,7 +201,11 @@ describe("loadSeoMetadata + saveSeoMetadata", () => {
 // --- Default model sanity check ------------------------------------------
 
 describe("DEFAULT_MODEL", () => {
-  it("points at the kie.ai Gemini 3.5 Flash registry id", () => {
-    expect(DEFAULT_MODEL).toBe("kie/gemini-3-5-flash");
+  it("points at a kie.ai model with an OpenAI-compatible chat completions endpoint", () => {
+    // kie.ai's gemini-3-5-flash only exposes Google-native
+    // streamGenerateContent, not chat completions, so the default
+    // landed on gemini-3-pro instead. See seo-metadata.ts for the
+    // full reasoning.
+    expect(DEFAULT_MODEL).toBe("kie/gemini-3-pro");
   });
 });

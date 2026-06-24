@@ -84,15 +84,29 @@ async function openaiChat(model: string, opts: ChatOpts): Promise<ChatResult> {
 }
 
 async function kieChat(model: string, opts: ChatOpts): Promise<ChatResult> {
-  // kie.ai operates as a unified gateway with an OpenAI-compatible chat
-  // completions endpoint. The image-side API at api.kie.ai/api/v1/jobs is
-  // an async createTask pattern; the LLM gateway uses the OpenAI shape at
-  // api.kie.ai/v1/chat/completions. KIE_BASE_URL can override if their
-  // routing ever changes — fail with the upstream body verbatim so the
-  // admin sees exactly what kie's server reported.
+  // kie.ai's OpenAI-compatible chat completions endpoint embeds the
+  // model id in the URL path, NOT in the request body:
+  //   POST https://api.kie.ai/{model}/v1/chat/completions
+  // (verified 2026-06-24 against gemini-3-pro and gemini-2.5-pro docs).
+  // The flat `api.kie.ai/v1/chat/completions` path we used earlier
+  // returns 404 — that pattern never existed; the old code comment
+  // was wrong.
+  //
+  // Caveat: not every kie model exposes chat completions. Some models
+  // (e.g. gemini-3-5-flash) only have the Gemini-native
+  // streamGenerateContent endpoint at /gemini/v1/models/{model}:
+  // streamGenerateContent. Those need a separate code path we don't
+  // ship today — pick a chat-completions-supported model
+  // (gemini-3-pro, gemini-2.5-pro, gemini-3.1-pro) for now.
+  //
+  // KIE_BASE_URL overrides the host (e.g. for a staging proxy) but
+  // the {model}/v1 path suffix stays constant per kie's docs.
+  const host =
+    process.env.KIE_BASE_URL?.trim().replace(/\/$/, "") ||
+    "https://api.kie.ai";
   return openaiCompatibleChat({
     label: "kie",
-    base: process.env.KIE_BASE_URL?.trim() || "https://api.kie.ai/v1",
+    base: `${host}/${model}/v1`,
     apiKey: process.env.KIE_API_KEY?.trim() ?? "",
     apiKeyEnvName: "KIE_API_KEY",
     model,
