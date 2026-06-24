@@ -27,7 +27,8 @@ import {
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
   filterIdsByPublished,
-  resolveHeroStory,
+  pickHeroAtIndex,
+  resolveHeroPool,
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
@@ -35,6 +36,7 @@ import {
   type HomepageInitial,
   type MergedCatalog,
 } from "@/lib/homepage-rails";
+import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import {
   pickRandomPlayable,
   pushShuffleRecent,
@@ -195,65 +197,184 @@ function TopNav({ view, setView, solid, query, setQuery, session }: { view: stri
 }
 
 /* ----------------------------- HERO ----------------------------- */
-function Hero({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn; onShuffle: () => void }) {
+// Rotation interval + crossfade timing for the hero carousel. The
+// fade-in CSS class (globals.css) drives the per-slide fade; this
+// constant only controls the auto-advance cadence.
+const HERO_ROTATION_INTERVAL_MS = 7000;
+
+function Hero({
+  pool,
+  onOpen,
+  onShuffle,
+  onActiveChange,
+}: {
+  pool: Story[];
+  onOpen: OpenFn;
+  onShuffle: () => void;
+  /** Fires whenever the visible slide changes. The outer shell reads it
+   *  via a ref so "Play Something" can exclude the marquee the user is
+   *  currently looking at. */
+  onActiveChange?: (heroId: string) => void;
+}) {
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [hovered, setHovered] = useState(false);
+  const [tabHidden, setTabHidden] = useState(false);
+  const [heroImageOk, setHeroImageOk] = useState(true);
+  const reducedMotion = usePrefersReducedMotion();
+  const sectionRef = useRef<HTMLElement>(null);
+
+  // Reset the image-ok flag whenever the slide changes so a previous
+  // slide's image failure doesn't permanently strip the artwork.
+  useEffect(() => {
+    setHeroImageOk(true);
+  }, [activeIndex]);
+
+  // Tab visibility — pause the auto-advance when the tab is hidden so we
+  // don't burn animation on a backgrounded page.
+  useEffect(() => {
+    const onVis = () => setTabHidden(document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  // Auto-advance. Paused on hover, when the tab is hidden, when the user
+  // prefers reduced motion, or when there's only one slide (or none).
+  useEffect(() => {
+    if (pool.length < 2 || hovered || tabHidden || reducedMotion) return;
+    const id = window.setInterval(() => {
+      setActiveIndex((i) => (i + 1) % pool.length);
+    }, HERO_ROTATION_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [pool.length, hovered, tabHidden, reducedMotion]);
+
+  // Expose the active hero id to the parent so the shuffle exclusion
+  // tracks the visible slide, not just pool[0].
+  useEffect(() => {
+    const active = pool[Math.min(activeIndex, pool.length - 1)];
+    if (active) onActiveChange?.(active.id);
+  }, [activeIndex, pool, onActiveChange]);
+
+  // Preload the next slide's hero image so the crossfade paints a
+  // complete picture, not a half-loaded one.
+  useEffect(() => {
+    if (pool.length < 2) return;
+    const next = pool[(activeIndex + 1) % pool.length];
+    const src = next.heroImageLandscape || next.heroImage;
+    if (!src || typeof window === "undefined") return;
+    const img = new window.Image();
+    img.src = src;
+  }, [activeIndex, pool]);
+
+  // Keyboard arrow-key navigation when the hero region has focus.
+  useEffect(() => {
+    if (pool.length < 2) return;
+    const el = sectionRef.current;
+    if (!el) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setActiveIndex((i) => (i - 1 + pool.length) % pool.length);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setActiveIndex((i) => (i + 1) % pool.length);
+      }
+    };
+    el.addEventListener("keydown", onKey);
+    return () => el.removeEventListener("keydown", onKey);
+  }, [pool.length]);
+
+  const story = pool[Math.min(activeIndex, pool.length - 1)];
+  if (!story) return null;
   const c = CAT[story.cat];
-  const [heroOk, setHeroOk] = useState(true);
-  // Desktop Hero is widescreen — prefer the 16:9 landscape variant when it
-  // exists, fall back to the 3:4 portrait with object-position adjustment
-  // otherwise.
   const heroSrc = story.heroImageLandscape || story.heroImage;
   const isLandscape = !!story.heroImageLandscape;
-  const showHero = !!heroSrc && heroOk;
+  const showHero = !!heroSrc && heroImageOk;
+  const hasRotation = pool.length > 1;
+
   return (
-    <section className="relative h-[82vh] min-h-[620px] w-full overflow-hidden">
-      <div className="absolute inset-0 drift" style={{ background: c }}>
-        {showHero && (
-          <img
-            src={heroSrc}
-            alt=""
-            className="absolute inset-0 w-full h-full object-cover"
-            // Landscape variant fits naturally; portrait fallback needs
-            // object-position to keep characters' faces visible instead of
-            // cropping into bodies.
-            style={isLandscape ? undefined : { objectPosition: "50% 25%" }}
-            onError={() => {
-              setHeroOk(false);
-              console.warn("[lorewire hero err]", { storyId: story.id, src: heroSrc });
-            }}
-          />
-        )}
-        <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(90deg, rgba(10,10,12,.85) 0%, rgba(10,10,12,.55) 25%, rgba(10,10,12,.15) 50%, rgba(10,10,12,.05) 100%), linear-gradient(180deg, rgba(0,0,0,0) 50%, rgba(10,10,12,.85) 100%)" : "radial-gradient(90% 110% at 78% 26%, rgba(255,255,255,.20), rgba(0,0,0,.42) 72%)" }}></div>
-        {!showHero && <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>}
-        {!showHero && <div className="absolute right-[2%] top-[2%] font-display font-black leading-none select-none" style={{ fontSize: 560, color: "rgba(255,255,255,.085)" }}>{story.glyph}</div>}
-      </div>
-      <div className="absolute inset-0" style={{ background: "linear-gradient(90deg,#0A0A0C 8%, rgba(10,10,12,.45) 42%, rgba(10,10,12,0) 72%)" }}></div>
-      <div className="absolute inset-x-0 bottom-0 h-44" style={{ background: "linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)" }}></div>
-      <div className="relative h-full max-w-[1600px] mx-auto px-10 flex items-end pb-24">
-        <div className="max-w-[620px]">
-          <div className="flex items-center gap-2.5 mb-4">
-            <span className="w-[3px] h-4 bg-accent rounded-full"></span>
-            <span className="font-mono text-[11px] uppercase tracking-[.36em] text-ink/90">LoreWire Original</span>
-          </div>
-          <h1 className="font-display font-black uppercase tracking-tightest leading-[.88] text-ink ink-shadow" style={{ fontSize: 84 }}>{story.title}</h1>
-          <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
-            <span className="font-semibold text-[15px]" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
-            <span className="text-muted">·</span><span className="text-ink/80 text-[15px]">{story.year}</span>
-            {story.dur && (
-              <>
-                <span className="text-muted">·</span>
-                <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
-              </>
-            )}
-            {story.tags.slice(0, 2).map((t) => <span key={t} className="font-body text-[14px] text-ink/80">· {t}</span>)}
-          </div>
-          <p className="font-body text-[17px] leading-relaxed text-ink/85 mt-5 max-w-[540px]">{story.syn}</p>
-          <div className="flex items-center gap-3 mt-7">
-            <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center gap-2.5 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]"><PlayI size={24} /> Play</button>
-            <button onClick={() => onOpen(story.id)} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> More Info</button>
-            <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Play Something</button>
+    <section
+      ref={sectionRef}
+      className="relative h-[82vh] min-h-[620px] w-full overflow-hidden"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      tabIndex={hasRotation ? 0 : undefined}
+      role={hasRotation ? "region" : undefined}
+      aria-roledescription={hasRotation ? "carousel" : undefined}
+      aria-label={hasRotation ? "Featured stories" : undefined}
+    >
+      {/* Keyed wrapper so each slide animates in via the existing fade-in
+          CSS class. React unmounts the old slide and mounts the new one,
+          which restarts the animation cleanly. */}
+      <div key={story.id} className="absolute inset-0 fade-in">
+        <div className="absolute inset-0 drift" style={{ background: c }}>
+          {showHero && (
+            <img
+              src={heroSrc}
+              alt=""
+              className="absolute inset-0 w-full h-full object-cover"
+              // Landscape variant fits naturally; portrait fallback needs
+              // object-position to keep characters' faces visible.
+              style={isLandscape ? undefined : { objectPosition: "50% 25%" }}
+              onError={() => {
+                setHeroImageOk(false);
+                console.warn("[lorewire hero err]", { storyId: story.id, src: heroSrc });
+              }}
+            />
+          )}
+          <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(90deg, rgba(10,10,12,.85) 0%, rgba(10,10,12,.55) 25%, rgba(10,10,12,.15) 50%, rgba(10,10,12,.05) 100%), linear-gradient(180deg, rgba(0,0,0,0) 50%, rgba(10,10,12,.85) 100%)" : "radial-gradient(90% 110% at 78% 26%, rgba(255,255,255,.20), rgba(0,0,0,.42) 72%)" }}></div>
+          {!showHero && <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>}
+          {!showHero && <div className="absolute right-[2%] top-[2%] font-display font-black leading-none select-none" style={{ fontSize: 560, color: "rgba(255,255,255,.085)" }}>{story.glyph}</div>}
+        </div>
+        <div className="absolute inset-0" style={{ background: "linear-gradient(90deg,#0A0A0C 8%, rgba(10,10,12,.45) 42%, rgba(10,10,12,0) 72%)" }}></div>
+        <div className="absolute inset-x-0 bottom-0 h-44" style={{ background: "linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)" }}></div>
+        <div className="relative h-full max-w-[1600px] mx-auto px-10 flex items-end pb-24">
+          <div className="max-w-[620px]" aria-live="polite">
+            <div className="flex items-center gap-2.5 mb-4">
+              <span className="w-[3px] h-4 bg-accent rounded-full"></span>
+              <span className="font-mono text-[11px] uppercase tracking-[.36em] text-ink/90">LoreWire Original</span>
+            </div>
+            <h1 className="font-display font-black uppercase tracking-tightest leading-[.88] text-ink ink-shadow" style={{ fontSize: 84 }}>{story.title}</h1>
+            <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
+              <span className="font-semibold text-[15px]" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
+              <span className="text-muted">·</span><span className="text-ink/80 text-[15px]">{story.year}</span>
+              {story.dur && (
+                <>
+                  <span className="text-muted">·</span>
+                  <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
+                </>
+              )}
+              {story.tags.slice(0, 2).map((t) => <span key={t} className="font-body text-[14px] text-ink/80">· {t}</span>)}
+            </div>
+            <p className="font-body text-[17px] leading-relaxed text-ink/85 mt-5 max-w-[540px]">{story.syn}</p>
+            <div className="flex items-center gap-3 mt-7">
+              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center gap-2.5 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]"><PlayI size={24} /> Play</button>
+              <button onClick={() => onOpen(story.id)} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> More Info</button>
+              <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Play Something</button>
+            </div>
           </div>
         </div>
       </div>
+
+      {hasRotation && (
+        <div className="absolute right-10 bottom-7 z-20 flex items-center gap-2">
+          {pool.map((s, i) => (
+            <button
+              key={s.id}
+              onClick={() => setActiveIndex(i)}
+              aria-label={`Show slide ${i + 1} of ${pool.length}`}
+              aria-current={i === activeIndex}
+              className="rounded-full transition-all"
+              style={{
+                width: i === activeIndex ? 22 : 8,
+                height: 8,
+                background:
+                  i === activeIndex ? "rgba(255,255,255,.95)" : "rgba(255,255,255,.36)",
+                border: "1px solid rgba(0,0,0,.18)",
+              }}
+            />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -1261,6 +1382,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
 function HomePage({
   onOpen,
   onShuffle,
+  onHeroActiveChange,
   curation,
   behavior,
   catalog,
@@ -1269,6 +1391,7 @@ function HomePage({
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
+  onHeroActiveChange?: (heroId: string) => void;
   curation: ReturnType<typeof useHomepageCuration>["curation"];
   behavior: ReturnType<typeof useHomepageCuration>["behavior"];
   catalog: ReturnType<typeof useHomepageCuration>["catalog"];
@@ -1293,10 +1416,11 @@ function HomePage({
   // resolveRailIds is: admin curation → user state → catalog fallback.
   const continueState = useContinueReading();
 
-  // Hero resolution lives in lib/homepage-rails so the outer shell's
-  // shuffle can read the same answer and exclude the current marquee from
-  // a random play pick.
-  const heroStory = resolveHeroStory(curation, behavior, catalog, resolveStory);
+  // Hero rotation pool (capacity 8). The shell uses the pool count for
+  // its [home render] log and onHeroActiveChange to keep the shuffle's
+  // hero-exclusion tracking the visible slide (not just pool[0]).
+  const heroPool = resolveHeroPool(curation, behavior, catalog, resolveStory);
+  const heroStory = pickHeroAtIndex(heroPool, 0);
 
   // Each rail flows through filterIdsByPublished AFTER resolveRailIds so
   // curated and fallback paths are both gated identically. Empty results
@@ -1320,7 +1444,7 @@ function HomePage({
   console.info("[home render]", {
     shell: "desktop",
     total_catalog: catalog.array.length,
-    hero: heroStory ? 1 : 0,
+    hero_pool: heroPool.length,
     continue: continueIds.length,
     top10: top10Ids.length,
     new_row: newRowIds.length,
@@ -1328,8 +1452,15 @@ function HomePage({
 
   return (
     <div className="pb-20">
-      {heroStory && <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />}
-      <div className={heroStory ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
+      {heroPool.length > 0 && (
+        <Hero
+          pool={heroPool}
+          onOpen={onOpen}
+          onShuffle={onShuffle}
+          onActiveChange={onHeroActiveChange}
+        />
+      )}
+      <div className={heroPool.length > 0 ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
         {continueIds.length > 0 && (
           <Rail title="Continue Watching">
             {continueIds.map((id) => {
@@ -1484,6 +1615,16 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
   // at 50 by the engagement-store.
   const { recordView } = useRecentlyViewed();
 
+  // Tracks the currently visible hero slide. The Hero carousel rotates
+  // through pool ids; the shuffle below reads this ref to exclude the
+  // visible slide (not just pool[0]) so a click never replays what's
+  // already on screen. Using a ref keeps the carousel's auto-advance
+  // from re-rendering the outer shell every 7s.
+  const heroActiveIdRef = useRef<string | null>(null);
+  const onHeroActiveChange = useCallback((heroId: string) => {
+    heroActiveIdRef.current = heroId;
+  }, []);
+
   // Hoisted curation + live-catalog hook. HomePage reads it through props
   // instead of calling the hook itself so every grid (Browse / New & Hot /
   // My List) can share resolveStory and resolve real-short ids saved
@@ -1521,8 +1662,16 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
   // click never replays what the user is already looking at; sessionStorage
   // recents soften repeats when inventory is thin.
   const shuffle = () => {
+    // Prefer the carousel's currently-visible slide (set by the Hero via
+    // onHeroActiveChange). Fall back to pool[0] when the carousel hasn't
+    // mounted yet (first paint, before useEffect runs).
     const heroId =
-      resolveHeroStory(curation, behavior, catalog, resolveStory)?.id ?? null;
+      heroActiveIdRef.current ??
+      pickHeroAtIndex(
+        resolveHeroPool(curation, behavior, catalog, resolveStory),
+        0,
+      )?.id ??
+      null;
     const recents = readShuffleRecents();
     const pickedId = pickRandomPlayable({
       catalog: catalog.array,
@@ -1551,6 +1700,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         <HomePage
           onOpen={open}
           onShuffle={shuffle}
+          onHeroActiveChange={onHeroActiveChange}
           curation={curation}
           behavior={behavior}
           catalog={catalog}
