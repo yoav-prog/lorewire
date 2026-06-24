@@ -99,6 +99,30 @@ describe("createComment — validation", () => {
     if (!r.ok) expect(r.httpStatus).toBe(404);
   });
 
+  it("accepts a comment on a published article whose published_at is null", async () => {
+    // Regression: older rows can be status='published' with a null
+    // published_at (the publish path didn't always backfill it). The reader
+    // serves these articles, so the comment gate must too — otherwise the UI
+    // shows the composer and every Post returns "This article isn't open for
+    // comments."
+    const id = randomUUID();
+    await run(
+      `INSERT INTO articles (id, language, slug, title, status, published_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        "en",
+        `slug-${id.slice(0, 8)}`,
+        "Legacy published article",
+        "published",
+        null,
+        new Date().toISOString(),
+      ],
+    );
+    const r = await createComment({ articleId: id, guestName: "Sam", body: "hi", ...base });
+    expect(r.ok).toBe(true);
+  });
+
   it("refuses a comment on a missing article", async () => {
     const r = await createComment({
       articleId: "does-not-exist",
