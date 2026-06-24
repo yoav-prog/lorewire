@@ -31,7 +31,9 @@ import { resolveShortSegments } from "@/lib/short-segments";
 import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
 import { rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
 import { publishShortToFacebook } from "@/lib/publish-to-facebook";
+import { publishShortToFacebookStory } from "@/lib/publish-to-facebook-story";
 import { publishShortToInstagram } from "@/lib/publish-to-instagram";
+import { publishShortToInstagramStory } from "@/lib/publish-to-instagram-story";
 import { publishShortToYouTube } from "@/lib/publish-to-youtube";
 import { publishShortToTikTok } from "@/lib/publish-to-tiktok";
 import { ensureSeoMetadataForStory } from "@/lib/seo-metadata";
@@ -355,6 +357,40 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       });
     },
   );
+  // Best-effort cross-post to FB Stories. Independent toggle
+  // (publisher.facebook.auto_publish_story, default off). Same
+  // gating + dedup + retry-cron shape as the FB Reel publish above,
+  // failures land in facebook_stories. Plan:
+  // _plans/2026-06-25-instagram-facebook-stories-cross-publish.md.
+  await publishShortToFacebookStory({
+    storyId: claimed.story_id,
+    renderId: claimed.id,
+    videoUrl: result.url,
+    trigger: "auto",
+  }).catch((err) => {
+    namespacedLog("facebook_story_publish_unhandled", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      err: String(err),
+    });
+  });
+  // Best-effort cross-post to IG Stories. Independent toggle
+  // (publisher.instagram.auto_publish_story, default off). Same
+  // gating + dedup + retry-cron shape; failures land in
+  // instagram_stories. Plan:
+  // _plans/2026-06-25-instagram-facebook-stories-cross-publish.md.
+  await publishShortToInstagramStory({
+    storyId: claimed.story_id,
+    renderId: claimed.id,
+    videoUrl: result.url,
+    trigger: "auto",
+  }).catch((err) => {
+    namespacedLog("instagram_story_publish_unhandled", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      err: String(err),
+    });
+  });
   // Best-effort auto-publish to the LoreWire YouTube channel. Same
   // shape as the FB / IG hooks above: gated by its own toggle,
   // dedup'd at story level, failures land in youtube_posts for the
