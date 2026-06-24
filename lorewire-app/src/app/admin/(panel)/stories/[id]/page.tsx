@@ -10,7 +10,6 @@ import {
 } from "@/lib/repo";
 import {
   loadHeroStyleSettings,
-  saveStory,
   saveStoryHeroStyleAction,
   setStoryOverrideAction,
   setStoryNoindexAction,
@@ -29,9 +28,7 @@ import {
   type GranularItem,
 } from "@/app/admin/(panel)/_components/GranularRegenGrid";
 import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel";
-import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StatusStepIndicator } from "./StatusStepIndicator";
-import { StoryAspectControl } from "./StoryAspectControl";
 import { PollEditor } from "./PollEditor";
 import {
   getPollByStoryId,
@@ -49,21 +46,28 @@ import { VoicePicker } from "@/components/voice-picker/VoicePicker";
 import { listVoices } from "@/lib/voice-library";
 import { one } from "@/lib/db";
 import StoryCommentsToggle from "./StoryCommentsToggle";
+import { OverviewTab } from "./OverviewTab";
+import { StoryTabBar } from "./StoryTabBar";
+import { resolveStoryTab, STORY_TABS, type StoryTabId } from "./tabs";
 
-const FIELD =
-  "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
 
 export default async function EditStory({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ tab?: string | string[] }>;
 }) {
   await requireCapability("content.manage");
-  const { id } = await params;
+  const [{ id }, sp] = await Promise.all([params, searchParams]);
+  const activeTab = resolveStoryTab(sp.tab);
   const s = await getStory(id);
   if (!s) notFound();
+
+  // eslint-disable-next-line no-console -- rule 14 (observability)
+  console.info("[unified editor mount]", { storyId: s.id, activeTab });
 
   // Hero style snapshot (global default + every per-category default +
   // every pre-generated thumbnail URL) — one round trip drives the
@@ -293,92 +297,24 @@ export default async function EditStory({
         </span>
       </div>
 
+      <StoryTabBar storyId={s.id} activeTab={activeTab} />
+
       <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
-        {/* Editor */}
-        <form action={saveStory} className="space-y-4">
-          <input type="hidden" name="id" value={s.id} />
-
-          <div>
-            <label className={LABEL}>Title</label>
-            <input name="title" defaultValue={s.title ?? ""} className={FIELD} />
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_180px]">
-            <div>
-              <label className={LABEL}>Category</label>
-              <CategoryChipGroup
-                name="category"
-                initial={s.category ?? "Entitled"}
-              />
-            </div>
-            <div>
-              <label className={LABEL}>Duration</label>
-              <input
-                name="duration"
-                defaultValue={s.duration ?? ""}
-                placeholder="2:14"
-                className={FIELD}
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className={LABEL}>Aspect ratio</label>
-            <StoryAspectControl
-              storyId={s.id}
+        {/* Active tab content */}
+        <div className="min-w-0">
+          {activeTab === "overview" ? (
+            <OverviewTab
+              story={s}
               initialAspect={initialAspect}
-              globalDefault={!aspectIsOverride}
+              aspectIsOverride={aspectIsOverride}
             />
-          </div>
+          ) : (
+            <ComingSoonTab tabId={activeTab} storyId={s.id} />
+          )}
+        </div>
 
-          <div>
-            <label className={LABEL}>Source URL</label>
-            <input
-              name="source_url"
-              defaultValue={s.source_url ?? ""}
-              className={FIELD}
-            />
-          </div>
-
-          <div>
-            <label className={LABEL}>Synopsis</label>
-            <textarea
-              name="summary"
-              defaultValue={s.summary ?? ""}
-              rows={2}
-              className={FIELD}
-            />
-          </div>
-
-          <div>
-            <label className={LABEL}>Article body</label>
-            <textarea
-              name="body"
-              defaultValue={s.body ?? ""}
-              rows={16}
-              className={`${FIELD} font-body leading-relaxed`}
-            />
-          </div>
-
-          <div>
-            <label className={LABEL}>Read-along script</label>
-            <textarea
-              name="teleprompter"
-              defaultValue={s.teleprompter ?? ""}
-              rows={6}
-              className={FIELD}
-            />
-          </div>
-
-          <button
-            type="submit"
-            className="rounded-lg bg-accent px-5 py-2.5 font-semibold text-bg transition-opacity hover:opacity-90"
-          >
-            Save changes
-          </button>
-        </form>
-
-        {/* Sidebar */}
+        {/* Sidebar — constant across all tabs (the right rail keeps the
+            per-story controls available no matter which tab is open). */}
         <aside className="space-y-4">
           <div className="rounded-xl border border-line bg-surface p-4">
             <div className={`${LABEL} mb-3`}>Status</div>
@@ -579,6 +515,36 @@ export default async function EditStory({
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function ComingSoonTab({
+  tabId,
+  storyId,
+}: {
+  tabId: StoryTabId;
+  storyId: string;
+}) {
+  const label = STORY_TABS.find((t) => t.id === tabId)?.label ?? tabId;
+  return (
+    <div className="rounded-xl border border-dashed border-line bg-surface p-8 text-center">
+      <div className="font-mono text-[11px] uppercase tracking-wider text-muted">
+        {label}
+      </div>
+      <p className="mt-2 text-[13px] text-ink">
+        This tab is being ported into the unified editor.
+      </p>
+      <p className="mt-1 text-[12px] text-muted">
+        While we finish the port, this surface still lives at{" "}
+        <Link
+          href={`/admin/shorts/${storyId}`}
+          className="text-accent hover:underline"
+        >
+          the standalone short editor
+        </Link>
+        .
+      </p>
     </div>
   );
 }
