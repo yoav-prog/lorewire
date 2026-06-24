@@ -483,6 +483,29 @@ export interface RailUserOverrides {
   continue?: string[];
 }
 
+// Surfaces that AUGMENT (curated ids pin at the front, fallback fills the
+// rest). The 2026-06-24 user feedback was: "curating 2 Dramas should mean
+// those 2 lead the rail, not that the entire rail is exactly those 2."
+// Augmenting matches that intuition AND makes thin curations self-heal —
+// a forgotten 2-pick curation from months ago no longer silently shrinks
+// the rail to 2.
+//
+// `hero` keeps replace semantics — it's a single pick by definition; an
+// "augmented" hero rail makes no sense. `continue` also keeps its own
+// resolution chain (curation → user override → fallback, no mixing)
+// because the rail's promise is "your progress," not "editorial picks
+// mixed with your progress."
+const AUGMENTING_SURFACES = new Set<keyof HomepageCuration>([
+  "top10",
+  "new_row",
+  "entitled_row",
+  "humor_row",
+  "wholesome_row",
+  "dating_row",
+  "roommate_row",
+  "drama_row",
+]);
+
 export function resolveRailIds(
   surface: keyof HomepageCuration,
   curation: HomepageCuration | null,
@@ -491,26 +514,65 @@ export function resolveRailIds(
   userOverrides?: RailUserOverrides,
 ): string[] | null {
   const curated = curation?.[surface] ?? [];
-  if (curated.length > 0) return curated;
-  if (
-    surface === "continue" &&
-    userOverrides?.continue &&
-    userOverrides.continue.length > 0
-  ) {
-    // eslint-disable-next-line no-console -- rule 14
-    console.info("[lorewire curation user-continue]", {
-      surface,
-      count: userOverrides.continue.length,
-    });
-    return userOverrides.continue;
+
+  // Continue Watching: personalized chain — curation OR user override OR
+  // fallback, never mixed. Editorial picks shouldn't blend into a user's
+  // own progress list; the user's localStorage state IS the rail's truth.
+  if (surface === "continue") {
+    if (curated.length > 0) return curated;
+    if (userOverrides?.continue && userOverrides.continue.length > 0) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[lorewire curation user-continue]", {
+        surface,
+        count: userOverrides.continue.length,
+      });
+      return userOverrides.continue;
+    }
+    if (curation && behavior.emptyRailBehavior === "hide") {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[lorewire curation hide]", { surface, reason: "empty" });
+      return null;
+    }
+    return fallbackIdsForSurface(surface, catalog.array);
   }
-  if (curation && behavior.emptyRailBehavior === "hide") {
+
+  // Hero: single-pick contract. Augmenting makes no sense. Curated wins
+  // when present; otherwise fallback's first published; otherwise hide
+  // (when the admin explicitly opted into hide-when-empty).
+  if (surface === "hero") {
+    if (curated.length > 0) return curated;
+    if (curation && behavior.emptyRailBehavior === "hide") return null;
+    return fallbackIdsForSurface(surface, catalog.array);
+  }
+
+  // Discovery rails (top10 / new_row / category rails): curated ids pin
+  // at the front, fallback fills the rest. Empty + hide still wins so the
+  // admin's explicit "no fallback for this rail" setting is honored.
+  if (
+    AUGMENTING_SURFACES.has(surface) &&
+    curated.length === 0 &&
+    curation &&
+    behavior.emptyRailBehavior === "hide"
+  ) {
     // eslint-disable-next-line no-console -- rule 14
     console.info("[lorewire curation hide]", { surface, reason: "empty" });
     return null;
   }
   const fallback = fallbackIdsForSurface(surface, catalog.array);
-  if (curation) {
+  const curatedSet = new Set(curated);
+  const augmented = [
+    ...curated,
+    ...fallback.filter((id) => !curatedSet.has(id)),
+  ];
+  if (curation && curated.length > 0) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[lorewire curation augment]", {
+      surface,
+      curated: curated.length,
+      fallback_added: augmented.length - curated.length,
+      total: augmented.length,
+    });
+  } else if (curation) {
     // eslint-disable-next-line no-console -- rule 14
     console.info("[lorewire curation fallback]", {
       surface,
@@ -518,7 +580,7 @@ export function resolveRailIds(
       fallback_count: fallback.length,
     });
   }
-  return fallback;
+  return augmented;
 }
 
 /** Single source of truth for resolving the current homepage hero. HomePage
