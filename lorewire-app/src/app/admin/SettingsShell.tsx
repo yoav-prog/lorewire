@@ -12,6 +12,7 @@ export type SettingsCategory =
   | "models"
   | "voiceovers"
   | "seo"
+  | "socials"
   | "intros";
 
 type CategoryDef = {
@@ -45,6 +46,13 @@ const CATEGORIES: CategoryDef[] = [
     label: "SEO",
     href: "/admin/seo",
     description: "Site identity, social cards, and search engine defaults.",
+  },
+  {
+    key: "socials",
+    label: "Socials",
+    href: "/admin/settings/socials",
+    description:
+      "Per-platform auto-publish defaults: Facebook, Instagram, YouTube, TikTok.",
   },
   {
     key: "intros",

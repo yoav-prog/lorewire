@@ -22,11 +22,15 @@ import { ScriptTab } from "./ScriptTab";
 import { UseShortAsVideoButton } from "./UseShortAsVideoButton";
 import { PublishToFacebookButton } from "./PublishToFacebookButton";
 import { PublishToInstagramButton } from "./PublishToInstagramButton";
+import { PublishToTikTokButton } from "./PublishToTikTokButton";
+import { PublishToYouTubeButton } from "./PublishToYouTubeButton";
 import { ShortPreviewPlayer } from "./ShortPreviewPlayer";
 import { VoiceTab } from "./VoiceTab";
 import type { LinkedArticleSummary } from "./actions";
 import type { FacebookPostRow } from "@/lib/publish-to-facebook";
 import type { InstagramPostRow } from "@/lib/publish-to-instagram";
+import type { TikTokPostRow } from "@/lib/publish-to-tiktok";
+import type { YouTubePostRow } from "@/lib/publish-to-youtube";
 import {
   claimShortEditSession,
   heartbeatShortEditSession,
@@ -70,6 +74,8 @@ export function ShortEditorClient({
   linkedArticles,
   initialFacebookPost,
   initialInstagramPost,
+  initialYouTubePost,
+  initialTikTokPost,
 }: {
   storyId: string;
   initialConfig: ShortConfig;
@@ -90,6 +96,10 @@ export function ShortEditorClient({
   initialFacebookPost: FacebookPostRow | null;
   /** Same as initialFacebookPost but for the Instagram button. */
   initialInstagramPost: InstagramPostRow | null;
+  /** Same as initialFacebookPost but for the YouTube button. */
+  initialYouTubePost: YouTubePostRow | null;
+  /** Same as initialFacebookPost but for the TikTok button. */
+  initialTikTokPost: TikTokPostRow | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabId>("scenes");
@@ -292,6 +302,24 @@ export function ShortEditorClient({
               !initialRender.output_url
             }
             initialPost={initialInstagramPost}
+          />
+          <PublishToYouTubeButton
+            storyId={storyId}
+            disabled={
+              initialRender === null ||
+              initialRender.status !== "done" ||
+              !initialRender.output_url
+            }
+            initialPost={initialYouTubePost}
+          />
+          <PublishToTikTokButton
+            storyId={storyId}
+            disabled={
+              initialRender === null ||
+              initialRender.status !== "done" ||
+              !initialRender.output_url
+            }
+            initialPost={initialTikTokPost}
           />
         </div>
 

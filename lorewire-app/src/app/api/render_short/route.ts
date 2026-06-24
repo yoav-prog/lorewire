@@ -32,6 +32,8 @@ import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
 import { rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
 import { publishShortToFacebook } from "@/lib/publish-to-facebook";
 import { publishShortToInstagram } from "@/lib/publish-to-instagram";
+import { publishShortToYouTube } from "@/lib/publish-to-youtube";
+import { publishShortToTikTok } from "@/lib/publish-to-tiktok";
 
 // A short runs kie image generation + Remotion render, the longest job in the
 // app, so override undici's 300s default timeouts. Vercel Pro's 800s cron cap is
@@ -336,6 +338,40 @@ async function serve(req: NextRequest): Promise<NextResponse> {
       });
     },
   );
+  // Best-effort auto-publish to the LoreWire YouTube channel. Same
+  // shape as the FB / IG hooks above: gated by its own toggle,
+  // dedup'd at story level, failures land in youtube_posts for the
+  // retry cron, never breaks the render route response. Plan:
+  // _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
+  await publishShortToYouTubeForRender(
+    claimed.story_id,
+    claimed.id,
+    result.url,
+    story,
+  ).catch((err) => {
+    namespacedLog("youtube_publish_unhandled", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      err: String(err),
+    });
+  });
+  // Best-effort auto-publish to the LoreWire TikTok account. Until
+  // TikTok approves the Content Posting API audit, this lands in the
+  // LoreWire TikTok app Inbox (drafts mode); after audit it goes live
+  // directly. Same gating + dedup + retry-cron shape. Plan:
+  // _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
+  await publishShortToTikTokForRender(
+    claimed.story_id,
+    claimed.id,
+    result.url,
+    story,
+  ).catch((err) => {
+    namespacedLog("tiktok_publish_unhandled", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      err: String(err),
+    });
+  });
   return NextResponse.json({
     drained: 1,
     render_id: claimed.id,
@@ -405,6 +441,75 @@ async function publishShortToInstagramForRender(
       hook: null,
       title: story?.title ?? null,
       article_url: articleUrl,
+    },
+  });
+}
+
+/** YouTube mirror of the FB/IG `*ForRender` helpers. Builds the metadata
+ *  context (story title + category + article URL) and dispatches to
+ *  publishShortToYouTube with `trigger: 'auto'`. The YT publisher
+ *  resolves title / description / tags from the templates in the
+ *  Socials settings + the per-category overrides. The category token
+ *  picks up the story.category column. Article lookup is best-effort:
+ *  a missing article falls back to the lorewire homepage. */
+async function publishShortToYouTubeForRender(
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+  story: Awaited<ReturnType<typeof getStory>>,
+): Promise<void> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  const articleUrl = article
+    ? `${origin}/articles/${article.language}/${article.slug}`
+    : origin;
+  await publishShortToYouTube({
+    storyId,
+    renderId,
+    videoUrl,
+    trigger: "auto",
+    context: {
+      hook: null,
+      title: story?.title ?? null,
+      article_url: articleUrl,
+      category: story?.category ?? null,
+    },
+  });
+}
+
+/** TikTok mirror. The TT publisher runs the OAuth refresh → creator
+ *  info query → init → poll pipeline against the Content Posting
+ *  API. post_mode (inbox vs direct) is read from settings inside
+ *  the publisher; this helper just supplies the per-render data. */
+async function publishShortToTikTokForRender(
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+  story: Awaited<ReturnType<typeof getStory>>,
+): Promise<void> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  const articleUrl = article
+    ? `${origin}/articles/${article.language}/${article.slug}`
+    : origin;
+  await publishShortToTikTok({
+    storyId,
+    renderId,
+    videoUrl,
+    trigger: "auto",
+    context: {
+      hook: null,
+      title: story?.title ?? null,
+      article_url: articleUrl,
+      category: story?.category ?? null,
     },
   });
 }

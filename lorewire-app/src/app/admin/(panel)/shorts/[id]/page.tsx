@@ -20,6 +20,8 @@ import {
 import {
   getLatestFacebookPostForStoryAction,
   getLatestInstagramPostForStoryAction,
+  getLatestTikTokPostForStoryAction,
+  getLatestYouTubePostForStoryAction,
   listArticlesLinkedToStoryAction,
   loadShortEditorState,
 } from "./actions";
@@ -46,6 +48,8 @@ export default async function ShortEditorPage({
     articlesResult,
     latestFacebookPost,
     latestInstagramPost,
+    latestYouTubePost,
+    latestTikTokPost,
   ] = await Promise.all([
     loadShortEditorState(id),
     listVoices().catch((err) => {
@@ -74,6 +78,22 @@ export default async function ShortEditorPage({
     getLatestInstagramPostForStoryAction(id).catch((err) => {
       // eslint-disable-next-line no-console -- rule 14
       console.warn("[short editor page] latest instagram post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    // YouTube button.
+    getLatestYouTubePostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest youtube post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    // TikTok button.
+    getLatestTikTokPostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest tiktok post lookup failed", {
         err: String(err),
       });
       return null;
@@ -186,6 +206,8 @@ export default async function ShortEditorPage({
           linkedArticles={linkedArticles}
           initialFacebookPost={latestFacebookPost}
           initialInstagramPost={latestInstagramPost}
+          initialYouTubePost={latestYouTubePost}
+          initialTikTokPost={latestTikTokPost}
         />
       )}
     </div>
