@@ -2590,6 +2590,32 @@ def update_story_video_url(story_id: str, url: str) -> None:
         )
 
 
+def update_story_duration(story_id: str, duration: str) -> None:
+    """Patch stories.duration (M:SS string). Written by the hero+thumbnail
+    finisher alongside `update_story_video_url` so the public rail thumbnail
+    badge ("DRAMA / 0:42") reflects the actual length of whatever currently
+    plays at stories.video_url. Overwrites unconditionally for the same reason
+    video_url overwrites: this column's contract is "duration of the currently-
+    applied video", not "admin's free-form note". Mirror of the TS
+    `applyShortToStory` write at lib/short-render-queue.ts."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET duration = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (duration, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET duration = ?, updated_at = ? WHERE id = ?",
+            (duration, now, story_id),
+        )
+
+
 def update_story_thumbnail(story_id: str, url: str) -> None:
     """Patch stories.thumbnail_image (3:4 portrait). Written by the
     hero+thumbnail finisher after a short completes. Sibling of

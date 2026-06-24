@@ -370,7 +370,7 @@ export async function useShortAsStoryVideo(
   if (render.status !== "done" || !render.output_url) {
     return { ok: false, error: "short-not-ready" };
   }
-  await applyShortToStory(storyId, render.output_url);
+  await applyShortToStory(storyId, render.output_url, render.props);
   // eslint-disable-next-line no-console -- rule 14
   console.info("[short apply-to-story]", {
     story_id: storyId,

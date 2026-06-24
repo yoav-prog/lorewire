@@ -1182,7 +1182,7 @@ export async function applyLatestShortToStoryAction(storyId: string): Promise<{
     return { ok: false, error: "latest short is not done" };
   }
   const previousUrl = story.video_url ?? null;
-  await applyShortToStory(storyId, latest.output_url);
+  await applyShortToStory(storyId, latest.output_url, latest.props);
   // Defense-in-depth: re-read the row and confirm video_url actually
   // landed. If a constraint or trigger silently dropped the write the
   // user would otherwise see "Applied ✓" forever on a no-op — surface

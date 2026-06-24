@@ -99,6 +99,44 @@ SCENE_TARGET_SECONDS_PER_SCENE_MAX = 30.0
 DEFAULT_IMAGE_COUNT = 4
 
 
+def _format_duration_ms(duration_ms: object) -> str | None:
+    """Format a millisecond duration as "M:SS" for stories.duration. Returns
+    None on missing / non-numeric / non-positive input so the caller can skip
+    the write rather than land an empty or malformed value. Mirrors the TS
+    `formatDurationMs` helper at lorewire-app/src/lib/duration.ts."""
+    try:
+        ms = float(duration_ms)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0:
+        return None
+    seconds = ms / 1000.0
+    m = int(seconds // 60)
+    s = round(seconds - m * 60)
+    if s == 60:
+        return f"{m + 1}:00"
+    return f"{m}:{s:02d}"
+
+
+def _short_duration_from_props(props: object) -> str | None:
+    """Pull duration_ms out of a short_renders.props blob and format as
+    "M:SS". The column is TEXT in the DB; cursors return it as a string we
+    parse, but a fetch that's already decoded the JSON (some test paths)
+    passes a dict here. Either is fine; anything else returns None."""
+    if isinstance(props, str):
+        try:
+            parsed = json.loads(props)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(props, dict):
+        parsed = props
+    else:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return _format_duration_ms(parsed.get("duration_ms"))
+
+
 def _parse_duration_to_seconds(duration: str | None) -> float | None:
     """Parse a `M:SS` or `H:MM:SS` duration string into seconds. Returns
     None on missing / malformed input so the caller can fall through to
@@ -1548,6 +1586,19 @@ def _build_hero_and_thumbnail_from_short(
             f"[hero+thumb from-short] id={safe_id} auto-applied short as "
             f"stories.video_url={short_output_url}"
         )
+        # Mirror duration alongside video_url so the public rail thumbnail
+        # badge reads the real ~30-60s short length instead of falling back
+        # to the legacy "2:00" long-form default. Same contract as the TS
+        # `applyShortToStory` write: overwrite unconditionally because
+        # stories.duration tracks "the currently-applied video's length",
+        # not "admin's free-form note".
+        short_duration = _short_duration_from_props(latest.get("props"))
+        if short_duration:
+            store.update_story_duration(story["id"], short_duration)
+            print(
+                f"[hero+thumb from-short] id={safe_id} auto-applied short "
+                f"duration as stories.duration={short_duration}"
+            )
 
     # 2026-06-24 resumability: when a Vercel function kill caused this
     # image_renders row to be reclaimed, the previous tick already

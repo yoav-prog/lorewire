@@ -80,7 +80,12 @@ def main() -> None:
             "id": r["id"],
             "title": r["title"] or r["id"],
             "cat": r["category"] or "Drama",
-            "dur": r["duration"] or "2:00",
+            # Empty string when the pipeline never populated `stories.duration`
+            # (most shorts today — the auto-apply path only swaps video_url).
+            # The web side reads through loadLiveCatalog which backfills from
+            # short_renders.props.duration_ms; the published.ts overlay no
+            # longer carries the legacy "2:00" long-form fallback.
+            "dur": r["duration"] or "",
             "year": _year(r),
             "syn": r["summary"] or "",
             "body": r["body"],

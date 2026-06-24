@@ -118,7 +118,9 @@ function PosterArt({ story, rounded = 8, showTitle = true, kicker = true }: { st
       {!showImage && <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize: 200, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
       <div className="absolute inset-0 poster-vig"></div>
       {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
-      <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
+      {story.dur && (
+        <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
+      )}
       {renderCssTitle && (
         <div className="absolute left-3.5 right-3.5 bottom-5">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 23, color: "#F5F3EF" }}>{story.title}</h3>
@@ -230,8 +232,12 @@ function Hero({ story, onOpen, onShuffle }: { story: Story; onOpen: OpenFn; onSh
           <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
             <span className="font-semibold text-[15px]" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
             <span className="text-muted">·</span><span className="text-ink/80 text-[15px]">{story.year}</span>
-            <span className="text-muted">·</span>
-            <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
+            {story.dur && (
+              <>
+                <span className="text-muted">·</span>
+                <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
+              </>
+            )}
             {story.tags.slice(0, 2).map((t) => <span key={t} className="font-body text-[14px] text-ink/80">· {t}</span>)}
           </div>
           <p className="font-body text-[17px] leading-relaxed text-ink/85 mt-5 max-w-[540px]">{story.syn}</p>
@@ -1140,7 +1146,9 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                 <div className="flex items-center gap-2.5 flex-wrap font-body text-[14px] mb-4">
                   <span className="font-semibold" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
                   <span className="text-muted">{story.year}</span>
-                  <span className="px-2 py-0.5 rounded border border-line text-ink/80 font-mono text-[11px]">{story.dur}</span>
+                  {story.dur && (
+                    <span className="px-2 py-0.5 rounded border border-line text-ink/80 font-mono text-[11px]">{story.dur}</span>
+                  )}
                   <span className="px-2 py-0.5 rounded font-mono text-[10px] uppercase tracking-wider" style={{ background: "rgba(232,70,43,.16)", color: "#E8462B" }}>True</span>
                   <span className="px-2.5 py-0.5 rounded-full text-[12px] font-semibold" style={{ background: c, color: "#fff" }}>{story.cat}</span>
                 </div>
@@ -1221,7 +1229,11 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                     <div style={{ height: 150 }}><PosterArt story={s} showTitle={false} rounded={0} /></div>
                     <div className="p-3.5">
                       <div className="flex items-center justify-between mb-1.5">
-                        <span className="font-mono text-[10px] text-muted">{s.dur}</span>
+                        {s.dur ? (
+                          <span className="font-mono text-[10px] text-muted">{s.dur}</span>
+                        ) : (
+                          <span />
+                        )}
                         <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ background: CAT[s.cat], color: "#fff" }}>{s.cat}</span>
                       </div>
                       <h3 className="font-display font-bold uppercase tracking-tightest text-ink text-[15px] leading-[.98]">{s.title}</h3>

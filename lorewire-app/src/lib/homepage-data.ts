@@ -14,6 +14,7 @@
 
 import "server-only";
 import { all } from "@/lib/db";
+import { shortDurationFromPropsJson } from "@/lib/duration";
 import { resolveMediaUrl } from "@/lib/media-url";
 import { getSetting } from "@/lib/repo";
 import {
@@ -66,9 +67,24 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
       "ORDER BY COALESCE(published_at, updated_at, created_at) DESC " +
       `LIMIT ${safeLimit}`,
   );
+  // stories.duration is admin-editable (M:SS string) and rarely set for shorts —
+  // the writer path that auto-applies a short as the story's video only swaps
+  // video_url, leaving duration NULL. Backfill from the latest done short_render's
+  // props.duration_ms so rail thumbnails show the real ~30-60s length instead of
+  // the historical "2:00" long-form fallback.
+  const enrichedDurations = await loadShortDurationsForStories(
+    rows.filter((r) => !r.duration).map((r) => r.id),
+  );
+  for (const r of rows) {
+    if (!r.duration) {
+      const real = enrichedDurations.get(r.id);
+      if (real) r.duration = real;
+    }
+  }
   console.info("[homepage live catalog load]", {
     count: rows.length,
     limit: safeLimit,
+    durations_backfilled: enrichedDurations.size,
   });
   // Resolve hero/video onto the delivery base (lib/media-url); passthrough when
   // MEDIA_PUBLIC_BASE is unset.
@@ -78,6 +94,31 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
     video_url: resolveMediaUrl(s.video_url),
   }));
   return { ok: true, stories };
+}
+
+// Pull duration_ms out of the latest done short_render for each story id and
+// format as "M:SS". Returns a map keyed by story_id; story ids whose renders
+// are missing / errored / lack a numeric duration_ms are simply absent so the
+// caller's fallback path can decide what to do.
+async function loadShortDurationsForStories(
+  storyIds: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (storyIds.length === 0) return out;
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<{ story_id: string; props: string | null }>(
+    "SELECT story_id, props FROM short_renders " +
+      `WHERE story_id IN (${placeholders}) ` +
+      "AND status = 'done' AND props IS NOT NULL " +
+      "ORDER BY COALESCE(finished_at, started_at, requested_at) DESC",
+    storyIds,
+  );
+  for (const r of rows) {
+    if (out.has(r.story_id)) continue;
+    const formatted = shortDurationFromPropsJson(r.props);
+    if (formatted) out.set(r.story_id, formatted);
+  }
+  return out;
 }
 
 // ─── curation ───────────────────────────────────────────────────────────────
