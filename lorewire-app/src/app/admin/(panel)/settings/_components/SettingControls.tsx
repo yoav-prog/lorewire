@@ -27,17 +27,25 @@ import {
 function FieldShell({
   label,
   hint,
+  status,
   children,
 }: {
   label: string;
   hint?: string;
+  /** Optional autosave-status pill rendered to the right of the label.
+   *  Used by SettingText / SettingPresetText to show idle / saving /
+   *  saved / error feedback (matches the SettingSlider layout). */
+  status?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <div className="rounded-xl border border-line bg-surface p-4">
-      <label className="mb-1 block text-[13px] font-semibold text-ink">
-        {label}
-      </label>
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <label className="block text-[13px] font-semibold text-ink">
+          {label}
+        </label>
+        {status}
+      </div>
       {hint && <p className="mb-2 text-[12px] text-muted">{hint}</p>}
       {children}
     </div>
@@ -382,7 +390,11 @@ export function SettingChipGroup<T extends string>({
 }
 
 // ─── SettingText ─────────────────────────────────────────────────────────────
-// Single-line text input.
+// Single-line text input with 500ms-debounced auto-save. Matches the
+// SettingSlider / SettingToggle pattern (no manual Save button — the
+// AutoSaveStatus pill next to the label shows idle / saving / saved /
+// error feedback). `flush` fires on blur so a user clicking away
+// without waiting still persists the value.
 
 export function SettingText({
   settingKey,
@@ -397,28 +409,58 @@ export function SettingText({
   initial: string;
   placeholder?: string;
 }) {
+  const [value, setValue] = useState(initial);
+  const save = useDebouncedSave(
+    async (next: string) => {
+      try {
+        const fd = new FormData();
+        fd.set("key", settingKey);
+        fd.set("value", next);
+        await saveSettingAction(fd);
+        return { ok: true };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : "save-failed",
+        };
+      }
+    },
+    { debounceMs: 500 },
+  );
+
+  function update(next: string) {
+    setValue(next);
+    save.request(next);
+  }
+
   return (
-    <FieldShell label={label} hint={hint}>
-      <form action={saveSettingAction} className="flex flex-wrap items-center gap-2">
-        <input type="hidden" name="key" value={settingKey} />
-        <input
-          name="value"
-          defaultValue={initial}
-          placeholder={placeholder}
-          className="min-w-[220px] flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
+    <FieldShell
+      label={label}
+      hint={hint}
+      status={
+        <AutoSaveStatus
+          state={save.state}
+          detail={save.lastError ?? undefined}
         />
-        <button className="rounded-lg border border-line px-4 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:text-accent">
-          Save
-        </button>
-      </form>
+      }
+    >
+      <input
+        value={value}
+        onChange={(e) => update(e.target.value)}
+        onBlur={save.flush}
+        placeholder={placeholder}
+        className="block w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
+      />
     </FieldShell>
   );
 }
 
 // ─── SettingPresetText ───────────────────────────────────────────────────────
-// Textarea + a row of preset chips. Clicking a chip fills the textarea with
-// that preset; the admin can then tweak before saving. Skips the round-trip
-// of "load default → edit → save" for the common cases.
+// Textarea + a row of preset chips with 500ms-debounced auto-save.
+// Clicking a chip fills the textarea with that preset; the admin can
+// tweak inline and the change autosaves like SettingText. No manual
+// Save button — the AutoSaveStatus pill shows idle / saving / saved /
+// error feedback.
 
 export function SettingPresetText({
   settingKey,
@@ -437,63 +479,77 @@ export function SettingPresetText({
   presets: { label: string; value: string }[];
   rows?: number;
 }) {
-  // Inline script keeps this server-component friendly. A controlled
-  // textarea would force the whole field client; presets are a one-shot
-  // DOM-write, so we let chip clicks just set the textarea value directly.
-  const textareaId = `setting-${settingKey.replace(/[^a-zA-Z0-9-]/g, "-")}`;
+  const [value, setValue] = useState(initial);
+  const save = useDebouncedSave(
+    async (next: string) => {
+      try {
+        const fd = new FormData();
+        fd.set("key", settingKey);
+        fd.set("value", next);
+        await saveSettingAction(fd);
+        return { ok: true };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : "save-failed",
+        };
+      }
+    },
+    { debounceMs: 500 },
+  );
+
+  function update(next: string) {
+    setValue(next);
+    save.request(next);
+  }
+
   return (
-    <FieldShell label={label} hint={hint}>
-      <form action={saveSettingAction} className="space-y-2">
-        <input type="hidden" name="key" value={settingKey} />
+    <FieldShell
+      label={label}
+      hint={hint}
+      status={
+        <AutoSaveStatus
+          state={save.state}
+          detail={save.lastError ?? undefined}
+        />
+      }
+    >
+      <div className="space-y-2">
         {presets.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
             {presets.map((p) => (
               <PresetChip
                 key={p.label}
                 label={p.label}
-                value={p.value}
-                targetId={textareaId}
+                onPick={() => update(p.value)}
               />
             ))}
           </div>
         )}
         <textarea
-          id={textareaId}
-          name="value"
-          defaultValue={initial}
+          value={value}
+          onChange={(e) => update(e.target.value)}
+          onBlur={save.flush}
           placeholder={placeholder}
           rows={rows}
           className="block w-full resize-y rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
         />
-        <div className="flex justify-end">
-          <button className="rounded-lg border border-line px-4 py-2 text-[13px] text-ink transition-colors hover:border-accent hover:text-accent">
-            Save
-          </button>
-        </div>
-      </form>
+      </div>
     </FieldShell>
   );
 }
 
 function PresetChip({
   label,
-  value,
-  targetId,
+  onPick,
 }: {
   label: string;
-  value: string;
-  targetId: string;
+  onPick: () => void;
 }) {
   return (
     <button
       type="button"
-      onClick={() => {
-        const el = document.getElementById(targetId);
-        if (el instanceof HTMLTextAreaElement) {
-          el.value = value;
-          el.focus();
-        }
-      }}
+      onClick={onPick}
       className="rounded-full border border-line px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted transition-colors hover:border-accent hover:text-accent"
     >
       {label}
