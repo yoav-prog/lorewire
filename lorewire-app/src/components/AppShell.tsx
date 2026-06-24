@@ -15,6 +15,7 @@ import {
   POLL_RAIL_TITLES,
   filterIdsByPillCat,
   filterIdsByPublished,
+  resolveHeroStory,
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
@@ -22,6 +23,11 @@ import {
   type HomepageInitial,
   type MergedCatalog,
 } from "@/lib/homepage-rails";
+import {
+  pickRandomPlayable,
+  pushShuffleRecent,
+  readShuffleRecents,
+} from "@/lib/play-shuffle";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
 import {
@@ -297,17 +303,9 @@ function Home({
   // beat the admin's "first-4-from-catalog" fallback (and lose to a
   // hand-curated continue list — admin override stays authoritative).
   const continueState = useContinueReading();
-  const heroIds = behavior.heroRequired
-    ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
-  // Same isPublishedStory gate Browse / Search / New & Hot use: if the
-  // resolved hero is a sample placeholder, drop it so the Billboard
-  // doesn't lead with a glyph poster the pipeline hasn't produced for.
-  const featuredCandidate = heroIds[0] ? resolveStory(heroIds[0]) : null;
-  const featured =
-    featuredCandidate && isPublishedStory(featuredCandidate)
-      ? featuredCandidate
-      : null;
+  // Hero resolution lives in lib/homepage-rails so the outer shell's
+  // shuffle reads the same answer and excludes the current marquee.
+  const featured = resolveHeroStory(curation, behavior, catalog, resolveStory);
 
   const continueIdsAll = resolveRailIds("continue", curation, behavior, catalog, {
     continue: continueState.ids,
@@ -1718,7 +1716,6 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     console.info("[deep-link modal open]", { story_id: id, tab, comment_id: commentId ?? null });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only
   }, []);
-  const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const screenRef = useRef<HTMLDivElement>(null);
 
   // My List is the persisted saved-stories store, shared with the Wires feed's
@@ -1748,16 +1745,33 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     recordView(id);
   };
   const close = () => setActive(null);
-  // "Play Something" jumps straight into the Wires feed (Phase 7 deep-link). An
-  // id scrolls to that short if it's in the loaded pages; otherwise the feed
-  // opens at the top.
-  const openWires = (id?: string) => {
-    if (id) recordView(id);
-    setWiresStoryId(id ?? null);
-    close();
-    setTab("Wires");
+  // "Play Something" picks a random playable story and opens it on the
+  // Watch tab — same affordance as the hero's Play button, so the modal's
+  // existing autoplay path kicks in. Excludes the current hero so the
+  // click never replays what the user is already looking at; sessionStorage
+  // recents soften repeats when inventory is thin.
+  const shuffle = () => {
+    const heroId =
+      resolveHeroStory(curation, behavior, catalog, resolveStory)?.id ?? null;
+    const recents = readShuffleRecents();
+    const pickedId = pickRandomPlayable({
+      catalog: catalog.array,
+      currentHeroId: heroId,
+      recentIds: recents,
+    });
+    const playablePoolSize = catalog.array.filter((s) => !!s.videoUrl).length;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[lorewire shuffle pick]", {
+      shell: "mobile",
+      picked: pickedId,
+      pool_size: playablePoolSize,
+      excluded_hero: heroId,
+      recents_count: recents.length,
+    });
+    if (!pickedId) return;
+    pushShuffleRecent(pickedId);
+    open(pickedId, "Watch");
   };
-  const shuffle = () => openWires();
 
   useEffect(() => {
     if (screenRef.current) screenRef.current.scrollTop = 0;
@@ -1788,13 +1802,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
       {/* Wires rides above the (now-empty) screen as a full-cover layer, like
           the Title sheet does — it owns its own snap scroller and pauses
           whenever a sheet opens over it. */}
-      {tab === "Wires" && (
-        <WiresFeed
-          onOpenInfo={open}
-          paused={!!active}
-          initialStoryId={wiresStoryId ?? undefined}
-        />
-      )}
+      {tab === "Wires" && <WiresFeed onOpenInfo={open} paused={!!active} />}
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
@@ -1817,9 +1825,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
         ) : null;
       })()}
 
-      {/* Switching tabs via the nav clears any Wires deep-link target so a plain
-          tab tap always opens the feed at the top. */}
-      <TabBar tab={tab} setTab={(t) => { close(); setWiresStoryId(null); setTab(t); }} />
+      <TabBar tab={tab} setTab={(t) => { close(); setTab(t); }} />
     </div>
   );
 }
