@@ -220,30 +220,11 @@ export function StoryActionBar({
         setError(result.error ?? "Re-render failed");
         return;
       }
-      // smartRerenderShort returns renderId but not the full row; the
-      // next poll cycle on the in-flight check will fill it in once
-      // the queue stamps phase + progress. Seed a minimal placeholder
-      // so the user sees "Queued…" immediately.
+      // Fetch the real row so polling picks it up and the user sees
+      // "Queued…" immediately without waiting for the next refresh.
       if (result.renderId) {
-        setRender({
-          id: result.renderId,
-          story_id: storyId,
-          status: "queued",
-          phase: null,
-          progress: 0,
-          error: null,
-          output_url: null,
-          props: null,
-          config_hash: null,
-          narration_style: render?.narration_style ?? DEFAULT_NARRATION_VIBE,
-          length_preset: render?.length_preset ?? DEFAULT_LENGTH_PRESET,
-          requested_by: null,
-          requested_at: new Date().toISOString(),
-          started_at: null,
-          finished_at: null,
-          lane: result.lane ?? null,
-          lane_inputs: null,
-        } as ShortRenderRow);
+        const row = await getShortRenderStatusAction(result.renderId);
+        if (row) setRender(row);
       }
     });
   }
