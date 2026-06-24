@@ -588,6 +588,13 @@ export const STORY_JOBS: Table = {
     // NULL = inactive, 'pending' = worker requested, 'done' = TS drain
     // flipped story to published, 'failed' = publish gate rejected.
     { name: "auto_publish_status", type: "TEXT" },
+    // 2026-06-24 stage-split: worker flips to 'pending' after enqueueing
+    // the short. The /api/run_hero_thumbnail_finisher cron polls for
+    // 'pending' rows whose short_renders is done, runs the i2i finisher,
+    // sets 'done', and chains into auto-publish if full_pipeline=1.
+    // Splitting this stage off keeps every Vercel function under the
+    // 800s ceiling.
+    { name: "finisher_status", type: "TEXT" },
   ],
 };
 

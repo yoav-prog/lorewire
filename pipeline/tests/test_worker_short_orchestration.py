@@ -98,14 +98,12 @@ class WaitForShortDoneTests(unittest.TestCase):
         self.assertEqual(result, "done")
 
 
-class RunShortAndFinisherTests(unittest.TestCase):
-    """`_run_short_and_finisher` is the new finisher orchestrator the
-    Reddit-source story-jobs worker calls per row. Tests every branch:
-    enqueue + wait + finisher success, cap-hit, short-failed, setup-failed.
-
-    All store-touching helpers are stubbed so the test runs without the
-    pipeline DB or any network. The finisher itself is mocked; its
-    contract is covered by test_hero_thumbnail_from_short.py."""
+class EnqueueShortAndMarkFinisherPendingTests(unittest.TestCase):
+    """2026-06-24 stage-split: the worker now enqueues the short and
+    returns IMMEDIATELY after marking finisher_status='pending'. The
+    inline-wait + finisher block moved to `run_finisher_for_job` which a
+    separate Vercel cron drives. Tests pin the new shape so a future
+    refactor can't silently re-introduce the 800s-timeout path."""
 
     ROW = {
         "id": "story1",
@@ -115,19 +113,88 @@ class RunShortAndFinisherTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self._log = _patch_event_logger(self)
-        # `_run_short_and_finisher` imports shorts_auto lazily, so we
-        # patch the module-level name.
         p_enqueue = mock.patch(
             "pipeline.shorts_auto.maybe_enqueue_short_for_story",
             return_value=True,
         )
         self.mock_enqueue = p_enqueue.start()
         self.addCleanup(p_enqueue.stop)
-        p_wait = mock.patch.object(
-            story_jobs_worker, "_wait_for_short_done", return_value="done",
+        p_mark = mock.patch.object(
+            story_jobs_worker.store, "mark_finisher_pending",
         )
+        self.mock_mark = p_mark.start()
+        self.addCleanup(p_mark.stop)
+        # Anything from the OLD inline path must not be touched. Patch
+        # the wait + finisher + upsert + cost helpers so a regression
+        # that re-introduces the old call shape is asserted out.
+        p_wait = mock.patch.object(story_jobs_worker, "_wait_for_short_done")
         self.mock_wait = p_wait.start()
         self.addCleanup(p_wait.stop)
+        p_finisher = mock.patch.object(
+            story_jobs_worker.media,
+            "generate_hero_and_thumbnail_from_short",
+        )
+        self.mock_finisher = p_finisher.start()
+        self.addCleanup(p_finisher.stop)
+
+    def test_force_true_passed_to_enqueue(self):
+        story_jobs_worker._enqueue_short_and_mark_finisher_pending(
+            dict(self.ROW), "job1", "r1",
+        )
+        self.mock_enqueue.assert_called_once()
+        kwargs = self.mock_enqueue.call_args.kwargs
+        self.assertTrue(kwargs["force"])
+        self.assertEqual(kwargs["requested_by"], "story_job")
+
+    def test_happy_path_marks_finisher_pending_and_returns(self):
+        story_jobs_worker._enqueue_short_and_mark_finisher_pending(
+            dict(self.ROW), "job1", "r1",
+        )
+        # NEW shape: enqueue + mark_finisher_pending, NOTHING ELSE.
+        self.mock_mark.assert_called_once_with("job1")
+        # OLD path must stay quiet.
+        self.mock_wait.assert_not_called()
+        self.mock_finisher.assert_not_called()
+        events = [c.args[2] for c in self._log.call_args_list]
+        self.assertIn("short_enqueued_for_story", events)
+
+    def test_cap_hit_does_not_mark_finisher_pending(self):
+        # enqueue returns False = global 24h cap hit. There's no short
+        # for the finisher to wait on, so the flag stays NULL.
+        self.mock_enqueue.return_value = False
+        story_jobs_worker._enqueue_short_and_mark_finisher_pending(
+            dict(self.ROW), "job1", "r1",
+        )
+        self.mock_mark.assert_not_called()
+        events = [c.args[2] for c in self._log.call_args_list]
+        self.assertIn("short_enqueue_capped", events)
+
+    def test_enqueue_exception_is_swallowed(self):
+        self.mock_enqueue.side_effect = RuntimeError("locked")
+        story_jobs_worker._enqueue_short_and_mark_finisher_pending(
+            dict(self.ROW), "job1", "r1",
+        )
+        self.mock_mark.assert_not_called()
+        events = [c.args[2] for c in self._log.call_args_list]
+        self.assertIn("short_enqueue_error", events)
+
+
+class RunFinisherForJobTests(unittest.TestCase):
+    """2026-06-24 stage-split: `run_finisher_for_job` is the body of
+    work the new /api/run_hero_thumbnail_finisher cron runs after
+    claiming one finisher-pending job. Covers the happy path (writes
+    cost, sets finisher_status='done', chains into auto-publish for
+    full-pipeline rows) and every failure mode."""
+
+    CLAIMED = {
+        "id": "job1",
+        "reddit_id": "r1",
+        "story_id": "story1",
+        "full_pipeline": 0,
+    }
+
+    def setUp(self) -> None:
+        self._log = _patch_event_logger(self)
         p_finisher = mock.patch.object(
             story_jobs_worker.media,
             "generate_hero_and_thumbnail_from_short",
@@ -145,121 +212,75 @@ class RunShortAndFinisherTests(unittest.TestCase):
         )
         self.mock_finisher = p_finisher.start()
         self.addCleanup(p_finisher.stop)
-        p_upsert = mock.patch.object(story_jobs_worker.store, "upsert_story")
-        self.mock_upsert = p_upsert.start()
-        self.addCleanup(p_upsert.stop)
-        # 2026-06-24 fix: the finisher writes video_url / images /
-        # thumbnail columns DIRECTLY via dedicated store helpers, so the
-        # worker must NOT do a full upsert here (it would clobber
-        # video_url back to NULL — the row dict never saw it). We
-        # now do a targeted cost_cents-only update instead.
+        p_story = mock.patch.object(
+            story_jobs_worker.store, "fetch_story",
+            return_value={"id": "story1", "cost_cents": 12},
+        )
+        self.mock_fetch = p_story.start()
+        self.addCleanup(p_story.stop)
         p_cost = mock.patch.object(
             story_jobs_worker.store, "update_story_cost_cents",
         )
         self.mock_cost = p_cost.start()
         self.addCleanup(p_cost.stop)
+        p_status = mock.patch.object(
+            story_jobs_worker.store, "set_finisher_status",
+        )
+        self.mock_status = p_status.start()
+        self.addCleanup(p_status.stop)
+        p_autopub = mock.patch.object(
+            story_jobs_worker.store, "request_story_job_auto_publish",
+        )
+        self.mock_autopub = p_autopub.start()
+        self.addCleanup(p_autopub.stop)
 
-    def test_force_true_passed_to_enqueue(self):
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
-        self.mock_enqueue.assert_called_once()
-        kwargs = self.mock_enqueue.call_args.kwargs
-        self.assertTrue(kwargs["force"])
-        self.assertEqual(kwargs["requested_by"], "story_job")
-
-    def test_happy_path_runs_finisher_and_updates_row(self):
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
+    def test_happy_path_writes_cost_and_marks_done(self):
+        story_jobs_worker.run_finisher_for_job(dict(self.CLAIMED))
         self.mock_finisher.assert_called_once_with("story1", story_jobs_worker.REPO_ROOT)
-        # Cost is incremented by the finisher's spend.
-        self.assertEqual(row["cost_cents"], 12 + 25)
-        # All five image URLs land on the row dict for downstream consumers.
-        self.assertEqual(row["hero_image"], "https://gcs/hero.png")
-        self.assertEqual(row["thumbnail_image_square"], "https://gcs/thumb-s.png")
-        # 2026-06-24 fix: the worker must NOT do a full upsert here —
-        # the finisher already wrote video_url + images + thumbnail
-        # columns directly. A full upsert would re-clobber video_url
-        # back to NULL because the row dict never saw it. Only the
-        # cost_cents column is updated.
-        self.mock_upsert.assert_not_called()
+        # Existing story's cost (12) plus the finisher's i2i spend (25).
         self.mock_cost.assert_called_once_with("story1", 12 + 25)
-        # Timeline event with the build metadata.
+        self.mock_status.assert_called_once_with("job1", "done")
+        # Not Full-Pipeline-armed → no auto-publish call.
+        self.mock_autopub.assert_not_called()
         events = [c.args[2] for c in self._log.call_args_list]
         self.assertIn("hero_thumbnail_built", events)
 
-    def test_cap_hit_skips_wait_and_finisher(self):
-        # enqueue returns False = global 24h cap hit.
-        self.mock_enqueue.return_value = False
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
-        self.mock_wait.assert_not_called()
-        self.mock_finisher.assert_not_called()
-        self.mock_upsert.assert_not_called()
-        # Row's cost untouched.
-        self.assertEqual(row["cost_cents"], 12)
+    def test_full_pipeline_armed_requests_auto_publish(self):
+        claimed = dict(self.CLAIMED, full_pipeline=1)
+        story_jobs_worker.run_finisher_for_job(claimed)
+        # On success, the cron now arms the auto-publish drain because
+        # the worker no longer does (it returned before the finisher ran).
+        self.mock_autopub.assert_called_once_with("job1")
         events = [c.args[2] for c in self._log.call_args_list]
-        self.assertIn("short_enqueue_capped", events)
+        self.assertIn("auto_publish_requested", events)
 
-    def test_short_failed_skips_finisher(self):
-        self.mock_wait.return_value = "failed"
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
+    def test_missing_story_id_marks_failed(self):
+        claimed = dict(self.CLAIMED, story_id=None)
+        story_jobs_worker.run_finisher_for_job(claimed)
         self.mock_finisher.assert_not_called()
-        self.mock_upsert.assert_not_called()
+        self.mock_status.assert_called_once_with("job1", "failed")
         events = [c.args[2] for c in self._log.call_args_list]
         self.assertIn("hero_thumbnail_skipped", events)
-        # Failed level escalates to error so the admin sees it red.
-        skip_call = next(
-            c for c in self._log.call_args_list
-            if c.args[2] == "hero_thumbnail_skipped"
-        )
-        self.assertEqual(skip_call.kwargs.get("level"), "error")
 
-    def test_short_timeout_skips_finisher_at_warn_level(self):
-        self.mock_wait.return_value = "timeout"
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
-        self.mock_finisher.assert_not_called()
-        skip_call = next(
-            c for c in self._log.call_args_list
-            if c.args[2] == "hero_thumbnail_skipped"
-        )
-        self.assertEqual(skip_call.kwargs.get("level"), "warn")
-
-    def test_finisher_value_error_logs_and_continues(self):
-        # Setup failure (e.g. props missing character_base_url) — finisher
-        # raises ValueError. Worker MUST swallow it; the story still ships.
+    def test_value_error_marks_failed_and_swallows(self):
         self.mock_finisher.side_effect = ValueError(
             "story story1 short render has no character_base_url",
         )
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
-        self.mock_upsert.assert_not_called()
+        story_jobs_worker.run_finisher_for_job(dict(self.CLAIMED))
+        self.mock_status.assert_called_once_with("job1", "failed")
         events = [c.args[2] for c in self._log.call_args_list]
         self.assertIn("hero_thumbnail_skipped", events)
+        # No auto-publish on a failed finisher (the auto-publish gate
+        # would reject for missing visuals anyway).
+        self.mock_autopub.assert_not_called()
 
-    def test_finisher_unexpected_exception_is_swallowed(self):
-        # Any non-ValueError raised by the finisher must NOT take down the
-        # story job. The article and the short are already in the DB; we
-        # surface an error event and let the worker mark the job done.
+    def test_unexpected_exception_marks_failed_and_swallows(self):
         self.mock_finisher.side_effect = RuntimeError("kie 503")
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
+        story_jobs_worker.run_finisher_for_job(dict(self.CLAIMED))
+        self.mock_status.assert_called_once_with("job1", "failed")
         events = [c.args[2] for c in self._log.call_args_list]
         self.assertIn("hero_thumbnail_error", events)
-        self.mock_upsert.assert_not_called()
-
-    def test_enqueue_exception_is_swallowed(self):
-        # If shorts_auto itself raises (rare but possible — e.g. DB
-        # contention), the worker must NOT crash. The article is the
-        # primary deliverable.
-        self.mock_enqueue.side_effect = RuntimeError("locked")
-        row = dict(self.ROW)
-        story_jobs_worker._run_short_and_finisher(row, "job1", "r1")
-        self.mock_wait.assert_not_called()
-        self.mock_finisher.assert_not_called()
-        events = [c.args[2] for c in self._log.call_args_list]
-        self.assertIn("short_enqueue_error", events)
+        self.mock_autopub.assert_not_called()
 
 
 if __name__ == "__main__":

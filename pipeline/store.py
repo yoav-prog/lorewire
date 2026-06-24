@@ -398,13 +398,28 @@ SCHEMA_STATEMENTS = [
     # pick the story up. NULL/0 = existing review-then-manual-publish.
     "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS full_pipeline INTEGER DEFAULT 0",
     # 2026-06-24 Full Pipeline auto-publish lane. Lifecycle:
-    # NULL (default) -> 'pending' (worker requested after all stages succeeded)
+    # NULL (default) -> 'pending' (worker/finisher requested after all stages succeeded)
     #               -> 'done' (TS drain successfully flipped story to published)
     #               -> 'failed' (publish gate rejected; admin must inspect)
     # The TS cron at /api/auto_publish_full_pipeline polls for 'pending'.
     "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS auto_publish_status TEXT",
     # Drain hot path: oldest pending first.
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_auto_publish_status ON story_jobs(auto_publish_status, finished_at)",
+    # 2026-06-24 stage-split: the worker no longer inline-waits for the
+    # short and runs the hero+thumb finisher synchronously — Vercel's
+    # 800s function ceiling killed that path for fresh sources where the
+    # short hadn't already rendered (incident 2026-06-24). Worker now
+    # marks the job 'pending' here after enqueueing the short, then
+    # returns. The /api/run_hero_thumbnail_finisher cron polls for
+    # 'pending' rows whose short is 'done', runs the finisher, sets
+    # 'done', and (when full_pipeline=1) chains into the auto-publish
+    # lane via request_story_job_auto_publish. Lifecycle:
+    # NULL (default; with_media=False jobs that don't need a finisher)
+    #   -> 'pending' (worker enqueued short, finisher hasn't run)
+    #   -> 'done' (finisher succeeded; auto-publish kicked off if armed)
+    #   -> 'failed' (finisher hit an unrecoverable error)
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS finisher_status TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_story_jobs_finisher_status ON story_jobs(finisher_status, finished_at)",
     # Worker hot path: oldest queued first. Mirrors the index on
     # image_renders(status, requested_at).
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_status_requested ON story_jobs(status, requested_at)",
@@ -3445,6 +3460,10 @@ _STORY_JOB_COLUMNS = [
     # decide whether to flip `auto_publish_status` to 'pending'.
     # `auto_publish_status` is always None on a fresh row.
     "full_pipeline", "auto_publish_status",
+    # 2026-06-24 stage-split: the worker sets `finisher_status='pending'`
+    # after enqueueing the short and returns; a separate cron runs the
+    # finisher when the short is done.
+    "finisher_status",
 ]
 
 
@@ -3519,6 +3538,9 @@ def enqueue_story_job(
         # False so legacy callers don't accidentally arm auto-publish.
         "full_pipeline": 1 if full_pipeline else 0,
         "auto_publish_status": None,
+        # 2026-06-24 stage-split: NULL until the worker enqueues the
+        # short, then 'pending' for the finisher cron to claim.
+        "finisher_status": None,
     }
     cols = ", ".join(_STORY_JOB_COLUMNS)
     conflict_clause = (
@@ -3655,6 +3677,126 @@ def finish_story_job(job_id: str, story_id: str) -> None:
             "WHERE id=? AND status IN ('queued', 'processing')",
             (story_id, now, job_id),
         )
+
+
+def mark_finisher_pending(job_id: str) -> None:
+    """2026-06-24 stage-split: the worker flips a finished job's
+    `finisher_status` to 'pending' once the short has been enqueued.
+    Lets the /api/run_hero_thumbnail_finisher cron claim the row when
+    the short eventually reaches status='done' without the worker
+    having to inline-wait (which exceeded Vercel's 800s function
+    ceiling on fresh sources). Conditional on the row currently being
+    NULL so a manual flip to 'done' / 'failed' from the cron can't be
+    bounced back by a late worker write."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET finisher_status='pending' "
+                    "WHERE id=%s AND finisher_status IS NULL",
+                    (job_id,),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET finisher_status='pending' "
+            "WHERE id=? AND finisher_status IS NULL",
+            (job_id,),
+        )
+
+
+def claim_finisher_job() -> dict | None:
+    """Atomically claim ONE story_job whose finisher is pending AND whose
+    short_renders row has reached status='done'. Returns the joined row
+    (story_jobs columns + the short's output_url) or None when the queue
+    is idle. The /api/run_hero_thumbnail_finisher cron calls this per
+    tick. Postgres path uses FOR UPDATE SKIP LOCKED so concurrent crons
+    can't double-claim; SQLite uses a conditional UPDATE with a single
+    short_renders lookup since SKIP LOCKED is a no-op there."""
+    cols = ", ".join(f"j.{c}" for c in _STORY_JOB_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE story_jobs SET finisher_status='running' "
+                    "WHERE id = ("
+                    f"  SELECT j.id FROM story_jobs j "
+                    "   JOIN short_renders s ON s.story_id = j.story_id "
+                    "   WHERE j.finisher_status = 'pending' "
+                    "     AND s.status = 'done' "
+                    "     AND s.output_url IS NOT NULL "
+                    "   ORDER BY j.finished_at ASC NULLS LAST LIMIT 1 "
+                    "   FOR UPDATE SKIP LOCKED"
+                    ") "
+                    f"RETURNING {cols.replace('j.', '')}",
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        candidate = c.execute(
+            "SELECT j.id FROM story_jobs j "
+            "  JOIN short_renders s ON s.story_id = j.story_id "
+            " WHERE j.finisher_status = 'pending' "
+            "   AND s.status = 'done' "
+            "   AND s.output_url IS NOT NULL "
+            " ORDER BY j.finished_at ASC LIMIT 1"
+        ).fetchone()
+        if not candidate:
+            return None
+        c.execute(
+            "UPDATE story_jobs SET finisher_status='running' "
+            "WHERE id=? AND finisher_status='pending'",
+            (candidate["id"],),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {', '.join(_STORY_JOB_COLUMNS)} FROM story_jobs WHERE id=?",
+            (candidate["id"],),
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def set_finisher_status(job_id: str, status: str) -> None:
+    """Terminal-state writer for the finisher cron. `status` is one of
+    'done' / 'failed' — the cron writes 'done' after the i2i loop lands
+    and 'failed' on an unrecoverable error. Unconditional so a row in
+    any current state is updated (the cron is the only writer of these
+    terminal values after `claim_finisher_job` flipped it to 'running')."""
+    if status not in {"done", "failed"}:
+        raise ValueError(f"set_finisher_status: invalid status {status!r}")
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET finisher_status=%s WHERE id=%s",
+                    (status, job_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET finisher_status=? WHERE id=?",
+            (status, job_id),
+        )
+
+
+def count_pending_finisher_jobs() -> int:
+    """Pure read: how many `finisher_status='pending'` rows exist (not
+    filtered by short readiness; useful as a backpressure signal for
+    cron monitoring). Mirrors `count_pending_story_jobs`."""
+    sql = "SELECT COUNT(*) AS n FROM story_jobs WHERE finisher_status='pending'"
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+            return int((row or {}).get("n") or 0)
+    with _sqlite_conn() as c:
+        row = c.execute(sql).fetchone()
+        return int(row["n"]) if row else 0
 
 
 def request_story_job_auto_publish(job_id: str) -> None:

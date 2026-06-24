@@ -44,6 +44,10 @@
     {
       "path": "/api/auto_publish_full_pipeline",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/run_hero_thumbnail_finisher",
+      "schedule": "*/2 * * * *"
     }
   ],
   "functions": {
@@ -70,6 +74,9 @@
     },
     "src/app/api/auto_publish_full_pipeline/route.ts": {
       "maxDuration": 300
+    },
+    "api/run_hero_thumbnail_finisher.py": {
+      "maxDuration": 800
     }
   }
 }

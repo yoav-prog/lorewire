@@ -451,22 +451,30 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     # fire-and-forget shape (no short, no finisher) because the admin
     # explicitly opted out of the visual pipeline.
     if with_media:
-        _run_short_and_finisher(row, job_id, reddit_id)
+        _enqueue_short_and_mark_finisher_pending(row, job_id, reddit_id)
 
     return row
 
 
-def _run_short_and_finisher(row: dict, job_id: str, reddit_id: str) -> None:
-    """Force-enqueue the short, wait inline for it, then run the hero +
-    thumbnail finisher. Best-effort throughout: failure at any step is
-    logged as a story_job_event but never raises — the article ships
-    even if the visuals are degraded (the public reader's fallback
-    chain handles missing hero/thumbnail).
+def _enqueue_short_and_mark_finisher_pending(
+    row: dict, job_id: str, reddit_id: str,
+) -> None:
+    """2026-06-24 stage-split: force-enqueue the short and flip the job's
+    `finisher_status` to 'pending' so the /api/run_hero_thumbnail_finisher
+    cron can run the hero+thumbnail finisher OUT of band when the short
+    eventually reaches status='done'.
 
-    Splits this orchestration out of `_default_process` so the inline-
-    wait branch (which is what blocks the worker slot for the short's
-    render duration) is unit-testable in isolation. The wait + finisher
-    pair is the entire 2026-06-19 plan in one function.
+    This replaces the old inline wait + finisher (`_run_short_and_finisher`)
+    which exceeded Vercel's 800s function ceiling on fresh sources where
+    the short hadn't been pre-rendered. The new shape returns in seconds
+    after enqueueing the short, leaving the heavy work (short generation
+    + 5 i2i finisher calls) to dedicated cron functions that each have
+    their own 800s budget.
+
+    Best-effort: failure to enqueue the short is logged as a timeline
+    event but never raises — the article still ships even if the visual
+    pipeline doesn't (the public reader's fallback chain handles missing
+    hero/thumbnail).
     """
     from pipeline import shorts_auto
 
@@ -501,27 +509,47 @@ def _run_short_and_finisher(row: dict, job_id: str, reddit_id: str) -> None:
     print(f"[story-jobs handoff] short force-enqueued story_id={story_id}")
     store.log_story_job_event(
         job_id, reddit_id, "short_enqueued_for_story",
-        message="Short enqueued (force) — waiting before hero+thumbnail finisher",
+        message=(
+            "Short enqueued (force) — finisher will run when the short is done"
+        ),
         payload={"story_id": story_id},
     )
+    # Stage-split signal: the finisher cron polls for this flag + a
+    # short_renders.status='done' join to decide when to claim.
+    store.mark_finisher_pending(job_id)
 
-    final_status = _wait_for_short_done(story_id, job_id, reddit_id)
-    if final_status != "done":
-        # Reasons we land here: short failed, was cancelled, or hit the
-        # wait ceiling. In every case the article ships without the
-        # scene-derived hero+thumbnail and the admin can rerun the
-        # "Generate hero + thumbnail from short" button later once the
-        # short is healthy.
-        level = "error" if final_status in {"failed", "error"} else "warn"
+
+def run_finisher_for_job(claimed: dict) -> None:
+    """2026-06-24 stage-split: the body of what used to be the worker's
+    inline finisher block, lifted into its own function so the Vercel
+    cron at /api/run_hero_thumbnail_finisher can call it after claiming
+    one row via `store.claim_finisher_job`.
+
+    Invariants the caller upholds:
+      - `claimed['story_id']` exists in stories.
+      - The story's short_renders row has status='done' (the claim SQL
+        verifies this).
+      - `claimed['finisher_status']` is 'running' (the claim flipped it
+        from 'pending' atomically).
+
+    On success: sets `finisher_status='done'` and, when the job is
+    Full-Pipeline-armed, calls `store.request_story_job_auto_publish`
+    so the auto-publish cron picks the row up next.
+
+    On failure: sets `finisher_status='failed'` and logs a structured
+    timeline event so the admin sees why. The job's `status='done'`
+    flag is left as-is — the article ships even without the visual
+    finisher because the public reader has a fallback chain.
+    """
+    job_id = claimed["id"]
+    reddit_id = claimed["reddit_id"]
+    story_id = claimed["story_id"]
+    if not story_id:
+        store.set_finisher_status(job_id, "failed")
         store.log_story_job_event(
             job_id, reddit_id, "hero_thumbnail_skipped",
-            level=level,
-            message=f"Short ended in status={final_status!r}; finisher skipped",
-            payload={"story_id": story_id, "short_status": final_status},
-        )
-        print(
-            f"[story-jobs handoff] short ended status={final_status} "
-            f"story_id={story_id}; finisher skipped"
+            level="warn",
+            message="Finisher claim had no story_id",
         )
         return
 
@@ -530,45 +558,33 @@ def _run_short_and_finisher(row: dict, job_id: str, reddit_id: str) -> None:
     except ValueError as e:
         # Expected setup failures (missing character_base_url, malformed
         # props, etc.) — surfaced verbatim by `_build_hero_and_thumbnail_from_short`.
+        store.set_finisher_status(job_id, "failed")
         store.log_story_job_event(
             job_id, reddit_id, "hero_thumbnail_skipped",
             level="warn",
             message=str(e)[:200],
         )
-        print(f"[story-jobs handoff] finisher refused story_id={story_id}: {e}")
+        print(f"[finisher refused] story_id={story_id}: {e}")
         return
-    except Exception as e:  # noqa: BLE001 — finisher must not break the job
+    except Exception as e:  # noqa: BLE001 — finisher must not break the cron
         traceback.print_exc()
+        store.set_finisher_status(job_id, "failed")
         store.log_story_job_event(
             job_id, reddit_id, "hero_thumbnail_error",
             level="error",
             message=f"Finisher raised: {e}"[:200],
         )
-        print(f"[story-jobs handoff] finisher raised story_id={story_id}: {e}")
+        print(f"[finisher error] story_id={story_id}: {e}")
         return
 
-    # Roll the finisher's spend into the story's cost column. The image
-    # columns (hero_image, hero_image_landscape, thumbnail_image and the
-    # two thumbnail variants) AND stories.video_url were already written
-    # by the finisher's per-variant store helpers directly, so we must
-    # NOT do a full upsert here — the in-memory `row` dict is stale on
-    # all of those (it never saw video_url; the auto-applied short URL
-    # would be clobbered back to NULL). 2026-06-24 incident: the second
-    # upsert silently reverted the worker's [auto-applied short as
-    # stories.video_url=...] write, so the article on the public site
-    # had no short and the admin saw a "Use as article video" button
-    # that should have been a no-op. Fix is a targeted cost_cents-only
-    # update; the image columns we mirror back into the row dict are
-    # for any in-process caller that reads `row` later.
+    # The image columns (hero_image, hero_image_landscape, thumbnail_*)
+    # AND stories.video_url were written by the finisher's per-variant
+    # store helpers directly. We only need to add the i2i spend to
+    # stories.cost_cents so the daily budget bar tracks reality.
     extra_cents = int(result.get("cost_cents") or 0)
-    row["cost_cents"] = (row.get("cost_cents") or 0) + extra_cents
-    for col in (
-        "hero_image", "hero_image_landscape",
-        "thumbnail_image", "thumbnail_image_landscape", "thumbnail_image_square",
-    ):
-        if result.get(col):
-            row[col] = result[col]
-    store.update_story_cost_cents(story_id, row["cost_cents"])
+    story = store.fetch_story(story_id)
+    base_cents = int((story or {}).get("cost_cents") or 0)
+    store.update_story_cost_cents(story_id, base_cents + extra_cents)
     store.log_story_job_event(
         job_id, reddit_id, "hero_thumbnail_built",
         message=(
@@ -589,9 +605,26 @@ def _run_short_and_finisher(row: dict, job_id: str, reddit_id: str) -> None:
         },
     )
     print(
-        f"[story-jobs handoff] hero+thumbnail done story_id={story_id} "
-        f"+${extra_cents / 100:.2f}"
+        f"[finisher done] story_id={story_id} +${extra_cents / 100:.2f}"
     )
+    store.set_finisher_status(job_id, "done")
+
+    # Full Pipeline auto-publish handoff. The worker used to do this
+    # inline after finish_story_job; with stage-split it must happen
+    # HERE so the auto-publish drain only sees rows that have a
+    # working hero+thumbnail. Reading from `claimed` is safe because
+    # full_pipeline is set at enqueue and never mutates.
+    if claimed.get("full_pipeline"):
+        store.request_story_job_auto_publish(job_id)
+        print(
+            f"[finisher auto-publish-requested] job={job_id} "
+            f"reddit_id={reddit_id} story_id={story_id}"
+        )
+        store.log_story_job_event(
+            job_id, reddit_id, "auto_publish_requested",
+            message="Full Pipeline opt-in: auto-publish queued for TS drain",
+            payload={"story_id": story_id},
+        )
 
 
 def _enqueue_video_render_for_story(story_row: dict) -> None:
@@ -767,14 +800,15 @@ def run_one_tick(
         message=f"Done. Story: {story_id}",
         payload={"story_id": story_id},
     )
-    # 2026-06-24 Full Pipeline: when the source was opted into auto-publish
-    # AND every stage above succeeded (we only reach here on success), arm
-    # the TS auto-publish drain by flipping `auto_publish_status` to
-    # 'pending'. The drain then runs the existing publish gate
-    # (evaluatePublishReadiness) so any missing artifact still blocks the
-    # actual flip to status='published'. Plan:
-    # _plans/2026-06-24-reddit-source-full-pipeline-toggle.md.
-    if claimed.get("full_pipeline"):
+    # 2026-06-24 Full Pipeline auto-publish handoff. The stage-split
+    # moved this for with_media=True jobs into `run_finisher_for_job`
+    # (the cron) because we want the auto-publish to fire ONLY after
+    # the hero+thumbnail are in place — otherwise the publish gate
+    # would reject for missing visuals. For with_media=False jobs
+    # there's no finisher, so the worker still arms auto-publish here
+    # directly.
+    with_media = bool(claimed.get("with_media", 1))
+    if claimed.get("full_pipeline") and not with_media:
         store.request_story_job_auto_publish(job_id)
         print(
             f"[story-jobs auto-publish-requested] job={job_id} "
@@ -782,7 +816,7 @@ def run_one_tick(
         )
         store.log_story_job_event(
             job_id, reddit_id, "auto_publish_requested",
-            message="Full Pipeline opt-in: auto-publish queued for TS drain",
+            message="Full Pipeline opt-in: auto-publish queued (no media path)",
             payload={"story_id": story_id},
         )
     return True
