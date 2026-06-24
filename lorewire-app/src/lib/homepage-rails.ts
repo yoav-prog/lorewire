@@ -508,6 +508,25 @@ export function resolveRailIds(
   return fallback;
 }
 
+/** Single source of truth for resolving the current homepage hero. HomePage
+ *  uses this for its render; the outer shell's "Play Something" shuffle
+ *  uses it to know which story to exclude from the random pick so a
+ *  shuffle click doesn't replay the marquee the user is already looking
+ *  at. Returns null when no published hero candidate exists (the same
+ *  signal HomePage uses to fall back to the no-hero top-padded layout). */
+export function resolveHeroStory(
+  curation: HomepageCuration | null,
+  behavior: HomepageCurationBehavior,
+  catalog: MergedCatalog,
+  resolveStory: (id: string) => Story | null,
+): Story | null {
+  const heroIds = behavior.heroRequired
+    ? curation?.hero ?? []
+    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
+  const candidate = heroIds[0] ? resolveStory(heroIds[0]) : null;
+  return candidate && isPublishedStory(candidate) ? candidate : null;
+}
+
 // The "All" sentinel for the homepage pill row. Lives next to
 // CATEGORY_RAILS / PILLS so the filter helper and the chip renderer
 // reference the same literal instead of two copies that can drift.

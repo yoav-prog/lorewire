@@ -27,6 +27,7 @@ import {
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
   filterIdsByPublished,
+  resolveHeroStory,
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
@@ -34,6 +35,11 @@ import {
   type HomepageInitial,
   type MergedCatalog,
 } from "@/lib/homepage-rails";
+import {
+  pickRandomPlayable,
+  pushShuffleRecent,
+  readShuffleRecents,
+} from "@/lib/play-shuffle";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
 import {
@@ -1287,20 +1293,10 @@ function HomePage({
   // resolveRailIds is: admin curation → user state → catalog fallback.
   const continueState = useContinueReading();
 
-  // Hero behaviour: curation.hero_required forces "no hero curation -> no
-  // hero", which HomePage honours by rendering null in the hero slot.
-  // Default (false) lets the empty-rail resolver auto-derive a hero so
-  // a fresh install doesn't show a blank top of the home page.
-  const heroIds = behavior.heroRequired
-    ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
-  // Same isPublishedStory gate Browse / Search / New & Hot use: if the
-  // resolved hero is a sample placeholder (no videoUrl / heroImage /
-  // audioUrl / body), drop it so the page falls back to the no-hero
-  // top-padded layout instead of leading with a glyph poster.
-  const heroCandidate = heroIds[0] ? resolveStory(heroIds[0]) : null;
-  const heroStory =
-    heroCandidate && isPublishedStory(heroCandidate) ? heroCandidate : null;
+  // Hero resolution lives in lib/homepage-rails so the outer shell's
+  // shuffle can read the same answer and exclude the current marquee from
+  // a random play pick.
+  const heroStory = resolveHeroStory(curation, behavior, catalog, resolveStory);
 
   // Each rail flows through filterIdsByPublished AFTER resolveRailIds so
   // curated and fallback paths are both gated identically. Empty results
@@ -1477,7 +1473,6 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     console.info("[deep-link modal open]", { story_id: id, tab, comment_id: commentId ?? null });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only
   }, []);
-  const [wiresStoryId, setWiresStoryId] = useState<string | null>(null);
   const [solid, setSolid] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -1520,18 +1515,37 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     recordView(id);
   };
   const close = () => setActive(null);
-  // "Play Something" jumps into the Wires feed (optionally at a story).
-  const openWires = (id?: string) => {
-    if (id) recordView(id);
-    setWiresStoryId(id ?? null);
-    close();
-    setView("Wires");
+  // "Play Something" picks a random playable story and opens it on the
+  // Watch tab — same affordance as the hero's Play button, so the modal's
+  // existing autoplay path kicks in. Excludes the current hero so the
+  // click never replays what the user is already looking at; sessionStorage
+  // recents soften repeats when inventory is thin.
+  const shuffle = () => {
+    const heroId =
+      resolveHeroStory(curation, behavior, catalog, resolveStory)?.id ?? null;
+    const recents = readShuffleRecents();
+    const pickedId = pickRandomPlayable({
+      catalog: catalog.array,
+      currentHeroId: heroId,
+      recentIds: recents,
+    });
+    const playablePoolSize = catalog.array.filter((s) => !!s.videoUrl).length;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[lorewire shuffle pick]", {
+      shell: "desktop",
+      picked: pickedId,
+      pool_size: playablePoolSize,
+      excluded_hero: heroId,
+      recents_count: recents.length,
+    });
+    if (!pickedId) return;
+    pushShuffleRecent(pickedId);
+    open(pickedId, "Watch");
   };
-  const shuffle = () => openWires();
 
   return (
     <div className="min-h-screen bg-bg">
-      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setWiresStoryId(null); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} session={initial.session} />
+      <TopNav view={view} setView={(v) => { if (v !== "Search") setQuery(""); setView(v); }} solid={solid || view !== "Home"} query={query} setQuery={setQuery} session={initial.session} />
 
       {view === "Home" && (
         <HomePage
@@ -1544,7 +1558,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           pollsInitial={initial.pollRails}
         />
       )}
-      {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} initialStoryId={wiresStoryId ?? undefined} />}
+      {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
       {view === "Browse" && (() => {
         // Browse advertises the public catalog of real stories. The bare
         // STORIES array carries 16 sample placeholders the design was
