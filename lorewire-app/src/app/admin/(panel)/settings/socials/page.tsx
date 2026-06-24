@@ -245,6 +245,13 @@ export default async function SocialsSettingsPage() {
         <Section
           title="Facebook"
           description="Auto-publish every freshly rendered short to the LoreWire Facebook Page. Plan: _plans/2026-06-23-facebook-auto-publish.md."
+          status={{
+            ok: fbTokenConfigured && Boolean(fbPageIdDisplay),
+            label:
+              fbTokenConfigured && Boolean(fbPageIdDisplay)
+                ? "Configured"
+                : "Env missing",
+          }}
         >
           <StatusLine
             label="Target page"
@@ -272,6 +279,13 @@ export default async function SocialsSettingsPage() {
         <Section
           title="Instagram"
           description="Auto-publish every freshly rendered short to the LoreWire Instagram account as a Reel. Reuses the Facebook Page Access Token (IG is linked to the Page). Plan: _plans/2026-06-24-instagram-auto-publish.md."
+          status={{
+            ok: igTokenConfigured && Boolean(igAccountIdDisplay),
+            label:
+              igTokenConfigured && Boolean(igAccountIdDisplay)
+                ? "Configured"
+                : "Env missing",
+          }}
         >
           <StatusLine
             label="Target IG account"
@@ -301,6 +315,13 @@ export default async function SocialsSettingsPage() {
         <Section
           title="YouTube"
           description="Auto-publish every freshly rendered short to the LoreWire YouTube channel (@LoreWireHQ). Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md."
+          status={{
+            ok: ytTokenConfigured && Boolean(ytChannelIdDisplay),
+            label:
+              ytTokenConfigured && Boolean(ytChannelIdDisplay)
+                ? "Configured"
+                : "Env missing",
+          }}
         >
           <StatusLine
             label="Target channel"
@@ -386,6 +407,13 @@ export default async function SocialsSettingsPage() {
         <Section
           title="TikTok"
           description="Auto-publish every freshly rendered short to the LoreWire TikTok account. Until TikTok approves our Content Posting API audit, the post lands as a draft in the LoreWire TikTok app's Inbox — flip Post mode to Direct after audit clears."
+          status={{
+            ok: ttTokenConfigured && Boolean(ttOpenIdDisplay),
+            label:
+              ttTokenConfigured && Boolean(ttOpenIdDisplay)
+                ? "Configured"
+                : "Env missing",
+          }}
         >
           <StatusLine
             label="Target open_id"
@@ -485,27 +513,75 @@ export default async function SocialsSettingsPage() {
   );
 }
 
+/** Collapsible platform section. Uses native <details>/<summary> so it
+ *  stays server-rendered (no client JS), accessible by default, and the
+ *  browser handles keyboard navigation. Status pill in the header tells
+ *  the operator at a glance which platforms still need env vars without
+ *  having to expand each section.
+ *
+ *  All sections default to closed — with four+ platforms expanded by
+ *  default the page is a wall of text. */
 function Section({
   title,
   description,
+  status,
+  defaultOpen = false,
   children,
 }: {
   title: string;
   description?: string;
+  /** Optional status pill in the summary. Omit on sections that have no
+   *  credential state to report (e.g. the cross-platform poll-hooks). */
+  status?: { ok: boolean; label: string };
+  /** Default closed. Pass `defaultOpen` for sections you want expanded
+   *  on first paint (e.g. the cross-platform one which is short). */
+  defaultOpen?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <section>
-      <div className="mb-3">
-        <h2 className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
-          {title}
-        </h2>
+    <details
+      open={defaultOpen}
+      className="group rounded-lg border border-line bg-surface"
+    >
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
+            {title}
+          </h2>
+          {status && (
+            <span
+              className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+                status.ok
+                  ? "bg-accent/10 text-accent"
+                  : "bg-warn/10 text-warn"
+              }`}
+            >
+              {status.ok ? "✓" : "✗"} {status.label}
+            </span>
+          )}
+        </div>
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 12 12"
+          className="h-3 w-3 shrink-0 text-muted transition-transform group-open:rotate-180"
+        >
+          <path
+            d="M2 4l4 4 4-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </summary>
+      <div className="space-y-3 border-t border-line px-4 py-4">
         {description && (
-          <p className="mt-0.5 text-[13px] text-muted">{description}</p>
+          <p className="text-[13px] text-muted">{description}</p>
         )}
+        {children}
       </div>
-      <div className="space-y-3">{children}</div>
-    </section>
+    </details>
   );
 }
 
