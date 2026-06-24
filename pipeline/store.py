@@ -363,6 +363,14 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_sub_len  ON reddit_source(subreddit, length_chars)",
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_comments ON reddit_source(comments)",
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_date     ON reddit_source(date_written)",
+    # 2026-06-24 Full Pipeline toggle (plan:
+    # _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). Per-source
+    # opt-in: when 1, the worker runs every stage end-to-end AND the TS
+    # auto-publish drain flips stories.status to 'published' on success
+    # (web + Facebook). When 0 (default), existing review-then-manual-publish
+    # behaviour is preserved. Propagated onto story_jobs.full_pipeline at
+    # enqueue time so the worker reads it without joining back.
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS full_pipeline INTEGER DEFAULT 0",
     # 2026-06-14 Phase 3 of _plans/2026-06-14-reddit-db-sync.md.
     # Per-attempt queue: each "Process N" click in the admin inserts one row
     # per selected reddit_source, the local pipeline/story_jobs_worker.py
@@ -384,6 +392,19 @@ SCHEMA_STATEMENTS = [
         started_at    TEXT,
         finished_at   TEXT
     )""",
+    # 2026-06-24 Full Pipeline toggle: propagated from reddit_source at
+    # enqueue. The worker reads this flag when finishing a job; when 1, it
+    # sets auto_publish_status='pending' so the TS auto-publish drain can
+    # pick the story up. NULL/0 = existing review-then-manual-publish.
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS full_pipeline INTEGER DEFAULT 0",
+    # 2026-06-24 Full Pipeline auto-publish lane. Lifecycle:
+    # NULL (default) -> 'pending' (worker requested after all stages succeeded)
+    #               -> 'done' (TS drain successfully flipped story to published)
+    #               -> 'failed' (publish gate rejected; admin must inspect)
+    # The TS cron at /api/auto_publish_full_pipeline polls for 'pending'.
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS auto_publish_status TEXT",
+    # Drain hot path: oldest pending first.
+    "CREATE INDEX IF NOT EXISTS idx_story_jobs_auto_publish_status ON story_jobs(auto_publish_status, finished_at)",
     # Worker hot path: oldest queued first. Mirrors the index on
     # image_renders(status, requested_at).
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_status_requested ON story_jobs(status, requested_at)",

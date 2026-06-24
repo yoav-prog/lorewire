@@ -19,6 +19,8 @@ import {
   processRedditSourcesAction,
   bulkReprocessRedditSourcesAction,
   cancelActiveStoryJobsAction,
+  setRedditSourceFullPipelineAction,
+  bulkSetRedditSourceFullPipelineAction,
 } from "@/app/admin/actions";
 import type {
   RedditSourceRow,
@@ -121,6 +123,13 @@ export default function RedditSourceTable({
               <Th className="text-right">Comments</Th>
               <Th>Date</Th>
               <Th>Priority</Th>
+              {/* 2026-06-24 Full Pipeline toggle. When ON for a source, the
+                  worker runs every stage end-to-end AND the auto-publish
+                  drain flips the resulting story to published on success
+                  (web + Facebook). OFF = today's review-then-manual-publish. */}
+              <Th title="When ON, the source auto-publishes on full success (web + Facebook). OFF = review-then-manual-publish.">
+                Full Pipeline
+              </Th>
               <Th>Status</Th>
               <Th className="text-right">Source</Th>
             </tr>
@@ -188,6 +197,12 @@ export default function RedditSourceTable({
                     />
                   </Td>
                   <Td>
+                    <FullPipelineToggle
+                      redditId={r.reddit_id}
+                      enabled={!!r.full_pipeline}
+                    />
+                  </Td>
+                  <Td>
                     <StatusChip status={r.status} />
                   </Td>
                   <Td className="whitespace-nowrap text-right">
@@ -241,6 +256,43 @@ function StatusChip({ status }: { status: string }) {
     >
       {status}
     </span>
+  );
+}
+
+// 2026-06-24 Per-row Full Pipeline toggle. A submit-on-click form so the
+// state lives in the DB column, not local component state — that way the
+// flag survives a refresh + is what the enqueue path reads. ON renders
+// a filled accent chip; OFF renders a muted "Review" placeholder so the
+// column never looks empty (lazy-user readability: the inverse state is
+// visible at a glance, not a missing badge). The form posts the opposite
+// of the current value so each click flips.
+function FullPipelineToggle({
+  redditId,
+  enabled,
+}: {
+  redditId: string;
+  enabled: boolean;
+}) {
+  return (
+    <form action={setRedditSourceFullPipelineAction}>
+      <input type="hidden" name="reddit_id" value={redditId} />
+      <input type="hidden" name="enabled" value={enabled ? "0" : "1"} />
+      <button
+        type="submit"
+        title={
+          enabled
+            ? "Full Pipeline ON — processing this source will auto-publish on full success. Click to switch back to Review."
+            : "Review mode — processing this source lands in review for manual publish. Click to switch to Full Pipeline."
+        }
+        className={
+          enabled
+            ? "inline-block rounded-full border border-accent/50 bg-accent/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-accent hover:opacity-80"
+            : "inline-block rounded-full border border-line px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted hover:text-ink"
+        }
+      >
+        {enabled ? "Full" : "Review"}
+      </button>
+    </form>
   );
 }
 
@@ -364,6 +416,50 @@ function BulkFooter({
             className="rounded-md border border-cat-entitled/40 bg-cat-entitled/10 px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-cat-entitled hover:opacity-80"
           >
             Skip {ids.length}
+          </button>
+        </form>
+        {/* 2026-06-24 Bulk Full Pipeline opt-in / opt-out. Sized for the
+            "I just imported 200 sources, all should be full pipeline"
+            flow without forcing per-row clicks. The confirm on Mark Full
+            quotes the per-source cost so a bulk arming doesn't catch
+            the admin off-guard at Process time. */}
+        <form
+          action={bulkSetRedditSourceFullPipelineAction}
+          onSubmit={(e) => {
+            if (
+              !window.confirm(
+                `Mark ${ids.length} source${ids.length === 1 ? "" : "s"} as Full Pipeline?\n\n` +
+                  "When you process them, each one runs every stage end-to-end and auto-publishes (web + Facebook) on full success. Approximate cost ~$1.00–1.50 per source.\n\n" +
+                  "You can still toggle individual rows back to Review afterwards.",
+              )
+            ) {
+              e.preventDefault();
+            }
+          }}
+        >
+          {ids.map((id) => (
+            <input key={id} type="hidden" name="reddit_id" value={id} />
+          ))}
+          <input type="hidden" name="enabled" value="1" />
+          <button
+            type="submit"
+            title="Arm these sources to auto-publish on full success when processed."
+            className="rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-accent hover:opacity-80"
+          >
+            Mark Full {ids.length}
+          </button>
+        </form>
+        <form action={bulkSetRedditSourceFullPipelineAction}>
+          {ids.map((id) => (
+            <input key={id} type="hidden" name="reddit_id" value={id} />
+          ))}
+          <input type="hidden" name="enabled" value="0" />
+          <button
+            type="submit"
+            title="Disarm Full Pipeline — these sources land in review for manual publish."
+            className="rounded-md border border-line px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-muted hover:text-ink"
+          >
+            Mark Review {ids.length}
           </button>
         </form>
         <form

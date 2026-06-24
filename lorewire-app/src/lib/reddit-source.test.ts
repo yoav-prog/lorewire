@@ -234,3 +234,81 @@ describe("parseCsvText", () => {
     ).toBe(true);
   });
 });
+
+// 2026-06-24 Full Pipeline toggle DB writes. The toggle is the foundation
+// the worker reads at finish-time, so a per-row + bulk write smoke test
+// here protects the propagation chain end-to-end (column exists, default
+// matches schema, setters write 0/1, list reflects the new value).
+describe("Full Pipeline toggle setters", () => {
+  // Lazy-import after vitest setup so the temp DB env vars are in place
+  // before the db.ts module resolves a connection.
+
+  async function seedSource(redditId: string) {
+    const { run } = await import("@/lib/db");
+    await run(
+      "INSERT INTO reddit_source (reddit_id, subreddit, date_written, title, full_text, comments, status, first_synced, last_synced) " +
+        "VALUES (?, 'AITAH', '2026-01-01T00:00:00+00:00', 't', 'f', 1, 'imported', '2026-06-24T00:00:00+00:00', '2026-06-24T00:00:00+00:00')",
+      [redditId],
+    );
+  }
+
+  async function clear() {
+    const { run } = await import("@/lib/db");
+    await run("DELETE FROM story_jobs", []);
+    await run("DELETE FROM reddit_source", []);
+  }
+
+  it("setRedditSourceFullPipeline flips one row's column to 1 and back", async () => {
+    await clear();
+    await seedSource("a");
+    const { setRedditSourceFullPipeline, getRedditSource } = await import(
+      "./reddit-source"
+    );
+
+    await setRedditSourceFullPipeline("a", true);
+    expect((await getRedditSource("a"))?.full_pipeline).toBe(1);
+
+    await setRedditSourceFullPipeline("a", false);
+    expect((await getRedditSource("a"))?.full_pipeline).toBe(0);
+  });
+
+  it("bulkSetRedditSourceFullPipeline flips many rows at once", async () => {
+    await clear();
+    await seedSource("a");
+    await seedSource("b");
+    await seedSource("c");
+    const { bulkSetRedditSourceFullPipeline, getRedditSource } = await import(
+      "./reddit-source"
+    );
+
+    const updated = await bulkSetRedditSourceFullPipeline(
+      ["a", "b", "c"],
+      true,
+    );
+    expect(updated).toBe(3);
+    expect((await getRedditSource("a"))?.full_pipeline).toBe(1);
+    expect((await getRedditSource("b"))?.full_pipeline).toBe(1);
+    expect((await getRedditSource("c"))?.full_pipeline).toBe(1);
+
+    // Flip only a subset back to 0.
+    await bulkSetRedditSourceFullPipeline(["b"], false);
+    expect((await getRedditSource("a"))?.full_pipeline).toBe(1);
+    expect((await getRedditSource("b"))?.full_pipeline).toBe(0);
+    expect((await getRedditSource("c"))?.full_pipeline).toBe(1);
+  });
+
+  it("bulkSetRedditSourceFullPipeline no-ops on an empty input", async () => {
+    await clear();
+    const { bulkSetRedditSourceFullPipeline } = await import(
+      "./reddit-source"
+    );
+    expect(await bulkSetRedditSourceFullPipeline([], true)).toBe(0);
+  });
+
+  it("setRedditSourceFullPipeline rejects an empty reddit_id", async () => {
+    const { setRedditSourceFullPipeline } = await import("./reddit-source");
+    await expect(setRedditSourceFullPipeline("", true)).rejects.toThrow(
+      /reddit_id/,
+    );
+  });
+});

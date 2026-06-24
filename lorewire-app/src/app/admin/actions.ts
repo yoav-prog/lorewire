@@ -3080,6 +3080,55 @@ export async function processRedditSourcesAction(
   );
 }
 
+// 2026-06-24 Full Pipeline toggle (plan:
+// _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). Per-row +
+// bulk setters for the auto-publish opt-in. The toggle only writes the
+// reddit_source column — propagation onto story_jobs happens at
+// enqueue time inside bulkEnqueueStoryJobs so a mid-flip on an active
+// job has no effect (the flag is snapshotted when Process N fires).
+export async function setRedditSourceFullPipelineAction(
+  formData: FormData,
+): Promise<void> {
+  await requireCapability("content.manage");
+  const redditId = String(formData.get("reddit_id") ?? "");
+  const enabled = String(formData.get("enabled") ?? "0") === "1";
+  if (!redditId) {
+    redirect("/admin/reddit-sources?error=missing-reddit-id");
+  }
+  const { setRedditSourceFullPipeline } = await import("@/lib/reddit-source");
+  await setRedditSourceFullPipeline(redditId, enabled);
+  console.info("[reddit-sources full-pipeline-toggle]", {
+    reddit_id: redditId,
+    enabled,
+  });
+  revalidatePath("/admin/reddit-sources");
+  revalidatePath(`/admin/reddit-sources/${redditId}`);
+}
+
+export async function bulkSetRedditSourceFullPipelineAction(
+  formData: FormData,
+): Promise<void> {
+  await requireCapability("content.manage");
+  const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
+  const enabled = String(formData.get("enabled") ?? "0") === "1";
+  if (ids.length === 0) {
+    redirect("/admin/reddit-sources?error=no-selection");
+  }
+  const { bulkSetRedditSourceFullPipeline } = await import(
+    "@/lib/reddit-source"
+  );
+  const updated = await bulkSetRedditSourceFullPipeline(ids, enabled);
+  console.info("[reddit-sources full-pipeline-bulk]", {
+    requested: ids.length,
+    updated,
+    enabled,
+  });
+  revalidatePath("/admin/reddit-sources");
+  redirect(
+    `/admin/reddit-sources?full_pipeline_updated=${updated}&full_pipeline_value=${enabled ? "1" : "0"}`,
+  );
+}
+
 // 2026-06-16 per-row event timeline. The StoryJobEventTimeline client
 // component polls this every 2s while the source row is queued/processing
 // and once on mount otherwise. Read-only; admin-gated.

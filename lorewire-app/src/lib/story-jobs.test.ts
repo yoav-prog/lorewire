@@ -157,6 +157,59 @@ describe("bulkEnqueueStoryJobs", () => {
     expect(result.enqueued).toBe(0);
     expect(result.skipped_active).toBe(1);
   });
+
+  // 2026-06-24 Full Pipeline propagation. The opt-in lives on reddit_source;
+  // bulkEnqueueStoryJobs snapshots it at enqueue and writes it onto the
+  // story_jobs row so the worker doesn't have to join back and a mid-flip
+  // doesn't affect an already-claimed job.
+  it("propagates full_pipeline=1 from source to job", async () => {
+    await seedSource("a", "imported");
+    await run("UPDATE reddit_source SET full_pipeline = 1 WHERE reddit_id = ?", [
+      "a",
+    ]);
+
+    await bulkEnqueueStoryJobs(["a"]);
+
+    const job = await one<{ full_pipeline: number | null; auto_publish_status: string | null }>(
+      "SELECT full_pipeline, auto_publish_status FROM story_jobs WHERE reddit_id = ?",
+      ["a"],
+    );
+    expect(job?.full_pipeline).toBe(1);
+    // auto_publish_status is the worker's lane signal; always NULL on enqueue.
+    expect(job?.auto_publish_status).toBeNull();
+  });
+
+  it("defaults full_pipeline=0 when source has the column at NULL/0", async () => {
+    await seedSource("a", "imported");
+    // No UPDATE: the seed left full_pipeline at the column default (0/NULL).
+
+    await bulkEnqueueStoryJobs(["a"]);
+
+    const job = await one<{ full_pipeline: number | null }>(
+      "SELECT full_pipeline FROM story_jobs WHERE reddit_id = ?",
+      ["a"],
+    );
+    expect(job?.full_pipeline).toBe(0);
+  });
+
+  it("propagates per-row in a mixed batch", async () => {
+    await seedSource("on", "imported");
+    await seedSource("off", "imported");
+    await run("UPDATE reddit_source SET full_pipeline = 1 WHERE reddit_id = ?", [
+      "on",
+    ]);
+
+    await bulkEnqueueStoryJobs(["on", "off"]);
+
+    const jobs = await all<{ reddit_id: string; full_pipeline: number | null }>(
+      "SELECT reddit_id, full_pipeline FROM story_jobs ORDER BY reddit_id",
+      [],
+    );
+    expect(jobs).toEqual([
+      { reddit_id: "off", full_pipeline: 0 },
+      { reddit_id: "on", full_pipeline: 1 },
+    ]);
+  });
 });
 
 describe("partial unique index", () => {

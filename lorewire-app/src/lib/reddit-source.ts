@@ -70,6 +70,13 @@ export interface RedditSourceRow {
   source_hint: string | null;
   needs_expansion: number;
   fingerprint: string | null;
+  // 2026-06-24 Full Pipeline toggle (plan:
+  // _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). When 1, the
+  // worker runs every stage end-to-end AND the TS auto-publish drain
+  // flips the resulting story to status='published' on success (web +
+  // Facebook). Default 0 = existing review-then-manual-publish behaviour.
+  // Propagated onto story_jobs.full_pipeline at enqueue.
+  full_pipeline: number;
 }
 
 const REFRESH_COLS = [
@@ -84,7 +91,7 @@ const REFRESH_COLS = [
 ] as const;
 
 const ALL_COLS =
-  "reddit_id, subreddit, date_written, title, full_text, comments, url, summary, length_chars, status, story_id, notes, first_synced, last_synced, strength, category, headline, source_hint, needs_expansion, fingerprint";
+  "reddit_id, subreddit, date_written, title, full_text, comments, url, summary, length_chars, status, story_id, notes, first_synced, last_synced, strength, category, headline, source_hint, needs_expansion, fingerprint, full_pipeline";
 
 // ---------- CSV parse ----------
 
@@ -868,6 +875,45 @@ export async function bulkSetRedditSourceStatus(
     await run(
       `UPDATE reddit_source SET ${sets.join(", ")} WHERE reddit_id IN (${placeholders})`,
       params,
+    );
+    updated += batch.length;
+  }
+  return updated;
+}
+
+// ---------- Full Pipeline toggle (2026-06-24) ----------
+
+// Per-source opt-in for end-to-end run + auto-publish on success. The
+// toggle is persisted on reddit_source (not story_jobs) so the admin
+// can flip it before processing — propagation onto the job row happens
+// at enqueue inside bulkEnqueueStoryJobs. Bulk variant matches the
+// shape of bulkSetRedditSourceStatus so the admin footer can reuse the
+// same selection model.
+export async function setRedditSourceFullPipeline(
+  redditId: string,
+  value: boolean,
+): Promise<void> {
+  if (!redditId) {
+    throw new Error("setRedditSourceFullPipeline requires reddit_id");
+  }
+  await run(
+    "UPDATE reddit_source SET full_pipeline = ? WHERE reddit_id = ?",
+    [value ? 1 : 0, redditId],
+  );
+}
+
+export async function bulkSetRedditSourceFullPipeline(
+  redditIds: string[],
+  value: boolean,
+): Promise<number> {
+  if (redditIds.length === 0) return 0;
+  let updated = 0;
+  for (let i = 0; i < redditIds.length; i += 500) {
+    const batch = redditIds.slice(i, i + 500);
+    const placeholders = batch.map(() => "?").join(", ");
+    await run(
+      `UPDATE reddit_source SET full_pipeline = ? WHERE reddit_id IN (${placeholders})`,
+      [value ? 1 : 0, ...batch],
     );
     updated += batch.length;
   }

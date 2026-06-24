@@ -522,6 +522,13 @@ export const REDDIT_SOURCE: Table = {
     { name: "source_hint", type: "TEXT" },
     { name: "needs_expansion", type: "INTEGER" },
     { name: "fingerprint", type: "TEXT" },
+    // 2026-06-24 Full Pipeline toggle (plan:
+    // _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). Per-source
+    // opt-in: when 1, the worker runs every stage end-to-end AND the TS
+    // drain flips stories.status to 'published' on success (web + Facebook).
+    // Default 0 = existing review-then-manual-publish. Mirror of the ALTER
+    // in pipeline/store.py.
+    { name: "full_pipeline", type: "INTEGER" },
   ],
 };
 
@@ -573,6 +580,14 @@ export const STORY_JOBS: Table = {
     { name: "requested_at", type: "TEXT" },
     { name: "started_at", type: "TEXT" },
     { name: "finished_at", type: "TEXT" },
+    // 2026-06-24 Full Pipeline: propagated from reddit_source at enqueue.
+    // Worker reads when finishing a job; when 1 + every stage succeeded,
+    // worker sets auto_publish_status='pending' for the TS drain.
+    { name: "full_pipeline", type: "INTEGER" },
+    // 2026-06-24 Full Pipeline auto-publish lane.
+    // NULL = inactive, 'pending' = worker requested, 'done' = TS drain
+    // flipped story to published, 'failed' = publish gate rejected.
+    { name: "auto_publish_status", type: "TEXT" },
   ],
 };
 

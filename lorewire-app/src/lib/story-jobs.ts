@@ -22,10 +22,19 @@ export interface StoryJobRow {
   requested_at: string;
   started_at: string | null;
   finished_at: string | null;
+  // 2026-06-24 Full Pipeline toggle. Propagated from reddit_source at
+  // enqueue so the worker reads it without joining back. When 1, the
+  // worker sets auto_publish_status='pending' on success and the
+  // /api/auto_publish_full_pipeline cron flips the story to published.
+  full_pipeline: number | null;
+  // 2026-06-24 auto-publish lane. NULL on a fresh row; the worker writes
+  // 'pending' when full_pipeline=1 and every stage succeeded; the TS
+  // drain writes 'done' on success or 'failed' on a publish gate reject.
+  auto_publish_status: string | null;
 }
 
 const COLS =
-  "id, reddit_id, status, progress, error, story_id, with_media, requested_by, requested_at, started_at, finished_at";
+  "id, reddit_id, status, progress, error, story_id, with_media, requested_by, requested_at, started_at, finished_at, full_pipeline, auto_publish_status";
 
 export interface BulkEnqueueResult {
   enqueued: number;
@@ -74,12 +83,12 @@ export async function bulkEnqueueStoryJobs(
   const toFlipQueued: string[] = [];
 
   for (const rid of redditIds) {
-    const status = sourceRows.get(rid);
-    if (status === undefined) {
+    const src = sourceRows.get(rid);
+    if (src === undefined) {
       result.not_found++;
       continue;
     }
-    if (!ALLOWED_SOURCE_STATUSES.has(status)) {
+    if (!ALLOWED_SOURCE_STATUSES.has(src.status)) {
       result.skipped_status++;
       continue;
     }
@@ -99,11 +108,17 @@ export async function bulkEnqueueStoryJobs(
       requested_at: now,
       started_at: null,
       finished_at: null,
+      // 2026-06-24 propagate Full Pipeline opt-in from the source row.
+      // The worker reads this flag when finishing the job; the cron
+      // drain reads it again as a safety check before flipping the
+      // story to published.
+      full_pipeline: src.full_pipeline,
+      auto_publish_status: null,
     });
     // Only flip reddit_source.status when the row was 'imported'; a row
     // already 'queued' (from a previous attempt the worker reset) stays as
     // it is — no spurious UPDATE.
-    if (status === "imported") toFlipQueued.push(rid);
+    if (src.status === "imported") toFlipQueued.push(rid);
   }
 
   if (toInsert.length > 0) {
@@ -175,18 +190,33 @@ async function readBackInsertedJobIds(jobIds: string[]): Promise<Set<string>> {
   return out;
 }
 
+// Snapshot the per-row state the enqueue path needs in a single round
+// trip: status (lifecycle gate) and full_pipeline (auto-publish opt-in
+// to propagate onto the job row). Returning the full object instead of
+// just status keeps callers free of a second fetch and lets future
+// per-source flags slot in without changing the call signature.
 async function snapshotSourceStatuses(
   redditIds: string[],
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, { status: string; full_pipeline: number }>> {
+  const out = new Map<string, { status: string; full_pipeline: number }>();
   for (let i = 0; i < redditIds.length; i += 500) {
     const batch = redditIds.slice(i, i + 500);
     const placeholders = batch.map(() => "?").join(", ");
-    const rows = await all<{ reddit_id: string; status: string }>(
-      `SELECT reddit_id, status FROM reddit_source WHERE reddit_id IN (${placeholders})`,
+    const rows = await all<{
+      reddit_id: string;
+      status: string;
+      full_pipeline: number | null;
+    }>(
+      `SELECT reddit_id, status, full_pipeline FROM reddit_source ` +
+        `WHERE reddit_id IN (${placeholders})`,
       batch,
     );
-    for (const r of rows) out.set(r.reddit_id, r.status);
+    for (const r of rows) {
+      out.set(r.reddit_id, {
+        status: r.status,
+        full_pipeline: r.full_pipeline ? 1 : 0,
+      });
+    }
   }
   return out;
 }
@@ -221,6 +251,11 @@ const INSERT_COLS = [
   "requested_at",
   "started_at",
   "finished_at",
+  // 2026-06-24 Full Pipeline propagation. auto_publish_status is always
+  // NULL on insert; the worker writes 'pending' after every stage
+  // succeeds for a full_pipeline=1 job.
+  "full_pipeline",
+  "auto_publish_status",
 ] as const;
 
 async function bulkInsertJobs(rows: StoryJobRow[]): Promise<void> {
