@@ -8,6 +8,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   fallbackIdsForSurface,
+  pickHeroAtIndex,
+  resolveHeroPool,
   resolveRailIds,
 } from "./homepage-rails";
 
@@ -381,5 +383,104 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
       fatDramaCatalog,
     );
     expect(result).toEqual(["d3"]);
+  });
+});
+
+describe("resolveHeroPool / pickHeroAtIndex", () => {
+  // Cast the minimal fixtures through `never` so the test stays focused
+  // on resolveHeroPool's pool-building behavior — building full Story
+  // objects would clutter every case with unrelated fields.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const story = (id: string): any => ({
+    id,
+    title: id,
+    cat: "Drama",
+    heroImage: `https://cdn/${id}.jpg`,
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const unpublished = (id: string): any => ({ id, title: id, cat: "Drama" });
+
+  const catalog = {
+    array: [story("a"), story("b"), story("c"), story("d"), story("e")],
+    map: new Map(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+  const emptyCuration = {
+    hero: [],
+    top10: [],
+    continue: [],
+    new_row: [],
+    drama_row: [],
+    entitled_row: [],
+    humor_row: [],
+    wholesome_row: [],
+    dating_row: [],
+    roommate_row: [],
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const resolveStory = (id: string): any =>
+    catalog.array.find((s: { id: string }) => s.id === id) ?? null;
+
+  it("returns curated pool in order, dropping unpublished candidates", () => {
+    const mixedCatalog = {
+      array: [story("a"), unpublished("b"), story("c"), story("d")],
+      map: new Map(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const localResolve = (id: string): any =>
+      mixedCatalog.array.find((s: { id: string }) => s.id === id) ?? null;
+    const curation = {
+      ...emptyCuration,
+      hero: ["a", "b", "c", "d"],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      mixedCatalog,
+      localResolve,
+    );
+    expect(pool.map((s) => s.id)).toEqual(["a", "c", "d"]);
+  });
+
+  it("falls back to a single auto-derived pick when curation is empty", () => {
+    const curation = {
+      ...emptyCuration,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+    );
+    expect(pool.map((s) => s.id)).toEqual(["a"]);
+  });
+
+  it("returns [] when behavior.heroRequired is true and curation is empty", () => {
+    const curation = {
+      ...emptyCuration,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const pool = resolveHeroPool(
+      curation,
+      { emptyRailBehavior: "fallback", heroRequired: true },
+      catalog,
+      resolveStory,
+    );
+    expect(pool).toEqual([]);
+  });
+
+  it("pickHeroAtIndex returns null on empty pool", () => {
+    expect(pickHeroAtIndex([], 0)).toBeNull();
+    expect(pickHeroAtIndex([], 5)).toBeNull();
+  });
+
+  it("pickHeroAtIndex clamps out-of-range index", () => {
+    const pool = [story("a"), story("b"), story("c")];
+    expect(pickHeroAtIndex(pool, -10)?.id).toBe("a");
+    expect(pickHeroAtIndex(pool, 100)?.id).toBe("c");
+    expect(pickHeroAtIndex(pool, 1)?.id).toBe("b");
   });
 });

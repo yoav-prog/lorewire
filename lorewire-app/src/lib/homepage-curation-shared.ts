@@ -23,11 +23,12 @@ export const HOMEPAGE_SURFACES = [
 ] as const;
 export type HomepageSurface = (typeof HOMEPAGE_SURFACES)[number];
 
-// Per-surface fixed capacity. Hero is a single pick. TOP 10 is exactly 10.
-// All other rails are unbounded; the admin page caps the picker at a
+// Per-surface fixed capacity. Hero is a rotation pool of up to 8 picks
+// (the carousel auto-advances between them). TOP 10 is exactly 10. All
+// other rails are unbounded; the admin page caps the picker at a
 // reasonable rail size so a rail can't grow past what fits.
 export const SURFACE_CAPACITY: Record<HomepageSurface, number | null> = {
-  hero: 1,
+  hero: 8,
   top10: 10,
   continue: null,
   new_row: null,

@@ -583,23 +583,55 @@ export function resolveRailIds(
   return augmented;
 }
 
-/** Single source of truth for resolving the current homepage hero. HomePage
- *  uses this for its render; the outer shell's "Play Something" shuffle
- *  uses it to know which story to exclude from the random pick so a
- *  shuffle click doesn't replay the marquee the user is already looking
- *  at. Returns null when no published hero candidate exists (the same
- *  signal HomePage uses to fall back to the no-hero top-padded layout). */
+/** Resolve the full rotation pool for the homepage hero carousel. The pool
+ *  is admin-curated (capacity 8) and falls back to a single auto-derived
+ *  pick when curation is empty + behavior allows fallback. Each entry is
+ *  guaranteed to be a published story — unpublished candidates are
+ *  dropped so the carousel never paints a placeholder slide.
+ *
+ *  Returns [] when no published candidate exists (HomePage uses that as
+ *  the signal to render the no-hero top-padded layout). */
+export function resolveHeroPool(
+  curation: HomepageCuration | null,
+  behavior: HomepageCurationBehavior,
+  catalog: MergedCatalog,
+  resolveStory: (id: string) => Story | null,
+): Story[] {
+  const heroIds = behavior.heroRequired
+    ? curation?.hero ?? []
+    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
+  const pool: Story[] = [];
+  for (const id of heroIds) {
+    const candidate = resolveStory(id);
+    if (candidate && isPublishedStory(candidate)) pool.push(candidate);
+  }
+  return pool;
+}
+
+/** Convenience for callers that need a single hero (the legacy single-pick
+ *  contract). Used by the outer shell's "Play Something" shuffle to know
+ *  which story is currently visible in the marquee so a shuffle click
+ *  doesn't replay it. `activeIndex` clamps into range so an out-of-band
+ *  value is safe. */
+export function pickHeroAtIndex(pool: Story[], activeIndex: number): Story | null {
+  if (pool.length === 0) return null;
+  const idx = Math.max(0, Math.min(activeIndex, pool.length - 1));
+  return pool[idx];
+}
+
+/** @deprecated Use resolveHeroPool + pickHeroAtIndex(pool, 0). Kept as a
+ *  thin wrapper so existing callers compile during the transition; will
+ *  be removed once every call site is migrated. */
 export function resolveHeroStory(
   curation: HomepageCuration | null,
   behavior: HomepageCurationBehavior,
   catalog: MergedCatalog,
   resolveStory: (id: string) => Story | null,
 ): Story | null {
-  const heroIds = behavior.heroRequired
-    ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
-  const candidate = heroIds[0] ? resolveStory(heroIds[0]) : null;
-  return candidate && isPublishedStory(candidate) ? candidate : null;
+  return pickHeroAtIndex(
+    resolveHeroPool(curation, behavior, catalog, resolveStory),
+    0,
+  );
 }
 
 // The "All" sentinel for the homepage pill row. Lives next to
