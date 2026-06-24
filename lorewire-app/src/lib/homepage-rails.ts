@@ -30,7 +30,14 @@ import {
   type StoryPollSeed,
   type StoryPollView,
 } from "@/app/actions";
-import { CAT, STORIES, tryById, type Cat, type Story } from "@/lib/stories";
+import {
+  CAT,
+  STORIES,
+  isPublishedStory,
+  tryById,
+  type Cat,
+  type Story,
+} from "@/lib/stories";
 import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
 
 /** 2026-06-18 polls plan extension: client-side fetch hook for the
@@ -524,5 +531,22 @@ export function filterIdsByPillCat(
   return ids.filter((id) => {
     const s = resolveStory(id);
     return s ? s.cat === pill : false;
+  });
+}
+
+/** Drop ids whose resolved story has no produced content (sample
+ *  placeholder). Same `isPublishedStory` gate Browse / Search / New & Hot
+ *  use; the home page rails apply it last so curated and fallback paths
+ *  both flow through it. Stale curation pointing at a deleted story is
+ *  dropped too (consistent with `filterIdsByPillCat`).
+ */
+export function filterIdsByPublished(
+  ids: string[] | null | undefined,
+  resolveStory: (id: string) => Story | null,
+): string[] {
+  if (!ids || ids.length === 0) return [];
+  return ids.filter((id) => {
+    const s = resolveStory(id);
+    return s ? isPublishedStory(s) : false;
   });
 }

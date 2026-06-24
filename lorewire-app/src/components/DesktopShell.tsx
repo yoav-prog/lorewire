@@ -26,6 +26,7 @@ import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
+  filterIdsByPublished,
   resolveRailIds,
   useHomepageCuration,
   useHomepagePolls,
@@ -1281,19 +1282,47 @@ function HomePage({
   const heroIds = behavior.heroRequired
     ? curation?.hero ?? []
     : resolveRailIds("hero", curation, behavior, catalog) ?? [];
-  const heroStory = heroIds[0] ? resolveStory(heroIds[0]) : null;
+  // Same isPublishedStory gate Browse / Search / New & Hot use: if the
+  // resolved hero is a sample placeholder (no videoUrl / heroImage /
+  // audioUrl / body), drop it so the page falls back to the no-hero
+  // top-padded layout instead of leading with a glyph poster.
+  const heroCandidate = heroIds[0] ? resolveStory(heroIds[0]) : null;
+  const heroStory =
+    heroCandidate && isPublishedStory(heroCandidate) ? heroCandidate : null;
 
-  const continueIds = resolveRailIds("continue", curation, behavior, catalog, {
-    continue: continueState.ids,
+  // Each rail flows through filterIdsByPublished AFTER resolveRailIds so
+  // curated and fallback paths are both gated identically. Empty results
+  // collapse the rail entirely (no header for an empty rail).
+  const continueIds = filterIdsByPublished(
+    resolveRailIds("continue", curation, behavior, catalog, {
+      continue: continueState.ids,
+    }),
+    resolveStory,
+  );
+  const top10Ids = filterIdsByPublished(
+    resolveRailIds("top10", curation, behavior, catalog),
+    resolveStory,
+  );
+  const newRowIds = filterIdsByPublished(
+    resolveRailIds("new_row", curation, behavior, catalog),
+    resolveStory,
+  );
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[home render]", {
+    shell: "desktop",
+    total_catalog: catalog.array.length,
+    hero: heroStory ? 1 : 0,
+    continue: continueIds.length,
+    top10: top10Ids.length,
+    new_row: newRowIds.length,
   });
-  const top10Ids = resolveRailIds("top10", curation, behavior, catalog);
-  const newRowIds = resolveRailIds("new_row", curation, behavior, catalog);
 
   return (
     <div className="pb-20">
       {heroStory && <Hero story={heroStory} onOpen={onOpen} onShuffle={onShuffle} />}
       <div className={heroStory ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
-        {continueIds && continueIds.length > 0 && (
+        {continueIds.length > 0 && (
           <Rail title="Continue Watching">
             {continueIds.map((id) => {
               const s = resolveStory(id);
@@ -1302,7 +1331,7 @@ function HomePage({
             })}
           </Rail>
         )}
-        {top10Ids && top10Ids.length > 0 && (
+        {top10Ids.length > 0 && (
           <Rail title="Top 10 Today">
             <Top10Row onOpen={onOpen} ids={top10Ids} resolveStory={resolveStory} />
           </Rail>
@@ -1311,9 +1340,11 @@ function HomePage({
           const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
           if (!ids) return null;
           // Skip rails that resolve to no displayable stories at all (no
-          // curation + no fallback hits) so the homepage doesn't render
-          // an empty section header.
-          const items = ids.map((id) => resolveStory(id)).filter((s): s is Story => s !== null);
+          // curation + no fallback hits, or only sample placeholders) so
+          // the homepage doesn't render an empty section header.
+          const items = ids
+            .map((id) => resolveStory(id))
+            .filter((s): s is Story => s !== null && isPublishedStory(s));
           if (items.length === 0) return null;
           return (
             <Rail key={rail.surface} title={rail.title}>
@@ -1332,7 +1363,7 @@ function HomePage({
             </Rail>
           );
         })}
-        {newRowIds && newRowIds.length > 0 && (
+        {newRowIds.length > 0 && (
           <Rail title="New on LoreWire">
             {newRowIds.map((id) => {
               const s = resolveStory(id);

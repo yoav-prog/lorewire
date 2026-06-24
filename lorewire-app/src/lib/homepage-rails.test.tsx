@@ -23,6 +23,7 @@ import {
   ALL_PILL,
   fallbackIdsForSurface,
   filterIdsByPillCat,
+  filterIdsByPublished,
   liveRowToStory,
   mergeStaticAndLive,
   useHomepageCuration,
@@ -160,6 +161,71 @@ describe("filterIdsByPillCat", () => {
     expect(filterIdsByPillCat(null, "Humor", resolve)).toEqual([]);
     expect(filterIdsByPillCat(undefined, "Humor", resolve)).toEqual([]);
     expect(filterIdsByPillCat([], "Humor", resolve)).toEqual([]);
+  });
+});
+
+// Published gate (matches Browse / Search / New & Hot). Home page rails
+// run this after the pill filter so curated and fallback paths can't
+// surface a sample placeholder card.
+describe("filterIdsByPublished", () => {
+  // Build placeholders explicitly — STORIES[0] in this codebase already
+  // has the published.ts CMS overlay applied, so spreading from it would
+  // smuggle in heroImage / videoUrl / body and turn every "placeholder"
+  // into a published story.
+  const bare = (id: string, overrides: Partial<Story> = {}): Story => ({
+    id,
+    title: id.toUpperCase(),
+    cat: "Humor" as Cat,
+    dur: "2:00",
+    match: 90,
+    year: 2026,
+    glyph: "!",
+    tags: ["True Story"],
+    syn: "",
+    ...overrides,
+  });
+  const stories: Record<string, Story> = {
+    placeholder: bare("placeholder"),
+    withVideo: bare("withVideo", { videoUrl: "https://cdn/v.mp4" }),
+    withHero: bare("withHero", { heroImage: "https://cdn/h.png" }),
+    withAudio: bare("withAudio", { audioUrl: "https://cdn/a.mp3" }),
+    withBody: bare("withBody", { body: "real article" }),
+    emptyBody: bare("emptyBody", { body: "" }),
+  };
+  const resolve = (id: string) => stories[id] ?? null;
+
+  it("drops ids whose story has no produced content", () => {
+    expect(
+      filterIdsByPublished(
+        ["placeholder", "withVideo", "withHero"],
+        resolve,
+      ),
+    ).toEqual(["withVideo", "withHero"]);
+  });
+
+  it("keeps any of videoUrl / heroImage / audioUrl / body as published", () => {
+    expect(
+      filterIdsByPublished(
+        ["withVideo", "withHero", "withAudio", "withBody"],
+        resolve,
+      ),
+    ).toEqual(["withVideo", "withHero", "withAudio", "withBody"]);
+  });
+
+  it("treats empty-string body as a placeholder", () => {
+    expect(filterIdsByPublished(["emptyBody"], resolve)).toEqual([]);
+  });
+
+  it("drops ids that don't resolve to a story", () => {
+    expect(
+      filterIdsByPublished(["withVideo", "missing"], resolve),
+    ).toEqual(["withVideo"]);
+  });
+
+  it("handles null / empty inputs", () => {
+    expect(filterIdsByPublished(null, resolve)).toEqual([]);
+    expect(filterIdsByPublished(undefined, resolve)).toEqual([]);
+    expect(filterIdsByPublished([], resolve)).toEqual([]);
   });
 });
 
