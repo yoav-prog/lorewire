@@ -749,6 +749,24 @@ def run_one_tick(
         message=f"Done. Story: {story_id}",
         payload={"story_id": story_id},
     )
+    # 2026-06-24 Full Pipeline: when the source was opted into auto-publish
+    # AND every stage above succeeded (we only reach here on success), arm
+    # the TS auto-publish drain by flipping `auto_publish_status` to
+    # 'pending'. The drain then runs the existing publish gate
+    # (evaluatePublishReadiness) so any missing artifact still blocks the
+    # actual flip to status='published'. Plan:
+    # _plans/2026-06-24-reddit-source-full-pipeline-toggle.md.
+    if claimed.get("full_pipeline"):
+        store.request_story_job_auto_publish(job_id)
+        print(
+            f"[story-jobs auto-publish-requested] job={job_id} "
+            f"reddit_id={reddit_id} story_id={story_id}"
+        )
+        store.log_story_job_event(
+            job_id, reddit_id, "auto_publish_requested",
+            message="Full Pipeline opt-in: auto-publish queued for TS drain",
+            payload={"story_id": story_id},
+        )
     return True
 
 

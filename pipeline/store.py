@@ -3373,6 +3373,11 @@ def list_reddit_source_subreddits() -> list[str]:
 _STORY_JOB_COLUMNS = [
     "id", "reddit_id", "status", "progress", "error", "story_id",
     "with_media", "requested_by", "requested_at", "started_at", "finished_at",
+    # 2026-06-24 Full Pipeline toggle. `full_pipeline` arrives on the
+    # row from the enqueue path; the worker reads it at finish time to
+    # decide whether to flip `auto_publish_status` to 'pending'.
+    # `auto_publish_status` is always None on a fresh row.
+    "full_pipeline", "auto_publish_status",
 ]
 
 
@@ -3409,6 +3414,7 @@ def enqueue_story_job(
     *,
     with_media: bool = True,
     requested_by: str | None = None,
+    full_pipeline: bool = False,
 ) -> dict | None:
     """Insert a queued story_job. Returns the inserted row, or None when an
     active job (queued or processing) already exists for this reddit_id —
@@ -3440,6 +3446,12 @@ def enqueue_story_job(
         "requested_at": now,
         "started_at": None,
         "finished_at": None,
+        # 2026-06-24 Full Pipeline propagation. The TS enqueue path
+        # writes the source's value here; the Python enqueue (used by
+        # the worker's --reddit ad-hoc dispatch + tests) defaults to
+        # False so legacy callers don't accidentally arm auto-publish.
+        "full_pipeline": 1 if full_pipeline else 0,
+        "auto_publish_status": None,
     }
     cols = ", ".join(_STORY_JOB_COLUMNS)
     conflict_clause = (
@@ -3575,6 +3587,38 @@ def finish_story_job(job_id: str, story_id: str) -> None:
             "story_id=?, finished_at=? "
             "WHERE id=? AND status IN ('queued', 'processing')",
             (story_id, now, job_id),
+        )
+
+
+def request_story_job_auto_publish(job_id: str) -> None:
+    """2026-06-24 Full Pipeline auto-publish request. Sets
+    `auto_publish_status='pending'` on a finished job so the TS drain at
+    /api/auto_publish_full_pipeline can claim it.
+
+    Called by the worker AFTER finish_story_job succeeds — the row must
+    be in status='done' for the drain's eligibility query to see it. The
+    UPDATE is conditional on status='done' so a job that finished but was
+    later moved to a different terminal state (cancelled, error via a
+    follow-up reaper) can't be re-armed. Idempotent: re-calling on a row
+    already at 'pending' is a no-op (the drain itself flips to 'done'
+    or 'failed', so we never overwrite those states either)."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET auto_publish_status='pending' "
+                    "WHERE id=%s AND status='done' "
+                    "AND auto_publish_status IS NULL",
+                    (job_id,),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET auto_publish_status='pending' "
+            "WHERE id=? AND status='done' "
+            "AND auto_publish_status IS NULL",
+            (job_id,),
         )
 
 
