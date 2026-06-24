@@ -17,6 +17,12 @@ import type {
   RedditSourceStrength,
 } from "@/lib/reddit-source";
 
+// 2026-06-24 Full Pipeline filter. Same checkbox idiom as Status and
+// Priority: pass nothing or both = "show both"; pass exactly one = filter
+// to that state. Values 'on'/'off' match the URL contract in page.tsx
+// and the badge labels in RedditSourceTable.FullPipelineToggle.
+type FullPipelineFilter = "on" | "off";
+
 interface FilterRailProps {
   searchParams: {
     q?: string;
@@ -29,12 +35,15 @@ interface FilterRailProps {
   activeStatuses: RedditSourceStatus[];
   activeSubreddits: string[];
   activeStrengths: RedditSourceStrength[];
+  activeFullPipeline: FullPipelineFilter[];
   allSubreddits: string[];
   sort: RedditSourceOrderBy;
   validStatuses: ReadonlyArray<RedditSourceStatus>;
   statusLabel: Record<RedditSourceStatus, string>;
   validStrengths: ReadonlyArray<RedditSourceStrength>;
   strengthLabel: Record<RedditSourceStrength, string>;
+  validFullPipeline: ReadonlyArray<FullPipelineFilter>;
+  fullPipelineLabel: Record<FullPipelineFilter, string>;
   sortLabel: Record<RedditSourceOrderBy, string>;
 }
 
@@ -55,12 +64,15 @@ export default function FilterRail({
   activeStatuses,
   activeSubreddits,
   activeStrengths,
+  activeFullPipeline,
   allSubreddits,
   sort,
   validStatuses,
   statusLabel,
   validStrengths,
   strengthLabel,
+  validFullPipeline,
+  fullPipelineLabel,
   sortLabel,
 }: FilterRailProps) {
   return (
@@ -143,6 +155,43 @@ export default function FilterRail({
         <p className="mt-1 font-mono text-[9px] text-muted">
           Set by the IdeasDB importer. Strong &gt; Medium &gt; None in the
           worker queue.
+        </p>
+      </fieldset>
+
+      {/* 2026-06-24 Full Pipeline filter. Mirrors the per-row toggle in
+          the table (RedditSourceTable.FullPipelineToggle): 'Full' means
+          full_pipeline=1 (auto-publish on full success); 'Review' means
+          full_pipeline=0 (lands in review for manual publish). Both
+          boxes checked (or both unchecked) = show both — same convention
+          as Status and Priority above. */}
+      <fieldset>
+        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
+          Full Pipeline
+        </legend>
+        <div className="grid grid-cols-2 gap-1">
+          {validFullPipeline.map((v) => {
+            const checked = activeFullPipeline.includes(v);
+            return (
+              <label
+                key={v}
+                className="flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors has-[input:checked]:border-accent has-[input:checked]:bg-surface2"
+              >
+                <input
+                  type="checkbox"
+                  name="full_pipeline"
+                  value={v}
+                  defaultChecked={checked}
+                  onChange={submitParentForm}
+                  className="accent-accent"
+                />
+                {fullPipelineLabel[v]}
+              </label>
+            );
+          })}
+        </div>
+        <p className="mt-1 font-mono text-[9px] text-muted">
+          Full = auto-publish on success. Review = land in review for
+          manual publish.
         </p>
       </fieldset>
 

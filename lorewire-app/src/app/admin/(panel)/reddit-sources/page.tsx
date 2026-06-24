@@ -63,11 +63,22 @@ const STRENGTH_LABEL: Record<RedditSourceStrength, string> = {
 
 const VALID_STRENGTHS: RedditSourceStrength[] = ["strong", "medium", "none"];
 
+// 2026-06-24 Full Pipeline filter. 'on' = auto-publish, 'off' = review.
+// Labels mirror the badge text in RedditSourceTable.FullPipelineToggle so
+// the filter rail and the row chips speak the same vocabulary.
+type FullPipelineFilter = "on" | "off";
+const VALID_FULL_PIPELINE: FullPipelineFilter[] = ["on", "off"];
+const FULL_PIPELINE_LABEL: Record<FullPipelineFilter, string> = {
+  on: "Full",
+  off: "Review",
+};
+
 interface SearchParams {
   q?: string;
   status?: string | string[];
   subreddits?: string | string[];
   strength?: string | string[];
+  full_pipeline?: string | string[];
   length_min?: string;
   length_max?: string;
   comments_min?: string;
@@ -91,6 +102,15 @@ function parseStrengths(
   const raw = toArray(v);
   return raw.filter((s): s is RedditSourceStrength =>
     (VALID_STRENGTHS as string[]).includes(s),
+  );
+}
+
+function parseFullPipeline(
+  v: string | string[] | undefined,
+): FullPipelineFilter[] {
+  const raw = toArray(v);
+  return raw.filter((s): s is FullPipelineFilter =>
+    (VALID_FULL_PIPELINE as string[]).includes(s),
   );
 }
 
@@ -136,6 +156,7 @@ export default async function RedditSourcesPage({
   const statuses = parseStatuses(sp.status);
   const subreddits = toArray(sp.subreddits);
   const strengths = parseStrengths(sp.strength);
+  const fullPipeline = parseFullPipeline(sp.full_pipeline);
   const sort = parseSort(sp.sort);
   const page = Math.max(intOrUndefined(sp.page) ?? 1, 1);
 
@@ -148,6 +169,7 @@ export default async function RedditSourcesPage({
     status: effectiveStatuses,
     subreddits: subreddits.length > 0 ? subreddits : undefined,
     strength: strengths.length > 0 ? strengths : undefined,
+    full_pipeline: fullPipeline.length > 0 ? fullPipeline : undefined,
     length_min: intOrUndefined(sp.length_min),
     length_max: intOrUndefined(sp.length_max),
     comments_min: intOrUndefined(sp.comments_min),
@@ -200,12 +222,15 @@ export default async function RedditSourcesPage({
           activeStatuses={effectiveStatuses}
           activeSubreddits={subreddits}
           activeStrengths={strengths}
+          activeFullPipeline={fullPipeline}
           allSubreddits={allSubs}
           sort={sort}
           validStatuses={VALID_STATUSES}
           statusLabel={STATUS_LABEL}
           validStrengths={VALID_STRENGTHS}
           strengthLabel={STRENGTH_LABEL}
+          validFullPipeline={VALID_FULL_PIPELINE}
+          fullPipelineLabel={FULL_PIPELINE_LABEL}
           sortLabel={SORT_LABEL}
         />
         <div className="space-y-3">
@@ -451,6 +476,7 @@ function buildPageHref(searchParams: SearchParams, page: number): string {
   appendMany("status", searchParams.status);
   appendMany("subreddits", searchParams.subreddits);
   appendMany("strength", searchParams.strength);
+  appendMany("full_pipeline", searchParams.full_pipeline);
   append("length_min", searchParams.length_min);
   append("length_max", searchParams.length_max);
   append("comments_min", searchParams.comments_min);

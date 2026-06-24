@@ -295,6 +295,12 @@ export interface RedditSourceFilters {
   // _plans/2026-06-23-ideasdb-priority-import.md). Lets the admin focus on
   // strong / medium priority rows that the IdeasDB sheet flagged.
   strength?: RedditSourceStrength | RedditSourceStrength[];
+  // 2026-06-24 Full Pipeline filter. Matches the per-row toggle in the
+  // table: 'on' = full_pipeline=1 (auto-publish on full success),
+  // 'off' = full_pipeline=0 (review-then-manual-publish). Passing both
+  // values (or none) is equivalent to no filter — same convention as
+  // the status / strength filters above.
+  full_pipeline?: "on" | "off" | Array<"on" | "off">;
 }
 
 export type RedditSourceOrderBy =
@@ -383,6 +389,17 @@ function buildWhere(
       // legacy rows to 'none' explicitly).
       parts.push(`strength IN (${arr.map(() => "?").join(", ")})`);
       params.push(...arr);
+    }
+  }
+  if (f.full_pipeline) {
+    const arr = Array.isArray(f.full_pipeline)
+      ? f.full_pipeline
+      : [f.full_pipeline];
+    // Both values selected (or none) = no filter; only emit SQL when the
+    // operator narrowed to a single state, matching status / strength.
+    if (arr.length === 1) {
+      parts.push("full_pipeline = ?");
+      params.push(arr[0] === "on" ? 1 : 0);
     }
   }
 
