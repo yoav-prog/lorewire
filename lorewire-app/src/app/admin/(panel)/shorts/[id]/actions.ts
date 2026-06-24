@@ -1435,6 +1435,35 @@ async function resolveArticleUrlForStory(storyId: string): Promise<string> {
   return `${origin}/articles/${article.language}/${article.slug}`;
 }
 
+/** Best-effort: ensure SEO metadata exists for this story before any
+ *  per-platform manual publish runs. Mirrors the same hook the render
+ *  route + bulk publish action use, so EVERY publish path produces
+ *  LLM-generated, content-aware captions instead of falling through
+ *  to the template default.
+ *
+ *  Idempotent: skips when metadata is fresh + the story hasn't been
+ *  updated. A generation failure is logged but never blocks — the
+ *  publisher falls back to the template if metadata's missing. */
+async function ensureSeoBeforeManualPublish(
+  storyId: string,
+  articleUrl: string,
+): Promise<void> {
+  try {
+    const result = await ensureSeoMetadataForStory({ storyId, articleUrl });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor seo ensure pre-publish]", {
+      story_id: storyId,
+      status: result.status,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor seo ensure threw]", {
+      story_id: storyId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export async function publishToFacebookAction(
   storyId: string,
   opts: ManualFacebookPublishOpts = {},
@@ -1472,6 +1501,7 @@ export async function publishToFacebookAction(
   }
 
   const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
   const result = await publishShortToFacebook({
     storyId,
     renderId: latest.id,
@@ -1610,6 +1640,7 @@ export async function publishToInstagramAction(
   }
 
   const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
   const result = await publishShortToInstagram({
     storyId,
     renderId: latest.id,
@@ -1752,6 +1783,7 @@ export async function publishToYouTubeAction(
   }
 
   const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
   const tagsOverrideArray =
     opts.tagsOverride != null
       ? opts.tagsOverride
@@ -1898,6 +1930,7 @@ export async function publishToTikTokAction(
   }
 
   const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
   const result = await publishShortToTikTok({
     storyId,
     renderId: latest.id,
