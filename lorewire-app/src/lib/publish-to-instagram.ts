@@ -19,6 +19,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
+import { loadSeoMetadata } from "@/lib/seo-metadata";
 
 // --- Types -----------------------------------------------------------------
 
@@ -612,10 +613,19 @@ export async function publishShortToInstagram(
 
   const template =
     (await getSetting(SETTING_CAPTION_TEMPLATE)) ?? DEFAULT_CAPTION_TEMPLATE;
+  // Resolution chain: per-publish override > seo_metadata > template.
+  const seoMeta = await loadSeoMetadata(args.storyId);
+  const seoIgCaption = seoMeta?.instagram?.caption;
+  const metadataSource: "override" | "seo_metadata" | "template" =
+    args.captionOverride != null && args.captionOverride.length > 0
+      ? "override"
+      : seoIgCaption
+        ? "seo_metadata"
+        : "template";
   const rendered =
     args.captionOverride != null && args.captionOverride.length > 0
       ? args.captionOverride
-      : renderCaption(template, args.context, args.storyId);
+      : (seoIgCaption ?? renderCaption(template, args.context, args.storyId));
   const { caption, truncated } = trimForIg(rendered);
 
   const row = await insertPendingRow({
@@ -636,6 +646,7 @@ export async function publishShortToInstagram(
     video_url_host: hostOf(row.video_url),
     caption_len: caption.length,
     caption_truncated: truncated,
+    metadata_source: metadataSource,
     ...tokenFingerprint(),
   });
 

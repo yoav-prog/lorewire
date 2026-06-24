@@ -5,6 +5,7 @@
     "options": [
       { "id": "openai/gpt-5.4-mini", "label": "GPT-5.4 mini", "provider": "openai", "cost": "cheap", "wired": true },
       { "id": "openai/gpt-5-nano", "label": "GPT-5 nano", "provider": "openai", "cost": "cheapest", "wired": true },
+      { "id": "kie/gemini-3-5-flash", "label": "Gemini 3.5 Flash (kie.ai)", "provider": "kie", "cost": "cheap", "wired": true },
       { "id": "kie/gemini-3.1-pro", "label": "Gemini 3.1 Pro (kie.ai)", "provider": "kie", "cost": "premium", "wired": false },
       { "id": "kie/gemini-3-pro", "label": "Gemini 3 Pro (kie.ai)", "provider": "kie", "cost": "standard", "wired": false },
       { "id": "anthropic/claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "anthropic", "cost": "standard", "wired": false }

@@ -83,6 +83,11 @@ import {
   publishShortToTikTok,
   type TikTokPostRow,
 } from "@/lib/publish-to-tiktok";
+import {
+  ensureSeoMetadataForStory,
+  loadSeoMetadata,
+  type SeoMetadata,
+} from "@/lib/seo-metadata";
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -1965,4 +1970,85 @@ export async function getLatestTikTokPostForStoryAction(
      ORDER BY created_at DESC LIMIT 1`,
     [storyId],
   );
+}
+
+// ─── SEO metadata: load + regenerate ─────────────────────────────────────────
+// Plan: _plans/2026-06-24-llm-seo-metadata.md.
+//
+// The render route auto-regenerates on every fresh render when the
+// auto-regenerate setting is on; this admin action lets the operator
+// force a regeneration on demand (e.g., after editing the teleprompter,
+// or to retry after an LLM failure). Returns the new metadata so the
+// UI can update without a page reload.
+
+export interface SeoMetadataState {
+  metadata: SeoMetadata | null;
+  generatedAt: string | null;
+}
+
+export async function getSeoMetadataForStoryAction(
+  storyId: string,
+): Promise<SeoMetadataState> {
+  await requireCapability("content.manage");
+  if (!storyId) return { metadata: null, generatedAt: null };
+  const row = await one<{ seo_metadata_generated_at: string | null }>(
+    "SELECT seo_metadata_generated_at FROM stories WHERE id = ?",
+    [storyId],
+  );
+  const metadata = await loadSeoMetadata(storyId);
+  return {
+    metadata,
+    generatedAt: row?.seo_metadata_generated_at ?? null,
+  };
+}
+
+export type RegenerateSeoMetadataResult =
+  | { ok: true; metadata: SeoMetadata; generatedAt: string; model: string }
+  | { ok: false; error: string };
+
+export async function regenerateSeoMetadataAction(
+  storyId: string,
+): Promise<RegenerateSeoMetadataResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  const result = await ensureSeoMetadataForStory({
+    storyId,
+    articleUrl,
+    force: true,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor seo-regen]", {
+    story_id: storyId,
+    user_id: session.userId,
+    status: result.status,
+    model: result.status === "generated" ? result.model : null,
+    error: result.status === "failed" ? result.error : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "generated") {
+    const row = await one<{ seo_metadata_generated_at: string | null }>(
+      "SELECT seo_metadata_generated_at FROM stories WHERE id = ?",
+      [storyId],
+    );
+    return {
+      ok: true,
+      metadata: result.metadata,
+      generatedAt: row?.seo_metadata_generated_at ?? new Date().toISOString(),
+      model: result.model,
+    };
+  }
+  if (result.status === "failed") {
+    return { ok: false, error: result.error };
+  }
+  return {
+    ok: false,
+    error: `regeneration skipped: ${result.reason}`,
+  };
 }
