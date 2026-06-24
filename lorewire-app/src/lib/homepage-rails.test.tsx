@@ -363,11 +363,18 @@ describe("fallbackIdsForSurface (merged catalog)", () => {
   // before slicing. Live rows must carry hero_image (or video_url) to
   // qualify — a row that exists in the DB but hasn't had artwork rendered
   // is not "published" by our definition and never appears in a rail.
-  it("hero picks the first published entry of the merged catalog", () => {
+  it("hero leads the rotation pool with the freshest live entry", () => {
+    // The hero fallback returns up to HERO_FALLBACK_CAP (8) most-recent
+    // published stories so an uncurated homepage auto-rotates instead of
+    // freezing on a single static slide. The live entry has the latest
+    // published_at (2026) so it leads the pool.
     const merged = mergeStaticAndLive([
       liveRow({ id: "first", hero_image: "https://cdn.test/first.jpg" }),
     ]);
-    expect(fallbackIdsForSurface("hero", merged.array)).toEqual(["first"]);
+    const ids = fallbackIdsForSurface("hero", merged.array);
+    expect(ids[0]).toBe("first");
+    expect(ids.length).toBeGreaterThanOrEqual(1);
+    expect(ids.length).toBeLessThanOrEqual(8);
   });
 
   it("category rails pick published live rows", () => {

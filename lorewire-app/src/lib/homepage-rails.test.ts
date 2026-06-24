@@ -370,7 +370,11 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
     expect(result).toEqual(["d3", "d1", "d2", "d4", "d5"]);
   });
 
-  it("hero stays single-pick (no augmentation)", () => {
+  it("hero augments too (rotation pool fills behind curated picks)", () => {
+    // Once the hero became a rotation carousel (PR #71), curated picks
+    // pin at the front and the fallback fills the rest — same shape as
+    // every other discovery rail. An admin curating 1 hero gets that
+    // story leading the rotation, not a single static slide.
     const curation = {
       ...emptyOtherSurfaces,
       hero: ["d3"],
@@ -382,7 +386,7 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
       BEHAVIOR_FALLBACK,
       fatDramaCatalog,
     );
-    expect(result).toEqual(["d3"]);
+    expect(result).toEqual(["d3", "d1", "d2", "d4", "d5"]);
   });
 });
 
@@ -444,7 +448,10 @@ describe("resolveHeroPool / pickHeroAtIndex", () => {
     expect(pool.map((s) => s.id)).toEqual(["a", "c", "d"]);
   });
 
-  it("falls back to a single auto-derived pick when curation is empty", () => {
+  it("auto-fills with the catalog's published stories when curation is empty", () => {
+    // Uncurated homepage should auto-rotate, not freeze on a single
+    // static slide. Fallback returns all published catalog entries (up
+    // to HERO_FALLBACK_CAP), sorted year DESC with catalog ties.
     const curation = {
       ...emptyCuration,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -455,7 +462,50 @@ describe("resolveHeroPool / pickHeroAtIndex", () => {
       catalog,
       resolveStory,
     );
-    expect(pool.map((s) => s.id)).toEqual(["a"]);
+    expect(pool.map((s) => s.id)).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("augments curated picks with fallback stories so the rotation stays full", () => {
+    // Admin curated 2 specific stories; the remainder of the rotation
+    // pool fills from the catalog (excluding duplicates). Mirrors the
+    // category-rail augmentation semantics shipped in PR #68.
+    const curation = {
+      ...emptyCuration,
+      hero: ["c", "e"],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+    );
+    expect(pool.map((s) => s.id)).toEqual(["c", "e", "a", "b", "d"]);
+  });
+
+  it("caps the augmented pool at HERO_FALLBACK_CAP (8)", () => {
+    const bigArray = Array.from({ length: 20 }, (_, i) => story(`s${i}`));
+    const bigCatalog = {
+      array: bigArray,
+      map: new Map(),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const bigResolve = (id: string): any =>
+      bigArray.find((s) => s.id === id) ?? null;
+    const curation = {
+      ...emptyCuration,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      bigCatalog,
+      bigResolve,
+    );
+    expect(pool).toHaveLength(8);
+    expect(pool[0].id).toBe("s0");
+    expect(pool[7].id).toBe("s7");
   });
 
   it("returns [] when behavior.heroRequired is true and curation is empty", () => {
