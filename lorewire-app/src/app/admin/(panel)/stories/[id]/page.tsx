@@ -4,10 +4,17 @@ import { requireCapability } from "@/lib/dal";
 import {
   getStory,
   getSetting,
+  getUserById,
   listSegments,
   type SegmentKind,
   type SegmentRow,
 } from "@/lib/repo";
+import { readForeignSession } from "@/lib/short-edit-session";
+import {
+  loadShortEditorState,
+  listArticlesLinkedToStoryAction,
+  type LinkedArticleSummary,
+} from "@/app/admin/(panel)/shorts/[id]/actions";
 import {
   loadHeroStyleSettings,
   saveStoryHeroStyleAction,
@@ -48,7 +55,16 @@ import { one } from "@/lib/db";
 import StoryCommentsToggle from "./StoryCommentsToggle";
 import { OverviewTab } from "./OverviewTab";
 import { StoryTabBar } from "./StoryTabBar";
-import { resolveStoryTab, STORY_TABS, type StoryTabId } from "./tabs";
+import {
+  asShortConfigTab,
+  StoryShortTabsClient,
+} from "./StoryShortTabsClient";
+import {
+  isShortConfigTab,
+  resolveStoryTab,
+  STORY_TABS,
+  type StoryTabId,
+} from "./tabs";
 
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
@@ -60,7 +76,7 @@ export default async function EditStory({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ tab?: string | string[] }>;
 }) {
-  await requireCapability("content.manage");
+  const session = await requireCapability("content.manage");
   const [{ id }, sp] = await Promise.all([params, searchParams]);
   const activeTab = resolveStoryTab(sp.tab);
   const s = await getStory(id);
@@ -68,6 +84,15 @@ export default async function EditStory({
 
   // eslint-disable-next-line no-console -- rule 14 (observability)
   console.info("[unified editor mount]", { storyId: s.id, activeTab });
+
+  // Lazy-load short editor state only when the active tab needs it. The
+  // 5 ShortConfig-driven tabs (Scenes / Captions / Style / Script /
+  // Voice) need the config + voices + linked articles + foreign-session
+  // resolution; the other tabs render without any of this so we don't
+  // pay the round trips on a plain Overview view.
+  const shortLoad = isShortConfigTab(activeTab)
+    ? await loadShortConfigTabState(id, session.userId)
+    : null;
 
   // Hero style snapshot (global default + every per-category default +
   // every pre-generated thumbnail URL) — one round trip drives the
@@ -302,13 +327,35 @@ export default async function EditStory({
       <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
         {/* Active tab content */}
         <div className="min-w-0">
-          {activeTab === "overview" ? (
+          {activeTab === "overview" && (
             <OverviewTab
               story={s}
               initialAspect={initialAspect}
               aspectIsOverride={aspectIsOverride}
             />
-          ) : (
+          )}
+          {isShortConfigTab(activeTab) &&
+            (shortLoad?.ok ? (
+              <StoryShortTabsClient
+                storyId={s.id}
+                // Safe narrow: we entered this branch because activeTab
+                // passed isShortConfigTab(); asShortConfigTab() can't
+                // return null here. The non-null assertion makes the
+                // exhaustive switch happy without an `as`.
+                activeTab={asShortConfigTab(activeTab)!}
+                initialConfig={shortLoad.config}
+                initialRender={shortLoad.latestRender}
+                voices={shortLoad.voices}
+                foreignOwnerEmail={shortLoad.foreignOwnerEmail}
+                linkedArticles={shortLoad.linkedArticles}
+              />
+            ) : (
+              <NoShortYetCard
+                error={shortLoad?.error ?? "unknown"}
+                storyId={s.id}
+              />
+            ))}
+          {(activeTab === "publish" || activeTab === "render") && (
             <ComingSoonTab tabId={activeTab} storyId={s.id} />
           )}
         </div>
@@ -515,6 +562,117 @@ export default async function EditStory({
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+// Server-side loader for the 5 ShortConfig-driven tabs. Mirrors the
+// parallel loaders in the standalone /admin/shorts/[id]/page.tsx so the
+// unified page reaches the same starting state (config blob, latest
+// render, voice catalog, linked articles, foreign-session resolution).
+// Best-effort: each side-load catches its own error so a transient
+// failure on one of them does not blank the entire editor.
+async function loadShortConfigTabState(
+  storyId: string,
+  currentUserId: string,
+): Promise<
+  | {
+      ok: true;
+      config: import("@/lib/short-config").ShortConfig;
+      latestRender: import("@/lib/short-render-queue").ShortRenderRow | null;
+      voices: Awaited<ReturnType<typeof listVoices>>;
+      linkedArticles: LinkedArticleSummary[];
+      foreignOwnerEmail: string | null;
+    }
+  | { ok: false; error: string }
+> {
+  const [state, voices, articlesResult] = await Promise.all([
+    loadShortEditorState(storyId),
+    listVoices().catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] listVoices failed", {
+        err: String(err),
+      });
+      return [] as Awaited<ReturnType<typeof listVoices>>;
+    }),
+    listArticlesLinkedToStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] linked articles failed", {
+        err: String(err),
+      });
+      return { ok: false, articles: [] } as const;
+    }),
+  ]);
+
+  if (!state.ok || !state.config) {
+    return { ok: false, error: state.error ?? "no-short-yet" };
+  }
+
+  const foreignOwnerEmail = await resolveForeignOwnerEmail(
+    state.config,
+    currentUserId,
+  );
+
+  return {
+    ok: true,
+    config: state.config,
+    latestRender: state.latestRender ?? null,
+    voices,
+    linkedArticles: articlesResult.ok ? (articlesResult.articles ?? []) : [],
+    foreignOwnerEmail,
+  };
+}
+
+// Mirrors the standalone short editor's foreign-session resolver. Returns
+// null when the current user owns the session, the session is stale, or
+// no session was ever claimed — all of which mean "no banner."
+async function resolveForeignOwnerEmail(
+  config: import("@/lib/short-config").ShortConfig,
+  currentUserId: string,
+): Promise<string | null> {
+  const read = readForeignSession(config, currentUserId);
+  if (!read.isForeign || !read.foreignUserId) return null;
+  const otherUser = await getUserById(read.foreignUserId);
+  return otherUser?.email ?? read.foreignUserId;
+}
+
+function NoShortYetCard({
+  error,
+  storyId,
+}: {
+  error: string;
+  storyId: string;
+}) {
+  // Same UX as the standalone short editor's NoShortYet: the most common
+  // reason the editor lands cold is "you haven't generated a short for
+  // this story yet." The Generate Short button lives on the long-form
+  // editor; cut 3 will move it into the unified page so the escape
+  // hatch is no longer the only path.
+  if (error === "no-short-yet" || error === "short_renders-props-empty") {
+    return (
+      <div className="rounded-lg border border-line bg-surface p-4">
+        <p className="text-[13px] text-ink">
+          No short exists for this story yet.
+        </p>
+        <p className="mt-1 text-[12px] text-muted">
+          Generate one from the long-form editor, then come back here to
+          fine-tune individual scenes.
+        </p>
+        <Link
+          href={`/admin/videos/${storyId}`}
+          className="mt-3 inline-block rounded-md border border-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-accent hover:bg-accent/10"
+        >
+          Open 16:9 long-form editor
+        </Link>
+      </div>
+    );
+  }
+  return (
+    <div
+      role="alert"
+      className="rounded-lg border border-warn bg-warn/10 p-4 text-[12px] text-warn"
+    >
+      Could not load the short editor: {error}
     </div>
   );
 }
