@@ -312,3 +312,66 @@ describe("Full Pipeline toggle setters", () => {
     );
   });
 });
+
+// 2026-06-24 Full Pipeline filter on listRedditSources. Pairs with the
+// filter rail's new "Full Pipeline" fieldset — exercises the buildWhere
+// branch end-to-end so a future refactor of the SQL or the URL-param
+// parser still narrows the candidate pool correctly.
+describe("listRedditSources full_pipeline filter", () => {
+  async function seedSource(redditId: string, fullPipeline: 0 | 1) {
+    const { run } = await import("@/lib/db");
+    await run(
+      "INSERT INTO reddit_source (reddit_id, subreddit, date_written, title, full_text, comments, status, first_synced, last_synced, full_pipeline) " +
+        "VALUES (?, 'AITAH', '2026-01-01T00:00:00+00:00', 't', 'f', 1, 'imported', '2026-06-24T00:00:00+00:00', '2026-06-24T00:00:00+00:00', ?)",
+      [redditId, fullPipeline],
+    );
+  }
+
+  async function clear() {
+    const { run } = await import("@/lib/db");
+    await run("DELETE FROM story_jobs", []);
+    await run("DELETE FROM reddit_source", []);
+  }
+
+  it("'on' returns only full_pipeline=1 rows", async () => {
+    await clear();
+    await seedSource("on1", 1);
+    await seedSource("on2", 1);
+    await seedSource("off1", 0);
+    const { listRedditSources } = await import("./reddit-source");
+
+    const rows = await listRedditSources({ full_pipeline: "on" });
+    expect(rows.map((r) => r.reddit_id).sort()).toEqual(["on1", "on2"]);
+  });
+
+  it("'off' returns only full_pipeline=0 rows", async () => {
+    await clear();
+    await seedSource("on1", 1);
+    await seedSource("off1", 0);
+    await seedSource("off2", 0);
+    const { listRedditSources } = await import("./reddit-source");
+
+    const rows = await listRedditSources({ full_pipeline: "off" });
+    expect(rows.map((r) => r.reddit_id).sort()).toEqual(["off1", "off2"]);
+  });
+
+  it("['on','off'] is equivalent to no filter (both states pass)", async () => {
+    await clear();
+    await seedSource("on1", 1);
+    await seedSource("off1", 0);
+    const { listRedditSources } = await import("./reddit-source");
+
+    const rows = await listRedditSources({ full_pipeline: ["on", "off"] });
+    expect(rows.map((r) => r.reddit_id).sort()).toEqual(["off1", "on1"]);
+  });
+
+  it("undefined leaves both states in the result", async () => {
+    await clear();
+    await seedSource("on1", 1);
+    await seedSource("off1", 0);
+    const { listRedditSources } = await import("./reddit-source");
+
+    const rows = await listRedditSources({});
+    expect(rows.map((r) => r.reddit_id).sort()).toEqual(["off1", "on1"]);
+  });
+});
