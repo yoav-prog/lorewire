@@ -250,6 +250,12 @@ export function liveRowToStory(row: LiveCatalogStory): Story {
   };
   if (row.hero_image) story.heroImage = row.hero_image;
   if (row.video_url) story.videoUrl = row.video_url;
+  // 2026-06-25 stories-reader-navigation plan: propagate slug so the
+  // Stories viewer's "Read full →" CTA can navigate to /v/[slug]
+  // without a per-active-wire getLiveStoryMedia fetch. Consumers that
+  // don't have a slug (sample placeholders, unpublished rows) still
+  // satisfy the type because Story.slug is optional.
+  if (row.slug) story.slug = row.slug;
   return story;
 }
 
@@ -311,6 +317,11 @@ function mergeLiveOverStatic(staticStory: Story, liveStory: Story): Story {
     heroHasBakedTitle:
       liveStory.heroHasBakedTitle ?? staticStory.heroHasBakedTitle,
     videoUrl: liveStory.videoUrl ?? staticStory.videoUrl,
+    // Live slug wins for the same reason title / heroImage do — the DB
+    // is the source of truth for the public reader path. Static seed
+    // stories don't have a slug, but the ?? pattern means a future
+    // static slug would still fill in for a live row that lacks one.
+    slug: liveStory.slug ?? staticStory.slug,
   };
 }
 

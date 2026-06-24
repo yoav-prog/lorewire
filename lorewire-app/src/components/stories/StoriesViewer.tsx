@@ -22,7 +22,12 @@
 //   - close button, mute button, share button, "Read full →" CTA
 //   - gesture target covering the frame
 //
-// Plan: _plans/2026-06-25-stories-rail-and-viewer.md.
+// Plans:
+//   - _plans/2026-06-25-stories-rail-and-viewer.md (v1)
+//   - _plans/2026-06-25-stories-reader-navigation.md (added the
+//     "Read full →" CTA, swipe-up-open-reader, keyboard Enter/ArrowUp
+//     → /v/[slug], and slug-canonical Share URL after slug landed
+//     on the Story type)
 
 import {
   useCallback,
@@ -32,7 +37,7 @@ import {
   useState,
 } from "react";
 
-import { copyToClipboard } from "@/lib/share";
+import { copyToClipboard, storyShareUrl } from "@/lib/share";
 import { type Story } from "@/lib/stories";
 import { useWirePrefs } from "@/components/wires/useWirePrefs";
 
@@ -183,14 +188,29 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
     if (v) v.muted = muted;
   }, [muted, activeIndex]);
 
+  // Open the active wire in the full long-form reader at /v/[slug].
+  // Source-of-truth for the three open-reader entry points (CTA button,
+  // swipe-up gesture, keyboard Enter / ArrowUp) so the dwell-mark + log
+  // shape stays identical. No-ops when the active wire has no slug
+  // (sample placeholders without a public reader path); the rest of the
+  // app gates `/v/[slug]` navigation the same way.
+  const openReader = useCallback(
+    (trigger: "cta" | "swipe-up" | "keyboard") => {
+      if (!active?.slug) return;
+      maybeMarkViewed("dwell-advance");
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[stories viewer open-reader]", {
+        id: active.id,
+        slug: active.slug,
+        trigger,
+      });
+      window.location.href = `/v/${active.slug}`;
+    },
+    [active?.id, active?.slug, maybeMarkViewed],
+  );
+
   // Keyboard nav. Only when the viewer is mounted, so we don't fight
   // the rest of the page for keystrokes.
-  //
-  // v1 does NOT wire ArrowUp / Enter → "open full reader" because the
-  // Story type doesn't carry a slug (the existing reader page lives at
-  // /v/[slug] and the slug is only available via a per-story
-  // getLiveStoryMedia fetch). A v2 plan can either extend the Story
-  // shape with slug or add the per-active-wire fetch.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -202,11 +222,13 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
       } else if (e.key === " " || e.key === "Spacebar") {
         e.preventDefault();
         setPaused((p) => !p);
+      } else if (e.key === "Enter" || e.key === "ArrowUp") {
+        openReader("keyboard");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [advanceNext, advancePrev, onClose]);
+  }, [advanceNext, advancePrev, onClose, openReader]);
 
   const { ref: gestureRef } = useStoriesGestures({
     onAction: (action) => {
@@ -233,11 +255,7 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
           onClose();
           return;
         case "open-reader":
-          // v1 limitation: the Story type doesn't carry slug, and the
-          // reader path /v/[slug] needs one. Treat swipe-up as a no-op
-          // for now (the gesture still resolves the same; the action
-          // just doesn't navigate). A v2 plan adds slug resolution.
-          maybeMarkViewed("dwell-advance");
+          openReader("swipe-up");
           return;
         case "snap-back":
           return;
@@ -391,23 +409,36 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
               {active.syn}
             </div>
           ) : null}
-          {/* v1 ships title + synopsis only. "Read full" + Share are
-              gated on the public slug which isn't on the Story shape
-              today (it lives behind the per-story getLiveStoryMedia
-              fetch). The Share button copies the current URL — the
-              `?wire=<id>` deep-link the viewer is already on — so the
-              recipient lands in the same viewer at the same wire. */}
+          {/* "Read full →" only renders when the active wire has a
+              public slug (live DB rows do; sample placeholders don't).
+              Share always renders — storyShareUrl falls back to the
+              site origin when slug is absent, mirroring how every
+              other share path in the app handles it. */}
           <div className="mt-3 flex items-center gap-2">
+            {active.slug ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openReader("cta");
+                }}
+                className="font-body font-semibold text-[13px] px-3.5 py-1.5 rounded-full bg-white text-black active:scale-[.97] transition"
+              >
+                Read full →
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={async (e) => {
                 e.stopPropagation();
-                const url =
-                  typeof window !== "undefined" ? window.location.href : "";
+                const origin =
+                  typeof window !== "undefined" ? window.location.origin : "";
+                const url = storyShareUrl(active.slug ?? null, origin);
                 const ok = await copyToClipboard(url);
                 // eslint-disable-next-line no-console -- rule 14
                 console.info("[stories viewer share]", {
                   id: active.id,
+                  slug: active.slug ?? null,
                   ok,
                 });
               }}
