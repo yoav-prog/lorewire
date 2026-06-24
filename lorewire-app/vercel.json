@@ -46,6 +46,14 @@
       "schedule": "*/5 * * * *"
     },
     {
+      "path": "/api/retry_facebook_stories",
+      "schedule": "3-59/5 * * * *"
+    },
+    {
+      "path": "/api/retry_instagram_stories",
+      "schedule": "4-59/5 * * * *"
+    },
+    {
       "path": "/api/retry_youtube_publishes",
       "schedule": "1-59/5 * * * *"
     },
@@ -85,6 +93,12 @@
       "maxDuration": 300
     },
     "src/app/api/retry_instagram_publishes/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_facebook_stories/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_instagram_stories/route.ts": {
       "maxDuration": 300
     },
     "src/app/api/retry_youtube_publishes/route.ts": {

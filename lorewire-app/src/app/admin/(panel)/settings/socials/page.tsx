@@ -17,11 +17,13 @@ import {
   SETTING_AUTO_PUBLISH as FB_SETTING_AUTO_PUBLISH,
   SETTING_CAPTION_TEMPLATE as FB_SETTING_CAPTION_TEMPLATE,
 } from "@/lib/publish-to-facebook";
+import { SETTING_AUTO_PUBLISH as FB_STORY_SETTING_AUTO_PUBLISH } from "@/lib/publish-to-facebook-story";
 import {
   DEFAULT_CAPTION_TEMPLATE as IG_DEFAULT_CAPTION_TEMPLATE,
   SETTING_AUTO_PUBLISH as IG_SETTING_AUTO_PUBLISH,
   SETTING_CAPTION_TEMPLATE as IG_SETTING_CAPTION_TEMPLATE,
 } from "@/lib/publish-to-instagram";
+import { SETTING_AUTO_PUBLISH as IG_STORY_SETTING_AUTO_PUBLISH } from "@/lib/publish-to-instagram-story";
 import {
   DEFAULT_CATEGORY_ID as YT_DEFAULT_CATEGORY_ID,
   DEFAULT_DESCRIPTION_TEMPLATE as YT_DEFAULT_DESCRIPTION_TEMPLATE,
@@ -146,18 +148,22 @@ export default async function SocialsSettingsPage() {
   await requireCapability("settings.manage");
 
   // Facebook block.
-  const [fbAutoPublishRaw, fbCaptionTemplateRaw] = await Promise.all([
-    getSetting(FB_SETTING_AUTO_PUBLISH),
-    getSetting(FB_SETTING_CAPTION_TEMPLATE),
-  ]);
+  const [fbAutoPublishRaw, fbCaptionTemplateRaw, fbStoryAutoPublishRaw] =
+    await Promise.all([
+      getSetting(FB_SETTING_AUTO_PUBLISH),
+      getSetting(FB_SETTING_CAPTION_TEMPLATE),
+      getSetting(FB_STORY_SETTING_AUTO_PUBLISH),
+    ]);
   const fbPageIdDisplay = process.env.FB_PAGE_ID ?? "";
   const fbTokenConfigured = Boolean(process.env.FB_PAGE_ACCESS_TOKEN);
 
   // Instagram block.
-  const [igAutoPublishRaw, igCaptionTemplateRaw] = await Promise.all([
-    getSetting(IG_SETTING_AUTO_PUBLISH),
-    getSetting(IG_SETTING_CAPTION_TEMPLATE),
-  ]);
+  const [igAutoPublishRaw, igCaptionTemplateRaw, igStoryAutoPublishRaw] =
+    await Promise.all([
+      getSetting(IG_SETTING_AUTO_PUBLISH),
+      getSetting(IG_SETTING_CAPTION_TEMPLATE),
+      getSetting(IG_STORY_SETTING_AUTO_PUBLISH),
+    ]);
   const igAccountIdDisplay = process.env.IG_BUSINESS_ACCOUNT_ID ?? "";
   const igTokenConfigured = fbTokenConfigured;
 
@@ -273,6 +279,12 @@ export default async function SocialsSettingsPage() {
             initial={fbCaptionTemplateRaw ?? ""}
             placeholder="Leave empty to use the default template"
           />
+          <SettingToggle
+            settingKey={FB_STORY_SETTING_AUTO_PUBLISH}
+            label="Also publish as a Story"
+            hint="When on, every successful Reel publish also cross-posts the same video to the LoreWire Facebook Page Story (24-hour ephemeral). Stories appear at the top of the feed but have no clickable link to the article — treat as a presence play, not traffic. Independent from the Reel toggle. Plan: _plans/2026-06-25-instagram-facebook-stories-cross-publish.md."
+            initialOn={readToggle(fbStoryAutoPublishRaw, false)}
+          />
         </Section>
 
         {/* ── Instagram ─────────────────────────────────────────────── */}
@@ -308,6 +320,12 @@ export default async function SocialsSettingsPage() {
             hint={`Tokens: {{hook}}, {{title}}, {{article_url}}. Empty falls back to the default: ${IG_DEFAULT_CAPTION_TEMPLATE.replace(/\n/g, "\\n")}. Instagram caps captions at 2200 characters — anything longer gets truncated with an ellipsis automatically.`}
             initial={igCaptionTemplateRaw ?? ""}
             placeholder="Leave empty to use the default template"
+          />
+          <SettingToggle
+            settingKey={IG_STORY_SETTING_AUTO_PUBLISH}
+            label="Also publish as a Story"
+            hint="When on, every successful Reel publish also cross-posts the same video to the LoreWire Instagram account as a Story (24-hour ephemeral). Stories appear at the top of follower feeds but have no clickable link to the article — treat as a presence play, not traffic. Independent from the Reel toggle. Plan: _plans/2026-06-25-instagram-facebook-stories-cross-publish.md."
+            initialOn={readToggle(igStoryAutoPublishRaw, false)}
           />
         </Section>
 
