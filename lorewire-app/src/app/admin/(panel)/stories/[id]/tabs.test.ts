@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_STORY_TAB,
-  isShortConfigTab,
+  isShortClientTab,
   resolveStoryTab,
   STORY_TABS,
 } from "./tabs";
@@ -37,18 +37,18 @@ describe("resolveStoryTab", () => {
   });
 });
 
-describe("isShortConfigTab", () => {
-  it("returns true for the 5 ShortConfig-driven tabs", () => {
-    expect(isShortConfigTab("scenes")).toBe(true);
-    expect(isShortConfigTab("captions")).toBe(true);
-    expect(isShortConfigTab("style")).toBe(true);
-    expect(isShortConfigTab("script")).toBe(true);
-    expect(isShortConfigTab("voice")).toBe(true);
+describe("isShortClientTab", () => {
+  it("returns true for every non-overview tab", () => {
+    expect(isShortClientTab("scenes")).toBe(true);
+    expect(isShortClientTab("captions")).toBe(true);
+    expect(isShortClientTab("style")).toBe(true);
+    expect(isShortClientTab("script")).toBe(true);
+    expect(isShortClientTab("voice")).toBe(true);
+    expect(isShortClientTab("publish")).toBe(true);
+    expect(isShortClientTab("render")).toBe(true);
   });
 
-  it("returns false for the metadata + publish + render tabs", () => {
-    expect(isShortConfigTab("overview")).toBe(false);
-    expect(isShortConfigTab("publish")).toBe(false);
-    expect(isShortConfigTab("render")).toBe(false);
+  it("returns false for the overview tab", () => {
+    expect(isShortClientTab("overview")).toBe(false);
   });
 });

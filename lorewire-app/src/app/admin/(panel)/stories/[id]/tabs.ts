@@ -32,18 +32,23 @@ export function resolveStoryTab(raw: unknown): StoryTabId {
   return match ? match.id : DEFAULT_STORY_TAB;
 }
 
-/** Tabs that read/write the per-short ShortConfig blob. These need the
- *  client-side state wrapper (StoryShortTabsClient) and the server-side
- *  short-state loaders to run. The other tabs (overview, publish, render)
- *  use their own loaders and can render standalone. */
-const SHORT_CONFIG_TABS = new Set<StoryTabId>([
+/** Tabs that render inside the shared client wrapper
+ *  (StoryShortTabsClient). All 7 non-overview tabs go through it so they
+ *  share the EditSessionBanner / RenderAfterEditsBanner / RenderStatusPanel
+ *  chrome and the foreign-session heartbeat — the render banner needs
+ *  configKey from ShortConfig, and the in-progress render indicator should
+ *  stay visible to a user who switches over to Publish or Render. Page
+ *  uses this predicate to gate the lazy server-side load of short state. */
+const SHORT_CLIENT_TABS = new Set<StoryTabId>([
   "scenes",
   "captions",
   "style",
   "script",
   "voice",
+  "publish",
+  "render",
 ]);
 
-export function isShortConfigTab(tab: StoryTabId): boolean {
-  return SHORT_CONFIG_TABS.has(tab);
+export function isShortClientTab(tab: StoryTabId): boolean {
+  return SHORT_CLIENT_TABS.has(tab);
 }

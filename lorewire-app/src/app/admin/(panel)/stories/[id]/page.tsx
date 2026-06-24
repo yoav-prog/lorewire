@@ -11,9 +11,15 @@ import {
 } from "@/lib/repo";
 import { readForeignSession } from "@/lib/short-edit-session";
 import {
+  getLatestFacebookPostForStoryAction,
+  getLatestInstagramPostForStoryAction,
+  getLatestTikTokPostForStoryAction,
+  getLatestYouTubePostForStoryAction,
+  getSeoMetadataForStoryAction,
   loadShortEditorState,
   listArticlesLinkedToStoryAction,
   type LinkedArticleSummary,
+  type SeoMetadataState,
 } from "@/app/admin/(panel)/shorts/[id]/actions";
 import {
   loadHeroStyleSettings,
@@ -56,15 +62,10 @@ import StoryCommentsToggle from "./StoryCommentsToggle";
 import { OverviewTab } from "./OverviewTab";
 import { StoryTabBar } from "./StoryTabBar";
 import {
-  asShortConfigTab,
+  asShortClientTab,
   StoryShortTabsClient,
 } from "./StoryShortTabsClient";
-import {
-  isShortConfigTab,
-  resolveStoryTab,
-  STORY_TABS,
-  type StoryTabId,
-} from "./tabs";
+import { isShortClientTab, resolveStoryTab } from "./tabs";
 
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
@@ -86,12 +87,12 @@ export default async function EditStory({
   console.info("[unified editor mount]", { storyId: s.id, activeTab });
 
   // Lazy-load short editor state only when the active tab needs it. The
-  // 5 ShortConfig-driven tabs (Scenes / Captions / Style / Script /
-  // Voice) need the config + voices + linked articles + foreign-session
-  // resolution; the other tabs render without any of this so we don't
-  // pay the round trips on a plain Overview view.
-  const shortLoad = isShortConfigTab(activeTab)
-    ? await loadShortConfigTabState(id, session.userId)
+  // 7 non-overview tabs all render through StoryShortTabsClient and
+  // share the same chrome (RenderAfterEditsBanner / RenderStatusPanel /
+  // EditSessionBanner / preview player), so the load fires for any of
+  // them. Overview pays zero short-related round trips.
+  const shortLoad = isShortClientTab(activeTab)
+    ? await loadShortClientTabState(id, session.userId)
     : null;
 
   // Hero style snapshot (global default + every per-category default +
@@ -334,20 +335,25 @@ export default async function EditStory({
               aspectIsOverride={aspectIsOverride}
             />
           )}
-          {isShortConfigTab(activeTab) &&
+          {isShortClientTab(activeTab) &&
             (shortLoad?.ok ? (
               <StoryShortTabsClient
                 storyId={s.id}
                 // Safe narrow: we entered this branch because activeTab
-                // passed isShortConfigTab(); asShortConfigTab() can't
+                // passed isShortClientTab(); asShortClientTab() can't
                 // return null here. The non-null assertion makes the
                 // exhaustive switch happy without an `as`.
-                activeTab={asShortConfigTab(activeTab)!}
+                activeTab={asShortClientTab(activeTab)!}
                 initialConfig={shortLoad.config}
                 initialRender={shortLoad.latestRender}
                 voices={shortLoad.voices}
                 foreignOwnerEmail={shortLoad.foreignOwnerEmail}
                 linkedArticles={shortLoad.linkedArticles}
+                initialFacebookPost={shortLoad.initialFacebookPost}
+                initialInstagramPost={shortLoad.initialInstagramPost}
+                initialYouTubePost={shortLoad.initialYouTubePost}
+                initialTikTokPost={shortLoad.initialTikTokPost}
+                initialSeoMetadata={shortLoad.initialSeoMetadata}
               />
             ) : (
               <NoShortYetCard
@@ -355,9 +361,6 @@ export default async function EditStory({
                 storyId={s.id}
               />
             ))}
-          {(activeTab === "publish" || activeTab === "render") && (
-            <ComingSoonTab tabId={activeTab} storyId={s.id} />
-          )}
         </div>
 
         {/* Sidebar — constant across all tabs (the right rail keeps the
@@ -566,13 +569,14 @@ export default async function EditStory({
   );
 }
 
-// Server-side loader for the 5 ShortConfig-driven tabs. Mirrors the
-// parallel loaders in the standalone /admin/shorts/[id]/page.tsx so the
-// unified page reaches the same starting state (config blob, latest
-// render, voice catalog, linked articles, foreign-session resolution).
-// Best-effort: each side-load catches its own error so a transient
-// failure on one of them does not blank the entire editor.
-async function loadShortConfigTabState(
+// Server-side loader for the 7 short-client tabs. Mirrors the parallel
+// loaders in the standalone /admin/shorts/[id]/page.tsx so the unified
+// page reaches the same starting state (config blob, latest render,
+// voice catalog, linked articles, per-platform publish rows, SEO
+// metadata, foreign-session resolution). Best-effort: each side-load
+// catches its own error so a transient failure on one of them does not
+// blank the entire editor.
+async function loadShortClientTabState(
   storyId: string,
   currentUserId: string,
 ): Promise<
@@ -583,10 +587,32 @@ async function loadShortConfigTabState(
       voices: Awaited<ReturnType<typeof listVoices>>;
       linkedArticles: LinkedArticleSummary[];
       foreignOwnerEmail: string | null;
+      initialFacebookPost: Awaited<
+        ReturnType<typeof getLatestFacebookPostForStoryAction>
+      >;
+      initialInstagramPost: Awaited<
+        ReturnType<typeof getLatestInstagramPostForStoryAction>
+      >;
+      initialYouTubePost: Awaited<
+        ReturnType<typeof getLatestYouTubePostForStoryAction>
+      >;
+      initialTikTokPost: Awaited<
+        ReturnType<typeof getLatestTikTokPostForStoryAction>
+      >;
+      initialSeoMetadata: SeoMetadataState;
     }
   | { ok: false; error: string }
 > {
-  const [state, voices, articlesResult] = await Promise.all([
+  const [
+    state,
+    voices,
+    articlesResult,
+    initialFacebookPost,
+    initialInstagramPost,
+    initialYouTubePost,
+    initialTikTokPost,
+    initialSeoMetadata,
+  ] = await Promise.all([
     loadShortEditorState(storyId),
     listVoices().catch((err) => {
       // eslint-disable-next-line no-console -- rule 14
@@ -601,6 +627,41 @@ async function loadShortConfigTabState(
         err: String(err),
       });
       return { ok: false, articles: [] } as const;
+    }),
+    getLatestFacebookPostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest facebook post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getLatestInstagramPostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest instagram post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getLatestYouTubePostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest youtube post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getLatestTikTokPostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest tiktok post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getSeoMetadataForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] seo metadata lookup failed", {
+        err: String(err),
+      });
+      return { metadata: null, generatedAt: null } as SeoMetadataState;
     }),
   ]);
 
@@ -620,6 +681,11 @@ async function loadShortConfigTabState(
     voices,
     linkedArticles: articlesResult.ok ? (articlesResult.articles ?? []) : [],
     foreignOwnerEmail,
+    initialFacebookPost,
+    initialInstagramPost,
+    initialYouTubePost,
+    initialTikTokPost,
+    initialSeoMetadata,
   };
 }
 
@@ -673,36 +739,6 @@ function NoShortYetCard({
       className="rounded-lg border border-warn bg-warn/10 p-4 text-[12px] text-warn"
     >
       Could not load the short editor: {error}
-    </div>
-  );
-}
-
-function ComingSoonTab({
-  tabId,
-  storyId,
-}: {
-  tabId: StoryTabId;
-  storyId: string;
-}) {
-  const label = STORY_TABS.find((t) => t.id === tabId)?.label ?? tabId;
-  return (
-    <div className="rounded-xl border border-dashed border-line bg-surface p-8 text-center">
-      <div className="font-mono text-[11px] uppercase tracking-wider text-muted">
-        {label}
-      </div>
-      <p className="mt-2 text-[13px] text-ink">
-        This tab is being ported into the unified editor.
-      </p>
-      <p className="mt-1 text-[12px] text-muted">
-        While we finish the port, this surface still lives at{" "}
-        <Link
-          href={`/admin/shorts/${storyId}`}
-          className="text-accent hover:underline"
-        >
-          the standalone short editor
-        </Link>
-        .
-      </p>
     </div>
   );
 }
