@@ -21,10 +21,12 @@ import { ScenesTab } from "./ScenesTab";
 import { ScriptTab } from "./ScriptTab";
 import { UseShortAsVideoButton } from "./UseShortAsVideoButton";
 import { PublishToFacebookButton } from "./PublishToFacebookButton";
+import { PublishToInstagramButton } from "./PublishToInstagramButton";
 import { ShortPreviewPlayer } from "./ShortPreviewPlayer";
 import { VoiceTab } from "./VoiceTab";
 import type { LinkedArticleSummary } from "./actions";
 import type { FacebookPostRow } from "@/lib/publish-to-facebook";
+import type { InstagramPostRow } from "@/lib/publish-to-instagram";
 import {
   claimShortEditSession,
   heartbeatShortEditSession,
@@ -67,6 +69,7 @@ export function ShortEditorClient({
   foreignOwnerEmail,
   linkedArticles,
   initialFacebookPost,
+  initialInstagramPost,
 }: {
   storyId: string;
   initialConfig: ShortConfig;
@@ -85,6 +88,8 @@ export function ShortEditorClient({
    *  the story has never been published to Facebook. Drives the manual
    *  publish button's adaptive text + the under-button status line. */
   initialFacebookPost: FacebookPostRow | null;
+  /** Same as initialFacebookPost but for the Instagram button. */
+  initialInstagramPost: InstagramPostRow | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabId>("scenes");
@@ -278,6 +283,15 @@ export function ShortEditorClient({
               !initialRender.output_url
             }
             initialPost={initialFacebookPost}
+          />
+          <PublishToInstagramButton
+            storyId={storyId}
+            disabled={
+              initialRender === null ||
+              initialRender.status !== "done" ||
+              !initialRender.output_url
+            }
+            initialPost={initialInstagramPost}
           />
         </div>
 

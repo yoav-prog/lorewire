@@ -19,6 +19,7 @@ import {
 } from "@/lib/aspect";
 import {
   getLatestFacebookPostForStoryAction,
+  getLatestInstagramPostForStoryAction,
   listArticlesLinkedToStoryAction,
   loadShortEditorState,
 } from "./actions";
@@ -39,7 +40,13 @@ export default async function ShortEditorPage({
   // costs ~1 ms after the first page load of the admin shell.
   // Linked articles: feed the per-scene "Use in article" promote actions
   // in ScenesTab. Empty list when no article points at this story.
-  const [state, voices, articlesResult, latestFacebookPost] = await Promise.all([
+  const [
+    state,
+    voices,
+    articlesResult,
+    latestFacebookPost,
+    latestInstagramPost,
+  ] = await Promise.all([
     loadShortEditorState(id),
     listVoices().catch((err) => {
       // eslint-disable-next-line no-console -- rule 14
@@ -59,6 +66,14 @@ export default async function ShortEditorPage({
     getLatestFacebookPostForStoryAction(id).catch((err) => {
       // eslint-disable-next-line no-console -- rule 14
       console.warn("[short editor page] latest facebook post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    // Same shape for the Instagram button.
+    getLatestInstagramPostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest instagram post lookup failed", {
         err: String(err),
       });
       return null;
@@ -170,6 +185,7 @@ export default async function ShortEditorPage({
           )}
           linkedArticles={linkedArticles}
           initialFacebookPost={latestFacebookPost}
+          initialInstagramPost={latestInstagramPost}
         />
       )}
     </div>
