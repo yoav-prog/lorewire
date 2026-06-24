@@ -88,12 +88,15 @@ const COLS =
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
 // that the list does not render — the full editor reads getStory() instead.
+// `reddit_id` is included so the Content inbox can batch-load the latest
+// story_jobs.status per row without a second per-row trip.
 const STORY_LIST_COLS =
-  "id, slug, category, title, status, cost_cents, created_at, updated_at";
+  "id, reddit_id, slug, category, title, status, cost_cents, created_at, updated_at";
 
 export type StoryListRow = Pick<
   StoryRow,
   | "id"
+  | "reddit_id"
   | "slug"
   | "category"
   | "title"
@@ -147,8 +150,20 @@ export async function listStories(
 // List-view variant: slim columns and a real LIMIT so the dashboard does not
 // pull every body/teleprompter on every render. The full editor still uses
 // listStories / getStory when it needs the heavy fields.
+//
+// 2026-06-24 last-updated filter (Content inbox). `updatedSince` and
+// `updatedUntil` accept ISO-8601 timestamps and compare against the same
+// `COALESCE(updated_at, created_at)` the ORDER BY uses, so the bucket
+// chips ("Last 7 days") and the range picker stay consistent with the
+// sort order operators see.
 export async function listStoriesSlim(
-  opts: { status?: string; category?: string; limit?: number } = {},
+  opts: {
+    status?: string;
+    category?: string;
+    updatedSince?: string;
+    updatedUntil?: string;
+    limit?: number;
+  } = {},
 ): Promise<StoryListRow[]> {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -159,6 +174,14 @@ export async function listStoriesSlim(
   if (opts.category) {
     where.push("category = ?");
     params.push(opts.category);
+  }
+  if (opts.updatedSince) {
+    where.push("COALESCE(updated_at, created_at) >= ?");
+    params.push(opts.updatedSince);
+  }
+  if (opts.updatedUntil) {
+    where.push("COALESCE(updated_at, created_at) < ?");
+    params.push(opts.updatedUntil);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
@@ -973,6 +996,8 @@ export async function listArticlesSlim(
     status?: string;
     type?: string;
     language?: string;
+    updatedSince?: string;
+    updatedUntil?: string;
     limit?: number;
   } = {},
 ): Promise<ArticleListRow[]> {
@@ -989,6 +1014,14 @@ export async function listArticlesSlim(
   if (opts.language) {
     where.push("language = ?");
     params.push(opts.language);
+  }
+  if (opts.updatedSince) {
+    where.push("COALESCE(updated_at, created_at) >= ?");
+    params.push(opts.updatedSince);
+  }
+  if (opts.updatedUntil) {
+    where.push("COALESCE(updated_at, created_at) < ?");
+    params.push(opts.updatedUntil);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
@@ -1444,7 +1477,22 @@ export interface ContentRow {
   published_at: string | null;
   /** Per-platform live-status. Articles always all-false. */
   published_on: PublishedOn;
+  /** Latest story_jobs.status for THIS story (newest by requested_at).
+   *  Stories with no pipeline run yet AND every article carry null —
+   *  the row UI surfaces null as no pill. */
+  job_status: JobStatus | null;
 }
+
+/** 2026-06-24 Content inbox: latest story_jobs row status per story.
+ *  Articles have no pipeline so their job_status is always null. */
+export type JobStatus = "queued" | "processing" | "done" | "error";
+
+export const JOB_STATUSES: readonly JobStatus[] = [
+  "queued",
+  "processing",
+  "done",
+  "error",
+] as const;
 
 export interface ListContentOpts {
   subKind?: ContentSubKind;
@@ -1457,6 +1505,14 @@ export interface ListContentOpts {
   publishedOn?: SocialPlatform[];
   /** AND-filter: only rows that ARE NOT published on every listed platform. */
   publishedNotOn?: SocialPlatform[];
+  /** Latest pipeline-job state. Articles are story-pipeline-less and fall
+   *  out of the result entirely when this is set. */
+  jobStatus?: JobStatus;
+  /** ISO-8601 lower bound on COALESCE(updated_at, created_at). */
+  updatedSince?: string;
+  /** ISO-8601 upper bound on COALESCE(updated_at, created_at) — exclusive,
+   *  so a "today" bucket lands as [start-of-today, start-of-tomorrow). */
+  updatedUntil?: string;
   limit?: number;
 }
 
@@ -1507,6 +1563,44 @@ export async function loadPublishedOnByStoryIds(
   return out;
 }
 
+/** 2026-06-24 Content inbox: most-recent story_jobs.status per reddit_id.
+ *  Stories with no pipeline run land outside the map (caller treats as null).
+ *  One query, then a JS dedupe — most stories have 1-3 job rows, so fetching
+ *  all and keeping the newest is cheaper than a per-row correlated subquery
+ *  and works identically in SQLite + Postgres. */
+export async function loadLatestJobStatusByReddit(
+  redditIds: readonly string[],
+): Promise<Map<string, JobStatus>> {
+  const out = new Map<string, JobStatus>();
+  if (redditIds.length === 0) return out;
+  const placeholders = redditIds.map(() => "?").join(", ");
+  const rows = await all<{
+    reddit_id: string;
+    status: string;
+    requested_at: string;
+  }>(
+    `SELECT reddit_id, status, requested_at FROM story_jobs
+     WHERE reddit_id IN (${placeholders})
+     ORDER BY requested_at DESC`,
+    [...redditIds],
+  );
+  // Rows are newest-first, so the FIRST hit per reddit_id is the latest
+  // — set-once and skip the rest. The closed-enum check guards against
+  // a future status value sneaking in unmapped.
+  for (const row of rows) {
+    if (out.has(row.reddit_id)) continue;
+    if (
+      row.status === "queued" ||
+      row.status === "processing" ||
+      row.status === "done" ||
+      row.status === "error"
+    ) {
+      out.set(row.reddit_id, row.status);
+    }
+  }
+  return out;
+}
+
 export async function listContentSlim(
   opts: ListContentOpts = {},
 ): Promise<ContentRow[]> {
@@ -1534,20 +1628,27 @@ export async function listContentSlim(
     (opts.subKind === undefined || isArticleSubKind);
 
   const articleType = isArticleSubKind ? (opts.subKind as ArticleType) : undefined;
+  // 2026-06-24 jobStatus filter: articles aren't pipeline citizens, so the
+  // moment the operator picks any job status the article half drops out.
+  const wantArticlesAfterJobFilter = wantArticles && !opts.jobStatus;
 
   const [stories, articles] = await Promise.all([
     wantStories
       ? listStoriesSlim({
           status: opts.status,
           category: opts.category,
+          updatedSince: opts.updatedSince,
+          updatedUntil: opts.updatedUntil,
           limit,
         })
       : Promise.resolve([] as StoryListRow[]),
-    wantArticles
+    wantArticlesAfterJobFilter
       ? listArticlesSlim({
           status: opts.status,
           type: articleType,
           language: opts.language,
+          updatedSince: opts.updatedSince,
+          updatedUntil: opts.updatedUntil,
           limit,
         })
       : Promise.resolve([] as ArticleListRow[]),
@@ -1558,6 +1659,13 @@ export async function listContentSlim(
   // own per-platform live-status. Articles get DEFAULT_PUBLISHED_ON.
   const storyIds = stories.map((s) => s.id);
   const publishedOnByStory = await loadPublishedOnByStoryIds(storyIds);
+  // Latest pipeline-job status per story. Keyed by reddit_id (the FK in
+  // story_jobs). Stories with no reddit_id (manual seeds) skip the lookup
+  // and surface job_status: null.
+  const redditIds = stories
+    .map((s) => s.reddit_id)
+    .filter((r): r is string => typeof r === "string" && r.length > 0);
+  const jobStatusByReddit = await loadLatestJobStatusByReddit(redditIds);
 
   const merged: ContentRow[] = [
     ...stories.map<ContentRow>((s) => ({
@@ -1575,6 +1683,9 @@ export async function listContentSlim(
       published_at: null, // slim story projection drops this
       published_on:
         publishedOnByStory.get(s.id) ?? { ...DEFAULT_PUBLISHED_ON },
+      job_status: s.reddit_id
+        ? (jobStatusByReddit.get(s.reddit_id) ?? null)
+        : null,
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -1590,6 +1701,7 @@ export async function listContentSlim(
       created_at: a.created_at,
       published_at: a.published_at,
       published_on: { ...DEFAULT_PUBLISHED_ON },
+      job_status: null,
     })),
   ];
 
@@ -1601,6 +1713,14 @@ export async function listContentSlim(
     return bT.localeCompare(aT);
   });
 
+  // 2026-06-24 jobStatus filter runs alongside the publish-on filter:
+  // both are in-memory because the underlying signal is an aggregate, not
+  // a per-row column. Stories with no job row land null and fall out the
+  // moment any jobStatus is set.
+  const jobFiltered = opts.jobStatus
+    ? merged.filter((row) => row.job_status === opts.jobStatus)
+    : merged;
+
   // Apply the published-on AND-filters AFTER aggregation so the SQL
   // stays simple. The slim list caps at 200 stories anyway, so an
   // in-memory filter is cheap.
@@ -1608,8 +1728,8 @@ export async function listContentSlim(
   const publishedNotOn = opts.publishedNotOn ?? [];
   const filteredByPublish =
     publishedOn.length === 0 && publishedNotOn.length === 0
-      ? merged
-      : merged.filter((row) => {
+      ? jobFiltered
+      : jobFiltered.filter((row) => {
           // Articles are never published-on-social. If any
           // publishedOn filter is set, articles fall out. If only
           // publishedNotOn is set, articles pass (they're not on
@@ -1637,6 +1757,9 @@ export async function listContentSlim(
     category: opts.category ?? null,
     publishedOn: publishedOn.length > 0 ? publishedOn : null,
     publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : null,
+    jobStatus: opts.jobStatus ?? null,
+    updatedSince: opts.updatedSince ?? null,
+    updatedUntil: opts.updatedUntil ?? null,
   });
   return out;
 }

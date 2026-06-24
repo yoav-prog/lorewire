@@ -16,7 +16,9 @@ import {
   CONTENT_SUBKINDS,
   ARTICLE_LANGUAGES,
   SOCIAL_PLATFORMS,
+  JOB_STATUSES,
   type ContentSubKind,
+  type JobStatus,
   type SocialPlatform,
 } from "@/lib/repo";
 import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
@@ -24,6 +26,65 @@ import { CATEGORIES, STATUSES } from "@/app/admin/ui";
 import { ContentList } from "./ContentList";
 
 const LIST_LIMIT = 200;
+
+// 2026-06-24 last-updated filter. Bucket chips collapse the common case
+// ("what changed today") to one click; "Custom" reveals a from/to date
+// pair for the rest. Keys land in the URL so refresh keeps the filter
+// and a copy-paste link shares the same view.
+const DATE_BUCKETS = ["today", "7d", "30d", "90d", "custom"] as const;
+type DateBucket = (typeof DATE_BUCKETS)[number];
+const DATE_BUCKET_LABELS: Record<DateBucket, string> = {
+  today: "Today",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days",
+  "90d": "Last 90 days",
+  custom: "Custom…",
+};
+
+function isDateBucket(v: string | undefined): v is DateBucket {
+  return DATE_BUCKETS.includes(v as DateBucket);
+}
+
+/** Resolve a preset bucket to the (since, until?) pair listContentSlim
+ *  applies. `until` is exclusive so "today" covers [start-of-today,
+ *  start-of-tomorrow); the rolling windows leave until=undefined. */
+function resolveBucket(
+  bucket: Exclude<DateBucket, "custom">,
+  now = new Date(),
+): { since: string; until?: string } {
+  const ms = 24 * 60 * 60 * 1000;
+  const startOfTodayUtc = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  switch (bucket) {
+    case "today":
+      return {
+        since: startOfTodayUtc.toISOString(),
+        until: new Date(startOfTodayUtc.getTime() + ms).toISOString(),
+      };
+    case "7d":
+      return { since: new Date(now.getTime() - 7 * ms).toISOString() };
+    case "30d":
+      return { since: new Date(now.getTime() - 30 * ms).toISOString() };
+    case "90d":
+      return { since: new Date(now.getTime() - 90 * ms).toISOString() };
+  }
+}
+
+/** YYYY-MM-DD validator. Rebuilding through Date and comparing back to the
+ *  input rejects impossible dates like 2026-13-45 without a third-party lib. */
+function parseDateInput(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return undefined;
+  const d = new Date(`${raw}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return undefined;
+  if (d.toISOString().slice(0, 10) !== raw) return undefined;
+  return d.toISOString();
+}
+
+function isJobStatus(v: string | undefined): v is JobStatus {
+  return (JOB_STATUSES as readonly string[]).includes(v ?? "");
+}
 
 const SUBKIND_FILTER_LABELS: Record<ContentSubKind, string> = {
   video: "Videos",
@@ -91,6 +152,10 @@ export default async function ContentPage({
     category?: string;
     publishedOn?: string;
     publishedNotOn?: string;
+    jobStatus?: string;
+    updatedBucket?: string;
+    updatedAfter?: string;
+    updatedBefore?: string;
   }>;
 }) {
   await requireCapability("content.manage");
@@ -106,6 +171,31 @@ export default async function ContentPage({
       : undefined;
   const publishedOn = parsePlatformList(sp.publishedOn);
   const publishedNotOn = parsePlatformList(sp.publishedNotOn);
+  const jobStatus = isJobStatus(sp.jobStatus) ? sp.jobStatus : undefined;
+  const updatedBucket = isDateBucket(sp.updatedBucket)
+    ? sp.updatedBucket
+    : undefined;
+  // updatedAfter / updatedBefore are only honored when bucket=custom; for
+  // preset buckets, resolveBucket() owns the math so the chip describes
+  // exactly what it filters to.
+  const customAfter =
+    updatedBucket === "custom" ? parseDateInput(sp.updatedAfter) : undefined;
+  // The form input is a date, so "Before 2026-06-24" should still include
+  // all of the 24th. parseDateInput returns start-of-day UTC; bump by one
+  // day so the comparison reads inclusive-of-that-day.
+  const customBeforeRaw =
+    updatedBucket === "custom" ? parseDateInput(sp.updatedBefore) : undefined;
+  const customBefore = customBeforeRaw
+    ? new Date(
+        new Date(customBeforeRaw).getTime() + 24 * 60 * 60 * 1000,
+      ).toISOString()
+    : undefined;
+  const resolvedRange =
+    updatedBucket === undefined
+      ? undefined
+      : updatedBucket === "custom"
+        ? { since: customAfter, until: customBefore }
+        : resolveBucket(updatedBucket);
   const rows = await listContentSlim({
     subKind,
     status,
@@ -113,6 +203,9 @@ export default async function ContentPage({
     category,
     publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
     publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
+    jobStatus,
+    updatedSince: resolvedRange?.since || undefined,
+    updatedUntil: resolvedRange?.until || undefined,
     limit: LIST_LIMIT,
   });
 
@@ -128,6 +221,12 @@ export default async function ContentPage({
       publishedOn: publishedOn.length > 0 ? publishedOn.join(",") : undefined,
       publishedNotOn:
         publishedNotOn.length > 0 ? publishedNotOn.join(",") : undefined,
+      jobStatus,
+      updatedBucket,
+      // Only persist the custom range when bucket=custom — otherwise switching
+      // from custom → 7d would drag stale date params along in the URL.
+      updatedAfter: updatedBucket === "custom" ? sp.updatedAfter : undefined,
+      updatedBefore: updatedBucket === "custom" ? sp.updatedBefore : undefined,
       ...override,
     };
     for (const [k, v] of Object.entries(merged)) {
@@ -290,6 +389,118 @@ export default async function ContentPage({
             (use to find stories MISSING from a platform)
           </span>
         </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Job
+          </span>
+          {chip(
+            `/admin/content${baseQs({ jobStatus: undefined })}`,
+            "All",
+            !jobStatus,
+          )}
+          {JOB_STATUSES.map((s) =>
+            chip(
+              `/admin/content${baseQs({ jobStatus: s })}`,
+              s,
+              jobStatus === s,
+            ),
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (latest pipeline run · video stories only)
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Updated
+          </span>
+          {chip(
+            `/admin/content${baseQs({ updatedBucket: undefined, updatedAfter: undefined, updatedBefore: undefined })}`,
+            "All",
+            !updatedBucket,
+          )}
+          {DATE_BUCKETS.map((b) =>
+            chip(
+              `/admin/content${baseQs({ updatedBucket: b })}`,
+              DATE_BUCKET_LABELS[b],
+              updatedBucket === b,
+            ),
+          )}
+        </div>
+
+        {updatedBucket === "custom" && (
+          // GET form so the inputs land back in the URL — same persistence
+          // story as the chips. An explicit Apply button (instead of
+          // submit-on-change) avoids one fetch per keystroke as the
+          // operator types a date.
+          <form
+            method="GET"
+            action="/admin/content"
+            className="flex flex-wrap items-center gap-2 pl-1"
+          >
+            {/* Re-thread every active filter so the Apply round-trip doesn't
+                drop the rest. Hidden inputs only. */}
+            {subKind && <input type="hidden" name="kind" value={subKind} />}
+            {status && <input type="hidden" name="status" value={status} />}
+            {language && (
+              <input type="hidden" name="language" value={language} />
+            )}
+            {category && (
+              <input type="hidden" name="category" value={category} />
+            )}
+            {publishedOn.length > 0 && (
+              <input
+                type="hidden"
+                name="publishedOn"
+                value={publishedOn.join(",")}
+              />
+            )}
+            {publishedNotOn.length > 0 && (
+              <input
+                type="hidden"
+                name="publishedNotOn"
+                value={publishedNotOn.join(",")}
+              />
+            )}
+            {jobStatus && (
+              <input type="hidden" name="jobStatus" value={jobStatus} />
+            )}
+            <input type="hidden" name="updatedBucket" value="custom" />
+            <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-muted">
+              From
+              <input
+                type="date"
+                name="updatedAfter"
+                defaultValue={sp.updatedAfter ?? ""}
+                className="rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] text-ink"
+              />
+            </label>
+            <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-muted">
+              To
+              <input
+                type="date"
+                name="updatedBefore"
+                defaultValue={sp.updatedBefore ?? ""}
+                className="rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] text-ink"
+              />
+            </label>
+            <button
+              type="submit"
+              className="rounded-md border border-accent px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent hover:text-bg"
+            >
+              Apply
+            </button>
+            {(sp.updatedAfter || sp.updatedBefore) && (
+              <Link
+                href={`/admin/content${baseQs({ updatedAfter: undefined, updatedBefore: undefined })}`}
+                className="font-mono text-[10px] text-muted underline-offset-2 hover:text-ink hover:underline"
+              >
+                clear
+              </Link>
+            )}
+          </form>
+        )}
       </div>
 
       <ContentList rows={rows} />
