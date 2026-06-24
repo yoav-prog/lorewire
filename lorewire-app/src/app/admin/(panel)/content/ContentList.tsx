@@ -88,6 +88,30 @@ function categoryChipClass(category: string | null | undefined): string {
   );
 }
 
+// 2026-06-24 latest pipeline-job state per row. Explicit class strings (no
+// dynamic Tailwind generation) so the purge step keeps them in the prod
+// bundle, matching the category chip pattern above. `processing` gets a
+// subtle animated pulse — the only state that's actively changing.
+const JOB_STATUS_CHIP_CLASS: Record<
+  NonNullable<ContentRow["job_status"]>,
+  string
+> = {
+  queued: "border-warn/40 bg-warn/15 text-warn",
+  processing: "border-warn/40 bg-warn/20 text-warn animate-pulse",
+  done: "border-cat-wholesome/40 bg-cat-wholesome/15 text-cat-wholesome",
+  error: "border-danger/40 bg-danger/15 text-danger",
+};
+
+const JOB_STATUS_LABEL: Record<
+  NonNullable<ContentRow["job_status"]>,
+  string
+> = {
+  queued: "queued",
+  processing: "processing",
+  done: "done",
+  error: "error",
+};
+
 type Kind = "story" | "article";
 
 interface UndoState {
@@ -821,6 +845,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                     <PublishedOnStrip
                       published={r.published_on}
                     />
+                  )}
+                  {r.kind === "story" && r.job_status && (
+                    <span
+                      title={`Latest pipeline run: ${JOB_STATUS_LABEL[r.job_status]}`}
+                      className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${JOB_STATUS_CHIP_CLASS[r.job_status]}`}
+                    >
+                      {JOB_STATUS_LABEL[r.job_status]}
+                    </span>
                   )}
                   <span
                     className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(

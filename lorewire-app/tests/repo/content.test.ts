@@ -218,3 +218,138 @@ describe("listContentSlim / filters", () => {
     expect(rows.some((r) => r.id === articleId)).toBe(false);
   });
 });
+
+// --- 2026-06-24 last-updated + pipeline-job filters -------------------------
+// updatedSince/updatedUntil push through to the SQL; jobStatus is post-
+// aggregation (depends on the story_jobs join). The pill render is covered
+// in ContentList; this file only checks the data plumbing.
+
+async function insertStoryWithReddit(opts: {
+  title: string;
+  redditId: string;
+  updatedAt?: string;
+}): Promise<string> {
+  const id = randomUUID();
+  const now = opts.updatedAt ?? new Date().toISOString();
+  await run(
+    "INSERT INTO stories (id, reddit_id, slug, category, title, status, created_at, updated_at) " +
+      "VALUES (?, ?, ?, 'Drama', ?, 'ready', ?, ?)",
+    [id, opts.redditId, `story-${id.slice(0, 6)}`, opts.title, now, now],
+  );
+  return id;
+}
+
+async function insertJob(opts: {
+  redditId: string;
+  status: "queued" | "processing" | "done" | "error";
+  requestedAt: string;
+}): Promise<void> {
+  await run(
+    "INSERT INTO story_jobs (id, reddit_id, status, requested_at) VALUES (?, ?, ?, ?)",
+    [randomUUID(), opts.redditId, opts.status, opts.requestedAt],
+  );
+}
+
+describe("listContentSlim / updatedSince + updatedUntil", () => {
+  it("updatedSince narrows to rows updated at or after the cutoff", async () => {
+    const old = await insertStory({
+      title: "Old story",
+      updatedAt: "2026-05-01T00:00:00.000Z",
+    });
+    const fresh = await insertStory({
+      title: "Fresh story",
+      updatedAt: "2026-06-24T00:00:00.000Z",
+    });
+    const rows = await listContentSlim({
+      updatedSince: "2026-06-01T00:00:00.000Z",
+      limit: 50,
+    });
+    expect(rows.some((r) => r.id === fresh)).toBe(true);
+    expect(rows.some((r) => r.id === old)).toBe(false);
+  });
+
+  it("updatedUntil is exclusive (today-bucket semantics)", async () => {
+    const on = await insertStory({
+      title: "On the boundary",
+      updatedAt: "2026-06-24T12:00:00.000Z",
+    });
+    const after = await insertStory({
+      title: "After the boundary",
+      updatedAt: "2026-06-25T00:00:00.000Z",
+    });
+    const rows = await listContentSlim({
+      updatedSince: "2026-06-24T00:00:00.000Z",
+      updatedUntil: "2026-06-25T00:00:00.000Z",
+      limit: 50,
+    });
+    expect(rows.some((r) => r.id === on)).toBe(true);
+    expect(rows.some((r) => r.id === after)).toBe(false);
+  });
+});
+
+describe("listContentSlim / job_status enrichment + filter", () => {
+  it("attaches the latest story_jobs.status per story; null when no job exists", async () => {
+    const redditA = `t3_jobtest_${randomUUID().slice(0, 6)}`;
+    const withJob = await insertStoryWithReddit({
+      title: "Story with a job",
+      redditId: redditA,
+    });
+    const withoutJob = await insertStory({ title: "Story without a job" });
+    // Two jobs for the same story; the newest (processing) must win.
+    await insertJob({
+      redditId: redditA,
+      status: "done",
+      requestedAt: "2026-06-23T10:00:00.000Z",
+    });
+    await insertJob({
+      redditId: redditA,
+      status: "processing",
+      requestedAt: "2026-06-24T10:00:00.000Z",
+    });
+    const rows = await listContentSlim({ limit: 50 });
+    const jobRow = rows.find((r) => r.id === withJob);
+    const noJobRow = rows.find((r) => r.id === withoutJob);
+    expect(jobRow?.job_status).toBe("processing");
+    expect(noJobRow?.job_status).toBeNull();
+  });
+
+  it("jobStatus filter narrows to stories whose latest job matches and drops articles", async () => {
+    const redditP = `t3_proc_${randomUUID().slice(0, 6)}`;
+    const redditD = `t3_done_${randomUUID().slice(0, 6)}`;
+    const procStory = await insertStoryWithReddit({
+      title: "Processing story",
+      redditId: redditP,
+    });
+    const doneStory = await insertStoryWithReddit({
+      title: "Done story",
+      redditId: redditD,
+    });
+    await insertJob({
+      redditId: redditP,
+      status: "processing",
+      requestedAt: "2026-06-24T10:00:00.000Z",
+    });
+    await insertJob({
+      redditId: redditD,
+      status: "done",
+      requestedAt: "2026-06-24T10:00:00.000Z",
+    });
+    const articleId = randomUUID();
+    await createArticle({
+      id: articleId,
+      type: "feature",
+      language: "en",
+      slug: `job-${articleId.slice(0, 6)}`,
+      title: "An article",
+      author_id: null,
+    });
+    const rows = await listContentSlim({
+      jobStatus: "processing",
+      limit: 50,
+    });
+    expect(rows.every((r) => r.kind === "story")).toBe(true);
+    expect(rows.some((r) => r.id === procStory)).toBe(true);
+    expect(rows.some((r) => r.id === doneStory)).toBe(false);
+    expect(rows.some((r) => r.id === articleId)).toBe(false);
+  });
+});
