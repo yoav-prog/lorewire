@@ -7,8 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  MIN_PUBLIC_RAIL_SIZE,
-  hasEnoughForPublicRail,
+  fallbackIdsForSurface,
   resolveRailIds,
 } from "./homepage-rails";
 
@@ -21,13 +20,17 @@ const BEHAVIOR_HIDE = {
   heroRequired: false,
 };
 
+// `heroImage: "x"` is what makes each fixture pass isPublishedStory.
+// Without it, fallbackIdsForSurface filters every fixture out and the
+// resolution-order tests below all return [] instead of the catalog
+// order they assert.
 const catalog = {
   array: [
-    { id: "s_a" },
-    { id: "s_b" },
-    { id: "s_c" },
-    { id: "s_d" },
-    { id: "s_e" },
+    { id: "s_a", heroImage: "x" },
+    { id: "s_b", heroImage: "x" },
+    { id: "s_c", heroImage: "x" },
+    { id: "s_d", heroImage: "x" },
+    { id: "s_e", heroImage: "x" },
   ],
   // The Map is unused by resolveRailIds; the array shape is what
   // fallbackIdsForSurface reads.
@@ -164,23 +167,79 @@ describe("resolveRailIds — continue rail resolution order", () => {
   });
 });
 
-describe("hasEnoughForPublicRail — homepage discovery threshold", () => {
-  it("rejects an empty rail", () => {
-    expect(hasEnoughForPublicRail(0)).toBe(false);
+// 2026-06-24 regression: production rails crashed to 0-2 items because
+// fallbackIdsForSurface sliced 6 candidates by category BEFORE filtering
+// by isPublishedStory. Sample placeholders and in-progress live rows
+// (no hero artwork yet) consumed slots that real published stories
+// never got. These tests pin "filter before slice" so the bug can't
+// silently come back.
+describe("fallbackIdsForSurface — filter-before-slice (2026-06-24 fix)", () => {
+  const publishedDrama = (id: string) => ({
+    id,
+    cat: "Drama",
+    heroImage: "x",
+  });
+  const unpublishedDrama = (id: string) => ({ id, cat: "Drama" });
+
+  it("drops unpublished entries from the rail", () => {
+    const result = fallbackIdsForSurface("drama_row", [
+      unpublishedDrama("u1"),
+      unpublishedDrama("u2"),
+      publishedDrama("p1"),
+      publishedDrama("p2"),
+      publishedDrama("p3"),
+      publishedDrama("p4"),
+    ] as never);
+    expect(result).toEqual(["p1", "p2", "p3", "p4"]);
   });
 
-  it("rejects rails below MIN_PUBLIC_RAIL_SIZE", () => {
-    for (let n = 1; n < MIN_PUBLIC_RAIL_SIZE; n += 1) {
-      expect(hasEnoughForPublicRail(n)).toBe(false);
-    }
+  it("returns published stories beyond catalog position 6 — the regression case", () => {
+    const stories = [
+      // First 6 slots are sample placeholders (no heroImage).
+      unpublishedDrama("u1"),
+      unpublishedDrama("u2"),
+      unpublishedDrama("u3"),
+      unpublishedDrama("u4"),
+      unpublishedDrama("u5"),
+      unpublishedDrama("u6"),
+      // Real published Dramas live at positions 6+.
+      publishedDrama("p1"),
+      publishedDrama("p2"),
+      publishedDrama("p3"),
+      publishedDrama("p4"),
+    ];
+    const result = fallbackIdsForSurface("drama_row", stories as never);
+    // Old (buggy) behavior: returns [] because slice(0, 6) only saw the
+    // unpublished entries. New behavior: returns the four real published
+    // Dramas regardless of position.
+    expect(result).toEqual(["p1", "p2", "p3", "p4"]);
   });
 
-  it("accepts rails at exactly MIN_PUBLIC_RAIL_SIZE", () => {
-    expect(hasEnoughForPublicRail(MIN_PUBLIC_RAIL_SIZE)).toBe(true);
+  it("caps at 20 to keep SSR payload bounded", () => {
+    const stories = Array.from({ length: 50 }, (_, i) =>
+      publishedDrama(`p${i}`),
+    );
+    const result = fallbackIdsForSurface("drama_row", stories as never);
+    expect(result).toHaveLength(20);
+    expect(result[0]).toBe("p0");
+    expect(result[19]).toBe("p19");
   });
 
-  it("accepts rails larger than the threshold", () => {
-    expect(hasEnoughForPublicRail(MIN_PUBLIC_RAIL_SIZE + 1)).toBe(true);
-    expect(hasEnoughForPublicRail(100)).toBe(true);
+  it("returns empty when no stories in the catalog pass isPublishedStory", () => {
+    const result = fallbackIdsForSurface("drama_row", [
+      unpublishedDrama("u1"),
+      unpublishedDrama("u2"),
+    ] as never);
+    expect(result).toEqual([]);
+  });
+
+  it("new_row sorts by year DESC after filtering by published", () => {
+    const result = fallbackIdsForSurface("new_row", [
+      { id: "u_2030", year: 2030 }, // unpublished — must NOT bubble to the top
+      { id: "p_2024", year: 2024, heroImage: "x" },
+      { id: "p_2026", year: 2026, heroImage: "x" },
+      { id: "p_2025", year: 2025, heroImage: "x" },
+    ] as never);
+    expect(result).toEqual(["p_2026", "p_2025", "p_2024"]);
   });
 });

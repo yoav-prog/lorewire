@@ -141,6 +141,10 @@ export const CATEGORY_RAILS: CategoryRailSpec[] = [
   { surface: "drama_row", title: "Pure Drama", cat: "Drama" },
 ];
 
+// Per-rail fallback cap. Keeps SSR payload bounded; the rails scroll
+// horizontally so the cap is a payload control, not a visual one.
+const FALLBACK_RAIL_CAP = 20;
+
 // Derived fallbacks for each surface. With the hardcoded rail constants
 // gone from stories.ts, "fallback" no longer means "use that specific
 // list of ids" — it means "auto-derive a sensible default from the
@@ -148,30 +152,39 @@ export const CATEGORY_RAILS: CategoryRailSpec[] = [
 // "most recent" ordering so newly published stories show up on the
 // homepage without waiting for `python -m pipeline.export_app` to
 // re-bake src/data/published.ts.
+//
+// CRITICAL: every fallback path filters by isPublishedStory BEFORE the
+// slice. Slicing first then filtering was the 2026-06-24 bug that
+// crashed every category rail to 0-2 items in production — the first
+// N catalog entries by category often include sample placeholders or
+// live rows whose hero artwork hasn't rendered yet, so the post-slice
+// filter dropped most of the rail. Filtering first means the cap
+// counts published stories, not candidates.
 export function fallbackIdsForSurface(
   surface: keyof HomepageCuration,
   catalog: Story[],
 ): string[] {
+  const published = catalog.filter(isPublishedStory);
   switch (surface) {
     case "hero":
-      return catalog.length > 0 ? [catalog[0].id] : [];
+      return published.length > 0 ? [published[0].id] : [];
     case "top10":
-      return catalog.slice(0, 10).map((s) => s.id);
+      return published.slice(0, 10).map((s) => s.id);
     case "continue":
-      return catalog.slice(0, 4).map((s) => s.id);
+      return published.slice(0, 4).map((s) => s.id);
     case "new_row":
-      // Sort by year DESC and slice 6; ties keep merged-catalog order
-      // (which is "live first, sample second" by construction).
-      return [...catalog]
+      // Sort by year DESC; ties keep merged-catalog order (live first,
+      // sample second) so the freshest published story leads the rail.
+      return [...published]
         .sort((a, b) => (b.year ?? 0) - (a.year ?? 0))
-        .slice(0, 6)
+        .slice(0, FALLBACK_RAIL_CAP)
         .map((s) => s.id);
     default: {
       const rail = CATEGORY_RAILS.find((r) => r.surface === surface);
       if (!rail || !rail.cat) return [];
-      return catalog
+      return published
         .filter((s) => s.cat === rail.cat)
-        .slice(0, 6)
+        .slice(0, FALLBACK_RAIL_CAP)
         .map((s) => s.id);
     }
   }
@@ -555,23 +568,6 @@ export function filterIdsByPillCat(
     const s = resolveStory(id);
     return s ? s.cat === pill : false;
   });
-}
-
-/** Minimum number of published stories a public discovery rail needs
- *  before it renders at all. A rail with one or two items reads as a
- *  half-built product — better to hide the section entirely until
- *  inventory grows. Applies to the category rails and "New on LoreWire";
- *  does NOT apply to Continue Watching (personalized signal matters at
- *  any size) or Top 10 (its numbered visual handles thin counts well
- *  enough on its own). */
-export const MIN_PUBLIC_RAIL_SIZE = 4;
-
-/** True when a public discovery rail has enough items to render. Single
- *  source of truth so DesktopShell + AppShell apply the same threshold;
- *  the named helper also reads better than a bare `>= 4` at the call
- *  site. */
-export function hasEnoughForPublicRail(count: number): boolean {
-  return count >= MIN_PUBLIC_RAIL_SIZE;
 }
 
 /** Drop ids whose resolved story has no produced content (sample
