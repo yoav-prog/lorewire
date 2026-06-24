@@ -557,6 +557,23 @@ export function filterIdsByPillCat(
   });
 }
 
+/** Minimum number of published stories a public discovery rail needs
+ *  before it renders at all. A rail with one or two items reads as a
+ *  half-built product — better to hide the section entirely until
+ *  inventory grows. Applies to the category rails and "New on LoreWire";
+ *  does NOT apply to Continue Watching (personalized signal matters at
+ *  any size) or Top 10 (its numbered visual handles thin counts well
+ *  enough on its own). */
+export const MIN_PUBLIC_RAIL_SIZE = 4;
+
+/** True when a public discovery rail has enough items to render. Single
+ *  source of truth so DesktopShell + AppShell apply the same threshold;
+ *  the named helper also reads better than a bare `>= 4` at the call
+ *  site. */
+export function hasEnoughForPublicRail(count: number): boolean {
+  return count >= MIN_PUBLIC_RAIL_SIZE;
+}
+
 /** Drop ids whose resolved story has no produced content (sample
  *  placeholder). Same `isPublishedStory` gate Browse / Search / New & Hot
  *  use; the home page rails apply it last so curated and fallback paths

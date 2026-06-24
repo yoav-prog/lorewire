@@ -27,6 +27,7 @@ import {
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
   filterIdsByPublished,
+  hasEnoughForPublicRail,
   resolveHeroStory,
   resolveRailIds,
   useHomepageCuration,
@@ -1347,13 +1348,13 @@ function HomePage({
         {CATEGORY_RAILS.map((rail) => {
           const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
           if (!ids) return null;
-          // Skip rails that resolve to no displayable stories at all (no
-          // curation + no fallback hits, or only sample placeholders) so
-          // the homepage doesn't render an empty section header.
+          // Public discovery rails hide below MIN_PUBLIC_RAIL_SIZE — a rail
+          // with one or two posters reads as a half-built product. Re-appears
+          // automatically once inventory grows past the threshold.
           const items = ids
             .map((id) => resolveStory(id))
             .filter((s): s is Story => s !== null && isPublishedStory(s));
-          if (items.length === 0) return null;
+          if (!hasEnoughForPublicRail(items.length)) return null;
           return (
             <Rail key={rail.surface} title={rail.title}>
               {items.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} />)}
@@ -1371,7 +1372,7 @@ function HomePage({
             </Rail>
           );
         })}
-        {newRowIds.length > 0 && (
+        {hasEnoughForPublicRail(newRowIds.length) && (
           <Rail title="New on LoreWire">
             {newRowIds.map((id) => {
               const s = resolveStory(id);
