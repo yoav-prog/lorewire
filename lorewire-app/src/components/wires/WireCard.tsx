@@ -133,6 +133,27 @@ const ShareUpIcon = ({ size = 22 }: { size?: number }) => (
     <path d="M12 15V3M8 7l4-4 4 4" />
   </svg>
 );
+// Fullscreen toggle glyph — four corner brackets when collapsed,
+// inward arrows when already expanded so the icon mirrors the action.
+const FullscreenIcon = ({ expanded, size = 18 }: { expanded: boolean; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} strokeLinecap="round" strokeLinejoin="round">
+    {expanded ? (
+      <>
+        <path d="M9 4v3a2 2 0 0 1-2 2H4" />
+        <path d="M15 4v3a2 2 0 0 0 2 2h3" />
+        <path d="M9 20v-3a2 2 0 0 0-2-2H4" />
+        <path d="M15 20v-3a2 2 0 0 1 2-2h3" />
+      </>
+    ) : (
+      <>
+        <path d="M4 9V6a2 2 0 0 1 2-2h3" />
+        <path d="M20 9V6a2 2 0 0 0-2-2h-3" />
+        <path d="M4 15v3a2 2 0 0 0 2 2h3" />
+        <path d="M20 15v3a2 2 0 0 1-2 2h-3" />
+      </>
+    )}
+  </svg>
+);
 
 export interface WireCardProps {
   short: WireStory;
@@ -224,6 +245,76 @@ export default function WireCard({
   const [heartBurst, setHeartBurst] = useState(false);
   // Our own ShareSheet overlay (not the OS share panel).
   const [shareOpen, setShareOpen] = useState(false);
+
+  // ── Fullscreen + chrome auto-hide ────────────────────────────────────────
+  // The video stage requests fullscreen on its own (so the dark control bar
+  // below the video stays out of the immersive view), and the top chrome
+  // (chips + 4 controls + scrim + scrubber + the fullscreen button itself)
+  // auto-fades after ~3s of uninterrupted playback. Tap, pause, hover (on
+  // desktop), seeking, or any chrome interaction brings everything back.
+  // The floating WirePollPill is intentionally NOT in this group — it's
+  // engagement, not chrome, and a wire about to ask "what do you think"
+  // shouldn't hide the question while the user watches.
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const [interactionTick, setInteractionTick] = useState(0);
+  const markActive = useCallback(() => {
+    setChromeVisible(true);
+    setInteractionTick((n) => n + 1);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+    const elx = el as HTMLDivElement & {
+      webkitRequestFullscreen?: () => Promise<void> | void;
+    };
+    const inFs = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
+    try {
+      if (inFs) {
+        const p = doc.exitFullscreen
+          ? doc.exitFullscreen()
+          : doc.webkitExitFullscreen?.();
+        if (p && typeof (p as Promise<void>).catch === "function") {
+          (p as Promise<void>).catch(() => undefined);
+        }
+      } else {
+        const p = elx.requestFullscreen
+          ? elx.requestFullscreen()
+          : elx.webkitRequestFullscreen?.();
+        if (p && typeof (p as Promise<void>).catch === "function") {
+          (p as Promise<void>).catch((err: unknown) => {
+            console.warn("[wires fullscreen err]", { err: String(err) });
+          });
+        }
+      }
+    } catch (err) {
+      console.warn("[wires fullscreen err]", { err: String(err) });
+    }
+  }, []);
+
+  // Mirror the document's fullscreen state into ours so the icon flips
+  // when the user exits via ESC or the platform UI (not just our button).
+  useEffect(() => {
+    const onChange = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      const inFs = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
+      setIsFullscreen(inFs && document.fullscreenElement === stageRef.current);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange);
+    };
+  }, []);
 
   // ── Poll state mirror (read by the floating pill) ────────────────────────
   // The WirePollPanel owns the canonical vote flow; we mirror the result +
@@ -378,6 +469,21 @@ export default function WireCard({
     };
   }, []);
 
+  // Chrome auto-hide. Anything other than steady playback (paused, hovered,
+  // seeking, an inactive card) pins the chrome visible; during a clean play
+  // we hide after ~3s of no interaction so the artwork breathes. The
+  // interaction tick is bumped by every stage tap so a single-tap resets
+  // the timer alongside the play/pause toggle. Skipped entirely while the
+  // viewer is in fullscreen — the platform's own UI takes over there.
+  useEffect(() => {
+    if (!shouldPlay || hovered || seeking || isFullscreen) {
+      setChromeVisible(true);
+      return;
+    }
+    const handle = window.setTimeout(() => setChromeVisible(false), 3000);
+    return () => window.clearTimeout(handle);
+  }, [shouldPlay, hovered, seeking, isFullscreen, interactionTick]);
+
   // Play/pause from a single tap. In opt-in mode (reduced motion or autoplay
   // off) the first tap starts; afterwards it toggles.
   const togglePlayPause = useCallback(() => {
@@ -489,8 +595,9 @@ export default function WireCard({
   }, []);
 
   const onStagePointerUp = useCallback(() => {
+    markActive();
     if (!endHold(true)) handleTap();
-  }, [endHold, handleTap]);
+  }, [endHold, handleTap, markActive]);
 
   const onStagePointerLeave = useCallback(() => {
     endHold(true);
@@ -563,7 +670,10 @@ export default function WireCard({
     <div className="flex h-full w-full flex-col bg-black">
       {/* ── Video stage — full frame, never cropped or covered ── */}
       <div
-        className="relative min-h-0 flex-1"
+        ref={stageRef}
+        // bg-black ensures fullscreen letterboxes the 9:16 frame on
+        // landscape monitors without bleeding a different color.
+        className="relative min-h-0 flex-1 bg-black"
         onMouseEnter={() => setHovered(true)}
         onMouseMove={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
@@ -636,23 +746,33 @@ export default function WireCard({
           </div>
         )}
 
-        {/* Subtle top scrim so the category + controls read over a bright frame. */}
+        {/* Subtle top scrim so the category + controls read over a bright
+            frame. Part of the auto-hide chrome group — fades out alongside
+            the buttons during a clean play so the artwork breathes. */}
         <div
-          className="pointer-events-none absolute inset-x-0 top-0 h-20"
+          className={`pointer-events-none absolute inset-x-0 top-0 h-20 transition-opacity duration-300 ${
+            chromeVisible ? "opacity-100" : "opacity-0"
+          }`}
           style={{ background: "linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,0) 100%)" }}
         />
 
-        {/* Top row: category + duration (left), autoplay + mute (right). */}
+        {/* Top row: category + duration (left), autoplay + mute (right).
+            The chips + 4-button row are wrapped in chromeVisible opacity
+            classes; the floating poll pill is intentionally NOT wrapped —
+            engagement stays visible while the user watches. */}
         <div
           className="absolute inset-x-0 top-0 flex items-start justify-between px-4"
           style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 14px)" }}
         >
-          {/* Left stack: category + duration chips on top, the floating
-              poll pill on its own row underneath so it sits in the upper
-              thumb zone without crowding the chips. The pill only renders
-              for wires that actually have a live poll attached. */}
+          {/* Left stack: category + duration chips on top (auto-hidden),
+              the floating poll pill on its own row underneath (always
+              visible while the wire has a live poll). */}
           <div className="flex flex-col items-start gap-2">
-            <div className="flex items-center gap-2">
+            <div
+              className={`flex items-center gap-2 transition-opacity duration-300 ${
+                chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
+              }`}
+            >
               {short.category && (
                 <span
                   className="rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
@@ -661,9 +781,13 @@ export default function WireCard({
                   {short.category}
                 </span>
               )}
-              {short.duration && (
+              {/* Duration: prefer the live `<video>` metadata once it loads
+                  so intro + outro are reflected in the chip. Falls back to
+                  the DB string (which lags reality on stories whose render
+                  was reburned with new bookends). */}
+              {(duration > 0 || short.duration) && (
                 <span className="rounded px-1.5 py-0.5 font-mono text-[10px] text-ink/85" style={{ background: "rgba(0,0,0,.4)" }}>
-                  {short.duration}
+                  {duration > 0 ? formatTime(duration) : short.duration}
                 </span>
               )}
             </div>
@@ -675,11 +799,16 @@ export default function WireCard({
               />
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div
+            className={`flex items-center gap-2 transition-opacity duration-300 ${
+              chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
+            }`}
+          >
             {onShuffle && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  markActive();
                   onShuffle();
                 }}
                 aria-label="Shuffle wires"
@@ -693,6 +822,7 @@ export default function WireCard({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                markActive();
                 onToggleAutoplay();
               }}
               aria-label={autoplay ? "Turn autoplay off" : "Turn autoplay on"}
@@ -706,6 +836,7 @@ export default function WireCard({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                markActive();
                 onToggleAdvance();
               }}
               aria-label={
@@ -721,6 +852,7 @@ export default function WireCard({
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                markActive();
                 onToggleMute();
                 onDismissSoundHint();
               }}
@@ -779,9 +911,34 @@ export default function WireCard({
           </div>
         )}
 
+        {/* Fullscreen toggle — sits above the scrubber on the right so the
+            CTA lands in the thumb zone without crowding the top chrome.
+            Joins the auto-hide group: fades alongside the scrubber when
+            the user just wants the video to play. */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            markActive();
+            toggleFullscreen();
+          }}
+          aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+          title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+          className={`absolute right-3 z-20 grid h-9 w-9 place-items-center rounded-full text-ink transition-opacity duration-300 ${
+            chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+          style={{ background: "rgba(0,0,0,.45)", bottom: 36 }}
+        >
+          <FullscreenIcon expanded={isFullscreen} size={18} />
+        </button>
+
         {/* Scrubber + time, pinned to the bottom of the video stage. The hit
-            zone is taller than the visible bar so it's easy to grab. */}
-        <div className="absolute inset-x-0 bottom-0 z-20 px-3 pb-1">
+            zone is taller than the visible bar so it's easy to grab. Auto-
+            hidden during steady playback so the artwork breathes. */}
+        <div
+          className={`absolute inset-x-0 bottom-0 z-20 px-3 pb-1 transition-opacity duration-300 ${
+            chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
+        >
           {(controlsExpanded || currentTime > 0) && (
             <div className="mb-1 flex justify-end">
               <span
