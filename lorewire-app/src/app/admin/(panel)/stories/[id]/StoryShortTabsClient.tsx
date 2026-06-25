@@ -60,6 +60,8 @@ import {
 // "Attempted to call X() from the server" in production (fixed
 // 2026-06-25 after a tab-click 500 incident).
 import type { ShortClientTabId } from "./tabs";
+import { useShortPreviewVisibility } from "./useShortPreviewVisibility";
+import type { ReactNode } from "react";
 
 // A stable digest the render-after-edits banner re-polls on. Includes
 // every field the render plan diffs against so any edit triggers a fresh
@@ -89,6 +91,7 @@ export function StoryShortTabsClient({
   initialYouTubePost,
   initialTikTokPost,
   initialSeoMetadata,
+  sceneGranularSlot,
 }: {
   storyId: string;
   /** One of the 7 short-client tabs. The parent only renders this
@@ -113,6 +116,13 @@ export function StoryShortTabsClient({
    *  when nothing has been generated yet — the SEO card surfaces a
    *  Generate button in that case. */
   initialSeoMetadata: SeoMetadataState;
+  /** Pre-rendered <GranularRegenGrid /> for the Scenes tab inline
+   *  regen surface. Rendered server-side and passed in as a ReactNode
+   *  slot because GranularRegenGrid transitively imports server-only
+   *  modules (db, repo, image-render-queue) — importing it directly
+   *  into this "use client" wrapper trips Next's RSC boundary. Null
+   *  when the story has no scenes to regen. */
+  sceneGranularSlot: ReactNode | null;
 }) {
   const router = useRouter();
   const [config, setConfig] = useState<ShortConfig>(initialConfig);
@@ -181,6 +191,14 @@ export function StoryShortTabsClient({
     };
   }, [storyId, foreignOwnerEmail, router]);
 
+  const { visible: previewVisible } = useShortPreviewVisibility();
+  // Render tab is where the detailed render surface lives now — the
+  // RenderAfterEditsBanner + RenderStatusPanel only attach there. On
+  // editing tabs the Action Bar's status line + Re-render button
+  // cover the everyday case; switching to Render tab gets you the
+  // lane plan + cost preview + in-flight progress bar.
+  const isRenderTab = activeTab === "render";
+
   return (
     <div className="space-y-3">
       <EditSessionBanner
@@ -188,27 +206,25 @@ export function StoryShortTabsClient({
         foreignOwnerEmail={foreignOwnerEmail}
       />
 
-      <RenderAfterEditsBanner
-        storyId={storyId}
-        configKey={configKey}
-        onRenderQueued={setActiveRenderId}
-      />
-
-      <RenderStatusPanel
-        activeRenderId={activeRenderId}
-        initialRender={initialRender}
-      />
-
-      <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
+      <div
+        className={
+          previewVisible
+            ? "grid gap-4 lg:grid-cols-[1fr_360px]"
+            : "grid gap-4"
+        }
+      >
         <div className="min-w-0 space-y-3">
           {activeTab === "scenes" && (
-            <ScenesTab
-              storyId={storyId}
-              config={config}
-              onConfigChange={setConfig}
-              initialRender={initialRender}
-              linkedArticles={linkedArticles}
-            />
+            <>
+              <ScenesTab
+                storyId={storyId}
+                config={config}
+                onConfigChange={setConfig}
+                initialRender={initialRender}
+                linkedArticles={linkedArticles}
+              />
+              {sceneGranularSlot}
+            </>
           )}
           {activeTab === "captions" && (
             <CaptionsTab
@@ -250,20 +266,33 @@ export function StoryShortTabsClient({
               initialSeoMetadata={initialSeoMetadata}
             />
           )}
-          {activeTab === "render" && (
-            <RenderTabContent
-              storyId={storyId}
-              initialRender={initialRender}
-            />
+          {isRenderTab && (
+            <>
+              <RenderAfterEditsBanner
+                storyId={storyId}
+                configKey={configKey}
+                onRenderQueued={setActiveRenderId}
+              />
+              <RenderStatusPanel
+                activeRenderId={activeRenderId}
+                initialRender={initialRender}
+              />
+              <RenderTabContent
+                storyId={storyId}
+                initialRender={initialRender}
+              />
+            </>
           )}
         </div>
 
-        <aside className="min-w-0">
-          <ShortPreviewPlayer
-            config={config}
-            baselineCaptionTemplate={baselineCaptionTemplate}
-          />
-        </aside>
+        {previewVisible && (
+          <aside className="min-w-0">
+            <ShortPreviewPlayer
+              config={config}
+              baselineCaptionTemplate={baselineCaptionTemplate}
+            />
+          </aside>
+        )}
       </div>
     </div>
   );

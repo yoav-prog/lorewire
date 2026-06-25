@@ -53,6 +53,29 @@ export function isShortClientTab(tab: StoryTabId): boolean {
   return SHORT_CLIENT_TABS.has(tab);
 }
 
+/** Tabs that ARE the per-short editing canvas. On these, the right
+ *  rail is hidden so the main column gets full width (cut 7 fix for
+ *  the squeezed scene grid). Granular regen + live preview move
+ *  inline. */
+const EDITING_TABS = new Set<StoryTabId>([
+  "scenes",
+  "captions",
+  "style",
+  "script",
+  "voice",
+]);
+
+export function isEditingTab(tab: StoryTabId): boolean {
+  return EDITING_TABS.has(tab);
+}
+
+/** Tabs that should render the right rail. Complement of EDITING_TABS:
+ *  Overview / Publish & SEO / Render. Page uses this to decide whether
+ *  to wrap content in the [1fr_320px] grid. */
+export function isRailTab(tab: StoryTabId): boolean {
+  return !EDITING_TABS.has(tab);
+}
+
 /** The 7 short-client tabs as a narrowed type. Lives next to the
  *  predicate so the server page can narrow + the client wrapper can
  *  consume the type, without either side reaching into the other's

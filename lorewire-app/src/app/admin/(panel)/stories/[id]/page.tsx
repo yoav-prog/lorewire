@@ -17,7 +17,10 @@ import {
 import { loadHeroStyleSettings } from "@/app/admin/actions";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import { type MediaAssetSpec } from "@/app/admin/(panel)/_components/MediaRegenPanel";
-import { type GranularItem } from "@/app/admin/(panel)/_components/GranularRegenGrid";
+import {
+  GranularRegenGrid,
+  type GranularItem,
+} from "@/app/admin/(panel)/_components/GranularRegenGrid";
 import { getPollByStoryId, getPresetForCategory } from "@/lib/polls";
 import {
   activeSegmentSettingKey,
@@ -36,6 +39,7 @@ import { StoryTabBar } from "./StoryTabBar";
 import { StoryShortTabsClient } from "./StoryShortTabsClient";
 import {
   asShortClientTab,
+  isRailTab,
   isShortClientTab,
   resolveStoryTab,
 } from "./tabs";
@@ -292,12 +296,68 @@ export default async function EditStory({
     });
   }
 
+  // Cut 7: editing tabs (Scenes / Captions / Style / Script / Voice)
+  // render full-width canvas with no rail. Overview / Publish / Render
+  // keep the rail because they're metadata/decision surfaces, not
+  // editing ones. isRailTab() encodes the split — see tabs.ts.
+  const showRail = isRailTab(activeTab);
+
+  const tabContent = (
+    <>
+      {activeTab === "overview" && (
+        <OverviewTab
+          story={s}
+          initialAspect={initialAspect}
+          aspectIsOverride={aspectIsOverride}
+        />
+      )}
+      {isShortClientTab(activeTab) &&
+        (shortLoad?.ok ? (
+          <StoryShortTabsClient
+            storyId={s.id}
+            // Safe narrow: we entered this branch because activeTab
+            // passed isShortClientTab(); asShortClientTab() can't
+            // return null here. The non-null assertion makes the
+            // exhaustive switch happy without an `as`.
+            activeTab={asShortClientTab(activeTab)!}
+            initialConfig={shortLoad.config}
+            initialRender={shortLoad.latestRender}
+            voices={shortLoad.voices}
+            foreignOwnerEmail={shortLoad.foreignOwnerEmail}
+            linkedArticles={shortLoad.linkedArticles}
+            initialFacebookPost={shortLoad.initialFacebookPost}
+            initialInstagramPost={shortLoad.initialInstagramPost}
+            initialYouTubePost={shortLoad.initialYouTubePost}
+            initialTikTokPost={shortLoad.initialTikTokPost}
+            initialSeoMetadata={shortLoad.initialSeoMetadata}
+            sceneGranularSlot={
+              sceneGranular.length > 0 ? (
+                <GranularRegenGrid
+                  ownerKind="story"
+                  ownerId={s.id}
+                  title="Per-image regen"
+                  description="Redo a single scene without touching the rest."
+                  items={sceneGranular}
+                />
+              ) : null
+            }
+          />
+        ) : (
+          <NoShortYetCard
+            error={shortLoad?.error ?? "unknown"}
+            storyId={s.id}
+          />
+        ))}
+    </>
+  );
+
   return (
     <div className="space-y-4">
       <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
 
       <StoryActionBar
         storyId={s.id}
+        activeTab={activeTab}
         initialStatus={s.status}
         initialRender={latestRender}
         initialNoindex={Boolean(s.noindex)}
@@ -305,85 +365,54 @@ export default async function EditStory({
 
       <StoryTabBar storyId={s.id} activeTab={activeTab} />
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
-        {/* Active tab content */}
-        <div className="min-w-0">
-          {activeTab === "overview" && (
-            <OverviewTab
-              story={s}
-              initialAspect={initialAspect}
-              aspectIsOverride={aspectIsOverride}
-            />
-          )}
-          {isShortClientTab(activeTab) &&
-            (shortLoad?.ok ? (
-              <StoryShortTabsClient
-                storyId={s.id}
-                // Safe narrow: we entered this branch because activeTab
-                // passed isShortClientTab(); asShortClientTab() can't
-                // return null here. The non-null assertion makes the
-                // exhaustive switch happy without an `as`.
-                activeTab={asShortClientTab(activeTab)!}
-                initialConfig={shortLoad.config}
-                initialRender={shortLoad.latestRender}
-                voices={shortLoad.voices}
-                foreignOwnerEmail={shortLoad.foreignOwnerEmail}
-                linkedArticles={shortLoad.linkedArticles}
-                initialFacebookPost={shortLoad.initialFacebookPost}
-                initialInstagramPost={shortLoad.initialInstagramPost}
-                initialYouTubePost={shortLoad.initialYouTubePost}
-                initialTikTokPost={shortLoad.initialTikTokPost}
-                initialSeoMetadata={shortLoad.initialSeoMetadata}
-              />
-            ) : (
-              <NoShortYetCard
-                error={shortLoad?.error ?? "unknown"}
-                storyId={s.id}
-              />
-            ))}
+      {showRail ? (
+        <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
+          <div className="min-w-0">{tabContent}</div>
+          {/* Per-tab rail. Cards land in either the primary section or
+              the Advanced drawer based on which tab is active. Status +
+              Search Visibility live in the StoryActionBar above
+              (single source of truth). */}
+          <StoryRail
+            activeTab={activeTab}
+            storyId={s.id}
+            storyCategory={s.category ?? null}
+            heroStyleId={s.hero_style_id ?? null}
+            heroImage={s.hero_image ?? null}
+            audioUrl={s.audio_url ?? null}
+            videoUrl={s.video_url ?? null}
+            pipelineCache={s.pipeline_cache ?? null}
+            videoConfig={s.video_config ?? null}
+            introSegmentId={s.intro_segment_id ?? null}
+            outroSegmentId={s.outro_segment_id ?? null}
+            skipIntro={Boolean(s.skip_intro)}
+            skipOutro={Boolean(s.skip_outro)}
+            tokens={s.tokens ?? null}
+            costCents={s.cost_cents ?? null}
+            createdAt={s.created_at ?? null}
+            publishedAt={s.published_at ?? null}
+            gallery={gallery}
+            poll={poll}
+            pollPreset={pollPreset}
+            heroStyleSettings={heroStyleSettings}
+            storyAssets={storyAssets}
+            sceneGranular={sceneGranular}
+            propGranular={propGranular}
+            intros={intros}
+            outros={outros}
+            activeIntroId={activeIntroId ?? null}
+            activeOutroId={activeOutroId ?? null}
+            commentsArticleId={commentsArticleId}
+            commentsClosed={commentsClosed}
+            siteCommentsEnabled={siteCommentsEnabled}
+          />
         </div>
-
-        {/* Per-tab rail via StoryRail (cut 6). Cards land in either the
-            primary section or the Advanced drawer based on which tab is
-            active — Overview gets Poll/HeroStyle/MediaPreview/Meta;
-            short-config tabs get a focused preview + per-scene regen;
-            Render gets the full media-regen + intro/outro + bible
-            firehose. Status + Search Visibility live in the
-            StoryActionBar above (single source of truth). */}
-        <StoryRail
-          activeTab={activeTab}
-          storyId={s.id}
-          storyCategory={s.category ?? null}
-          heroStyleId={s.hero_style_id ?? null}
-          heroImage={s.hero_image ?? null}
-          audioUrl={s.audio_url ?? null}
-          videoUrl={s.video_url ?? null}
-          pipelineCache={s.pipeline_cache ?? null}
-          videoConfig={s.video_config ?? null}
-          introSegmentId={s.intro_segment_id ?? null}
-          outroSegmentId={s.outro_segment_id ?? null}
-          skipIntro={Boolean(s.skip_intro)}
-          skipOutro={Boolean(s.skip_outro)}
-          tokens={s.tokens ?? null}
-          costCents={s.cost_cents ?? null}
-          createdAt={s.created_at ?? null}
-          publishedAt={s.published_at ?? null}
-          gallery={gallery}
-          poll={poll}
-          pollPreset={pollPreset}
-          heroStyleSettings={heroStyleSettings}
-          storyAssets={storyAssets}
-          sceneGranular={sceneGranular}
-          propGranular={propGranular}
-          intros={intros}
-          outros={outros}
-          activeIntroId={activeIntroId ?? null}
-          activeOutroId={activeOutroId ?? null}
-          commentsArticleId={commentsArticleId}
-          commentsClosed={commentsClosed}
-          siteCommentsEnabled={siteCommentsEnabled}
-        />
-      </div>
+      ) : (
+        // Editing tabs: full-width canvas, no rail. The inline
+        // ShortPreviewPlayer inside StoryShortTabsClient handles the
+        // 9:16 preview (toggleable via the Action Bar's "Hide preview"
+        // chip).
+        <div className="min-w-0">{tabContent}</div>
+      )}
     </div>
   );
 }
