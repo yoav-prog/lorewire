@@ -140,11 +140,16 @@ async function runBackfill(dryRun: boolean): Promise<BackfillResult> {
         continue;
       }
       // Safe-overwrite gate: only touch the row when the existing value
-      // is NULL (no precedence question) or matches body-only (clearly
-      // auto-written by the pre-PR-107 writer). A value that differs
-      // from both NULL and body-only is treated as admin override and
-      // left alone.
-      const isAutoWritten = c.duration === null || c.duration === bodyOnly;
+      // is functionally empty (NULL or "" — both mean "no admin override
+      // has ever been stored"; the admin UI persists an empty input as
+      // either depending on the path) OR matches body-only (clearly
+      // auto-written by the pre-PR-107 writer). A non-empty value that
+      // differs from body-only is treated as admin override and left
+      // alone. The "" branch is the 2026-06-25 fix for the dry-run
+      // that skipped 2/40 stale rows because the column carried "" not
+      // NULL.
+      const isEmpty = c.duration === null || c.duration === "";
+      const isAutoWritten = isEmpty || c.duration === bodyOnly;
       if (!isAutoWritten) {
         outcomes.push({
           story_id: c.id,
