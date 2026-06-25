@@ -198,6 +198,8 @@ export default async function SettingsPage() {
     publicFloorRaw,
     endcardEnabled,
     endcardDurationRaw,
+    autoPublishEnabledRaw,
+    autoPublishMaxAttemptsRaw,
   ] = await Promise.all([
     getSetting(railEnabledSettingKey("divisive")),
     getSetting(railEnabledSettingKey("agreed")),
@@ -205,6 +207,12 @@ export default async function SettingsPage() {
     getSetting("polls.public_floor"),
     getSetting("polls.endcard.enabled"),
     getSetting("polls.endcard.duration_ms"),
+    // 2026-06-25 bulk complete-and-publish
+    // (_plans/2026-06-25-bulk-complete-and-publish.md).
+    // The kill switch + per-story retry cap consumed by
+    // /api/auto_complete_publish.
+    getSetting("auto_publish.enabled"),
+    getSetting("auto_publish.max_attempts"),
   ]);
   const SHORT_CATEGORIES = [
     "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
@@ -668,6 +676,27 @@ export default async function SettingsPage() {
             to configure Facebook, Instagram, YouTube, TikTok, and the
             cross-platform poll-hook caption suffixes.
           </p>
+        </Section>
+
+        <Section
+          title="Auto-publish"
+          description="One-click bulk Complete & publish (admin Content) flags selected stories for the /api/auto_complete_publish cron — a 2-minute watcher that publishes each flagged story to all four socials the moment every asset (article body, hero, thumbnails, short, voiceover, scene images, poll) is ready."
+        >
+          <SettingToggle
+            settingKey="auto_publish.enabled"
+            label="Enable the auto-publish cron"
+            hint="Kill switch. Off = the cron returns immediately without scanning. Flagged stories sit until the switch is flipped back on — they are not unflagged. Use during incidents to halt publishing without dropping the queue."
+            initialOn={readToggle(autoPublishEnabledRaw, true)}
+          />
+          <SettingNumber
+            settingKey="auto_publish.max_attempts"
+            label="Max attempts per story"
+            hint="How many cron ticks (each ~2 min) the watcher waits on missing assets before giving up on a story and clearing its flag. Default 12 (≈ 24 minutes). 0 or negative = no cap (operator override for known-slow asset queues)."
+            initial={autoPublishMaxAttemptsRaw ?? "12"}
+            min={0}
+            max={1000}
+            step={1}
+          />
         </Section>
       </div>
     </SettingsShell>

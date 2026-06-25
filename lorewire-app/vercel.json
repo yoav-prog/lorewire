@@ -66,6 +66,10 @@
       "schedule": "*/2 * * * *"
     },
     {
+      "path": "/api/auto_complete_publish",
+      "schedule": "*/2 * * * *"
+    },
+    {
       "path": "/api/run_hero_thumbnail_finisher",
       "schedule": "*/2 * * * *"
     }
@@ -108,6 +112,9 @@
       "maxDuration": 300
     },
     "src/app/api/auto_publish_full_pipeline/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/auto_complete_publish/route.ts": {
       "maxDuration": 300
     },
     "api/run_hero_thumbnail_finisher.py": {

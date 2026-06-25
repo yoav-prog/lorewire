@@ -1259,7 +1259,7 @@ const CAPTION_STYLE_FIELDS_SET = new Set<string>([
 // control-char rejected (rule 13 §Security).
 
 const MAX_PRESET_NAME_LEN = 60;
-// eslint-disable-next-line no-control-regex -- intentional: rejecting them
+ 
 const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 
 export interface ApplyCaptionPresetResult {
@@ -3884,13 +3884,13 @@ export async function bulkPublishToSocialsAction(
         storyId: item.id,
         articleUrl,
       });
-      // eslint-disable-next-line no-console -- rule 14
+       
       console.info("[content bulk-publish seo ensure]", {
         story_id: item.id,
         status: seoResult.status,
       });
     } catch (err) {
-      // eslint-disable-next-line no-console -- rule 14
+       
       console.warn("[content bulk-publish seo ensure threw]", {
         story_id: item.id,
         err: err instanceof Error ? err.message : String(err),
@@ -4094,3 +4094,317 @@ async function crossPostStoryIfEnabled(
     });
   }
 }
+
+// ─── Bulk complete-and-publish ──────────────────────────────────────────────
+// Plan: _plans/2026-06-25-bulk-complete-and-publish.md.
+//
+// One-click action: for every selected video story, enqueue every
+// missing asset, flag the story for auto-publish, and let the
+// /api/auto_complete_publish cron push it to all four socials the
+// moment it passes evaluateAssetCompleteness(). The action returns
+// immediately — it does NOT wait for renders.
+//
+// Enqueue strategy by missing-set:
+//   - body / short_render / voiceover / scene_images missing →
+//     kick the full pipeline (bulkEnqueueStoryJobs), which
+//     regenerates the script + voice + scenes + short atomically.
+//   - only hero or any thumbnail variant missing → enqueue hero
+//     regen, which produces all five variants in one
+//     hero_thumbnail_from_short job.
+//   - only poll missing → no enqueue. The poll-autodraft cron
+//     handles unattached video stories on its own cadence; the
+//     auto-publish flag waits.
+//   - already ready → flag only. The cron publishes on its next
+//     tick (within 2 minutes).
+
+export interface BulkCompleteAndPublishOutcome {
+  kind: BulkContentKind;
+  id: string;
+  /** What we did for this row, structured so the toast can summarize
+   *  without parsing strings. `enqueued` lists every regen target we
+   *  fired (empty when the story was already ready). */
+  state:
+    | "already_ready_flagged"
+    | "missing_assets_enqueued"
+    | "only_poll_missing_flagged"
+    | "skipped"
+    | "errored";
+  missing: string[];
+  enqueued: Array<"pipeline" | "hero" | "scenes" | "voice">;
+  /** Set when state === "skipped" or "errored". */
+  reason?: string;
+}
+
+export interface BulkCompleteAndPublishResult {
+  /** Stories now flagged auto_publish_when_ready=1 (across every
+   *  non-error state). The cron will pick them up. */
+  flaggedCount: number;
+  /** Stories that were rejected before flagging (article, missing
+   *  story row, no reddit source for pipeline kick, daily budget
+   *  exceeded, etc.) — surfaced individually in `outcomes`. */
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkCompleteAndPublishOutcome[];
+}
+
+const MISSING_BLOCKS_PIPELINE: ReadonlySet<string> = new Set([
+  "body",
+  "short_render",
+  "voiceover",
+  "scene_images",
+]);
+const MISSING_BLOCKS_HERO: ReadonlySet<string> = new Set([
+  "hero_image",
+  "hero_image_landscape",
+  "thumbnail_image",
+  "thumbnail_image_landscape",
+  "thumbnail_image_square",
+]);
+
+export async function bulkCompleteAndPublishAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkCompleteAndPublishResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  const t0 = Date.now();
+   
+  console.info("[bulk-complete-publish click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  // Lazy imports keep the action surface light when nothing is in flight,
+  // matching bulkRegenerateContentAction's pattern.
+  const { evaluateAssetCompleteness } = await import(
+    "@/lib/asset-completeness"
+  );
+  const { enqueueVoiceRender: _enqueueVoice } = await import(
+    "@/lib/voice-render-queue"
+  );
+  // _enqueueVoice is referenced via the closure below; the import is
+  // kept top-level here so the lazy-load round-trip happens once per
+  // action call. The pipeline path is the dominant case; voice-only
+  // re-enqueues are not currently emitted by this action.
+  void _enqueueVoice;
+  const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+
+  const outcomes: BulkCompleteAndPublishOutcome[] = [];
+  let flaggedCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        missing: [],
+        enqueued: [],
+        reason: "articles cannot complete-and-publish",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const completeness = await evaluateAssetCompleteness(item.id);
+
+       
+      console.info("[bulk-complete-publish gate]", {
+        story_id: item.id,
+        ready: completeness.ready,
+        missing: completeness.missing,
+      });
+
+      // Already-published is a no-op skip — never re-flag.
+      if (completeness.missing.includes("already_published")) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          missing: completeness.missing,
+          enqueued: [],
+          reason: "story is already published",
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      const enqueued: Array<"pipeline" | "hero" | "scenes" | "voice"> = [];
+
+      if (completeness.ready) {
+        // Already complete. Flag for the cron's next tick.
+        await flagStoryForAutoPublish(item.id);
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "already_ready_flagged",
+          missing: [],
+          enqueued: [],
+        });
+        flaggedCount += 1;
+        continue;
+      }
+
+      const missingSet = new Set(completeness.missing);
+      const needsPipeline = [...missingSet].some((m) =>
+        MISSING_BLOCKS_PIPELINE.has(m),
+      );
+      const needsHero =
+        !needsPipeline &&
+        [...missingSet].some((m) => MISSING_BLOCKS_HERO.has(m));
+
+      if (needsPipeline) {
+        const story = await getStoryRow(item.id);
+        if (!story) {
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "errored",
+            missing: completeness.missing,
+            enqueued: [],
+            reason: "story disappeared between gate and enqueue",
+          });
+          erroredCount += 1;
+          continue;
+        }
+        if (!story.reddit_id) {
+          // Same gap bulkRegenerateContentAction surfaces: a manual seed
+          // can't drive the full pipeline. Flag the story so the cron
+          // still publishes once the operator manually completes the
+          // missing assets — but report the gap so they know.
+          await flagStoryForAutoPublish(item.id);
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "missing_assets_enqueued",
+            missing: completeness.missing,
+            enqueued: [],
+            reason:
+              "no reddit source — pipeline restart skipped; flagged for manual completion",
+          });
+          flaggedCount += 1;
+          continue;
+        }
+        const r = await bulkEnqueueStoryJobs([story.reddit_id], {
+          with_media: true,
+          requested_by: session.email,
+        });
+        if (r.enqueued === 0) {
+          const reason =
+            r.skipped_active > 0
+              ? "pipeline-already-running"
+              : r.skipped_status > 0
+                ? "reddit-source-locked"
+                : "not-enqueued";
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "errored",
+            missing: completeness.missing,
+            enqueued: [],
+            reason,
+          });
+          erroredCount += 1;
+          continue;
+        }
+        enqueued.push("pipeline");
+         
+        console.info("[bulk-complete-publish enqueue]", {
+          story_id: item.id,
+          asset: "pipeline",
+        });
+      } else if (needsHero) {
+        const pre = await canEnqueueImageRegen("hero");
+        if (!pre.ok) {
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "errored",
+            missing: completeness.missing,
+            enqueued: [],
+            reason: "daily-budget-exceeded",
+          });
+          erroredCount += 1;
+          continue;
+        }
+        await enqueueImageRegen({
+          ownerKind: "story",
+          ownerId: item.id,
+          asset: "hero",
+          promptHash: null,
+          requestedBy: session.userId,
+        });
+        enqueued.push("hero");
+         
+        console.info("[bulk-complete-publish enqueue]", {
+          story_id: item.id,
+          asset: "hero",
+        });
+      }
+      // Else: only poll (or nothing currently enqueueable) is missing.
+      // Flag and let the poll-autodraft cron land the poll.
+
+      await flagStoryForAutoPublish(item.id);
+       
+      console.info("[bulk-complete-publish flag-set]", {
+        story_id: item.id,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: enqueued.length > 0
+          ? "missing_assets_enqueued"
+          : "only_poll_missing_flagged",
+        missing: completeness.missing,
+        enqueued,
+      });
+      flaggedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+       
+      console.error("[bulk-complete-publish errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        missing: [],
+        enqueued: [],
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  // Refresh the inbox so flag-driven visual state (a future "flagged"
+  // chip on the row) updates on next paint.
+  revalidatePath("/admin/content");
+
+   
+  console.info("[bulk-complete-publish result]", {
+    user_id: session.userId,
+    flaggedCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return { flaggedCount, skippedCount, erroredCount, outcomes };
+}
+
+/** Set stories.auto_publish_when_ready=1 + reset the retry counter so a
+ *  story that previously hit the attempt cap (and was cleared) gets a
+ *  fresh window when the operator re-flags it. */
+async function flagStoryForAutoPublish(storyId: string): Promise<void> {
+  await run(
+    "UPDATE stories SET auto_publish_when_ready = 1, " +
+      "auto_publish_attempts = 0 WHERE id = ?",
+    [storyId],
+  );
+}
+
