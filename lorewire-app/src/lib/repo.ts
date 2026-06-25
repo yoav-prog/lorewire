@@ -80,10 +80,20 @@ export interface StoryRow {
   // auto-pick from the category's whitelist. Settings changes never overwrite
   // an existing row's pin; only the per-story picker writes here.
   hero_style_id: string | null;
+  // 2026-06-25 bulk complete-and-publish flag the
+  // /api/auto_complete_publish cron watches. 1 = enqueue social
+  // publishes the moment evaluateAssetCompleteness passes; 0 / NULL =
+  // not flagged. Plan:
+  // _plans/2026-06-25-bulk-complete-and-publish.md.
+  auto_publish_when_ready: number | null;
+  // Per-story retry counter the cron increments on every NOT-READY
+  // visit. Cleared back to 0 when the flag clears (on publish or on
+  // hitting the per-story max-attempts cap).
+  auto_publish_attempts: number | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
@@ -91,7 +101,7 @@ const COLS =
 // `reddit_id` is included so the Content inbox can batch-load the latest
 // story_jobs.status per row without a second per-row trip.
 const STORY_LIST_COLS =
-  "id, reddit_id, slug, category, title, status, cost_cents, created_at, updated_at";
+  "id, reddit_id, slug, category, title, status, cost_cents, created_at, updated_at, auto_publish_when_ready, auto_publish_attempts";
 
 export type StoryListRow = Pick<
   StoryRow,
@@ -104,6 +114,8 @@ export type StoryListRow = Pick<
   | "cost_cents"
   | "created_at"
   | "updated_at"
+  | "auto_publish_when_ready"
+  | "auto_publish_attempts"
 >;
 
 // Columns the admin editor is allowed to write directly.
@@ -162,6 +174,10 @@ export async function listStoriesSlim(
     category?: string;
     updatedSince?: string;
     updatedUntil?: string;
+    /** 2026-06-25: narrow to stories currently flagged for the
+     *  auto-publish cron (true) or explicitly not flagged (false).
+     *  Undefined = no filter. */
+    flagged?: boolean;
     limit?: number;
   } = {},
 ): Promise<StoryListRow[]> {
@@ -174,6 +190,11 @@ export async function listStoriesSlim(
   if (opts.category) {
     where.push("category = ?");
     params.push(opts.category);
+  }
+  if (opts.flagged === true) {
+    where.push("COALESCE(auto_publish_when_ready, 0) = 1");
+  } else if (opts.flagged === false) {
+    where.push("COALESCE(auto_publish_when_ready, 0) = 0");
   }
   if (opts.updatedSince) {
     where.push("COALESCE(updated_at, created_at) >= ?");
@@ -1481,6 +1502,12 @@ export interface ContentRow {
    *  Stories with no pipeline run yet AND every article carry null —
    *  the row UI surfaces null as no pill. */
   job_status: JobStatus | null;
+  /** 2026-06-25 auto-publish cron flag state. `flagged` is the boolean
+   *  view of stories.auto_publish_when_ready (1 → true, anything else
+   *  → false). `flagged_attempts` is the per-story retry count.
+   *  Articles always read both as false / 0 (no flag column). */
+  flagged: boolean;
+  flagged_attempts: number;
 }
 
 /** 2026-06-24 Content inbox: latest story_jobs row status per story.
@@ -1513,6 +1540,10 @@ export interface ListContentOpts {
   /** ISO-8601 upper bound on COALESCE(updated_at, created_at) — exclusive,
    *  so a "today" bucket lands as [start-of-today, start-of-tomorrow). */
   updatedUntil?: string;
+  /** 2026-06-25: narrow to stories currently flagged for the
+   *  auto-publish cron. Articles never carry the flag so the article
+   *  half drops out the moment this is true. */
+  flagged?: boolean;
   limit?: number;
 }
 
@@ -1561,6 +1592,33 @@ export async function loadPublishedOnByStoryIds(
     }
   }
   return out;
+}
+
+/** 2026-06-25 Content inbox header card: aggregate count of stories
+ *  currently flagged for the /api/auto_complete_publish cron, plus
+ *  how many of them have already burned through half of the default
+ *  retry budget (a "struggling" subset the operator should triage
+ *  before the cap clears the flag). One small SELECT; fired
+ *  alongside the row list on /admin/content. Articles aren't
+ *  flag-bearing so the count is video-stories-only by construction. */
+export interface AutoPublishFlaggedSummary {
+  flagged: number;
+  struggling: number;
+}
+
+export async function getAutoPublishFlaggedSummary(): Promise<AutoPublishFlaggedSummary> {
+  const row = await one<{ flagged: number | string; struggling: number | string }>(
+    `SELECT
+       COUNT(*) AS flagged,
+       COALESCE(SUM(CASE WHEN COALESCE(auto_publish_attempts, 0) >= 6 THEN 1 ELSE 0 END), 0) AS struggling
+     FROM stories
+     WHERE COALESCE(auto_publish_when_ready, 0) = 1`,
+    [],
+  );
+  return {
+    flagged: Number(row?.flagged ?? 0),
+    struggling: Number(row?.struggling ?? 0),
+  };
 }
 
 /** 2026-06-24 Content inbox: most-recent story_jobs.status per reddit_id.
@@ -1630,7 +1688,11 @@ export async function listContentSlim(
   const articleType = isArticleSubKind ? (opts.subKind as ArticleType) : undefined;
   // 2026-06-24 jobStatus filter: articles aren't pipeline citizens, so the
   // moment the operator picks any job status the article half drops out.
-  const wantArticlesAfterJobFilter = wantArticles && !opts.jobStatus;
+  // 2026-06-25 flagged filter: same shape — articles have no
+  // auto_publish_when_ready column so the article half drops out when
+  // the operator narrows to flagged-only.
+  const wantArticlesAfterJobFilter =
+    wantArticles && !opts.jobStatus && opts.flagged !== true;
 
   const [stories, articles] = await Promise.all([
     wantStories
@@ -1639,6 +1701,7 @@ export async function listContentSlim(
           category: opts.category,
           updatedSince: opts.updatedSince,
           updatedUntil: opts.updatedUntil,
+          flagged: opts.flagged,
           limit,
         })
       : Promise.resolve([] as StoryListRow[]),
@@ -1686,6 +1749,8 @@ export async function listContentSlim(
       job_status: s.reddit_id
         ? (jobStatusByReddit.get(s.reddit_id) ?? null)
         : null,
+      flagged: s.auto_publish_when_ready === 1,
+      flagged_attempts: s.auto_publish_attempts ?? 0,
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -1702,6 +1767,8 @@ export async function listContentSlim(
       published_at: a.published_at,
       published_on: { ...DEFAULT_PUBLISHED_ON },
       job_status: null,
+      flagged: false,
+      flagged_attempts: 0,
     })),
   ];
 

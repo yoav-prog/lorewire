@@ -918,6 +918,9 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                       {JOB_STATUS_LABEL[r.job_status]}
                     </span>
                   )}
+                  {r.kind === "story" && r.flagged && (
+                    <FlaggedPill attempts={r.flagged_attempts} />
+                  )}
                   <span
                     className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
                       r.status,
@@ -1816,6 +1819,34 @@ function RegenResultBanner({
         </ul>
       )}
     </div>
+  );
+}
+
+// --- Per-row flag pill ------------------------------------------------------
+// 2026-06-25. Renders only when stories.auto_publish_when_ready=1 so the
+// operator can spot at a glance which rows the /api/auto_complete_publish
+// cron is currently watching. Attempts counter turns warn → danger past
+// the half-budget mark (DEFAULT_MAX_ATTEMPTS = 12 in the cron); that's
+// the same "struggling" threshold the header status card uses.
+
+const FLAG_STRUGGLING_THRESHOLD = 6;
+
+function FlaggedPill({ attempts }: { attempts: number }) {
+  const struggling = attempts >= FLAG_STRUGGLING_THRESHOLD;
+  const tone = struggling
+    ? "border-danger/50 bg-danger/15 text-danger"
+    : "border-accent/40 bg-accent/15 text-accent";
+  return (
+    <span
+      title={`Flagged for auto-publish · ${attempts} attempt${attempts === 1 ? "" : "s"} so far${
+        struggling
+          ? " (struggling — check Vercel function logs)"
+          : ""
+      }`}
+      className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${tone}`}
+    >
+      flagged{attempts > 0 ? ` · ${attempts}` : ""}
+    </span>
   );
 }
 
