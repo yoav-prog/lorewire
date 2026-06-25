@@ -39,7 +39,10 @@ import {
 
 import { copyToClipboard, storyShareUrl } from "@/lib/share";
 import { type Story } from "@/lib/stories";
-import { useWirePrefs } from "@/components/wires/useWirePrefs";
+import {
+  SLOW_MODE_PLAYBACK_RATE,
+  useWirePrefs,
+} from "@/components/wires/useWirePrefs";
 
 import { StoriesProgressBar } from "./StoriesProgressBar";
 import { useStoriesGestures } from "./use-stories-gestures";
@@ -92,7 +95,7 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
   const reducedMotionRef = useRef(false);
 
   const { markViewed, isViewed } = useViewedWires();
-  const { muted, toggleMuted } = useWirePrefs();
+  const { muted, toggleMuted, slow } = useWirePrefs();
 
   const active = stablePlaylist[activeIndex] ?? null;
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -109,6 +112,31 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
       total: stablePlaylist.length,
     });
   }, [activeIndex, active?.id, stablePlaylist.length, imageDwellMs]);
+
+  // Mirror slow-mode onto the <video> element. Fires both when the user
+  // toggles slow during playback AND when the active wire changes (the
+  // <video> is re-keyed and remounts at the default 1.0x, so the rate
+  // has to be re-applied to the new element). preservesPitch keeps
+  // voices intelligible at 0.75x.
+  // Plan: _plans/2026-06-25-slow-mode-playback.md.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const rate = slow ? SLOW_MODE_PLAYBACK_RATE : 1;
+    const vWithPitch = v as HTMLVideoElement & {
+      preservesPitch?: boolean;
+      webkitPreservesPitch?: boolean;
+    };
+    vWithPitch.preservesPitch = true;
+    vWithPitch.webkitPreservesPitch = true;
+    v.playbackRate = rate;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[stories playback rate]", {
+      id: active?.id ?? null,
+      rate,
+      slow,
+    });
+  }, [slow, active?.id, restartToken]);
 
   // Track prefers-reduced-motion on mount.
   useEffect(() => {

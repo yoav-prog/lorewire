@@ -33,6 +33,7 @@ import type { WireStory } from "@/app/actions";
 import type { PollResultView, PollSide } from "@/lib/polls-shared";
 import { WirePollPanel } from "@/components/wires/WirePollPanel";
 import { WirePollPill } from "@/components/wires/WirePollPill";
+import { SLOW_MODE_PLAYBACK_RATE } from "@/components/wires/useWirePrefs";
 
 type OpenFn = (id: string, tab?: string) => void;
 
@@ -167,6 +168,9 @@ export interface WireCardProps {
   autoplay: boolean;
   /** End-of-wire behavior: true = advance to the next wire, false = loop it. */
   advance: boolean;
+  /** Slow mode: when true, the video plays at SLOW_MODE_PLAYBACK_RATE (0.75x)
+   *  with pitch preservation so voices stay intelligible. */
+  slow: boolean;
   /** prefers-reduced-motion — suppress autoplay, require an explicit tap. */
   reducedMotion: boolean;
   /** A modal (Title sheet) is open over the feed — keep playback paused. */
@@ -181,6 +185,8 @@ export interface WireCardProps {
   onToggleAutoplay: () => void;
   /** Toggle end-of-wire behavior between advance and loop. */
   onToggleAdvance: () => void;
+  /** Toggle slow-mode playback (0.75x ↔ 1.0x). */
+  onToggleSlow: () => void;
   /** Shuffle the feed order (feed-level). When omitted, the control hides. */
   onShuffle?: () => void;
   onOpenInfo: OpenFn;
@@ -210,6 +216,7 @@ export default function WireCard({
   muted,
   autoplay,
   advance,
+  slow,
   reducedMotion,
   paused,
   eager = false,
@@ -217,6 +224,7 @@ export default function WireCard({
   onToggleMute,
   onToggleAutoplay,
   onToggleAdvance,
+  onToggleSlow,
   onShuffle,
   onOpenInfo,
   showSoundHint,
@@ -459,6 +467,28 @@ export default function WireCard({
   useEffect(() => {
     if (videoRef.current) videoRef.current.muted = muted;
   }, [muted]);
+
+  // Mirror the slow-mode pref onto the <video> element. preservesPitch keeps
+  // voices intelligible at 0.75x (without it, the result sounds underwater).
+  // Set on every slow change AND on canplay so a freshly-mounted card picks
+  // up the rate before play() starts; otherwise the first wire after a load
+  // plays at 1.0x for a frame before the effect fires.
+  // Plan: _plans/2026-06-25-slow-mode-playback.md.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const rate = slow ? SLOW_MODE_PLAYBACK_RATE : 1;
+    // Webkit ships the un-prefixed property too on current Safari, but the
+    // prefixed alias is harmless and covers older builds.
+    const vWithPitch = v as HTMLVideoElement & {
+      preservesPitch?: boolean;
+      webkitPreservesPitch?: boolean;
+    };
+    vWithPitch.preservesPitch = true;
+    vWithPitch.webkitPreservesPitch = true;
+    v.playbackRate = rate;
+    console.info("[wires playback rate]", { id: short.id, rate, slow });
+  }, [slow, short.id]);
 
   // Clear any pending gesture timers on unmount.
   useEffect(() => {
@@ -848,6 +878,20 @@ export default function WireCard({
               style={{ background: "rgba(0,0,0,.4)" }}
             >
               {advance ? <AdvanceGlyph size={18} /> : <LoopGlyph size={18} />}
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                markActive();
+                onToggleSlow();
+              }}
+              aria-label={slow ? "Slow mode on; switch to normal speed" : "Turn slow mode on"}
+              aria-pressed={slow}
+              title={slow ? "Slow mode (0.75×)" : "Slow mode off"}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full font-mono text-[10px] font-semibold tabular-nums text-ink"
+              style={{ background: "rgba(0,0,0,.4)", opacity: slow ? 1 : 0.7 }}
+            >
+              {slow ? ".75×" : "1×"}
             </button>
             <button
               onClick={(e) => {

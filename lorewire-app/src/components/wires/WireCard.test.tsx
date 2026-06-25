@@ -103,6 +103,7 @@ function defaultProps(overrides: Partial<WireCardProps> = {}): WireCardProps {
     muted: true,
     autoplay: true,
     advance: true,
+    slow: false,
     reducedMotion: false,
     paused: false,
     eager: true,
@@ -110,6 +111,7 @@ function defaultProps(overrides: Partial<WireCardProps> = {}): WireCardProps {
     onToggleMute: () => undefined,
     onToggleAutoplay: () => undefined,
     onToggleAdvance: () => undefined,
+    onToggleSlow: () => undefined,
     onOpenInfo: () => undefined,
     showSoundHint: false,
     onDismissSoundHint: () => undefined,
@@ -260,6 +262,84 @@ describe("WireCard play/pause race", () => {
 
     expect(findPlayOverlay(m.container)).toBeNull();
 
+    unmount(m);
+  });
+});
+
+describe("WireCard slow-mode chrome toggle", () => {
+  // Plan: _plans/2026-06-25-slow-mode-playback.md. The chrome toggle sits in
+  // the top-right cluster next to autoplay/advance/mute and shows a "0.75×"
+  // label when slow is on, "1×" when off. Tapping it calls onToggleSlow and
+  // the effect mirrors the chosen rate onto the <video> element.
+
+  function findSlowToggle(container: HTMLElement): HTMLButtonElement | null {
+    // Both states have the same label prefix "Turn slow mode on" /
+    // "Slow mode on; switch to normal speed" — easier to match aria-pressed.
+    return container.querySelector<HTMLButtonElement>(
+      'button[aria-pressed][title^="Slow mode"]',
+    );
+  }
+
+  it("renders '1×' and aria-pressed=false when slow mode is off", () => {
+    const m = mount(defaultProps({ slow: false }));
+    const btn = findSlowToggle(m.container);
+    expect(btn).not.toBeNull();
+    expect(btn!.getAttribute("aria-pressed")).toBe("false");
+    expect(btn!.textContent).toContain("1×");
+    unmount(m);
+  });
+
+  it("renders '.75×' and aria-pressed=true when slow mode is on", () => {
+    const m = mount(defaultProps({ slow: true }));
+    const btn = findSlowToggle(m.container);
+    expect(btn).not.toBeNull();
+    expect(btn!.getAttribute("aria-pressed")).toBe("true");
+    expect(btn!.textContent).toContain(".75×");
+    unmount(m);
+  });
+
+  it("invokes onToggleSlow when clicked", () => {
+    const calls: number[] = [];
+    const m = mount(
+      defaultProps({
+        slow: false,
+        onToggleSlow: () => calls.push(1),
+      }),
+    );
+    const btn = findSlowToggle(m.container)!;
+    act(() => {
+      btn.click();
+    });
+    expect(calls).toHaveLength(1);
+    unmount(m);
+  });
+
+  it("sets <video>.playbackRate to 0.75 + preservesPitch=true when slow is on", () => {
+    const m = mount(defaultProps({ slow: true }));
+    const v = m.container.querySelector("video") as HTMLVideoElement & {
+      preservesPitch?: boolean;
+    };
+    expect(v).not.toBeNull();
+    expect(v.playbackRate).toBeCloseTo(0.75);
+    expect(v.preservesPitch).toBe(true);
+    unmount(m);
+  });
+
+  it("sets <video>.playbackRate to 1 when slow is off", () => {
+    const m = mount(defaultProps({ slow: false }));
+    const v = m.container.querySelector("video") as HTMLVideoElement;
+    expect(v.playbackRate).toBeCloseTo(1);
+    unmount(m);
+  });
+
+  it("updates <video>.playbackRate live when slow flips during playback", () => {
+    const m = mount(defaultProps({ slow: false }));
+    const v = m.container.querySelector("video") as HTMLVideoElement;
+    expect(v.playbackRate).toBeCloseTo(1);
+    rerender(m, defaultProps({ slow: true }));
+    expect(v.playbackRate).toBeCloseTo(0.75);
+    rerender(m, defaultProps({ slow: false }));
+    expect(v.playbackRate).toBeCloseTo(1);
     unmount(m);
   });
 });

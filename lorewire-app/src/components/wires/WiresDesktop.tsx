@@ -59,8 +59,16 @@ export default function WiresDesktop({
   const [soundHintShown, setSoundHintShown] = useState(true);
   const reducedMotion = usePrefersReducedMotion();
   // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
-  const { autoplay, muted, advance, toggleAutoplay, toggleMuted, toggleAdvance } =
-    useWirePrefs();
+  const {
+    autoplay,
+    muted,
+    advance,
+    slow,
+    toggleAutoplay,
+    toggleMuted,
+    toggleAdvance,
+    toggleSlow,
+  } = useWirePrefs();
   const { isSaved, toggle: toggleSave } = useSavedStories();
   const { seed: seedLikes, toggle: toggleLike, get: getLike } = useWireLikes();
   useEffect(() => {
@@ -248,11 +256,13 @@ export default function WiresDesktop({
               muted={muted}
               autoplay={autoplay}
               advance={advance}
+              slow={slow}
               reducedMotion={reducedMotion}
               paused={paused}
               onToggleMute={toggleMuted}
               onToggleAutoplay={toggleAutoplay}
               onToggleAdvance={toggleAdvance}
+              onToggleSlow={toggleSlow}
               onShuffle={onShuffle}
               onOpenInfo={onOpenInfo}
               showSoundHint={i === activeIdx && soundHintShown}
