@@ -69,10 +69,18 @@ import {
   type FacebookPostRow,
 } from "@/lib/publish-to-facebook";
 import {
+  publishShortToFacebookStory,
+  SETTING_AUTO_PUBLISH as FB_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-facebook-story";
+import {
   deleteLatestPostedRowForStory as deleteLatestPostedIgRowForStory,
   publishShortToInstagram,
   type InstagramPostRow,
 } from "@/lib/publish-to-instagram";
+import {
+  publishShortToInstagramStory,
+  SETTING_AUTO_PUBLISH as IG_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-instagram-story";
 import {
   deleteLatestPostedRowForStory as deleteLatestPostedYtRowForStory,
   publishShortToYouTube,
@@ -1569,6 +1577,14 @@ export async function publishToFacebookAction(
       result.status === "posted" ? result.row.external_post_id : null,
   });
 
+  // After a successful Reel publish, also cross-post as a Story if the
+  // Story toggle is on. Fire-and-forget: a Story failure must never
+  // mutate the Reel response surfaced to the admin UI. Plan:
+  // _plans/2026-06-25-instagram-facebook-stories-cross-publish.md.
+  if (result.status === "posted") {
+    void crossPostFacebookStoryIfEnabled(storyId, latest.id, latest.output_url);
+  }
+
   revalidatePath(`/admin/shorts/${storyId}`);
 
   if (result.status === "posted") {
@@ -1592,6 +1608,55 @@ export async function publishToFacebookAction(
     error: "publish skipped — server env vars FB_PAGE_ACCESS_TOKEN / FB_PAGE_ID may be missing",
     deletedPostId,
   };
+}
+
+/** Story toggle-gated FB cross-post helper. Called after a successful
+ *  manual Reel publish. Errors are logged + swallowed; the caller does
+ *  not await the network call — the Reel response surfaces immediately
+ *  and the Story attempt completes in the background. The toggle is
+ *  the per-platform `publisher.facebook.auto_publish_story` setting —
+ *  same gate the auto-render path consults. */
+async function crossPostFacebookStoryIfEnabled(
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+): Promise<void> {
+  try {
+    const on = (await getSetting(FB_STORY_SETTING_AUTO_PUBLISH)) === "1";
+    if (!on) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[short editor fb-story manual]", {
+        story_id: storyId,
+        render_id: renderId,
+        skipped: "story toggle off",
+      });
+      return;
+    }
+    const r = await publishShortToFacebookStory({
+      storyId,
+      renderId,
+      videoUrl,
+      // 'manual' bypasses the publisher's own toggle gate (we just
+      // checked it above) and the story-level dedup so a manual click
+      // always produces a fresh Story, matching the Reel manual flow.
+      trigger: "manual",
+    });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor fb-story manual]", {
+      story_id: storyId,
+      render_id: renderId,
+      status: r.status,
+      external_post_id:
+        r.status === "posted" ? r.row.external_post_id : null,
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor fb-story manual error]", {
+      story_id: storyId,
+      render_id: renderId,
+      error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
 }
 
 /** Slim getter for the editor page: returns the most recent
@@ -1712,6 +1777,13 @@ export async function publishToInstagramAction(
         : null,
   });
 
+  // After a successful Reel publish (or pending — the retry cron will
+  // finish it), also cross-post as a Story if the Story toggle is on.
+  // Fire-and-forget; mirrors the FB side.
+  if (result.status === "posted" || result.status === "pending") {
+    void crossPostInstagramStoryIfEnabled(storyId, latest.id, latest.output_url);
+  }
+
   revalidatePath(`/admin/shorts/${storyId}`);
 
   if (result.status === "posted") {
@@ -1743,6 +1815,51 @@ export async function publishToInstagramAction(
       "publish skipped — server env vars IG_BUSINESS_ACCOUNT_ID / FB_PAGE_ACCESS_TOKEN may be missing",
     deletedPostId,
   };
+}
+
+/** Story toggle-gated IG cross-post helper. Twin of the FB one above. */
+async function crossPostInstagramStoryIfEnabled(
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+): Promise<void> {
+  try {
+    const on = (await getSetting(IG_STORY_SETTING_AUTO_PUBLISH)) === "1";
+    if (!on) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[short editor ig-story manual]", {
+        story_id: storyId,
+        render_id: renderId,
+        skipped: "story toggle off",
+      });
+      return;
+    }
+    const r = await publishShortToInstagramStory({
+      storyId,
+      renderId,
+      videoUrl,
+      trigger: "manual",
+    });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor ig-story manual]", {
+      story_id: storyId,
+      render_id: renderId,
+      status: r.status,
+      external_post_id:
+        r.status === "posted" ? r.row.external_post_id : null,
+      container_id:
+        r.status === "pending" || r.status === "posted" || r.status === "failed"
+          ? r.row.container_id
+          : null,
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor ig-story manual error]", {
+      story_id: storyId,
+      render_id: renderId,
+      error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
 }
 
 /** Mirror of getLatestFacebookPostForStoryAction for the IG button. */

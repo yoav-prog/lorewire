@@ -106,7 +106,15 @@ import {
 import { isValidSlugShape } from "@/lib/article-seo";
 import type { ArticleType, SocialPlatform } from "@/lib/repo";
 import { publishShortToFacebook } from "@/lib/publish-to-facebook";
+import {
+  publishShortToFacebookStory,
+  SETTING_AUTO_PUBLISH as FB_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-facebook-story";
 import { publishShortToInstagram } from "@/lib/publish-to-instagram";
+import {
+  publishShortToInstagramStory,
+  SETTING_AUTO_PUBLISH as IG_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-instagram-story";
 import { publishShortToYouTube } from "@/lib/publish-to-youtube";
 import { publishShortToTikTok } from "@/lib/publish-to-tiktok";
 import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
@@ -3955,8 +3963,32 @@ export async function bulkPublishToSocialsAction(
             platform,
             externalId,
           });
+          // After a successful FB/IG Reel publish, also cross-post as
+          // a Story if the per-platform Story toggle is on. Fire-and-
+          // forget — the Story call must never block the bulk-publish
+          // response or surface a failure here (logs only). Plan:
+          // _plans/2026-06-25-instagram-facebook-stories-cross-publish.md.
+          if (platform === "facebook" || platform === "instagram") {
+            void crossPostStoryIfEnabled(
+              platform,
+              item.id,
+              render.id,
+              render.output_url,
+            );
+          }
         } else if (result.status === "pending") {
           pending.push({ kind: item.kind, id: item.id, platform });
+          // IG Reel pending = container created but still IN_PROGRESS;
+          // the retry cron will publish it. Still trigger Story now —
+          // it has its own independent container/upload flow.
+          if (platform === "instagram") {
+            void crossPostStoryIfEnabled(
+              platform,
+              item.id,
+              render.id,
+              render.output_url,
+            );
+          }
         } else if (result.status === "failed") {
           failed.push({
             kind: item.kind,
@@ -4002,4 +4034,63 @@ export async function bulkPublishToSocialsAction(
   revalidatePath("/admin/content");
 
   return { posted, pending, failed, skipped };
+}
+
+/** Story toggle-gated cross-post helper used by the bulk publish path.
+ *  Called after a successful FB/IG Reel publish for an item. Errors
+ *  are logged + swallowed; the caller does not await, so the bulk
+ *  response surfaces immediately and the Story call completes in the
+ *  background. Toggle: per-platform
+ *  `publisher.{facebook,instagram}.auto_publish_story`. */
+async function crossPostStoryIfEnabled(
+  platform: "facebook" | "instagram",
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+): Promise<void> {
+  try {
+    const settingKey =
+      platform === "facebook"
+        ? FB_STORY_SETTING_AUTO_PUBLISH
+        : IG_STORY_SETTING_AUTO_PUBLISH;
+    const on = (await getSetting(settingKey)) === "1";
+    if (!on) {
+      console.info("[content bulk-publish story]", {
+        story_id: storyId,
+        render_id: renderId,
+        platform,
+        skipped: "story toggle off",
+      });
+      return;
+    }
+    const r =
+      platform === "facebook"
+        ? await publishShortToFacebookStory({
+            storyId,
+            renderId,
+            videoUrl,
+            trigger: "manual",
+          })
+        : await publishShortToInstagramStory({
+            storyId,
+            renderId,
+            videoUrl,
+            trigger: "manual",
+          });
+    console.info("[content bulk-publish story]", {
+      story_id: storyId,
+      render_id: renderId,
+      platform,
+      status: r.status,
+      external_post_id:
+        r.status === "posted" ? r.row.external_post_id : null,
+    });
+  } catch (e) {
+    console.warn("[content bulk-publish story error]", {
+      story_id: storyId,
+      render_id: renderId,
+      platform,
+      error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
 }
