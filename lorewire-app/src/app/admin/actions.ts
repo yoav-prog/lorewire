@@ -242,6 +242,31 @@ export async function changeStatus(formData: FormData): Promise<void> {
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "") as StoryStatus;
   if (!id || !status) return;
+  // 2026-06-25 (#101 follow-up): per-story editor's status dropdown
+  // form was the LAST publish path without an asset gate, so an
+  // operator could flip a story to 'published' here with no short /
+  // no thumbnails / no poll and the public site would serve a
+  // missing-video story. Same gate the bulk Publish + manual
+  // review-publish + Complete & publish + full-pipeline cron use.
+  // Caught when 1nkq58q shipped with audio but no video.
+  if (status === "published") {
+    const current = await getStoryRow(id);
+    if (current && current.status !== "published") {
+      const { evaluateAssetCompleteness } = await import(
+        "@/lib/asset-completeness"
+      );
+      const completeness = await evaluateAssetCompleteness(id);
+      if (!completeness.ready) {
+        const reason = encodeURIComponent(completeness.missing.join(" | "));
+        console.warn("[stories action] publish-blocked", {
+          id,
+          missing: completeness.missing,
+        });
+        revalidatePath(`/admin/stories/${id}`);
+        redirect(`/admin/stories/${id}?publish_blocked=${reason}`);
+      }
+    }
+  }
   await setStatus(id, status);
   // 2026-06-18 polls plan extension: fire the autodraft service when
   // a story transitions to published — the public widget needs a poll
