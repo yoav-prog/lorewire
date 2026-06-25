@@ -53,6 +53,12 @@ export default function SettingsClient({ hasSession }: SettingsClientProps) {
           value={wires.muted}
           onChange={(v) => settingsLog("wires.muted", wires.muted, v, wires.setMuted)}
         />
+        <ToggleRow
+          label="Slow mode"
+          description="Play wires and stories at 0.75× speed for an easier, calmer pace."
+          value={wires.slow}
+          onChange={(v) => settingsLog("wires.slow", wires.slow, v, wires.setSlow)}
+        />
         <SegmentedRow
           label="When a wire ends"
           description="Whether to move to the next wire or loop the current one."

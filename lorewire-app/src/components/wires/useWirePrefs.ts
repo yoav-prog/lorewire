@@ -1,11 +1,17 @@
 "use client";
 
 // Persisted viewer preferences for the Wires feed: the autoplay master toggle,
-// the mute state, and the end-of-wire behavior (advance to the next wire vs.
-// loop the current one). All live in localStorage and are consent-gated the
-// same way the engagement stores are — a visitor who declined persistence still
-// gets the toggles in-session, but nothing is written to disk. Defaults:
-// autoplay ON, muted ON (required for unattended autoplay), advance ON.
+// the mute state, the end-of-wire behavior (advance to the next wire vs.
+// loop the current one), and Slow mode (0.75x playback for users who find
+// the default pace too fast). All live in localStorage and are consent-gated
+// the same way the engagement stores are — a visitor who declined persistence
+// still gets the toggles in-session, but nothing is written to disk. Defaults:
+// autoplay ON, muted ON (required for unattended autoplay), advance ON,
+// slow OFF (opt-in for accessibility).
+//
+// Slow mode also applies to the Stories video viewer; the slow store is read
+// directly by StoriesViewer so the two surfaces agree on one toggle. Plan:
+// _plans/2026-06-25-slow-mode-playback.md.
 //
 // Implemented with useSyncExternalStore (the same pattern as engagement-store)
 // so SSR and the first client paint both see the defaults — the stored value
@@ -16,6 +22,11 @@ import { useSyncExternalStore } from "react";
 const AUTOPLAY_KEY = "lw.wires.autoplay.v1";
 const MUTED_KEY = "lw.wires.muted.v1";
 const ADVANCE_KEY = "lw.wires.advance.v1";
+const SLOW_KEY = "lw.wires.slow.v1";
+
+/** Slow-mode playback rate. 0.75x is the sweet spot — noticeably calmer
+ *  while keeping voices intelligible with preservesPitch enabled. */
+export const SLOW_MODE_PLAYBACK_RATE = 0.75;
 
 type Listener = () => void;
 
@@ -100,18 +111,25 @@ const autoplayStore = createBoolStore(AUTOPLAY_KEY, true);
 const mutedStore = createBoolStore(MUTED_KEY, true);
 // advance = true → move to the next wire when one ends; false → loop it.
 const advanceStore = createBoolStore(ADVANCE_KEY, true);
+// slow = true → playback runs at SLOW_MODE_PLAYBACK_RATE instead of 1.0x.
+// Default OFF — the slow speed is opt-in accessibility, not the brand default.
+const slowStore = createBoolStore(SLOW_KEY, false);
 
 export interface WirePrefs {
   autoplay: boolean;
   muted: boolean;
   /** End-of-wire behavior: true = advance to the next wire, false = loop. */
   advance: boolean;
+  /** Slow mode: true = 0.75x playback for an easier pace; false = 1.0x. */
+  slow: boolean;
   setAutoplay: (v: boolean) => void;
   toggleAutoplay: () => void;
   setMuted: (v: boolean) => void;
   toggleMuted: () => void;
   setAdvance: (v: boolean) => void;
   toggleAdvance: () => void;
+  setSlow: (v: boolean) => void;
+  toggleSlow: () => void;
 }
 
 export function useWirePrefs(): WirePrefs {
@@ -130,15 +148,23 @@ export function useWirePrefs(): WirePrefs {
     advanceStore.getSnapshot,
     advanceStore.getServerSnapshot,
   );
+  const slow = useSyncExternalStore(
+    slowStore.subscribe,
+    slowStore.getSnapshot,
+    slowStore.getServerSnapshot,
+  );
   return {
     autoplay,
     muted,
     advance,
+    slow,
     setAutoplay: autoplayStore.set,
     toggleAutoplay: () => autoplayStore.set(!autoplayStore.getSnapshot()),
     setMuted: mutedStore.set,
     toggleMuted: () => mutedStore.set(!mutedStore.getSnapshot()),
     setAdvance: advanceStore.set,
     toggleAdvance: () => advanceStore.set(!advanceStore.getSnapshot()),
+    setSlow: slowStore.set,
+    toggleSlow: () => slowStore.set(!slowStore.getSnapshot()),
   };
 }

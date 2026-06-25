@@ -57,8 +57,16 @@ export default function WiresFeed({
   const reducedMotion = usePrefersReducedMotion();
   const didInitialScroll = useRef(false);
   // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
-  const { autoplay, muted, advance, toggleAutoplay, toggleMuted, toggleAdvance } =
-    useWirePrefs();
+  const {
+    autoplay,
+    muted,
+    advance,
+    slow,
+    toggleAutoplay,
+    toggleMuted,
+    toggleAdvance,
+    toggleSlow,
+  } = useWirePrefs();
 
   // Shuffle: a stored permutation of story ids (null = natural order). New
   // pages (loadMore) append in server order after the shuffled ids.
@@ -260,11 +268,13 @@ export default function WiresFeed({
             muted={muted}
             autoplay={autoplay}
             advance={advance}
+            slow={slow}
             reducedMotion={reducedMotion}
             paused={paused}
             onToggleMute={toggleMuted}
             onToggleAutoplay={toggleAutoplay}
             onToggleAdvance={toggleAdvance}
+            onToggleSlow={toggleSlow}
             onShuffle={onShuffle}
             onOpenInfo={onOpenInfo}
             showSoundHint={i === activeIdx && soundHintShown}
