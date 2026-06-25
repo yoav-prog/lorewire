@@ -209,6 +209,35 @@ describe("/api/admin/backfill_short_durations", () => {
     expect(await readDuration("s-c")).toBe("0:35");
   });
 
+  it("treats an empty-string duration the same as NULL and fills it in", async () => {
+    // Production dry-run on 2026-06-25 caught two rows whose
+    // stories.duration was "" (empty string) instead of NULL. The
+    // pre-fix safe-overwrite gate compared `c.duration === null` only —
+    // empty string fell through to the admin-override branch and got
+    // preserved. Both "" and NULL mean "no admin override stored", so
+    // the route must treat them identically.
+    await seedSegment({ id: "intro-empty", kind: "intro", durationMs: 4_000 });
+    await seedSegment({ id: "outro-empty", kind: "outro", durationMs: 3_000 });
+    await seedStory("s-empty", {
+      duration: "",
+      lastRenderedSegments: {
+        intro_segment_id: "intro-empty",
+        outro_segment_id: "outro-empty",
+      },
+    });
+    await seedShortRender({
+      id: "r-empty",
+      storyId: "s-empty",
+      durationMs: 42_000,
+    });
+
+    const resp = await POST();
+    const body = (await resp.json()) as BackfillResult;
+    expect(body.updated).toBe(1);
+    expect(body.skipped).toBe(0);
+    expect(await readDuration("s-empty")).toBe("0:49");
+  });
+
   it("leaves an admin-typed override alone", async () => {
     // Admin hand-typed "1:23" on a stamped short. Body is 42s so the
     // safe-overwrite check would NOT match — the route must skip with
