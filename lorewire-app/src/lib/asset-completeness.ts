@@ -19,12 +19,19 @@
 //
 //   3. Short render — a short_renders row with status='done' AND
 //      output_url. Same gate latestDoneShortRenderForStory uses.
+//      A completed short_renders row IS the proof that voiceover +
+//      every scene image existed at render time (the renderer can't
+//      finish without them). So gates 4 below are SUPPRESSED when
+//      this gate passes — we trust the render over the editor blob.
 //
-//   4. Voiceover + every scene image — these are the inputs to the
-//      short render, so a successful short implies both are present.
-//      We still check them explicitly so an operator looking at a
-//      stuck story sees the precise broken link instead of
-//      "short render missing" without context.
+//   4. Voiceover + every scene image — only checked when the short
+//      itself is missing, as informational hints so the operator
+//      knows which sub-asset to re-enqueue. Suppressing these when
+//      short_render exists prevents false-negative gates on rows
+//      whose short_config was never seeded by the editor (the field
+//      `short_config.voiceover_url` only lands when the short
+//      editor first opens; older stories rendered before that have
+//      a NULL value even though the audio existed at render time).
 //
 //   5. Poll attached — polls row matching story_id with enabled=1
 //      and a non-blank question. Per-product rule: a video story
@@ -181,23 +188,25 @@ export async function evaluateAssetCompleteness(
     !!render && render.status === "done" && !!render.output_url;
   if (!shortRenderPresent) missing.push("short_render");
 
-  // Voiceover: the short carries a voiceover_url in its short_config
-  // blob (lib/short-config.ts). A successful short render writes it,
-  // so this gate is the implicit consequence of `short_render`. We
-  // still check explicitly because the short_renders.props can land
-  // before short_config is finalized in rare race conditions, and
-  // because the audit log wants the precise broken link.
+  // Voiceover + scene images are INPUTS to the short render. A
+  // completed short_renders row is the proof that both existed at
+  // render time, so we trust the render and skip the sub-checks.
+  // When the short is missing we still walk short_config to surface
+  // which input is gone so the operator (and the cron's structured
+  // log) can see whether to re-enqueue voice or scenes. The
+  // alternative — checking short_config unconditionally — produced
+  // false-negative gates on legacy rows whose short_config was
+  // never seeded by the editor (no voiceover_url even though the
+  // audio existed at render time). PR follow-up to #99.
   const sceneState = parseShortConfigState(story.short_config);
-  if (!sceneState.voiceoverPresent) missing.push("voiceover");
-
-  // Scene images: every frame in short_config.doodle_frames must
-  // have a non-empty url. Empty doodle_frames array also counts as
-  // missing — a video story with zero scenes can't render a short.
-  if (
-    sceneState.scenesTotal === 0 ||
-    sceneState.scenesWithUrl !== sceneState.scenesTotal
-  ) {
-    missing.push("scene_images");
+  if (!shortRenderPresent) {
+    if (!sceneState.voiceoverPresent) missing.push("voiceover");
+    if (
+      sceneState.scenesTotal === 0 ||
+      sceneState.scenesWithUrl !== sceneState.scenesTotal
+    ) {
+      missing.push("scene_images");
+    }
   }
 
   // Poll: a row in polls keyed by story_id with enabled=1 and a
