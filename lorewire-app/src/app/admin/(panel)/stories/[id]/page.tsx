@@ -17,7 +17,10 @@ import {
 import { loadHeroStyleSettings } from "@/app/admin/actions";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import { type MediaAssetSpec } from "@/app/admin/(panel)/_components/MediaRegenPanel";
-import { type GranularItem } from "@/app/admin/(panel)/_components/GranularRegenGrid";
+import {
+  GranularRegenGrid,
+  type GranularItem,
+} from "@/app/admin/(panel)/_components/GranularRegenGrid";
 import { getPollByStoryId, getPresetForCategory } from "@/lib/polls";
 import {
   activeSegmentSettingKey,
@@ -327,7 +330,17 @@ export default async function EditStory({
             initialYouTubePost={shortLoad.initialYouTubePost}
             initialTikTokPost={shortLoad.initialTikTokPost}
             initialSeoMetadata={shortLoad.initialSeoMetadata}
-            sceneGranular={sceneGranular}
+            sceneGranularSlot={
+              sceneGranular.length > 0 ? (
+                <GranularRegenGrid
+                  ownerKind="story"
+                  ownerId={s.id}
+                  title="Per-image regen"
+                  description="Redo a single scene without touching the rest."
+                  items={sceneGranular}
+                />
+              ) : null
+            }
           />
         ) : (
           <NoShortYetCard

@@ -61,10 +61,7 @@ import {
 // 2026-06-25 after a tab-click 500 incident).
 import type { ShortClientTabId } from "./tabs";
 import { useShortPreviewVisibility } from "./useShortPreviewVisibility";
-import {
-  GranularRegenGrid,
-  type GranularItem,
-} from "@/app/admin/(panel)/_components/GranularRegenGrid";
+import type { ReactNode } from "react";
 
 // A stable digest the render-after-edits banner re-polls on. Includes
 // every field the render plan diffs against so any edit triggers a fresh
@@ -94,7 +91,7 @@ export function StoryShortTabsClient({
   initialYouTubePost,
   initialTikTokPost,
   initialSeoMetadata,
-  sceneGranular,
+  sceneGranularSlot,
 }: {
   storyId: string;
   /** One of the 7 short-client tabs. The parent only renders this
@@ -119,11 +116,13 @@ export function StoryShortTabsClient({
    *  when nothing has been generated yet — the SEO card surfaces a
    *  Generate button in that case. */
   initialSeoMetadata: SeoMetadataState;
-  /** Per-scene regen items (frame URL + prompt). Cut 7 moved this
-   *  inline below the Scenes tab grid since editing tabs no longer
-   *  render a right rail. Empty array when the story has no scenes
-   *  yet (no inline regen surface in that case). */
-  sceneGranular: GranularItem[];
+  /** Pre-rendered <GranularRegenGrid /> for the Scenes tab inline
+   *  regen surface. Rendered server-side and passed in as a ReactNode
+   *  slot because GranularRegenGrid transitively imports server-only
+   *  modules (db, repo, image-render-queue) — importing it directly
+   *  into this "use client" wrapper trips Next's RSC boundary. Null
+   *  when the story has no scenes to regen. */
+  sceneGranularSlot: ReactNode | null;
 }) {
   const router = useRouter();
   const [config, setConfig] = useState<ShortConfig>(initialConfig);
@@ -224,15 +223,7 @@ export function StoryShortTabsClient({
                 initialRender={initialRender}
                 linkedArticles={linkedArticles}
               />
-              {sceneGranular.length > 0 && (
-                <GranularRegenGrid
-                  ownerKind="story"
-                  ownerId={storyId}
-                  title="Per-image regen"
-                  description="Redo a single scene without touching the rest."
-                  items={sceneGranular}
-                />
-              )}
+              {sceneGranularSlot}
             </>
           )}
           {activeTab === "captions" && (
