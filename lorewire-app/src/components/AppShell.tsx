@@ -781,7 +781,7 @@ function WatchDoodle({
   // toggle. preservesPitch keeps voices intelligible at 0.75x.
   // Plan: _plans/2026-06-25-slow-mode-playback.md (Layer 2 follow-up — this
   // surface was missed in the original PR #105 scope).
-  const { slow } = useWirePrefs();
+  const { slow, toggleSlow } = useWirePrefs();
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -812,6 +812,23 @@ function WatchDoodle({
             onTimeUpdate={playEvents.onTimeUpdate}
             onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
+          {/* Slow-mode pill — top-right of the video frame, matching the
+              WireCard chrome cluster. Native HTML5 controls live at the
+              bottom of the video so this pill never collides with them. */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSlow();
+            }}
+            aria-label={slow ? "Slow mode on; switch to normal speed" : "Turn slow mode on"}
+            aria-pressed={slow}
+            title={slow ? "Slow mode (0.75×)" : "Slow mode off"}
+            className="absolute right-2 top-2 z-10 grid h-9 w-9 place-items-center rounded-full font-mono text-[10px] font-semibold tabular-nums text-ink"
+            style={{ background: "rgba(0,0,0,.55)", opacity: slow ? 1 : 0.7 }}
+          >
+            {slow ? ".75×" : "1×"}
+          </button>
         </div>
         <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted text-center mt-3">LoreWire Original &middot; doodle short</p>
       </div>
