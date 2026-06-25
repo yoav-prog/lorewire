@@ -64,6 +64,27 @@ export interface PollResultView {
   lastVoteAt: string | null;
 }
 
+/** Per-wire poll bundle: poll row fields + this viewer's already-voted
+ *  side + the server-resolved initial result. Shipped on every
+ *  `WireStory` so the Wires feed can paint the panel + the floating
+ *  pill on first byte without an extra fetch. Null on the parent when
+ *  the story has no live poll.
+ *
+ *  Plan: _plans/2026-06-25-wires-poll-wrapper.md. */
+export interface WirePollData {
+  pollId: string;
+  question: string;
+  optionA: string;
+  optionB: string;
+  /** Null when the poll has zero votes (panel shows the pre-vote
+   *  "be one of the first" state regardless). */
+  initialResult: PollResultView | null;
+  /** Which side this cookie has already voted, if any. Drives the
+   *  initial render — when set, panel lands in post-vote state and
+   *  the pill is the ambient "% agree" chip. */
+  initialVotedSide: PollSide | null;
+}
+
 /** Card shape rendered on the public rail pages AND on the homepage
  *  PollRail. Self-contained: carries every field the card needs so a
  *  consumer never has to look the story up in a static catalog.

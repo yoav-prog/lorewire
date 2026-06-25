@@ -87,6 +87,11 @@ function makeStory(): WireStory {
     created_at: null,
     like_count: 0,
     viewer_liked: false,
+    // No poll on the play/pause race fixture — the poll surface is
+    // covered separately by WirePollPanel.test.tsx; setting it null
+    // here keeps the WireCard render path identical to a wire without
+    // a poll, which is what these tests actually exercise.
+    poll: null,
   };
 }
 

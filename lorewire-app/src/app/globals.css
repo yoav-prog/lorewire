@@ -166,6 +166,40 @@ button:not(:disabled),
   animation: wireHeartBurst 0.7s ease-out forwards;
   filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.45));
 }
+/* One-shot pulse ring around a wire poll's answer buttons. Fires when
+   the floating WirePollPill is tapped while the panel is already on
+   screen, drawing the eye to the buttons without scrolling. The ring
+   color is set inline (each button's accent hue); only the size +
+   opacity animate here. */
+@keyframes wire-poll-pulse {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 0.55;
+  }
+  100% {
+    box-shadow: 0 0 0 12px currentColor;
+    opacity: 0;
+  }
+}
+/* Floating wire-poll pill — pre-vote pulses to draw attention, post-vote
+   sits as ambient social proof. The pulse is a two-stage glow on the
+   dot inside the pill so the pill itself stays compact. Same reduced-
+   motion-friendly tween Tailwind already applies to opacity. */
+@keyframes wire-poll-pill-pulse {
+  0%,
+  60%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  30% {
+    transform: scale(1.6);
+    opacity: 0.55;
+  }
+}
+.wire-poll-pill-pulse {
+  animation: wire-poll-pill-pulse 1.6s ease-in-out infinite;
+}
 .poster-vig {
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.28) 38%, rgba(0, 0, 0, 0) 62%);
 }
