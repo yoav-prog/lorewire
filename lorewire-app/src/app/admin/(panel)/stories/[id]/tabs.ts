@@ -52,3 +52,30 @@ const SHORT_CLIENT_TABS = new Set<StoryTabId>([
 export function isShortClientTab(tab: StoryTabId): boolean {
   return SHORT_CLIENT_TABS.has(tab);
 }
+
+/** The 7 short-client tabs as a narrowed type. Lives next to the
+ *  predicate so the server page can narrow + the client wrapper can
+ *  consume the type, without either side reaching into the other's
+ *  module. (StoryShortTabsClient.tsx has "use client", which makes
+ *  every value export client-only and uncallable from server code —
+ *  the narrowing helper must live in a server-safe module like this
+ *  one to be callable from page.tsx.) */
+export type ShortClientTabId = Exclude<StoryTabId, "overview">;
+
+/** Narrowing helper for callers that only have a StoryTabId. Lets
+ *  page.tsx gate on isShortClientTab() and then safely cast to the
+ *  narrow ShortClientTabId without a raw `as`. */
+export function asShortClientTab(tab: StoryTabId): ShortClientTabId | null {
+  switch (tab) {
+    case "scenes":
+    case "captions":
+    case "style":
+    case "script":
+    case "voice":
+    case "publish":
+    case "render":
+      return tab;
+    default:
+      return null;
+  }
+}
