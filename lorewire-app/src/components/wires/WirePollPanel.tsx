@@ -142,38 +142,29 @@ export function WirePollPanel({
       aria-label="Story poll"
       data-testid="wire-poll-panel"
       data-pulse={pulseNonce}
-      className="relative overflow-hidden rounded-2xl border border-line bg-[#0e0e10]"
+      className="relative overflow-hidden rounded-xl border border-line bg-[#0e0e10]"
     >
       {/* Two-sided accent strip on the left edge. Amber→blue gradient
           signals "two opinions" before the user reads a word — without
           screaming color across the whole card. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-y-0 left-0 w-[3px]"
+        className="pointer-events-none absolute inset-y-0 left-0 w-[2.5px]"
         style={{
           background:
             "linear-gradient(180deg, #F59E0B 0%, #F59E0B 48%, #3B82F6 52%, #3B82F6 100%)",
         }}
       />
 
-      <div className="px-4 py-3.5">
-        {/* Kicker row: small uppercase mono, identifies the surface and
-            (when the floor is met) shows the vote count for trust. */}
-        <div className="flex items-center justify-between gap-3 font-mono text-[10px] uppercase tracking-[.22em] text-muted">
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent" />
-            POLL · {showResults ? "Your verdict" : "You decide"}
-          </span>
-          {hasFloor && (
-            <span className="tabular-nums text-ink/70">
-              {totalVotes.toLocaleString()} votes
-            </span>
-          )}
-        </div>
-
-        {/* Question — big, brand-voice display type. Two lines max so the
-            panel height stays predictable inside the control bar. */}
-        <h3 className="mt-2 line-clamp-2 font-display text-[15.5px] font-black uppercase leading-[1.15] tracking-tight text-ink">
+      {/* Compact layout: video is king. The floating WirePollPill on the
+          video already carries the "POLL" identity + vote count, so the
+          panel skips the kicker row entirely and goes straight to the
+          question. Single-line question + tight result rows let us drop
+          the panel height by ~half without losing any information. */}
+      <div className="px-3 py-2 pl-3.5">
+        {/* Question — single line, truncated. Display font, smaller size
+            so it reads as a heading without eating two rows. */}
+        <h3 className="line-clamp-1 font-display text-[12.5px] font-bold uppercase leading-tight tracking-tight text-ink/90">
           {poll.question}
         </h3>
 
@@ -196,14 +187,17 @@ export function WirePollPanel({
           />
         )}
 
-        {/* Footer microcopy — pre-vote: floor tease, post-vote: verdict. */}
-        <p className="mt-3 font-mono text-[10px] uppercase tracking-[.18em] text-muted">
+        {/* Footer microcopy — pre-vote: floor tease, post-vote: verdict.
+            Tiny mono caps; tighter top margin than the original panel.
+            Vote count moved here from the removed kicker row when the
+            floor is met, so the trust signal isn't lost. */}
+        <p className="mt-1.5 line-clamp-1 font-mono text-[9.5px] uppercase tracking-[.18em] text-muted">
           {!showResults
             ? hasFloor
-              ? "Tap a side to reveal the split."
+              ? `Tap a side to reveal the split · ${totalVotes.toLocaleString()} votes`
               : "Be one of the first to vote."
             : hasFloor
-              ? verdict
+              ? `${verdict ?? ""} · ${totalVotes.toLocaleString()} votes`
               : `${totalVotes.toLocaleString()} vote${
                   totalVotes === 1 ? "" : "s"
                 } — split reveals once more voters chime in.`}
@@ -212,7 +206,7 @@ export function WirePollPanel({
         {error && (
           <p
             role="alert"
-            className="mt-2 rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1.5 font-body text-[11px] text-accent"
+            className="mt-1.5 rounded-md border border-accent/40 bg-accent/10 px-2 py-1 font-body text-[10.5px] text-accent"
           >
             {error}
           </p>
@@ -238,7 +232,7 @@ function WirePollChoices({
   onVote: (side: PollSide) => void;
 }) {
   return (
-    <div className="mt-3 grid grid-cols-2 gap-2">
+    <div className="mt-2 grid grid-cols-2 gap-1.5">
       <WirePollChoiceButton
         side="A"
         label={optionA}
@@ -287,9 +281,10 @@ function WirePollChoiceButton({
       }}
       disabled={disabled}
       data-side={side}
-      // 48px min-height matches Apple/Material's thumb-zone guidance;
-      // padding lets the label breathe without bloating panel height.
-      className="group relative flex min-h-[48px] items-center justify-center gap-2 rounded-xl border border-line bg-bg/50 px-3 py-2 text-center text-ink transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-[.98] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+      // 44px min-height keeps the button in thumb-zone guidance while
+      // costing 4 fewer pixels per row than the previous 48px target —
+      // matters because video is king (user feedback 2026-06-25).
+      className="group relative flex min-h-[44px] items-center justify-center gap-1.5 rounded-lg border border-line bg-bg/50 px-2 py-1.5 text-center text-ink transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-[.98] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
       style={{
         // Inline because the option hues are deliberately outside the
         // brand token palette — they're poll-only and live alongside the
@@ -345,7 +340,7 @@ function WirePollResults({
   hasFloor: boolean;
 }) {
   return (
-    <div className="mt-3 space-y-2">
+    <div className="mt-2 space-y-1.5">
       <WirePollResultRow
         side="A"
         label={optionA}
@@ -387,7 +382,7 @@ function WirePollResultRow({
     <div
       data-side={side}
       data-highlighted={highlighted}
-      className="relative overflow-hidden rounded-xl border border-line bg-bg/40 px-3 py-2.5"
+      className="relative overflow-hidden rounded-lg border border-line bg-bg/40 px-2 py-1.5"
       style={{
         borderColor: highlighted ? accentHex : undefined,
         boxShadow: highlighted ? `inset 0 0 0 1px ${accentHex}66` : undefined,
@@ -405,10 +400,10 @@ function WirePollResultRow({
             : `${accentHex}18`,
         }}
       />
-      <div className="relative flex items-center gap-2.5">
+      <div className="relative flex items-center gap-2">
         <span
           aria-hidden
-          className="grid h-6 w-6 shrink-0 place-items-center rounded-full font-display text-[10px] font-black uppercase tracking-tight"
+          className="grid h-5 w-5 shrink-0 place-items-center rounded-full font-display text-[9px] font-black uppercase tracking-tight"
           style={{
             background: highlighted ? accentHex : "transparent",
             color: highlighted ? "#0e0e10" : accentHex,
@@ -417,16 +412,16 @@ function WirePollResultRow({
         >
           {side}
         </span>
-        <span className="flex-1 truncate font-display text-[13px] font-bold uppercase leading-tight tracking-tight text-ink">
+        <span className="flex-1 truncate font-display text-[12px] font-bold uppercase leading-tight tracking-tight text-ink">
           {label}
         </span>
         {highlighted && (
-          <span className="rounded-full bg-accent px-1.5 py-0.5 font-mono text-[8.5px] font-bold uppercase tracking-[.18em] text-bg">
+          <span className="rounded-full bg-accent px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase tracking-[.18em] text-bg">
             You
           </span>
         )}
         <span
-          className="font-display text-[15px] font-black tabular-nums tracking-tight text-ink"
+          className="font-display text-[13px] font-black tabular-nums tracking-tight text-ink"
           style={{ color: highlighted ? accentHex : undefined }}
         >
           {hasFloor ? `${clamped}%` : "—"}

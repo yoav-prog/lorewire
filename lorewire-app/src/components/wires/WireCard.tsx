@@ -844,7 +844,7 @@ export default function WireCard({
             it walks down to the title + Read CTA. Plan:
             _plans/2026-06-25-wires-poll-wrapper.md. */}
         {short.poll && (
-          <div className="mb-3">
+          <div className="mb-2">
             <WirePollPanel
               storyId={short.id}
               poll={short.poll}
