@@ -1,14 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requireCapability } from "@/lib/dal";
-import {
-  getStory,
-  getSetting,
-  getUserById,
-  listSegments,
-  type SegmentKind,
-  type SegmentRow,
-} from "@/lib/repo";
+import { getStory, getSetting, getUserById, listSegments } from "@/lib/repo";
 import { readForeignSession } from "@/lib/short-edit-session";
 import {
   getLatestFacebookPostForStoryAction,
@@ -21,30 +14,11 @@ import {
   type LinkedArticleSummary,
   type SeoMetadataState,
 } from "@/app/admin/(panel)/shorts/[id]/actions";
-import {
-  loadHeroStyleSettings,
-  saveStoryHeroStyleAction,
-  setStoryOverrideAction,
-} from "@/app/admin/actions";
-import { HeroStylePicker } from "@/app/admin/(panel)/_components/HeroStylePicker";
-import { resolveHeroStyleFromContext } from "@/lib/hero-styles-resolver";
-import { heroStyleSourceLabel } from "@/lib/hero-styles";
+import { loadHeroStyleSettings } from "@/app/admin/actions";
 import Breadcrumb from "@/app/admin/Breadcrumb";
-import {
-  MediaRegenPanel,
-  type MediaAssetSpec,
-} from "@/app/admin/(panel)/_components/MediaRegenPanel";
-import {
-  GranularRegenGrid,
-  type GranularItem,
-} from "@/app/admin/(panel)/_components/GranularRegenGrid";
-import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel";
-import { PollEditor } from "./PollEditor";
-import {
-  getPollByStoryId,
-  getPresetForCategory,
-  type StoryCategory,
-} from "@/lib/polls";
+import { type MediaAssetSpec } from "@/app/admin/(panel)/_components/MediaRegenPanel";
+import { type GranularItem } from "@/app/admin/(panel)/_components/GranularRegenGrid";
+import { getPollByStoryId, getPresetForCategory } from "@/lib/polls";
 import {
   activeSegmentSettingKey,
   isVideoAspect,
@@ -52,13 +26,12 @@ import {
   type VideoAspect,
 } from "@/lib/aspect";
 import { resolveSceneCount, readSceneCountMode } from "@/lib/scene-count";
-import { VoicePicker } from "@/components/voice-picker/VoicePicker";
 import { listVoices } from "@/lib/voice-library";
 import { one } from "@/lib/db";
-import StoryCommentsToggle from "./StoryCommentsToggle";
 import { latestShortRenderForStory } from "@/lib/short-render-queue";
 import { OverviewTab } from "./OverviewTab";
 import { StoryActionBar } from "./StoryActionBar";
+import { StoryRail } from "./StoryRail";
 import { StoryTabBar } from "./StoryTabBar";
 import { StoryShortTabsClient } from "./StoryShortTabsClient";
 import {
@@ -66,9 +39,6 @@ import {
   isShortClientTab,
   resolveStoryTab,
 } from "./tabs";
-
-const LABEL =
-  "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
 
 export default async function EditStory({
   params,
@@ -168,24 +138,19 @@ export default async function EditStory({
   // the editor shows the right starting value (Phase 4 of
   // _plans/2026-06-12-video-aspect-ratio.md).
   //
-  // `voicePickerEnabled` gates the Phase 3 picker (per
-  // `_plans/2026-06-14-voiceover-picker.md`). The setting defaults to off
-  // ("0") so the picker is dark until the admin flips it on AND the
-  // Phase 2.b bake script has populated preview MP3s — that's the
-  // contract: don't ship UI that plays broken audio.
-  const [intros, outros, defaultAspectRaw, voicePickerEnabledRaw, poll] =
-    await Promise.all([
-      listSegments("intro"),
-      listSegments("outro"),
-      getSetting("video.default_aspect"),
-      getSetting("voice.picker_enabled"),
-      // Phase 1 of _plans/2026-06-17-engagement-polls.md. Either the
-      // existing poll row OR null; the editor seeds null rows with the
-      // category preset so the form is never empty on first author.
-      getPollByStoryId(id),
-    ]);
+  // The legacy story-level VoicePicker was removed from the rail in
+  // cut 6 — the Voice tab is the canonical per-short voice surface.
+  // voice.picker_enabled setting + listVoices load are gone with it.
+  const [intros, outros, defaultAspectRaw, poll] = await Promise.all([
+    listSegments("intro"),
+    listSegments("outro"),
+    getSetting("video.default_aspect"),
+    // Phase 1 of _plans/2026-06-17-engagement-polls.md. Either the
+    // existing poll row OR null; the editor seeds null rows with the
+    // category preset so the form is never empty on first author.
+    getPollByStoryId(id),
+  ]);
   const pollPreset = getPresetForCategory(s.category);
-  const voicePickerEnabled = String(voicePickerEnabledRaw ?? "0") !== "0";
 
   // Resolve the aspect for THIS story's display. The chain is:
   //   per-story video_config.aspect -> global default -> legacy 9:16.
@@ -327,27 +292,6 @@ export default async function EditStory({
     });
   }
 
-  // Pull the voice library only when the picker flag is on. The library
-  // does a 24h-memoized live ElevenLabs fetch under the hood; pulling it
-  // when the picker is dark wastes a round trip on every story render.
-  const voices = voicePickerEnabled ? await listVoices() : [];
-
-  // In-flight regen state. Drives the "Synthesizing voiceover..."
-  // pending UI and the disabled regen button — a second click during a
-  // running synth would double-spend TTS credit on identical output.
-  const [latestVoiceRender, voiceRegenInFlight] = voicePickerEnabled
-    ? await Promise.all([
-        (await import("@/lib/voice-render-queue")).latestVoiceRenderForStory(
-          s.id,
-        ),
-        (await import("@/lib/voice-render-queue")).hasActiveVoiceRender(s.id),
-      ])
-    : [null, false];
-  const lastVoiceRegenError =
-    latestVoiceRender && latestVoiceRender.status === "error"
-      ? latestVoiceRender.error
-      : null;
-
   return (
     <div className="space-y-4">
       <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
@@ -399,176 +343,46 @@ export default async function EditStory({
             ))}
         </div>
 
-        {/* Sidebar — constant across all tabs. Status + Search visibility
-            moved into the StoryActionBar above (single source of truth). */}
-        <aside className="space-y-4">
-          <PollEditor
-            storyId={s.id}
-            storyCategory={s.category as StoryCategory | string | null}
-            poll={poll}
-            presetQuestion={pollPreset.question}
-            presetOptionA={pollPreset.optionA}
-            presetOptionB={pollPreset.optionB}
-          />
-
-          <MediaRegenPanel
-            ownerKind="story"
-            ownerId={s.id}
-            assets={storyAssets}
-          />
-
-          {/* Hero & poster style picker (step 5 of
-              _plans/2026-06-17-hero-style-registry.md). Reuses the same
-              shared HeroStylePicker the settings page renders, but
-              points its form at saveStoryHeroStyleAction so the value
-              lands on `stories.hero_style_id` (NULL = "use the
-              resolver chain"). The caption surfaces the resolved
-              style + the layer that produced it — the explicit
-              "show the resolution source" ask. The "Restyle hero from
-              short character" button on MediaRegenPanel above uses
-              the SAME resolution to pick which style to render. */}
-          {(() => {
-            const ctx = {
-              pinnedId: s.hero_style_id,
-              category: s.category ?? "Drama",
-              storyId: s.id,
-              globalStyleId: heroStyleSettings.globalStyleId,
-              categoryDefaults: heroStyleSettings.categoryDefaults,
-            };
-            const resolved = resolveHeroStyleFromContext(ctx);
-            const captionPrefix =
-              s.hero_style_id
-                ? `Pinned to "${resolved.style.label}"`
-                : `Currently resolves to "${resolved.style.label}"`;
-            const sourceLine = heroStyleSourceLabel(
-              resolved.source,
-              s.category ?? "Drama",
-              resolved.whitelist,
-            );
-            return (
-              <HeroStylePicker
-                label="Hero & poster style"
-                hint="Closed-enum override for which poster look gets rendered on this story. Empty = let the resolver chain pick (per-category default → global default → smart auto-pick from this category's short-list). Changing this only affects the NEXT hero render — click 'Restyle hero from short character' on the panel above to regenerate."
-                selectedId={s.hero_style_id ?? ""}
-                thumbnails={heroStyleSettings.thumbnails}
-                includeAutoOption
-                autoOptionLabel="Use the resolver chain"
-                formAction={saveStoryHeroStyleAction}
-                formHiddenFields={{ storyId: s.id }}
-                captionOverride={`${captionPrefix}. ${sourceLine}.`}
-                saveLabel="Save hero style"
-              />
-            );
-          })()}
-
-          {/* Per-story comments open/closed toggle. The control lives
-              next to hero style because both are "how this story
-              behaves on the public surface" knobs. Site-wide kill
-              switch lives at /admin/comments and overrides this
-              setting — see the helper text inside the toggle. */}
-          <StoryCommentsToggle
-            resolvedArticleId={commentsArticleId}
-            closed={commentsClosed}
-            siteWideEnabled={siteCommentsEnabled}
-            revalidatePath={`/admin/stories/${id}`}
-          />
-
-          {/* Bible lives in `stories.pipeline_cache` (split off
-              video_config 2026-06-14 — see
-              `_plans/2026-06-14-pipeline-cache-column.md`). Fall back
-              to video_config so stories persisted before the migration
-              still render in the inspector. */}
-          <WorldBiblePanel
-            cacheJson={s.pipeline_cache ?? s.video_config ?? null}
-          />
-
-          {sceneGranular.length > 0 && (
-            <GranularRegenGrid
-              ownerKind="story"
-              ownerId={s.id}
-              title="Scenes (per-image)"
-              description="Redo a single scene without touching the rest."
-              items={sceneGranular}
-            />
-          )}
-
-          {propGranular.length > 0 && (
-            <GranularRegenGrid
-              ownerKind="story"
-              ownerId={s.id}
-              title="Props (per-image)"
-              description="Redo a single prop. Label + side stay; only the image changes."
-              items={propGranular}
-            />
-          )}
-
-          {voicePickerEnabled && voices.length > 0 && (
-            <VoicePicker
-              storyId={s.id}
-              voices={voices}
-              currentProvider={s.voice_provider}
-              currentVoiceId={s.voice_id}
-              regenInFlight={voiceRegenInFlight}
-              lastRegenError={lastVoiceRegenError}
-            />
-          )}
-
-          <div className="rounded-xl border border-line bg-surface p-4">
-            <div className={LABEL}>Media</div>
-            {s.hero_image ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={s.hero_image}
-                alt=""
-                className="mb-3 w-full rounded-lg border border-line"
-              />
-            ) : (
-              <p className="mb-2 text-[13px] text-muted">No hero image yet.</p>
-            )}
-            {gallery.length > 0 && (
-              <p className="mb-2 text-[13px] text-muted">
-                {gallery.length} illustration(s)
-              </p>
-            )}
-            {s.audio_url && (
-              <audio controls src={s.audio_url} className="mb-2 w-full" />
-            )}
-            {s.video_url ? (
-              <video controls src={s.video_url} className="w-full rounded-lg" />
-            ) : (
-              <p className="text-[13px] text-muted">No video rendered yet.</p>
-            )}
-          </div>
-
-          <SegmentOverrideCard
-            kind="intro"
-            label="Intro"
-            rows={intros}
-            storyId={s.id}
-            pinnedId={s.intro_segment_id}
-            skip={Boolean(s.skip_intro)}
-            globalActiveId={activeIntroId ?? null}
-          />
-
-          <SegmentOverrideCard
-            kind="outro"
-            label="Outro"
-            rows={outros}
-            storyId={s.id}
-            pinnedId={s.outro_segment_id}
-            skip={Boolean(s.skip_outro)}
-            globalActiveId={activeOutroId ?? null}
-          />
-
-          <div className="rounded-xl border border-line bg-surface p-4 font-mono text-[11px] text-muted">
-            <div className={LABEL}>Meta</div>
-            <p>id: {s.id}</p>
-            <p>tokens: {s.tokens ?? 0}</p>
-            <p>cost: ${((s.cost_cents ?? 0) / 100).toFixed(2)}</p>
-            {s.created_at && <p>created: {s.created_at.slice(0, 16)}</p>}
-            {s.published_at && <p>published: {s.published_at.slice(0, 16)}</p>}
-          </div>
-        </aside>
+        {/* Per-tab rail via StoryRail (cut 6). Cards land in either the
+            primary section or the Advanced drawer based on which tab is
+            active — Overview gets Poll/HeroStyle/MediaPreview/Meta;
+            short-config tabs get a focused preview + per-scene regen;
+            Render gets the full media-regen + intro/outro + bible
+            firehose. Status + Search Visibility live in the
+            StoryActionBar above (single source of truth). */}
+        <StoryRail
+          activeTab={activeTab}
+          storyId={s.id}
+          storyCategory={s.category ?? null}
+          heroStyleId={s.hero_style_id ?? null}
+          heroImage={s.hero_image ?? null}
+          audioUrl={s.audio_url ?? null}
+          videoUrl={s.video_url ?? null}
+          pipelineCache={s.pipeline_cache ?? null}
+          videoConfig={s.video_config ?? null}
+          introSegmentId={s.intro_segment_id ?? null}
+          outroSegmentId={s.outro_segment_id ?? null}
+          skipIntro={Boolean(s.skip_intro)}
+          skipOutro={Boolean(s.skip_outro)}
+          tokens={s.tokens ?? null}
+          costCents={s.cost_cents ?? null}
+          createdAt={s.created_at ?? null}
+          publishedAt={s.published_at ?? null}
+          gallery={gallery}
+          poll={poll}
+          pollPreset={pollPreset}
+          heroStyleSettings={heroStyleSettings}
+          storyAssets={storyAssets}
+          sceneGranular={sceneGranular}
+          propGranular={propGranular}
+          intros={intros}
+          outros={outros}
+          activeIntroId={activeIntroId ?? null}
+          activeOutroId={activeOutroId ?? null}
+          commentsArticleId={commentsArticleId}
+          commentsClosed={commentsClosed}
+          siteCommentsEnabled={siteCommentsEnabled}
+        />
       </div>
     </div>
   );
@@ -748,59 +562,3 @@ function NoShortYetCard({
   );
 }
 
-function SegmentOverrideCard({
-  kind,
-  label,
-  rows,
-  storyId,
-  pinnedId,
-  skip,
-  globalActiveId,
-}: {
-  kind: SegmentKind;
-  label: string;
-  rows: SegmentRow[];
-  storyId: string;
-  pinnedId: string | null;
-  skip: boolean;
-  globalActiveId: string | null;
-}) {
-  const enabledRows = rows.filter((r) => r.enabled !== 0);
-  // The select's current value reflects the resolution chain so the UI shows
-  // exactly what the render will use: a skip flag wins over a pinned id, and
-  // a pinned id wins over the global active.
-  const currentValue = skip ? "skip" : pinnedId || "inherit";
-  const globalRow = rows.find((r) => r.id === globalActiveId);
-  return (
-    <div className="rounded-xl border border-line bg-surface p-4">
-      <div className={LABEL}>{label}</div>
-      <form action={setStoryOverrideAction} className="space-y-2">
-        <input type="hidden" name="story_id" value={storyId} />
-        <input type="hidden" name="kind" value={kind} />
-        <select
-          name="pick"
-          defaultValue={currentValue}
-          className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
-        >
-          <option value="inherit">
-            Use global active
-            {globalRow ? ` (${globalRow.label ?? globalRow.id.slice(0, 8)})` : " (none set)"}
-          </option>
-          <option value="skip">Skip — no {kind} for this story</option>
-          {enabledRows.length > 0 && (
-            <optgroup label="Pin a specific one">
-              {enabledRows.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.label ?? r.id.slice(0, 8)}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </select>
-        <button className="w-full rounded-md border border-line px-3 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
-          Save {label.toLowerCase()} choice
-        </button>
-      </form>
-    </div>
-  );
-}
