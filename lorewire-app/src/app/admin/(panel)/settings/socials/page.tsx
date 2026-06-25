@@ -1,6 +1,7 @@
 import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import SettingsShell from "@/app/admin/SettingsShell";
+import SettingsSection from "@/app/admin/SettingsSection";
 import {
   SettingChipGroup,
   SettingText,
@@ -248,7 +249,7 @@ export default async function SocialsSettingsPage() {
     >
       <div className="space-y-8">
         {/* ── Facebook ──────────────────────────────────────────────── */}
-        <Section
+        <SettingsSection
           title="Facebook"
           description="Auto-publish every freshly rendered short to the LoreWire Facebook Page. Plan: _plans/2026-06-23-facebook-auto-publish.md."
           status={{
@@ -285,10 +286,10 @@ export default async function SocialsSettingsPage() {
             hint="When on, every successful Reel publish also cross-posts the same video to the LoreWire Facebook Page Story (24-hour ephemeral). Stories appear at the top of the feed but have no clickable link to the article — treat as a presence play, not traffic. Independent from the Reel toggle. Plan: _plans/2026-06-25-instagram-facebook-stories-cross-publish.md."
             initialOn={readToggle(fbStoryAutoPublishRaw, false)}
           />
-        </Section>
+        </SettingsSection>
 
         {/* ── Instagram ─────────────────────────────────────────────── */}
-        <Section
+        <SettingsSection
           title="Instagram"
           description="Auto-publish every freshly rendered short to the LoreWire Instagram account as a Reel. Reuses the Facebook Page Access Token (IG is linked to the Page). Plan: _plans/2026-06-24-instagram-auto-publish.md."
           status={{
@@ -327,10 +328,10 @@ export default async function SocialsSettingsPage() {
             hint="When on, every successful Reel publish also cross-posts the same video to the LoreWire Instagram account as a Story (24-hour ephemeral). Stories appear at the top of follower feeds but have no clickable link to the article — treat as a presence play, not traffic. Independent from the Reel toggle. Plan: _plans/2026-06-25-instagram-facebook-stories-cross-publish.md."
             initialOn={readToggle(igStoryAutoPublishRaw, false)}
           />
-        </Section>
+        </SettingsSection>
 
         {/* ── YouTube ───────────────────────────────────────────────── */}
-        <Section
+        <SettingsSection
           title="YouTube"
           description="Auto-publish every freshly rendered short to the LoreWire YouTube channel (@LoreWireHQ). Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md."
           status={{
@@ -419,10 +420,10 @@ export default async function SocialsSettingsPage() {
             hint="When on, the rendered SRT is attached via captions.insert after the video upload succeeds. Best-effort: a captions failure won't roll back the video upload. Uploaded captions outrank auto-generated for indexing."
             initialOn={readToggle(ytUploadCaptionsRaw, true)}
           />
-        </Section>
+        </SettingsSection>
 
         {/* ── TikTok ───────────────────────────────────────────────── */}
-        <Section
+        <SettingsSection
           title="TikTok"
           description="Auto-publish every freshly rendered short to the LoreWire TikTok account. Until TikTok approves our Content Posting API audit, the post lands as a draft in the LoreWire TikTok app's Inbox — flip Post mode to Direct after audit clears."
           status={{
@@ -508,10 +509,10 @@ export default async function SocialsSettingsPage() {
             hint="When on, comments are closed on this post."
             initialOn={readToggle(ttDisableCommentRaw, false)}
           />
-        </Section>
+        </SettingsSection>
 
         {/* ── Cross-platform ───────────────────────────────────────── */}
-        <Section
+        <SettingsSection
           title="Cross-platform — Publisher caption hooks"
           description="Per-platform caption suffix appended when a short with an enabled poll is published. Empty = use the default for that platform. Substitution tokens: {question} and {slug}."
         >
@@ -525,81 +526,9 @@ export default async function SocialsSettingsPage() {
               placeholder="Leave empty to use the platform default"
             />
           ))}
-        </Section>
+        </SettingsSection>
       </div>
     </SettingsShell>
-  );
-}
-
-/** Collapsible platform section. Uses native <details>/<summary> so it
- *  stays server-rendered (no client JS), accessible by default, and the
- *  browser handles keyboard navigation. Status pill in the header tells
- *  the operator at a glance which platforms still need env vars without
- *  having to expand each section.
- *
- *  All sections default to closed — with four+ platforms expanded by
- *  default the page is a wall of text. */
-function Section({
-  title,
-  description,
-  status,
-  defaultOpen = false,
-  children,
-}: {
-  title: string;
-  description?: string;
-  /** Optional status pill in the summary. Omit on sections that have no
-   *  credential state to report (e.g. the cross-platform poll-hooks). */
-  status?: { ok: boolean; label: string };
-  /** Default closed. Pass `defaultOpen` for sections you want expanded
-   *  on first paint (e.g. the cross-platform one which is short). */
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <details
-      open={defaultOpen}
-      className="group rounded-lg border border-line bg-surface"
-    >
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
-        <div className="flex flex-wrap items-center gap-3">
-          <h2 className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
-            {title}
-          </h2>
-          {status && (
-            <span
-              className={`rounded-full px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
-                status.ok
-                  ? "bg-accent/10 text-accent"
-                  : "bg-warn/10 text-warn"
-              }`}
-            >
-              {status.ok ? "✓" : "✗"} {status.label}
-            </span>
-          )}
-        </div>
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 12 12"
-          className="h-3 w-3 shrink-0 text-muted transition-transform group-open:rotate-180"
-        >
-          <path
-            d="M2 4l4 4 4-4"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      </summary>
-      <div className="space-y-3 border-t border-line px-4 py-4">
-        {description && (
-          <p className="text-[13px] text-muted">{description}</p>
-        )}
-        {children}
-      </div>
-    </details>
   );
 }
 

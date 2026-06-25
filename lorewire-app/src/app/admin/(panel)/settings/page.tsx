@@ -3,6 +3,7 @@ import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import { listGoogleVoices, listElevenLabsVoices } from "@/lib/voice-providers";
 import SettingsShell from "@/app/admin/SettingsShell";
+import SettingsSection from "@/app/admin/SettingsSection";
 import { loadHeroStyleSettings } from "@/app/admin/actions";
 import { HeroStylePicker } from "@/app/admin/(panel)/_components/HeroStylePicker";
 import {
@@ -259,7 +260,7 @@ export default async function SettingsPage() {
       description="Pipeline defaults, voice, video look, and the intro/outro splice switch. Read by the pipeline at run time."
     >
       <div className="space-y-8">
-        <Section
+        <SettingsSection
           title="Article shorts"
           description="Auto-generate a 40-60s vertical doodle short when a story finishes. Off by default. The per-category overrides win over the global default; narration vibe + length apply to every auto-generated short (each short can still be (re)generated manually with its own picks in the video editor)."
         >
@@ -293,9 +294,9 @@ export default async function SettingsPage() {
               options={catOverrideOptions}
             />
           ))}
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Hero & poster style"
           description="Which named look the hero / poster art uses on every render. Lives ABOVE the existing 'Video & image style' field below — that field still steers scene illustrations + narration; this one steers ONLY the hero / poster. Empty layers fall through: per-story pin → category default → global default → an automatic per-category short-list. Changing a default here only affects FUTURE renders; existing rows keep their current art until you click 'Restyle hero from short character' on the story."
         >
@@ -331,9 +332,9 @@ export default async function SettingsPage() {
             once after a fresh install or after editing a style&apos;s prompt
             band. Idempotent — re-running with no edits is a no-op.
           </p>
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Style presets"
           description="Creative direction for everything the pipeline generates — narrator delivery, scene images, and prop cutouts. Pick a preset to fill the field, then tweak."
         >
@@ -353,9 +354,9 @@ export default async function SettingsPage() {
             presets={GEMINI_PROMPT_PRESETS}
             placeholder="Read this in a calm, conversational tone, like a podcaster telling a story"
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Image prompts"
           description="How the pipeline builds the prompt sent to kie.ai for each scene image. Grounding ties each scene's prompt to the narration line spoken at that moment; turning it off reverts to the older article-body-only prompts."
         >
@@ -371,9 +372,9 @@ export default async function SettingsPage() {
             hint="Diagnostic toggle. When on, the bible (the 2-4 recurring characters with their visual cues) is computed once per story and reused across scene regens — same characters scene to scene. Off forces a fresh bible on every regen, useful when the cached bible turns out wrong. Default on."
             initialOn={readToggle(characterBibleCache, true)}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="World bible (Option C)"
           description="2026-06-14: a structured per-story bible of characters, sub-characters, locations, and items, each with a stable id. Characters (and optionally locations) get a canonical reference image so kie.ai's nano-banana-2 endpoint can keep faces consistent scene to scene. Disable the master switch to revert to the previous text-only grounded path."
         >
@@ -410,9 +411,9 @@ export default async function SettingsPage() {
               { id: "kie/gpt-image-2", label: "gpt-image-2 ($0.05, no refs)" },
             ]}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Pipeline"
           description="What the Python pipeline pulls and how much it spends."
         >
@@ -454,9 +455,9 @@ export default async function SettingsPage() {
             min={1}
             max={60}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Voice"
           description="Narrator voice settings used by the active TTS model."
         >
@@ -481,9 +482,9 @@ export default async function SettingsPage() {
           <p className="rounded-lg border border-line bg-surface2/40 px-3 py-2 text-[12px] text-muted">
             Narrator tone preset for Gemini-TTS lives in <strong className="text-ink">Style presets</strong> above.
           </p>
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Video look"
           description="Scene count and motion effects applied during render. Visual style preset lives in Style presets above."
         >
@@ -549,9 +550,9 @@ export default async function SettingsPage() {
             hint="Small bottom-left bust of the protagonist with lip-flap mouth shapes timed to the narration. The next --media run generates a character portrait + mouth-removed copy via kie (~$0.10 / story)."
             initialOn={readToggle(mouthSwap)}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Intro / outro splice"
           description="Master switch for the branded clips spliced onto every render. Manage the library and the active picks under Intros & outros."
         >
@@ -561,9 +562,9 @@ export default async function SettingsPage() {
             hint="When on, the active intro and outro are spliced onto every rendered video. Per-story overrides still apply. Defaults to on."
             initialOn={readToggle(introOutroEnabled, true)}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Video editor"
           description="Per-frame image regen controls for /admin/videos/[id]. The cap is the safety net against a runaway click in the storyboard."
         >
@@ -585,9 +586,9 @@ export default async function SettingsPage() {
               { id: "contain", label: "Contain (letterbox)" },
             ]}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Caption defaults"
           description="Global caption appearance — color, motion, typography. Per-video overrides land in the video editor."
         >
@@ -607,9 +608,9 @@ export default async function SettingsPage() {
               <span className="font-mono text-[14px] text-muted">→</span>
             </div>
           </Link>
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Engagement — Polls"
           description="Story- and article-attached polls (the burnt-in question card on shorts + the on-site widget). Plan: _plans/2026-06-17-engagement-polls.md."
         >
@@ -655,13 +656,13 @@ export default async function SettingsPage() {
             max={10000}
             step={100}
           />
-        </Section>
+        </SettingsSection>
 
         {/* Per-platform social publishing config (Facebook, Instagram,
             YouTube, TikTok) and the publisher poll-hook caption suffixes
             live under Settings / Socials. Cross-link so admin lands
             there from a familiar starting point. */}
-        <Section
+        <SettingsSection
           title="Social publishing"
           description="Per-platform auto-publish defaults — toggles, caption / title templates, privacy, and category overrides — moved to their own home so they stay together."
         >
@@ -676,9 +677,9 @@ export default async function SettingsPage() {
             to configure Facebook, Instagram, YouTube, TikTok, and the
             cross-platform poll-hook caption suffixes.
           </p>
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Auto-publish"
           description="One-click bulk Complete & publish (admin Content) flags selected stories for the /api/auto_complete_publish cron — a 2-minute watcher that publishes each flagged story to all four socials the moment every asset (article body, hero, thumbnails, short, voiceover, scene images, poll) is ready."
         >
@@ -697,33 +698,9 @@ export default async function SettingsPage() {
             max={1000}
             step={1}
           />
-        </Section>
+        </SettingsSection>
       </div>
     </SettingsShell>
-  );
-}
-
-function Section({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section>
-      <div className="mb-3">
-        <h2 className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
-          {title}
-        </h2>
-        {description && (
-          <p className="mt-0.5 text-[13px] text-muted">{description}</p>
-        )}
-      </div>
-      <div className="space-y-3">{children}</div>
-    </section>
   );
 }
 
