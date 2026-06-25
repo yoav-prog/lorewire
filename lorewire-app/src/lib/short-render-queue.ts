@@ -342,11 +342,17 @@ export async function applyShortToStory(
 }
 
 // Resolve "body_ms + spliced intro/outro" to a M:SS string for the writer
-// path. Mirrors the read-side fan-out in homepage-data.loadShortDurationsForStories
-// but for a single story: pull the short_config stamp, look up segment
-// duration_ms for any referenced ids, sum, format. Body-only when the
-// stamp is missing/empty so legacy rows still produce a duration.
-async function formatFullDurationForStory(
+// path AND the one-shot backfill route. Mirrors the read-side fan-out in
+// homepage-data.loadShortDurationsForStories but for a single story:
+// pull the short_config stamp, look up segment duration_ms for any
+// referenced ids, sum, format. Body-only when the stamp is missing/empty
+// so legacy rows still produce a duration.
+//
+// Exported (not private) because api/admin/backfill_short_durations needs
+// the exact same derivation to retroactively repair stories.duration
+// rows that were written body-only before lib/duration's stamp-aware
+// helpers existed.
+export async function formatFullDurationForStory(
   storyId: string,
   bodyMs: number,
 ): Promise<string | null> {
