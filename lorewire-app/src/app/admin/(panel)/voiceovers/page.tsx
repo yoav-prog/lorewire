@@ -8,11 +8,10 @@ import { listVoices } from "@/lib/voice-library";
 import { options } from "@/lib/models";
 import { CATEGORIES } from "@/app/admin/ui";
 import SettingsShell from "@/app/admin/SettingsShell";
+import SettingsSection from "@/app/admin/SettingsSection";
 import VoiceoverPresetRow from "./VoiceoverPresetRow";
 import CategoryVoiceoverSelect from "./CategoryVoiceoverSelect";
 import CreateVoiceover from "./CreateVoiceover";
-
-const LABEL = "font-mono text-[11px] uppercase tracking-wider text-muted";
 
 export default async function VoiceoversPage() {
   await requireCapability("settings.manage");
@@ -37,16 +36,12 @@ export default async function VoiceoversPage() {
       title="Voiceovers"
       description="Save narrator presets and pick one per category. Tap a row's ▶ for a quick listen, or open it to edit and preview. The pipeline resolves per-category → default → built-in fallback."
     >
-      <div className="space-y-6">
-        {/* Presets */}
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className={LABEL}>Presets</h2>
-            <span className="text-[11px] text-muted">
-              {voiceovers.length} saved
-            </span>
-          </div>
-
+      <div className="space-y-3">
+        <SettingsSection
+          title="Presets"
+          description="Saved narrator presets. Each row plays a quick preview, opens to edit, and can be set as the global default."
+          status={{ ok: true, label: `${voiceovers.length} saved` }}
+        >
           {voiceovers.length === 0 ? (
             <p className="rounded-xl border border-line bg-surface p-4 text-[13px] text-muted">
               No voiceovers yet — create your first one below.
@@ -73,16 +68,12 @@ export default async function VoiceoversPage() {
               library configuration.
             </p>
           )}
-        </section>
+        </SettingsSection>
 
-        {/* Per-category */}
-        <section className="rounded-xl border border-line bg-surface p-5">
-          <h2 className={LABEL}>Per-category voice</h2>
-          <p className="mb-3 mt-1 text-[13px] text-muted">
-            Override the default for a category. &quot;Inherit default&quot; uses
-            the preset badged <span className="text-ink">default</span> above.
-            Changes save instantly.
-          </p>
+        <SettingsSection
+          title="Per-category voice"
+          description={`Override the default for a category. "Inherit default" uses the preset badged "default" above. Changes save instantly.`}
+        >
           <div className="space-y-2">
             {CATEGORIES.map((cat) => (
               <CategoryVoiceoverSelect
@@ -93,7 +84,7 @@ export default async function VoiceoversPage() {
               />
             ))}
           </div>
-        </section>
+        </SettingsSection>
       </div>
     </SettingsShell>
   );
