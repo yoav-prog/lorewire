@@ -30,6 +30,7 @@ import {
   readShuffleRecents,
 } from "@/lib/play-shuffle";
 import { useStoryPlayEvents } from "@/lib/use-story-play-events";
+import { heroTitleFontSizeMobile, heroTitleBucket } from "@/lib/hero-title-size";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
@@ -186,6 +187,33 @@ const BILLBOARD_ROTATION_INTERVAL_MS = 7000;
 // swipe always trips, big enough that an accidental drift on a Play
 // tap doesn't.
 const BILLBOARD_SWIPE_THRESHOLD_PX = 50;
+
+// Length-aware <h1> for the mobile billboard title. Mirrors the
+// desktop Hero's HeroTitleH1 (DesktopShell.tsx) so a too-long title
+// shrinks instead of dominating the billboard
+// (plan: _plans/2026-06-25-title-length-gate.md, Layer 2).
+function MobileHeroTitleH1({ title, storyId }: { title: string; storyId: string }) {
+  const fontSize = heroTitleFontSizeMobile(title);
+  if (fontSize < 46) {
+    // eslint-disable-next-line no-console -- rule 14: namespaced observability
+    console.info("[hero title size]", {
+      surface: "mobile",
+      storyId,
+      chars: title.length,
+      words: title.trim().split(/\s+/).length,
+      bucket: heroTitleBucket(title),
+      fontSize,
+    });
+  }
+  return (
+    <h1
+      className="font-display font-black uppercase tracking-tightest leading-[.9] text-ink ink-shadow"
+      style={{ fontSize }}
+    >
+      {title}
+    </h1>
+  );
+}
 
 function Billboard({
   pool,
@@ -358,7 +386,7 @@ function Billboard({
           <span className="w-[3px] h-3.5 bg-accent rounded-full"></span>
           <span className="font-mono text-[10px] uppercase tracking-[.34em] text-ink/90">LW Original</span>
         </div>
-        <h1 className="font-display font-black uppercase tracking-tightest leading-[.9] text-ink ink-shadow" style={{ fontSize: 46 }}>{story.title}</h1>
+        <MobileHeroTitleH1 title={story.title} storyId={story.id} />
         <div className="flex items-center gap-1.5 mt-3 flex-wrap">
           {story.tags.map((t, i) => (
             <React.Fragment key={t}>
