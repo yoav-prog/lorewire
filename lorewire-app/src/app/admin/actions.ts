@@ -4474,3 +4474,212 @@ async function flagStoryForAutoPublish(storyId: string): Promise<void> {
   );
 }
 
+// ─── Bulk refresh assets ─────────────────────────────────────────────────────
+// 2026-06-25 follow-up to #99 / #102 / #104. The Complete & publish
+// gate only checks asset PRESENCE — a story with old-but-present
+// short / hero / thumbnails passes the gate. So a story published
+// before the voice defaults locked OR before the hero-from-short
+// pipeline existed sits live with stale assets, and there's no
+// one-click way to fix it: "Restart entire pipeline" refuses on
+// reddit_source = 'used', and the per-asset regen actions don't
+// chain.
+//
+// This action kicks off a state-machine refresh that preserves
+// story_id / slug / URL / SEO / comments and just regenerates the
+// media chain:
+//
+//   voice -> short (Lane B) -> hero+thumbnails (finisher cron)
+//
+// The action enqueues voice + sets refresh_assets_state='voice_pending'.
+// The /api/refresh_assets cron watches flagged stories every 1 min
+// and advances each through the state machine when the upstream
+// stage's finished_at beats refresh_assets_started_at.
+
+export interface BulkRefreshAssetsOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state:
+    | "refresh_started"
+    | "already_refreshing"
+    | "skipped"
+    | "errored";
+  reason?: string;
+}
+
+export interface BulkRefreshAssetsResult {
+  startedCount: number;
+  alreadyRefreshingCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkRefreshAssetsOutcome[];
+}
+
+export async function bulkRefreshAssetsAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkRefreshAssetsResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  const t0 = Date.now();
+   
+  console.info("[bulk-refresh-assets click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  // Lazy imports keep the action surface light when nothing's in flight.
+  const { enqueueVoiceRender } = await import("@/lib/voice-render-queue");
+  const { latestDoneShortRenderForStory } = await import(
+    "@/lib/short-render-queue"
+  );
+
+  const outcomes: BulkRefreshAssetsOutcome[] = [];
+  let startedCount = 0;
+  let alreadyRefreshingCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "articles have no media chain to refresh",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "not-found",
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      // Already mid-refresh — don't double-fire the chain. The cron
+      // will keep advancing the existing flag through the state machine.
+      if (story.refresh_assets_state) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "already_refreshing",
+          reason: `state=${story.refresh_assets_state}`,
+        });
+        alreadyRefreshingCount += 1;
+        continue;
+      }
+
+      // Lane B re-render needs a baseline short to diff against.
+      // Without one, the right answer is the regular Restart entire
+      // pipeline path, not refresh assets.
+      const baseline = await latestDoneShortRenderForStory(item.id);
+      if (!baseline) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason: "no baseline short — use Restart entire pipeline instead",
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      const body = (story.body ?? "").trim();
+      if (!body) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "empty body — voice render cannot start",
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      // Enqueue voice using the story's pinned voice if any, falling
+      // back to the global default at synthesis time (voice.py picks
+      // it up). This means a story whose pinned voice is null
+      // automatically gets the CURRENT global default — exactly the
+      // refresh semantic we want when voice defaults change.
+      const voiceResult = await enqueueVoiceRender({
+        storyId: item.id,
+        body,
+        voiceProvider: story.voice_provider,
+        voiceId: story.voice_id,
+        requestedBy: session.userId,
+      });
+      if (!voiceResult.ok) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: `voice enqueue failed: ${voiceResult.error}`,
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      const now = new Date().toISOString();
+      await run(
+        "UPDATE stories SET refresh_assets_state = 'voice_pending', " +
+          "refresh_assets_started_at = ?, refresh_assets_attempts = 0 " +
+          "WHERE id = ?",
+        [now, item.id],
+      );
+       
+      console.info("[bulk-refresh-assets started]", {
+        story_id: item.id,
+        baseline_render_id: baseline.id,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "refresh_started",
+      });
+      startedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+       
+      console.error("[bulk-refresh-assets errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+   
+  console.info("[bulk-refresh-assets result]", {
+    user_id: session.userId,
+    startedCount,
+    alreadyRefreshingCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return {
+    startedCount,
+    alreadyRefreshingCount,
+    skippedCount,
+    erroredCount,
+    outcomes,
+  };
+}
+

@@ -145,6 +145,34 @@ export const STORIES: Table = {
     // Per-story retry counter the cron increments on every NOT-READY
     // visit. Hard cap lives in settings.auto_publish.max_attempts.
     { name: "auto_publish_attempts", type: "INTEGER" },
+    // 2026-06-25 refresh-assets state machine
+    // (_plans/2026-06-25-bulk-complete-and-publish.md follow-up).
+    // The /api/refresh_assets cron drives an already-published video
+    // story through voice -> short (Lane B) -> hero+thumbnails
+    // (finisher) while preserving story_id / URL / SEO / comments.
+    // Distinct from auto_publish_when_ready which is the "asset gate
+    // + publish" flag — this one is "regenerate stale assets in
+    // place." States:
+    //   NULL                = not refreshing
+    //   'voice_pending'     = waiting for the new voice_renders row
+    //   'short_pending'     = waiting for the new short_renders row
+    //   'hero_pending'      = waiting for the finisher to write
+    //                         hero + 5 thumbnail variants
+    //   The cron clears the column back to NULL on completion OR on
+    //   hitting refresh_assets_attempts cap (so a permanently-stuck
+    //   stage can't pile up infinite work).
+    { name: "refresh_assets_state", type: "TEXT" },
+    // ISO-8601 of when the refresh was kicked off. Used as the
+    // "before timestamp" for freshness comparisons — a downstream
+    // asset's finished_at must beat this for the cron to consider
+    // that stage done.
+    { name: "refresh_assets_started_at", type: "TEXT" },
+    // Per-story retry counter the refresh cron increments on every
+    // tick that doesn't advance. Cap lives in
+    // settings.refresh_assets.max_attempts (default 30 ticks
+    // ≈ 60 min, generous because Lane B + finisher each take
+    // multiple minutes).
+    { name: "refresh_assets_attempts", type: "INTEGER" },
   ],
 };
 

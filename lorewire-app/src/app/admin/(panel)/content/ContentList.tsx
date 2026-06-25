@@ -19,6 +19,7 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   bulkCompleteAndPublishAction,
   bulkPublishToSocialsAction,
+  bulkRefreshAssetsAction,
   bulkUpdateContentAction,
   bulkDeleteContentAction,
   bulkReclassifyStoriesAction,
@@ -28,6 +29,8 @@ import {
   type BulkCompleteAndPublishResult,
   type BulkContentItem,
   type BulkPublishResult,
+  type BulkRefreshAssetsOutcome,
+  type BulkRefreshAssetsResult,
   type BulkRegenResult,
   type BulkRegenTarget,
   type BulkUpdateOp,
@@ -297,6 +300,18 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   >(null);
   const [completeResult, setCompleteResult] =
     useState<BulkCompleteAndPublishResult | null>(null);
+  // 2026-06-25 bulk refresh-assets state machine click + result.
+  // Different from Complete & publish: this regenerates voice +
+  // short + hero+thumbnails for stories that already have all the
+  // assets but rendered with older defaults (old voice, hero not
+  // aligned to the short character). Preserves story_id / URL / SEO /
+  // comments. Plan: _plans/2026-06-25-bulk-complete-and-publish.md
+  // follow-up.
+  const [refreshConfirm, setRefreshConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [refreshResult, setRefreshResult] =
+    useState<BulkRefreshAssetsResult | null>(null);
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -646,6 +661,50 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     });
   }
 
+  function requestRefresh() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    setRefreshResult(null);
+    setRefreshConfirm(storyItems);
+  }
+
+  function runRefreshConfirmed() {
+    if (!refreshConfirm) return;
+    const items = refreshConfirm;
+    console.info("[content list refresh-assets request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkRefreshAssetsResult;
+      try {
+        result = await bulkRefreshAssetsAction(items);
+      } catch (err) {
+        result = {
+          startedCount: 0,
+          alreadyRefreshingCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list refresh-assets result]", {
+        startedCount: result.startedCount,
+        alreadyRefreshingCount: result.alreadyRefreshingCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setRefreshConfirm(null);
+      setRefreshResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   function runReclassify() {
     console.info("[content list reclassify submit]");
     setReclassifyConfirmOpen(false);
@@ -755,6 +814,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           result={completeResult}
           rowByKey={rowByKey}
           onDismiss={() => setCompleteResult(null)}
+        />
+      )}
+
+      {refreshResult && (
+        <RefreshResultBanner
+          result={refreshResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setRefreshResult(null)}
         />
       )}
 
@@ -922,6 +989,9 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   {r.kind === "story" && r.flagged && (
                     <FlaggedPill attempts={r.flagged_attempts} />
                   )}
+                  {r.kind === "story" && r.refresh_state && (
+                    <RefreshingPill state={r.refresh_state} />
+                  )}
                   {r.kind === "story" && r.progress && (
                     <ProgressPill snapshot={r.progress} />
                   )}
@@ -954,6 +1024,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           onRegen={requestRegen}
           onBulkPublish={runBulkPublish}
           onBulkComplete={requestComplete}
+          onBulkRefresh={requestRefresh}
           onClear={clearSelection}
         />
       )}
@@ -990,6 +1061,16 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           onRun={runRegenConfirmed}
         />
       )}
+
+      {refreshConfirm && (
+        <RefreshConfirmModal
+          items={refreshConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setRefreshConfirm(null)}
+          onRun={runRefreshConfirmed}
+        />
+      )}
     </>
   );
 }
@@ -1003,6 +1084,7 @@ function BulkActionBar({
   onRegen,
   onBulkPublish,
   onBulkComplete,
+  onBulkRefresh,
   onClear,
 }: {
   counts: { total: number; stories: number; articles: number };
@@ -1011,6 +1093,7 @@ function BulkActionBar({
   onRegen: (target: BulkRegenTarget) => void;
   onBulkPublish: (platforms: SocialPlatform[]) => void;
   onBulkComplete: () => void;
+  onBulkRefresh: () => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
@@ -1020,6 +1103,7 @@ function BulkActionBar({
   const regenDisabled = counts.stories === 0;
   const bulkPublishDisabled = counts.stories === 0;
   const completeDisabled = counts.stories === 0;
+  const refreshDisabled = counts.stories === 0;
   return (
     <div className="sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2 px-4 py-3 shadow-2xl">
       <span className="font-mono text-[11px] uppercase tracking-wider text-ink">
@@ -1040,6 +1124,17 @@ function BulkActionBar({
           accent
           disabled={disabled || completeDisabled}
           onClick={onBulkComplete}
+        />
+        {/* Refresh assets: voice + short + hero + thumbnails regenerated
+            in place. Preserves story_id / URL / SEO / comments. For the
+            case where a story is already published with stale media
+            (old voice, hero not aligned to short character) and
+            "Restart entire pipeline" refuses because reddit_source is
+            'used'. */}
+        <BarButton
+          label="Refresh assets"
+          disabled={disabled || refreshDisabled}
+          onClick={onBulkRefresh}
         />
         <BulkPublishPicker
           disabled={disabled || bulkPublishDisabled}
@@ -2335,4 +2430,193 @@ function labelFor(
 ): string {
   const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
   return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
+}
+
+// --- Refresh assets confirm modal + result banner + row pill ---------------
+// 2026-06-25 follow-up. Different from Complete & publish: this is the
+// "story is already live but its assets are stale" path. The action
+// enqueues a fresh voice render and the cron at /api/refresh_assets
+// chains voice -> short (force re-generation) -> hero+thumbnails
+// (finisher). Story_id / URL / SEO / comments are preserved.
+
+function RefreshConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="refresh-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="refresh-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Refresh assets for {items.length}{" "}
+          {items.length === 1 ? "story" : "stories"}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          For each story: re-render voice with the CURRENT defaults,
+          regenerate the short from scratch (picks up the new voice +
+          current scene defaults), then trigger the finisher to write
+          a fresh hero + 5 thumbnail variants from the new short&apos;s
+          character. Story id, URL, SEO, and comments are preserved.
+          The cron at /api/refresh_assets walks the chain every 1 min.
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          Worst case: ≈ $0.50 per story (full short re-generation +
+          5 hero/thumb i2i calls) · ≈ $
+          {(items.length * 0.5).toFixed(2)} total.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Starting…" : `Refresh ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RefreshResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkRefreshAssetsResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const skipped = result.outcomes.filter((o) => o.state === "skipped");
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  const previewSkipped = skipped.slice(0, 5);
+  const overflowSkipped = skipped.length - previewSkipped.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Refresh assets:</span> Started{" "}
+          <span className="text-accent">{result.startedCount}</span>
+          {result.alreadyRefreshingCount > 0
+            ? ` · Already refreshing ${result.alreadyRefreshingCount}`
+            : ""}
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+          <span className="ml-1 text-muted">
+            (watch the per-row pill — voice → short → hero usually
+            lands in 5-10 min)
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">{refreshLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70"> — {o.reason ?? "unknown"}</span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+      {previewSkipped.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Skipped
+          </li>
+          {previewSkipped.map((o) => (
+            <li key={`skip:${o.kind}:${o.id}`}>
+              <span className="text-ink">{refreshLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70"> — {o.reason ?? "—"}</span>
+            </li>
+          ))}
+          {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function refreshLabelFor(
+  outcome: BulkRefreshAssetsOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
+}
+
+const REFRESH_STATE_LABEL: Record<string, string> = {
+  voice_pending: "voice",
+  short_pending: "short",
+  hero_pending: "hero+thumb",
+};
+
+function RefreshingPill({ state }: { state: string }) {
+  const label = REFRESH_STATE_LABEL[state] ?? state;
+  return (
+    <span
+      title={`Refresh assets: ${state} — the /api/refresh_assets cron is walking voice → short → hero+thumbnails`}
+      className="mr-2 shrink-0 self-center rounded-full border border-accent/40 bg-accent/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-accent animate-pulse"
+    >
+      refresh · {label}
+    </span>
+  );
 }
