@@ -53,18 +53,13 @@ import {
   type LinkedArticleSummary,
   type SeoMetadataState,
 } from "@/app/admin/(panel)/shorts/[id]/actions";
-import type { StoryTabId } from "./tabs";
-
-// The 7 tabs this wrapper renders. Narrower than StoryTabId so the
-// switch below is exhaustive in TypeScript.
-type ShortClientTabId =
-  | "scenes"
-  | "captions"
-  | "style"
-  | "script"
-  | "voice"
-  | "publish"
-  | "render";
+// ShortClientTabId + asShortClientTab live in tabs.ts (server-safe).
+// Importing the value-form of either from this "use client" module
+// would make them client-only, and page.tsx (a Server Component) calls
+// asShortClientTab during render — which throws
+// "Attempted to call X() from the server" in production (fixed
+// 2026-06-25 after a tab-click 500 incident).
+import type { ShortClientTabId } from "./tabs";
 
 // A stable digest the render-after-edits banner re-polls on. Includes
 // every field the render plan diffs against so any edit triggers a fresh
@@ -376,22 +371,4 @@ function RenderTabContent({
       </div>
     </div>
   );
-}
-
-/** Narrowing helper for callers that only have a StoryTabId. Lets the
- *  parent gate on isShortClientTab() and then safely cast to the narrow
- *  ShortClientTabId without an `as`. */
-export function asShortClientTab(tab: StoryTabId): ShortClientTabId | null {
-  switch (tab) {
-    case "scenes":
-    case "captions":
-    case "style":
-    case "script":
-    case "voice":
-    case "publish":
-    case "render":
-      return tab;
-    default:
-      return null;
-  }
 }

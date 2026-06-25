@@ -60,11 +60,12 @@ import { latestShortRenderForStory } from "@/lib/short-render-queue";
 import { OverviewTab } from "./OverviewTab";
 import { StoryActionBar } from "./StoryActionBar";
 import { StoryTabBar } from "./StoryTabBar";
+import { StoryShortTabsClient } from "./StoryShortTabsClient";
 import {
   asShortClientTab,
-  StoryShortTabsClient,
-} from "./StoryShortTabsClient";
-import { isShortClientTab, resolveStoryTab } from "./tabs";
+  isShortClientTab,
+  resolveStoryTab,
+} from "./tabs";
 
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
