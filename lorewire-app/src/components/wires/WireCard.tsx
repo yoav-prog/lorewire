@@ -832,46 +832,44 @@ export default function WireCard({
         </div>
       </div>
 
-      {/* ── Control bar BELOW the video — title, Read CTA, actions ── */}
+      {/* ── Control bar BELOW the video — title row + poll wrapper ── */}
       <div
-        className="relative z-10 shrink-0 border-t border-line bg-black px-4 pt-3"
+        className="relative z-10 shrink-0 border-t border-line bg-black px-4 pt-2.5"
         style={{ paddingBottom: insetBottom }}
       >
-        {/* Engagement poll wrapper — only renders for wires with a live
-            poll, so wires without one keep the original control-bar
-            height. Sits above the title row so the question and answer
-            options form a clear visual container the eye lands on before
-            it walks down to the title + Read CTA. Plan:
-            _plans/2026-06-25-wires-poll-wrapper.md. */}
-        {short.poll && (
-          <div className="mb-2">
-            <WirePollPanel
-              storyId={short.id}
-              poll={short.poll}
-              pulseNonce={pollPulseNonce}
-              onVoted={onPollVoted}
-            />
-          </div>
-        )}
-        <div className="flex items-end gap-3">
-          <div className="min-w-0 flex-1">
-            <h2 className="line-clamp-2 font-display font-black uppercase tracking-tightest leading-[1.02] text-ink" style={{ fontSize: 17 }}>
+        {/* Title row sits FIRST so the order reads: video → "this is what
+            you watched" → "what do you think." Removing the dedicated
+            "Read the story" pill — the whole title row is now the tap
+            target, signalled by a small chevron after the title — gave
+            the video back ~40 px on every card without losing the
+            action. Engagement icons are icon-only (no stacked labels);
+            the heart's count surfaces inline once it crosses the
+            display threshold. */}
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenInfo(short.id, "Read");
+            }}
+            aria-label={`Read the story: ${short.title ?? "untitled"}`}
+            className="group flex min-w-0 flex-1 items-center gap-1.5 text-left active:opacity-80 transition"
+          >
+            <h2 className="line-clamp-1 min-w-0 font-display font-black uppercase tracking-tightest leading-[1.05] text-ink" style={{ fontSize: 16 }}>
               {short.title}
             </h2>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenInfo(short.id, "Read");
-              }}
-              className="mt-2 inline-flex items-center gap-2 rounded-[9px] bg-ink px-3.5 py-2 font-display text-[12px] font-bold uppercase tracking-tight text-bg active:scale-[.98] transition"
+            <span
+              aria-hidden
+              className="shrink-0 font-display text-[14px] font-bold text-ink/55 transition-transform group-hover:translate-x-0.5 group-hover:text-ink/80"
             >
-              Read the story
-            </button>
-          </div>
+              →
+            </span>
+          </button>
 
-          {/* Engagement — Like is server-counted (shown past a threshold), Save
-              writes the real My List, Share to the public /v/[slug]. */}
-          <div className="flex shrink-0 items-end gap-3.5 pb-0.5">
+          {/* Engagement — icon-only row. Like is server-counted (count
+              shows past a threshold, inline next to the heart), Save
+              writes the real My List, Share opens our own ShareSheet. */}
+          <div className="flex shrink-0 items-center gap-4 text-ink">
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -879,12 +877,17 @@ export default function WireCard({
               }}
               aria-label={liked ? "Unlike" : "Like"}
               aria-pressed={liked}
-              className="flex flex-col items-center gap-0.5 text-ink active:scale-90 transition"
+              className="flex items-center gap-1 active:scale-90 transition"
             >
-              <HeartIcon filled={liked} />
-              <span className="font-body text-[10px] font-semibold tabular-nums" style={{ color: liked ? "var(--color-accent)" : undefined }}>
-                {showCount ? formatCount(likeCount) : "Like"}
-              </span>
+              <HeartIcon filled={liked} size={22} />
+              {showCount && (
+                <span
+                  className="font-body text-[11px] font-semibold tabular-nums"
+                  style={{ color: liked ? "var(--color-accent)" : undefined }}
+                >
+                  {formatCount(likeCount)}
+                </span>
+              )}
             </button>
             <button
               onClick={(e) => {
@@ -893,12 +896,10 @@ export default function WireCard({
               }}
               aria-label={saved ? "Remove from My List" : "Save to My List"}
               aria-pressed={saved}
-              className="flex flex-col items-center gap-0.5 text-ink active:scale-90 transition"
+              className="active:scale-90 transition"
+              style={{ color: saved ? "var(--color-accent)" : undefined }}
             >
-              <BookmarkIcon filled={saved} />
-              <span className="font-body text-[10px] font-semibold" style={{ color: saved ? "var(--color-accent)" : undefined }}>
-                {saved ? "Saved" : "Save"}
-              </span>
+              <BookmarkIcon filled={saved} size={21} />
             </button>
             <button
               onClick={(e) => {
@@ -906,13 +907,28 @@ export default function WireCard({
                 setShareOpen(true);
               }}
               aria-label="Share"
-              className="flex flex-col items-center gap-0.5 text-ink active:scale-90 transition"
+              className="active:scale-90 transition"
             >
-              <ShareUpIcon />
-              <span className="font-body text-[10px] font-semibold">Share</span>
+              <ShareUpIcon size={21} />
             </button>
           </div>
         </div>
+
+        {/* Engagement poll wrapper — sits BELOW the title row so the eye
+            walks "this is what you watched → what do you think." Wires
+            without a live poll skip the section and keep the original
+            control-bar height. Plan:
+            _plans/2026-06-25-wires-poll-wrapper.md. */}
+        {short.poll && (
+          <div className="mt-2.5">
+            <WirePollPanel
+              storyId={short.id}
+              poll={short.poll}
+              pulseNonce={pollPulseNonce}
+              onVoted={onPollVoted}
+            />
+          </div>
+        )}
       </div>
 
       {shareOpen && (
