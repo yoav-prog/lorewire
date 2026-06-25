@@ -28,6 +28,7 @@ import {
 } from "./actions";
 import { ShortEditorClient } from "./ShortEditorClient";
 import { ShortSegmentsStatusCard } from "./ShortSegmentsStatusCard";
+import { StoryTitleHeader } from "./StoryTitleHeader";
 
 export default async function ShortEditorPage({
   params,
@@ -173,9 +174,9 @@ export default async function ShortEditorPage({
             <span>·</span>
             <span>Short editor</span>
           </div>
-          <h1 className="mt-1 text-base font-semibold text-ink">
-            {story.title ?? "(untitled)"}
-          </h1>
+          <div className="mt-1">
+            <StoryTitleHeader storyId={id} initialTitle={story.title ?? null} />
+          </div>
         </div>
         <div className="font-mono text-[10px] uppercase tracking-wider text-muted">
           Scenes · Captions · Script · Voice

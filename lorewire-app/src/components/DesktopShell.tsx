@@ -41,6 +41,7 @@ import {
   type HomepageInitial,
   type MergedCatalog,
 } from "@/lib/homepage-rails";
+import { heroTitleFontSizeDesktop, heroTitleBucket } from "@/lib/hero-title-size";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import { useStoryPlayEvents } from "@/lib/use-story-play-events";
 import {
@@ -230,6 +231,36 @@ function TopNav({ view, setView, solid, query, setQuery, session }: { view: stri
 // constant only controls the auto-advance cadence.
 const HERO_ROTATION_INTERVAL_MS = 7000;
 
+// Length-aware <h1> for the hero title. Pre-floor the hero hardcoded
+// fontSize: 84 for every title, which wrapped a 99-char title into 9
+// lines. Now the size buckets down for over-length titles so the hero
+// stays composed even when a bad title leaks past the pipeline gate
+// (plan: _plans/2026-06-25-title-length-gate.md, Layer 2).
+function HeroTitleH1({ title, storyId }: { title: string; storyId: string }) {
+  const fontSize = heroTitleFontSizeDesktop(title);
+  // Log when the floor fires so we can grep how often Layer 1 leaks.
+  // A high rate here is the signal to retune the Python pipeline.
+  if (fontSize < 84) {
+    // eslint-disable-next-line no-console -- rule 14: namespaced observability
+    console.info("[hero title size]", {
+      surface: "desktop",
+      storyId,
+      chars: title.length,
+      words: title.trim().split(/\s+/).length,
+      bucket: heroTitleBucket(title),
+      fontSize,
+    });
+  }
+  return (
+    <h1
+      className="font-display font-black uppercase tracking-tightest leading-[.88] text-ink ink-shadow"
+      style={{ fontSize }}
+    >
+      {title}
+    </h1>
+  );
+}
+
 function Hero({
   pool,
   onOpen,
@@ -361,7 +392,7 @@ function Hero({
               <span className="w-[3px] h-4 bg-accent rounded-full"></span>
               <span className="font-mono text-[11px] uppercase tracking-[.36em] text-ink/90">LoreWire Original</span>
             </div>
-            <h1 className="font-display font-black uppercase tracking-tightest leading-[.88] text-ink ink-shadow" style={{ fontSize: 84 }}>{story.title}</h1>
+            <HeroTitleH1 title={story.title} storyId={story.id} />
             <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
               <span className="font-semibold text-[15px]" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
               <span className="text-muted">·</span><span className="text-ink/80 text-[15px]">{story.year}</span>

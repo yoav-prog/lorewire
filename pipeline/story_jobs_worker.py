@@ -343,7 +343,12 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         "reddit_id": idea["reddit_id"],
         "slug": idea["reddit_id"],
         "category": idea["category"],
-        "title": branded_title or idea["headline"],
+        # `branded_title` is guaranteed non-empty and length-gated by
+        # stages.make_title_and_synopsis (validator + retry + salvage).
+        # The pre-2026-06-25 `or idea["headline"]` fallback was the
+        # mechanism by which 99-char Reddit headlines reached the live
+        # hero. Plan: _plans/2026-06-25-title-length-gate.md.
+        "title": branded_title,
         "summary": branded_syn or post.get("selftext", "")[:160],
         "body": body,
         # Fresh from the worker lands in review, never published — the

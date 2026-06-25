@@ -288,6 +288,41 @@ export async function setStoryNoindexAction(
   revalidatePath(`/admin/videos/${id}`);
 }
 
+// Plan: _plans/2026-06-25-title-length-gate.md (Layer 3).
+// One-click admin recovery for when the pipeline's title gate lets a
+// too-long title through. Calls into the lib/title-regenerator module
+// which runs the same LLM prompt as the Python pipeline, validates the
+// new title against the length policy, and writes it to stories.title.
+export type RegenerateStoryTitleActionResult =
+  | { ok: true; title: string; previousTitle: string | null }
+  | { ok: false; error: string };
+
+export async function regenerateStoryTitleAction(
+  storyId: string,
+): Promise<RegenerateStoryTitleActionResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story id" };
+  const { regenerateTitleForStory } = await import("@/lib/title-regenerator");
+  const result = await regenerateTitleForStory(storyId);
+  console.info("[admin title regen]", {
+    storyId,
+    actorId: session.userId,
+    ok: result.ok,
+    stage: result.ok ? "ok" : result.stage,
+  });
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+  revalidatePath(`/admin/shorts/${storyId}`);
+  revalidatePath(`/admin/videos/${storyId}`);
+  revalidatePath("/admin");
+  return {
+    ok: true,
+    title: result.title,
+    previousTitle: result.previousTitle,
+  };
+}
+
 // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: per-story aspect
 // override. Lives inside `video_config.aspect` (the same field the renderer
 // reads via `resolveAspect`). When the story has no video_config yet we

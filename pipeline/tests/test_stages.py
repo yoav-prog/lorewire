@@ -101,6 +101,140 @@ class ParseTitleSynopsisTests(unittest.TestCase):
         self.assertEqual((title, syn), ("", ""))
 
 
+class TitleLengthGateTests(unittest.TestCase):
+    """Plan: _plans/2026-06-25-title-length-gate.md. Guards three things:
+    the bounds check itself, the LLM retry path when the first attempt fails,
+    and the deterministic salvage when both LLM attempts fail."""
+
+    def test_within_bounds_accepts_brand_voice_titles(self):
+        # The TITLE_STYLE_EXAMPLES list is the canonical "voice" set;
+        # every entry must pass the gate or the gate is misconfigured.
+        for example in stages.TITLE_STYLE_EXAMPLES:
+            self.assertTrue(
+                stages._title_within_bounds(example),
+                f"style example failed gate: {example}",
+            )
+
+    def test_within_bounds_rejects_the_cinnamon_roll_title(self):
+        # The exact 99-char string that reached the hero on 2026-06-25.
+        bad = (
+            "MY SON ATE THE MIDDLES OUT OF EVERY CINNAMON ROLL BEFORE "
+            "I GOT TO THE TABLE THIS MORNING."
+        )
+        self.assertFalse(stages._title_within_bounds(bad))
+
+    def test_within_bounds_rejects_empty(self):
+        self.assertFalse(stages._title_within_bounds(""))
+        self.assertFalse(stages._title_within_bounds("   "))
+
+    def test_within_bounds_rejects_too_many_words(self):
+        # 9 short words is within 50 chars but past the 8-word cap.
+        nine_words = "ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE"
+        self.assertLessEqual(len(nine_words), stages.TITLE_MAX_CHARS)
+        self.assertFalse(stages._title_within_bounds(nine_words))
+
+    def test_salvage_prefers_body_first_sentence(self):
+        body = "She sent one envelope and the office never recovered."
+        out = stages._salvage_title_from_body(body, "AITA for invoicing?")
+        self.assertTrue(stages._title_within_bounds(out))
+        self.assertTrue(out.isupper())
+        # Should pull from the body, not the headline.
+        self.assertNotIn("AITA", out)
+
+    def test_salvage_falls_back_to_headline_when_body_unusable(self):
+        # Empty body should make the salvage reach for the headline.
+        out = stages._salvage_title_from_body("", "Wrong Number Right Guy")
+        self.assertTrue(stages._title_within_bounds(out))
+        self.assertTrue(out.isupper())
+
+    def test_salvage_truncates_long_headlines_at_word_boundary(self):
+        long_headline = (
+            "My son ate the middles out of every cinnamon roll before "
+            "I got to the table this morning"
+        )
+        out = stages._salvage_title_from_body("", long_headline)
+        self.assertTrue(stages._title_within_bounds(out))
+        # Must end on a whole word, never mid-word.
+        self.assertFalse(out.endswith(("-", " ")))
+        for word in out.split():
+            self.assertIn(word.lower(), long_headline.lower())
+
+    def test_salvage_returns_placeholder_for_empty_inputs(self):
+        out = stages._salvage_title_from_body("", "")
+        self.assertTrue(out)
+        self.assertTrue(stages._title_within_bounds(out))
+
+    def test_make_title_retries_on_too_long(self):
+        # First call returns a too-long title (forces retry); second call
+        # returns a clean one. We mock `pipeline.llm.chat` so no network.
+        calls = {"n": 0}
+
+        def fake_chat(prompt: str, max_tokens: int, model: str = "") -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (
+                    '{"title": "MY SON ATE THE MIDDLES OUT OF EVERY '
+                    'CINNAMON ROLL BEFORE I GOT TO THE TABLE THIS MORNING", '
+                    '"synopsis": "A short synopsis of the breakfast story '
+                    'told over twenty words with a small hook for the reader."}'
+                )
+            return (
+                '{"title": "THE CINNAMON ROLL HEIST", '
+                '"synopsis": "A short synopsis of the breakfast story told '
+                'over twenty words with a small hook for the reader."}'
+            )
+
+        from pipeline import llm as llm_mod
+
+        original = llm_mod.chat
+        llm_mod.chat = fake_chat  # type: ignore[assignment]
+        try:
+            title, syn = stages.make_title_and_synopsis(
+                {"headline": "AITA for cinnamon rolls", "category": "Humor"},
+                body="The boy reached the kitchen first.",
+                dry_run=False,
+            )
+        finally:
+            llm_mod.chat = original
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(title, "THE CINNAMON ROLL HEIST")
+        self.assertTrue(stages._title_within_bounds(title))
+        self.assertTrue(syn)
+
+    def test_make_title_salvages_when_both_attempts_fail(self):
+        # Both LLM responses violate the gate; salvage must fire and the
+        # final title must still pass the gate (the worker's invariant).
+        too_long = (
+            '{"title": "AN EXTREMELY LONG TITLE THAT GOES WELL PAST THE '
+            'FIFTY CHARACTER CAP AND THEN SOME MORE", "synopsis": "A long '
+            'synopsis written for the test that fills out enough words to '
+            'satisfy any reasonable lower bound."}'
+        )
+
+        def fake_chat(prompt: str, max_tokens: int, model: str = "") -> str:
+            return too_long
+
+        from pipeline import llm as llm_mod
+
+        original = llm_mod.chat
+        llm_mod.chat = fake_chat  # type: ignore[assignment]
+        try:
+            title, syn = stages.make_title_and_synopsis(
+                {"headline": "Coworker took the envelope", "category": "Drama"},
+                body="Sarah noticed the envelope was lighter than yesterday.",
+                dry_run=False,
+            )
+        finally:
+            llm_mod.chat = original
+
+        self.assertTrue(title)
+        self.assertTrue(stages._title_within_bounds(title))
+        # Never the raw Reddit headline.
+        self.assertNotIn("AITA", title.upper())
+        self.assertTrue(syn)
+
+
 class StripPromptWrappersTests(unittest.TestCase):
     """Used by make_character_prompt to pull a plain prompt out of whatever
     surface the LLM wraps it in. Locks the contract so a small model that

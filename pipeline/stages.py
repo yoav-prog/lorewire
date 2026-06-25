@@ -1007,6 +1007,63 @@ TITLE_STYLE_EXAMPLES = [
     "MY ROOMMATE'S 3AM RULES",
 ]
 
+# Length gate (plan: _plans/2026-06-25-title-length-gate.md).
+# The hero typography wraps cleanly under ~50 chars / 8 words. Past that
+# point the title visually dominates the hero — see the 2026-06-25
+# "cinnamon roll" incident, a 99-char Reddit headline that reached the
+# live hero because the LLM returned an empty branded title and the
+# worker silently fell back to the raw post title.
+TITLE_MAX_CHARS = 50
+TITLE_MAX_WORDS = 8
+
+
+def _title_within_bounds(title: str) -> bool:
+    """Length gate for branded titles. A title past either bound is rejected
+    by `make_title_and_synopsis` and triggers the retry/salvage path."""
+    cleaned = title.strip()
+    if not cleaned:
+        return False
+    if len(cleaned) > TITLE_MAX_CHARS:
+        return False
+    if len(cleaned.split()) > TITLE_MAX_WORDS:
+        return False
+    return True
+
+
+def _salvage_title_from_body(body: str, headline: str) -> str:
+    """Last-resort title producer for when the LLM returns garbage twice.
+
+    Walks the article body's first sentence for a short noun-phrase, then
+    falls back to the Reddit headline truncated at a word boundary. Always
+    returns a non-empty string within `TITLE_MAX_CHARS` / `TITLE_MAX_WORDS`
+    so the worker never has to ship a raw Reddit headline to the live site.
+    """
+    # Try the article body's first sentence first — it's the editorial voice,
+    # so a chopped version reads better than a chopped Reddit question.
+    for candidate in (body or "").split("."):
+        words = candidate.strip().split()
+        if not words:
+            continue
+        head = " ".join(words[:TITLE_MAX_WORDS])
+        if len(head) <= TITLE_MAX_CHARS and len(head) >= 6:
+            return head.upper()
+        break  # only consider the first sentence; deeper isn't more relevant
+    # Headline fallback: truncate at the last word boundary that fits.
+    words = (headline or "").split()
+    bag: list[str] = []
+    for w in words[:TITLE_MAX_WORDS]:
+        nxt = " ".join(bag + [w])
+        if len(nxt) > TITLE_MAX_CHARS:
+            break
+        bag.append(w)
+    salvaged = " ".join(bag).strip()
+    if not salvaged:
+        # Empty body AND empty headline: emit a placeholder rather than "" so
+        # downstream NOT NULL constraints / "ready for publish" gates still
+        # pass. The admin sees the placeholder and uses the regenerate button.
+        salvaged = "Untitled Story"
+    return salvaged.upper()
+
 
 def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, str]:
     """Generate a branded LoreWire title + 1-sentence synopsis from the article.
@@ -1016,6 +1073,12 @@ def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, 
     title + synopsis the CMS publishes. Both are also Typography-cleaned so
     smart quotes / em dashes never sneak in. Dry-run returns deterministic
     stubs so the rest of the pipeline can run end to end without an LLM key.
+
+    Length gate (plan: _plans/2026-06-25-title-length-gate.md): the parsed
+    title is validated against `_title_within_bounds`. A failure triggers
+    one retry with a stricter prompt that quotes the rejected attempt; a
+    second failure salvages a short title from the article body so the
+    return value is always non-empty and always within bounds.
     """
     from pipeline import llm
 
@@ -1029,7 +1092,8 @@ def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, 
         "You write headlines for LoreWire, where true internet stories are "
         "retold as short, vivid pieces. Read the article below and return "
         "exactly one JSON object with two keys:\n"
-        '  "title": a short branded title, ALL CAPS, 2 to 6 words, evocative, '
+        f'  "title": a short branded title, ALL CAPS, 2 to 6 words, at most '
+        f"{TITLE_MAX_CHARS} characters total, evocative, "
         "no question marks, no Reddit-isms (\"AITA\", \"WIBTA\"), no leading "
         '"THE STORY OF". The same voice as these:\n'
         f"{examples}\n"
@@ -1045,6 +1109,43 @@ def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, 
     # the JSON object after reasoning.
     raw = llm.chat(instruction, 2000, model="openai/gpt-5-nano").strip()
     title, synopsis = _parse_title_synopsis(raw)
+    print(
+        f"[stages title gate] attempt=1 chars={len(title)} "
+        f"words={len(title.split())} accepted={_title_within_bounds(title)}"
+    )
+    if not _title_within_bounds(title):
+        # One retry, quoting the rejected attempt so the model can self-correct
+        # against its own output rather than the abstract rule.
+        retry_instruction = (
+            f'Your previous title attempt was rejected: "{title}" '
+            f"({len(title)} characters, {len(title.split())} words). "
+            f"It exceeds the LoreWire length cap of {TITLE_MAX_CHARS} characters "
+            f"and {TITLE_MAX_WORDS} words.\n\n"
+            f"{instruction}"
+        )
+        raw_retry = llm.chat(
+            retry_instruction, 2000, model="openai/gpt-5-nano"
+        ).strip()
+        retry_title, retry_synopsis = _parse_title_synopsis(raw_retry)
+        print(
+            f"[stages title gate] attempt=2 chars={len(retry_title)} "
+            f"words={len(retry_title.split())} "
+            f"accepted={_title_within_bounds(retry_title)}"
+        )
+        if _title_within_bounds(retry_title):
+            title, synopsis = retry_title, retry_synopsis or synopsis
+        else:
+            # Both LLM attempts failed. Salvage a short title from the body so
+            # the worker never has to fall back to the raw Reddit headline.
+            salvaged = _salvage_title_from_body(body, idea.get("headline", ""))
+            print(
+                f"[stages title salvaged] chars={len(salvaged)} "
+                f'words={len(salvaged.split())} value="{salvaged}"'
+            )
+            title = salvaged
+            # Preserve the LLM's synopsis if we got one on either attempt,
+            # otherwise compose a minimal stub so the row isn't half-populated.
+            synopsis = synopsis or retry_synopsis or (body or "").split(".")[0][:160]
     return _clean_typography(title), _clean_typography(synopsis)
 
 
