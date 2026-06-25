@@ -648,6 +648,30 @@ export async function enqueueImageRegenAction(opts: {
     };
   }
 
+  // 2026-06-25: when the operator explicitly clicks "Generate hero +
+  // thumbnail from short" on a story that already has variants, the
+  // Python finisher's resume optimization (pipeline/media.py:1711)
+  // emits `variant_resumed ... already persisted — skipping i2i` and
+  // silently keeps the OLD URLs. That logic is correct for the
+  // crash-recovery case (cron reclaimed a mid-flight row, don't
+  // re-bill kie for what already landed) but wrong for the
+  // operator-clicked-regen case. NULL the 5 columns here so the
+  // finisher sees no persisted URLs and treats every variant as a
+  // fresh i2i call. Same workaround the /api/refresh_assets cron
+  // uses in advanceShortPending.
+  if (ownerKind === "story" && asset === "hero_thumbnail_from_short") {
+    await run(
+      "UPDATE stories SET hero_image = NULL, hero_image_landscape = NULL, " +
+        "thumbnail_image = NULL, thumbnail_image_landscape = NULL, " +
+        "thumbnail_image_square = NULL WHERE id = ?",
+      [ownerId],
+    );
+    console.info("[image regen action] cleared hero+thumbnail variants", {
+      owner_id: ownerId,
+      reason: "operator regen, bypass finisher resume-skip",
+    });
+  }
+
   const fresh = await enqueueImageRegen({
     ownerKind,
     ownerId,
