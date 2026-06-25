@@ -17,12 +17,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
+  bulkCompleteAndPublishAction,
   bulkPublishToSocialsAction,
   bulkUpdateContentAction,
   bulkDeleteContentAction,
   bulkReclassifyStoriesAction,
   bulkRegenerateContentAction,
   type BulkActionResult,
+  type BulkCompleteAndPublishOutcome,
+  type BulkCompleteAndPublishResult,
   type BulkContentItem,
   type BulkPublishResult,
   type BulkRegenResult,
@@ -284,6 +287,15 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   const [publishResult, setPublishResult] = useState<BulkPublishResult | null>(
     null,
   );
+  // 2026-06-25 bulk complete-and-publish. `completeConfirm` opens the
+  // cost confirmation; `completeResult` shows the per-row outcome
+  // banner after the action returns. Plan:
+  // _plans/2026-06-25-bulk-complete-and-publish.md.
+  const [completeConfirm, setCompleteConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [completeResult, setCompleteResult] =
+    useState<BulkCompleteAndPublishResult | null>(null);
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -589,6 +601,50 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     });
   }
 
+  function requestComplete() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    setCompleteResult(null);
+    setCompleteConfirm(storyItems);
+  }
+
+  function runCompleteConfirmed() {
+    if (!completeConfirm) return;
+    const items = completeConfirm;
+    console.info("[content list complete-and-publish request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkCompleteAndPublishResult;
+      try {
+        result = await bulkCompleteAndPublishAction(items);
+      } catch (err) {
+        result = {
+          flaggedCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            missing: [],
+            enqueued: [],
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list complete-and-publish result]", {
+        flaggedCount: result.flaggedCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setCompleteConfirm(null);
+      setCompleteResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   function runReclassify() {
     console.info("[content list reclassify submit]");
     setReclassifyConfirmOpen(false);
@@ -690,6 +746,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           result={publishResult}
           rowByKey={rowByKey}
           onDismiss={() => setPublishResult(null)}
+        />
+      )}
+
+      {completeResult && (
+        <CompleteResultBanner
+          result={completeResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setCompleteResult(null)}
         />
       )}
 
@@ -882,6 +946,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           onAction={(op) => requestAction(selectedItems, op)}
           onRegen={requestRegen}
           onBulkPublish={runBulkPublish}
+          onBulkComplete={requestComplete}
           onClear={clearSelection}
         />
       )}
@@ -895,6 +960,16 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           pending={pending}
           onCancel={() => setConfirm(null)}
           onRun={runConfirmed}
+        />
+      )}
+
+      {completeConfirm && (
+        <CompleteConfirmModal
+          items={completeConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setCompleteConfirm(null)}
+          onRun={runCompleteConfirmed}
         />
       )}
 
@@ -920,6 +995,7 @@ function BulkActionBar({
   onAction,
   onRegen,
   onBulkPublish,
+  onBulkComplete,
   onClear,
 }: {
   counts: { total: number; stories: number; articles: number };
@@ -927,6 +1003,7 @@ function BulkActionBar({
   onAction: (op: BulkUpdateOp | { type: "delete" }) => void;
   onRegen: (target: BulkRegenTarget) => void;
   onBulkPublish: (platforms: SocialPlatform[]) => void;
+  onBulkComplete: () => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
@@ -935,6 +1012,7 @@ function BulkActionBar({
   // only. Mixed selections light up but the server filters to stories.
   const regenDisabled = counts.stories === 0;
   const bulkPublishDisabled = counts.stories === 0;
+  const completeDisabled = counts.stories === 0;
   return (
     <div className="sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2 px-4 py-3 shadow-2xl">
       <span className="font-mono text-[11px] uppercase tracking-wider text-ink">
@@ -944,6 +1022,18 @@ function BulkActionBar({
         </span>
       </span>
       <div className="ml-auto flex flex-wrap items-center gap-2">
+        {/* Complete & Publish: the one-click "fill in missing assets +
+            publish to all socials when ready" button. Placed left of the
+            existing PUBLISH TO SOCIALS picker because it supersedes that
+            flow for the common case (all four platforms, auto). Stays
+            disabled when the selection has no video stories — articles
+            don't have a short to publish. */}
+        <BarButton
+          label="Complete & publish"
+          accent
+          disabled={disabled || completeDisabled}
+          onClick={onBulkComplete}
+        />
         <BulkPublishPicker
           disabled={disabled || bulkPublishDisabled}
           disabledHint={
@@ -1023,24 +1113,30 @@ function BulkActionBar({
 function BarButton({
   label,
   danger,
+  accent,
   disabled,
   onClick,
 }: {
   label: string;
   danger?: boolean;
+  /** Primary highlight — used for the "Complete & publish" action so it
+   *  reads as the recommended one-click path next to the more granular
+   *  pickers around it. */
+  accent?: boolean;
   disabled: boolean;
   onClick: () => void;
 }) {
+  const tone = danger
+    ? "border-danger/50 text-danger hover:bg-danger hover:text-bg"
+    : accent
+      ? "border-accent bg-accent/10 text-accent hover:bg-accent hover:text-bg"
+      : "border-line text-ink hover:border-accent hover:text-accent";
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-md border px-3 py-1 font-mono text-[11px] uppercase tracking-wider transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-        danger
-          ? "border-danger/50 text-danger hover:bg-danger hover:text-bg"
-          : "border-line text-ink hover:border-accent hover:text-accent"
-      }`}
+      className={`rounded-md border px-3 py-1 font-mono text-[11px] uppercase tracking-wider transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${tone}`}
     >
       {label}
     </button>
@@ -1967,4 +2063,175 @@ function BulkPublishResultBanner({
       )}
     </div>
   );
+}
+
+// --- Bulk complete-and-publish modal + banner -------------------------------
+// 2026-06-25. Same modal/banner pattern as RegenConfirmModal +
+// RegenResultBanner. The action is asynchronous: clicking it
+// enqueues missing assets and FLAGS the stories — the cron at
+// /api/auto_complete_publish drives the actual publishes minutes
+// later. The modal warns about the cost; the banner reports what
+// got flagged vs skipped vs errored.
+
+function CompleteConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="complete-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="complete-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Complete &amp; publish {items.length}{" "}
+          {items.length === 1 ? "story" : "stories"}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          For each story missing an asset (article body, hero,
+          thumbnails, short, voiceover, scene images, or poll), the
+          missing pieces will be enqueued through the existing
+          pipeline. A 2-minute cron then publishes each story to all
+          four socials (Facebook + Instagram Reels &amp; Stories, YouTube,
+          TikTok) the moment every asset is ready.
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          Worst case (full pipeline restart): ≈ $0.50 per story · ≈ $
+          {(items.length * 0.5).toFixed(2)} total. Already-complete
+          stories cost nothing. The cron flags and publishes them on
+          the next tick.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Flagging…" : `Flag ${items.length} for auto-publish`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompleteResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkCompleteAndPublishResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const skipped = result.outcomes.filter((o) => o.state === "skipped");
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  const previewSkipped = skipped.slice(0, 5);
+  const overflowSkipped = skipped.length - previewSkipped.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Complete &amp; publish:</span> Flagged{" "}
+          <span className="text-accent">{result.flaggedCount}</span>{" "}
+          <span className="text-muted">
+            (cron will publish each within ~2 min of being ready)
+          </span>
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">
+                {labelFor(o, rowByKey)}
+              </span>
+              <span className="opacity-70"> — {o.reason ?? "unknown"}</span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+      {previewSkipped.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Skipped (no flag set)
+          </li>
+          {previewSkipped.map((o) => (
+            <li key={`skip:${o.kind}:${o.id}`}>
+              <span className="text-ink">{labelFor(o, rowByKey)}</span>
+              <span className="opacity-70"> — {o.reason ?? "—"}</span>
+            </li>
+          ))}
+          {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function labelFor(
+  outcome: BulkCompleteAndPublishOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
 }

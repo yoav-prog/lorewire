@@ -118,6 +118,33 @@ export const STORIES: Table = {
     // against stories.updated_at to decide whether to regenerate when
     // a story's teleprompter has been edited since the last run.
     { name: "seo_metadata_generated_at", type: "TEXT" },
+    // 2026-06-25 hero / poster / per-platform thumbnail variants.
+    // These four columns are written by the Python hero+thumbnail
+    // finisher (pipeline/media.py::_HERO_THUMB_VARIANTS) alongside
+    // the hero_image column above; together they're the five outputs
+    // of one atomic image-render job. Declared here so the TS
+    // additive ALTER picks them up on fresh DBs (the Python
+    // ALTER is idempotent so co-declaring is safe), and so the
+    // asset-completeness gate can SELECT them without a try/catch
+    // dance against environments where the Python pipeline hasn't
+    // run yet. The TS side never writes here.
+    { name: "hero_image_landscape", type: "TEXT" },
+    { name: "thumbnail_image", type: "TEXT" },
+    { name: "thumbnail_image_landscape", type: "TEXT" },
+    { name: "thumbnail_image_square", type: "TEXT" },
+    // 2026-06-25 bulk complete-and-publish
+    // (_plans/2026-06-25-bulk-complete-and-publish.md). Flag the
+    // /api/auto_complete_publish cron watches. 1 = enqueue social
+    // publishes the moment evaluateAssetCompleteness() passes. The
+    // bulk action sets this AFTER enqueueing every missing asset,
+    // so a flagged-but-not-yet-ready story always has the renders in
+    // flight. The cron clears it back to 0 on a successful publish
+    // OR when auto_publish_attempts exceeds the per-story retry cap
+    // (so a permanently-stuck asset can't pile up infinite work).
+    { name: "auto_publish_when_ready", type: "INTEGER" },
+    // Per-story retry counter the cron increments on every NOT-READY
+    // visit. Hard cap lives in settings.auto_publish.max_attempts.
+    { name: "auto_publish_attempts", type: "INTEGER" },
   ],
 };
 
