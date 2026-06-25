@@ -41,6 +41,7 @@ import {
 import type {
   ContentRow,
   ContentSubKind,
+  ProgressSnapshot,
   PublishedOn,
   SocialPlatform,
 } from "@/lib/repo";
@@ -920,6 +921,9 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   )}
                   {r.kind === "story" && r.flagged && (
                     <FlaggedPill attempts={r.flagged_attempts} />
+                  )}
+                  {r.kind === "story" && r.progress && (
+                    <ProgressPill snapshot={r.progress} />
                   )}
                   <span
                     className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
@@ -1848,6 +1852,62 @@ function FlaggedPill({ attempts }: { attempts: number }) {
       flagged{attempts > 0 ? ` · ${attempts}` : ""}
     </span>
   );
+}
+
+// --- Per-row in-flight progress pill ----------------------------------------
+// 2026-06-25. Renders only for stories with an active short_renders /
+// image_renders / voice_renders / story_jobs row. The aggregator in
+// repo.ts picks the most-prominent signal per story; this just paints
+// it. Rendering = warn-accent, queued = muted-accent. Tooltip carries
+// the full context for ops-debug.
+
+const PROGRESS_KIND_LABEL: Record<ProgressSnapshot["kind"], string> = {
+  short: "short",
+  images: "images",
+  voice: "voice",
+  pipeline: "pipeline",
+};
+
+function ProgressPill({ snapshot }: { snapshot: ProgressSnapshot }) {
+  const active = snapshot.status === "rendering" || snapshot.status === "processing";
+  const tone = active
+    ? "border-warn/50 bg-warn/15 text-warn animate-pulse"
+    : "border-warn/40 bg-warn/10 text-warn/80";
+  const label = formatProgressLabel(snapshot);
+  const tooltip = formatProgressTooltip(snapshot);
+  return (
+    <span
+      title={tooltip}
+      className={`mr-2 shrink-0 self-center rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${tone}`}
+    >
+      {label}
+    </span>
+  );
+}
+
+function formatProgressLabel(snapshot: ProgressSnapshot): string {
+  const kindLabel =
+    snapshot.kind === "images" && snapshot.count
+      ? `${snapshot.count} ${snapshot.count === 1 ? "image" : "images"}`
+      : PROGRESS_KIND_LABEL[snapshot.kind];
+  const parts: string[] = [kindLabel];
+  if (snapshot.progressPct != null) {
+    parts.push(`${snapshot.progressPct}%`);
+  } else {
+    parts.push(snapshot.status);
+  }
+  if (snapshot.phase) parts.push(snapshot.phase);
+  return parts.join(" · ");
+}
+
+function formatProgressTooltip(snapshot: ProgressSnapshot): string {
+  const parts: string[] = [
+    `${PROGRESS_KIND_LABEL[snapshot.kind]} ${snapshot.status}`,
+  ];
+  if (snapshot.progressPct != null) parts.push(`${snapshot.progressPct}%`);
+  if (snapshot.phase) parts.push(`phase: ${snapshot.phase}`);
+  if (snapshot.count != null) parts.push(`${snapshot.count} job(s)`);
+  return parts.join(" · ");
 }
 
 // --- Per-row published-on icon strip ----------------------------------------

@@ -1508,6 +1508,10 @@ export interface ContentRow {
    *  Articles always read both as false / 0 (no flag column). */
   flagged: boolean;
   flagged_attempts: number;
+  /** 2026-06-25 most-prominent active render for this story (short,
+   *  images, voice, or pipeline). NULL when nothing is in flight.
+   *  Articles are always NULL. */
+  progress: ProgressSnapshot | null;
 }
 
 /** 2026-06-24 Content inbox: latest story_jobs row status per story.
@@ -1544,6 +1548,11 @@ export interface ListContentOpts {
    *  auto-publish cron. Articles never carry the flag so the article
    *  half drops out the moment this is true. */
   flagged?: boolean;
+  /** 2026-06-25 in-flight filter. "any" = any active render across
+   *  short / images / voice / pipeline; the specific kinds narrow
+   *  to one source table. Applied in-memory after the row +
+   *  progress join (same shape as publishedOn/jobStatus). */
+  activeKind?: ProgressKind | "any";
   limit?: number;
 }
 
@@ -1619,6 +1628,200 @@ export async function getAutoPublishFlaggedSummary(): Promise<AutoPublishFlagged
     flagged: Number(row?.flagged ?? 0),
     struggling: Number(row?.struggling ?? 0),
   };
+}
+
+// 2026-06-25 per-row "what's actively running for this story" snapshot.
+// Aggregates short_renders + image_renders + voice_renders + story_jobs
+// in 4 parallel SELECTs and picks the single most-prominent active
+// signal per story via the priority table below. The Content list
+// renders this as a per-row pill so the operator can see, at a
+// glance, which renders are in flight without drilling into each
+// story page. Same data the per-kind editor pages render piecemeal.
+
+export type ProgressKind = "short" | "images" | "voice" | "pipeline";
+export type ProgressStatus = "queued" | "rendering" | "processing";
+
+export interface ProgressSnapshot {
+  kind: ProgressKind;
+  status: ProgressStatus;
+  /** Free-text phase from short_renders.phase (e.g. "encoding",
+   *  "upload"). Other kinds don't carry a phase column today. */
+  phase: string | null;
+  /** 0..100 (whole percent). NULL when the underlying row hasn't
+   *  reported progress yet (rendering just started, or the worker
+   *  doesn't write progress for this kind). */
+  progressPct: number | null;
+  /** For kind='images' only: how many image_renders rows for this
+   *  story are currently queued + rendering combined. Lets the pill
+   *  read "3 images · rendering" instead of just "images · rendering". */
+  count: number | null;
+}
+
+/** Priority order for "which active signal wins when a story has
+ *  multiple in flight." Rendering beats queued; short beats images
+ *  beats voice beats pipeline so the most user-visible thing wins
+ *  the pill. Tie-broken by insertion order. */
+const PROGRESS_PRIORITY: ReadonlyArray<{
+  kind: ProgressKind;
+  status: ProgressStatus;
+  rank: number;
+}> = [
+  { kind: "short", status: "rendering", rank: 0 },
+  { kind: "short", status: "queued", rank: 1 },
+  { kind: "images", status: "rendering", rank: 2 },
+  { kind: "images", status: "queued", rank: 3 },
+  { kind: "voice", status: "rendering", rank: 4 },
+  { kind: "voice", status: "queued", rank: 5 },
+  { kind: "pipeline", status: "processing", rank: 6 },
+  { kind: "pipeline", status: "queued", rank: 7 },
+];
+
+function progressRank(kind: ProgressKind, status: ProgressStatus): number {
+  for (const p of PROGRESS_PRIORITY) {
+    if (p.kind === kind && p.status === status) return p.rank;
+  }
+  return 99;
+}
+
+export async function loadStoryProgressByIds(
+  storyIds: readonly string[],
+): Promise<Map<string, ProgressSnapshot>> {
+  const out = new Map<string, ProgressSnapshot>();
+  if (storyIds.length === 0) return out;
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const params = [...storyIds];
+
+  const [shorts, images, voices, jobs] = await Promise.all([
+    all<{
+      story_id: string;
+      status: string;
+      phase: string | null;
+      progress: number | null;
+    }>(
+      `SELECT story_id, status, phase, progress FROM short_renders
+       WHERE story_id IN (${placeholders})
+         AND status IN ('queued', 'rendering')`,
+      params,
+    ),
+    all<{ owner_id: string; status: string; progress: number | null }>(
+      `SELECT owner_id, status, progress FROM image_renders
+       WHERE owner_kind = 'story'
+         AND owner_id IN (${placeholders})
+         AND status IN ('queued', 'rendering')`,
+      params,
+    ),
+    all<{ story_id: string; status: string; progress: number | null }>(
+      `SELECT story_id, status, progress FROM voice_renders
+       WHERE story_id IN (${placeholders})
+         AND status IN ('queued', 'rendering')`,
+      params,
+    ),
+    all<{ story_id: string | null; status: string; progress: number | null }>(
+      `SELECT story_id, status, progress FROM story_jobs
+       WHERE story_id IN (${placeholders})
+         AND status IN ('queued', 'processing')`,
+      params,
+    ),
+  ]);
+
+  const apply = (storyId: string, snap: ProgressSnapshot): void => {
+    const r = progressRank(snap.kind, snap.status);
+    const existing = out.get(storyId);
+    if (!existing) {
+      out.set(storyId, snap);
+      return;
+    }
+    const existingRank = progressRank(existing.kind, existing.status);
+    if (r < existingRank) out.set(storyId, snap);
+  };
+
+  for (const row of shorts) {
+    const status: ProgressStatus =
+      row.status === "rendering" ? "rendering" : "queued";
+    // short_renders.progress is REAL (0..1) per the schema comment; the
+    // other three tables use INTEGER (0..100). Normalise here so the
+    // UI shows a consistent whole percent.
+    const pct =
+      row.progress != null && Number.isFinite(row.progress)
+        ? Math.round(row.progress * 100)
+        : null;
+    apply(row.story_id, {
+      kind: "short",
+      status,
+      phase: row.phase,
+      progressPct: pct,
+      count: null,
+    });
+  }
+
+  // Aggregate images per story so the pill reads "3 images" rather
+  // than the count of N separate jobs each with its own status.
+  const imagesByStory = new Map<
+    string,
+    { rendering: number; queued: number; topProgress: number }
+  >();
+  for (const row of images) {
+    const slot = imagesByStory.get(row.owner_id) ?? {
+      rendering: 0,
+      queued: 0,
+      topProgress: 0,
+    };
+    if (row.status === "rendering") slot.rendering += 1;
+    else slot.queued += 1;
+    if (
+      row.progress != null &&
+      Number.isFinite(row.progress) &&
+      row.progress > slot.topProgress
+    ) {
+      slot.topProgress = row.progress;
+    }
+    imagesByStory.set(row.owner_id, slot);
+  }
+  for (const [storyId, agg] of imagesByStory) {
+    const status: ProgressStatus = agg.rendering > 0 ? "rendering" : "queued";
+    apply(storyId, {
+      kind: "images",
+      status,
+      phase: null,
+      progressPct: status === "rendering" && agg.topProgress > 0
+        ? Math.round(agg.topProgress)
+        : null,
+      count: agg.rendering + agg.queued,
+    });
+  }
+
+  for (const row of voices) {
+    const status: ProgressStatus =
+      row.status === "rendering" ? "rendering" : "queued";
+    apply(row.story_id, {
+      kind: "voice",
+      status,
+      phase: null,
+      progressPct:
+        row.progress != null && Number.isFinite(row.progress)
+          ? Math.round(row.progress)
+          : null,
+      count: null,
+    });
+  }
+
+  for (const row of jobs) {
+    if (!row.story_id) continue;
+    const status: ProgressStatus =
+      row.status === "processing" ? "processing" : "queued";
+    apply(row.story_id, {
+      kind: "pipeline",
+      status,
+      phase: null,
+      progressPct:
+        row.progress != null && Number.isFinite(row.progress)
+          ? Math.round(row.progress)
+          : null,
+      count: null,
+    });
+  }
+
+  return out;
 }
 
 /** 2026-06-24 Content inbox: most-recent story_jobs.status per reddit_id.
@@ -1721,7 +1924,10 @@ export async function listContentSlim(
   // batched call (4 queries) before the merge so each row carries its
   // own per-platform live-status. Articles get DEFAULT_PUBLISHED_ON.
   const storyIds = stories.map((s) => s.id);
-  const publishedOnByStory = await loadPublishedOnByStoryIds(storyIds);
+  const [publishedOnByStory, progressByStory] = await Promise.all([
+    loadPublishedOnByStoryIds(storyIds),
+    loadStoryProgressByIds(storyIds),
+  ]);
   // Latest pipeline-job status per story. Keyed by reddit_id (the FK in
   // story_jobs). Stories with no reddit_id (manual seeds) skip the lookup
   // and surface job_status: null.
@@ -1751,6 +1957,7 @@ export async function listContentSlim(
         : null,
       flagged: s.auto_publish_when_ready === 1,
       flagged_attempts: s.auto_publish_attempts ?? 0,
+      progress: progressByStory.get(s.id) ?? null,
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -1769,6 +1976,7 @@ export async function listContentSlim(
       job_status: null,
       flagged: false,
       flagged_attempts: 0,
+      progress: null,
     })),
   ];
 
@@ -1788,6 +1996,17 @@ export async function listContentSlim(
     ? merged.filter((row) => row.job_status === opts.jobStatus)
     : merged;
 
+  // 2026-06-25 activeKind filter — narrows to stories with a matching
+  // in-flight render. "any" passes everything with a non-null progress;
+  // the specific kinds match on progress.kind.
+  const activeFiltered = opts.activeKind
+    ? jobFiltered.filter((row) => {
+        if (!row.progress) return false;
+        if (opts.activeKind === "any") return true;
+        return row.progress.kind === opts.activeKind;
+      })
+    : jobFiltered;
+
   // Apply the published-on AND-filters AFTER aggregation so the SQL
   // stays simple. The slim list caps at 200 stories anyway, so an
   // in-memory filter is cheap.
@@ -1795,8 +2014,8 @@ export async function listContentSlim(
   const publishedNotOn = opts.publishedNotOn ?? [];
   const filteredByPublish =
     publishedOn.length === 0 && publishedNotOn.length === 0
-      ? jobFiltered
-      : jobFiltered.filter((row) => {
+      ? activeFiltered
+      : activeFiltered.filter((row) => {
           // Articles are never published-on-social. If any
           // publishedOn filter is set, articles fall out. If only
           // publishedNotOn is set, articles pass (they're not on
