@@ -36,7 +36,12 @@ import { exec } from "node:child_process";
 const CLIENT_ID = process.env.YOUTUBE_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.YOUTUBE_CLIENT_SECRET ?? "";
 const REDIRECT_URI = "http://localhost:3719/callback";
-const SCOPES = ["https://www.googleapis.com/auth/youtube.upload"];
+// youtube.force-ssl covers every endpoint the publish pipeline calls
+// (videos.insert, channels.list?mine=true for the channel-verify step,
+// and captions.insert). youtube.upload alone is insufficient: it does
+// not authorize channels.list?mine=true, so verifyChannelId returns
+// "Insufficient Permission" and the upload never starts.
+const SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"];
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
   console.error(
