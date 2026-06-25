@@ -13,6 +13,7 @@ import Link from "next/link";
 import { requireCapability } from "@/lib/dal";
 import {
   listContentSlim,
+  getAutoPublishFlaggedSummary,
   CONTENT_SUBKINDS,
   ARTICLE_LANGUAGES,
   SOCIAL_PLATFORMS,
@@ -156,6 +157,10 @@ export default async function ContentPage({
     updatedBucket?: string;
     updatedAfter?: string;
     updatedBefore?: string;
+    /** 2026-06-25 auto-publish cron flag filter. "1" = only flagged
+     *  rows; "0" = only NOT-flagged rows; anything else / unset =
+     *  no filter. The header status card links into ?flagged=1. */
+    flagged?: string;
   }>;
 }) {
   await requireCapability("content.manage");
@@ -172,6 +177,11 @@ export default async function ContentPage({
   const publishedOn = parsePlatformList(sp.publishedOn);
   const publishedNotOn = parsePlatformList(sp.publishedNotOn);
   const jobStatus = isJobStatus(sp.jobStatus) ? sp.jobStatus : undefined;
+  // 2026-06-25 closed-enum filter: "1" / "0" or no filter. Anything
+  // else collapses to "no filter" so a hand-edited URL can't produce
+  // a weird third state.
+  const flaggedFilter: boolean | undefined =
+    sp.flagged === "1" ? true : sp.flagged === "0" ? false : undefined;
   const updatedBucket = isDateBucket(sp.updatedBucket)
     ? sp.updatedBucket
     : undefined;
@@ -196,18 +206,22 @@ export default async function ContentPage({
       : updatedBucket === "custom"
         ? { since: customAfter, until: customBefore }
         : resolveBucket(updatedBucket);
-  const rows = await listContentSlim({
-    subKind,
-    status,
-    language,
-    category,
-    publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
-    publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
-    jobStatus,
-    updatedSince: resolvedRange?.since || undefined,
-    updatedUntil: resolvedRange?.until || undefined,
-    limit: LIST_LIMIT,
-  });
+  const [rows, flaggedSummary] = await Promise.all([
+    listContentSlim({
+      subKind,
+      status,
+      language,
+      category,
+      publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
+      publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
+      jobStatus,
+      updatedSince: resolvedRange?.since || undefined,
+      updatedUntil: resolvedRange?.until || undefined,
+      flagged: flaggedFilter,
+      limit: LIST_LIMIT,
+    }),
+    getAutoPublishFlaggedSummary(),
+  ]);
 
   // Filter chips share a builder so adding a new dimension (Phase 3 will add
   // author) only edits one function. Clearing a filter means dropping its key.
@@ -227,6 +241,7 @@ export default async function ContentPage({
       // from custom → 7d would drag stale date params along in the URL.
       updatedAfter: updatedBucket === "custom" ? sp.updatedAfter : undefined,
       updatedBefore: updatedBucket === "custom" ? sp.updatedBefore : undefined,
+      flagged: sp.flagged,
       ...override,
     };
     for (const [k, v] of Object.entries(merged)) {
@@ -276,6 +291,37 @@ export default async function ContentPage({
         Video stories arrive from the Reddit pipeline. Articles are
         hand-authored here.
       </p>
+
+      {flaggedSummary.flagged > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-accent/10 px-4 py-2 font-mono text-[11px] text-ink">
+          <span>
+            <span className="text-accent">{flaggedSummary.flagged}</span>{" "}
+            stor{flaggedSummary.flagged === 1 ? "y" : "ies"} flagged for
+            auto-publish. The /api/auto_complete_publish cron picks each up
+            within ~2 min of being ready.
+            {flaggedSummary.struggling > 0 && (
+              <>
+                {" "}
+                <span className="text-danger">
+                  {flaggedSummary.struggling}
+                </span>{" "}
+                {flaggedSummary.struggling === 1 ? "is" : "are"} on attempt
+                6+ &mdash; check the Vercel function logs for{" "}
+                <span className="text-ink">
+                  [auto-complete-publish-cron giveup]
+                </span>{" "}
+                events.
+              </>
+            )}
+          </span>
+          <Link
+            href={`/admin/content${baseQs({ flagged: "1" })}`}
+            className="rounded-md border border-accent px-2 py-0.5 text-accent transition-colors hover:bg-accent hover:text-bg"
+          >
+            View {flaggedSummary.flagged}
+          </Link>
+        </div>
+      )}
 
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-2">
@@ -365,7 +411,7 @@ export default async function ContentPage({
             ),
           )}
           <span className="font-mono text-[10px] text-muted">
-            (video stories only · multi-select for "live on all selected")
+            (video stories only · multi-select for &ldquo;live on all selected&rdquo;)
           </span>
         </div>
 
@@ -408,6 +454,30 @@ export default async function ContentPage({
           )}
           <span className="font-mono text-[10px] text-muted">
             (latest pipeline run · video stories only)
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Flagged
+          </span>
+          {chip(
+            `/admin/content${baseQs({ flagged: undefined })}`,
+            "All",
+            flaggedFilter === undefined,
+          )}
+          {chip(
+            `/admin/content${baseQs({ flagged: "1" })}`,
+            "Waiting for auto-publish",
+            flaggedFilter === true,
+          )}
+          {chip(
+            `/admin/content${baseQs({ flagged: "0" })}`,
+            "Not flagged",
+            flaggedFilter === false,
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (auto_publish_when_ready · video stories only)
           </span>
         </div>
 
@@ -465,6 +535,9 @@ export default async function ContentPage({
             )}
             {jobStatus && (
               <input type="hidden" name="jobStatus" value={jobStatus} />
+            )}
+            {sp.flagged && (
+              <input type="hidden" name="flagged" value={sp.flagged} />
             )}
             <input type="hidden" name="updatedBucket" value="custom" />
             <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-muted">
