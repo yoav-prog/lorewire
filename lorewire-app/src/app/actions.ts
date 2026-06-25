@@ -21,7 +21,14 @@ import {
   loadHomepagePolls,
   loadLiveCatalog,
 } from "@/lib/homepage-data";
-import type { HomepagePollRails, PollRailKind } from "@/lib/polls";
+import {
+  getWirePollsForStories,
+  resolvePublicFloor,
+  type HomepagePollRails,
+  type PollRailKind,
+  type WirePollData,
+} from "@/lib/polls";
+import { readVoteToken } from "@/lib/poll-cookie";
 import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 import { resolveMediaUrl } from "@/lib/media-url";
 import { randomUUID } from "node:crypto";
@@ -329,9 +336,15 @@ export interface LiveCatalogStory {
 // `viewer_liked` is this viewer's own like (signed-in user or anon cookie);
 // `like_count` is the public total. The client hides the number until it
 // crosses the display threshold (see WireCard).
+//
+// `poll` is the server-resolved engagement-poll bundle for this story —
+// question + options + this cookie's already-voted-side + the floor-aware
+// initial result. Null when the story has no enabled poll. Plan:
+// _plans/2026-06-25-wires-poll-wrapper.md.
 export interface WireStory extends LiveCatalogStory {
   like_count: number;
   viewer_liked: boolean;
+  poll: WirePollData | null;
 }
 
 export interface LiveCatalogResult {
@@ -432,7 +445,41 @@ export async function listPublishedShorts(
   // Attach server-counted like state (count + this viewer's own like) so the
   // feed paints real hearts on first byte instead of after a second fetch.
   const withLikes = await attachLikeState(shorts);
-  return { ok: true, shorts: withLikes, nextCursor };
+  // Attach the server-resolved poll bundle (question + options + this cookie's
+  // voted side + floor-aware initial result) so the Wires panel + floating
+  // pill paint correctly on first byte. Stories with no enabled poll get
+  // `poll: null` — the card hides both surfaces in that case. Plan:
+  // _plans/2026-06-25-wires-poll-wrapper.md.
+  const withPolls = await attachWirePollState(withLikes);
+  return { ok: true, shorts: withPolls, nextCursor };
+}
+
+/** Batch-resolve the per-wire poll bundle and slot it onto each row.
+ *  Best-effort: any failure logs and falls through to `poll: null` so a
+ *  busted poll read can never crash the Wires feed (which is a public,
+ *  unauthenticated read path). */
+async function attachWirePollState(
+  shorts: WireStory[],
+): Promise<WireStory[]> {
+  if (shorts.length === 0) return shorts;
+  try {
+    const [cookieToken, floor] = await Promise.all([
+      readVoteToken(),
+      resolvePublicFloor(),
+    ]);
+    const polls = await getWirePollsForStories(
+      shorts.map((s) => s.id),
+      cookieToken,
+      floor,
+    );
+    return shorts.map((s) => ({ ...s, poll: polls.get(s.id) ?? null }));
+  } catch (err) {
+    console.warn("[wires poll panel resolve err]", {
+      story_count: shorts.length,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return shorts.map((s) => ({ ...s, poll: null }));
+  }
 }
 
 // ─── Wires likes: server-counted, one per viewer ─────────────────────────────
@@ -486,10 +533,14 @@ async function attachLikeState(rows: LiveCatalogStory[]): Promise<WireStory[]> {
     likedByViewer = new Set(mine.map((r) => r.story_id));
   }
 
+  // `poll` starts null and is filled in by `attachWirePollState` after this
+  // helper returns — keeping the field initialised here satisfies the
+  // `WireStory` shape so the chained transform doesn't have to widen.
   return rows.map((r) => ({
     ...r,
     like_count: countById.get(r.id) ?? 0,
     viewer_liked: likedByViewer.has(r.id),
+    poll: null,
   }));
 }
 

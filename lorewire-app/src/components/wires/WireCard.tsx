@@ -30,6 +30,9 @@ import { CAT, type Cat } from "@/lib/stories";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
 import type { WireStory } from "@/app/actions";
+import type { PollResultView, PollSide } from "@/lib/polls-shared";
+import { WirePollPanel } from "@/components/wires/WirePollPanel";
+import { WirePollPill } from "@/components/wires/WirePollPill";
 
 type OpenFn = (id: string, tab?: string) => void;
 
@@ -221,6 +224,33 @@ export default function WireCard({
   const [heartBurst, setHeartBurst] = useState(false);
   // Our own ShareSheet overlay (not the OS share panel).
   const [shareOpen, setShareOpen] = useState(false);
+
+  // ── Poll state mirror (read by the floating pill) ────────────────────────
+  // The WirePollPanel owns the canonical vote flow; we mirror the result +
+  // votedSide so the pill on the video can render the post-vote "% agreed"
+  // chip without subscribing to the panel's internal state machine. The
+  // initial values come from the server-resolved poll bundle; the panel
+  // calls onVoted after a successful vote so we patch them here.
+  const initialPoll = short.poll;
+  const [pollVotedSide, setPollVotedSide] = useState<PollSide | null>(
+    initialPoll?.initialVotedSide ?? null,
+  );
+  const [pollResult, setPollResult] = useState<PollResultView | null>(
+    initialPoll?.initialResult ?? null,
+  );
+  // Tapping the pill flashes the panel below. Pulse nonce is a monotonic
+  // counter so the panel's pulse effect retriggers cleanly on every tap.
+  const [pollPulseNonce, setPollPulseNonce] = useState(0);
+  const onPollPillClick = useCallback(() => {
+    setPollPulseNonce((n) => n + 1);
+  }, []);
+  const onPollVoted = useCallback(
+    (side: PollSide, result: PollResultView) => {
+      setPollVotedSide(side);
+      setPollResult(result);
+    },
+    [],
+  );
 
   // Gesture bookkeeping (refs so handlers stay stable and read fresh values).
   const seekingRef = useRef(false);
@@ -617,19 +647,32 @@ export default function WireCard({
           className="absolute inset-x-0 top-0 flex items-start justify-between px-4"
           style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 14px)" }}
         >
-          <div className="flex items-center gap-2">
-            {short.category && (
-              <span
-                className="rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
-                style={{ background: catColor(short.category) }}
-              >
-                {short.category}
-              </span>
-            )}
-            {short.duration && (
-              <span className="rounded px-1.5 py-0.5 font-mono text-[10px] text-ink/85" style={{ background: "rgba(0,0,0,.4)" }}>
-                {short.duration}
-              </span>
+          {/* Left stack: category + duration chips on top, the floating
+              poll pill on its own row underneath so it sits in the upper
+              thumb zone without crowding the chips. The pill only renders
+              for wires that actually have a live poll attached. */}
+          <div className="flex flex-col items-start gap-2">
+            <div className="flex items-center gap-2">
+              {short.category && (
+                <span
+                  className="rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
+                  style={{ background: catColor(short.category) }}
+                >
+                  {short.category}
+                </span>
+              )}
+              {short.duration && (
+                <span className="rounded px-1.5 py-0.5 font-mono text-[10px] text-ink/85" style={{ background: "rgba(0,0,0,.4)" }}>
+                  {short.duration}
+                </span>
+              )}
+            </div>
+            {short.poll && (
+              <WirePollPill
+                votedSide={pollVotedSide}
+                result={pollResult}
+                onClick={onPollPillClick}
+              />
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -794,6 +837,22 @@ export default function WireCard({
         className="relative z-10 shrink-0 border-t border-line bg-black px-4 pt-3"
         style={{ paddingBottom: insetBottom }}
       >
+        {/* Engagement poll wrapper — only renders for wires with a live
+            poll, so wires without one keep the original control-bar
+            height. Sits above the title row so the question and answer
+            options form a clear visual container the eye lands on before
+            it walks down to the title + Read CTA. Plan:
+            _plans/2026-06-25-wires-poll-wrapper.md. */}
+        {short.poll && (
+          <div className="mb-3">
+            <WirePollPanel
+              storyId={short.id}
+              poll={short.poll}
+              pulseNonce={pollPulseNonce}
+              onVoted={onPollVoted}
+            />
+          </div>
+        )}
         <div className="flex items-end gap-3">
           <div className="min-w-0 flex-1">
             <h2 className="line-clamp-2 font-display font-black uppercase tracking-tightest leading-[1.02] text-ink" style={{ fontSize: 17 }}>

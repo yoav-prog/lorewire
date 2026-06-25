@@ -21,11 +21,13 @@ import {
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
   isPollSide,
+  toResultView,
   validatePollInputs,
   type PollAggregateRow,
   type PollRow,
   type PollSide,
   type RailCardRow,
+  type WirePollData,
 } from "@/lib/polls-shared";
 
 // Re-export the entire client-safe surface so legacy server callers
@@ -58,6 +60,7 @@ export {
   type PollValidation,
   type RailCardRow,
   type StoryCategory,
+  type WirePollData,
 } from "@/lib/polls-shared";
 
 // ─── Settings-driven floor ────────────────────────────────────────────────────
@@ -123,6 +126,121 @@ export async function getAggregateByStoryId(
     `SELECT ${AGG_COLS} FROM poll_aggregates WHERE story_id = ?`,
     [storyId],
   );
+}
+
+// ─── Batch reads (Wires feed) ─────────────────────────────────────────────────
+//
+// The Wires feed loads up to 50 stories per page; resolving each
+// story's poll + aggregate + this-cookie-voted-side one row at a time
+// would N+1 the feed. These helpers take the full id list and answer
+// in three round trips total (polls IN (…), poll_aggregates IN (…),
+// poll_votes WHERE cookie AND poll_id IN (…)).
+//
+// Plan: _plans/2026-06-25-wires-poll-wrapper.md.
+
+/** Batch sibling of `getPollByStoryId`. Returns one entry per id that
+ *  has an ENABLED poll attached — disabled polls are filtered out at
+ *  the SQL level so the caller doesn't have to re-check the flag. Ids
+ *  with no row simply don't appear in the map. Empty input → empty
+ *  map (no SQL round trip). */
+export async function getPollsByStoryIds(
+  storyIds: string[],
+): Promise<Map<string, PollRow>> {
+  if (storyIds.length === 0) return new Map();
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<PollRow>(
+    `SELECT ${POLL_COLS} FROM polls
+     WHERE enabled = 1 AND story_id IN (${placeholders})`,
+    storyIds,
+  );
+  const out = new Map<string, PollRow>();
+  for (const r of rows) {
+    if (r.story_id) out.set(r.story_id, r);
+  }
+  return out;
+}
+
+/** Batch sibling of `getAggregateByStoryId`. Same shape rules as
+ *  `getPollsByStoryIds`: empty input → empty map, missing rows simply
+ *  absent. */
+export async function getAggregatesByStoryIds(
+  storyIds: string[],
+): Promise<Map<string, PollAggregateRow>> {
+  if (storyIds.length === 0) return new Map();
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<PollAggregateRow>(
+    `SELECT ${AGG_COLS} FROM poll_aggregates WHERE story_id IN (${placeholders})`,
+    storyIds,
+  );
+  const out = new Map<string, PollAggregateRow>();
+  for (const r of rows) out.set(r.story_id, r);
+  return out;
+}
+
+/** Batch sibling of `getVoteSideForCookie`. Returns one entry per poll
+ *  this cookie has voted on. Empty input, missing cookie, or an
+ *  unrecognised side all collapse to an empty map. */
+export async function getVoteSidesForCookieAndPolls(
+  pollIds: string[],
+  cookieToken: string | null,
+): Promise<Map<string, PollSide>> {
+  if (pollIds.length === 0 || !cookieToken) return new Map();
+  const placeholders = pollIds.map(() => "?").join(", ");
+  const rows = await all<{ poll_id: string; side: string }>(
+    `SELECT poll_id, side FROM poll_votes
+     WHERE cookie_token = ? AND poll_id IN (${placeholders})`,
+    [cookieToken, ...pollIds],
+  );
+  const out = new Map<string, PollSide>();
+  for (const r of rows) {
+    if (isPollSide(r.side)) out.set(r.poll_id, r.side);
+  }
+  return out;
+}
+
+/** Compose the three batch reads into the per-story bundle the Wires
+ *  panel consumes. Story ids without an enabled poll are simply absent
+ *  from the result — callers set `poll: null` on those rows.
+ *
+ *  `floor` is passed through so call sites that have already resolved
+ *  the settings value don't pay for a second lookup, but it defaults
+ *  to `DEFAULT_PUBLIC_FLOOR` so callers that don't care still get safe
+ *  pre-floor behavior. */
+export async function getWirePollsForStories(
+  storyIds: string[],
+  cookieToken: string | null,
+  floor: number = DEFAULT_PUBLIC_FLOOR,
+): Promise<Map<string, WirePollData>> {
+  if (storyIds.length === 0) return new Map();
+  const polls = await getPollsByStoryIds(storyIds);
+  const pollIds = Array.from(polls.values()).map((p) => p.id);
+  const [aggregates, voteSides] = await Promise.all([
+    getAggregatesByStoryIds(storyIds),
+    getVoteSidesForCookieAndPolls(pollIds, cookieToken),
+  ]);
+  const out = new Map<string, WirePollData>();
+  for (const [storyId, poll] of polls) {
+    const agg = aggregates.get(storyId) ?? null;
+    out.set(storyId, {
+      pollId: poll.id,
+      question: poll.question,
+      optionA: poll.option_a_text,
+      optionB: poll.option_b_text,
+      // Pre-vote with zero votes: callers pass null so the panel
+      // skips the "X votes — split reveals…" copy. Once any vote
+      // lands we paint the floor-aware result view (percentages
+      // stay hidden below the floor).
+      initialResult: agg ? toResultView(agg, floor) : null,
+      initialVotedSide: voteSides.get(poll.id) ?? null,
+    });
+  }
+  console.info("[wires poll panel batch resolve]", {
+    requested: storyIds.length,
+    with_poll: polls.size,
+    with_aggregate: aggregates.size,
+    with_vote: voteSides.size,
+  });
+  return out;
 }
 
 // ─── Writes (admin) ───────────────────────────────────────────────────────────
