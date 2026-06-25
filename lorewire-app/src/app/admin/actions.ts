@@ -2934,9 +2934,7 @@ export async function publishReviewedStoryAction(
   const redditId = String(formData.get("reddit_id") ?? "");
   if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
 
-  const { getRedditSource, evaluatePublishReadiness } = await import(
-    "@/lib/reddit-source"
-  );
+  const { getRedditSource } = await import("@/lib/reddit-source");
   const source = await getRedditSource(redditId);
   if (!source) {
     redirect(`/admin/reddit-sources?error=source-not-found&id=${redditId}`);
@@ -2944,18 +2942,31 @@ export async function publishReviewedStoryAction(
   const story = source!.story_id
     ? await getStoryRow(source!.story_id)
     : null;
-  const readiness = evaluatePublishReadiness(story, {
-    status: source!.status,
-    story_id: source!.story_id,
-  });
-  if (!readiness.ready) {
-    // Encode the missing-list as a single string so the review page can
-    // surface it without a separate state shape. URL-safe; the page splits
-    // by `|` to render line items.
-    const reason = encodeURIComponent(readiness.missing.join(" | "));
+  if (!source!.story_id || !story) {
+    const reason = encodeURIComponent(
+      !source!.story_id
+        ? "source row has no linked story_id"
+        : "story has not been generated yet",
+    );
+    redirect(`${REVIEW_ROUTE(redditId)}?publish_blocked=${reason}`);
+  }
+  // 2026-06-25 (PR follow-up): use the unified asset gate from the bulk
+  // complete-and-publish work so every publish path enforces the same
+  // requirements. Manual publish from review used to require only
+  // body+hero, letting half-built stories (no short, no thumbnails, no
+  // poll) reach the public site. The new gate blocks those at the
+  // single publish entry the operator uses for review-page publishing.
+  // Operators who want to PUBLISH AND complete missing assets in one
+  // click should use the Content list's "Complete & publish" action.
+  const { evaluateAssetCompleteness } = await import(
+    "@/lib/asset-completeness"
+  );
+  const completeness = await evaluateAssetCompleteness(story!.id);
+  if (!completeness.ready) {
+    const reason = encodeURIComponent(completeness.missing.join(" | "));
     console.warn("[reddit-review publish-blocked]", {
       reddit_id: redditId,
-      missing: readiness.missing,
+      missing: completeness.missing,
     });
     redirect(`${REVIEW_ROUTE(redditId)}?publish_blocked=${reason}`);
   }
@@ -3328,6 +3339,26 @@ export async function bulkUpdateContentAction(
           if (!STORY_STATUSES.has(op.status as StoryStatus)) {
             failed.push({ ...item, reason: "invalid-status-for-story" });
             continue;
+          }
+          // 2026-06-25 (PR follow-up): apply the unified asset gate
+          // before flipping a video story to published. Same gate the
+          // "Complete & publish" action and the manual review-publish
+          // use, so bulk Publish can no longer ship a story missing a
+          // short / thumbnails / poll. The Complete & publish action
+          // is the right tool for "publish AND complete" — bulk
+          // Publish is "publish what's ready now."
+          if (op.status === "published" && story.status !== "published") {
+            const { evaluateAssetCompleteness } = await import(
+              "@/lib/asset-completeness"
+            );
+            const completeness = await evaluateAssetCompleteness(item.id);
+            if (!completeness.ready) {
+              failed.push({
+                ...item,
+                reason: `asset-incomplete: ${completeness.missing.join(",")}`,
+              });
+              continue;
+            }
           }
           const prevStatus = story.status;
           await setStatus(item.id, op.status as StoryStatus);
