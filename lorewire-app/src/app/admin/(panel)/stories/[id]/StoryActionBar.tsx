@@ -29,6 +29,8 @@ import {
   LENGTH_PRESETS,
 } from "@/lib/shorts-options";
 import type { ShortRenderRow } from "@/lib/short-render-queue";
+import { useShortPreviewVisibility } from "./useShortPreviewVisibility";
+import { isEditingTab, type StoryTabId } from "./tabs";
 
 const POLL_MS = 2500;
 
@@ -90,11 +92,17 @@ function statusPillClass(status: string): string {
 
 export function StoryActionBar({
   storyId,
+  activeTab,
   initialStatus,
   initialRender,
   initialNoindex,
 }: {
   storyId: string;
+  /** Which tab is active. Drives the preview-toggle chip's visibility
+   *  — the chip only appears on editing tabs (Scenes / Captions /
+   *  Style / Script / Voice) where the inline preview can actually be
+   *  hidden to reclaim canvas width. */
+  activeTab: StoryTabId;
   initialStatus: string | null | undefined;
   initialRender: ShortRenderRow | null;
   initialNoindex: boolean;
@@ -108,6 +116,8 @@ export function StoryActionBar({
   const [error, setError] = useState<string | null>(null);
   const [, startTransition] = useTransition();
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const preview = useShortPreviewVisibility();
+  const showPreviewToggle = isEditingTab(activeTab);
 
   // Popover/dropdown open state. Only one at a time.
   const [openPanel, setOpenPanel] = useState<
@@ -512,7 +522,26 @@ export function StoryActionBar({
           )}
         </div>
 
-        <div className="ml-auto text-[11px] text-muted">
+        {showPreviewToggle && (
+          <button
+            type="button"
+            onClick={preview.toggle}
+            className="ml-auto rounded-md border border-line px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:border-accent hover:text-accent"
+            title={
+              preview.visible
+                ? "Hide the 9:16 live preview to widen the editing canvas"
+                : "Show the 9:16 live preview alongside the editing canvas"
+            }
+          >
+            {preview.visible ? "Hide preview" : "Show preview"}
+          </button>
+        )}
+
+        <div
+          className={`text-[11px] text-muted ${
+            showPreviewToggle ? "" : "ml-auto"
+          }`}
+        >
           {renderProgressText(render)}
         </div>
       </div>
