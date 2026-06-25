@@ -15,7 +15,12 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
-import { shortDurationFromPropsJson } from "@/lib/duration";
+import {
+  bodyDurationMsFromPropsJson,
+  formatDurationMs,
+  fullDurationMsFromParts,
+  parseLastRenderedSegments,
+} from "@/lib/duration";
 
 export type ShortRenderStatus =
   | "queued"
@@ -302,20 +307,26 @@ export async function failShortRender(
 // at its own GCS key (<story>/video.mp4 vs <story>-short/video.mp4), so this is
 // just a pointer swap and is reversible by re-rendering the long-form video.
 //
-// Also writes stories.duration (M:SS) from the render's props.duration_ms when
-// it can be parsed — the rail thumbnail badge reads this directly, and keeping
-// it in lockstep with video_url means a re-rendered short with a different
-// length doesn't display a stale duration. Overwrites unconditionally for the
-// same reason video_url overwrites: stories.duration's contract is "duration
-// of whatever currently plays at video_url", not "admin's free-form note".
-// Pass `null` for `propsJson` to skip the duration write entirely.
+// Also writes stories.duration (M:SS) as the FULL assembled length — body +
+// intro + outro segments — so the rail thumbnail badge matches what the
+// `<video>` element reports. The intro/outro contribution comes from the
+// `_last_rendered_segments` stamp render_short/route.ts writes onto
+// stories.short_config after a successful render; when the stamp is missing
+// or a segment row was deleted, that side contributes 0 and we fall back to
+// body-only (legacy-safe). Overwrites unconditionally — stories.duration's
+// contract is "duration of whatever currently plays at video_url", not
+// "admin's free-form note". Pass `null` for `propsJson` to skip the duration
+// write entirely.
 export async function applyShortToStory(
   storyId: string,
   outputUrl: string,
   propsJson: string | null = null,
 ): Promise<void> {
   const now = new Date().toISOString();
-  const duration = shortDurationFromPropsJson(propsJson);
+  const bodyMs = bodyDurationMsFromPropsJson(propsJson);
+  const duration = bodyMs !== null
+    ? await formatFullDurationForStory(storyId, bodyMs)
+    : null;
   if (duration) {
     await run(
       `UPDATE stories SET video_url = ?, duration = ?, updated_at = ? WHERE id = ?`,
@@ -328,6 +339,52 @@ export async function applyShortToStory(
       storyId,
     ]);
   }
+}
+
+// Resolve "body_ms + spliced intro/outro" to a M:SS string for the writer
+// path. Mirrors the read-side fan-out in homepage-data.loadShortDurationsForStories
+// but for a single story: pull the short_config stamp, look up segment
+// duration_ms for any referenced ids, sum, format. Body-only when the
+// stamp is missing/empty so legacy rows still produce a duration.
+async function formatFullDurationForStory(
+  storyId: string,
+  bodyMs: number,
+): Promise<string | null> {
+  const stampRow = await one<{ short_config: string | null }>(
+    "SELECT short_config FROM stories WHERE id = ?",
+    [storyId],
+  );
+  const stamp = parseLastRenderedSegments(stampRow?.short_config ?? null);
+  const segIds: string[] = [];
+  if (stamp?.intro_segment_id) segIds.push(stamp.intro_segment_id);
+  if (stamp?.outro_segment_id) segIds.push(stamp.outro_segment_id);
+  const segmentMsById = new Map<string, number>();
+  if (segIds.length > 0) {
+    const placeholders = segIds.map(() => "?").join(", ");
+    const segRows = await all<{ id: string; duration_ms: number | null }>(
+      `SELECT id, duration_ms FROM video_segments WHERE id IN (${placeholders})`,
+      segIds,
+    );
+    for (const s of segRows) {
+      const n = Number(s.duration_ms);
+      if (Number.isFinite(n) && n > 0) segmentMsById.set(s.id, n);
+    }
+  }
+  const introMs = stamp?.intro_segment_id
+    ? segmentMsById.get(stamp.intro_segment_id) ?? 0
+    : 0;
+  const outroMs = stamp?.outro_segment_id
+    ? segmentMsById.get(stamp.outro_segment_id) ?? 0
+    : 0;
+  const totalMs = fullDurationMsFromParts(bodyMs, introMs, outroMs);
+  console.info("[short apply duration]", {
+    story_id: storyId,
+    body_ms: bodyMs,
+    intro_ms: introMs,
+    outro_ms: outroMs,
+    total_ms: totalMs,
+  });
+  return formatDurationMs(totalMs);
 }
 
 // ─── per-row event timeline (2026-06-15 progress log + Stop / Restart) ───────

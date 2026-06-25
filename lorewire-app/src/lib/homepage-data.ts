@@ -14,7 +14,12 @@
 
 import "server-only";
 import { all } from "@/lib/db";
-import { shortDurationFromPropsJson } from "@/lib/duration";
+import {
+  bodyDurationMsFromPropsJson,
+  formatDurationMs,
+  fullDurationMsFromParts,
+  parseLastRenderedSegments,
+} from "@/lib/duration";
 import { resolveMediaUrl } from "@/lib/media-url";
 import { getSetting } from "@/lib/repo";
 import {
@@ -96,27 +101,103 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   return { ok: true, stories };
 }
 
-// Pull duration_ms out of the latest done short_render for each story id and
-// format as "M:SS". Returns a map keyed by story_id; story ids whose renders
-// are missing / errored / lack a numeric duration_ms are simply absent so the
-// caller's fallback path can decide what to do.
+// Compute the FULL on-disk duration of each story's latest done short
+// (body + intro + outro segments) and format as "M:SS". Story ids whose
+// renders are missing / errored / lack a numeric body duration are absent
+// from the returned map so the caller's fallback path can decide what to
+// do.
+//
+// The intro/outro contribution comes from `stories.short_config.
+// _last_rendered_segments` — the stamp render_short/route.ts writes after a
+// successful render. When the stamp is missing (legacy rows, stamp write
+// failed) or the segment row was deleted, that side contributes 0 and we
+// fall back to body-only — never a worse badge than before this change.
 async function loadShortDurationsForStories(
   storyIds: string[],
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (storyIds.length === 0) return out;
   const placeholders = storyIds.map(() => "?").join(", ");
-  const rows = await all<{ story_id: string; props: string | null }>(
-    "SELECT story_id, props FROM short_renders " +
-      `WHERE story_id IN (${placeholders}) ` +
-      "AND status = 'done' AND props IS NOT NULL " +
-      "ORDER BY COALESCE(finished_at, started_at, requested_at) DESC",
-    storyIds,
-  );
-  for (const r of rows) {
-    if (out.has(r.story_id)) continue;
-    const formatted = shortDurationFromPropsJson(r.props);
-    if (formatted) out.set(r.story_id, formatted);
+  // Fan out the three reads in parallel: body durations from the latest
+  // done render, the per-story stamp from stories.short_config, and the
+  // segment library rows. The segment query is conditional on the stamps
+  // having referenced anything, so empty-stamp story sets pay one fewer
+  // round trip.
+  const [renderRows, storyConfigRows] = await Promise.all([
+    all<{ story_id: string; props: string | null }>(
+      "SELECT story_id, props FROM short_renders " +
+        `WHERE story_id IN (${placeholders}) ` +
+        "AND status = 'done' AND props IS NOT NULL " +
+        "ORDER BY COALESCE(finished_at, started_at, requested_at) DESC",
+      storyIds,
+    ),
+    all<{ id: string; short_config: string | null }>(
+      `SELECT id, short_config FROM stories WHERE id IN (${placeholders})`,
+      storyIds,
+    ),
+  ]);
+  // Latest body duration per story id (dedupe by first-seen, matching the
+  // historical ORDER BY ... DESC + skip-if-seen contract).
+  const bodyMsByStory = new Map<string, number>();
+  for (const r of renderRows) {
+    if (bodyMsByStory.has(r.story_id)) continue;
+    const bodyMs = bodyDurationMsFromPropsJson(r.props);
+    if (bodyMs !== null) bodyMsByStory.set(r.story_id, bodyMs);
+  }
+  // Stamp per story id -> segment ids actually spliced into the assembled
+  // MP4. Null when no stamp; we treat that as body-only.
+  const stampByStory = new Map<
+    string,
+    ReturnType<typeof parseLastRenderedSegments>
+  >();
+  const segmentIds = new Set<string>();
+  for (const r of storyConfigRows) {
+    const stamp = parseLastRenderedSegments(r.short_config);
+    stampByStory.set(r.id, stamp);
+    if (stamp?.intro_segment_id) segmentIds.add(stamp.intro_segment_id);
+    if (stamp?.outro_segment_id) segmentIds.add(stamp.outro_segment_id);
+  }
+  // Segment durations lookup. Only fire the query if any stamp referenced
+  // a segment id at all — most legacy rows won't.
+  const segmentMsById = new Map<string, number>();
+  if (segmentIds.size > 0) {
+    const segIds = Array.from(segmentIds);
+    const segPlaceholders = segIds.map(() => "?").join(", ");
+    const segRows = await all<{ id: string; duration_ms: number | null }>(
+      `SELECT id, duration_ms FROM video_segments WHERE id IN (${segPlaceholders})`,
+      segIds,
+    );
+    for (const s of segRows) {
+      const n = Number(s.duration_ms);
+      if (Number.isFinite(n) && n > 0) segmentMsById.set(s.id, n);
+    }
+  }
+  // Combine + format. A missing body row means the loader can't produce a
+  // badge at all for that story; a missing stamp / segment falls through
+  // to body-only via fullDurationMsFromParts' 0-coalescing.
+  for (const storyId of storyIds) {
+    const bodyMs = bodyMsByStory.get(storyId);
+    if (bodyMs === undefined) continue;
+    const stamp = stampByStory.get(storyId) ?? null;
+    const introMs = stamp?.intro_segment_id
+      ? segmentMsById.get(stamp.intro_segment_id) ?? 0
+      : 0;
+    const outroMs = stamp?.outro_segment_id
+      ? segmentMsById.get(stamp.outro_segment_id) ?? 0
+      : 0;
+    const totalMs = fullDurationMsFromParts(bodyMs, introMs, outroMs);
+    const formatted = formatDurationMs(totalMs);
+    if (formatted) {
+      out.set(storyId, formatted);
+      console.info("[homepage live catalog duration]", {
+        story_id: storyId,
+        body_ms: bodyMs,
+        intro_ms: introMs,
+        outro_ms: outroMs,
+        total_ms: totalMs,
+        formatted,
+      });
+    }
   }
   return out;
 }

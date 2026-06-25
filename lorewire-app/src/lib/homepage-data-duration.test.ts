@@ -21,16 +21,29 @@ vi.mock("@/lib/impersonation", () => ({
 async function reset(): Promise<void> {
   await run("DELETE FROM short_renders WHERE 1=1", []);
   await run("DELETE FROM stories WHERE 1=1", []);
+  await run("DELETE FROM video_segments WHERE 1=1", []);
 }
 
 async function seedStory(
   id: string,
-  opts: { duration?: string | null; status?: string } = {},
+  opts: {
+    duration?: string | null;
+    status?: string;
+    /** Stamp `_last_rendered_segments` onto stories.short_config so the
+     *  duration loader can sum intro + outro segments alongside the body. */
+    lastRenderedSegments?: {
+      intro_segment_id: string | null;
+      outro_segment_id: string | null;
+    };
+  } = {},
 ): Promise<void> {
+  const shortConfig = opts.lastRenderedSegments
+    ? JSON.stringify({ _last_rendered_segments: opts.lastRenderedSegments })
+    : null;
   await run(
     "INSERT INTO stories (id, slug, title, category, summary, status, duration, " +
-      "created_at, published_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "short_config, created_at, published_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       id,
       `slug-${id}`,
@@ -39,8 +52,34 @@ async function seedStory(
       "synopsis",
       opts.status ?? "published",
       opts.duration ?? null,
+      shortConfig,
       "2026-06-20T00:00:00.000Z",
       "2026-06-20T00:00:00.000Z",
+    ],
+  );
+}
+
+const SEGMENT_NOW = "2026-06-20T00:00:00.000Z";
+
+async function seedSegment(opts: {
+  id: string;
+  kind: "intro" | "outro";
+  durationMs: number;
+}): Promise<void> {
+  await run(
+    "INSERT INTO video_segments " +
+      "(id, kind, label, source_url, normalized_url, duration_ms, enabled, " +
+      " status, error, uploaded_at, aspect, created_at, updated_at) " +
+      "VALUES (?, ?, ?, NULL, ?, ?, 1, 'ready', NULL, ?, '9:16', ?, ?)",
+    [
+      opts.id,
+      opts.kind,
+      `seg-${opts.id}`,
+      `https://gcs/${opts.id}.mp4`,
+      opts.durationMs,
+      SEGMENT_NOW,
+      SEGMENT_NOW,
+      SEGMENT_NOW,
     ],
   );
 }
@@ -194,5 +233,120 @@ describe("loadLiveCatalog duration backfill", () => {
     const result = await loadLiveCatalog();
     const story = result.stories.find((s) => s.id === "short-g");
     expect(story?.duration ?? null).toBeNull();
+  });
+
+  it("sums body + intro + outro segments when stories.short_config carries the stamp", async () => {
+    // This is the rail-vs-player mismatch case from production: body is
+    // 0:42 in props.duration_ms, the spliced intro adds 4s and the outro
+    // adds 3s — the assembled MP4 plays for 0:49. The badge must match
+    // what the user sees in the player, not the bare body length.
+    await seedSegment({ id: "intro-h", kind: "intro", durationMs: 4_000 });
+    await seedSegment({ id: "outro-h", kind: "outro", durationMs: 3_000 });
+    await seedStory("short-h", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-h",
+        outro_segment_id: "outro-h",
+      },
+    });
+    await seedShortRender({
+      id: "render-h",
+      storyId: "short-h",
+      status: "done",
+      props: { duration_ms: 42_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-h");
+    expect(story?.duration).toBe("0:49");
+  });
+
+  it("falls back to body-only when stories.short_config carries no stamp", async () => {
+    // Legacy row (rendered before _last_rendered_segments was a thing, or
+    // the stamp write failed). The loader must not silently produce a
+    // worse badge than before this change.
+    await seedStory("short-i");
+    await seedShortRender({
+      id: "render-i",
+      storyId: "short-i",
+      status: "done",
+      props: { duration_ms: 28_400 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-i");
+    expect(story?.duration).toBe("0:28");
+  });
+
+  it("falls back to body-only when the stamped segment row is missing or has no duration", async () => {
+    // A segment row was deleted between render and read. The loader must
+    // not skip the badge entirely — body-only is still better than blank.
+    await seedStory("short-j", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-gone",
+        outro_segment_id: "outro-gone",
+      },
+    });
+    await seedShortRender({
+      id: "render-j",
+      storyId: "short-j",
+      status: "done",
+      props: { duration_ms: 30_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-j");
+    expect(story?.duration).toBe("0:30");
+  });
+
+  it("handles a one-sided stamp (intro only or outro only)", async () => {
+    // skip_outro=true on the short_config means the route stamps a null
+    // outro_segment_id. Intro still contributes, outro contributes 0.
+    await seedSegment({ id: "intro-k", kind: "intro", durationMs: 5_000 });
+    await seedStory("short-k", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-k",
+        outro_segment_id: null,
+      },
+    });
+    await seedShortRender({
+      id: "render-k",
+      storyId: "short-k",
+      status: "done",
+      props: { duration_ms: 40_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-k");
+    expect(story?.duration).toBe("0:45");
+  });
+
+  it("admin-set stories.duration still wins over the body+segments backfill", async () => {
+    // Reasserts the existing precedence for the segment-aware path: an
+    // admin's hand-typed M:SS is intentional and must not be overwritten
+    // at read time, even when the computed full duration would differ.
+    await seedSegment({ id: "intro-l", kind: "intro", durationMs: 4_000 });
+    await seedSegment({ id: "outro-l", kind: "outro", durationMs: 3_000 });
+    await seedStory("short-l", {
+      duration: "1:23",
+      lastRenderedSegments: {
+        intro_segment_id: "intro-l",
+        outro_segment_id: "outro-l",
+      },
+    });
+    await seedShortRender({
+      id: "render-l",
+      storyId: "short-l",
+      status: "done",
+      props: { duration_ms: 42_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-l");
+    expect(story?.duration).toBe("1:23");
   });
 });
