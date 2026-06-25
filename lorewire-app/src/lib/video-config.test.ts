@@ -74,6 +74,11 @@ function emptyStoryRow(overrides: Partial<StoryRow> = {}): StoryRow {
     voice_provider: null,
     voice_id: null,
     hero_style_id: null,
+    auto_publish_when_ready: null,
+    auto_publish_attempts: null,
+    refresh_assets_state: null,
+    refresh_assets_started_at: null,
+    refresh_assets_attempts: null,
     ...overrides,
   };
 }

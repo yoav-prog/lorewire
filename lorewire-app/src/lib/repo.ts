@@ -90,10 +90,15 @@ export interface StoryRow {
   // visit. Cleared back to 0 when the flag clears (on publish or on
   // hitting the per-story max-attempts cap).
   auto_publish_attempts: number | null;
+  // 2026-06-25 refresh-assets state machine. NULL = not refreshing.
+  // 'voice_pending' / 'short_pending' / 'hero_pending'. See schema.ts.
+  refresh_assets_state: string | null;
+  refresh_assets_started_at: string | null;
+  refresh_assets_attempts: number | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
@@ -101,7 +106,7 @@ const COLS =
 // `reddit_id` is included so the Content inbox can batch-load the latest
 // story_jobs.status per row without a second per-row trip.
 const STORY_LIST_COLS =
-  "id, reddit_id, slug, category, title, status, cost_cents, created_at, updated_at, auto_publish_when_ready, auto_publish_attempts";
+  "id, reddit_id, slug, category, title, status, cost_cents, created_at, updated_at, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts";
 
 export type StoryListRow = Pick<
   StoryRow,
@@ -116,6 +121,9 @@ export type StoryListRow = Pick<
   | "updated_at"
   | "auto_publish_when_ready"
   | "auto_publish_attempts"
+  | "refresh_assets_state"
+  | "refresh_assets_started_at"
+  | "refresh_assets_attempts"
 >;
 
 // Columns the admin editor is allowed to write directly.
@@ -1512,6 +1520,10 @@ export interface ContentRow {
    *  images, voice, or pipeline). NULL when nothing is in flight.
    *  Articles are always NULL. */
   progress: ProgressSnapshot | null;
+  /** 2026-06-25 refresh-assets state-machine state. NULL = not
+   *  refreshing. 'voice_pending' / 'short_pending' / 'hero_pending'
+   *  per the cron at /api/refresh_assets. Articles always NULL. */
+  refresh_state: string | null;
 }
 
 /** 2026-06-24 Content inbox: latest story_jobs row status per story.
@@ -1958,6 +1970,7 @@ export async function listContentSlim(
       flagged: s.auto_publish_when_ready === 1,
       flagged_attempts: s.auto_publish_attempts ?? 0,
       progress: progressByStory.get(s.id) ?? null,
+      refresh_state: s.refresh_assets_state ?? null,
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -1977,6 +1990,7 @@ export async function listContentSlim(
       flagged: false,
       flagged_attempts: 0,
       progress: null,
+      refresh_state: null,
     })),
   ];
 
