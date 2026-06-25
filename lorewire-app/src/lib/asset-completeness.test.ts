@@ -159,7 +159,12 @@ describe("evaluateAssetCompleteness", () => {
     expect(r.missing).toContain("short_render");
   });
 
-  it("flags voiceover when short_config has no voiceover_url", async () => {
+  it("does NOT flag voiceover when short_render is done, even if short_config has no voiceover_url", async () => {
+    // A completed short_renders row is the proof that voiceover
+    // existed at render time. Legacy stories whose short_config was
+    // never seeded by the editor have voiceover_url=null even though
+    // their short rendered successfully — gating on the editor blob
+    // would falsely block publishing them.
     await seedComplete({
       short_config: {
         config_version: 1,
@@ -168,10 +173,12 @@ describe("evaluateAssetCompleteness", () => {
       },
     });
     const r = await evaluateAssetCompleteness(STORY_ID);
-    expect(r.missing).toContain("voiceover");
+    expect(r.missing).not.toContain("voiceover");
+    expect(r.missing).not.toContain("scene_images");
+    expect(r.ready).toBe(true);
   });
 
-  it("flags scene_images when a frame is missing its url", async () => {
+  it("does NOT flag scene_images when short_render is done, even if a frame url is empty", async () => {
     await seedComplete({
       short_config: {
         config_version: 1,
@@ -184,6 +191,25 @@ describe("evaluateAssetCompleteness", () => {
       },
     });
     const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.missing).not.toContain("scene_images");
+    expect(r.ready).toBe(true);
+  });
+
+  it("DOES surface voiceover + scene_images as hints when short_render is missing entirely", async () => {
+    // Without a successful short_render, the gate falls back to
+    // walking short_config so the operator's log shows which sub-
+    // asset to re-enqueue.
+    await seedComplete({
+      short_config: {
+        config_version: 1,
+        doodle_frames: [],
+        captions: [],
+      },
+    });
+    await run("UPDATE short_renders SET status = 'rendering' WHERE story_id = ?", [STORY_ID]);
+    const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.missing).toContain("short_render");
+    expect(r.missing).toContain("voiceover");
     expect(r.missing).toContain("scene_images");
   });
 
@@ -208,9 +234,19 @@ describe("evaluateAssetCompleteness", () => {
     expect(r.ready).toBe(false);
   });
 
-  it("treats a missing short_config as both voiceover and scene_images missing", async () => {
+  it("ignores a null short_config when short_render is done (trusts the render)", async () => {
     await seedComplete({ short_config: null });
     const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.missing).not.toContain("voiceover");
+    expect(r.missing).not.toContain("scene_images");
+    expect(r.ready).toBe(true);
+  });
+
+  it("falls back to short_config when short_render is missing AND short_config is null", async () => {
+    await seedComplete({ short_config: null });
+    await run("DELETE FROM short_renders WHERE story_id = ?", [STORY_ID]);
+    const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.missing).toContain("short_render");
     expect(r.missing).toContain("voiceover");
     expect(r.missing).toContain("scene_images");
   });

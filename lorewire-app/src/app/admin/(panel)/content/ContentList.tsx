@@ -2205,6 +2205,11 @@ function CompleteResultBanner({
                 {labelFor(o, rowByKey)}
               </span>
               <span className="opacity-70"> — {o.reason ?? "unknown"}</span>
+              {o.missing.length > 0 && (
+                <span className="opacity-70">
+                  {" "}· missing: {o.missing.join(", ")}
+                </span>
+              )}
             </li>
           ))}
           {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
@@ -2219,6 +2224,11 @@ function CompleteResultBanner({
             <li key={`skip:${o.kind}:${o.id}`}>
               <span className="text-ink">{labelFor(o, rowByKey)}</span>
               <span className="opacity-70"> — {o.reason ?? "—"}</span>
+              {o.missing.length > 0 && (
+                <span className="opacity-70">
+                  {" "}· missing: {o.missing.join(", ")}
+                </span>
+              )}
             </li>
           ))}
           {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
