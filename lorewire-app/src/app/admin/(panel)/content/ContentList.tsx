@@ -2300,9 +2300,11 @@ function CompleteConfirmModal({
           For each story missing an asset (article body, hero,
           thumbnails, short, voiceover, scene images, or poll), the
           missing pieces will be enqueued through the existing
-          pipeline. A 2-minute cron then publishes each story to all
-          four socials (Facebook + Instagram Reels &amp; Stories, YouTube,
-          TikTok) the moment every asset is ready.
+          pipeline. A 2-minute cron then publishes each story to up
+          to 6 surfaces the moment every asset is ready: Facebook
+          Reel, Facebook Story, Instagram Reel, Instagram Story,
+          YouTube, TikTok. Story posts are gated by their
+          per-platform toggle in Settings / Socials.
         </p>
         <p className="mt-2 font-mono text-[11px] text-muted">
           Worst case (full pipeline restart): ≈ $0.50 per story · ≈ $
