@@ -42,6 +42,10 @@ import {
   type MergedCatalog,
 } from "@/lib/homepage-rails";
 import { heroTitleFontSizeDesktop, heroTitleBucket } from "@/lib/hero-title-size";
+import {
+  SLOW_MODE_PLAYBACK_RATE,
+  useWirePrefs,
+} from "@/components/wires/useWirePrefs";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import { useStoryPlayEvents } from "@/lib/use-story-play-events";
 import {
@@ -548,6 +552,26 @@ function WatchDoodle({
     }
     onPlayConsumed();
   }, [pendingPlay, onPlayConsumed, story.id]);
+
+  // Mirror the global Slow mode pref onto the WATCH-tab <video>. Same effect
+  // shape as WireCard / StoriesViewer so all three video surfaces honor one
+  // toggle. preservesPitch keeps voices intelligible at 0.75x.
+  // Plan: _plans/2026-06-25-slow-mode-playback.md (Layer 2 follow-up — this
+  // surface was missed in the original PR #105 scope).
+  const { slow } = useWirePrefs();
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const rate = slow ? SLOW_MODE_PLAYBACK_RATE : 1;
+    const vWithPitch = v as HTMLVideoElement & {
+      preservesPitch?: boolean;
+      webkitPreservesPitch?: boolean;
+    };
+    vWithPitch.preservesPitch = true;
+    vWithPitch.webkitPreservesPitch = true;
+    v.playbackRate = rate;
+    console.info("[detail watch playback rate]", { storyId: story.id, rate, slow });
+  }, [slow, story.id, videoUrl]);
 
   if (videoUrl) {
     return (
