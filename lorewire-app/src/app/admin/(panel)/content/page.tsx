@@ -20,11 +20,13 @@ import {
   JOB_STATUSES,
   type ContentSubKind,
   type JobStatus,
+  type ProgressKind,
   type SocialPlatform,
 } from "@/lib/repo";
 import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
 import { CATEGORIES, STATUSES } from "@/app/admin/ui";
 import { ContentList } from "./ContentList";
+import { AutoRefresh } from "./AutoRefresh";
 
 const LIST_LIMIT = 200;
 
@@ -86,6 +88,30 @@ function parseDateInput(raw: string | undefined): string | undefined {
 function isJobStatus(v: string | undefined): v is JobStatus {
   return (JOB_STATUSES as readonly string[]).includes(v ?? "");
 }
+
+// 2026-06-25 active-render filter values. The chip row collapses
+// "any active" to a single click; specific kinds let the operator
+// narrow to "stories whose short is rendering right now" etc.
+const ACTIVE_KIND_VALUES = [
+  "any",
+  "short",
+  "images",
+  "voice",
+  "pipeline",
+] as const;
+type ActiveKindValue = (typeof ACTIVE_KIND_VALUES)[number];
+
+function isActiveKindValue(v: string | undefined): v is ActiveKindValue {
+  return (ACTIVE_KIND_VALUES as readonly string[]).includes(v ?? "");
+}
+
+const ACTIVE_KIND_LABELS: Record<ActiveKindValue, string> = {
+  any: "Any active",
+  short: "Short rendering",
+  images: "Images rendering",
+  voice: "Voice rendering",
+  pipeline: "Pipeline running",
+};
 
 const SUBKIND_FILTER_LABELS: Record<ContentSubKind, string> = {
   video: "Videos",
@@ -161,6 +187,9 @@ export default async function ContentPage({
      *  rows; "0" = only NOT-flagged rows; anything else / unset =
      *  no filter. The header status card links into ?flagged=1. */
     flagged?: string;
+    /** 2026-06-25 active-render filter. Closed-enum, see
+     *  ACTIVE_KIND_VALUES. Unset = no filter. */
+    active?: string;
   }>;
 }) {
   await requireCapability("content.manage");
@@ -182,6 +211,8 @@ export default async function ContentPage({
   // a weird third state.
   const flaggedFilter: boolean | undefined =
     sp.flagged === "1" ? true : sp.flagged === "0" ? false : undefined;
+  const activeKindFilter: ProgressKind | "any" | undefined =
+    isActiveKindValue(sp.active) ? sp.active : undefined;
   const updatedBucket = isDateBucket(sp.updatedBucket)
     ? sp.updatedBucket
     : undefined;
@@ -218,6 +249,7 @@ export default async function ContentPage({
       updatedSince: resolvedRange?.since || undefined,
       updatedUntil: resolvedRange?.until || undefined,
       flagged: flaggedFilter,
+      activeKind: activeKindFilter,
       limit: LIST_LIMIT,
     }),
     getAutoPublishFlaggedSummary(),
@@ -242,6 +274,7 @@ export default async function ContentPage({
       updatedAfter: updatedBucket === "custom" ? sp.updatedAfter : undefined,
       updatedBefore: updatedBucket === "custom" ? sp.updatedBefore : undefined,
       flagged: sp.flagged,
+      active: sp.active,
       ...override,
     };
     for (const [k, v] of Object.entries(merged)) {
@@ -483,6 +516,27 @@ export default async function ContentPage({
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Active
+          </span>
+          {chip(
+            `/admin/content${baseQs({ active: undefined })}`,
+            "All",
+            activeKindFilter === undefined,
+          )}
+          {ACTIVE_KIND_VALUES.map((k) =>
+            chip(
+              `/admin/content${baseQs({ active: k })}`,
+              ACTIVE_KIND_LABELS[k],
+              activeKindFilter === k,
+            ),
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (in-flight short/image/voice/pipeline render · video stories only)
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
             Updated
           </span>
           {chip(
@@ -539,6 +593,9 @@ export default async function ContentPage({
             {sp.flagged && (
               <input type="hidden" name="flagged" value={sp.flagged} />
             )}
+            {sp.active && (
+              <input type="hidden" name="active" value={sp.active} />
+            )}
             <input type="hidden" name="updatedBucket" value="custom" />
             <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-muted">
               From
@@ -583,6 +640,8 @@ export default async function ContentPage({
           Showing the {LIST_LIMIT} most recently updated. Filter to narrow.
         </p>
       )}
+
+      {rows.some((r) => r.progress != null) && <AutoRefresh />}
     </div>
   );
 }
