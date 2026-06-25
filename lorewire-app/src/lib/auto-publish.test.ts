@@ -5,7 +5,14 @@
 // autocurate on the happy path so the public site sees the new story
 // without a manual click.
 //
-// Plan: _plans/2026-06-24-reddit-source-full-pipeline-toggle.md.
+// 2026-06-25 (#101 follow-up): the helper now runs evaluateAssetCompleteness
+// instead of evaluatePublishReadiness, so the fixture must seed the full
+// asset chain (short, thumbnails, poll) for the happy-path tests. Tests
+// that exercise a specific failure mode null out just that asset on
+// top of the fully-seeded baseline.
+//
+// Plan: _plans/2026-06-24-reddit-source-full-pipeline-toggle.md +
+// _plans/2026-06-25-bulk-complete-and-publish.md follow-up.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { all, one, run } from "@/lib/db";
@@ -20,8 +27,22 @@ vi.mock("next/cache", () => ({
   revalidatePath: () => {},
 }));
 
+// Stub the poll-autodraft self-heal path — its real implementation
+// reaches the LLM and we don't want network in unit tests. The
+// poll-only retry composes correctness from the autodraft module's
+// own tests; here we only need to know it's CALLED and it doesn't
+// itself raise. Returning ok:true keeps the gate satisfied for the
+// upgrade-existing-draft scenario; ok:false leaves the missing list
+// intact for the draft-never-happened scenario. Tests below mock
+// per-case as needed.
+vi.mock("@/lib/poll-autodraft", () => ({
+  autoDraftPollForSubject: vi.fn(async () => ({ ok: true, ai: true })),
+}));
+
 async function reset(): Promise<void> {
   await run("DELETE FROM homepage_curation WHERE 1=1", []);
+  await run("DELETE FROM polls WHERE 1=1", []);
+  await run("DELETE FROM short_renders WHERE 1=1", []);
   await run("DELETE FROM stories WHERE 1=1", []);
   await run("DELETE FROM reddit_source WHERE 1=1", []);
 }
@@ -46,10 +67,60 @@ async function seedSourceWithUsedStory(
     storyPatch.hero_image === undefined
       ? "https://example.com/hero.png"
       : storyPatch.hero_image;
+  // Seed every column the asset gate now checks: 5 hero/thumbnail
+  // variants on the story row + a done short_renders row + a
+  // short_config with a non-empty voiceover_url and at least one
+  // frame so the short_render gate passes. The voiceover/scene_images
+  // gates are SUPPRESSED when short_render is present (per #100), so
+  // we only need short_config minimal enough to round-trip parsing.
+  const shortConfig = JSON.stringify({
+    config_version: 1,
+    doodle_frames: [
+      { id: "frame-00", url: "https://example.com/scene-00.png", caption_chunk_start_index: 0 },
+    ],
+    captions: [],
+    voiceover_url: "https://example.com/voice.mp3",
+  });
   await run(
-    "INSERT INTO stories (id, reddit_id, status, body, hero_image, created_at, updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, '2026-06-24T00:00:00+00:00', '2026-06-24T00:00:00+00:00')",
-    [storyId, redditId, status, body, hero],
+    "INSERT INTO stories (id, reddit_id, status, body, hero_image, " +
+      "hero_image_landscape, thumbnail_image, thumbnail_image_landscape, " +
+      "thumbnail_image_square, short_config, " +
+      "created_at, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " +
+      "'2026-06-24T00:00:00+00:00', '2026-06-24T00:00:00+00:00')",
+    [
+      storyId,
+      redditId,
+      status,
+      body,
+      hero,
+      "https://example.com/hero-landscape.png",
+      "https://example.com/thumb.png",
+      "https://example.com/thumb-landscape.png",
+      "https://example.com/thumb-square.png",
+      shortConfig,
+    ],
+  );
+  // Done short_renders row — the gate looks for status='done' AND
+  // output_url AND props IS NOT NULL.
+  await run(
+    "INSERT INTO short_renders (id, story_id, status, output_url, props, requested_at) " +
+      "VALUES (?, ?, 'done', ?, ?, '2026-06-24T00:00:00+00:00')",
+    [
+      `${storyId}-short`,
+      storyId,
+      "https://example.com/short.mp4",
+      "{}",
+    ],
+  );
+  // Enabled poll with a question — the gate requires enabled=1 AND
+  // non-empty question.
+  await run(
+    "INSERT INTO polls (id, story_id, article_id, question, option_a_text, option_b_text, " +
+      "enabled, category, created_at, updated_at) " +
+      "VALUES (?, ?, NULL, 'Who is right?', 'A', 'B', 1, 'Drama', " +
+      "'2026-06-24T00:00:00+00:00', '2026-06-24T00:00:00+00:00')",
+    [`${storyId}-poll`, storyId],
   );
 }
 
@@ -84,9 +155,7 @@ describe("publishStoryIfReady", () => {
     expect(result.ok).toBe(false);
     if (result.ok === false) {
       expect(result.reason).toBe("not_ready");
-      expect(result.missing).toEqual(
-        expect.arrayContaining([expect.stringMatching(/body/i)]),
-      );
+      expect(result.missing).toContain("body");
     }
     // Story should NOT have been flipped.
     const row = await one<{ status: string }>(
@@ -102,9 +171,7 @@ describe("publishStoryIfReady", () => {
     const result = await publishStoryIfReady("r-1");
     expect(result.ok).toBe(false);
     if (result.ok === false) {
-      expect(result.missing).toEqual(
-        expect.arrayContaining([expect.stringMatching(/hero/i)]),
-      );
+      expect(result.missing).toContain("hero_image");
     }
   });
 
@@ -114,16 +181,14 @@ describe("publishStoryIfReady", () => {
     const result = await publishStoryIfReady("r-1");
     expect(result.ok).toBe(false);
     if (result.ok === false) {
-      expect(result.missing).toEqual(
-        expect.arrayContaining([expect.stringMatching(/already published/i)]),
-      );
+      expect(result.missing).toContain("already_published");
     }
   });
 
   it("rejects when the source is still 'imported' (worker hadn't finished)", async () => {
     // Edge case: worker bug somehow set auto_publish_status='pending'
     // before the source flipped to 'used'. The gate must still catch
-    // this — it's the safety belt mentioned in store.py.
+    // this — the source-row has no story_id, so we return story_not_found.
     await run(
       "INSERT INTO reddit_source (reddit_id, subreddit, date_written, title, full_text, comments, status, story_id, first_synced, last_synced) " +
         "VALUES (?, 'AITAH', '2026-01-01T00:00:00+00:00', 't', 'f', 1, 'imported', NULL, '2026-06-24T00:00:00+00:00', '2026-06-24T00:00:00+00:00')",
@@ -133,11 +198,11 @@ describe("publishStoryIfReady", () => {
     const result = await publishStoryIfReady("r-1");
     expect(result.ok).toBe(false);
     if (result.ok === false) {
-      expect(result.reason).toBe("not_ready");
+      expect(result.reason).toBe("story_not_found");
     }
   });
 
-  it("publishes the story exactly once on a repeat call (second call rejects with already-published)", async () => {
+  it("publishes the story exactly once on a repeat call (second call rejects with already_published)", async () => {
     await seedSourceWithUsedStory("r-1", "s-1");
 
     const first = await publishStoryIfReady("r-1");
@@ -146,9 +211,7 @@ describe("publishStoryIfReady", () => {
     const second = await publishStoryIfReady("r-1");
     expect(second.ok).toBe(false);
     if (second.ok === false) {
-      expect(second.missing).toEqual(
-        expect.arrayContaining([expect.stringMatching(/already published/i)]),
-      );
+      expect(second.missing).toContain("already_published");
     }
 
     // status didn't bounce back.
