@@ -74,3 +74,29 @@ export function filterStoriesPlaylistByUnseen(
   const set = viewedIds instanceof Set ? viewedIds : new Set(viewedIds);
   return playlist.filter((s) => !set.has(s.id));
 }
+
+/** Reorder a Stories playlist so unseen wires lead and already-viewed
+ *  wires fall to the end of the queue — matches IG, where viewed
+ *  stories drop to the back of the row instead of holding the front
+ *  with a dimmed ring. Within each group the original (newest-first)
+ *  order is preserved. The viewer takes its traversal order from this
+ *  same reorder so tap-next inside the viewer follows the visual rail
+ *  order, not the source order.
+ *
+ *  Stable partition implementation: one pass into two buckets, then
+ *  concat. Avoids the overhead of Array.sort comparator-based
+ *  partitioning when the input is small (capped at
+ *  STORIES_PLAYLIST_CAP = 10). */
+export function partitionStoriesPlaylistByViewed(
+  playlist: Story[],
+  viewedIds: ReadonlySet<string> | string[],
+): Story[] {
+  const set = viewedIds instanceof Set ? viewedIds : new Set(viewedIds);
+  const unseen: Story[] = [];
+  const viewed: Story[] = [];
+  for (const story of playlist) {
+    if (set.has(story.id)) viewed.push(story);
+    else unseen.push(story);
+  }
+  return [...unseen, ...viewed];
+}

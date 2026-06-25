@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   STORIES_PLAYLIST_CAP,
   filterStoriesPlaylistByUnseen,
+  partitionStoriesPlaylistByViewed,
   resolveStoriesPlaylist,
 } from "./stories-playlist";
 
@@ -225,5 +226,44 @@ describe("filterStoriesPlaylistByUnseen", () => {
     expect(
       filterStoriesPlaylistByUnseen(playlist, ["a", "b", "c", "d"]),
     ).toEqual([]);
+  });
+});
+
+describe("partitionStoriesPlaylistByViewed — IG-style unseen-first ordering", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const story = (id: string): any => ({ id });
+  const playlist = [story("a"), story("b"), story("c"), story("d")];
+
+  it("returns the full playlist unchanged when nothing is viewed", () => {
+    expect(
+      partitionStoriesPlaylistByViewed(playlist, []).map((s) => s.id),
+    ).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("moves viewed wires to the end while preserving within-group order", () => {
+    // b + d are viewed → unseen group [a, c] leads, viewed group [b, d]
+    // follows. Original order preserved within each group.
+    expect(
+      partitionStoriesPlaylistByViewed(playlist, ["b", "d"]).map((s) => s.id),
+    ).toEqual(["a", "c", "b", "d"]);
+  });
+
+  it("when every wire is viewed, returns them all (now at the end of an empty unseen list)", () => {
+    // Rail's job — not this helper's — to decide whether to render
+    // anything in this case. The reorder semantics stay consistent:
+    // empty unseen + full viewed = full viewed list.
+    expect(
+      partitionStoriesPlaylistByViewed(playlist, ["a", "b", "c", "d"]).map(
+        (s) => s.id,
+      ),
+    ).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("accepts a Set directly (avoids redundant Array→Set rebuild)", () => {
+    expect(
+      partitionStoriesPlaylistByViewed(playlist, new Set(["c"])).map(
+        (s) => s.id,
+      ),
+    ).toEqual(["a", "b", "d", "c"]);
   });
 });

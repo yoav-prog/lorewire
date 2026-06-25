@@ -43,7 +43,10 @@ import DesktopShell from "@/components/DesktopShell";
 import WiresFeed from "@/components/wires/WiresFeed";
 import { StoriesRail } from "@/components/stories/StoriesRail";
 import { StoriesViewer } from "@/components/stories/StoriesViewer";
-import { resolveStoriesPlaylist } from "@/components/stories/stories-playlist";
+import {
+  partitionStoriesPlaylistByViewed,
+  resolveStoriesPlaylist,
+} from "@/components/stories/stories-playlist";
 import { useStoriesUrlState } from "@/components/stories/use-stories-url-state";
 import { useViewedWires } from "@/components/stories/use-viewed-wires";
 import CookieConsent from "@/components/CookieConsent";
@@ -1863,18 +1866,42 @@ function MyList({
     .filter((s): s is Story => s !== null);
   return (
     <div className="pt-14 px-4 pb-28">
-      {/* Header row: title + sign-in chip. For anonymous users with at
-          least one save, the chip is the persistent "save across
-          devices" entry point — the nudge fires at most once per
-          snooze cycle, but this surface is always reachable. */}
+      {/* Header row: title + settings gear + sign-in chip. For anonymous
+          users with at least one save, the chip is the persistent "save
+          across devices" entry point. The gear is the mobile entry to
+          /settings (no tab-bar slot available; gear here keeps it
+          reachable from a screen the user already visits regularly). */}
       <div className="mb-5 flex items-center justify-between gap-3">
         <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px]">
           My List
         </h1>
-        <SignInChip
-          session={session}
-          tone={!session && items.length > 0 ? "prominent" : "subtle"}
-        />
+        <div className="flex items-center gap-2">
+          <a
+            href="/settings"
+            aria-label="Settings"
+            title="Settings"
+            className="flex items-center justify-center w-9 h-9 rounded-full text-ink hover:opacity-80 transition"
+            style={{ background: "rgba(255,255,255,.07)" }}
+          >
+            <svg
+              width={18}
+              height={18}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.7}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </a>
+          <SignInChip
+            session={session}
+            tone={!session && items.length > 0 ? "prominent" : "subtle"}
+          />
+        </div>
       </div>
       {items.length === 0 ? (
         <p className="font-body text-muted mt-10 text-center">Nothing saved yet. Tap <span className="text-ink">+ My List</span> on any story.</p>
@@ -1967,17 +1994,28 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     liveRows: initial.liveRows,
   });
 
-  // 2026-06-25 stories plan: IG-style rail + viewer riding on the same
-  // catalog as the homepage rails. Playlist is computed once per
-  // catalog/curation change; rail filters by useViewedWires's unseen
-  // set so the rail hides cleanly when there's nothing new. The viewer
-  // opens via `?wire=<id>` (distinct from `?story=`, which is the
-  // Comments deep-link). Plan: _plans/2026-06-25-stories-rail-and-viewer.md.
+  // 2026-06-25 stories plans: IG-style rail + viewer. The playlist
+  // is resolved once per catalog/curation change, then re-partitioned
+  // by useViewedWires so unseen wires lead and already-viewed wires
+  // fall to the end of the queue (matches IG — viewed thumbs at the
+  // back, not at the front with a dimmed ring). Both the rail and
+  // the viewer consume the SAME reordered playlist so tap-next inside
+  // the viewer follows the visual rail order. The viewer snapshots
+  // its prop at mount so an in-session mark-viewed doesn't shuffle
+  // the queue mid-story; close + reopen takes a fresh snapshot. The
+  // viewer opens via `?wire=<id>` (distinct from `?story=`, which is
+  // the Comments deep-link). Plans:
+  //   - _plans/2026-06-25-stories-rail-and-viewer.md
+  //   - _plans/2026-06-25-user-settings-page.md (partition + prefs)
   const storiesPlaylist = useMemo(
     () => resolveStoriesPlaylist(curation, catalog, resolveStory),
     [curation, catalog, resolveStory],
   );
   const { viewed: viewedWireIds } = useViewedWires();
+  const storiesPlaylistOrdered = useMemo(
+    () => partitionStoriesPlaylistByViewed(storiesPlaylist, viewedWireIds),
+    [storiesPlaylist, viewedWireIds],
+  );
   const { openWireId, openWire, closeWire } = useStoriesUrlState();
 
   const open: OpenFn = (id, t) => {
@@ -2041,7 +2079,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             resolveStory={resolveStory}
             pollsInitial={initial.pollRails}
             session={initial.session}
-            storiesPlaylist={storiesPlaylist}
+            storiesPlaylist={storiesPlaylistOrdered}
             viewedWireIds={viewedWireIds}
             onOpenWire={openWire}
           />
@@ -2085,9 +2123,9 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
           TitleSheet alike. Mounting it at the shell level (not inside
           Home) means a deep link works regardless of which tab is
           currently active. Plan: _plans/2026-06-25-stories-rail-and-viewer.md. */}
-      {openWireId && storiesPlaylist.length > 0 && (
+      {openWireId && storiesPlaylistOrdered.length > 0 && (
         <StoriesViewer
-          playlist={storiesPlaylist}
+          playlist={storiesPlaylistOrdered}
           startId={openWireId}
           onClose={closeWire}
         />

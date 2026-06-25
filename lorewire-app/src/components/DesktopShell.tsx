@@ -93,6 +93,20 @@ const Ico = ({ d, fill, size = 24, stroke = 1.7 }: IconProps & { d: React.ReactN
   <svg width={size} height={size} viewBox="0 0 24 24" fill={fill || "none"} stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">{d}</svg>
 );
 const SearchI: IconCmp = (p) => <Ico {...p} d={<><circle cx="11" cy="11" r="6.2" /><path d="m20 20-3.6-3.6" /></>} />;
+// Gear icon for the Settings link in TopNav. Outline-only to match
+// the rest of the icon family; same 24-viewBox geometry so it sits
+// on the same baseline as SearchI/PlayI etc.
+const SettingsGearI: IconCmp = (p) => (
+  <Ico
+    {...p}
+    d={
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </>
+    }
+  />
+);
 const PlayI = ({ size = 22 }: { size?: number }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l11-6.5z" /></svg>
 );
@@ -195,6 +209,14 @@ function TopNav({ view, setView, solid, query, setQuery, session }: { view: stri
             <button onClick={() => { setSearchOpen((o) => !o); setView("Search"); }} className="w-[38px] h-[38px] flex items-center justify-center text-ink shrink-0"><SearchI size={19} /></button>
             <input value={query} onChange={(e) => { setQuery(e.target.value); setView("Search"); }} placeholder="Stories, categories..." className="bg-transparent outline-none font-body text-[13.5px] text-ink placeholder:text-muted pr-3 w-full" style={{ display: open ? "block" : "none" }} />
           </div>
+          <a
+            href="/settings"
+            aria-label="Settings"
+            title="Settings"
+            className="w-[38px] h-[38px] flex items-center justify-center text-ink hover:opacity-80 transition"
+          >
+            <SettingsGearI size={19} />
+          </a>
           <SignInChip session={session} />
         </div>
       </div>

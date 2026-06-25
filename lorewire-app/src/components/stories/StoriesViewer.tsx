@@ -43,9 +43,12 @@ import { useWirePrefs } from "@/components/wires/useWirePrefs";
 
 import { StoriesProgressBar } from "./StoriesProgressBar";
 import { useStoriesGestures } from "./use-stories-gestures";
+import {
+  useStoriesAutoAdvance,
+  useStoriesImageDwellMs,
+} from "./use-stories-prefs";
 import { useViewedWires } from "./use-viewed-wires";
 
-const DEFAULT_IMAGE_DWELL_MS = 6000;
 const MIN_DWELL_FOR_VIEW_MARK_MS = 2000;
 
 export interface StoriesViewerProps {
@@ -60,41 +63,52 @@ export interface StoriesViewerProps {
 }
 
 export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps) {
-  // Resolve startId → starting index. Unknown id falls back to 0
-  // rather than throwing — defensive against stale share links.
+  const { autoAdvance } = useStoriesAutoAdvance();
+  const { imageDwellMs } = useStoriesImageDwellMs();
+
+  // Snapshot the playlist at viewer-open time so an in-session re-
+  // partition (the parent re-orders the rail when viewedIds changes,
+  // which the viewer triggers via markViewed) doesn't shuffle the
+  // queue under the user's feet. The viewer re-mounts on close +
+  // reopen, taking a fresh snapshot that reflects the new viewed
+  // state. Lazy-init via useState so it captures the first-render
+  // playlist exactly once per viewer mount.
+  const [stablePlaylist] = useState<Story[]>(() => playlist);
+
+  // Resolve startId → starting index against the SNAPSHOT (not the
+  // live playlist prop). Unknown id falls back to 0 rather than
+  // throwing — defensive against stale share links.
   const startIndex = useMemo(() => {
     if (!startId) return 0;
-    const idx = playlist.findIndex((s) => s.id === startId);
+    const idx = stablePlaylist.findIndex((s) => s.id === startId);
     return idx >= 0 ? idx : 0;
-  }, [playlist, startId]);
+  }, [stablePlaylist, startId]);
 
   const [activeIndex, setActiveIndex] = useState(startIndex);
   const [paused, setPaused] = useState(false);
   const [restartToken, setRestartToken] = useState(0);
-  const [activeDurationMs, setActiveDurationMs] = useState(
-    DEFAULT_IMAGE_DWELL_MS,
-  );
+  const [activeDurationMs, setActiveDurationMs] = useState(imageDwellMs);
   const dwellStartRef = useRef<number>(performance.now());
   const reducedMotionRef = useRef(false);
 
   const { markViewed, isViewed } = useViewedWires();
   const { muted, toggleMuted } = useWirePrefs();
 
-  const active = playlist[activeIndex] ?? null;
+  const active = stablePlaylist[activeIndex] ?? null;
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // Reset dwell + restartToken when the active wire changes.
   useEffect(() => {
     dwellStartRef.current = performance.now();
-    setActiveDurationMs(DEFAULT_IMAGE_DWELL_MS);
+    setActiveDurationMs(imageDwellMs);
     setRestartToken((t) => t + 1);
     // eslint-disable-next-line no-console -- rule 14
     console.info("[stories viewer active]", {
       index: activeIndex,
       id: active?.id ?? null,
-      total: playlist.length,
+      total: stablePlaylist.length,
     });
-  }, [activeIndex, active?.id, playlist.length]);
+  }, [activeIndex, active?.id, stablePlaylist.length, imageDwellMs]);
 
   // Track prefers-reduced-motion on mount.
   useEffect(() => {
@@ -142,7 +156,7 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
   const advanceNext = useCallback(
     (reason: "complete" | "dwell-advance") => {
       maybeMarkViewed(reason);
-      if (activeIndex + 1 >= playlist.length) {
+      if (activeIndex + 1 >= stablePlaylist.length) {
         // End of playlist → dismiss.
         // eslint-disable-next-line no-console -- rule 14
         console.info("[stories viewer end-of-playlist]", {
@@ -153,7 +167,7 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
       }
       setActiveIndex((i) => i + 1);
     },
-    [activeIndex, playlist.length, active?.id, maybeMarkViewed, onClose],
+    [activeIndex, stablePlaylist.length, active?.id, maybeMarkViewed, onClose],
   );
 
   const advancePrev = useCallback(() => {
@@ -167,18 +181,33 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
   }, [activeIndex]);
 
   // Auto-advance timer for image / text-only wires. Videos use their
-  // own `ended` event so the timer is skipped. Reduced-motion short-
-  // circuits the timer entirely; user still advances manually.
+  // own `ended` event so the timer is skipped. Three short-circuits:
+  //   - paused (hold-to-pause, tab hidden) — skip while paused
+  //   - prefers-reduced-motion — accessibility, skip entirely
+  //   - !autoAdvance (user pref from Settings) — manual-only mode
+  // Note that the video `ended` handler still fires under
+  // !autoAdvance for video wires — that's intentional. The pref
+  // means "don't ADVANCE on a timer"; a finished video that just
+  // sits on its last frame would be jarring. If users want video
+  // wires to stop at the end too, that's a separate toggle.
   useEffect(() => {
     if (paused) return;
     if (active?.videoUrl) return;
     if (reducedMotionRef.current) return;
+    if (!autoAdvance) return;
     const handle = setTimeout(
       () => advanceNext("dwell-advance"),
       activeDurationMs,
     );
     return () => clearTimeout(handle);
-  }, [paused, active?.videoUrl, activeIndex, activeDurationMs, advanceNext]);
+  }, [
+    paused,
+    active?.videoUrl,
+    activeIndex,
+    activeDurationMs,
+    advanceNext,
+    autoAdvance,
+  ]);
 
   // Imperative mute write — React's `muted` attribute is unreliable
   // for the same reasons WireCard documents (autoplay-muted requires
@@ -263,7 +292,7 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
     },
   });
 
-  if (playlist.length === 0 || !active) {
+  if (stablePlaylist.length === 0 || !active) {
     return null;
   }
 
@@ -283,7 +312,7 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
         style={{ aspectRatio: "9 / 16" }}
       >
         <StoriesProgressBar
-          total={playlist.length}
+          total={stablePlaylist.length}
           activeIndex={activeIndex}
           durationMs={activeDurationMs}
           paused={paused}
