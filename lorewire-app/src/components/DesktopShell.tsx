@@ -271,6 +271,7 @@ function Hero({
   onOpen,
   onShuffle,
   onActiveChange,
+  pollQuestions,
 }: {
   pool: Story[];
   onOpen: OpenFn;
@@ -279,6 +280,11 @@ function Hero({
    *  via a ref so "Play Something" can exclude the marquee the user is
    *  currently looking at. */
   onActiveChange?: (heroId: string) => void;
+  /** 2026-06-26 slice D of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  poll question keyed by story id. Renders above the title as a
+   *  handwritten audience-question hint when present; missing entries
+   *  skip the overlay so the slide reads as a normal hero. */
+  pollQuestions: HomepageInitial["heroPollQuestions"];
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [hovered, setHovered] = useState(false);
@@ -397,6 +403,25 @@ function Hero({
               <span className="w-[3px] h-4 bg-accent rounded-full"></span>
               <span className="font-mono text-[11px] uppercase tracking-[.36em] text-ink/90">LoreWire Original</span>
             </div>
+            {/* 2026-06-26 slice D of _plans/2026-06-26-homepage-redesign-v1.md:
+                the question hint sits BETWEEN the eyebrow and the title so
+                it reads as "the dilemma the audience is debating" before
+                the show's name lands. Handwriting font (Caveat) is
+                intentional — visually attributes the question to the
+                audience, not the brand. Question only, no option labels
+                (the spoiler tradeoff locked with Yoav). */}
+            {pollQuestions[story.id] && (
+              <p
+                className="leading-tight text-ink mb-3 select-none"
+                style={{
+                  fontFamily: "var(--font-caveat)",
+                  fontSize: 40,
+                  textShadow: "0 1px 14px rgba(0,0,0,.55)",
+                }}
+              >
+                {pollQuestions[story.id]}
+              </p>
+            )}
             <HeroTitleH1 title={story.title} storyId={story.id} />
             <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
               <span className="font-semibold text-[15px]" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
@@ -1502,6 +1527,8 @@ function HomePage({
   resolveStory,
   pollsInitial,
   votedStoryIds,
+  heroDivisiveIds,
+  heroPollQuestions,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -1517,6 +1544,14 @@ function HomePage({
    *  the viewer hasn't cast a verdict on yet — the "You Didn't Vote
    *  Yet" reframe. Empty array for anonymous viewers (filter no-ops). */
   votedStoryIds: HomepageInitial["votedStoryIds"];
+  /** 2026-06-26 slice D: top story ids by current divisiveness.
+   *  Threaded into resolveHeroPool as the auto-fill source so an
+   *  uncurated hero leads with the most-debated stories. */
+  heroDivisiveIds: HomepageInitial["heroDivisiveIds"];
+  /** 2026-06-26 slice D: poll question keyed by story id. Used by
+   *  the hero overlay to render the question hint above the title;
+   *  only the question is surfaced, never the option labels. */
+  heroPollQuestions: HomepageInitial["heroPollQuestions"];
 }) {
   // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
   // New & Hot grids can share the same resolveStory (saved real shorts aren't
@@ -1539,7 +1574,16 @@ function HomePage({
   // Hero rotation pool (capacity 8). The shell uses the pool count for
   // its [home render] log and onHeroActiveChange to keep the shuffle's
   // hero-exclusion tracking the visible slide (not just pool[0]).
-  const heroPool = resolveHeroPool(curation, behavior, catalog, resolveStory);
+  // heroDivisiveIds (slice D of _plans/2026-06-26-homepage-redesign-v1.md)
+  // becomes the auto-fill source so the carousel leads with the
+  // most-debated stories, not just the most recent.
+  const heroPool = resolveHeroPool(
+    curation,
+    behavior,
+    catalog,
+    resolveStory,
+    heroDivisiveIds,
+  );
   const heroStory = pickHeroAtIndex(heroPool, 0);
 
   // 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md.
@@ -1595,6 +1639,7 @@ function HomePage({
           onOpen={onOpen}
           onShuffle={onShuffle}
           onActiveChange={onHeroActiveChange}
+          pollQuestions={heroPollQuestions}
         />
       )}
       <div className={heroPool.length > 0 ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
@@ -1805,7 +1850,13 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     const heroId =
       heroActiveIdRef.current ??
       pickHeroAtIndex(
-        resolveHeroPool(curation, behavior, catalog, resolveStory),
+        resolveHeroPool(
+          curation,
+          behavior,
+          catalog,
+          resolveStory,
+          initial.heroDivisiveIds,
+        ),
         0,
       )?.id ??
       null;
@@ -1844,6 +1895,8 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           resolveStory={resolveStory}
           pollsInitial={initial.pollRails}
           votedStoryIds={initial.votedStoryIds}
+          heroDivisiveIds={initial.heroDivisiveIds}
+          heroPollQuestions={initial.heroPollQuestions}
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}

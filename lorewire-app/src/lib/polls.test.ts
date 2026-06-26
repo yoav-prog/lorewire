@@ -14,6 +14,7 @@ import {
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
   getAggregateByStoryId,
+  getEnabledPollQuestionsByStoryIds,
   getPollByArticleId,
   getPollById,
   getPollByStoryId,
@@ -1140,6 +1141,78 @@ describe("rail queries", () => {
         new Set(["test-voted-dedupe", "test-voted-dedupe-2"]),
       );
       expect(ids.length).toBe(2);
+    });
+  });
+
+  describe("getEnabledPollQuestionsByStoryIds", () => {
+    async function seedPollWithQuestion(
+      storyId: string,
+      question: string,
+      enabled: boolean,
+    ): Promise<void> {
+      const now = new Date().toISOString();
+      await run("DELETE FROM stories WHERE id = ?", [storyId]);
+      await run(
+        "INSERT INTO stories (id, slug, category, title, status, published_at, created_at, updated_at) " +
+          "VALUES (?, ?, 'Drama', 'T', 'published', ?, ?, ?)",
+        [storyId, `slug-${storyId}`, now, now, now],
+      );
+      await upsertPoll({
+        storyId,
+        question,
+        optionA: "A",
+        optionB: "B",
+        enabled,
+        category: "Drama",
+      });
+    }
+
+    it("returns an empty record for empty input (no SQL round trip)", async () => {
+      const out = await getEnabledPollQuestionsByStoryIds([]);
+      expect(out).toEqual({});
+    });
+
+    it("returns a question per requested story id that has an enabled poll", async () => {
+      await seedPollWithQuestion("test-hero-q-1", "Who's wrong?", true);
+      await seedPollWithQuestion("test-hero-q-2", "Did they go too far?", true);
+      const out = await getEnabledPollQuestionsByStoryIds([
+        "test-hero-q-1",
+        "test-hero-q-2",
+      ]);
+      expect(out).toEqual({
+        "test-hero-q-1": "Who's wrong?",
+        "test-hero-q-2": "Did they go too far?",
+      });
+    });
+
+    it("drops disabled polls", async () => {
+      await seedPollWithQuestion("test-hero-q-on", "Who's wrong?", true);
+      await seedPollWithQuestion("test-hero-q-off", "Hidden question", false);
+      const out = await getEnabledPollQuestionsByStoryIds([
+        "test-hero-q-on",
+        "test-hero-q-off",
+      ]);
+      expect(out).toEqual({ "test-hero-q-on": "Who's wrong?" });
+    });
+
+    it("returns only requested ids, even when other polls exist", async () => {
+      // Seed three; ask for one. The other two stay out of the result.
+      await seedPollWithQuestion("test-hero-q-only-1", "Q1?", true);
+      await seedPollWithQuestion("test-hero-q-only-2", "Q2?", true);
+      await seedPollWithQuestion("test-hero-q-only-3", "Q3?", true);
+      const out = await getEnabledPollQuestionsByStoryIds([
+        "test-hero-q-only-2",
+      ]);
+      expect(out).toEqual({ "test-hero-q-only-2": "Q2?" });
+    });
+
+    it("ignores story ids that don't exist", async () => {
+      await seedPollWithQuestion("test-hero-q-real", "Real?", true);
+      const out = await getEnabledPollQuestionsByStoryIds([
+        "test-hero-q-real",
+        "test-hero-q-ghost",
+      ]);
+      expect(out).toEqual({ "test-hero-q-real": "Real?" });
     });
   });
 

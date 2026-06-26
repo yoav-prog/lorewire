@@ -534,6 +534,114 @@ describe("resolveHeroPool / pickHeroAtIndex", () => {
     expect(pickHeroAtIndex(pool, 100)?.id).toBe("c");
     expect(pickHeroAtIndex(pool, 1)?.id).toBe("b");
   });
+
+  // ─── slice D: divisive auto-fill ────────────────────────────────────────────
+
+  it("divisiveIds replace the recency auto-fill when curation is empty", () => {
+    // Catalog sorted recency: a, b, c, d, e (story() defaults the year
+    // chronologically via the test fixture). With divisiveIds present,
+    // the pool should lead with those instead of the recency order.
+    const curation = { ...emptyCuration } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+      ["c", "e"],
+    );
+    // c, e from divisive first; then recency fills (skipping dupes).
+    expect(pool.map((s) => s.id)).toEqual(["c", "e", "a", "b", "d"]);
+  });
+
+  it("curated picks still pin at the front, divisive fills, recency tops up", () => {
+    // Admin curated 'b'. Top-divisive is 'd', then 'e'. Recency
+    // remainder fills any leftover slot. Result order: curated, then
+    // divisive (skipping the curated dupe if any), then recency
+    // (skipping all previous dupes).
+    const curation = { ...emptyCuration, hero: ["b"] } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+      ["d", "e"],
+    );
+    expect(pool.map((s) => s.id)).toEqual(["b", "d", "e", "a", "c"]);
+  });
+
+  it("dedupes when a curated story is also in the divisive list", () => {
+    // 'c' appears in both curation and divisiveIds — should only get
+    // ONE slot (the curated one, since curation pins first).
+    const curation = { ...emptyCuration, hero: ["c"] } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+      ["c", "d"],
+    );
+    expect(pool.map((s) => s.id)).toEqual(["c", "d", "a", "b", "e"]);
+    // 'c' appears exactly once.
+    expect(pool.filter((s) => s.id === "c")).toHaveLength(1);
+  });
+
+  it("empty divisiveIds preserve the pre-slice-D behavior (curated + recency)", () => {
+    // Backward-compat guarantee: callers that haven't been migrated to
+    // pass divisiveIds still get the original augmenting behavior.
+    const curation = { ...emptyCuration, hero: ["c", "e"] } as any;
+    const poolWithoutArg = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+    );
+    const poolWithEmpty = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+      [],
+    );
+    expect(poolWithoutArg.map((s) => s.id)).toEqual([
+      "c",
+      "e",
+      "a",
+      "b",
+      "d",
+    ]);
+    expect(poolWithEmpty.map((s) => s.id)).toEqual(
+      poolWithoutArg.map((s) => s.id),
+    );
+  });
+
+  it("divisive ids that aren't in the catalog are skipped gracefully", () => {
+    // Server might return a divisive id whose story has been unpublished
+    // since the projection refresh — resolveStory returns null, the id
+    // is dropped, the rest of the pool composes normally.
+    const curation = { ...emptyCuration } as any;
+    const pool = resolveHeroPool(
+      curation,
+      BEHAVIOR_FALLBACK,
+      catalog,
+      resolveStory,
+      ["ghost", "c"],
+    );
+    expect(pool.map((s) => s.id)).toEqual(["c", "a", "b", "d", "e"]);
+  });
+
+  it("heroRequired=true ignores divisiveIds entirely", () => {
+    // Admin explicitly said "no fallback" — divisive doesn't sneak in
+    // as a backdoor fallback. Only curated picks count.
+    const curation = { ...emptyCuration, hero: ["c"] } as any;
+    const pool = resolveHeroPool(
+      curation,
+      { emptyRailBehavior: "fallback", heroRequired: true },
+      catalog,
+      resolveStory,
+      ["a", "b", "d"],
+    );
+    expect(pool.map((s) => s.id)).toEqual(["c"]);
+  });
 });
 
 // 2026-06-25 stories-reader-navigation plan: liveRowToStory and

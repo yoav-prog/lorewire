@@ -615,11 +615,26 @@ export function resolveRailIds(
 }
 
 /** Resolve the full rotation pool for the homepage hero carousel. The pool
- *  is admin-curated (curated picks pin at the front via the augmenting
- *  resolver) and auto-fills with the most-recent published stories from
- *  the catalog so an uncurated homepage still rotates instead of
- *  freezing on a single static slide. Capped at HERO_FALLBACK_CAP so
- *  the augmented set never exceeds the visual contract.
+ *  is admin-curated (curated picks pin at the front) and auto-fills with
+ *  the most-divisive published stories from the catalog so an uncurated
+ *  homepage opens on the verdict the audience can't agree on — the
+ *  hook the carousel is meant to deliver. Capped at HERO_FALLBACK_CAP
+ *  so the augmented set never exceeds the visual contract.
+ *
+ *  Resolution order (matches the v1 spec — slice D of
+ *  _plans/2026-06-26-homepage-redesign-v1.md):
+ *
+ *    1. Curated hero picks pin at the front (admin override stays
+ *       authoritative).
+ *    2. `divisiveIds` (top-divisive story ids by current poll_aggregates
+ *       data, server-resolved through the SSR seed) fill remaining slots.
+ *    3. Recency fallback (most-recent published) fills any leftover slots,
+ *       so a cold catalog with no divisive candidates yet still rotates
+ *       instead of freezing on a single slide.
+ *
+ *  `divisiveIds` defaults to `[]` so legacy callers (no SSR seed wiring
+ *  yet) preserve the pre-slice-D behaviour exactly: curated + recency,
+ *  no divisive layer in the middle.
  *
  *  Returns [] when no published candidate exists (HomePage uses that as
  *  the signal to render the no-hero top-padded layout). */
@@ -628,13 +643,58 @@ export function resolveHeroPool(
   behavior: HomepageCurationBehavior,
   catalog: MergedCatalog,
   resolveStory: (id: string) => Story | null,
+  divisiveIds: string[] = [],
 ): Story[] {
-  const heroIds = behavior.heroRequired
-    ? curation?.hero ?? []
-    : resolveRailIds("hero", curation, behavior, catalog) ?? [];
+  // heroRequired === true means admin set "no fallback for this rail":
+  // ONLY curated picks count, even if it leaves the hero empty. Honour
+  // it unchanged; slice D doesn't override that intent.
+  if (behavior.heroRequired) {
+    return collectPublishedStories(
+      curation?.hero ?? [],
+      resolveStory,
+      HERO_FALLBACK_CAP,
+    );
+  }
+
+  // Hide-when-empty: admin chose "hide" instead of fallback AND has
+  // an explicit (possibly empty) curation. Returns [] so the carousel
+  // doesn't render. Mirrors the resolveRailIds behaviour the previous
+  // implementation routed through for hero.
+  const curated = curation?.hero ?? [];
+  if (
+    curated.length === 0 &&
+    curation &&
+    behavior.emptyRailBehavior === "hide"
+  ) {
+    return [];
+  }
+
+  // Compose in priority order, deduplicating so a curated story that's
+  // also top-divisive doesn't take two slots. Cap at the visual
+  // contract.
+  const recencyIds = fallbackIdsForSurface("hero", catalog.array);
+  const seen = new Set<string>();
+  const composed: string[] = [];
+  for (const id of [...curated, ...divisiveIds, ...recencyIds]) {
+    if (composed.length >= HERO_FALLBACK_CAP) break;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    composed.push(id);
+  }
+  return collectPublishedStories(composed, resolveStory, HERO_FALLBACK_CAP);
+}
+
+/** Walk an id list, resolve each id through the catalog, filter to
+ *  published stories, cap the result. Shared seam between the
+ *  heroRequired and augmenting paths above. */
+function collectPublishedStories(
+  ids: string[],
+  resolveStory: (id: string) => Story | null,
+  cap: number,
+): Story[] {
   const pool: Story[] = [];
-  for (const id of heroIds) {
-    if (pool.length >= HERO_FALLBACK_CAP) break;
+  for (const id of ids) {
+    if (pool.length >= cap) break;
     const candidate = resolveStory(id);
     if (candidate && isPublishedStory(candidate)) pool.push(candidate);
   }
