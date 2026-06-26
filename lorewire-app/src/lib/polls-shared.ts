@@ -85,6 +85,65 @@ export interface WirePollData {
   initialVotedSide: PollSide | null;
 }
 
+/** Verdict badge for the homepage hero overlay (slice H of
+ *  _plans/2026-06-26-homepage-redesign-v1.md). Replaces the
+ *  Netflix-style "% Match" position with a LoreWire-specific signal:
+ *  what the audience decided.
+ *
+ *  Only surfaces when the poll has crossed DEFAULT_PUBLIC_FLOOR
+ *  votes (the same threshold that gates percentage reveal in the
+ *  on-widget result). Below the floor the badge is omitted entirely
+ *  rather than nudging the viewer to "cast the first verdict" —
+ *  pushy copy reads as desperate.
+ *
+ *  Client picks the rendered string from divisiveness +
+ *  majorityPct:
+ *    - divisiveness >= 0.9 (within ~5 points of 50/50) → "Audience
+ *      is divided" — numbers compete with the question; the badge
+ *      should hint at the divide, not score it.
+ *    - otherwise → "{majorityPct}% chose {majorityLabel}".
+ *  Keeping the rendering on the client lets the copy evolve
+ *  without re-deploying the SSR loader. */
+export interface HeroVerdictBadge {
+  totalVotes: number;
+  divisiveness: number;
+  /** 50..100 — always the WINNING side's percentage (never < 50). */
+  majorityPct: number;
+  /** Option text from the polls table for the winning side. */
+  majorityLabel: string;
+}
+
+/** Threshold above which a verdict is rendered as "Audience is
+ *  divided" instead of a percentage. 0.9 corresponds to roughly a
+ *  45/55 or tighter split — once we're that close to 50/50, the
+ *  numbers compete with the question instead of supporting it.
+ *  Lives next to the badge type so callers and tests reference the
+ *  same constant. */
+export const HERO_VERDICT_DIVIDED_THRESHOLD = 0.9;
+
+/** Render a HeroVerdictBadge as the display string for the hero
+ *  overlay (slice H of _plans/2026-06-26-homepage-redesign-v1.md):
+ *
+ *  - Tight split (divisiveness >= HERO_VERDICT_DIVIDED_THRESHOLD)
+ *    → "Audience is divided". Numbers compete with the question;
+ *    the badge should hint at the divide, not score it.
+ *  - Otherwise → "{majorityPct}% chose {majorityLabel}".
+ *
+ *  Pure function so the rendering can be unit-tested without
+ *  mounting the Billboard / Hero. Empty / nullish majorityLabel
+ *  falls back to a generic copy so a malformed poll row never
+ *  surfaces "73% chose " (with a dangling space) on the hero. */
+export function renderHeroVerdictBadge(verdict: HeroVerdictBadge): string {
+  if (verdict.divisiveness >= HERO_VERDICT_DIVIDED_THRESHOLD) {
+    return "Audience is divided";
+  }
+  const label = verdict.majorityLabel?.trim();
+  if (!label) {
+    return `${verdict.majorityPct}% sided with the majority`;
+  }
+  return `${verdict.majorityPct}% chose ${label}`;
+}
+
 /** Card shape rendered on the public rail pages AND on the homepage
  *  PollRail. Self-contained: carries every field the card needs so a
  *  consumer never has to look the story up in a static catalog.
