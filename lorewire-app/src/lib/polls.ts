@@ -716,6 +716,44 @@ export async function countMinorityVotesByCookie(
   return c;
 }
 
+/** Resolve enabled-poll questions for the given story ids. Powers the
+ *  homepage hero's question-hint overlay (slice D of
+ *  _plans/2026-06-26-homepage-redesign-v1.md): the SSR seed pre-fetches
+ *  the question text so the carousel can paint each slide's hint on
+ *  the first byte without an extra round-trip.
+ *
+ *  Hybrid spoiler tradeoff (locked with Yoav 2026-06-26): only the
+ *  question text is surfaced, never the option labels. The hint is
+ *  meant to set up the dilemma; revealing options dilutes the
+ *  emotional payoff of watching the short.
+ *
+ *  Returns a plain Record (not a Map) so the value can serialise
+ *  cleanly through the SSR seed without a manual Array.from round-trip.
+ *  Disabled polls are filtered out at the SQL level so the caller
+ *  doesn't have to re-check the flag.
+ *
+ *  Empty input → empty Record (no SQL round trip). */
+export async function getEnabledPollQuestionsByStoryIds(
+  storyIds: string[],
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  if (storyIds.length === 0) return out;
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<{ story_id: string; question: string }>(
+    `SELECT story_id, question FROM polls
+     WHERE enabled = 1 AND story_id IN (${placeholders})`,
+    storyIds,
+  );
+  for (const r of rows) {
+    if (r.story_id && r.question) out[r.story_id] = r.question;
+  }
+  console.info("[polls hero questions]", {
+    requested: storyIds.length,
+    resolved: Object.keys(out).length,
+  });
+  return out;
+}
+
 /** List the story ids this cookie has voted on. Powers the homepage
  *  "You Didn't Vote Yet" rail filter (slice C of
  *  _plans/2026-06-26-homepage-redesign-v1.md) — the Continue Watching
