@@ -532,6 +532,7 @@ function Home({
   votedStoryIds,
   heroDivisiveIds,
   heroPollQuestions,
+  rotatingCategoryToday,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -567,6 +568,10 @@ function Home({
    *  the hero overlay to render the question hint above the title;
    *  only the question is surfaced, never the option labels. */
   heroPollQuestions: HomepageInitial["heroPollQuestions"];
+  /** 2026-06-26 slice E: which category surface fills the rotating
+   *  homepage slot today (or null when the kill switch is off and
+   *  the legacy all-category-rails render path takes over). */
+  rotatingCategoryToday: HomepageInitial["rotatingCategoryToday"];
 }) {
   // Curation + live catalog are hoisted to MobileShell so MyList / TitleSheet
   // can share resolveStory (saved real shorts aren't in the baked STORIES
@@ -716,7 +721,16 @@ function Home({
         </section>
       )}
 
-      {CATEGORY_RAILS.map((rail) => {
+      {/* 2026-06-26 slice E of _plans/2026-06-26-homepage-redesign-v1.md:
+          when rotation is on (rotatingCategoryToday set), the homepage
+          shows ONE category rail per day instead of all six. When the
+          kill switch is off (rotatingCategoryToday === null), every
+          category rail renders — the pre-redesign behaviour. The pill
+          filter still narrows when a specific category chip is active. */}
+      {(rotatingCategoryToday
+        ? CATEGORY_RAILS.filter((r) => r.surface === rotatingCategoryToday)
+        : CATEGORY_RAILS
+      ).map((rail) => {
         // Pill filter: when a category is active, only show that one
         // category rail — the rest would just be empty or distracting.
         if (pill !== ALL_PILL && rail.cat !== pill) return null;
@@ -2240,6 +2254,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             votedStoryIds={initial.votedStoryIds}
             heroDivisiveIds={initial.heroDivisiveIds}
             heroPollQuestions={initial.heroPollQuestions}
+            rotatingCategoryToday={initial.rotatingCategoryToday}
           />
         )}
         {tab === "Search" && <Search onOpen={open} catalog={catalog} />}

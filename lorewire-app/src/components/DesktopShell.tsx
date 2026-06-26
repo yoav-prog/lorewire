@@ -1529,6 +1529,7 @@ function HomePage({
   votedStoryIds,
   heroDivisiveIds,
   heroPollQuestions,
+  rotatingCategoryToday,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -1552,6 +1553,10 @@ function HomePage({
    *  the hero overlay to render the question hint above the title;
    *  only the question is surfaced, never the option labels. */
   heroPollQuestions: HomepageInitial["heroPollQuestions"];
+  /** 2026-06-26 slice E: which category surface fills the rotating
+   *  homepage slot today (or null when the kill switch is off and
+   *  the legacy all-category-rails render path takes over). */
+  rotatingCategoryToday: HomepageInitial["rotatingCategoryToday"];
 }) {
   // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
   // New & Hot grids can share the same resolveStory (saved real shorts aren't
@@ -1657,7 +1662,15 @@ function HomePage({
             <Top10Row onOpen={onOpen} ids={top10Ids} resolveStory={resolveStory} />
           </Rail>
         )}
-        {CATEGORY_RAILS.map((rail) => {
+        {/* 2026-06-26 slice E of _plans/2026-06-26-homepage-redesign-v1.md:
+            when rotation is on (rotatingCategoryToday set), the homepage
+            shows ONE category rail per day instead of all six. When the
+            kill switch is off (rotatingCategoryToday === null), every
+            category rail renders — the pre-redesign behaviour. */}
+        {(rotatingCategoryToday
+          ? CATEGORY_RAILS.filter((r) => r.surface === rotatingCategoryToday)
+          : CATEGORY_RAILS
+        ).map((rail) => {
           const ids = resolveRailIds(rail.surface, curation, behavior, catalog);
           if (!ids) return null;
           // Skip rails that resolve to no displayable stories at all (no
@@ -1897,6 +1910,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           votedStoryIds={initial.votedStoryIds}
           heroDivisiveIds={initial.heroDivisiveIds}
           heroPollQuestions={initial.heroPollQuestions}
+          rotatingCategoryToday={initial.rotatingCategoryToday}
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
