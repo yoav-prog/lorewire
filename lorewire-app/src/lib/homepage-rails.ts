@@ -482,11 +482,20 @@ export function useHomepagePolls(
 
 /** Stable display title per rail. Single source of truth so adding a
  *  new rail kind in the future surfaces compile errors at every call
- *  site. */
+ *  site.
+ *
+ *  `unpopular` is the personalized "You Voted With the Minority" rail
+ *  post-slice-A of _plans/2026-06-26-homepage-redesign-v1.md — the
+ *  rail only surfaces to viewers who've voted on the losing side
+ *  enough times to meet the threshold, so the title can name the
+ *  identity directly. The dedicated /c/unpopular landing page keeps
+ *  the "Unpopular opinions" framing because that page falls back to
+ *  landslide stories for anonymous viewers (a different surface, a
+ *  different contract). */
 export const POLL_RAIL_TITLES: Record<PollRailKind, string> = {
   divisive: "Most divisive stories",
   agreed: "Community agreed",
-  unpopular: "Unpopular opinions",
+  unpopular: "You Voted With the Minority",
 };
 
 // Returns the id list to render for a surface, or `null` when the rail
