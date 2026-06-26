@@ -144,7 +144,7 @@ export default async function SeoPage() {
             label="Default meta description"
             hint="Fallback description for pages without their own. Keep under 160 characters for Google to render the whole thing."
             initial={defaultMetaDescription ?? ""}
-            placeholder="Netflix for true internet stories. Watch the short, read the article."
+            placeholder="Every internet story ends with your verdict. Watch the short, decide who's right, see what the crowd said."
           />
           <SettingColor
             settingKey="seo.theme_color"
