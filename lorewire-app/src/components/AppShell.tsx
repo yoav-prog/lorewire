@@ -407,85 +407,85 @@ function Billboard({
 
       {/* Action row sits ABOVE the touch layer (relative z-20 vs the
           fade-in's absolute inset). Buttons stay tappable, swipe stays
-          contained to the artwork half — no gesture conflict.
-          2026-06-26 slice H Option B follow-up: editorial paper-card
-          composition. Question / Title / meta / primary buttons live
-          INSIDE a warm-paper card with soft shadow, sitting over the
-          cinematic image (instead of text-overlay-on-gradient, which
-          is Netflix's hero composition). The card creates strong
-          editorial "card over photograph" contrast — magazine-cover
-          language — without redesigning the whole hero. Surprise me
-          + carousel dots stay outside the card, less prominent. */}
+          contained to the artwork half — no gesture conflict. */}
       <div className="absolute left-0 right-0 bottom-5 px-5 z-20" aria-live="polite">
-        <div
-          className="rounded-xl p-5"
-          style={{
-            background: "#fbfaf4",
-            color: "#1a1714",
-            boxShadow: "0 20px 40px -10px rgba(0,0,0,.55), 0 8px 16px -4px rgba(0,0,0,.3)",
-          }}
-        >
-          {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
-              the QUESTION is the LEAD element of the hero. Handwriting
-              font (Caveat) keeps the "audience is asking" attribution;
-              no text-shadow needed because we're on paper now. */}
-          {pollQuestions[story.id] && (
-            <p
-              className="leading-tight mb-1 select-none"
-              style={{
-                fontFamily: "var(--font-caveat)",
-                fontSize: 42,
-                color: "#1a1714",
-              }}
-            >
-              {pollQuestions[story.id]}
-            </p>
+        {/* 2026-06-26 slice H follow-up: "LW Original" eyebrow dropped
+            (direct copy of Netflix's "NETFLIX ORIGINAL" pattern with
+            the accent strip + small-caps mono). The hero now opens
+            straight on the question, which is what the brand thesis
+            actually is. */}
+        {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+            the QUESTION is now the LEAD element of the hero (was a small
+            kicker in slice D). Netflix leads with the title because the
+            title IS the product; LoreWire leads with the question because
+            the question IS the product. Handwriting font (Caveat) keeps
+            the "audience is asking" attribution from slice D. Story
+            without an enabled poll skips this whole block — title-only
+            hero is the graceful fallback. */}
+        {pollQuestions[story.id] && (
+          <p
+            className="leading-tight text-ink mb-1 select-none"
+            style={{
+              fontFamily: "var(--font-caveat)",
+              fontSize: 42,
+              textShadow: "0 1px 14px rgba(0,0,0,.55)",
+            }}
+          >
+            {pollQuestions[story.id]}
+          </p>
+        )}
+        {/* Title: secondary now (was the huge H1). The show name still
+            grounds the slide but doesn't compete with the question.
+            Bumped 24 -> 30 after the first preview review -- 24
+            read as too small on mobile. */}
+        <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[1] text-ink ink-shadow" style={{ fontSize: 30 }}>
+          {story.title}
+        </h2>
+        {/* Verdict + meta row. The verdict badge replaces the legacy
+            "90% Match" position (Netflix's exact match-score copy);
+            absent when the poll is below the public floor. Year + dur
+            + tags follow as the supporting metadata. */}
+        <div className="flex items-center gap-1.5 mt-2 flex-wrap text-[12.5px]">
+          {pollVerdicts[story.id] && (
+            <>
+              <span className="font-semibold text-accent">
+                {renderHeroVerdictBadge(pollVerdicts[story.id])}
+              </span>
+              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+            </>
           )}
-          {/* Title: secondary, sits below the question. Now in
-              Fraunces (display token) on a paper card -- reads as a
-              magazine cover headline. */}
-          <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[1]" style={{ fontSize: 30, color: "#1a1714" }}>
-            {story.title}
-          </h2>
-          {/* Verdict + meta row, dark-on-paper styling. */}
-          <div className="flex items-center gap-1.5 mt-2 flex-wrap text-[12.5px]">
-            {pollVerdicts[story.id] && (
-              <>
-                <span className="font-semibold text-accent">
-                  {renderHeroVerdictBadge(pollVerdicts[story.id])}
-                </span>
-                <span className="w-1 h-1 rounded-full" style={{ background: "rgba(26,23,20,.3)" }}></span>
-              </>
-            )}
-            <span className="font-body" style={{ color: "rgba(26,23,20,.7)" }}>{story.year}</span>
-            {story.dur && (
-              <>
-                <span className="w-1 h-1 rounded-full" style={{ background: "rgba(26,23,20,.3)" }}></span>
-                <span className="font-mono text-[12px]" style={{ color: "rgba(26,23,20,.7)" }}>{story.dur}</span>
-              </>
-            )}
-            {story.tags.map((t) => (
-              <React.Fragment key={t}>
-                <span className="w-1 h-1 rounded-full" style={{ background: "rgba(26,23,20,.3)" }}></span>
-                <span className="font-body" style={{ color: "rgba(26,23,20,.7)" }}>{t}</span>
-              </React.Fragment>
-            ))}
-          </div>
-          {/* Primary CTAs sit inside the card. Dark button on paper
-              (inverted from the old off-white-on-dark pattern that
-              would blend in here). */}
-          <div className="flex items-center gap-2.5 mt-4">
-            <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition" style={{ background: "#1a1714", color: "#fbfaf4" }}>
-              Watch &amp; Vote
-            </button>
-            <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] active:scale-[.98] transition" style={{ background: "rgba(26,23,20,.08)", color: "#1a1714" }}>
-              <InfoI size={18} /> Read the article
-            </button>
-          </div>
+          <span className="font-body text-ink/85">{story.year}</span>
+          {story.dur && (
+            <>
+              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+              <span className="font-mono text-[12px] text-ink/85">{story.dur}</span>
+            </>
+          )}
+          {story.tags.map((t) => (
+            <React.Fragment key={t}>
+              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+              <span className="font-body text-ink/85">{t}</span>
+            </React.Fragment>
+          ))}
         </div>
-        {/* Surprise me + dots stay OUTSIDE the card so the card's
-            primary CTAs read as the deliberate ones. Less prominent
-            chrome below. */}
+        {/* Button vocabulary swap (slice H): the trio used to be "PLAY /
+            More Info / Play Something" -- literally Netflix's hero
+            button language. Now it names what those actions actually
+            DO on LoreWire: watch + cast a verdict, read the long-form
+            article, or shuffle for a random one. */}
+        <div className="flex items-center gap-2.5 mt-4">
+          {/* 2026-06-26 slice H follow-up: play icon dropped from the
+              primary CTA. The triangle glyph is one of Netflix's most
+              iconic UI cues; removing it pushes the button toward
+              editorial "call to action" rather than streamer "press
+              play." */}
+          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition">
+            Watch &amp; Vote
+          </button>
+          <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
+            <InfoI size={18} /> Read the article
+          </button>
+        </div>
         <button onClick={onShuffle} className="mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-[10px] border border-line font-mono text-[11px] uppercase tracking-[.2em] text-ink/80 active:scale-[.98] transition">
           <ShuffleI size={15} /> Surprise me
         </button>
