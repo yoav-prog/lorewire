@@ -162,6 +162,44 @@ export function isRailEnabledValue(v: string | null | undefined): boolean {
  *  runtime once the settings UI lands. */
 export const DEFAULT_PUBLIC_FLOOR = 20;
 
+// ─── "You Voted With the Minority" threshold ─────────────────────────────────
+
+/** Minimum number of polls where this viewer's cookie/user landed on
+ *  the (current) minority side before the personalized "You Voted With
+ *  the Minority" rail surfaces. Below this the rail hides entirely
+ *  rather than show a near-empty personal recommendation list — a
+ *  brand-new visitor with one minority vote hasn't given us enough
+ *  signal to call them "the kind of person who often disagrees with
+ *  the crowd," which is the rail's whole reason to exist.
+ *
+ *  The constant is the default; the admin can override via the
+ *  `homepage.minority_vote_threshold` setting.
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice A). */
+export const MINORITY_VOTE_DEFAULT_THRESHOLD = 5;
+
+/** Settings key for the override. Keeping it under the `homepage.`
+ *  namespace (not `polls.`) because the threshold is a HOMEPAGE
+ *  personalization control, not a poll-mechanics knob. */
+export function minorityVoteThresholdSettingKey(): string {
+  return "homepage.minority_vote_threshold";
+}
+
+/** Parse the settings_kv string into a positive integer threshold.
+ *  Blank, malformed, or negative values fall through to the default —
+ *  a negative threshold would surface the rail to anyone with any vote
+ *  history, which defeats the gate. */
+export function parseMinorityVoteThreshold(
+  raw: string | null | undefined,
+): number {
+  if (raw === null || raw === undefined) return MINORITY_VOTE_DEFAULT_THRESHOLD;
+  const trimmed = raw.trim();
+  if (trimmed === "") return MINORITY_VOTE_DEFAULT_THRESHOLD;
+  const n = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(n) || n < 1) return MINORITY_VOTE_DEFAULT_THRESHOLD;
+  return n;
+}
+
 // ─── Author-facing length caps ────────────────────────────────────────────────
 
 export const POLL_QUESTION_MAX = 80;

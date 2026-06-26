@@ -10,6 +10,7 @@ import { run } from "@/lib/db";
 import {
   CATEGORY_POLL_PRESETS,
   computeArticlePollAggregate,
+  countMinorityVotesByCookie,
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
   getAggregateByStoryId,
@@ -22,6 +23,9 @@ import {
   isPollSide,
   isRailEnabledValue,
   listPollOverview,
+  MINORITY_VOTE_DEFAULT_THRESHOLD,
+  minorityVoteThresholdSettingKey,
+  parseMinorityVoteThreshold,
   pctA,
   pctBComplement,
   POLL_OPTION_MAX,
@@ -928,6 +932,137 @@ describe("rail queries", () => {
     });
   });
 
+  describe("countMinorityVotesByCookie", () => {
+    // Plant `cookie` as a vote on a fresh story, then build the crowd
+    // around it on the same poll. Refreshes the aggregate so the
+    // count query sees current totals. Centralises the SETUP that the
+    // `topUnpopular` test inlines (lines 815+); future minority-rail
+    // tests can reuse it.
+    async function seedMyVote(
+      storyId: string,
+      cookieToken: string,
+      mySide: "A" | "B",
+      otherA: number,
+      otherB: number,
+    ): Promise<void> {
+      const now = new Date().toISOString();
+      await run("DELETE FROM stories WHERE id = ?", [storyId]);
+      await run(
+        "INSERT INTO stories (id, slug, category, title, status, published_at, created_at, updated_at) " +
+          "VALUES (?, ?, 'Drama', 'T', 'published', ?, ?, ?)",
+        [storyId, `slug-${storyId}`, now, now, now],
+      );
+      const u = await upsertPoll({
+        storyId,
+        question: "Q?",
+        optionA: "A",
+        optionB: "B",
+        enabled: true,
+        category: "Drama",
+      });
+      await recordVote({
+        pollId: u.pollId,
+        storyId,
+        category: "Drama",
+        side: mySide,
+        cookieToken,
+        ipUaHash: null,
+      });
+      for (let i = 0; i < otherA; i++) {
+        await recordVote({
+          pollId: u.pollId,
+          storyId,
+          category: "Drama",
+          side: "A",
+          cookieToken: `crowd-${storyId}-a-${i}`,
+          ipUaHash: null,
+        });
+      }
+      for (let i = 0; i < otherB; i++) {
+        await recordVote({
+          pollId: u.pollId,
+          storyId,
+          category: "Drama",
+          side: "B",
+          cookieToken: `crowd-${storyId}-b-${i}`,
+          ipUaHash: null,
+        });
+      }
+      await refreshPollAggregateForStory(storyId);
+    }
+
+    it("returns 0 for a null or empty cookie token", async () => {
+      expect(await countMinorityVotesByCookie(null)).toBe(0);
+      expect(await countMinorityVotesByCookie("")).toBe(0);
+    });
+
+    it("returns 0 for a cookie that has not voted on anything", async () => {
+      // Seed an established poll so the aggregate exists, but vote
+      // from a different cookie. The probe cookie has zero votes.
+      await seedMyVote("test-minority-noop-1", "other-cookie", "A", 24, 75);
+      expect(await countMinorityVotesByCookie("probe-cookie")).toBe(0);
+    });
+
+    it("counts a vote that landed on the current minority side", async () => {
+      // 25 A / 75 B → A is the minority. 'me' voted A.
+      await seedMyVote("test-minority-yes-1", "me", "A", 24, 75);
+      expect(await countMinorityVotesByCookie("me")).toBe(1);
+    });
+
+    it("does NOT count a vote that landed on the majority side", async () => {
+      // 75 A / 25 B → A is the majority. 'me' voted A.
+      await seedMyVote("test-minority-no-1", "me", "A", 74, 25);
+      expect(await countMinorityVotesByCookie("me")).toBe(0);
+    });
+
+    it("does NOT count a 50/50 tie as minority", async () => {
+      // Perfect split: neither side is strictly less than half.
+      // Matches the strict-inequality `votes_a * 2 < total_votes`
+      // predicate `topUnpopular` uses, so the gate and the rail agree.
+      await seedMyVote("test-minority-tie-1", "me", "A", 49, 50);
+      expect(await countMinorityVotesByCookie("me")).toBe(0);
+    });
+
+    it("does NOT count polls below the public floor", async () => {
+      // 1 A / 4 B → A IS the minority by percentage, but total_votes
+      // (5) is well below RAIL_MIN_VOTES (20). The floor keeps the
+      // count from inflating on freshly-launched polls where any
+      // single early vote is technically "minority."
+      await seedMyVote("test-minority-floor-1", "me", "A", 0, 4);
+      expect(await countMinorityVotesByCookie("me")).toBe(0);
+    });
+
+    it("sums minority votes across multiple polls", async () => {
+      // Two minority hits, one majority hit. Expect 2.
+      await seedMyVote("test-minority-sum-1", "me", "A", 24, 75); // A minority
+      await seedMyVote("test-minority-sum-2", "me", "B", 75, 24); // B minority
+      await seedMyVote("test-minority-sum-3", "me", "A", 74, 25); // A majority
+      expect(await countMinorityVotesByCookie("me")).toBe(2);
+    });
+
+    it("only counts the requested cookie", async () => {
+      // Two cookies both vote minority on the same poll. Each should
+      // count exactly 1 minority vote — no cross-contamination.
+      await seedMyVote("test-minority-iso-1", "alice", "A", 0, 75);
+      // 'bob' votes A too (still minority); seed via a second recordVote.
+      const u = await getPollByStoryId("test-minority-iso-1");
+      if (u) {
+        await recordVote({
+          pollId: u.id,
+          storyId: "test-minority-iso-1",
+          category: "Drama",
+          side: "A",
+          cookieToken: "bob",
+          ipUaHash: null,
+        });
+      }
+      await refreshPollAggregateForStory("test-minority-iso-1");
+      expect(await countMinorityVotesByCookie("alice")).toBe(1);
+      expect(await countMinorityVotesByCookie("bob")).toBe(1);
+      expect(await countMinorityVotesByCookie("eve")).toBe(0);
+    });
+  });
+
   describe("rail floor + visibility", () => {
     it("only surfaces published, non-noindex stories", async () => {
       // Story published but noindex=1 should be hidden.
@@ -1658,5 +1793,61 @@ describe("article rail queries", () => {
         "test-poll-art-disabled",
       );
     });
+  });
+});
+
+// ─── Minority-vote threshold (slice A of homepage-redesign-v1) ──────────────
+
+describe("minorityVoteThresholdSettingKey", () => {
+  it("returns the homepage-namespaced settings key", () => {
+    expect(minorityVoteThresholdSettingKey()).toBe(
+      "homepage.minority_vote_threshold",
+    );
+  });
+});
+
+describe("parseMinorityVoteThreshold", () => {
+  it("returns the default when raw is null, undefined, or blank", () => {
+    expect(parseMinorityVoteThreshold(null)).toBe(MINORITY_VOTE_DEFAULT_THRESHOLD);
+    expect(parseMinorityVoteThreshold(undefined)).toBe(MINORITY_VOTE_DEFAULT_THRESHOLD);
+    expect(parseMinorityVoteThreshold("")).toBe(MINORITY_VOTE_DEFAULT_THRESHOLD);
+    expect(parseMinorityVoteThreshold("   ")).toBe(MINORITY_VOTE_DEFAULT_THRESHOLD);
+  });
+
+  it("returns the default on malformed values", () => {
+    expect(parseMinorityVoteThreshold("not-a-number")).toBe(
+      MINORITY_VOTE_DEFAULT_THRESHOLD,
+    );
+    expect(parseMinorityVoteThreshold("abc123")).toBe(
+      MINORITY_VOTE_DEFAULT_THRESHOLD,
+    );
+  });
+
+  it("returns the default on zero or negative values", () => {
+    // A zero or negative threshold would surface the rail to anyone
+    // with any vote history (or nobody at all on -1), which defeats
+    // the gate. Fall through to the default in both cases.
+    expect(parseMinorityVoteThreshold("0")).toBe(MINORITY_VOTE_DEFAULT_THRESHOLD);
+    expect(parseMinorityVoteThreshold("-1")).toBe(MINORITY_VOTE_DEFAULT_THRESHOLD);
+    expect(parseMinorityVoteThreshold("-100")).toBe(
+      MINORITY_VOTE_DEFAULT_THRESHOLD,
+    );
+  });
+
+  it("returns the parsed value when it is a positive integer", () => {
+    expect(parseMinorityVoteThreshold("1")).toBe(1);
+    expect(parseMinorityVoteThreshold("5")).toBe(5);
+    expect(parseMinorityVoteThreshold("100")).toBe(100);
+  });
+
+  it("trims surrounding whitespace before parsing", () => {
+    expect(parseMinorityVoteThreshold("  7  ")).toBe(7);
+  });
+});
+
+describe("MINORITY_VOTE_DEFAULT_THRESHOLD", () => {
+  it("is a sensible positive integer (not zero, not absurd)", () => {
+    expect(MINORITY_VOTE_DEFAULT_THRESHOLD).toBeGreaterThan(0);
+    expect(MINORITY_VOTE_DEFAULT_THRESHOLD).toBeLessThanOrEqual(50);
   });
 });

@@ -27,10 +27,12 @@ import {
   listAllCuration,
 } from "@/lib/homepage-curation";
 import {
+  countMinorityVotesByCookie,
   HOMEPAGE_RAIL_LIMIT,
   isRailEnabledValue,
   POLL_RAIL_KINDS,
   railEnabledSettingKey,
+  resolveMinorityVoteThreshold,
   topAgreed,
   topDivisive,
   topUnpopular,
@@ -283,19 +285,23 @@ const EMPTY_POLL_RAILS: HomepagePollRails = {
 };
 
 export async function loadHomepagePolls(): Promise<HomepagePollRailsResult> {
-  // Pull all four reads in one round trip — three settings + the
-  // cookie token (the cookie read is the cheap one but still serial
-  // if we don't parallelize). Settings are decoded through the
-  // shared isRailEnabledValue helper so absent = enabled.
+  // Pull all five reads in one round trip — three rail enables, the
+  // minority-vote threshold, and the cookie token. Settings are decoded
+  // through the shared isRailEnabledValue helper so absent = enabled.
+  // The minority threshold goes through parseMinorityVoteThreshold via
+  // resolveMinorityVoteThreshold so blank/malformed values fall back to
+  // the default.
   const [
     divisiveEnabledRaw,
     agreedEnabledRaw,
     unpopularEnabledRaw,
+    minorityThreshold,
     voteToken,
   ] = await Promise.all([
     getSetting(railEnabledSettingKey("divisive")),
     getSetting(railEnabledSettingKey("agreed")),
     getSetting(railEnabledSettingKey("unpopular")),
+    resolveMinorityVoteThreshold(),
     readVoteToken(),
   ]);
   const enabled: Record<PollRailKind, boolean> = {
@@ -303,6 +309,26 @@ export async function loadHomepagePolls(): Promise<HomepagePollRailsResult> {
     agreed: isRailEnabledValue(agreedEnabledRaw),
     unpopular: isRailEnabledValue(unpopularEnabledRaw),
   };
+
+  // 2026-06-26 (slice A of _plans/2026-06-26-homepage-redesign-v1.md):
+  // the `unpopular` rail is being repurposed as the personalized
+  // "You Voted With the Minority" rail. The semantic stays — topUnpopular
+  // already returns the cookie's minority-vote stories when given a
+  // cookieToken. What changes is the SURFACING contract:
+  //  - No cookie → rail hides (no fallback to "smaller side under 15%")
+  //  - Cookie present but minority-vote count below threshold → rail hides
+  //  - Cookie present + threshold met → topUnpopular personalized path
+  // The threshold gate keeps the rail from surfacing to a viewer with
+  // one or two minority votes — not enough signal to label them "the
+  // kind of person who often disagrees with the crowd," which is the
+  // rail's whole reason to exist.
+  const minorityCount = enabled.unpopular
+    ? await countMinorityVotesByCookie(voteToken)
+    : 0;
+  const minorityEligible =
+    enabled.unpopular &&
+    voteToken !== null &&
+    minorityCount >= minorityThreshold;
 
   // Three queries in parallel — same shape, different sort, isolated
   // failure handling so one slow / broken rail can't stall the others.
@@ -317,6 +343,8 @@ export async function loadHomepagePolls(): Promise<HomepagePollRailsResult> {
       if (kind === "agreed") {
         return await topAgreed({ limit: HOMEPAGE_RAIL_LIMIT });
       }
+      // unpopular: gated by the minority-vote threshold above.
+      if (!minorityEligible) return [];
       return await topUnpopular({
         cookieToken: voteToken,
         limit: HOMEPAGE_RAIL_LIMIT,
@@ -342,6 +370,9 @@ export async function loadHomepagePolls(): Promise<HomepagePollRailsResult> {
     },
     enabled,
     has_cookie: voteToken !== null,
+    minority_count: minorityCount,
+    minority_threshold: minorityThreshold,
+    minority_eligible: minorityEligible,
   });
 
   return { ok: true, rails, enabled };
