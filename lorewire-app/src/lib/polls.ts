@@ -716,6 +716,36 @@ export async function countMinorityVotesByCookie(
   return c;
 }
 
+/** List the story ids this cookie has voted on. Powers the homepage
+ *  "You Didn't Vote Yet" rail filter (slice C of
+ *  _plans/2026-06-26-homepage-redesign-v1.md) — the Continue Watching
+ *  source gives "watched", this list gives "voted", and the rail is
+ *  the set difference.
+ *
+ *  Story-poll rows only — article-poll votes don't appear here
+ *  because article votes have story_id NULL and the homepage rail
+ *  surfaces story cards. Returns a deduplicated, unordered list;
+ *  callers wrap in a Set for the O(1) `has` the filter needs.
+ *
+ *  Returns [] for an absent / empty cookie — there's nothing to
+ *  filter against for a viewer with no vote history. */
+export async function listVotedStoryIdsByCookie(
+  cookieToken: string | null,
+): Promise<string[]> {
+  if (!cookieToken) return [];
+  const rows = await all<{ story_id: string }>(
+    "SELECT DISTINCT story_id FROM poll_votes " +
+      "WHERE cookie_token = ? AND story_id IS NOT NULL",
+    [cookieToken],
+  );
+  const ids = rows.map((r) => r.story_id);
+  console.info("[polls voted story ids]", {
+    cookie_prefix: cookieToken.slice(0, 8),
+    count: ids.length,
+  });
+  return ids;
+}
+
 // ─── Public rails: divisive / agreed / unpopular ──────────────────────────────
 //
 // `RailCardRow` is the shared card shape consumed by both the public

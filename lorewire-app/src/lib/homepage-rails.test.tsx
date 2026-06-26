@@ -22,6 +22,7 @@ import { createRoot, type Root } from "react-dom/client";
 import {
   ALL_PILL,
   fallbackIdsForSurface,
+  filterIdsByNotVoted,
   filterIdsByPillCat,
   filterIdsByPublished,
   liveRowToStory,
@@ -411,5 +412,48 @@ describe("fallbackIdsForSurface (merged catalog)", () => {
     ]);
     const ids = fallbackIdsForSurface("drama_row", merged.array);
     expect(ids).not.toContain("no-art");
+  });
+});
+
+// ─── filterIdsByNotVoted (slice C of homepage redesign v1) ─────────────────
+// Reframes the Continue Watching list into "You Didn't Vote Yet" by
+// subtracting story ids the viewer has already voted on.
+
+describe("filterIdsByNotVoted", () => {
+  it("returns an empty list for empty / null / undefined input", () => {
+    const voted = new Set<string>(["s1"]);
+    expect(filterIdsByNotVoted([], voted)).toEqual([]);
+    expect(filterIdsByNotVoted(null, voted)).toEqual([]);
+    expect(filterIdsByNotVoted(undefined, voted)).toEqual([]);
+  });
+
+  it("returns the input verbatim when the voted set is empty", () => {
+    // Anonymous viewer / no vote history: filter collapses to a copy.
+    // Returns a new array (not the same ref) so the caller can't
+    // accidentally mutate the seed list.
+    const ids = ["s1", "s2", "s3"];
+    const out = filterIdsByNotVoted(ids, new Set<string>());
+    expect(out).toEqual(ids);
+    expect(out).not.toBe(ids);
+  });
+
+  it("drops ids in the voted set, preserves the rest in order", () => {
+    const ids = ["s1", "s2", "s3", "s4", "s5"];
+    const voted = new Set<string>(["s2", "s4"]);
+    expect(filterIdsByNotVoted(ids, voted)).toEqual(["s1", "s3", "s5"]);
+  });
+
+  it("drops every id when the viewer has voted on all of them", () => {
+    const ids = ["s1", "s2"];
+    const voted = new Set<string>(["s1", "s2"]);
+    expect(filterIdsByNotVoted(ids, voted)).toEqual([]);
+  });
+
+  it("ignores voted ids that are not in the watched list", () => {
+    // Cookie has votes spread across the catalog; only the ones that
+    // also appear in `ids` should affect the result.
+    const ids = ["s1", "s2"];
+    const voted = new Set<string>(["s99", "s100"]);
+    expect(filterIdsByNotVoted(ids, voted)).toEqual(["s1", "s2"]);
   });
 });

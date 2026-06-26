@@ -30,6 +30,7 @@ import {
   countMinorityVotesByCookie,
   HOMEPAGE_RAIL_LIMIT,
   isRailEnabledValue,
+  listVotedStoryIdsByCookie,
   POLL_RAIL_KINDS,
   railEnabledSettingKey,
   resolveMinorityVoteThreshold,
@@ -417,6 +418,14 @@ export interface HomepageInitial {
    *  matches the open story id. Null when no `?story=` was on the
    *  request, or when the lookup failed. */
   seededModalComments: SeededModalComments | null;
+  /** 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  story ids this viewer's cookie has voted on. Used by the
+   *  homepage "You Didn't Vote Yet" rail (the reframed Continue
+   *  Watching) to filter out stories the viewer already voted on.
+   *  Empty array for anonymous visitors / cookies with no vote
+   *  history — the shells' `filterIdsByNotVoted` collapses to a
+   *  no-op so the rail keeps showing every watched story. */
+  votedStoryIds: string[];
 }
 
 const EMPTY_POLL_RAILS_RESULT: HomepagePollRailsResult = {
@@ -430,7 +439,13 @@ const DEFAULT_BEHAVIOR: HomepageCurationBehavior = {
   heroRequired: false,
 };
 
-type SsrSource = "curation" | "catalog" | "polls" | "session" | "seededModalComments";
+type SsrSource =
+  | "curation"
+  | "catalog"
+  | "polls"
+  | "session"
+  | "seededModalComments"
+  | "votedStoryIds";
 
 async function safeLoad<T>(
   source: SsrSource,
@@ -446,6 +461,23 @@ async function safeLoad<T>(
     });
     return fallback;
   }
+}
+
+/** Resolve the story ids this viewer has already voted on. Feeds the
+ *  homepage "You Didn't Vote Yet" rail filter so the reframed Continue
+ *  Watching surface drops anything the viewer has cast a verdict on.
+ *
+ *  Anonymous-first: cookie-token is the attribution primitive (per the
+ *  Anonymous-first auth strategy memory and existing poll_votes
+ *  contract). Signed-in users still have a cookie token because
+ *  setVoteToken runs on the first vote regardless of sign-in state.
+ *  Empty cookie / read failure → empty list, treated by the filter as
+ *  a no-op.
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice C). */
+async function loadVotedStoryIds(): Promise<string[]> {
+  const voteToken = await readVoteToken();
+  return listVotedStoryIdsByCookie(voteToken);
 }
 
 async function loadSession(): Promise<PublicSession | null> {
@@ -550,32 +582,44 @@ export async function loadHomepageSSRData(opts?: {
   seededModalStoryId?: string;
 }): Promise<HomepageInitial> {
   const t0 = Date.now();
-  const [curationResult, catalogResult, pollsResult, session, seededModalComments] =
-    await Promise.all([
-      safeLoad<HomepageCurationResult | null>(
-        "curation",
-        loadHomepageCuration,
-        null,
-      ),
-      safeLoad<LiveCatalogResult>(
-        "catalog",
-        () => loadLiveCatalog(),
-        { ok: false, stories: [] },
-      ),
-      safeLoad<HomepagePollRailsResult>(
-        "polls",
-        loadHomepagePolls,
-        EMPTY_POLL_RAILS_RESULT,
-      ),
-      safeLoad<PublicSession | null>("session", loadSession, null),
-      opts?.seededModalStoryId
-        ? safeLoad<SeededModalComments | null>(
-            "seededModalComments",
-            () => loadSeededModalComments(opts.seededModalStoryId!),
-            null,
-          )
-        : Promise.resolve(null),
-    ]);
+  const [
+    curationResult,
+    catalogResult,
+    pollsResult,
+    session,
+    seededModalComments,
+    votedStoryIds,
+  ] = await Promise.all([
+    safeLoad<HomepageCurationResult | null>(
+      "curation",
+      loadHomepageCuration,
+      null,
+    ),
+    safeLoad<LiveCatalogResult>(
+      "catalog",
+      () => loadLiveCatalog(),
+      { ok: false, stories: [] },
+    ),
+    safeLoad<HomepagePollRailsResult>(
+      "polls",
+      loadHomepagePolls,
+      EMPTY_POLL_RAILS_RESULT,
+    ),
+    safeLoad<PublicSession | null>("session", loadSession, null),
+    opts?.seededModalStoryId
+      ? safeLoad<SeededModalComments | null>(
+          "seededModalComments",
+          () => loadSeededModalComments(opts.seededModalStoryId!),
+          null,
+        )
+      : Promise.resolve(null),
+    // 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md.
+    // Failure path returns [] so the "You Didn't Vote Yet" filter
+    // degrades to a no-op (rail still shows the raw watched list)
+    // rather than blanking out for everyone if the poll_votes read
+    // throws.
+    safeLoad<string[]>("votedStoryIds", loadVotedStoryIds, []),
+  ]);
   const initial: HomepageInitial = {
     curation: curationResult?.curation ?? null,
     behavior: curationResult?.behavior ?? DEFAULT_BEHAVIOR,
@@ -584,6 +628,7 @@ export async function loadHomepageSSRData(opts?: {
     pollRails: pollsResult,
     session,
     seededModalComments,
+    votedStoryIds,
   };
   console.info("[lorewire homepage ssr]", {
     curation_count: initial.rawCurationCount,
@@ -599,6 +644,7 @@ export async function loadHomepageSSRData(opts?: {
       unpopular: initial.pollRails.rails.unpopular.length,
     },
     signed_in: initial.session !== null,
+    voted_story_ids: initial.votedStoryIds.length,
     ms: Date.now() - t0,
   });
   return initial;

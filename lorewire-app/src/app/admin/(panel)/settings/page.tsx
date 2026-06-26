@@ -623,7 +623,7 @@ export default async function SettingsPage() {
         >
           <SettingToggle
             settingKey={railEnabledSettingKey("divisive")}
-            label="Most Divisive rail on the homepage"
+            label={`"The Internet Can't Agree" rail on the homepage`}
             hint="Surface polls whose votes split closest to 50/50. Auto-hides when there's nothing above the floor; turn off to suppress the section entirely."
             initialOn={readToggle(railDivisive, true)}
           />
