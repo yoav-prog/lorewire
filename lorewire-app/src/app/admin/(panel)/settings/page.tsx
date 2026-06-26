@@ -32,6 +32,8 @@ import {
   railEnabledSettingKey,
 } from "@/lib/polls";
 import {
+  COLD_START_FLOOR_DEFAULT,
+  coldStartFloorSettingKey,
   rotatingCategoryEnabledSettingKey,
   rotatingCategoryOverrideSettingKey,
 } from "@/lib/homepage-curation-shared";
@@ -206,6 +208,7 @@ export default async function SettingsPage() {
     minorityVoteThresholdRaw,
     rotatingCategoryEnabled,
     rotatingCategoryOverrideRaw,
+    coldStartFloorRaw,
     endcardEnabled,
     endcardDurationRaw,
     autoPublishEnabledRaw,
@@ -223,6 +226,9 @@ export default async function SettingsPage() {
     // kill switch + per-day editorial pin.
     getSetting(rotatingCategoryEnabledSettingKey()),
     getSetting(rotatingCategoryOverrideSettingKey()),
+    // 2026-06-26 homepage redesign v1 slice F: cold-start floor —
+    // minimum cards a floor-eligible rail must have before rendering.
+    getSetting(coldStartFloorSettingKey()),
     getSetting("polls.endcard.enabled"),
     getSetting("polls.endcard.duration_ms"),
     // 2026-06-25 bulk complete-and-publish
@@ -641,8 +647,8 @@ export default async function SettingsPage() {
         </SettingsSection>
 
         <SettingsSection
-          title="Homepage — Rotating category"
-          description="The homepage v1 surface ships a single rotating category rail (cycles through Entitled / Humor / Wholesome / Dating / Roommate / Drama by UTC day) instead of rendering every category at once. Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice E)."
+          title="Homepage"
+          description="Composition controls for the v1 voting-first homepage: single rotating category rail and the cold-start floor that hides half-built rails. Plan: _plans/2026-06-26-homepage-redesign-v1.md (slices E and F)."
         >
           <SettingToggle
             settingKey={rotatingCategoryEnabledSettingKey()}
@@ -656,6 +662,15 @@ export default async function SettingsPage() {
             hint="Pin a specific category for today regardless of the auto-rotation. Pick 'Auto' to let the UTC-day modulo decide. Has no effect when the rotation toggle above is off."
             initial={rotatingCategoryOverrideRaw ?? ""}
             options={rotatingCategoryOptions}
+          />
+          <SettingNumber
+            settingKey={coldStartFloorSettingKey()}
+            label="Minimum cards per rail (cold-start floor)"
+            hint={`Floor-eligible rails (New on LoreWire, category rails, "The Internet Can't Agree", "Community agreed") hide entirely until they reach this many published cards, so a 1-3 poster rail doesn't read as broken. Personalized rails ("You Didn't Vote Yet", "You Voted With the Minority") and special-render rails (Hero, Top 10) skip the floor. Set to 0 to disable the floor and restore the legacy "> 0" gate. Default ${COLD_START_FLOOR_DEFAULT}.`}
+            initial={coldStartFloorRaw ?? String(COLD_START_FLOOR_DEFAULT)}
+            min={0}
+            max={50}
+            step={1}
           />
         </SettingsSection>
 

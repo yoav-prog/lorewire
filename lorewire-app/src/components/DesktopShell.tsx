@@ -1530,6 +1530,7 @@ function HomePage({
   heroDivisiveIds,
   heroPollQuestions,
   rotatingCategoryToday,
+  coldStartFloor,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -1557,6 +1558,11 @@ function HomePage({
    *  homepage slot today (or null when the kill switch is off and
    *  the legacy all-category-rails render path takes over). */
   rotatingCategoryToday: HomepageInitial["rotatingCategoryToday"];
+  /** 2026-06-26 slice F: minimum published cards a floor-eligible
+   *  rail must have before rendering. 0 disables the floor. Floor
+   *  applies to: new_row, category rails, divisive/agreed poll
+   *  rails. Skipped for: continue, top10, unpopular. */
+  coldStartFloor: HomepageInitial["coldStartFloor"];
 }) {
   // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
   // New & Hot grids can share the same resolveStory (saved real shorts aren't
@@ -1679,7 +1685,11 @@ function HomePage({
           const items = ids
             .map((id) => resolveStory(id))
             .filter((s): s is Story => s !== null && isPublishedStory(s));
-          if (items.length === 0) return null;
+          // 2026-06-26 slice F of _plans/2026-06-26-homepage-redesign-v1.md:
+          // hide category rails below the cold-start floor. Admin can set
+          // the floor to 0 to disable; Math.max(1, ...) preserves the
+          // legacy `> 0` gate when the floor is off.
+          if (items.length < Math.max(1, coldStartFloor)) return null;
           return (
             <Rail key={rail.surface} title={rail.title}>
               {items.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} />)}
@@ -1688,7 +1698,13 @@ function HomePage({
         })}
         {POLL_RAIL_KINDS.map((kind) => {
           const cards = pollRails[kind];
-          if (cards.length === 0) return null;
+          // 2026-06-26 slice F: divisive + agreed are floor-eligible;
+          // unpopular is the personalized minority rail (already gated
+          // by the slice-A vote-count threshold) so it surfaces at any
+          // size for the viewers who qualify.
+          const railFloor =
+            kind === "unpopular" ? 1 : Math.max(1, coldStartFloor);
+          if (cards.length < railFloor) return null;
           return (
             <Rail key={`poll-${kind}`} title={POLL_RAIL_TITLES[kind]}>
               {cards.map((row) => (
@@ -1697,7 +1713,11 @@ function HomePage({
             </Rail>
           );
         })}
-        {newRowIds.length > 0 && (
+        {/* 2026-06-26 slice F of _plans/2026-06-26-homepage-redesign-v1.md:
+            "New on LoreWire" is floor-eligible — a 1-poster New row would
+            undercut the rail's promise of "fresh content." Math.max(1, ...)
+            keeps the legacy `> 0` semantic when admin sets the floor to 0. */}
+        {newRowIds.length >= Math.max(1, coldStartFloor) && (
           <Rail title="New on LoreWire">
             {newRowIds.map((id) => {
               const s = resolveStory(id);
@@ -1911,6 +1931,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           heroDivisiveIds={initial.heroDivisiveIds}
           heroPollQuestions={initial.heroPollQuestions}
           rotatingCategoryToday={initial.rotatingCategoryToday}
+          coldStartFloor={initial.coldStartFloor}
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}

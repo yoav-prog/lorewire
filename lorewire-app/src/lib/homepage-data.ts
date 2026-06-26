@@ -27,6 +27,9 @@ import {
   listAllCuration,
 } from "@/lib/homepage-curation";
 import {
+  COLD_START_FLOOR_DEFAULT,
+  coldStartFloorSettingKey,
+  parseColdStartFloor,
   resolveRotatingCategorySurface,
   rotatingCategoryEnabledSettingKey,
   rotatingCategoryOverrideSettingKey,
@@ -459,6 +462,14 @@ export interface HomepageInitial {
    *  Null here is the explicit "fall back to all six rails" signal so
    *  the shells don't need to second-guess it. */
   rotatingCategoryToday: RotatingCategorySurface | null;
+  /** 2026-06-26 slice F of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  minimum published cards a floor-eligible rail must have before
+   *  rendering. Defaults to COLD_START_FLOOR_DEFAULT (4); admins can
+   *  set 0 to disable the floor (legacy `> 0` gate). Eligibility is
+   *  decided in the shells — personalized (continue, unpopular) and
+   *  special-render (hero, top10) rails skip the floor entirely so
+   *  thin personalized signals still surface. */
+  coldStartFloor: number;
 }
 
 const EMPTY_POLL_RAILS_RESULT: HomepagePollRailsResult = {
@@ -480,7 +491,8 @@ type SsrSource =
   | "seededModalComments"
   | "votedStoryIds"
   | "heroDivisiveIds"
-  | "rotatingCategory";
+  | "rotatingCategory"
+  | "coldStartFloor";
 
 async function safeLoad<T>(
   source: SsrSource,
@@ -565,6 +577,18 @@ async function loadRotatingCategorySurface(): Promise<RotatingCategorySurface | 
     resolved: surface,
   });
   return surface;
+}
+
+/** Resolve the homepage cold-start floor from settings. Reuses the
+ *  parse helper's trust boundary so blank / malformed / negative
+ *  values fall through to the default and 0 is honoured (disables
+ *  the floor). See parseColdStartFloor for the rationale and the
+ *  PR #66 historical context.
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice F). */
+async function loadColdStartFloor(): Promise<number> {
+  const raw = await getSetting(coldStartFloorSettingKey());
+  return parseColdStartFloor(raw);
 }
 
 async function loadSession(): Promise<PublicSession | null> {
@@ -678,6 +702,7 @@ export async function loadHomepageSSRData(opts?: {
     votedStoryIds,
     heroDivisiveCards,
     rotatingCategoryToday,
+    coldStartFloor,
   ] = await Promise.all([
     safeLoad<HomepageCurationResult | null>(
       "curation",
@@ -720,6 +745,15 @@ export async function loadHomepageSSRData(opts?: {
       "rotatingCategory",
       loadRotatingCategorySurface,
       null,
+    ),
+    // 2026-06-26 slice F of _plans/2026-06-26-homepage-redesign-v1.md.
+    // Failure path returns the in-code default so the floor stays in
+    // effect at the canonical value rather than silently dropping to
+    // 0 (which would let half-built rails through).
+    safeLoad<number>(
+      "coldStartFloor",
+      loadColdStartFloor,
+      COLD_START_FLOOR_DEFAULT,
     ),
   ]);
 
@@ -769,6 +803,7 @@ export async function loadHomepageSSRData(opts?: {
     heroDivisiveIds,
     heroPollQuestions,
     rotatingCategoryToday,
+    coldStartFloor,
   };
   console.info("[lorewire homepage ssr]", {
     curation_count: initial.rawCurationCount,
@@ -788,6 +823,7 @@ export async function loadHomepageSSRData(opts?: {
     hero_divisive_ids: initial.heroDivisiveIds.length,
     hero_poll_questions: Object.keys(initial.heroPollQuestions).length,
     rotating_category: initial.rotatingCategoryToday,
+    cold_start_floor: initial.coldStartFloor,
     ms: Date.now() - t0,
   });
   return initial;
