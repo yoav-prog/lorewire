@@ -26,6 +26,8 @@ import {
 } from "@/lib/aspect";
 import {
   DEFAULT_PUBLIC_FLOOR,
+  MINORITY_VOTE_DEFAULT_THRESHOLD,
+  minorityVoteThresholdSettingKey,
   POLL_RAIL_KINDS,
   railEnabledSettingKey,
 } from "@/lib/polls";
@@ -197,6 +199,7 @@ export default async function SettingsPage() {
     railAgreed,
     railUnpopular,
     publicFloorRaw,
+    minorityVoteThresholdRaw,
     endcardEnabled,
     endcardDurationRaw,
     autoPublishEnabledRaw,
@@ -206,6 +209,10 @@ export default async function SettingsPage() {
     getSetting(railEnabledSettingKey("agreed")),
     getSetting(railEnabledSettingKey("unpopular")),
     getSetting("polls.public_floor"),
+    // 2026-06-26 homepage redesign v1 slice B
+    // (_plans/2026-06-26-homepage-redesign-v1.md): per-viewer
+    // threshold gating the "You Voted With the Minority" rail.
+    getSetting(minorityVoteThresholdSettingKey()),
     getSetting("polls.endcard.enabled"),
     getSetting("polls.endcard.duration_ms"),
     // 2026-06-25 bulk complete-and-publish
@@ -628,9 +635,20 @@ export default async function SettingsPage() {
           />
           <SettingToggle
             settingKey={railEnabledSettingKey("unpopular")}
-            label="Unpopular Opinions rail on the homepage"
-            hint="Personalized when the visitor has vote history; falls back to landslide stories otherwise."
+            label='"You Voted With the Minority" rail on the homepage'
+            hint="Surfaces stories where this viewer voted on the side the crowd disagreed with. Personalized only — requires the threshold below; hides entirely for visitors without enough vote history. The dedicated /c/unpopular page keeps the broader landslide fallback for anonymous visitors."
             initialOn={readToggle(railUnpopular, true)}
+          />
+          <SettingNumber
+            settingKey={minorityVoteThresholdSettingKey()}
+            label="Minority votes needed to surface the rail"
+            hint={`How many polls a viewer must have voted on the minority side of before the rail appears for them. Below the threshold the rail hides — one or two minority votes isn't enough signal to label someone "the kind of person who disagrees with the crowd." Default ${MINORITY_VOTE_DEFAULT_THRESHOLD}.`}
+            initial={
+              minorityVoteThresholdRaw ?? String(MINORITY_VOTE_DEFAULT_THRESHOLD)
+            }
+            min={1}
+            max={50}
+            step={1}
           />
           <SettingNumber
             settingKey="polls.public_floor"
