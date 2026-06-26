@@ -226,6 +226,7 @@ function Billboard({
   onShuffle,
   onActiveChange,
   session,
+  pollQuestions,
 }: {
   pool: Story[];
   onOpen: OpenFn;
@@ -236,6 +237,13 @@ function Billboard({
    *  screen. */
   onActiveChange?: (heroId: string) => void;
   session: HomepageInitial["session"];
+  /** 2026-06-26 slice D of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  poll question keyed by story id. Renders above the title as a
+   *  handwritten "the audience is asking" hint when present. Missing
+   *  entries (story without a poll, or with a disabled poll) skip the
+   *  overlay entirely — the slide reads as a normal hero, no broken
+   *  empty row. */
+  pollQuestions: HomepageInitial["heroPollQuestions"];
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [touching, setTouching] = useState(false);
@@ -391,6 +399,25 @@ function Billboard({
           <span className="w-[3px] h-3.5 bg-accent rounded-full"></span>
           <span className="font-mono text-[10px] uppercase tracking-[.34em] text-ink/90">LW Original</span>
         </div>
+        {/* 2026-06-26 slice D of _plans/2026-06-26-homepage-redesign-v1.md:
+            the question hint sits BETWEEN the eyebrow and the title so it
+            reads as "the dilemma the audience is debating" before the
+            show's name lands. Handwriting font (Caveat) is intentional —
+            it visually attributes the question to the audience, not the
+            brand. Question only, no option labels (the spoiler tradeoff
+            locked with Yoav). */}
+        {pollQuestions[story.id] && (
+          <p
+            className="leading-tight text-ink mb-2 select-none"
+            style={{
+              fontFamily: "var(--font-caveat)",
+              fontSize: 26,
+              textShadow: "0 1px 14px rgba(0,0,0,.55)",
+            }}
+          >
+            {pollQuestions[story.id]}
+          </p>
+        )}
         <MobileHeroTitleH1 title={story.title} storyId={story.id} />
         <div className="flex items-center gap-1.5 mt-3 flex-wrap">
           {story.tags.map((t, i) => (
@@ -645,6 +672,7 @@ function Home({
           onShuffle={onShuffle}
           onActiveChange={onHeroActiveChange}
           session={session}
+          pollQuestions={heroPollQuestions}
         />
       )}
 
