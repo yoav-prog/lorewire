@@ -8,10 +8,16 @@ import { describe, expect, it } from "vitest";
 
 import {
   fallbackIdsForSurface,
+  isRotatingCategorySurface,
   liveRowToStory,
   pickHeroAtIndex,
+  pickRotatingCategoryByDay,
   resolveHeroPool,
   resolveRailIds,
+  resolveRotatingCategorySurface,
+  ROTATING_CATEGORY_SURFACES,
+  rotatingCategoryEnabledSettingKey,
+  rotatingCategoryOverrideSettingKey,
 } from "./homepage-rails";
 
 const BEHAVIOR_FALLBACK = {
@@ -683,5 +689,126 @@ describe("liveRowToStory — slug propagation", () => {
     // empty-string slugs leaking into /v/[slug] navigation.
     const story = liveRowToStory(buildRow({ slug: "" }));
     expect(story.slug).toBeUndefined();
+  });
+});
+
+// ─── Rotating category (slice E of homepage redesign v1) ──────────────────
+
+describe("rotating category settings keys", () => {
+  it("override key is stable + namespaced under homepage", () => {
+    expect(rotatingCategoryOverrideSettingKey()).toBe(
+      "homepage.rotating_category_today",
+    );
+  });
+
+  it("kill-switch key is stable + namespaced under homepage", () => {
+    expect(rotatingCategoryEnabledSettingKey()).toBe(
+      "homepage.rotating_category_enabled",
+    );
+  });
+});
+
+describe("isRotatingCategorySurface", () => {
+  it("accepts every surface in the rotation list", () => {
+    for (const s of ROTATING_CATEGORY_SURFACES) {
+      expect(isRotatingCategorySurface(s)).toBe(true);
+    }
+  });
+
+  it("rejects non-surface strings and non-strings", () => {
+    expect(isRotatingCategorySurface("hero")).toBe(false);
+    expect(isRotatingCategorySurface("top10")).toBe(false);
+    expect(isRotatingCategorySurface("")).toBe(false);
+    expect(isRotatingCategorySurface(null)).toBe(false);
+    expect(isRotatingCategorySurface(undefined)).toBe(false);
+    expect(isRotatingCategorySurface(0)).toBe(false);
+  });
+});
+
+describe("pickRotatingCategoryByDay", () => {
+  // Anchor: 1970-01-01 UTC is day 0 → ROTATING_CATEGORY_SURFACES[0].
+  // Every test computes against this so it stays deterministic even if
+  // ROTATING_CATEGORY_SURFACES is reordered in the future.
+  const epoch = new Date("1970-01-01T00:00:00Z");
+
+  it("returns the first surface on day 0", () => {
+    expect(pickRotatingCategoryByDay(epoch)).toBe(
+      ROTATING_CATEGORY_SURFACES[0],
+    );
+  });
+
+  it("advances one surface per UTC day", () => {
+    for (let i = 0; i < ROTATING_CATEGORY_SURFACES.length; i++) {
+      const day = new Date(epoch.getTime() + i * 86_400_000);
+      expect(pickRotatingCategoryByDay(day)).toBe(
+        ROTATING_CATEGORY_SURFACES[i],
+      );
+    }
+  });
+
+  it("wraps back to the first surface after a full cycle", () => {
+    const wrap = new Date(
+      epoch.getTime() +
+        ROTATING_CATEGORY_SURFACES.length * 86_400_000,
+    );
+    expect(pickRotatingCategoryByDay(wrap)).toBe(
+      ROTATING_CATEGORY_SURFACES[0],
+    );
+  });
+
+  it("returns the same surface for two times within the same UTC day", () => {
+    const morning = new Date("2026-06-26T03:14:00Z");
+    const evening = new Date("2026-06-26T22:47:00Z");
+    expect(pickRotatingCategoryByDay(morning)).toBe(
+      pickRotatingCategoryByDay(evening),
+    );
+  });
+
+  it("handles pre-epoch (negative day numbers) without crashing", () => {
+    // JavaScript's % returns a negative remainder for negative
+    // operands; the helper's double-modulo guards against that.
+    const preEpoch = new Date("1969-12-30T00:00:00Z");
+    const surface = pickRotatingCategoryByDay(preEpoch);
+    expect(ROTATING_CATEGORY_SURFACES).toContain(surface);
+  });
+});
+
+describe("resolveRotatingCategorySurface", () => {
+  const epoch = new Date("1970-01-01T00:00:00Z");
+
+  it("returns null when the kill switch is off, regardless of override", () => {
+    expect(resolveRotatingCategorySurface(false, null, epoch)).toBeNull();
+    expect(
+      resolveRotatingCategorySurface(false, "drama_row", epoch),
+    ).toBeNull();
+  });
+
+  it("returns the admin override when it matches a known surface", () => {
+    expect(
+      resolveRotatingCategorySurface(true, "drama_row", epoch),
+    ).toBe("drama_row");
+    expect(
+      resolveRotatingCategorySurface(true, "humor_row", epoch),
+    ).toBe("humor_row");
+  });
+
+  it("falls through to auto when override is invalid / blank / null", () => {
+    // All these should land on the day-0 auto pick.
+    const auto = ROTATING_CATEGORY_SURFACES[0];
+    expect(resolveRotatingCategorySurface(true, null, epoch)).toBe(auto);
+    expect(resolveRotatingCategorySurface(true, "", epoch)).toBe(auto);
+    expect(
+      resolveRotatingCategorySurface(true, "garbage_row", epoch),
+    ).toBe(auto);
+    expect(resolveRotatingCategorySurface(true, "hero", epoch)).toBe(auto);
+  });
+
+  it("auto rotation advances per UTC day when no override is set", () => {
+    for (let i = 0; i < ROTATING_CATEGORY_SURFACES.length; i++) {
+      const day = new Date(epoch.getTime() + i * 86_400_000);
+      expect(resolveRotatingCategorySurface(true, null, day)).toBe(
+        ROTATING_CATEGORY_SURFACES[i],
+      );
+    }
   });
 });

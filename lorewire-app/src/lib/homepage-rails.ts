@@ -141,6 +141,21 @@ export const CATEGORY_RAILS: CategoryRailSpec[] = [
   { surface: "drama_row", title: "Pure Drama", cat: "Drama" },
 ];
 
+// Rotating-category helpers (slice E of homepage redesign v1) moved to
+// lib/homepage-curation-shared.ts so server-only loaders can import
+// them without crossing the "use client" boundary at the top of this
+// file. Re-exported below to keep this module's public surface stable
+// for client callers that already import from "@/lib/homepage-rails".
+export {
+  isRotatingCategorySurface,
+  pickRotatingCategoryByDay,
+  resolveRotatingCategorySurface,
+  ROTATING_CATEGORY_SURFACES,
+  rotatingCategoryEnabledSettingKey,
+  rotatingCategoryOverrideSettingKey,
+  type RotatingCategorySurface,
+} from "@/lib/homepage-curation-shared";
+
 // Per-rail fallback cap. Keeps SSR payload bounded; the rails scroll
 // horizontally so the cap is a payload control, not a visual one.
 const FALLBACK_RAIL_CAP = 20;
