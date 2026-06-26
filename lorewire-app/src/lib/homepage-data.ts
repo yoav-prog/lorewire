@@ -28,6 +28,7 @@ import {
 } from "@/lib/homepage-curation";
 import {
   countMinorityVotesByCookie,
+  getEnabledPollQuestionsByStoryIds,
   HOMEPAGE_RAIL_LIMIT,
   isRailEnabledValue,
   listVotedStoryIdsByCookie,
@@ -426,6 +427,22 @@ export interface HomepageInitial {
    *  history — the shells' `filterIdsByNotVoted` collapses to a
    *  no-op so the rail keeps showing every watched story. */
   votedStoryIds: string[];
+  /** 2026-06-26 slice D of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  top story ids by current divisiveness, capped at the hero pool
+   *  size. Feeds resolveHeroPool's new auto-fill source — when the
+   *  admin hasn't curated the hero, the carousel auto-fills with the
+   *  most-debated stories rather than the most-recent. Curated picks
+   *  still pin at the front (admin override stays authoritative).
+   *  Empty array on a cold catalog falls through to the existing
+   *  recency fallback so the hero is never blank. */
+  heroDivisiveIds: string[];
+  /** 2026-06-26 slice D: poll question text keyed by story id. Used
+   *  by the hero carousel's question-hint overlay — only the
+   *  question is surfaced, never the option labels (locked decision
+   *  on the spoiler tradeoff). Covers every enabled-poll story in the
+   *  live catalog so the overlay paints on whatever composition
+   *  resolveHeroPool ends up with (curated, divisive, or recency). */
+  heroPollQuestions: Record<string, string>;
 }
 
 const EMPTY_POLL_RAILS_RESULT: HomepagePollRailsResult = {
@@ -445,7 +462,8 @@ type SsrSource =
   | "polls"
   | "session"
   | "seededModalComments"
-  | "votedStoryIds";
+  | "votedStoryIds"
+  | "heroDivisiveIds";
 
 async function safeLoad<T>(
   source: SsrSource,
@@ -463,6 +481,15 @@ async function safeLoad<T>(
   }
 }
 
+/** Hero pool capacity — must match `SURFACE_CAPACITY.hero` in
+ *  homepage-curation-shared.ts and `HERO_FALLBACK_CAP` in
+ *  homepage-rails.ts. The three live in different layers (admin
+ *  curation cap, client-side fallback cap, and now this SSR loader)
+ *  so the constant is duplicated rather than imported — each layer
+ *  carries the bound it actually needs. If the capacity ever changes,
+ *  flip all three together. */
+const HERO_POOL_CAP = 8;
+
 /** Resolve the story ids this viewer has already voted on. Feeds the
  *  homepage "You Didn't Vote Yet" rail filter so the reframed Continue
  *  Watching surface drops anything the viewer has cast a verdict on.
@@ -478,6 +505,23 @@ async function safeLoad<T>(
 async function loadVotedStoryIds(): Promise<string[]> {
   const voteToken = await readVoteToken();
   return listVotedStoryIdsByCookie(voteToken);
+}
+
+/** Top hero-pool candidates by current divisiveness. Re-uses the
+ *  rail-side `topDivisive` so the hero ranking and the
+ *  "The Internet Can't Agree" rail draw from the same projection
+ *  table — no divergence between "what the hero promotes" and
+ *  "what the rail promotes," just different caps.
+ *
+ *  Returns the cards (not just ids) so the SSR loader can pull both
+ *  the divisive id list AND the per-story question text from a
+ *  single round-trip. The caller splits the result into
+ *  heroDivisiveIds + heroPollQuestions before sealing the SSR
+ *  payload.
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice D). */
+async function loadHeroDivisiveCards(): Promise<RailCardRow[]> {
+  return topDivisive({ limit: HERO_POOL_CAP });
 }
 
 async function loadSession(): Promise<PublicSession | null> {
@@ -589,6 +633,7 @@ export async function loadHomepageSSRData(opts?: {
     session,
     seededModalComments,
     votedStoryIds,
+    heroDivisiveCards,
   ] = await Promise.all([
     safeLoad<HomepageCurationResult | null>(
       "curation",
@@ -619,7 +664,46 @@ export async function loadHomepageSSRData(opts?: {
     // rather than blanking out for everyone if the poll_votes read
     // throws.
     safeLoad<string[]>("votedStoryIds", loadVotedStoryIds, []),
+    // 2026-06-26 slice D of _plans/2026-06-26-homepage-redesign-v1.md.
+    // Failure path returns [] so the hero pool falls through to its
+    // existing recency-based auto-fill rather than going blank.
+    safeLoad<RailCardRow[]>("heroDivisiveIds", loadHeroDivisiveCards, []),
   ]);
+
+  // 2026-06-26 slice D: split the divisive cards into the id-ordered
+  // list resolveHeroPool consumes and the per-story question map the
+  // overlay reads. Done client-side of the SSR boundary (still server-
+  // executed; "client" here means "after the parallel fan-out") so
+  // the on-wire shape matches what the carousel actually needs —
+  // resolveHeroPool deals in story ids, the overlay reads questions
+  // by id, neither needs the full RailCardRow.
+  //
+  // Curated hero picks (admin override) get a question lookup too, so
+  // the overlay paints on those slides even when they aren't in the
+  // divisive set. Recency-fallback picks naturally lack a poll most of
+  // the time — no question, no overlay, the slide reads as a normal
+  // hero. That's the graceful degradation contract.
+  const heroDivisiveIds: string[] = [];
+  const heroPollQuestions: Record<string, string> = {};
+  for (const card of heroDivisiveCards) {
+    heroDivisiveIds.push(card.storyId);
+    if (card.question) heroPollQuestions[card.storyId] = card.question;
+  }
+  const curatedHeroIds = curationResult?.curation?.hero ?? [];
+  const extraQuestionIds = curatedHeroIds.filter(
+    (id) => !(id in heroPollQuestions),
+  );
+  if (extraQuestionIds.length > 0) {
+    const extra = await safeLoad<Record<string, string>>(
+      "heroDivisiveIds",
+      () => getEnabledPollQuestionsByStoryIds(extraQuestionIds),
+      {},
+    );
+    for (const [id, q] of Object.entries(extra)) {
+      heroPollQuestions[id] = q;
+    }
+  }
+
   const initial: HomepageInitial = {
     curation: curationResult?.curation ?? null,
     behavior: curationResult?.behavior ?? DEFAULT_BEHAVIOR,
@@ -629,6 +713,8 @@ export async function loadHomepageSSRData(opts?: {
     session,
     seededModalComments,
     votedStoryIds,
+    heroDivisiveIds,
+    heroPollQuestions,
   };
   console.info("[lorewire homepage ssr]", {
     curation_count: initial.rawCurationCount,
@@ -645,6 +731,8 @@ export async function loadHomepageSSRData(opts?: {
     },
     signed_in: initial.session !== null,
     voted_story_ids: initial.votedStoryIds.length,
+    hero_divisive_ids: initial.heroDivisiveIds.length,
+    hero_poll_questions: Object.keys(initial.heroPollQuestions).length,
     ms: Date.now() - t0,
   });
   return initial;
