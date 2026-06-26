@@ -21,6 +21,9 @@ import {
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
   isPollSide,
+  MINORITY_VOTE_DEFAULT_THRESHOLD,
+  minorityVoteThresholdSettingKey,
+  parseMinorityVoteThreshold,
   toResultView,
   validatePollInputs,
   type PollAggregateRow,
@@ -41,6 +44,9 @@ export {
   HOMEPAGE_RAIL_LIMIT,
   isPollSide,
   isRailEnabledValue,
+  MINORITY_VOTE_DEFAULT_THRESHOLD,
+  minorityVoteThresholdSettingKey,
+  parseMinorityVoteThreshold,
   pctA,
   pctBComplement,
   POLL_OPTION_MAX,
@@ -81,6 +87,19 @@ export async function resolvePublicFloor(): Promise<number> {
   const n = Number.parseInt(raw.trim(), 10);
   if (!Number.isFinite(n) || n < 0) return DEFAULT_PUBLIC_FLOOR;
   return n;
+}
+
+/** Resolve the minimum number of minority-side votes a viewer must
+ *  have before the homepage "You Voted With the Minority" rail surfaces.
+ *  Reads `homepage.minority_vote_threshold` from settings; falls back
+ *  to MINORITY_VOTE_DEFAULT_THRESHOLD on any unset / malformed /
+ *  non-positive value (see parseMinorityVoteThreshold for the trust
+ *  boundary).
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice A). */
+export async function resolveMinorityVoteThreshold(): Promise<number> {
+  const raw = await getSetting(minorityVoteThresholdSettingKey());
+  return parseMinorityVoteThreshold(raw);
 }
 
 // ─── Reads ────────────────────────────────────────────────────────────────────
@@ -652,6 +671,49 @@ export async function getVoteSideForCookie(
   );
   if (!row) return null;
   return isPollSide(row.side) ? row.side : null;
+}
+
+/** Count polls where this cookie voted on the side that is currently
+ *  the MINORITY at the live `poll_aggregates` counts. Powers the
+ *  threshold gate for the homepage "You Voted With the Minority" rail
+ *  (slice A of _plans/2026-06-26-homepage-redesign-v1.md).
+ *
+ *  Semantic: "currently the minority" — strictly less than half of
+ *  total_votes. Ties (50/50) don't count as minority, matching the
+ *  same `votes_a * 2 < total_votes` predicate `topUnpopular` uses for
+ *  rail surfacing, so the gate and the rail agree on "minority."
+ *
+ *  Floor: only polls with `total_votes >= DEFAULT_PUBLIC_FLOOR` count
+ *  toward the threshold. A cookie that voted on a 1-vote poll and is
+ *  technically the "100% side" wouldn't naturally count anyway, but
+ *  the floor is the cleaner expression of "established poll" and
+ *  matches `RAIL_MIN_VOTES`.
+ *
+ *  Returns 0 for an absent / empty cookie — the rail can't personalize
+ *  for an unidentified viewer. */
+export async function countMinorityVotesByCookie(
+  cookieToken: string | null,
+): Promise<number> {
+  if (!cookieToken) return 0;
+  const row = await one<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM poll_votes v
+     JOIN poll_aggregates pa ON pa.poll_id = v.poll_id
+     WHERE v.cookie_token = ?
+       AND pa.total_votes >= ?
+       AND (
+         (v.side = 'A' AND pa.votes_a * 2 < pa.total_votes)
+         OR (v.side = 'B' AND pa.votes_b * 2 < pa.total_votes)
+       )`,
+    [cookieToken, RAIL_MIN_VOTES],
+  );
+  const c = Number(row?.c) || 0;
+  console.info("[polls minority count]", {
+    cookie_prefix: cookieToken.slice(0, 8),
+    count: c,
+    floor: RAIL_MIN_VOTES,
+  });
+  return c;
 }
 
 // ─── Public rails: divisive / agreed / unpopular ──────────────────────────────
