@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Archivo, Fraunces, Hanken_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
+import { Archivo, Hanken_Grotesk, Space_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
 import RegisterSW from "@/components/RegisterSW";
 import { getSiteSeo } from "@/lib/site-seo";
 import {
@@ -9,13 +9,15 @@ import {
 import "./globals.css";
 
 const archivo = Archivo({ subsets: ["latin"], variable: "--font-archivo" });
-// 2026-06-26 visual-distance pass (Netflix font is sans condensed bold;
-// editorial publications use serifs with stroke contrast). Fraunces is
-// a variable serif with optical sizing — the letterforms physically
-// reshape between large display sizes and small chrome sizes, which is
-// the literal answer to "looks good on all devices." Variable font so
-// no `weight` array — all weights via one file.
-const fraunces = Fraunces({ subsets: ["latin"], variable: "--font-fraunces" });
+// 2026-06-26 visual-distance pass: Space Grotesk replaces Archivo on
+// the display token. Different sans-serif grammar from Netflix Sans /
+// Archivo Black (Netflix's pattern is heavy condensed geometric;
+// Space Grotesk is medium-width humanist with distinctive single-
+// story `a` and narrow apertures). Modern editorial / designer
+// publications use this exact font family — Substack publication
+// covers, Wired digital, indie magazines. Variable font, no weight
+// array needed.
+const spaceGrotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-space-grotesk" });
 const hanken = Hanken_Grotesk({ subsets: ["latin"], variable: "--font-hanken" });
 const spline = Spline_Sans_Mono({ subsets: ["latin"], variable: "--font-spline" });
 const caveat = Caveat({ subsets: ["latin"], variable: "--font-caveat" });
@@ -68,7 +70,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${archivo.variable} ${fraunces.variable} ${hanken.variable} ${spline.variable} ${caveat.variable}`}
+      className={`${archivo.variable} ${spaceGrotesk.variable} ${hanken.variable} ${spline.variable} ${caveat.variable}`}
     >
       <head>
         {/* Runs BEFORE React hydration so the document paints with the
