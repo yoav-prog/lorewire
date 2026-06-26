@@ -137,7 +137,12 @@ const ShuffleI: IconCmp = (p) => <Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l
 const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /><path d="M12 11v5M12 8h.01" /></>} />;
 
 /* ----------------------------- POSTER ART ----------------------------- */
-function PosterArt({ story, rounded = 8, showTitle = true, kicker = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean }) {
+// 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+// default poster border-radius 8 -> 12. Softer card reads less
+// rectangular-streamer-grid; callers that need a different radius
+// pass `rounded` explicitly (Search result tiles still opt out
+// with `rounded={0}`).
+function PosterArt({ story, rounded = 12, showTitle = true, kicker = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean }) {
   const c = CAT[story.cat];
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
@@ -523,9 +528,18 @@ function Rail({ title, children }: { title: string; children: React.ReactNode })
 
 function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number; landscape?: boolean; voteCount?: number }) {
   const { getRating } = useStoryRatings();
+  // 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+  // hover treatment swaps from Netflix's scale-pop (transform:
+  // scale(1.05) on hover) to an editorial underline stroke that
+  // draws left-to-right under the poster. Reads as a newspaper
+  // "this is the article you're hovering" cue rather than a
+  // streamer "this tile is interactive" cue. scaleX from origin-left
+  // (instead of width 0 -> 100%) so the animation is GPU-cheap.
+  // 180ms ease-out matches the spec; group-focus-visible mirrors the
+  // hover so keyboard navigation gets the same affordance.
   return (
-    <button onClick={() => onOpen(story.id)} className="relative shrink-0 transition-transform duration-200 hover:scale-[1.05] hover:z-10" style={{ width: w }}>
-      <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}>
+    <button onClick={() => onOpen(story.id)} className="group relative shrink-0" style={{ width: w }}>
+      <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}>
         <PosterArt story={story} showTitle={!landscape} />
         <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 30 }} />
         {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
@@ -552,6 +566,14 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
           <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }}></div>
         </div>
       )}
+      {/* The underline stroke. Hangs below the poster (negative
+          bottom) so it doesn't overlap the artwork or the progress
+          bar. 4px inset on each side reads as a deliberate stroke
+          rather than a divider rule across the whole rail. */}
+      <span
+        className="absolute left-1 right-1 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+        style={{ transitionDuration: "180ms" }}
+      />
     </button>
   );
 }
@@ -586,9 +608,16 @@ function Top10Row({
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end transition-transform duration-200 hover:scale-[1.04] hover:z-10" style={{ minWidth: 264 }}>
+          <button key={id} onClick={() => onOpen(id)} className="group relative shrink-0 flex items-end" style={{ minWidth: 264 }}>
             <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
-            <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 8 }}><PosterArt story={s} /></div>
+            <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}><PosterArt story={s} /></div>
+            {/* Slice H underline-stroke hover. Inset to the poster
+                bounds (the giant number doesn't get an underline
+                drawn under it — it's the poster that's the link). */}
+            <span
+              className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+              style={{ width: 164, transitionDuration: "180ms" }}
+            />
           </button>
         );
       })}
