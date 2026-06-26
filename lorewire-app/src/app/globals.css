@@ -21,15 +21,14 @@
   --color-cat-roommate: #5b3b8a;
 
   /* 2026-06-26 Netflix-distance pass: --font-display swapped from
-     Archivo (heavy condensed sans, same DNA as Netflix Sans) to
-     Space Grotesk (medium-width humanist sans with distinctive
-     character — single-story `a`, narrow apertures, off-kilter
-     curves). Different sans grammar entirely; reads as designer-y
-     editorial / indie magazine rather than streamer grid. Variable
-     font, every Tailwind `font-display` usage picks this up via the
-     token. Archivo stays imported as `var(--font-archivo)` for any
-     element that wants the old voice during transition. */
-  --font-display: var(--font-space-grotesk), system-ui, sans-serif;
+     Archivo (sans condensed bold, same DNA as Netflix Sans) to
+     Fraunces (variable serif with optical sizing — modern editorial,
+     Substack / Linear / Vercel-blog adjacent). Every Tailwind
+     `font-display` usage (hero title, rail headers, buttons) picks
+     this up automatically. Archivo stays imported as
+     `var(--font-archivo)` for any element that needs the old voice
+     during transition. */
+  --font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
   --font-body: var(--font-hanken), system-ui, sans-serif;
   --font-mono: var(--font-spline), ui-monospace, monospace;
   --font-hand: var(--font-caveat), cursive;

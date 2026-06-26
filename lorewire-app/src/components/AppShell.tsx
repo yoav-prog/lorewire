@@ -380,7 +380,12 @@ function Billboard({
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
       >
-        <div className="absolute inset-0 drift" style={{ background: c }}>
+        {/* 2026-06-26 slice H follow-up: `drift` class removed. The
+            slow zoom animation on the hero image is Netflix's exact
+            "cinematic still" treatment. Editorial publications use
+            STATIC images. Keyframe stays in globals.css for any
+            future opt-in use. */}
+        <div className="absolute inset-0" style={{ background: c }}>
           {showHero && (
             <img
               src={heroSrc}
@@ -404,10 +409,11 @@ function Billboard({
           fade-in's absolute inset). Buttons stay tappable, swipe stays
           contained to the artwork half — no gesture conflict. */}
       <div className="absolute left-0 right-0 bottom-5 px-5 z-20" aria-live="polite">
-        <div className="flex items-center gap-2 mb-2.5">
-          <span className="w-[3px] h-3.5 bg-accent rounded-full"></span>
-          <span className="font-mono text-[10px] uppercase tracking-[.34em] text-ink/90">LW Original</span>
-        </div>
+        {/* 2026-06-26 slice H follow-up: "LW Original" eyebrow dropped
+            (direct copy of Netflix's "NETFLIX ORIGINAL" pattern with
+            the accent strip + small-caps mono). The hero now opens
+            straight on the question, which is what the brand thesis
+            actually is. */}
         {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
             the QUESTION is now the LEAD element of the hero (was a small
             kicker in slice D). Netflix leads with the title because the
@@ -468,8 +474,13 @@ function Billboard({
             DO on LoreWire: watch + cast a verdict, read the long-form
             article, or shuffle for a random one. */}
         <div className="flex items-center gap-2.5 mt-4">
-          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition">
-            <PlayI /> Watch &amp; Vote
+          {/* 2026-06-26 slice H follow-up: play icon dropped from the
+              primary CTA. The triangle glyph is one of Netflix's most
+              iconic UI cues; removing it pushes the button toward
+              editorial "call to action" rather than streamer "press
+              play." */}
+          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition">
+            Watch &amp; Vote
           </button>
           <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
             <InfoI size={18} /> Read the article

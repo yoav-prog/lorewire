@@ -397,7 +397,10 @@ function Hero({
           CSS class. React unmounts the old slide and mounts the new one,
           which restarts the animation cleanly. */}
       <div key={story.id} className="absolute inset-0 fade-in">
-        <div className="absolute inset-0 drift" style={{ background: c }}>
+        {/* 2026-06-26 slice H follow-up: `drift` removed. Editorial
+            publications use STATIC hero images, not the slow zoom
+            that's Netflix's exact "cinematic still" treatment. */}
+        <div className="absolute inset-0" style={{ background: c }}>
           {showHero && (
             <img
               src={heroSrc}
@@ -420,10 +423,10 @@ function Hero({
         <div className="absolute inset-x-0 bottom-0 h-44" style={{ background: "linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)" }}></div>
         <div className="relative h-full max-w-[1600px] mx-auto px-10 flex items-end pb-24">
           <div className="max-w-[620px]" aria-live="polite">
-            <div className="flex items-center gap-2.5 mb-4">
-              <span className="w-[3px] h-4 bg-accent rounded-full"></span>
-              <span className="font-mono text-[11px] uppercase tracking-[.36em] text-ink/90">LoreWire Original</span>
-            </div>
+            {/* 2026-06-26 slice H follow-up: "LoreWire Original"
+                eyebrow dropped (direct copy of Netflix's "NETFLIX
+                ORIGINAL" pattern with the accent strip + small-caps
+                mono). The hero now opens straight on the question. */}
             {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
                 the QUESTION is now the LEAD element of the hero (was a
                 small kicker in slice D). Netflix leads with the title
@@ -479,7 +482,11 @@ function Hero({
                 actually DO on LoreWire: watch + cast a verdict, read the
                 long-form article, or shuffle for a random one. */}
             <div className="flex items-center gap-3 mt-7">
-              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center gap-2.5 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]"><PlayI size={24} /> Watch &amp; Vote</button>
+              {/* 2026-06-26 slice H follow-up: play icon dropped
+                  from the primary CTA. The triangle is one of
+                  Netflix's most iconic UI cues; removing it pushes
+                  the button toward editorial CTA. */}
+              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]">Watch &amp; Vote</button>
               <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</button>
               <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
             </div>
