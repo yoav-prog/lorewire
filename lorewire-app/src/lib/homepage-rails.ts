@@ -493,7 +493,7 @@ export function useHomepagePolls(
  *  landslide stories for anonymous viewers (a different surface, a
  *  different contract). */
 export const POLL_RAIL_TITLES: Record<PollRailKind, string> = {
-  divisive: "Most divisive stories",
+  divisive: "The Internet Can't Agree",
   agreed: "Community agreed",
   unpopular: "You Voted With the Minority",
 };

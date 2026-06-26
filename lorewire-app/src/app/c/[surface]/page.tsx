@@ -40,7 +40,7 @@ interface SurfaceMeta {
 
 const SURFACE_META: Record<RailSurface, SurfaceMeta> = {
   divisive: {
-    title: "Most divisive stories",
+    title: "The Internet Can't Agree",
     description:
       "Lorewire stories where the audience is most evenly split. Closest to 50/50 first.",
     blurb:
