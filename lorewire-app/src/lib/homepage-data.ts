@@ -37,16 +37,21 @@ import {
 } from "@/lib/homepage-curation-shared";
 import {
   countMinorityVotesByCookie,
+  DEFAULT_PUBLIC_FLOOR,
+  getAggregatesByStoryIds,
   getEnabledPollQuestionsByStoryIds,
+  getPollsByStoryIds,
   HOMEPAGE_RAIL_LIMIT,
   isRailEnabledValue,
   listVotedStoryIdsByCookie,
+  pctA,
   POLL_RAIL_KINDS,
   railEnabledSettingKey,
   resolveMinorityVoteThreshold,
   topAgreed,
   topDivisive,
   topUnpopular,
+  type HeroVerdictBadge,
   type HomepagePollRails,
   type PollRailKind,
   type RailCardRow,
@@ -470,6 +475,20 @@ export interface HomepageInitial {
    *  special-render (hero, top10) rails skip the floor entirely so
    *  thin personalized signals still surface. */
   coldStartFloor: number;
+  /** 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  the "audience verdict" badge for the homepage hero, keyed by
+   *  story id. Replaces the Netflix-style "% Match" position with a
+   *  LoreWire-specific signal (what the audience decided). Only
+   *  populated for stories whose poll has crossed the public floor
+   *  (>= 20 votes by default); below that the entry is absent so
+   *  the hero overlay can quietly skip the badge. */
+  heroVerdicts: Record<string, HeroVerdictBadge>;
+  /** 2026-06-26 slice H: poster vote counts keyed by story id. Used
+   *  by the rail PosterCard to render a small "234 votes" corner
+   *  chip. Same floor as heroVerdicts — entries below
+   *  DEFAULT_PUBLIC_FLOOR are omitted so the chip doesn't surface on
+   *  freshly-launched polls where the count is meaningless. */
+  posterVoteCounts: Record<string, number>;
 }
 
 const EMPTY_POLL_RAILS_RESULT: HomepagePollRailsResult = {
@@ -492,7 +511,8 @@ type SsrSource =
   | "votedStoryIds"
   | "heroDivisiveIds"
   | "rotatingCategory"
-  | "coldStartFloor";
+  | "coldStartFloor"
+  | "catalogPollData";
 
 async function safeLoad<T>(
   source: SsrSource,
@@ -589,6 +609,69 @@ async function loadRotatingCategorySurface(): Promise<RotatingCategorySurface | 
 async function loadColdStartFloor(): Promise<number> {
   const raw = await getSetting(coldStartFloorSettingKey());
   return parseColdStartFloor(raw);
+}
+
+interface CatalogPollDataResult {
+  heroVerdicts: Record<string, HeroVerdictBadge>;
+  posterVoteCounts: Record<string, number>;
+}
+
+/** Resolve the per-story poll signals the homepage needs for the
+ *  audience-verdict hero badge and the poster vote-count chip.
+ *
+ *  Reads polls + poll_aggregates in parallel for the given story ids
+ *  and composes two maps:
+ *
+ *  - `heroVerdicts` — only populated for stories whose total_votes
+ *    has crossed DEFAULT_PUBLIC_FLOOR. The majority side and pct are
+ *    computed via the existing `pctA` math; the badge string is
+ *    rendered client-side from divisiveness + majorityPct so the
+ *    copy can evolve without a server deploy.
+ *
+ *  - `posterVoteCounts` — keyed by story id with `total_votes` for
+ *    every story whose count has crossed the floor. Same floor on
+ *    both maps so the same set of polls drives both surfaces.
+ *
+ *  Empty input short-circuits to empty maps (no SQL round trip).
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice H). */
+async function loadCatalogPollData(
+  storyIds: string[],
+): Promise<CatalogPollDataResult> {
+  if (storyIds.length === 0) {
+    return { heroVerdicts: {}, posterVoteCounts: {} };
+  }
+  const [polls, aggregates] = await Promise.all([
+    getPollsByStoryIds(storyIds),
+    getAggregatesByStoryIds(storyIds),
+  ]);
+  const heroVerdicts: Record<string, HeroVerdictBadge> = {};
+  const posterVoteCounts: Record<string, number> = {};
+  for (const [storyId, agg] of aggregates) {
+    if (agg.total_votes < DEFAULT_PUBLIC_FLOOR) continue;
+    const poll = polls.get(storyId);
+    if (!poll) continue;
+    posterVoteCounts[storyId] = agg.total_votes;
+    // Use pctA + complement so the displayed percentages always sum
+    // to 100 even on a perfect 50/50 (rounding both halves
+    // independently can produce 101 or 99).
+    const aPct = pctA(agg.votes_a, agg.votes_b);
+    const bPct = 100 - aPct;
+    const majorityIsA = aPct >= bPct;
+    heroVerdicts[storyId] = {
+      totalVotes: agg.total_votes,
+      divisiveness: agg.divisiveness,
+      majorityPct: majorityIsA ? aPct : bPct,
+      majorityLabel: majorityIsA ? poll.option_a_text : poll.option_b_text,
+    };
+  }
+  console.info("[homepage catalog poll data]", {
+    requested: storyIds.length,
+    polls_resolved: polls.size,
+    aggregates_resolved: aggregates.size,
+    verdicts: Object.keys(heroVerdicts).length,
+    vote_counts: Object.keys(posterVoteCounts).length,
+  });
+  return { heroVerdicts, posterVoteCounts };
 }
 
 async function loadSession(): Promise<PublicSession | null> {
@@ -791,6 +874,19 @@ export async function loadHomepageSSRData(opts?: {
     }
   }
 
+  // 2026-06-26 slice H: poll aggregates for the hero verdict badge
+  // (replaces "% Match") and the rail poster vote-count chip. Runs
+  // AFTER the catalog load because the query needs the catalog's
+  // story ids — adding a separate eager query would scan polls /
+  // poll_aggregates without knowing which rows the shells actually
+  // surface. The catalog cap (200) bounds the work; the helper
+  // composes both maps from one read.
+  const catalogPollData = await safeLoad<CatalogPollDataResult>(
+    "catalogPollData",
+    () => loadCatalogPollData(catalogResult.stories.map((s) => s.id)),
+    { heroVerdicts: {}, posterVoteCounts: {} },
+  );
+
   const initial: HomepageInitial = {
     curation: curationResult?.curation ?? null,
     behavior: curationResult?.behavior ?? DEFAULT_BEHAVIOR,
@@ -804,6 +900,8 @@ export async function loadHomepageSSRData(opts?: {
     heroPollQuestions,
     rotatingCategoryToday,
     coldStartFloor,
+    heroVerdicts: catalogPollData.heroVerdicts,
+    posterVoteCounts: catalogPollData.posterVoteCounts,
   };
   console.info("[lorewire homepage ssr]", {
     curation_count: initial.rawCurationCount,
@@ -824,6 +922,8 @@ export async function loadHomepageSSRData(opts?: {
     hero_poll_questions: Object.keys(initial.heroPollQuestions).length,
     rotating_category: initial.rotatingCategoryToday,
     cold_start_floor: initial.coldStartFloor,
+    hero_verdicts: Object.keys(initial.heroVerdicts).length,
+    poster_vote_counts: Object.keys(initial.posterVoteCounts).length,
     ms: Date.now() - t0,
   });
   return initial;

@@ -13,6 +13,7 @@ import {
   countMinorityVotesByCookie,
   DEFAULT_PUBLIC_FLOOR,
   divisiveness,
+  HERO_VERDICT_DIVIDED_THRESHOLD,
   getAggregateByStoryId,
   getEnabledPollQuestionsByStoryIds,
   getPollByArticleId,
@@ -37,6 +38,7 @@ import {
   RAIL_MIN_VOTES,
   recordVote,
   refreshPollAggregateForStory,
+  renderHeroVerdictBadge,
   toResultView,
   topAgreed,
   topArticleAgreed,
@@ -2002,5 +2004,83 @@ describe("MINORITY_VOTE_DEFAULT_THRESHOLD", () => {
   it("is a sensible positive integer (not zero, not absurd)", () => {
     expect(MINORITY_VOTE_DEFAULT_THRESHOLD).toBeGreaterThan(0);
     expect(MINORITY_VOTE_DEFAULT_THRESHOLD).toBeLessThanOrEqual(50);
+  });
+});
+
+// ─── Hero verdict badge (slice H of homepage redesign v1) ─────────────────
+
+describe("HERO_VERDICT_DIVIDED_THRESHOLD", () => {
+  it("is a sensible split threshold (close to 1 = perfect tie)", () => {
+    // Anything above this gets rendered as "Audience is divided"
+    // instead of a percentage. Should be high enough that only
+    // near-tie polls trigger the divided copy.
+    expect(HERO_VERDICT_DIVIDED_THRESHOLD).toBeGreaterThan(0.7);
+    expect(HERO_VERDICT_DIVIDED_THRESHOLD).toBeLessThanOrEqual(1);
+  });
+});
+
+describe("renderHeroVerdictBadge", () => {
+  it("renders the percentage + winning option text when the split is clear", () => {
+    expect(
+      renderHeroVerdictBadge({
+        totalVotes: 1200,
+        divisiveness: 0.4,
+        majorityPct: 73,
+        majorityLabel: "the bride",
+      }),
+    ).toBe("73% chose the bride");
+  });
+
+  it("renders 'Audience is divided' on a tight split", () => {
+    // Exactly at the threshold → divided.
+    expect(
+      renderHeroVerdictBadge({
+        totalVotes: 800,
+        divisiveness: HERO_VERDICT_DIVIDED_THRESHOLD,
+        majorityPct: 53,
+        majorityLabel: "Yes",
+      }),
+    ).toBe("Audience is divided");
+    // Above the threshold → divided.
+    expect(
+      renderHeroVerdictBadge({
+        totalVotes: 1500,
+        divisiveness: 0.96,
+        majorityPct: 51,
+        majorityLabel: "the aunt",
+      }),
+    ).toBe("Audience is divided");
+  });
+
+  it("falls back to a generic copy when the option label is empty / whitespace", () => {
+    // Malformed poll row (option text wiped) should never produce
+    // "73% chose " with a dangling space.
+    expect(
+      renderHeroVerdictBadge({
+        totalVotes: 300,
+        divisiveness: 0.5,
+        majorityPct: 73,
+        majorityLabel: "",
+      }),
+    ).toBe("73% sided with the majority");
+    expect(
+      renderHeroVerdictBadge({
+        totalVotes: 300,
+        divisiveness: 0.5,
+        majorityPct: 73,
+        majorityLabel: "   ",
+      }),
+    ).toBe("73% sided with the majority");
+  });
+
+  it("trims surrounding whitespace from the option label", () => {
+    expect(
+      renderHeroVerdictBadge({
+        totalVotes: 500,
+        divisiveness: 0.4,
+        majorityPct: 67,
+        majorityLabel: "  the husband  ",
+      }),
+    ).toBe("67% chose the husband");
   });
 });
