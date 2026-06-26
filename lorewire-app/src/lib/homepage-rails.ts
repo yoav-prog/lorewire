@@ -713,3 +713,24 @@ export function filterIdsByPublished(
     return s ? isPublishedStory(s) : false;
   });
 }
+
+/** Drop ids the viewer has already voted on. Used to convert the raw
+ *  Continue Watching list (engagement-store says "watched this story")
+ *  into the "You Didn't Vote Yet" rail surface (watched but the viewer
+ *  hasn't cast a verdict yet). Empty votedSet collapses to a no-op so
+ *  anonymous viewers — who have no vote history — still see their raw
+ *  watched list and the rail header stays honest (someone with zero
+ *  votes hasn't voted on ANY of these).
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice C). Sibling
+ *  of `filterIdsByPillCat` / `filterIdsByPublished`; the homepage
+ *  shells compose them in order.
+ */
+export function filterIdsByNotVoted(
+  ids: string[] | null | undefined,
+  votedStoryIds: ReadonlySet<string>,
+): string[] {
+  if (!ids || ids.length === 0) return [];
+  if (votedStoryIds.size === 0) return [...ids];
+  return ids.filter((id) => !votedStoryIds.has(id));
+}

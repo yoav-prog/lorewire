@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CAT,
   STORIES,
@@ -31,6 +31,7 @@ import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
+  filterIdsByNotVoted,
   filterIdsByPublished,
   pickHeroAtIndex,
   resolveHeroPool,
@@ -1500,6 +1501,7 @@ function HomePage({
   catalog,
   resolveStory,
   pollsInitial,
+  votedStoryIds,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -1509,6 +1511,12 @@ function HomePage({
   catalog: ReturnType<typeof useHomepageCuration>["catalog"];
   resolveStory: ReturnType<typeof useHomepageCuration>["resolveStory"];
   pollsInitial: HomepageInitial["pollRails"];
+  /** 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  story ids the viewer's cookie has voted on. Subtracted from the
+   *  Continue Watching list so the rail surfaces only watched stories
+   *  the viewer hasn't cast a verdict on yet — the "You Didn't Vote
+   *  Yet" reframe. Empty array for anonymous viewers (filter no-ops). */
+  votedStoryIds: HomepageInitial["votedStoryIds"];
 }) {
   // Curation + live catalog are hoisted to DesktopShell so My List / Browse /
   // New & Hot grids can share the same resolveStory (saved real shorts aren't
@@ -1534,13 +1542,30 @@ function HomePage({
   const heroPool = resolveHeroPool(curation, behavior, catalog, resolveStory);
   const heroStory = pickHeroAtIndex(heroPool, 0);
 
+  // 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md.
+  // Build the voted-story-id Set once per render so the filter does
+  // O(1) lookups instead of rebuilding the Set per call.
+  const votedSet = useMemo(
+    () => new Set(votedStoryIds),
+    [votedStoryIds],
+  );
+
   // Each rail flows through filterIdsByPublished AFTER resolveRailIds so
   // curated and fallback paths are both gated identically. Empty results
   // collapse the rail entirely (no header for an empty rail).
+  // For the continue rail specifically, ALSO drop ids the viewer has
+  // already voted on — that turns the raw watched list into the
+  // "You Didn't Vote Yet" surface (slice C). Anonymous viewers and
+  // viewers with no vote history get an empty Set, which makes the
+  // filter a no-op (rail behaves exactly like the old Continue
+  // Watching).
   const continueIds = filterIdsByPublished(
-    resolveRailIds("continue", curation, behavior, catalog, {
-      continue: continueState.ids,
-    }),
+    filterIdsByNotVoted(
+      resolveRailIds("continue", curation, behavior, catalog, {
+        continue: continueState.ids,
+      }),
+      votedSet,
+    ),
     resolveStory,
   );
   const top10Ids = filterIdsByPublished(
@@ -1574,7 +1599,7 @@ function HomePage({
       )}
       <div className={heroPool.length > 0 ? "relative -mt-20 z-10" : "relative z-10 pt-[110px]"}>
         {continueIds.length > 0 && (
-          <Rail title="Continue Watching">
+          <Rail title="You Didn't Vote Yet">
             {continueIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
@@ -1818,6 +1843,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           catalog={catalog}
           resolveStory={resolveStory}
           pollsInitial={initial.pollRails}
+          votedStoryIds={initial.votedStoryIds}
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}

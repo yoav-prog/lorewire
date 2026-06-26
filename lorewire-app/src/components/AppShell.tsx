@@ -13,6 +13,7 @@ import {
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
   POLL_RAIL_TITLES,
+  filterIdsByNotVoted,
   filterIdsByPillCat,
   filterIdsByPublished,
   pickHeroAtIndex,
@@ -501,6 +502,7 @@ function Home({
   storiesPlaylist,
   viewedWireIds,
   onOpenWire,
+  votedStoryIds,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -521,6 +523,13 @@ function Home({
   viewedWireIds: string[];
   /** Open the Stories viewer at a wire (pushes `?wire=<id>`). */
   onOpenWire: (wireId: string) => void;
+  /** 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  story ids the viewer's cookie has voted on. Subtracted from the
+   *  Continue Watching list so the rail surfaces only watched stories
+   *  the viewer hasn't cast a verdict on yet — the "You Didn't Vote
+   *  Yet" reframe. Empty array for anonymous viewers (filter no-ops).
+   *  Threaded through from `initial.votedStoryIds` via MobileShell. */
+  votedStoryIds: HomepageInitial["votedStoryIds"];
 }) {
   // Curation + live catalog are hoisted to MobileShell so MyList / TitleSheet
   // can share resolveStory (saved real shorts aren't in the baked STORIES
@@ -550,6 +559,14 @@ function Home({
   const top10IdsAll = resolveRailIds("top10", curation, behavior, catalog);
   const newRowIdsAll = resolveRailIds("new_row", curation, behavior, catalog);
 
+  // 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md.
+  // Build the voted-story-id Set once per render so each filter pass
+  // does O(1) lookups instead of rebuilding the Set per call.
+  const votedSet = useMemo(
+    () => new Set(votedStoryIds),
+    [votedStoryIds],
+  );
+
   // 2026-06-21 pill filter (_plans/2026-06-21-category-classifier-and-pills.md).
   // When the user picks a category chip the rails narrow in place: each rail
   // keeps only stories whose `cat` matches the active pill. Empty rails hide
@@ -558,8 +575,17 @@ function Home({
   // pick is jarring (Netflix doesn't do it either).
   // After the pill filter, drop ids whose story has no produced content
   // so a curated rail can't surface a placeholder card.
+  // For the continue rail specifically, ALSO drop ids the viewer has
+  // already voted on — that turns the raw watched list into the
+  // "You Didn't Vote Yet" surface (slice C). Anonymous viewers and
+  // viewers with no vote history get an empty Set, which makes the
+  // filter a no-op (rail behaves exactly like the old Continue
+  // Watching).
   const continueIds = filterIdsByPublished(
-    filterIdsByPillCat(continueIdsAll, pill, resolveStory),
+    filterIdsByNotVoted(
+      filterIdsByPillCat(continueIdsAll, pill, resolveStory),
+      votedSet,
+    ),
     resolveStory,
   );
   const top10Ids = filterIdsByPublished(
@@ -614,7 +640,7 @@ function Home({
 
       {continueIds && continueIds.length > 0 && (
         <section className="mt-1">
-          <RailHead>Continue Watching</RailHead>
+          <RailHead>You Didn&apos;t Vote Yet</RailHead>
           <div className={railClass}>
             {continueIds.map((id) => {
               const s = resolveStory(id);
@@ -2158,6 +2184,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             storiesPlaylist={storiesPlaylistOrdered}
             viewedWireIds={viewedWireIds}
             onOpenWire={openWire}
+            votedStoryIds={initial.votedStoryIds}
           />
         )}
         {tab === "Search" && <Search onOpen={open} catalog={catalog} />}
