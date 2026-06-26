@@ -39,6 +39,7 @@ import {
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
+import { renderHeroVerdictBadge } from "@/lib/polls-shared";
 import {
   BackToTop,
   InlineJumpToPoll,
@@ -227,6 +228,7 @@ function Billboard({
   onActiveChange,
   session,
   pollQuestions,
+  pollVerdicts,
 }: {
   pool: Story[];
   onOpen: OpenFn;
@@ -244,6 +246,13 @@ function Billboard({
    *  overlay entirely — the slide reads as a normal hero, no broken
    *  empty row. */
   pollQuestions: HomepageInitial["heroPollQuestions"];
+  /** 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  audience-verdict badge keyed by story id. Replaces the legacy
+   *  "% Match" position in the meta row with a LoreWire signal
+   *  ("73% chose the bride" or "Audience is divided"). Missing
+   *  entries (poll below the public floor, or no poll) skip the
+   *  badge — the meta row falls through to year + dur + tags only. */
+  pollVerdicts: HomepageInitial["heroVerdicts"];
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [touching, setTouching] = useState(false);
@@ -399,44 +408,73 @@ function Billboard({
           <span className="w-[3px] h-3.5 bg-accent rounded-full"></span>
           <span className="font-mono text-[10px] uppercase tracking-[.34em] text-ink/90">LW Original</span>
         </div>
-        {/* 2026-06-26 slice D of _plans/2026-06-26-homepage-redesign-v1.md:
-            the question hint sits BETWEEN the eyebrow and the title so it
-            reads as "the dilemma the audience is debating" before the
-            show's name lands. Handwriting font (Caveat) is intentional —
-            it visually attributes the question to the audience, not the
-            brand. Question only, no option labels (the spoiler tradeoff
-            locked with Yoav). */}
+        {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+            the QUESTION is now the LEAD element of the hero (was a small
+            kicker in slice D). Netflix leads with the title because the
+            title IS the product; LoreWire leads with the question because
+            the question IS the product. Handwriting font (Caveat) keeps
+            the "audience is asking" attribution from slice D. Story
+            without an enabled poll skips this whole block — title-only
+            hero is the graceful fallback. */}
         {pollQuestions[story.id] && (
           <p
-            className="leading-tight text-ink mb-2 select-none"
+            className="leading-tight text-ink mb-1 select-none"
             style={{
               fontFamily: "var(--font-caveat)",
-              fontSize: 26,
+              fontSize: 42,
               textShadow: "0 1px 14px rgba(0,0,0,.55)",
             }}
           >
             {pollQuestions[story.id]}
           </p>
         )}
-        <MobileHeroTitleH1 title={story.title} storyId={story.id} />
-        <div className="flex items-center gap-1.5 mt-3 flex-wrap">
-          {story.tags.map((t, i) => (
+        {/* Title: secondary now (was the huge H1). The show name still
+            grounds the slide but doesn't compete with the question. */}
+        <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[1] text-ink ink-shadow" style={{ fontSize: 24 }}>
+          {story.title}
+        </h2>
+        {/* Verdict + meta row. The verdict badge replaces the legacy
+            "90% Match" position (Netflix's exact match-score copy);
+            absent when the poll is below the public floor. Year + dur
+            + tags follow as the supporting metadata. */}
+        <div className="flex items-center gap-1.5 mt-2 flex-wrap text-[12.5px]">
+          {pollVerdicts[story.id] && (
+            <>
+              <span className="font-semibold text-accent">
+                {renderHeroVerdictBadge(pollVerdicts[story.id])}
+              </span>
+              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+            </>
+          )}
+          <span className="font-body text-ink/85">{story.year}</span>
+          {story.dur && (
+            <>
+              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+              <span className="font-mono text-[12px] text-ink/85">{story.dur}</span>
+            </>
+          )}
+          {story.tags.map((t) => (
             <React.Fragment key={t}>
-              {i > 0 && <span className="w-1 h-1 rounded-full bg-muted/70"></span>}
-              <span className="font-body text-[12.5px] text-ink/85">{t}</span>
+              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+              <span className="font-body text-ink/85">{t}</span>
             </React.Fragment>
           ))}
         </div>
+        {/* Button vocabulary swap (slice H): the trio used to be "PLAY /
+            More Info / Play Something" -- literally Netflix's hero
+            button language. Now it names what those actions actually
+            DO on LoreWire: watch + cast a verdict, read the long-form
+            article, or shuffle for a random one. */}
         <div className="flex items-center gap-2.5 mt-4">
           <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition">
-            <PlayI /> Play
+            <PlayI /> Watch &amp; Vote
           </button>
-          <button onClick={() => onOpen(story.id)} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
-            <InfoI size={18} /> More Info
+          <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
+            <InfoI size={18} /> Read the article
           </button>
         </div>
         <button onClick={onShuffle} className="mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-[10px] border border-line font-mono text-[11px] uppercase tracking-[.2em] text-ink/80 active:scale-[.98] transition">
-          <ShuffleI size={15} /> Play Something
+          <ShuffleI size={15} /> Surprise me
         </button>
 
         {/* Progress dots — Apple TV+ style. Inactive dots are 6px circles;
@@ -498,12 +536,25 @@ function Billboard({
 }
 
 /* ----------------------------- POSTER CARD (rail) ----------------------------- */
-function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number }) {
+function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number; voteCount?: number }) {
   const { getRating } = useStoryRatings();
   return (
     <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w }}>
       <div style={{ height: h }}><PosterArt story={story} /></div>
       <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 28 }} />
+      {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+          vote-count chip in the bottom-left corner of the poster. The
+          parent rail passes voteCount from initial.posterVoteCounts;
+          values are pre-floored on the server (>= DEFAULT_PUBLIC_FLOOR
+          only). Renders nothing when absent — graceful degradation. */}
+      {voteCount != null && voteCount > 0 && (
+        <div
+          className="absolute left-2 z-10 font-mono uppercase tracking-wider rounded bg-black/65 text-white/95 backdrop-blur-sm"
+          style={{ bottom: 8, fontSize: 9, padding: "2px 6px" }}
+        >
+          {formatVoteCount(voteCount)}
+        </div>
+      )}
       {progress != null && (
         <div className="absolute left-1.5 right-1.5 bottom-1.5 h-[3px] rounded-full" style={{ background: "rgba(255,255,255,.25)" }}>
           <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }}></div>
@@ -511,6 +562,20 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress }: { story: Stor
       )}
     </button>
   );
+}
+
+/** Render a vote count as a compact chip string. < 1k stays raw
+ *  ("234 votes"); >= 1k drops the trailing ".0" so 1000 reads as
+ *  "1k votes" rather than "1.0k votes" but 1234 reads as "1.2k
+ *  votes". Plural for any value — there's no story with < 20 votes
+ *  reaching this code path (the server filters under the floor). */
+function formatVoteCount(n: number): string {
+  if (n >= 1000) {
+    const k = n / 1000;
+    const formatted = k % 1 === 0 ? k.toFixed(0) : k.toFixed(1);
+    return `${formatted}k votes`;
+  }
+  return `${n} votes`;
 }
 
 /* ----------------------------- HOME ----------------------------- */
@@ -534,6 +599,8 @@ function Home({
   heroPollQuestions,
   rotatingCategoryToday,
   coldStartFloor,
+  heroVerdicts,
+  posterVoteCounts,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
@@ -580,6 +647,12 @@ function Home({
    *  top10 (numbered visual handles thin counts), unpopular
    *  (personalized + already gated by minority threshold). */
   coldStartFloor: HomepageInitial["coldStartFloor"];
+  /** 2026-06-26 slice H: audience-verdict badges keyed by story id
+   *  (used by the hero overlay) + poster vote counts (rail PosterCard
+   *  chip). Both maps are pre-floored — entries are present only when
+   *  total_votes >= DEFAULT_PUBLIC_FLOOR. */
+  heroVerdicts: HomepageInitial["heroVerdicts"];
+  posterVoteCounts: HomepageInitial["posterVoteCounts"];
 }) {
   // Curation + live catalog are hoisted to MobileShell so MyList / TitleSheet
   // can share resolveStory (saved real shorts aren't in the baked STORIES
@@ -686,6 +759,7 @@ function Home({
           onActiveChange={onHeroActiveChange}
           session={session}
           pollQuestions={heroPollQuestions}
+          pollVerdicts={heroVerdicts}
         />
       )}
 
@@ -759,7 +833,7 @@ function Home({
             <RailHead>{rail.title}</RailHead>
             <div className={railClass}>
               {items.map((s) => (
-                <PosterCard key={s.id} story={s} onOpen={onOpen} />
+                <PosterCard key={s.id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[s.id]} />
               ))}
             </div>
           </section>
@@ -805,7 +879,7 @@ function Home({
             {newRowIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} />;
+              return <PosterCard key={id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[id]} />;
             })}
           </div>
         </section>
@@ -2101,7 +2175,13 @@ function MyList({
 
 /* ----------------------------- TAB BAR ----------------------------- */
 function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
-  const items: [string, IconCmp][] = [["Home", HomeI], ["Wires", WiresI], ["Search", SearchI], ["New", NewI], ["My List", ListI]];
+  // 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
+  // mobile tab labels swap toward LoreWire vocabulary. "My List" was
+  // Netflix's exact term -> "Saved" (generic but honest; the page is
+  // a saved-stories list, not a vote-history list). "New" was the
+  // mobile abbreviation of "New & Hot" -> "Today's" (matches the
+  // desktop "Today's Verdicts" within the bottom-bar width budget).
+  const items: [string, IconCmp][] = [["Home", HomeI], ["Wires", WiresI], ["Search", SearchI], ["Today's", NewI], ["Saved", ListI]];
   return (
     <div className="absolute bottom-0 left-0 right-0 z-50" style={{ background: "linear-gradient(0deg,#0A0A0C 70%, rgba(10,10,12,0))" }}>
       <div className="flex justify-around items-center pt-2.5 pb-7 px-2">
@@ -2109,7 +2189,7 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
           const active = tab === label;
           return (
             <button key={label} onClick={() => setTab(label)} className="flex flex-col items-center gap-1 flex-1 transition" style={{ color: active ? "#E8462B" : "#8E8A97" }}>
-              <Icon size={23} fill={active && label === "My List" ? "#E8462B" : "none"} />
+              <Icon size={23} fill={active && label === "Saved" ? "#E8462B" : "none"} />
               <span className="font-body text-[10px] font-semibold tracking-tight">{label}</span>
             </button>
           );
@@ -2278,11 +2358,13 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             heroPollQuestions={initial.heroPollQuestions}
             rotatingCategoryToday={initial.rotatingCategoryToday}
             coldStartFloor={initial.coldStartFloor}
+            heroVerdicts={initial.heroVerdicts}
+            posterVoteCounts={initial.posterVoteCounts}
           />
         )}
         {tab === "Search" && <Search onOpen={open} catalog={catalog} />}
-        {tab === "New" && <NewScreen onOpen={open} catalog={catalog} />}
-        {tab === "My List" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
+        {tab === "Today's" && <NewScreen onOpen={open} catalog={catalog} />}
+        {tab === "Saved" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
 
       {/* Wires rides above the (now-empty) screen as a full-cover layer, like
