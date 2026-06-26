@@ -421,75 +421,70 @@ function Hero({
         </div>
         <div className="absolute inset-0" style={{ background: "linear-gradient(90deg,#0A0A0C 8%, rgba(10,10,12,.45) 42%, rgba(10,10,12,0) 72%)" }}></div>
         <div className="absolute inset-x-0 bottom-0 h-44" style={{ background: "linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)" }}></div>
+        {/* 2026-06-26 slice H Option B: editorial paper-card hero.
+            All the editorial content (question, title, verdict, meta,
+            synopsis, primary CTAs) lives inside a warm-paper card with
+            soft shadow, sitting over the cinematic image instead of
+            on a dark gradient overlay. Magazine-cover language —
+            different composition from Netflix's "text on cinematic
+            still." Surprise me sits outside the card as less-prominent
+            chrome. */}
         <div className="relative h-full max-w-[1600px] mx-auto px-10 flex items-end pb-24">
-          <div className="max-w-[620px]" aria-live="polite">
-            {/* 2026-06-26 slice H follow-up: "LoreWire Original"
-                eyebrow dropped (direct copy of Netflix's "NETFLIX
-                ORIGINAL" pattern with the accent strip + small-caps
-                mono). The hero now opens straight on the question. */}
-            {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
-                the QUESTION is now the LEAD element of the hero (was a
-                small kicker in slice D). Netflix leads with the title
-                because the title IS the product; LoreWire leads with the
-                question because the question IS the product. Handwriting
-                (Caveat) keeps the "audience is asking" attribution from
-                slice D. Story without an enabled poll skips this block
-                — title-only hero is the graceful fallback. */}
-            {pollQuestions[story.id] && (
-              <p
-                className="leading-tight text-ink mb-2 select-none"
-                style={{
-                  fontFamily: "var(--font-caveat)",
-                  fontSize: 64,
-                  textShadow: "0 1px 14px rgba(0,0,0,.55)",
-                }}
-              >
-                {pollQuestions[story.id]}
-              </p>
-            )}
-            {/* Title: secondary now (was the huge H1). Show name still
-                grounds the slide but doesn't compete with the question.
-                Bumped 36 -> 52 after the first preview review -- 36
-                read as too small for the available space on desktop. */}
-            <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[.95] text-ink ink-shadow" style={{ fontSize: 52 }}>
-              {story.title}
-            </h2>
-            {/* Verdict + meta row. The accent-coloured verdict badge
-                replaces the legacy "{match}% Match" position (Netflix's
-                exact match-score copy); absent when the poll is below
-                the public floor. Year + dur + tags follow as supporting
-                metadata. */}
-            <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
-              {pollVerdicts[story.id] && (
-                <>
-                  <span className="font-semibold text-[15px] text-accent">{renderHeroVerdictBadge(pollVerdicts[story.id])}</span>
-                  <span className="text-muted">·</span>
-                </>
+          <div className="max-w-[520px]" aria-live="polite">
+            <div
+              className="rounded-2xl p-8"
+              style={{
+                background: "#fbfaf4",
+                color: "#1a1714",
+                boxShadow: "0 30px 60px -10px rgba(0,0,0,.6), 0 14px 24px -6px rgba(0,0,0,.35)",
+              }}
+            >
+              {/* Question is the LEAD element. Handwriting font
+                  attributes it to the audience. No text-shadow on
+                  paper. */}
+              {pollQuestions[story.id] && (
+                <p
+                  className="leading-tight mb-3 select-none"
+                  style={{
+                    fontFamily: "var(--font-caveat)",
+                    fontSize: 64,
+                    color: "#1a1714",
+                  }}
+                >
+                  {pollQuestions[story.id]}
+                </p>
               )}
-              <span className="text-ink/80 text-[15px]">{story.year}</span>
-              {story.dur && (
-                <>
-                  <span className="text-muted">·</span>
-                  <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
-                </>
-              )}
-              {story.tags.slice(0, 2).map((t) => <span key={t} className="font-body text-[14px] text-ink/80">· {t}</span>)}
+              <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[.95]" style={{ fontSize: 52, color: "#1a1714" }}>
+                {story.title}
+              </h2>
+              {/* Verdict + meta row, dark-on-paper styling. */}
+              <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
+                {pollVerdicts[story.id] && (
+                  <>
+                    <span className="font-semibold text-[15px] text-accent">{renderHeroVerdictBadge(pollVerdicts[story.id])}</span>
+                    <span style={{ color: "rgba(26,23,20,.4)" }}>·</span>
+                  </>
+                )}
+                <span className="text-[15px]" style={{ color: "rgba(26,23,20,.75)" }}>{story.year}</span>
+                {story.dur && (
+                  <>
+                    <span style={{ color: "rgba(26,23,20,.4)" }}>·</span>
+                    <span className="font-mono text-[12px] px-2 py-0.5 rounded border" style={{ color: "rgba(26,23,20,.75)", borderColor: "rgba(26,23,20,.15)" }}>{story.dur}</span>
+                  </>
+                )}
+                {story.tags.slice(0, 2).map((t) => <span key={t} className="font-body text-[14px]" style={{ color: "rgba(26,23,20,.75)" }}>· {t}</span>)}
+              </div>
+              <p className="font-body text-[16px] leading-relaxed mt-4" style={{ color: "rgba(26,23,20,.8)" }}>{story.syn}</p>
+              {/* Primary CTAs sit inside the card. Dark button on
+                  paper (inverted from the off-white-on-dark pattern
+                  that would blend into the card background). */}
+              <div className="flex items-center gap-3 mt-6">
+                <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 active:scale-[.98] transition" style={{ background: "#1a1714", color: "#fbfaf4" }}>Watch &amp; Vote</button>
+                <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] rounded-[10px] px-6 py-3.5 active:scale-[.98] transition" style={{ background: "rgba(26,23,20,.08)", color: "#1a1714" }}><InfoI size={20} /> Read the article</button>
+              </div>
             </div>
-            <p className="font-body text-[17px] leading-relaxed text-ink/85 mt-5 max-w-[540px]">{story.syn}</p>
-            {/* Button vocabulary swap (slice H): the trio used to be
-                "Play / More Info / Play Something" — literally Netflix's
-                hero button language. Now it names what those actions
-                actually DO on LoreWire: watch + cast a verdict, read the
-                long-form article, or shuffle for a random one. */}
-            <div className="flex items-center gap-3 mt-7">
-              {/* 2026-06-26 slice H follow-up: play icon dropped
-                  from the primary CTA. The triangle is one of
-                  Netflix's most iconic UI cues; removing it pushes
-                  the button toward editorial CTA. */}
-              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]">Watch &amp; Vote</button>
-              <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</button>
-              <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
-            </div>
+            {/* Surprise me sits outside the card as tertiary chrome. */}
+            <button onClick={onShuffle} className="mt-5 flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
           </div>
         </div>
       </div>
