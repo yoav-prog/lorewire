@@ -7,11 +7,24 @@
   --color-line: rgba(255, 255, 255, 0.085);
   --color-ink: #f5f3ef;
   --color-muted: #8e8a97;
-  --color-accent: #e8462b;
+  /* 2026-06-26 slice G of _plans/2026-06-26-homepage-redesign-v1.md:
+     accent swap from #e8462b (Netflix-adjacent red-orange) to #2d4a72
+     (editorial ink-blue). The ink/canvas warm-paper palette already
+     signals "publication" via the light theme; the accent change
+     completes the visual-distance pass. Every component using
+     bg-accent / text-accent / border-accent picks this up
+     automatically; the hardcoded rgba(232,70,43,...) references below
+     are migrated to rgba(45,74,114,...) so the keyframe glows match. */
+  --color-accent: #2d4a72;
   --color-canvas: #fbfaf4;
   --color-doodle: #1a1714;
   --color-high: #ffd84d;
   --color-warn: #d4a83a;
+  /* Reserved for the poll-divider treatment (slice G). Same hue as
+     --color-warn for now; lives as its own token so future poll UI can
+     theme by intent ("this is a poll element") rather than reusing the
+     warning color. */
+  --color-poll-amber: #d4a83a;
   --color-danger: #d9532b;
   --color-cat-drama: #9b3a30;
   --color-cat-entitled: #c06234;
@@ -230,7 +243,7 @@ button:not(:disabled),
   animation: jumpToPollFadeIn 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 .jump-to-poll-cta:hover {
-  box-shadow: 0 12px 32px rgba(232, 70, 43, 0.45), 0 4px 10px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 12px 32px rgba(45, 74, 114, 0.45), 0 4px 10px rgba(0, 0, 0, 0.5);
 }
 .jump-to-poll-cta:focus-visible {
   outline: 2px solid #f5f3ef;
@@ -242,10 +255,10 @@ button:not(:disabled),
 @keyframes lorewireDotPulse {
   0%,
   100% {
-    box-shadow: 0 0 0 4px rgba(232, 70, 43, 0.18);
+    box-shadow: 0 0 0 4px rgba(45, 74, 114, 0.18);
   }
   50% {
-    box-shadow: 0 0 0 6px rgba(232, 70, 43, 0.06);
+    box-shadow: 0 0 0 6px rgba(45, 74, 114, 0.06);
   }
 }
 .lorewire-pulse-dot {
@@ -278,15 +291,15 @@ button:not(:disabled),
    CommentItem (lorewire-app/src/components/CommentsSection.tsx). */
 @keyframes comment-focus-glow {
   0% {
-    background: rgba(232, 70, 43, 0);
-    box-shadow: 0 0 0 0 rgba(232, 70, 43, 0);
+    background: rgba(45, 74, 114, 0);
+    box-shadow: 0 0 0 0 rgba(45, 74, 114, 0);
   }
   10% {
-    background: rgba(232, 70, 43, 0.16);
-    box-shadow: 0 0 0 1px rgba(232, 70, 43, 0.5);
+    background: rgba(45, 74, 114, 0.16);
+    box-shadow: 0 0 0 1px rgba(45, 74, 114, 0.5);
   }
   100% {
-    background: rgba(232, 70, 43, 0);
-    box-shadow: 0 0 0 0 rgba(232, 70, 43, 0);
+    background: rgba(45, 74, 114, 0);
+    box-shadow: 0 0 0 0 rgba(45, 74, 114, 0);
   }
 }
