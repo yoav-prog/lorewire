@@ -27,6 +27,12 @@ import {
   listAllCuration,
 } from "@/lib/homepage-curation";
 import {
+  resolveRotatingCategorySurface,
+  rotatingCategoryEnabledSettingKey,
+  rotatingCategoryOverrideSettingKey,
+  type RotatingCategorySurface,
+} from "@/lib/homepage-curation-shared";
+import {
   countMinorityVotesByCookie,
   getEnabledPollQuestionsByStoryIds,
   HOMEPAGE_RAIL_LIMIT,
@@ -443,6 +449,16 @@ export interface HomepageInitial {
    *  live catalog so the overlay paints on whatever composition
    *  resolveHeroPool ends up with (curated, divisive, or recency). */
   heroPollQuestions: Record<string, string>;
+  /** 2026-06-26 slice E of _plans/2026-06-26-homepage-redesign-v1.md:
+   *  which category surface fills the homepage rotating slot today.
+   *  Resolution order (server-side):
+   *    1. Kill switch off → null. Shells render every category rail
+   *       (pre-slice-E behaviour).
+   *    2. Admin override pinned → that surface.
+   *    3. Otherwise → deterministic modulo over UTC day.
+   *  Null here is the explicit "fall back to all six rails" signal so
+   *  the shells don't need to second-guess it. */
+  rotatingCategoryToday: RotatingCategorySurface | null;
 }
 
 const EMPTY_POLL_RAILS_RESULT: HomepagePollRailsResult = {
@@ -463,7 +479,8 @@ type SsrSource =
   | "session"
   | "seededModalComments"
   | "votedStoryIds"
-  | "heroDivisiveIds";
+  | "heroDivisiveIds"
+  | "rotatingCategory";
 
 async function safeLoad<T>(
   source: SsrSource,
@@ -522,6 +539,32 @@ async function loadVotedStoryIds(): Promise<string[]> {
  *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice D). */
 async function loadHeroDivisiveCards(): Promise<RailCardRow[]> {
   return topDivisive({ limit: HERO_POOL_CAP });
+}
+
+/** Resolve which category surface the homepage rotating slot lands on
+ *  today. Reads the kill-switch + admin-override settings keys in
+ *  parallel and hands off to the pure resolver in
+ *  homepage-curation-shared.ts.
+ *
+ *  isRailEnabledValue is reused for the kill-switch parse (matches
+ *  the per-rail toggle convention: blank/missing reads as ON, "0" /
+ *  "false" reads as OFF). Returns null when the feature is disabled
+ *  so the shells render every category rail instead.
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice E). */
+async function loadRotatingCategorySurface(): Promise<RotatingCategorySurface | null> {
+  const [enabledRaw, overrideRaw] = await Promise.all([
+    getSetting(rotatingCategoryEnabledSettingKey()),
+    getSetting(rotatingCategoryOverrideSettingKey()),
+  ]);
+  const enabled = isRailEnabledValue(enabledRaw);
+  const surface = resolveRotatingCategorySurface(enabled, overrideRaw);
+  console.info("[homepage rotating category]", {
+    enabled,
+    override: overrideRaw ?? null,
+    resolved: surface,
+  });
+  return surface;
 }
 
 async function loadSession(): Promise<PublicSession | null> {
@@ -634,6 +677,7 @@ export async function loadHomepageSSRData(opts?: {
     seededModalComments,
     votedStoryIds,
     heroDivisiveCards,
+    rotatingCategoryToday,
   ] = await Promise.all([
     safeLoad<HomepageCurationResult | null>(
       "curation",
@@ -668,6 +712,15 @@ export async function loadHomepageSSRData(opts?: {
     // Failure path returns [] so the hero pool falls through to its
     // existing recency-based auto-fill rather than going blank.
     safeLoad<RailCardRow[]>("heroDivisiveIds", loadHeroDivisiveCards, []),
+    // 2026-06-26 slice E of _plans/2026-06-26-homepage-redesign-v1.md.
+    // Failure path returns null so the shells fall back to rendering
+    // every category rail (legacy behaviour) rather than swallowing
+    // the category section entirely on a settings_kv read error.
+    safeLoad<RotatingCategorySurface | null>(
+      "rotatingCategory",
+      loadRotatingCategorySurface,
+      null,
+    ),
   ]);
 
   // 2026-06-26 slice D: split the divisive cards into the id-ordered
@@ -715,6 +768,7 @@ export async function loadHomepageSSRData(opts?: {
     votedStoryIds,
     heroDivisiveIds,
     heroPollQuestions,
+    rotatingCategoryToday,
   };
   console.info("[lorewire homepage ssr]", {
     curation_count: initial.rawCurationCount,
@@ -733,6 +787,7 @@ export async function loadHomepageSSRData(opts?: {
     voted_story_ids: initial.votedStoryIds.length,
     hero_divisive_ids: initial.heroDivisiveIds.length,
     hero_poll_questions: Object.keys(initial.heroPollQuestions).length,
+    rotating_category: initial.rotatingCategoryToday,
     ms: Date.now() - t0,
   });
   return initial;
