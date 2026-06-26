@@ -31,6 +31,10 @@ import {
   POLL_RAIL_KINDS,
   railEnabledSettingKey,
 } from "@/lib/polls";
+import {
+  rotatingCategoryEnabledSettingKey,
+  rotatingCategoryOverrideSettingKey,
+} from "@/lib/homepage-curation-shared";
 // Per-platform social-publishing settings (Facebook, Instagram, YouTube,
 // TikTok) and the publisher-poll-hook caption suffixes live under
 // /admin/settings/socials — see socials/page.tsx. Imports from those
@@ -200,6 +204,8 @@ export default async function SettingsPage() {
     railUnpopular,
     publicFloorRaw,
     minorityVoteThresholdRaw,
+    rotatingCategoryEnabled,
+    rotatingCategoryOverrideRaw,
     endcardEnabled,
     endcardDurationRaw,
     autoPublishEnabledRaw,
@@ -213,6 +219,10 @@ export default async function SettingsPage() {
     // (_plans/2026-06-26-homepage-redesign-v1.md): per-viewer
     // threshold gating the "You Voted With the Minority" rail.
     getSetting(minorityVoteThresholdSettingKey()),
+    // 2026-06-26 homepage redesign v1 slice E: rotating-category
+    // kill switch + per-day editorial pin.
+    getSetting(rotatingCategoryEnabledSettingKey()),
+    getSetting(rotatingCategoryOverrideSettingKey()),
     getSetting("polls.endcard.enabled"),
     getSetting("polls.endcard.duration_ms"),
     // 2026-06-25 bulk complete-and-publish
@@ -222,6 +232,19 @@ export default async function SettingsPage() {
     getSetting("auto_publish.enabled"),
     getSetting("auto_publish.max_attempts"),
   ]);
+  // Rotating-category dropdown options. "" is the "auto rotation"
+  // sentinel — the resolver treats blank / unknown the same way and
+  // falls through to the UTC-day modulo, so the dropdown stays
+  // honest about which path will run.
+  const rotatingCategoryOptions: SelectOption[] = [
+    { id: "", label: "Auto (rotate by UTC day)" },
+    { id: "entitled_row", label: "Audacity: Entitled People" },
+    { id: "humor_row", label: "Humor & Awkward Moments" },
+    { id: "wholesome_row", label: "Wholesome Wins" },
+    { id: "dating_row", label: "Dating Disasters" },
+    { id: "roommate_row", label: "Roommate Files" },
+    { id: "drama_row", label: "Pure Drama" },
+  ];
   const SHORT_CATEGORIES = [
     "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
   ];
@@ -615,6 +638,25 @@ export default async function SettingsPage() {
               <span className="font-mono text-[14px] text-muted">→</span>
             </div>
           </Link>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Homepage — Rotating category"
+          description="The homepage v1 surface ships a single rotating category rail (cycles through Entitled / Humor / Wholesome / Dating / Roommate / Drama by UTC day) instead of rendering every category at once. Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice E)."
+        >
+          <SettingToggle
+            settingKey={rotatingCategoryEnabledSettingKey()}
+            label="Rotating category rail on the homepage"
+            hint="When ON (default), the homepage shows ONE category rail per day, picked deterministically by UTC date so every visitor sees the same one. When OFF, the homepage falls back to rendering all six category rails (pre-redesign behaviour)."
+            initialOn={readToggle(rotatingCategoryEnabled, true)}
+          />
+          <SettingSelect
+            settingKey={rotatingCategoryOverrideSettingKey()}
+            label="Today's category (manual override)"
+            hint="Pin a specific category for today regardless of the auto-rotation. Pick 'Auto' to let the UTC-day modulo decide. Has no effect when the rotation toggle above is off."
+            initial={rotatingCategoryOverrideRaw ?? ""}
+            options={rotatingCategoryOptions}
+          />
         </SettingsSection>
 
         <SettingsSection
