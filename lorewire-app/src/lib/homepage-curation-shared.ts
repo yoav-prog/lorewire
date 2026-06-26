@@ -151,3 +151,61 @@ export function resolveRotatingCategorySurface(
   if (isRotatingCategorySurface(override)) return override;
   return pickRotatingCategoryByDay(today);
 }
+
+// ─── Cold-start floor (slice F of homepage redesign v1) ─────────────────────
+//
+// Floor-eligible rails hide entirely until they have at least N published
+// cards. The shells already drop empty rails on `> 0`; the floor lifts
+// that bar so a half-built rail (1-3 posters) doesn't read as "the
+// product is broken." Per-rail eligibility lives in the shells (slice
+// F.3); the constant + parse helpers are the contract.
+//
+// HISTORICAL CONTEXT — read before changing this:
+//
+// PR #66 introduced a hard-coded MIN_PUBLIC_RAIL_SIZE = 4, which hid
+// EVERY rail on production because an underlying fallback bug was
+// returning thin counts. PR #67 fixed the real bug (filter by
+// isPublishedStory BEFORE slicing) AND removed the floor. The memory
+// `feedback_investigate_inventory_before_hiding_ui.md` codifies the
+// rule: investigate inventory before adding hide-if-thin thresholds.
+//
+// Re-introducing the floor now is safe because #67's count fix is
+// in place — the floor sees a TRUE published count and won't blank
+// the homepage when the data is actually there. Defensive measures:
+// the value is admin-tunable via the setting below (set to 0 to
+// disable), the SSR seed logs the resolved value, and the personalized
+// rails (continue, minority) + special-render rails (hero, top10) are
+// SKIPPED so a thin personalized signal still surfaces.
+//
+// Plan: _plans/2026-06-26-homepage-redesign-v1.md.
+
+/** Default minimum published cards a floor-eligible rail must have
+ *  before it renders. 4 matches the original PR #66 design target —
+ *  enough cards to fill the visible portion of a horizontally
+ *  scrolling rail without the next-card cue. */
+export const COLD_START_FLOOR_DEFAULT = 4;
+
+/** Settings key for the admin override. Set the value to 0 to disable
+ *  the floor entirely (legacy `> 0` gate); other positive integers
+ *  raise/lower the threshold. */
+export function coldStartFloorSettingKey(): string {
+  return "homepage.cold_start_floor";
+}
+
+/** Strict non-negative-integer parse. Blank / malformed / negative
+ *  falls through to the default; 0 is honoured (turns the floor off).
+ *
+ *  Note: unlike the minority-vote threshold parser, this one DOES
+ *  accept 0 — "disable the floor" is a legitimate admin choice (e.g.
+ *  during a content-thin launch window) and a useful escape hatch
+ *  given the PR #66 history. */
+export function parseColdStartFloor(
+  raw: string | null | undefined,
+): number {
+  if (raw === null || raw === undefined) return COLD_START_FLOOR_DEFAULT;
+  const trimmed = raw.trim();
+  if (trimmed === "") return COLD_START_FLOOR_DEFAULT;
+  const n = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(n) || n < 0) return COLD_START_FLOOR_DEFAULT;
+  return n;
+}

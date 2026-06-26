@@ -19,6 +19,11 @@ import {
   rotatingCategoryEnabledSettingKey,
   rotatingCategoryOverrideSettingKey,
 } from "./homepage-rails";
+import {
+  COLD_START_FLOOR_DEFAULT,
+  coldStartFloorSettingKey,
+  parseColdStartFloor,
+} from "./homepage-curation-shared";
 
 const BEHAVIOR_FALLBACK = {
   emptyRailBehavior: "fallback" as const,
@@ -810,5 +815,62 @@ describe("resolveRotatingCategorySurface", () => {
         ROTATING_CATEGORY_SURFACES[i],
       );
     }
+  });
+});
+
+// ─── Cold-start floor (slice F of homepage redesign v1) ─────────────────────
+
+describe("coldStartFloorSettingKey", () => {
+  it("is stable + namespaced under homepage", () => {
+    expect(coldStartFloorSettingKey()).toBe("homepage.cold_start_floor");
+  });
+});
+
+describe("COLD_START_FLOOR_DEFAULT", () => {
+  it("is a small positive integer (sanity check on the v1 design target)", () => {
+    expect(COLD_START_FLOOR_DEFAULT).toBeGreaterThan(0);
+    expect(COLD_START_FLOOR_DEFAULT).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("parseColdStartFloor", () => {
+  it("returns the default for null / undefined / blank input", () => {
+    expect(parseColdStartFloor(null)).toBe(COLD_START_FLOOR_DEFAULT);
+    expect(parseColdStartFloor(undefined)).toBe(COLD_START_FLOOR_DEFAULT);
+    expect(parseColdStartFloor("")).toBe(COLD_START_FLOOR_DEFAULT);
+    expect(parseColdStartFloor("   ")).toBe(COLD_START_FLOOR_DEFAULT);
+  });
+
+  it("returns the default for malformed input", () => {
+    expect(parseColdStartFloor("not-a-number")).toBe(
+      COLD_START_FLOOR_DEFAULT,
+    );
+    expect(parseColdStartFloor("abc42")).toBe(COLD_START_FLOOR_DEFAULT);
+  });
+
+  it("returns the default for negative values", () => {
+    // Negative threshold is meaningless ("hide rails with at most -1
+    // items"). Fall through to the default instead of papering over
+    // the typo.
+    expect(parseColdStartFloor("-1")).toBe(COLD_START_FLOOR_DEFAULT);
+    expect(parseColdStartFloor("-100")).toBe(COLD_START_FLOOR_DEFAULT);
+  });
+
+  it("HONOURS 0 as a valid disable-the-floor value", () => {
+    // Distinct from minority-vote threshold: 0 is a legitimate admin
+    // choice here ("disable the floor"), the escape hatch the PR #66
+    // postmortem made important. Tests pin this so a future refactor
+    // doesn't drift back to "fall through on 0."
+    expect(parseColdStartFloor("0")).toBe(0);
+  });
+
+  it("returns the parsed value for positive integers", () => {
+    expect(parseColdStartFloor("1")).toBe(1);
+    expect(parseColdStartFloor("4")).toBe(4);
+    expect(parseColdStartFloor("12")).toBe(12);
+  });
+
+  it("trims surrounding whitespace before parsing", () => {
+    expect(parseColdStartFloor("  6  ")).toBe(6);
   });
 });
