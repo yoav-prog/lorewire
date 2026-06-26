@@ -429,8 +429,10 @@ function Billboard({
           </p>
         )}
         {/* Title: secondary now (was the huge H1). The show name still
-            grounds the slide but doesn't compete with the question. */}
-        <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[1] text-ink ink-shadow" style={{ fontSize: 24 }}>
+            grounds the slide but doesn't compete with the question.
+            Bumped 24 -> 30 after the first preview review -- 24
+            read as too small on mobile. */}
+        <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[1] text-ink ink-shadow" style={{ fontSize: 30 }}>
           {story.title}
         </h2>
         {/* Verdict + meta row. The verdict badge replaces the legacy

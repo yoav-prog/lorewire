@@ -445,8 +445,10 @@ function Hero({
               </p>
             )}
             {/* Title: secondary now (was the huge H1). Show name still
-                grounds the slide but doesn't compete with the question. */}
-            <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[.95] text-ink ink-shadow" style={{ fontSize: 36 }}>
+                grounds the slide but doesn't compete with the question.
+                Bumped 36 -> 52 after the first preview review -- 36
+                read as too small for the available space on desktop. */}
+            <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[.95] text-ink ink-shadow" style={{ fontSize: 52 }}>
               {story.title}
             </h2>
             {/* Verdict + meta row. The accent-coloured verdict badge
