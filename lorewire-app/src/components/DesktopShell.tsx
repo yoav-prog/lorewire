@@ -1527,6 +1527,8 @@ function HomePage({
   resolveStory,
   pollsInitial,
   votedStoryIds,
+  heroDivisiveIds,
+  heroPollQuestions,
 }: {
   onOpen: OpenFn;
   onShuffle: () => void;
