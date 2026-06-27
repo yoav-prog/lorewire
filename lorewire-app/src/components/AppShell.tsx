@@ -360,11 +360,15 @@ function Billboard({
       aria-label={hasRotation ? "Featured stories" : undefined}
     >
       <div className="absolute left-5 z-30 flex items-center gap-2" style={{ top: "calc(env(safe-area-inset-top, 0px) + 14px)" }}>
-        <span className="relative grid place-items-center bg-ink text-bg font-display font-black rounded-[7px]" style={{ width: 26, height: 26, fontSize: 11, letterSpacing: "-.04em" }}>
+        {/* 2026-06-26 slice H follow-up: the LW badge + LoreWire
+            wordmark stay in Archivo Black regardless of the
+            --font-display swap. Brand identity locked to the
+            wordmark's original voice. */}
+        <span className="relative grid place-items-center bg-ink text-bg font-black rounded-[7px]" style={{ width: 26, height: 26, fontSize: 11, letterSpacing: "-.04em", fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
           LW
           <span className="absolute rounded-full bg-accent" style={{ top: 3, right: 4, width: 4, height: 4 }}></span>
         </span>
-        <span className="font-display font-black tracking-tight text-ink ink-shadow" style={{ fontSize: 18 }}>LoreWire</span>
+        <span className="font-black tracking-tight text-ink ink-shadow" style={{ fontSize: 18, fontFamily: "var(--font-archivo), Arial, sans-serif" }}>LoreWire</span>
       </div>
       <div className="absolute right-4 z-30" style={{ top: "calc(env(safe-area-inset-top, 0px) + 10px)" }}>
         <SignInChip session={session} tone="overlay" />

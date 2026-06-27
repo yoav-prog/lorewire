@@ -217,8 +217,13 @@ function TopNav({ view, setView, solid, query, setQuery, session }: { view: stri
       )}
       <div className="relative mx-auto max-w-[1600px] flex items-center gap-9 px-10 h-[68px]">
         <button onClick={() => setView("Home")} className="flex items-center gap-1.5 shrink-0">
-          <span className="font-display font-black text-[26px] tracking-tightest text-ink">LORE</span>
-          <span className="font-display font-black text-[26px] tracking-tightest text-accent">WIRE</span>
+          {/* 2026-06-26 slice H follow-up: the LORE WIRE wordmark
+              stays in Archivo Black regardless of the --font-display
+              swap. Brand identity is locked to the wordmark's original
+              voice; only chrome typography (headlines, rail headers)
+              moves to Fraunces. */}
+          <span className="font-black text-[26px] tracking-tightest text-ink" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>LORE</span>
+          <span className="font-black text-[26px] tracking-tightest text-accent" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>WIRE</span>
         </button>
         <nav className="flex items-center gap-7">
           {NAV.map((n) => (
@@ -494,8 +499,12 @@ function Hero({
         </div>
       </div>
 
+      {/* 2026-06-26 slice H follow-up: carousel dots moved from
+          bottom-right (Netflix's exact corner placement) to
+          bottom-center. Mobile already centers its dots inside the
+          action stack. */}
       {hasRotation && (
-        <div className="absolute right-10 bottom-7 z-20 flex items-center gap-2">
+        <div className="absolute left-1/2 -translate-x-1/2 bottom-7 z-20 flex items-center gap-2">
           {pool.map((s, i) => (
             <button
               key={s.id}
