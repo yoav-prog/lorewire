@@ -163,15 +163,23 @@ class HappyPathTests(unittest.TestCase):
         mocks["update_thumb"].assert_called_once()
         mocks["update_thumb_landscape"].assert_called_once()
         mocks["update_thumb_square"].assert_called_once()
-        # Result dict carries every URL so the worker can update its row.
-        self.assertTrue(result["hero_image"].endswith("hero.png"))
-        self.assertTrue(result["hero_image_landscape"].endswith("hero-landscape.png"))
-        self.assertTrue(result["thumbnail_image"].endswith("thumbnail.png"))
-        self.assertTrue(
-            result["thumbnail_image_landscape"].endswith("thumbnail-landscape.png")
+        # Result dict carries every URL so the worker can update its
+        # row. Each URL ends with `<filename>?v=<int>` — `_cache_bust`
+        # (added 2026-06-27) stamps a version query param on every
+        # regen write so cache layers treat each upload as a fresh
+        # asset.
+        self.assertRegex(result["hero_image"], r"hero\.png\?v=\d+$")
+        self.assertRegex(
+            result["hero_image_landscape"], r"hero-landscape\.png\?v=\d+$",
         )
-        self.assertTrue(
-            result["thumbnail_image_square"].endswith("thumbnail-square.png")
+        self.assertRegex(result["thumbnail_image"], r"thumbnail\.png\?v=\d+$")
+        self.assertRegex(
+            result["thumbnail_image_landscape"],
+            r"thumbnail-landscape\.png\?v=\d+$",
+        )
+        self.assertRegex(
+            result["thumbnail_image_square"],
+            r"thumbnail-square\.png\?v=\d+$",
         )
 
     def test_total_cost_counts_only_variants_that_landed(self):
@@ -417,7 +425,10 @@ class RegenWrapperTests(unittest.TestCase):
             url, cents = media.regen_one(
                 "abc123", "hero_thumbnail_from_short", Path(tmp),
             )
-        self.assertTrue(url.endswith("hero.png"))
+        # URL ends with `hero.png?v=<int>` — `_cache_bust` (added
+        # 2026-06-27) stamps a version query param so cache layers
+        # don't serve stale bytes after an in-place upload.
+        self.assertRegex(url, r"hero\.png\?v=\d+$")
         self.assertEqual(cents, 25)
 
     def test_regen_one_raises_when_all_five_fail(self):
