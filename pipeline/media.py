@@ -44,6 +44,38 @@ PUBLIC_DIR_RELATIVE = Path("lorewire-app") / "public" / "generated"
 PUBLIC_URL_PREFIX = "/generated"
 
 
+def _cache_bust(url: str) -> str:
+    """Append `?v={epoch_seconds}` to a deterministic-path asset URL so
+    browser cache, Vercel Image Optimizer, and the edge cache treat each
+    regen as a fresh asset.
+
+    Why: hero/thumbnail filenames are stable per story (see
+    `_HERO_THUMB_VARIANTS`), so a regen overwrites the SAME R2/GCS
+    object key. Without a query-param version the URL string stored in
+    `stories.hero_image` never changes, every cache layer keeps serving
+    the old bytes, and on the public homepage you see one regen
+    "revert" another because what reaches the browser is a random
+    sample of cached versions across layers. Bug observed 2026-06-27
+    on the public TOP 10 rail. Plan:
+    `_plans/2026-06-27-hero-thumb-url-cache-bust.md`.
+
+    R2/GCS ignore query strings for object lookup, so the file at the
+    deterministic key still serves. Everything in front of R2 keys on
+    the full URL, so a new `v=` is a new cache entry.
+
+    Idempotent: a URL already carrying `v=` is returned unchanged so
+    the resume path (`_build_hero_and_thumbnail_from_short` re-reading
+    `existing[column]` after a Vercel-function kill) doesn't double-stamp.
+    """
+    if not url:
+        return url
+    if "v=" in url:
+        return url
+    bust = int(time.time())
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={bust}"
+
+
 def _staging_dir(safe_id: str, repo_root: Path) -> Path:
     """Where intermediate PNG/MP3/etc. files land before GCS upload.
 
@@ -1175,9 +1207,9 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     portrait_local = out_dir / "hero.png"
     images.download(portrait_kie, portrait_local)
     portrait_public = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
-    portrait_url = gcs.publish(
+    portrait_url = _cache_bust(gcs.publish(
         portrait_local, f"{safe_id}/hero.png", portrait_public,
-    )
+    ))
     store.log_render_event(
         "image_saved",
         f"Portrait uploaded — {portrait_url}",
@@ -1227,11 +1259,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
             landscape_public = (
                 f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
             )
-            landscape_url = gcs.publish(
+            landscape_url = _cache_bust(gcs.publish(
                 landscape_local,
                 f"{safe_id}/hero-landscape.png",
                 landscape_public,
-            )
+            ))
             store.log_render_event(
                 "image_saved",
                 f"Landscape uploaded — {landscape_url}",
@@ -1381,9 +1413,9 @@ def _regen_hero_from_short(
     portrait_local = out_dir / "hero.png"
     images.download(portrait_kie, portrait_local)
     portrait_public = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
-    portrait_url = gcs.publish(
+    portrait_url = _cache_bust(gcs.publish(
         portrait_local, f"{safe_id}/hero.png", portrait_public,
-    )
+    ))
     store.log_render_event(
         "image_saved",
         f"Portrait (i2i) uploaded — {portrait_url}",
@@ -1439,11 +1471,11 @@ def _regen_hero_from_short(
             landscape_public = (
                 f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
             )
-            landscape_url = gcs.publish(
+            landscape_url = _cache_bust(gcs.publish(
                 landscape_local,
                 f"{safe_id}/hero-landscape.png",
                 landscape_public,
-            )
+            ))
             store.log_render_event(
                 "image_saved",
                 f"Landscape (i2i) uploaded — {landscape_url}",
@@ -1765,7 +1797,9 @@ def _build_hero_and_thumbnail_from_short(
             local_path = out_dir / filename
             images.download(kie_url, local_path)
             public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/{filename}"
-            stored_url = gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+            stored_url = _cache_bust(
+                gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+            )
         except Exception as e:  # noqa: BLE001 — keep going on transient I/O
             store.log_render_event(
                 "image_save_failed",
