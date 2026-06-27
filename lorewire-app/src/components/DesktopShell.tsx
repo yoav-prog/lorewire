@@ -398,21 +398,21 @@ function Hero({
       aria-roledescription={hasRotation ? "carousel" : undefined}
       aria-label={hasRotation ? "Featured stories" : undefined}
     >
-      {/* Keyed wrapper so each slide animates in via the existing fade-in
-          CSS class. React unmounts the old slide and mounts the new one,
-          which restarts the animation cleanly. */}
-      <div key={story.id} className="absolute inset-0 fade-in">
-        {/* 2026-06-26 slice H follow-up: `drift` removed. Editorial
-            publications use STATIC hero images, not the slow zoom
-            that's Netflix's exact "cinematic still" treatment. */}
-        <div className="absolute inset-0" style={{ background: c }}>
+      {/* 2026-06-27 Wired/Verge-style magazine split hero composition.
+          Left 60% is the cinematic image; right 40% is a warm-paper
+          editorial panel with the editorial type stack. HARD edge at
+          the 60% boundary (no gradient blend, no floating shadow) so
+          it reads as a publication layout rather than a streamer hero
+          with a popup. Replaces the rejected Option B paper-card
+          overlay from slice H. */}
+      <div key={story.id} className="absolute inset-0 fade-in flex">
+        {/* LEFT 60%: cinematic image side */}
+        <div className="relative h-full" style={{ width: "60%", background: c }}>
           {showHero && (
             <img
               src={heroSrc}
               alt=""
               className="absolute inset-0 w-full h-full object-cover"
-              // Landscape variant fits naturally; portrait fallback needs
-              // object-position to keep characters' faces visible.
               style={isLandscape ? undefined : { objectPosition: "50% 25%" }}
               onError={() => {
                 setHeroImageOk(false);
@@ -420,88 +420,79 @@ function Hero({
               }}
             />
           )}
-          <div className="absolute inset-0" style={{ background: showHero ? "linear-gradient(90deg, rgba(10,10,12,.85) 0%, rgba(10,10,12,.55) 25%, rgba(10,10,12,.15) 50%, rgba(10,10,12,.05) 100%), linear-gradient(180deg, rgba(0,0,0,0) 50%, rgba(10,10,12,.85) 100%)" : "radial-gradient(90% 110% at 78% 26%, rgba(255,255,255,.20), rgba(0,0,0,.42) 72%)" }}></div>
           {!showHero && <div className="absolute inset-0 grain opacity-35 mix-blend-overlay"></div>}
-          {!showHero && <div className="absolute right-[2%] top-[2%] font-display font-black leading-none select-none" style={{ fontSize: 560, color: "rgba(255,255,255,.085)" }}>{story.glyph}</div>}
+          {!showHero && <div className="absolute right-[2%] top-[2%] font-display font-black leading-none select-none" style={{ fontSize: 480, color: "rgba(255,255,255,.085)" }}>{story.glyph}</div>}
+          {/* Subtle vignette at the right edge so the hard split into
+              the paper panel doesn't feel like an abrupt cut on busy
+              images. Only 8% of width, soft fade. */}
+          {showHero && (
+            <div className="absolute inset-y-0 right-0 w-[8%]" style={{ background: "linear-gradient(90deg, rgba(0,0,0,0) 0%, rgba(0,0,0,.18) 100%)" }}></div>
+          )}
         </div>
-        <div className="absolute inset-0" style={{ background: "linear-gradient(90deg,#0A0A0C 8%, rgba(10,10,12,.45) 42%, rgba(10,10,12,0) 72%)" }}></div>
-        <div className="absolute inset-x-0 bottom-0 h-44" style={{ background: "linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)" }}></div>
-        <div className="relative h-full max-w-[1600px] mx-auto px-10 flex items-end pb-24">
-          <div className="max-w-[620px]" aria-live="polite">
-            {/* 2026-06-26 slice H follow-up: "LoreWire Original"
-                eyebrow dropped (direct copy of Netflix's "NETFLIX
-                ORIGINAL" pattern with the accent strip + small-caps
-                mono). The hero now opens straight on the question. */}
-            {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
-                the QUESTION is now the LEAD element of the hero (was a
-                small kicker in slice D). Netflix leads with the title
-                because the title IS the product; LoreWire leads with the
-                question because the question IS the product. Handwriting
-                (Caveat) keeps the "audience is asking" attribution from
-                slice D. Story without an enabled poll skips this block
-                — title-only hero is the graceful fallback. */}
+
+        {/* RIGHT 40%: warm-paper editorial panel */}
+        <div
+          className="relative h-full flex items-center"
+          style={{ width: "40%", background: "#fbfaf4", color: "#1a1714" }}
+          aria-live="polite"
+        >
+          <div className="px-12 py-12 w-full">
+            {/* Editorial kicker - category + year as masthead-style
+                small-caps. Magazine cover language. */}
+            <div className="font-mono uppercase tracking-[.3em] mb-6" style={{ fontSize: 11, color: "rgba(26,23,20,.55)" }}>
+              {story.cat} · {story.year}
+            </div>
+            {/* Question = LEAD element, handwritten attribution */}
             {pollQuestions[story.id] && (
               <p
-                className="leading-tight text-ink mb-2 select-none"
+                className="leading-tight mb-3 select-none"
                 style={{
                   fontFamily: "var(--font-caveat)",
-                  fontSize: 64,
-                  textShadow: "0 1px 14px rgba(0,0,0,.55)",
+                  fontSize: 56,
+                  color: "#1a1714",
                 }}
               >
                 {pollQuestions[story.id]}
               </p>
             )}
-            {/* Title: secondary now (was the huge H1). Show name still
-                grounds the slide but doesn't compete with the question.
-                Bumped 36 -> 52 after the first preview review -- 36
-                read as too small for the available space on desktop. */}
-            <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[.95] text-ink ink-shadow" style={{ fontSize: 52 }}>
+            {/* Title - Fraunces serif on paper, all-caps editorial */}
+            <h2 className="font-display font-extrabold uppercase tracking-tightest leading-[.95]" style={{ fontSize: 44, color: "#1a1714" }}>
               {story.title}
             </h2>
-            {/* Verdict + meta row. The accent-coloured verdict badge
-                replaces the legacy "{match}% Match" position (Netflix's
-                exact match-score copy); absent when the poll is below
-                the public floor. Year + dur + tags follow as supporting
-                metadata. */}
+            {/* Verdict + meta row, dark on paper */}
             <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
               {pollVerdicts[story.id] && (
                 <>
-                  <span className="font-semibold text-[15px] text-accent">{renderHeroVerdictBadge(pollVerdicts[story.id])}</span>
-                  <span className="text-muted">·</span>
+                  <span className="font-semibold text-[14px] text-accent">{renderHeroVerdictBadge(pollVerdicts[story.id])}</span>
+                  <span style={{ color: "rgba(26,23,20,.4)" }}>·</span>
                 </>
               )}
-              <span className="text-ink/80 text-[15px]">{story.year}</span>
               {story.dur && (
                 <>
-                  <span className="text-muted">·</span>
-                  <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
+                  <span className="font-mono text-[11px] px-2 py-0.5 rounded border" style={{ color: "rgba(26,23,20,.7)", borderColor: "rgba(26,23,20,.15)" }}>{story.dur}</span>
                 </>
               )}
-              {story.tags.slice(0, 2).map((t) => <span key={t} className="font-body text-[14px] text-ink/80">· {t}</span>)}
+              {story.tags.slice(0, 2).map((t, i) => (
+                <React.Fragment key={t}>
+                  {i > 0 || (story.dur || pollVerdicts[story.id]) ? <span style={{ color: "rgba(26,23,20,.4)" }}>·</span> : null}
+                  <span className="font-body text-[13px]" style={{ color: "rgba(26,23,20,.7)" }}>{t}</span>
+                </React.Fragment>
+              ))}
             </div>
-            <p className="font-body text-[17px] leading-relaxed text-ink/85 mt-5 max-w-[540px]">{story.syn}</p>
-            {/* Button vocabulary swap (slice H): the trio used to be
-                "Play / More Info / Play Something" — literally Netflix's
-                hero button language. Now it names what those actions
-                actually DO on LoreWire: watch + cast a verdict, read the
-                long-form article, or shuffle for a random one. */}
-            <div className="flex items-center gap-3 mt-7">
-              {/* 2026-06-26 slice H follow-up: play icon dropped
-                  from the primary CTA. The triangle is one of
-                  Netflix's most iconic UI cues; removing it pushes
-                  the button toward editorial CTA. */}
-              {/* 2026-06-26 slice H follow-up: primary CTA font
-                  locked to Archivo Black. Fraunces serif uppercase at
-                  button sizes reads odd; bold sans CTAs against
-                  serif headlines = classic magazine pairing. */}
-              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</button>
-              <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</button>
-              <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
+            <p className="font-body text-[15px] leading-relaxed mt-4" style={{ color: "rgba(26,23,20,.8)" }}>{story.syn}</p>
+            {/* Buttons - dark on paper, Archivo CTA */}
+            <div className="flex items-center gap-3 mt-7 flex-wrap">
+              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center font-bold uppercase tracking-tight text-[15px] rounded-[10px] px-7 py-3 active:scale-[.98] transition" style={{ background: "#1a1714", color: "#fbfaf4", fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</button>
+              <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2 font-body font-semibold text-[14px] rounded-[10px] px-5 py-3 active:scale-[.98] transition" style={{ background: "rgba(26,23,20,.08)", color: "#1a1714" }}><InfoI size={18} /> Read the article</button>
+              <button onClick={onShuffle} className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-[.18em] rounded-[10px] px-4 py-3 border active:scale-[.98] transition" style={{ borderColor: "rgba(26,23,20,.18)", color: "rgba(26,23,20,.7)" }}><ShuffleI size={15} /> Surprise me</button>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Bottom strip at the IMAGE side only — keeps the paper panel
+          clean. Subtle ground for the left half. */}
+      <div className="absolute left-0 bottom-0 w-[60%] h-24 pointer-events-none" style={{ background: "linear-gradient(0deg, rgba(0,0,0,.6) 0%, rgba(0,0,0,0) 100%)" }}></div>
 
       {/* 2026-06-26 slice H follow-up: carousel dots moved from
           bottom-right (Netflix's exact corner placement) to
