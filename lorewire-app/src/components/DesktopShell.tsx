@@ -464,23 +464,40 @@ function Hero({
                 exact match-score copy); absent when the poll is below
                 the public floor. Year + dur + tags follow as supporting
                 metadata. */}
+            {/* 2026-06-27 hero polish: verdict badge becomes a soft
+                accent pill (was plain accent-colored text). Reads as a
+                deliberate callout element. Separators unified to small
+                dots (mobile already used these); the typographic "·"
+                was heavier than the meta around it. */}
             <div className="flex items-center gap-2.5 mt-5 flex-wrap whitespace-nowrap">
               {pollVerdicts[story.id] && (
                 <>
-                  <span className="font-semibold text-[15px] text-accent">{renderHeroVerdictBadge(pollVerdicts[story.id])}</span>
-                  <span className="text-muted">·</span>
+                  <span
+                    className="font-semibold text-[13px] text-accent px-2.5 py-0.5 rounded-full"
+                    style={{ background: "rgba(232, 70, 43, 0.14)" }}
+                  >
+                    {renderHeroVerdictBadge(pollVerdicts[story.id])}
+                  </span>
+                  <span className="w-1 h-1 rounded-full bg-ink/30"></span>
                 </>
               )}
               <span className="text-ink/80 text-[15px]">{story.year}</span>
               {story.dur && (
                 <>
-                  <span className="text-muted">·</span>
+                  <span className="w-1 h-1 rounded-full bg-ink/30"></span>
                   <span className="font-mono text-[12px] px-2 py-0.5 rounded border border-line text-ink/80">{story.dur}</span>
                 </>
               )}
-              {story.tags.slice(0, 2).map((t) => <span key={t} className="font-body text-[14px] text-ink/80">· {t}</span>)}
+              {story.tags.slice(0, 2).map((t) => (
+                <React.Fragment key={t}>
+                  <span className="w-1 h-1 rounded-full bg-ink/30"></span>
+                  <span className="font-body text-[14px] text-ink/80">{t}</span>
+                </React.Fragment>
+              ))}
             </div>
-            <p className="font-body text-[17px] leading-relaxed text-ink/85 mt-5 max-w-[540px]">{story.syn}</p>
+            {/* Synopsis bumped text-ink/85 -> text-ink/90 for slight
+                legibility win over dark gradient. */}
+            <p className="font-body text-[17px] leading-relaxed text-ink/90 mt-5 max-w-[540px]">{story.syn}</p>
             {/* Button vocabulary swap (slice H): the trio used to be
                 "Play / More Info / Play Something" — literally Netflix's
                 hero button language. Now it names what those actions
@@ -503,27 +520,33 @@ function Hero({
         </div>
       </div>
 
-      {/* 2026-06-26 slice H follow-up: carousel dots moved from
-          bottom-right (Netflix's exact corner placement) to
-          bottom-center. Mobile already centers its dots inside the
-          action stack. */}
+      {/* 2026-06-27 hero polish: dots refined. Smaller (5px instead of
+          8px) for a quieter footprint. Active dot uses accent (orange-
+          red) instead of white -- LoreWire's brand color, not Netflix's
+          neutral chrome. Generous tap target preserved via the wrapper
+          button padding. Border dropped (was a half-pixel pseudo-shadow
+          that read fuzzy at small sizes). */}
       {hasRotation && (
-        <div className="absolute left-1/2 -translate-x-1/2 bottom-7 z-20 flex items-center gap-2">
+        <div className="absolute left-1/2 -translate-x-1/2 bottom-7 z-20 flex items-center gap-3">
           {pool.map((s, i) => (
             <button
               key={s.id}
               onClick={() => setActiveIndex(i)}
               aria-label={`Show slide ${i + 1} of ${pool.length}`}
               aria-current={i === activeIndex}
-              className="rounded-full transition-all"
-              style={{
-                width: i === activeIndex ? 22 : 8,
-                height: 8,
-                background:
-                  i === activeIndex ? "rgba(255,255,255,.95)" : "rgba(255,255,255,.36)",
-                border: "1px solid rgba(0,0,0,.18)",
-              }}
-            />
+              className="relative grid place-items-center"
+              style={{ width: 20, height: 20 }}
+            >
+              <span
+                className="rounded-full transition-all"
+                style={{
+                  width: i === activeIndex ? 22 : 5,
+                  height: 5,
+                  background:
+                    i === activeIndex ? "rgb(232, 70, 43)" : "rgba(255, 255, 255, .38)",
+                }}
+              />
+            </button>
           ))}
         </div>
       )}
