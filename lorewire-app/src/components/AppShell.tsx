@@ -449,25 +449,33 @@ function Billboard({
             "90% Match" position (Netflix's exact match-score copy);
             absent when the poll is below the public floor. Year + dur
             + tags follow as the supporting metadata. */}
+        {/* 2026-06-27 hero polish: verdict becomes a soft accent pill
+            (was plain accent-coloured text). Reads as a deliberate
+            callout. Separator dots' contrast bumped from bg-muted/70
+            to bg-ink/30 so they're slightly less prominent against
+            the dark gradient. */}
         <div className="flex items-center gap-1.5 mt-2 flex-wrap text-[12.5px]">
           {pollVerdicts[story.id] && (
             <>
-              <span className="font-semibold text-accent">
+              <span
+                className="font-semibold text-[11.5px] text-accent px-2 py-0.5 rounded-full"
+                style={{ background: "rgba(232, 70, 43, 0.14)" }}
+              >
                 {renderHeroVerdictBadge(pollVerdicts[story.id])}
               </span>
-              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+              <span className="w-1 h-1 rounded-full bg-ink/30"></span>
             </>
           )}
           <span className="font-body text-ink/85">{story.year}</span>
           {story.dur && (
             <>
-              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+              <span className="w-1 h-1 rounded-full bg-ink/30"></span>
               <span className="font-mono text-[12px] text-ink/85">{story.dur}</span>
             </>
           )}
           {story.tags.map((t) => (
             <React.Fragment key={t}>
-              <span className="w-1 h-1 rounded-full bg-muted/70"></span>
+              <span className="w-1 h-1 rounded-full bg-ink/30"></span>
               <span className="font-body text-ink/85">{t}</span>
             </React.Fragment>
           ))}
@@ -536,10 +544,15 @@ function Billboard({
                         // Key by activeIndex so React remounts the fill
                         // on every slide change — the CSS animation
                         // restarts from 0% cleanly.
+                        // 2026-06-27 hero polish: progress fill swapped
+                        // from white to accent (orange-red). Brand colour
+                        // on the active dot ties LoreWire identity into
+                        // the carousel chrome.
                         key={`fill-${activeIndex}`}
-                        className="absolute inset-y-0 left-0 bg-white"
+                        className="absolute inset-y-0 left-0"
                         style={{
                           width: isPaused ? "0%" : "100%",
+                          background: "rgb(232, 70, 43)",
                           animation: isPaused
                             ? "none"
                             : `heroProgress ${BILLBOARD_ROTATION_INTERVAL_MS}ms linear forwards`,
