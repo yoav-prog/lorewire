@@ -11,7 +11,10 @@ export default function SiteFooter() {
   return (
     <footer className="border-t border-line mt-10">
       <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-6 gap-y-3 px-6 py-8 lg:px-10 lg:py-9">
-        <span className="font-display font-black text-[20px] tracking-tightest text-ink">
+        {/* 2026-06-26 slice H follow-up: footer LORE WIRE wordmark
+            locked to Archivo (brand identity stays fixed regardless
+            of the --font-display Fraunces swap). */}
+        <span className="font-black text-[20px] tracking-tightest text-ink" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
           LORE<span className="text-accent">WIRE</span>
         </span>
         <span className="hidden font-mono text-[11px] uppercase tracking-[.2em] text-muted sm:inline">

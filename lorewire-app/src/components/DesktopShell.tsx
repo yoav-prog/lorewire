@@ -1514,8 +1514,11 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
           <div className="px-10 pb-12">
             <div className="flex items-start gap-8 pt-6">
               <div className="flex-1">
+                {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
+                    from the modal meta row -- Netflix's exact match-score
+                    copy. The hero already swapped this for the verdict
+                    badge; the modal aligns. */}
                 <div className="flex items-center gap-2.5 flex-wrap font-body text-[14px] mb-4">
-                  <span className="font-semibold" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
                   <span className="text-muted">{story.year}</span>
                   {story.dur && (
                     <span className="px-2 py-0.5 rounded border border-line text-ink/80 font-mono text-[11px]">{story.dur}</span>

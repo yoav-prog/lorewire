@@ -1928,8 +1928,10 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
       <div className="px-4 -mt-6 relative pb-28">
         <h1 className="font-display font-black uppercase tracking-tightest leading-[.92] text-ink ink-shadow" style={{ fontSize: 34 }}>{story.title}</h1>
 
+        {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
+            from the mobile TitleSheet meta row -- Netflix's exact
+            match-score copy. Aligned with the hero + desktop modal. */}
         <div className="flex items-center gap-2 mt-3 flex-wrap font-body text-[12.5px]">
-          <span className="font-semibold" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
           <span className="text-muted">{story.year}</span>
           {story.dur && (
             <span className="px-1.5 py-0.5 rounded border border-line text-ink/80 font-mono text-[10px]">{story.dur}</span>

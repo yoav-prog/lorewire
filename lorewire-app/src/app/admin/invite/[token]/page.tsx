@@ -28,7 +28,9 @@ export default async function AcceptInvitePage({
   return (
     <div className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6 py-12">
       <div className="mb-6">
-        <span className="font-display text-[18px] font-extrabold tracking-tightest text-ink">
+        {/* 2026-06-26 slice H follow-up: admin invite wordmark
+            locked to Archivo. */}
+        <span className="text-[18px] font-extrabold tracking-tightest text-ink" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
           LORE<span className="text-accent">WIRE</span>
         </span>
         <span className="mt-0.5 block font-mono text-[10px] uppercase tracking-[0.2em] text-muted">
