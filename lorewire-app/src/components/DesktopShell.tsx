@@ -491,7 +491,11 @@ function Hero({
                   from the primary CTA. The triangle is one of
                   Netflix's most iconic UI cues; removing it pushes
                   the button toward editorial CTA. */}
-              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]">Watch &amp; Vote</button>
+              {/* 2026-06-26 slice H follow-up: primary CTA font
+                  locked to Archivo Black. Fraunces serif uppercase at
+                  button sizes reads odd; bold sans CTAs against
+                  serif headlines = classic magazine pairing. */}
+              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</button>
               <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</button>
               <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
             </div>
@@ -1529,7 +1533,8 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                 <p className="font-body text-[15.5px] leading-relaxed text-ink/85 max-w-[520px]">{story.syn}</p>
               </div>
               <div className="flex items-center gap-3 shrink-0 pt-1">
-                <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
+                {/* Slice H follow-up: modal PLAY button font -> Archivo. */}
+                <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}><PlayI size={20} /> Play</button>
                 <button onClick={() => toggleList(story.id)} title="Saved" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color: inList ? "#E8462B" : "#F5F3EF" }}>{inList ? <CheckI size={20} /> : <PlusI size={20} />}</button>
                 <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} title={myRating > 0 ? `Your rating: ${myRating}` : "Rate"} className="w-11 h-11 rounded-full border flex items-center justify-center hover:border-ink/50 transition" style={{ borderColor: rateOpen ? "#F4B740" : "var(--color-line)", color: myRating > 0 ? "#F4B740" : "#F5F3EF" }}><StarI size={19} /></button>
                 <button onClick={() => { setShareOpen(true); import("@/app/actions").then((m) => m.recordStoryEventAction(story.id, "share_initiated")).catch(() => {}); }} aria-label="Share" title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
@@ -1543,7 +1548,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
             )}
             <div className="flex gap-8 mt-8 border-b border-line">
               {["Watch", "Read", "Read-along", "Comments"].map((t) => (
-                <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-display font-bold uppercase tracking-tight text-[15px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
+                <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-bold uppercase tracking-tight text-[15px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97", fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
                   {t === "Comments" && commentInfo ? `${t} (${commentInfo.count})` : t}{tab === t && <span className="absolute left-0 right-0 -bottom-px h-[3px] bg-accent rounded-full"></span>}
                 </button>
               ))}

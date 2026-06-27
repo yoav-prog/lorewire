@@ -483,7 +483,12 @@ function Billboard({
               iconic UI cues; removing it pushes the button toward
               editorial "call to action" rather than streamer "press
               play." */}
-          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition">
+          {/* 2026-06-26 slice H follow-up: primary CTA font locked to
+              Archivo Black. Fraunces (the new --font-display) is built
+              for editorial display at large sizes; uppercase serif at
+              ~15px button size reads odd. Bold sans CTAs against serif
+              headlines = classic magazine pairing. */}
+          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
             Watch &amp; Vote
           </button>
           <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
@@ -1940,7 +1945,8 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
           <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ background: c, color: "#fff" }}>{story.cat}</span>
         </div>
 
-        <button onClick={onPlayClick} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition">
+        {/* Slice H follow-up: modal PLAY button font -> Archivo. */}
+        <button onClick={onPlayClick} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
           <PlayI /> Play
         </button>
 
@@ -1968,7 +1974,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
 
         <div className="flex gap-6 mt-6 border-b border-line overflow-x-auto noscroll">
           {["Watch", "Read", "Read-along", "Comments"].map((t) => (
-            <button key={t} onClick={() => setTab(t)} className="relative pb-2.5 font-display font-bold uppercase tracking-tight text-[14px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
+            <button key={t} onClick={() => setTab(t)} className="relative pb-2.5 font-bold uppercase tracking-tight text-[14px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97", fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
               {t === "Comments" && commentInfo ? `${t} (${commentInfo.count})` : t}
               {tab === t && <span className="absolute left-0 right-0 -bottom-px h-[2.5px] bg-accent rounded-full"></span>}
             </button>
