@@ -20,7 +20,15 @@
   --color-cat-dating: #a8466a;
   --color-cat-roommate: #5b3b8a;
 
-  --font-display: var(--font-archivo), "Arial Black", Arial, sans-serif;
+  /* 2026-06-26 Netflix-distance pass: --font-display swapped from
+     Archivo (sans condensed bold, same DNA as Netflix Sans) to
+     Fraunces (variable serif with optical sizing — modern editorial,
+     Substack / Linear / Vercel-blog adjacent). Every Tailwind
+     `font-display` usage (hero title, rail headers, buttons) picks
+     this up automatically. Archivo stays imported as
+     `var(--font-archivo)` for any element that needs the old voice
+     during transition. */
+  --font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
   --font-body: var(--font-hanken), system-ui, sans-serif;
   --font-mono: var(--font-spline), ui-monospace, monospace;
   --font-hand: var(--font-caveat), cursive;

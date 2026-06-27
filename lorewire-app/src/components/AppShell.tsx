@@ -360,11 +360,15 @@ function Billboard({
       aria-label={hasRotation ? "Featured stories" : undefined}
     >
       <div className="absolute left-5 z-30 flex items-center gap-2" style={{ top: "calc(env(safe-area-inset-top, 0px) + 14px)" }}>
-        <span className="relative grid place-items-center bg-ink text-bg font-display font-black rounded-[7px]" style={{ width: 26, height: 26, fontSize: 11, letterSpacing: "-.04em" }}>
+        {/* 2026-06-26 slice H follow-up: the LW badge + LoreWire
+            wordmark stay in Archivo Black regardless of the
+            --font-display swap. Brand identity locked to the
+            wordmark's original voice. */}
+        <span className="relative grid place-items-center bg-ink text-bg font-black rounded-[7px]" style={{ width: 26, height: 26, fontSize: 11, letterSpacing: "-.04em", fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
           LW
           <span className="absolute rounded-full bg-accent" style={{ top: 3, right: 4, width: 4, height: 4 }}></span>
         </span>
-        <span className="font-display font-black tracking-tight text-ink ink-shadow" style={{ fontSize: 18 }}>LoreWire</span>
+        <span className="font-black tracking-tight text-ink ink-shadow" style={{ fontSize: 18, fontFamily: "var(--font-archivo), Arial, sans-serif" }}>LoreWire</span>
       </div>
       <div className="absolute right-4 z-30" style={{ top: "calc(env(safe-area-inset-top, 0px) + 10px)" }}>
         <SignInChip session={session} tone="overlay" />
@@ -380,7 +384,12 @@ function Billboard({
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
       >
-        <div className="absolute inset-0 drift" style={{ background: c }}>
+        {/* 2026-06-26 slice H follow-up: `drift` class removed. The
+            slow zoom animation on the hero image is Netflix's exact
+            "cinematic still" treatment. Editorial publications use
+            STATIC images. Keyframe stays in globals.css for any
+            future opt-in use. */}
+        <div className="absolute inset-0" style={{ background: c }}>
           {showHero && (
             <img
               src={heroSrc}
@@ -404,10 +413,11 @@ function Billboard({
           fade-in's absolute inset). Buttons stay tappable, swipe stays
           contained to the artwork half — no gesture conflict. */}
       <div className="absolute left-0 right-0 bottom-5 px-5 z-20" aria-live="polite">
-        <div className="flex items-center gap-2 mb-2.5">
-          <span className="w-[3px] h-3.5 bg-accent rounded-full"></span>
-          <span className="font-mono text-[10px] uppercase tracking-[.34em] text-ink/90">LW Original</span>
-        </div>
+        {/* 2026-06-26 slice H follow-up: "LW Original" eyebrow dropped
+            (direct copy of Netflix's "NETFLIX ORIGINAL" pattern with
+            the accent strip + small-caps mono). The hero now opens
+            straight on the question, which is what the brand thesis
+            actually is. */}
         {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
             the QUESTION is now the LEAD element of the hero (was a small
             kicker in slice D). Netflix leads with the title because the
@@ -468,8 +478,18 @@ function Billboard({
             DO on LoreWire: watch + cast a verdict, read the long-form
             article, or shuffle for a random one. */}
         <div className="flex items-center gap-2.5 mt-4">
-          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition">
-            <PlayI /> Watch &amp; Vote
+          {/* 2026-06-26 slice H follow-up: play icon dropped from the
+              primary CTA. The triangle glyph is one of Netflix's most
+              iconic UI cues; removing it pushes the button toward
+              editorial "call to action" rather than streamer "press
+              play." */}
+          {/* 2026-06-26 slice H follow-up: primary CTA font locked to
+              Archivo Black. Fraunces (the new --font-display) is built
+              for editorial display at large sizes; uppercase serif at
+              ~15px button size reads odd. Bold sans CTAs against serif
+              headlines = classic magazine pairing. */}
+          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
+            Watch &amp; Vote
           </button>
           <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
             <InfoI size={18} /> Read the article
@@ -1913,8 +1933,10 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
       <div className="px-4 -mt-6 relative pb-28">
         <h1 className="font-display font-black uppercase tracking-tightest leading-[.92] text-ink ink-shadow" style={{ fontSize: 34 }}>{story.title}</h1>
 
+        {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
+            from the mobile TitleSheet meta row -- Netflix's exact
+            match-score copy. Aligned with the hero + desktop modal. */}
         <div className="flex items-center gap-2 mt-3 flex-wrap font-body text-[12.5px]">
-          <span className="font-semibold" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
           <span className="text-muted">{story.year}</span>
           {story.dur && (
             <span className="px-1.5 py-0.5 rounded border border-line text-ink/80 font-mono text-[10px]">{story.dur}</span>
@@ -1923,7 +1945,8 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
           <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold" style={{ background: c, color: "#fff" }}>{story.cat}</span>
         </div>
 
-        <button onClick={onPlayClick} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition">
+        {/* Slice H follow-up: modal PLAY button font -> Archivo. */}
+        <button onClick={onPlayClick} className="w-full flex items-center justify-center gap-2 bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 mt-4 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
           <PlayI /> Play
         </button>
 
@@ -1951,7 +1974,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
 
         <div className="flex gap-6 mt-6 border-b border-line overflow-x-auto noscroll">
           {["Watch", "Read", "Read-along", "Comments"].map((t) => (
-            <button key={t} onClick={() => setTab(t)} className="relative pb-2.5 font-display font-bold uppercase tracking-tight text-[14px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
+            <button key={t} onClick={() => setTab(t)} className="relative pb-2.5 font-bold uppercase tracking-tight text-[14px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97", fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
               {t === "Comments" && commentInfo ? `${t} (${commentInfo.count})` : t}
               {tab === t && <span className="absolute left-0 right-0 -bottom-px h-[2.5px] bg-accent rounded-full"></span>}
             </button>

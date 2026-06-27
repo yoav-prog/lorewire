@@ -15,7 +15,9 @@ export default function ArticlesLayout({
     <div className="min-h-screen bg-bg text-ink">
       <header className="border-b border-line bg-bg/85 px-5 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-[920px] items-center justify-between gap-4">
-          <Link href="/" className="font-display text-[18px] font-extrabold tracking-tightest">
+          {/* 2026-06-26 slice H follow-up: article-page header LORE
+              WIRE wordmark locked to Archivo. */}
+          <Link href="/" className="text-[18px] font-extrabold tracking-tightest" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
             LORE<span className="text-accent">WIRE</span>
           </Link>
           <nav className="flex items-center gap-4 font-mono text-[11px] uppercase tracking-wider text-muted">

@@ -12,7 +12,9 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center p-6">
       <div className="w-full max-w-[360px]">
         <div className="mb-8 text-center">
-          <div className="font-display text-[26px] font-extrabold tracking-tightest text-ink">
+          {/* 2026-06-26 slice H follow-up: admin login wordmark
+              locked to Archivo. */}
+          <div className="text-[26px] font-extrabold tracking-tightest text-ink" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
             LORE<span className="text-accent">WIRE</span>
           </div>
           <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.2em] text-muted">

@@ -217,8 +217,13 @@ function TopNav({ view, setView, solid, query, setQuery, session }: { view: stri
       )}
       <div className="relative mx-auto max-w-[1600px] flex items-center gap-9 px-10 h-[68px]">
         <button onClick={() => setView("Home")} className="flex items-center gap-1.5 shrink-0">
-          <span className="font-display font-black text-[26px] tracking-tightest text-ink">LORE</span>
-          <span className="font-display font-black text-[26px] tracking-tightest text-accent">WIRE</span>
+          {/* 2026-06-26 slice H follow-up: the LORE WIRE wordmark
+              stays in Archivo Black regardless of the --font-display
+              swap. Brand identity is locked to the wordmark's original
+              voice; only chrome typography (headlines, rail headers)
+              moves to Fraunces. */}
+          <span className="font-black text-[26px] tracking-tightest text-ink" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>LORE</span>
+          <span className="font-black text-[26px] tracking-tightest text-accent" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>WIRE</span>
         </button>
         <nav className="flex items-center gap-7">
           {NAV.map((n) => (
@@ -397,7 +402,10 @@ function Hero({
           CSS class. React unmounts the old slide and mounts the new one,
           which restarts the animation cleanly. */}
       <div key={story.id} className="absolute inset-0 fade-in">
-        <div className="absolute inset-0 drift" style={{ background: c }}>
+        {/* 2026-06-26 slice H follow-up: `drift` removed. Editorial
+            publications use STATIC hero images, not the slow zoom
+            that's Netflix's exact "cinematic still" treatment. */}
+        <div className="absolute inset-0" style={{ background: c }}>
           {showHero && (
             <img
               src={heroSrc}
@@ -420,10 +428,10 @@ function Hero({
         <div className="absolute inset-x-0 bottom-0 h-44" style={{ background: "linear-gradient(0deg,#0A0A0C 4%, rgba(10,10,12,0) 100%)" }}></div>
         <div className="relative h-full max-w-[1600px] mx-auto px-10 flex items-end pb-24">
           <div className="max-w-[620px]" aria-live="polite">
-            <div className="flex items-center gap-2.5 mb-4">
-              <span className="w-[3px] h-4 bg-accent rounded-full"></span>
-              <span className="font-mono text-[11px] uppercase tracking-[.36em] text-ink/90">LoreWire Original</span>
-            </div>
+            {/* 2026-06-26 slice H follow-up: "LoreWire Original"
+                eyebrow dropped (direct copy of Netflix's "NETFLIX
+                ORIGINAL" pattern with the accent strip + small-caps
+                mono). The hero now opens straight on the question. */}
             {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
                 the QUESTION is now the LEAD element of the hero (was a
                 small kicker in slice D). Netflix leads with the title
@@ -479,7 +487,15 @@ function Hero({
                 actually DO on LoreWire: watch + cast a verdict, read the
                 long-form article, or shuffle for a random one. */}
             <div className="flex items-center gap-3 mt-7">
-              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center gap-2.5 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]"><PlayI size={24} /> Watch &amp; Vote</button>
+              {/* 2026-06-26 slice H follow-up: play icon dropped
+                  from the primary CTA. The triangle is one of
+                  Netflix's most iconic UI cues; removing it pushes
+                  the button toward editorial CTA. */}
+              {/* 2026-06-26 slice H follow-up: primary CTA font
+                  locked to Archivo Black. Fraunces serif uppercase at
+                  button sizes reads odd; bold sans CTAs against
+                  serif headlines = classic magazine pairing. */}
+              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</button>
               <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</button>
               <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
             </div>
@@ -487,8 +503,12 @@ function Hero({
         </div>
       </div>
 
+      {/* 2026-06-26 slice H follow-up: carousel dots moved from
+          bottom-right (Netflix's exact corner placement) to
+          bottom-center. Mobile already centers its dots inside the
+          action stack. */}
       {hasRotation && (
-        <div className="absolute right-10 bottom-7 z-20 flex items-center gap-2">
+        <div className="absolute left-1/2 -translate-x-1/2 bottom-7 z-20 flex items-center gap-2">
           {pool.map((s, i) => (
             <button
               key={s.id}
@@ -1498,8 +1518,11 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
           <div className="px-10 pb-12">
             <div className="flex items-start gap-8 pt-6">
               <div className="flex-1">
+                {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
+                    from the modal meta row -- Netflix's exact match-score
+                    copy. The hero already swapped this for the verdict
+                    badge; the modal aligns. */}
                 <div className="flex items-center gap-2.5 flex-wrap font-body text-[14px] mb-4">
-                  <span className="font-semibold" style={{ color: "#5fcf86" }}>{story.match}% Match</span>
                   <span className="text-muted">{story.year}</span>
                   {story.dur && (
                     <span className="px-2 py-0.5 rounded border border-line text-ink/80 font-mono text-[11px]">{story.dur}</span>
@@ -1510,7 +1533,8 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                 <p className="font-body text-[15.5px] leading-relaxed text-ink/85 max-w-[520px]">{story.syn}</p>
               </div>
               <div className="flex items-center gap-3 shrink-0 pt-1">
-                <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-display font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition"><PlayI size={20} /> Play</button>
+                {/* Slice H follow-up: modal PLAY button font -> Archivo. */}
+                <button onClick={onPlayClick} className="flex items-center gap-2 bg-ink text-bg font-bold uppercase tracking-tight text-[14px] rounded-[9px] px-6 py-3 hover:bg-white transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}><PlayI size={20} /> Play</button>
                 <button onClick={() => toggleList(story.id)} title="Saved" className="w-11 h-11 rounded-full border border-line flex items-center justify-center transition hover:border-ink/50" style={{ color: inList ? "#E8462B" : "#F5F3EF" }}>{inList ? <CheckI size={20} /> : <PlusI size={20} />}</button>
                 <button onClick={() => setRateOpen((v) => !v)} aria-label="Rate" aria-pressed={myRating > 0} title={myRating > 0 ? `Your rating: ${myRating}` : "Rate"} className="w-11 h-11 rounded-full border flex items-center justify-center hover:border-ink/50 transition" style={{ borderColor: rateOpen ? "#F4B740" : "var(--color-line)", color: myRating > 0 ? "#F4B740" : "#F5F3EF" }}><StarI size={19} /></button>
                 <button onClick={() => { setShareOpen(true); import("@/app/actions").then((m) => m.recordStoryEventAction(story.id, "share_initiated")).catch(() => {}); }} aria-label="Share" title="Share" className="w-11 h-11 rounded-full border border-line flex items-center justify-center text-ink hover:border-ink/50 transition"><ShareI size={19} /></button>
@@ -1524,7 +1548,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
             )}
             <div className="flex gap-8 mt-8 border-b border-line">
               {["Watch", "Read", "Read-along", "Comments"].map((t) => (
-                <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-display font-bold uppercase tracking-tight text-[15px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97" }}>
+                <button key={t} onClick={() => setTab(t)} className="relative pb-3 font-bold uppercase tracking-tight text-[15px] transition whitespace-nowrap" style={{ color: tab === t ? "#F5F3EF" : "#8E8A97", fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
                   {t === "Comments" && commentInfo ? `${t} (${commentInfo.count})` : t}{tab === t && <span className="absolute left-0 right-0 -bottom-px h-[3px] bg-accent rounded-full"></span>}
                 </button>
               ))}
