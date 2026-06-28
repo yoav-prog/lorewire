@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { Capability } from "@/lib/authz";
+import SidebarLiveBadge from "./SidebarLiveBadge";
 
 // Studio sidebar. Three primary destinations: Overview, Content, Settings.
 // Plus an optional Dev zone surfaced only when NODE_ENV !== 'production'
@@ -26,12 +27,27 @@ export type SidebarItem = {
   label: string;
   /** Path prefixes that should highlight this item. Defaults to [href without query]. */
   activePrefixes?: string[];
+  /** Path prefixes that should NOT highlight this item, even if an
+   *  activePrefix would otherwise match. Used to carve out a nested
+   *  sub-item's URL from its parent's broader active range — e.g.
+   *  Reddit Sources matches /admin/reddit-sources/* but explicitly
+   *  excludes /admin/reddit-sources/live so the nested Live runs entry
+   *  owns that path uniquely. */
+  notPrefixes?: string[];
   /** When true, the item is active only when pathname exactly equals href (no query). */
   exact?: boolean;
   /** When set, the item is shown only to staff whose role grants this
    *  capability. Unset = visible to every staff role. Server-side gates still
    *  enforce access; this only hides what the user can't use. */
   capability?: Capability;
+  /** Renders a small left-indent so the item visually nests under its
+   *  preceding sibling (used for the Live runs entry under Reddit
+   *  Sources). The sidebar has no real parent/child concept; this is
+   *  purely the visual affordance. */
+  nested?: boolean;
+  /** Trailing slot rendered inside the link, after the label. Used for
+   *  status badges (e.g. the active-runs count). Optional. */
+  slot?: React.ReactNode;
 };
 
 export type SidebarGroup = {
@@ -63,11 +79,27 @@ const STATIC_GROUPS: SidebarGroup[] = [
       },
       {
         // Reddit candidate pool — the import / review / publish upstream
-        // for stories. See _plans/2026-06-14-reddit-db-sync.md.
+        // for stories. See _plans/2026-06-14-reddit-db-sync.md. The
+        // notPrefixes carve-out keeps /admin/reddit-sources/live from
+        // double-lighting both this entry AND the nested Live runs
+        // entry below.
         href: "/admin/reddit-sources",
         label: "Reddit Sources",
         activePrefixes: ["/admin/reddit-sources"],
+        notPrefixes: ["/admin/reddit-sources/live"],
         capability: "content.manage",
+      },
+      {
+        // 2026-06-28 aggregator: every queued/processing job + recently
+        // finished, with event logs streaming live. Sits visually under
+        // Reddit Sources. Plan:
+        // _plans/2026-06-28-reddit-sources-live-runs-page.md.
+        href: "/admin/reddit-sources/live",
+        label: "Live runs",
+        activePrefixes: ["/admin/reddit-sources/live"],
+        capability: "content.manage",
+        nested: true,
+        slot: <SidebarLiveBadge />,
       },
       {
         // Homepage curation: which stories appear on each rail. Live
@@ -160,6 +192,7 @@ const DEV_GROUP: SidebarGroup = {
 export function isItemActive(pathname: string, item: SidebarItem): boolean {
   const hrefPath = item.href.split("?")[0];
   if (item.exact) return pathname === hrefPath;
+  if (item.notPrefixes?.some((p) => pathname.startsWith(p))) return false;
   const prefixes = item.activePrefixes ?? [hrefPath];
   return prefixes.some((p) => pathname.startsWith(p));
 }
@@ -269,13 +302,17 @@ export default function AdminSidebar({
                         <Link
                           href={it.href}
                           onClick={() => setOpen(false)}
-                          className={`block rounded-md px-2.5 py-1.5 font-mono text-[12px] uppercase tracking-wider transition-colors ${
+                          aria-current={active ? "page" : undefined}
+                          className={`flex items-center gap-2 rounded-md py-1.5 font-mono text-[12px] uppercase tracking-wider transition-colors ${
+                            it.nested ? "pl-6 pr-2.5" : "px-2.5"
+                          } ${
                             active
                               ? "bg-surface2 text-ink"
                               : "text-muted hover:bg-surface2 hover:text-ink"
                           }`}
                         >
-                          {it.label}
+                          <span className="truncate">{it.label}</span>
+                          {it.slot}
                         </Link>
                       </li>
                     );
