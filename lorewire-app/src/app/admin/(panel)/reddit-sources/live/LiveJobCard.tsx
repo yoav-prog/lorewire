@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { isJobActive, type ActiveJobView } from "@/lib/story-jobs-live";
+import { isJobActive, type ActiveJobView } from "@/lib/story-jobs-live-shared";
 
 const STATUS_TONE: Record<string, string> = {
   queued: "border-accent/40 bg-accent/10 text-accent",

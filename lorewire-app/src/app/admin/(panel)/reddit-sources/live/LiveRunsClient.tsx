@@ -18,7 +18,7 @@ import {
   isJobActive,
   isJobFinished,
   type ActiveJobView,
-} from "@/lib/story-jobs-live";
+} from "@/lib/story-jobs-live-shared";
 import { listActiveJobsWithEventsAction } from "@/app/admin/actions";
 import LiveJobCard from "./LiveJobCard";
 

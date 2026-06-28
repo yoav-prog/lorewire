@@ -11,7 +11,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
-import type { ActiveJobView } from "@/lib/story-jobs-live";
+import type { ActiveJobView } from "@/lib/story-jobs-live-shared";
 
 // The component pulls in a Server Action; stub it so the test doesn't
 // need a server runtime. The polling tick never fires from SSR anyway,

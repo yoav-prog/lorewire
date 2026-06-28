@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 import { renderToString } from "react-dom/server";
-import type { ActiveJobView } from "@/lib/story-jobs-live";
+import type { ActiveJobView } from "@/lib/story-jobs-live-shared";
 import LiveJobCard from "./LiveJobCard";
 
 const NOW = "2026-06-28T12:00:00.000Z";

@@ -16,56 +16,44 @@
 // SQL is portable across the postgres + sqlite drivers: no DISTINCT ON,
 // no window functions, no CTEs. Two SELECTs, group in memory.
 //
+// Types + pure helpers + constants live in ./story-jobs-live-shared.ts
+// so the client components can import them without dragging
+// "server-only" + the postgres driver into the client bundle. This
+// module re-exports the shared surface so existing server callers
+// (the page, the actions module, the tests) keep their single import
+// site at "@/lib/story-jobs-live".
+//
 // Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
 
 import "server-only";
 import { all } from "@/lib/db";
+import {
+  MAX_ACTIVE_JOBS,
+  MAX_EVENTS_PER_JOB,
+  FINISHED_GRACE_MS,
+  normalizeEventLevel,
+  type ActiveJobEvent,
+  type ActiveJobView,
+  type ListActiveJobsOpts,
+} from "@/lib/story-jobs-live-shared";
 
-export const MAX_ACTIVE_JOBS = 50;
-export const MAX_EVENTS_PER_JOB = 50;
-export const FINISHED_GRACE_MS = 15 * 60 * 1000;
-
-const ACTIVE_STATUSES = ["queued", "processing"] as const;
-const FINISHED_STATUSES = ["done", "error", "cancelled"] as const;
-
-export interface ActiveJobEvent {
-  id: string;
-  ts: string;
-  level: "info" | "warn" | "error";
-  event: string;
-  message: string | null;
-  /** JSON-encoded structured payload. Client parses + displays inline. */
-  payload: string | null;
-}
-
-export interface ActiveJobView {
-  job_id: string;
-  reddit_id: string;
-  /** Job status as written by the worker / cancel path. May include
-   *  'cancelled' even though StoryJobStatus in story-jobs.ts narrows
-   *  finished states to done/error — we surface the raw column so the
-   *  card can render a 'Stopped' chip honestly. */
-  status: string;
-  progress: number | null;
-  error: string | null;
-  story_id: string | null;
-  requested_at: string;
-  started_at: string | null;
-  finished_at: string | null;
-  /** From reddit_source. NULL when the source row was deleted between
-   *  enqueue and now (defensive; should not happen). */
-  title: string | null;
-  subreddit: string | null;
-  /** Latest MAX_EVENTS_PER_JOB events, oldest-first. */
-  events: ActiveJobEvent[];
-}
-
-export interface ListActiveJobsOpts {
-  /** Override the wall clock for deterministic tests. */
-  now?: Date;
-  /** Override the grace window for tests. */
-  graceMs?: number;
-}
+// Re-export the shared surface so existing imports of
+// "@/lib/story-jobs-live" continue to resolve without churn.
+export {
+  MAX_ACTIVE_JOBS,
+  MAX_EVENTS_PER_JOB,
+  FINISHED_GRACE_MS,
+  ACTIVE_STATUSES,
+  FINISHED_STATUSES,
+  isJobActive,
+  isJobFinished,
+  normalizeEventLevel,
+} from "@/lib/story-jobs-live-shared";
+export type {
+  ActiveJobEvent,
+  ActiveJobView,
+  ListActiveJobsOpts,
+} from "@/lib/story-jobs-live-shared";
 
 /**
  * One snapshot read for the live page. Returns active jobs first
@@ -147,7 +135,7 @@ export async function listActiveJobsWithEvents(
     bucket.push({
       id: e.id,
       ts: e.ts,
-      level: normalizeLevel(e.level),
+      level: normalizeEventLevel(e.level),
       event: e.event,
       message: e.message,
       payload: e.payload,
@@ -174,26 +162,4 @@ export async function listActiveJobsWithEvents(
     subreddit: r.subreddit,
     events: eventsByJob.get(r.job_id) ?? [],
   }));
-}
-
-function normalizeLevel(raw: string): "info" | "warn" | "error" {
-  if (raw === "warn" || raw === "error") return raw;
-  return "info";
-}
-
-/**
- * Returns true if a job row is currently in-flight (vs. finished-grace).
- * Exposed so the client can colour active vs. settled cards consistently
- * with the same predicate the SQL uses.
- */
-export function isJobActive(view: ActiveJobView): boolean {
-  return (ACTIVE_STATUSES as readonly string[]).includes(view.status);
-}
-
-/**
- * Returns true if a job is settled (done/error/cancelled). Mirrors the
- * SQL's finished branch; used for the `?finished=hide` URL param.
- */
-export function isJobFinished(view: ActiveJobView): boolean {
-  return (FINISHED_STATUSES as readonly string[]).includes(view.status);
 }
