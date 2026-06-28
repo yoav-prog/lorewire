@@ -126,6 +126,14 @@ interface ResolvedSpliceSegments {
    *  flag or resolver miss). */
   intro_segment_id: string | null;
   outro_segment_id: string | null;
+  /** Seconds at which the spoken cold-open hook ends. When > 0 AND an
+   *  intro is being spliced, Cloud Run reorders to
+   *  [body_hook][intro][body_rest][outro] so the hook lands BEFORE the
+   *  brand stinger. Per _plans/2026-06-28-hook-before-brand-intro.md.
+   *  Sourced from `inputProps.hook_end_ms` which the Python pipeline
+   *  computes from the alignment data; null when the pipeline can't
+   *  compute a boundary (legacy short_renders rows, alignment drift). */
+  hookEndSec: number | null;
 }
 
 /** Resolve the 9:16 intro/outro for a short, defensively (everything-null on any
@@ -141,6 +149,7 @@ async function resolveShortSegmentsSafe(
     outro: null,
     intro_segment_id: null,
     outro_segment_id: null,
+    hookEndSec: null,
   };
   if (!story) return empty;
   try {
@@ -155,10 +164,45 @@ async function resolveShortSegmentsSafe(
       outro: resolved.outro.segment?.normalized_url ?? null,
       intro_segment_id: resolved.intro.segment?.id ?? null,
       outro_segment_id: resolved.outro.segment?.id ?? null,
+      // hookEndSec is populated from inputProps.hook_end_ms by the
+      // caller below; the segment resolver doesn't know about the
+      // hook (it's a script-side concept, not a per-story setting).
+      hookEndSec: null,
     };
   } catch {
     return empty;
   }
+}
+
+/** Extract the hook end timestamp from inputProps (the Python pipeline
+ *  writes it onto the props row when building a short). Returns
+ *  `{ hookEndSec, propsStripped }` where `propsStripped` is true when
+ *  the key was removed from inputProps (so Remotion never receives a
+ *  phantom prop). Returns null when the value is missing, non-finite,
+ *  or non-positive — the splicer falls back to legacy ordering in that
+ *  case. Per _plans/2026-06-28-hook-before-brand-intro.md. Exported for
+ *  pure-logic tests; the dispatcher is the only production caller. */
+export function extractHookEndSecFromProps(inputProps: unknown): {
+  hookEndSec: number | null;
+  propsStripped: boolean;
+} {
+  if (!inputProps || typeof inputProps !== "object" || Array.isArray(inputProps)) {
+    return { hookEndSec: null, propsStripped: false };
+  }
+  const obj = inputProps as Record<string, unknown>;
+  const raw = obj.hook_end_ms;
+  // Strip the key regardless of validity so Remotion can't see it as a
+  // phantom composition prop. A malformed value just falls through with
+  // hookEndSec = null (splice uses legacy ordering).
+  let stripped = false;
+  if ("hook_end_ms" in obj) {
+    delete obj.hook_end_ms;
+    stripped = true;
+  }
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+    return { hookEndSec: null, propsStripped: stripped };
+  }
+  return { hookEndSec: raw / 1000, propsStripped: stripped };
 }
 
 async function serve(req: NextRequest): Promise<NextResponse> {
@@ -220,10 +264,27 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     (inputProps as Record<string, unknown>).end_hold_ms = SHORT_END_HOLD_MS;
   }
 
+  // Pull the cold-open hook boundary out of inputProps and strip it so it
+  // never reaches Remotion as a phantom prop. The Python build_short_props
+  // writes `hook_end_ms` from the alignment data; we forward the seconds-
+  // form to Cloud Run via the segments POST field so the splice can reorder
+  // to [body_hook][intro][body_rest][outro]. Per
+  // _plans/2026-06-28-hook-before-brand-intro.md. When the row predates the
+  // pipeline change (no hook_end_ms) the splice falls through to the legacy
+  // [intro][body][outro] ordering — no regression for old rows.
+  const { hookEndSec, propsStripped: hookEndStripped } =
+    extractHookEndSecFromProps(inputProps);
+
   // Resolve the 9:16 intro/outro so Cloud Run splices them around the short,
   // same as the long-form render (shorts are always 9:16). Body-only if none.
   const story = await getStory(claimed.story_id);
   const segments = await resolveShortSegmentsSafe(story);
+  // Hook-first reorder only meaningful when an intro will sit in front
+  // of the body; the Cloud Run side also enforces this, but mirroring
+  // the gate here keeps the outgoing POST shape honest.
+  if (hookEndSec !== null && segments.intro) {
+    segments.hookEndSec = hookEndSec;
+  }
 
   // Walk inputProps and rewrite any persisted legacy GCS URLs onto
   // MEDIA_PUBLIC_BASE before they cross out to Cloud Run. Cloud Run's
@@ -254,6 +315,8 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     segments_rewrote: 0,
     intro_present: Boolean(segments.intro),
     outro_present: Boolean(segments.outro),
+    hook_end_sec: segments.hookEndSec,
+    hook_end_stripped: hookEndStripped,
   });
 
   // Cloud Run writes the MP4 to GCS key `<storyId>/video.mp4`. We must NOT pass

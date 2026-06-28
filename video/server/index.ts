@@ -58,12 +58,35 @@ function parseSegments(raw: unknown): SpliceSegments {
   // Default for missing / malformed shapes is "no segments" — a
   // body-only render is the safe fallback and matches today's behavior.
   if (!raw || typeof raw !== "object") return { intro: null, outro: null };
-  const obj = raw as { intro?: unknown; outro?: unknown };
+  const obj = raw as {
+    intro?: unknown;
+    outro?: unknown;
+    outroLeadInSec?: unknown;
+    hookEndSec?: unknown;
+  };
   const intro =
     typeof obj.intro === "string" && obj.intro.length > 0 ? obj.intro : null;
   const outro =
     typeof obj.outro === "string" && obj.outro.length > 0 ? obj.outro : null;
-  return { intro, outro };
+  const out: SpliceSegments = { intro, outro };
+  // Optional numeric splice tuning fields. A non-finite or negative value
+  // is dropped silently so a stale / malformed dispatcher can't push the
+  // render into an unsafe shape.
+  if (
+    typeof obj.outroLeadInSec === "number" &&
+    Number.isFinite(obj.outroLeadInSec) &&
+    obj.outroLeadInSec >= 0
+  ) {
+    out.outroLeadInSec = obj.outroLeadInSec;
+  }
+  if (
+    typeof obj.hookEndSec === "number" &&
+    Number.isFinite(obj.hookEndSec) &&
+    obj.hookEndSec > 0
+  ) {
+    out.hookEndSec = obj.hookEndSec;
+  }
+  return out;
 }
 
 function parseRenderBody(body: RenderRequestBody | undefined): {

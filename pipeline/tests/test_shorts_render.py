@@ -222,6 +222,119 @@ class BuildShortPropsBaseFrameTests(unittest.TestCase):
         )
 
 
+class ComputeHookEndMsTests(unittest.TestCase):
+    """Pure-helper tests for shorts_render.compute_hook_end_ms. The boundary
+    drives the hook-first splice reorder; off-by-a-syllable here means the
+    brand intro lands mid-hook, so each branch (matched / fallback / empty)
+    gets a focused lock. Per _plans/2026-06-28-hook-before-brand-intro.md."""
+
+    def test_aligned_when_every_hook_token_matches_in_order(self):
+        # The end timestamp + a small trailing pad (HOOK_END_PAD_MS) so the
+        # syllable lands before the brand stinger jumps in.
+        ms, source = shorts_render.compute_hook_end_ms(
+            "Eight hundred dollars. Gone.",
+            [
+                {"word": "Eight", "start": 0.0, "end": 0.4},
+                {"word": "hundred", "start": 0.4, "end": 0.9},
+                {"word": "dollars.", "start": 0.9, "end": 1.6},
+                {"word": "Gone.", "start": 1.8, "end": 2.2},
+                {"word": "This", "start": 2.5, "end": 2.7},
+                {"word": "started", "start": 2.7, "end": 3.1},
+            ],
+        )
+        self.assertEqual(source, "aligned")
+        self.assertEqual(ms, 2200 + shorts_render.HOOK_END_PAD_MS)
+
+    def test_aligned_strips_punctuation_and_is_case_insensitive(self):
+        # Hook: "DON'T LOOK NOW". Alignment: lowercase, no apostrophe.
+        # Both normalize to the same token sequence and match.
+        ms, source = shorts_render.compute_hook_end_ms(
+            "DON'T LOOK NOW.",
+            [
+                {"word": "dont", "start": 0.0, "end": 0.5},
+                {"word": "look", "start": 0.5, "end": 0.9},
+                {"word": "now", "start": 0.9, "end": 1.3},
+            ],
+        )
+        self.assertEqual(source, "aligned")
+        self.assertEqual(ms, 1300 + shorts_render.HOOK_END_PAD_MS)
+
+    def test_aligned_ignores_alignment_words_past_the_hook(self):
+        # Hook is 2 tokens; alignment continues into beat 2 ("This started").
+        # Boundary is the second matched word, NOT the last word in alignment.
+        ms, source = shorts_render.compute_hook_end_ms(
+            "Gone forever.",
+            [
+                {"word": "Gone", "start": 0.0, "end": 0.5},
+                {"word": "forever.", "start": 0.5, "end": 1.2},
+                {"word": "This", "start": 1.5, "end": 1.7},
+                {"word": "started", "start": 1.7, "end": 2.1},
+            ],
+        )
+        self.assertEqual(source, "aligned")
+        self.assertEqual(ms, 1200 + shorts_render.HOOK_END_PAD_MS)
+
+    def test_fallback_when_alignment_doesnt_contain_hook_tokens(self):
+        # Drift / homophone — alignment says "ate hundred" instead of
+        # "eight hundred". The matcher refuses partial matches because a
+        # too-early cut clips the hook mid-syllable; fall back to the
+        # script-budget midpoint with the "fallback" source flag.
+        ms, source = shorts_render.compute_hook_end_ms(
+            "Eight hundred dollars gone.",
+            [
+                {"word": "ate", "start": 0.0, "end": 0.3},
+                {"word": "hundred", "start": 0.3, "end": 0.8},
+                {"word": "dollars.", "start": 0.8, "end": 1.4},
+            ],
+        )
+        self.assertEqual(source, "fallback")
+        self.assertEqual(ms, shorts_render.HOOK_FALLBACK_MS)
+
+    def test_fallback_when_alignment_is_empty(self):
+        ms, source = shorts_render.compute_hook_end_ms("Eight hundred gone.", [])
+        self.assertEqual(source, "fallback")
+        self.assertEqual(ms, shorts_render.HOOK_FALLBACK_MS)
+
+    def test_empty_when_hook_is_missing_or_blank(self):
+        # No hook ⇒ no boundary to compute. Returns 0/"empty" so the
+        # dispatcher gates the splice reorder OFF (legacy ordering).
+        for bad in (None, "", "   ", ".", "?!"):
+            ms, source = shorts_render.compute_hook_end_ms(
+                bad,
+                [{"word": "anything", "start": 0.0, "end": 0.5}],
+            )
+            self.assertEqual(ms, 0, f"hook={bad!r} should yield 0")
+            self.assertEqual(source, "empty", f"hook={bad!r} should be empty")
+
+    def test_handles_alignment_word_with_punctuation_tail(self):
+        # Provider returns "hook." trailing the period; tokenizer strips it
+        # so the match still succeeds.
+        ms, source = shorts_render.compute_hook_end_ms(
+            "The hook lands",
+            [
+                {"word": "The", "start": 0.0, "end": 0.2},
+                {"word": "hook.", "start": 0.2, "end": 0.6},
+                {"word": "lands", "start": 0.6, "end": 1.0},
+            ],
+        )
+        self.assertEqual(source, "aligned")
+        self.assertEqual(ms, 1000 + shorts_render.HOOK_END_PAD_MS)
+
+    def test_alignment_entry_without_end_timestamp_falls_back(self):
+        # Malformed alignment row (no `end` key) on the last hook word ⇒
+        # we can't compute a real boundary. Fall back rather than emit a
+        # bogus zero.
+        ms, source = shorts_render.compute_hook_end_ms(
+            "Two words",
+            [
+                {"word": "two", "start": 0.0, "end": 0.3},
+                {"word": "words", "start": 0.3},  # no `end`
+            ],
+        )
+        self.assertEqual(source, "fallback")
+        self.assertEqual(ms, shorts_render.HOOK_FALLBACK_MS)
+
+
 class CacheBustHelperTests(unittest.TestCase):
     """Pure-helper tests for shorts_render._cache_bust. Covered separately so a
     URL-shape edge case can't regress without a targeted failure."""

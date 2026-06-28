@@ -180,6 +180,7 @@ def _ffmpeg_splice_cmd(
     *,
     body_index: int | None = None,
     body_tail_pad_sec: float = 0.0,
+    hook_end_sec: float = 0.0,
 ) -> list[str]:
     """Build the ffmpeg argv that concatenates 2+ inputs with the concat
     filter. All inputs are assumed normalized (same res/fps/codec). Pure.
@@ -197,9 +198,26 @@ def _ffmpeg_splice_cmd(
     index 1 when an intro precedes it; index 0 when not), and only the
     body's streams get the pad — the intro / outro inputs are passed
     through unchanged.
+
+    When `hook_end_sec > 0` AND there is at least one input preceding
+    the body (i.e. an intro is in the chain), the concat reorders to
+    hook-first: [body_hook][intro][body_rest][outro] instead of the
+    legacy [intro][body][outro]. `body_hook` is the body clipped to
+    [0, hook_end_sec] and `body_rest` is the body from `hook_end_sec`
+    to the end — both implemented by listing the body input twice
+    with different `-ss`/`-t` flags so the encoder runs once. Per
+    _plans/2026-06-28-hook-before-brand-intro.md. Mirror of the
+    TypeScript `buildConcatArgv` hook-first path in
+    `video/server/ffmpeg.ts` so a Cloud Run render matches a
+    locally-spliced one.
     """
     if len(inputs) < 2:
         raise ValueError("splice needs at least 2 inputs")
+    hook_first_active = (
+        body_index is not None
+        and hook_end_sec > 0.0
+        and 0 < body_index < len(inputs)
+    )
     pad_active = (
         body_index is not None
         and body_tail_pad_sec > 0.0
@@ -207,6 +225,20 @@ def _ffmpeg_splice_cmd(
         # No point padding the body when nothing follows it (no outro).
         and body_index < len(inputs) - 1
     )
+
+    if hook_first_active:
+        # `body_index` is gated > 0 above; mypy / type-checker hint.
+        assert body_index is not None
+        return _ffmpeg_splice_cmd_hook_first(
+            inputs,
+            output,
+            body_index,
+            hook_end_sec,
+            has_audio,
+            body_tail_pad_sec,
+            pad_active,
+        )
+
     argv: list[str] = ["ffmpeg", "-y"]
     for p in inputs:
         argv += ["-i", str(p)]
@@ -237,6 +269,90 @@ def _ffmpeg_splice_cmd(
                 streams += f"[{i}:a:0]"
     a = 1 if has_audio else 0
     streams += f"concat=n={len(inputs)}:v=1:a={a}[v]"
+    if has_audio:
+        streams += "[a]"
+    argv += ["-filter_complex", streams]
+    argv += ["-map", "[v]"]
+    if has_audio:
+        argv += ["-map", "[a]"]
+    argv += [
+        "-r", str(TARGET_FPS),
+        "-c:v", "libx264",
+        "-preset", H264_PRESET,
+        "-crf", H264_CRF,
+        "-pix_fmt", "yuv420p",
+    ]
+    if has_audio:
+        argv += [
+            "-c:a", "aac",
+            "-b:a", AAC_BITRATE,
+            "-ar", str(TARGET_AUDIO_RATE),
+            "-ac", str(TARGET_AUDIO_CHANNELS),
+        ]
+    argv += ["-movflags", "+faststart", str(output)]
+    return argv
+
+
+def _ffmpeg_splice_cmd_hook_first(
+    inputs: list[Path],
+    output: Path,
+    body_index: int,
+    hook_end_sec: float,
+    has_audio: bool,
+    body_tail_pad_sec: float,
+    pad_active: bool,
+) -> list[str]:
+    """Hook-first variant of the splice argv: lists the body input twice
+    (with different `-ss`/`-t`) so the encoder produces
+    [body_hook][pre-body inputs][body_rest][post-body inputs] in one pass.
+
+    For the canonical caller shape ``inputs=[intro, body, outro]`` with
+    ``body_index=1`` the physical argv inputs become
+    ``[body, intro, body, outro]`` (positions 0, 1, 2, 3) and the concat
+    filter references them in playback order. When `pad_active`, the
+    tail-pad applies to the SECOND body input (body_rest at physical
+    position ``body_index + 1``) so the outro still sees the silence-
+    before-outro contract.
+
+    Pure. Mirrors `video/server/ffmpeg.ts::buildHookFirstArgv`.
+    """
+    argv: list[str] = ["ffmpeg", "-y"]
+    hook_end_s = format(hook_end_sec, "g")
+    body_path = str(inputs[body_index])
+    # Position 0: body_hook.
+    argv += ["-ss", "0", "-t", hook_end_s, "-i", body_path]
+    # Positions 1..body_index: pre-body inputs (typically just the intro).
+    for i in range(body_index):
+        argv += ["-i", str(inputs[i])]
+    # Position body_index + 1: body_rest.
+    argv += ["-ss", hook_end_s, "-i", body_path]
+    # Positions body_index + 2..: post-body inputs (typically the outro).
+    for i in range(body_index + 1, len(inputs)):
+        argv += ["-i", str(inputs[i])]
+
+    rest_physical_index = body_index + 1
+    concat_n = len(inputs) + 1
+
+    streams = ""
+    if pad_active:
+        pad_s = format(body_tail_pad_sec, "g")
+        streams += (
+            f"[{rest_physical_index}:v:0]"
+            f"tpad=stop_mode=clone:stop_duration={pad_s}[bv];"
+        )
+        if has_audio:
+            streams += f"[{rest_physical_index}:a:0]apad=pad_dur={pad_s}[ba];"
+    for i in range(concat_n):
+        if pad_active and i == rest_physical_index:
+            streams += "[bv]"
+            if has_audio:
+                streams += "[ba]"
+        else:
+            streams += f"[{i}:v:0]"
+            if has_audio:
+                streams += f"[{i}:a:0]"
+    a = 1 if has_audio else 0
+    streams += f"concat=n={concat_n}:v=1:a={a}[v]"
     if has_audio:
         streams += "[a]"
     argv += ["-filter_complex", streams]
@@ -519,6 +635,7 @@ def splice(
     context_id: str = "",
     *,
     outro_lead_in_sec: float = 0.0,
+    hook_end_sec: float = 0.0,
 ) -> dict:
     """Glue intro + body + outro into `output_path` with one re-encode pass.
 
@@ -532,6 +649,14 @@ def splice(
     narrator's last word doesn't get stepped on by the outro cue.
     Defaults to 0 for back-compat; callers that want the user-facing
     default (1.5s) read `resolve_outro_lead_in_sec(store.get_setting)`.
+
+    `hook_end_sec` (2026-06-28) opts the splice into hook-first ordering:
+    when > 0 AND an intro is present, the concat reorders to
+    [body_hook][intro][body_rest][outro] so the cold-open spoken hook
+    lands BEFORE the brand stinger. Defaults to 0 for back-compat — every
+    caller that hasn't opted in gets the legacy [intro][body][outro]
+    ordering byte-for-byte. Per
+    _plans/2026-06-28-hook-before-brand-intro.md.
     """
     tag = f"[video splice id={context_id or '?'}]"
     if not body_path.exists():
@@ -565,16 +690,38 @@ def splice(
     # tail-padding before just an intro-then-body chain would extend the
     # output for no reason.
     pad_sec = outro_lead_in_sec if outro_path is not None else 0.0
+    # Hook-first only fires when an intro will sit in front of the body;
+    # gate here so the argv builder's check is redundant defense.
+    hook_sec = hook_end_sec if (intro_path is not None and hook_end_sec > 0) else 0.0
     argv = _ffmpeg_splice_cmd(
-        inputs, output_path, body_index=body_index, body_tail_pad_sec=pad_sec,
+        inputs,
+        output_path,
+        body_index=body_index,
+        body_tail_pad_sec=pad_sec,
+        hook_end_sec=hook_sec,
     )
-    parts_desc = "+".join(
-        ["intro" if intro_path else ""] +
-        ["body"] +
-        (["outro"] if outro_path else [])
-    ).strip("+")
-    if pad_sec > 0:
-        parts_desc = parts_desc.replace("body", f"body+{pad_sec:g}s-pad")
+    # Compose the log description from the spliced parts so the operator can
+    # see at a glance which path each render took. The hook-first reorder
+    # surfaces as `body-hook@2.5s+intro+body-rest+...` so a misconfigured
+    # render is debuggable from the log alone.
+    if hook_sec > 0:
+        rest_label = (
+            f"body-rest+{pad_sec:g}s-pad" if pad_sec > 0 else "body-rest"
+        )
+        parts = (
+            [f"body-hook@{hook_sec:g}s"]
+            + (["intro"] if intro_path else [])
+            + [rest_label]
+            + (["outro"] if outro_path else [])
+        )
+    else:
+        body_label = f"body+{pad_sec:g}s-pad" if pad_sec > 0 else "body"
+        parts = (
+            (["intro"] if intro_path else [])
+            + [body_label]
+            + (["outro"] if outro_path else [])
+        )
+    parts_desc = "+".join(parts)
     print(f"{tag} start parts={parts_desc} inputs={len(inputs)} -> {output_path.name}")
     started = time.time()
     result = _run_ffmpeg(argv, context=f"video splice id={context_id}")

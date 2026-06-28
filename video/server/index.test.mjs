@@ -223,4 +223,76 @@ describe("Cloud Run render service /render segments parsing", () => {
     assert.equal(status, 200);
     assert.deepEqual(lastRenderCall.segments, { intro, outro: null });
   });
+
+  it("passes hookEndSec through when the dispatcher sends a positive number", async () => {
+    // _plans/2026-06-28-hook-before-brand-intro.md. The dispatcher
+    // computes hook_end_ms from the alignment data and POSTs the
+    // seconds-form here so the server stays content-free.
+    lastRenderCall = null;
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        storyId: "envelope",
+        configHash: "abc",
+        inputProps: {},
+        segments: { intro, outro: null, hookEndSec: 2.5 },
+      },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, {
+      intro,
+      outro: null,
+      hookEndSec: 2.5,
+    });
+  });
+
+  it("drops hookEndSec when it's <= 0, non-finite, or wrong type", async () => {
+    // Defense in depth: a stale / malformed dispatcher can't push the
+    // splice into an unsafe shape. Falls through to the legacy ordering.
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    for (const bad of [0, -1, Infinity, NaN, "2.5", null]) {
+      lastRenderCall = null;
+      const { status } = await post("/render", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          storyId: "envelope",
+          configHash: "abc",
+          inputProps: {},
+          segments: { intro, outro: null, hookEndSec: bad },
+        },
+      });
+      assert.equal(status, 200);
+      assert.equal(
+        lastRenderCall.segments.hookEndSec,
+        undefined,
+        `hookEndSec=${JSON.stringify(bad)} must be dropped`,
+      );
+    }
+  });
+
+  it("passes outroLeadInSec through when the dispatcher sends one", async () => {
+    // Pre-existing latent bug: SpliceSegments declared outroLeadInSec
+    // and the renderer used it, but parseSegments dropped it before
+    // 2026-06-28. The hook-first refactor that added hookEndSec parsing
+    // also fixed this gap. Lock the fix in with a regression test.
+    lastRenderCall = null;
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    const outro = "https://storage.googleapis.com/test-bucket/segments/o1.mp4";
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        storyId: "envelope",
+        configHash: "abc",
+        inputProps: {},
+        segments: { intro, outro, outroLeadInSec: 1.5 },
+      },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, {
+      intro,
+      outro,
+      outroLeadInSec: 1.5,
+    });
+  });
 });
