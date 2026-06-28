@@ -564,7 +564,12 @@ function Rail({ title, children }: { title: string; children: React.ReactNode })
       <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 max-w-[1600px] mx-auto mb-3.5">{title}</h2>
       <div className="relative">
         <button onClick={() => scroll(-1)} className="absolute left-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-l absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevL size={22} /></span></button>
-        <div ref={ref} className="flex gap-3.5 overflow-x-auto noscroll px-10 max-w-[1600px] mx-auto" style={{ scrollPaddingLeft: 40 }}>{children}</div>
+        {/* pb-3 reserves room for the cards' -bottom-2 hover underline
+            stroke. Without it, overflow-x: auto forces overflow-y: auto
+            (CSS spec), so the underline 8px below each card triggers a
+            vertical scroll and the hover affordance is hidden until the
+            user scrolls within the rail. */}
+        <div ref={ref} className="flex gap-3.5 overflow-x-auto noscroll px-10 pb-3 max-w-[1600px] mx-auto" style={{ scrollPaddingLeft: 40 }}>{children}</div>
         <button onClick={() => scroll(1)} className="absolute right-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-r absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevR size={22} /></span></button>
       </div>
     </section>
