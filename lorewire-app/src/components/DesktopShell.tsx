@@ -679,16 +679,22 @@ function Top10Row({
         if (!s) return null;
         return (
           <button key={id} onClick={() => onOpen(id)} className="group relative flex items-end min-w-0">
-            {/* Numeral on the LEFT, bottom-aligned with the poster.
-                z-0 so the poster (z-10) covers any pixels where they
-                overlap on the right edge — that's the "slightly hide
-                behind the thumbnail" tuck. */}
+            {/* Numeral on the LEFT, shifted further left via left: -8
+                so it bleeds into the inter-cell gap (visually "more to
+                the side" than flush-left). z-0 so the poster (z-10)
+                covers the right-edge tuck. leading-none + bottom: 6
+                keeps the character box safely INSIDE the cell so
+                font-metric descent doesn't push the Rail into
+                overflow-y: auto scroll. Brighter stroke (2.5px / 0.85
+                alpha) for the "more visible" ask. */}
             <span
-              className="absolute left-0 bottom-0 font-display font-black leading-[.7] select-none pointer-events-none"
+              className="absolute font-display font-black leading-none select-none pointer-events-none"
               style={{
-                fontSize: 100,
+                left: -8,
+                bottom: 6,
+                fontSize: 110,
                 color: "transparent",
-                WebkitTextStroke: "1.75px rgba(255,255,255,.55)",
+                WebkitTextStroke: "2.5px rgba(255,255,255,.85)",
                 zIndex: 0,
               }}
             >
