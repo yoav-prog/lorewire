@@ -1,27 +1,59 @@
 "use client";
 
-// One card per active or recently-finished story job. Collapsed view
-// shows the header + status + latest event line so a 20-row batch
-// renders without becoming a wall of text. Expanded view shows the
-// full event log (capped at MAX_EVENTS_PER_JOB by the data layer) with
-// elapsed-from-start times, mirroring StoryJobEventTimeline's idiom.
+// One card per active or recently-finished story job. Pipeline-aware as
+// of 2026-06-28 — the card shows the overall state plus a per-stage
+// pill row (STORY · SHORT · HERO · PUBLISH) so the admin can see at a
+// glance which stage is the bottleneck. Collapsed body shows the
+// latest event line; expanded body shows the full event log with
+// elapsed-from-start times.
 //
-// Card click target is the title link → per-row review page. The card
-// itself doesn't capture clicks because every actionable element wants
-// its own hit area for accessibility.
+// PUBLISH stage is hidden when it's `skipped` (the common case where
+// the source isn't full_pipeline=1). That keeps the row from carrying
+// a constantly-greyed pill that adds noise without information.
 //
-// Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
+// Plans:
+//   _plans/2026-06-28-live-runs-multistage-pipeline.md (this scope)
+//   _plans/2026-06-28-reddit-sources-live-runs-page.md (PR #129)
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { isJobActive, type ActiveJobView } from "@/lib/story-jobs-live-shared";
+import {
+  isJobActive,
+  type ActiveJobView,
+  type PipelineOverallState,
+  type PipelineStage,
+  type PipelineStageState,
+} from "@/lib/story-jobs-live-shared";
 
-const STATUS_TONE: Record<string, string> = {
+const OVERALL_TONE: Record<PipelineOverallState, string> = {
   queued: "border-accent/40 bg-accent/10 text-accent",
-  processing: "border-accent/40 bg-accent/15 text-accent",
+  running: "border-accent/40 bg-accent/15 text-accent",
   done: "border-cat-ok/40 bg-cat-ok/10 text-cat-ok",
-  error: "border-danger/40 bg-danger/10 text-danger",
+  failed: "border-danger/40 bg-danger/10 text-danger",
   cancelled: "border-cat-entitled/40 bg-cat-entitled/10 text-cat-entitled",
+};
+
+const OVERALL_LABEL: Record<PipelineOverallState, string> = {
+  queued: "Queued",
+  running: "Running",
+  done: "All done",
+  failed: "Failed",
+  cancelled: "Stopped",
+};
+
+const STAGE_TONE: Record<PipelineStageState, string> = {
+  pending:
+    "border-line bg-bg text-muted",
+  running:
+    "border-accent bg-accent/15 text-accent",
+  done:
+    "border-cat-ok/40 bg-cat-ok/10 text-cat-ok",
+  failed:
+    "border-danger/40 bg-danger/10 text-danger",
+  cancelled:
+    "border-cat-entitled/40 bg-cat-entitled/10 text-cat-entitled",
+  skipped:
+    "border-line/40 bg-transparent text-muted/60",
 };
 
 export default function LiveJobCard({ job }: { job: ActiveJobView }) {
@@ -56,10 +88,12 @@ export default function LiveJobCard({ job }: { job: ActiveJobView }) {
           )}
         </div>
         <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
-          <StatusChip status={job.status} />
+          <OverallChip overall={job.overall} />
           <ElapsedChip job={job} />
         </div>
       </header>
+
+      <StagePillRow stages={job.stages} />
 
       <footer className="mt-3 flex items-center justify-between gap-2">
         <button
@@ -84,20 +118,92 @@ export default function LiveJobCard({ job }: { job: ActiveJobView }) {
   );
 }
 
-function StatusChip({ status }: { status: string }) {
-  const tone = STATUS_TONE[status] ?? "border-line text-muted";
+function OverallChip({ overall }: { overall: PipelineOverallState }) {
   return (
     <span
-      className={`inline-block rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${tone}`}
+      className={`inline-block rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${OVERALL_TONE[overall]}`}
     >
-      {status}
+      {OVERALL_LABEL[overall]}
     </span>
+  );
+}
+
+/**
+ * Step indicator showing each pipeline stage as its own pill. The
+ * pills are positional (story → short → hero → publish), with a thin
+ * connector between them for the visual progression. Skipped pills
+ * (typically PUBLISH for non-full_pipeline sources) are dropped from
+ * the rendered row so the card stays clean.
+ */
+function StagePillRow({ stages }: { stages: PipelineStage[] }) {
+  const visible = stages.filter((s) => s.state !== "skipped");
+  if (visible.length === 0) return null;
+  return (
+    <ol
+      aria-label="Pipeline progress"
+      className="mt-3 flex flex-wrap items-center gap-1.5"
+    >
+      {visible.map((stage, i) => (
+        <li key={stage.id} className="flex items-center gap-1.5">
+          <StagePill stage={stage} />
+          {i < visible.length - 1 && (
+            <span
+              aria-hidden="true"
+              className="block h-px w-3 bg-line"
+            />
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function StagePill({ stage }: { stage: PipelineStage }) {
+  const running = stage.state === "running";
+  const tone = STAGE_TONE[stage.state];
+  return (
+    <span
+      title={
+        stage.sub_label
+          ? `${stage.label} — ${stage.state} (${stage.sub_label})`
+          : `${stage.label} — ${stage.state}`
+      }
+      aria-label={`${stage.label}: ${stage.state}`}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${tone}`}
+    >
+      {running && (
+        <span
+          aria-hidden="true"
+          className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent"
+        />
+      )}
+      {!running && (
+        <StageGlyph state={stage.state} />
+      )}
+      <span>{stage.label}</span>
+    </span>
+  );
+}
+
+/** Tiny per-state glyph (check / cross / dot) so the pill state reads
+ *  without relying on colour alone (a11y). */
+function StageGlyph({ state }: { state: PipelineStageState }) {
+  if (state === "done") return <span aria-hidden>✓</span>;
+  if (state === "failed") return <span aria-hidden>✗</span>;
+  if (state === "cancelled") return <span aria-hidden>⏹</span>;
+  // pending / skipped → small dot
+  return (
+    <span
+      aria-hidden
+      className="inline-block h-1.5 w-1.5 rounded-full bg-current opacity-50"
+    />
   );
 }
 
 function ElapsedChip({ job }: { job: ActiveJobView }) {
   // For active jobs: time since requested_at, ticking.
-  // For finished jobs: wall-clock from requested_at to finished_at.
+  // For finished jobs: wall-clock from requested_at to last_settled_at
+  //   (or finished_at as a fallback for legacy story-only paths).
   const active = isJobActive(job);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -107,11 +213,10 @@ function ElapsedChip({ job }: { job: ActiveJobView }) {
   }, [active]);
 
   const start = new Date(job.requested_at).getTime();
-  const end = active
-    ? now
-    : job.finished_at
-      ? new Date(job.finished_at).getTime()
-      : now;
+  const endIso = active
+    ? null
+    : (job.last_settled_at ?? job.finished_at);
+  const end = endIso ? new Date(endIso).getTime() : now;
   const elapsedSec = Math.max(0, Math.floor((end - start) / 1000));
   const label = formatElapsedSeconds(elapsedSec);
   return (

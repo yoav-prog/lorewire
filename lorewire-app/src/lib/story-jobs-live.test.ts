@@ -1,11 +1,21 @@
-// Unit tests for the live runs view data layer.
+// Integration tests for the live runs view data layer.
 //
-// Mirrors the pattern of story-jobs.test.ts: integration-style against the
-// SQLite seam wired up by tests/setup.ts, with helpers to seed
-// reddit_source / story_jobs / story_job_events directly so we can control
-// timestamps and statuses without going through the enqueue path.
+// Mirrors story-jobs.test.ts: hit the real SQLite seam from tests/setup.ts,
+// seed reddit_source / story_jobs / story_job_events / short_renders rows
+// directly so we can control timestamps + per-stage state independent of
+// the worker.
 //
-// Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
+// 2026-06-28 expanded scope: tests pin down the multi-stage pipeline
+// truth model (computePipelineState on the server, surfaced as
+// view.stages / view.overall / view.last_settled_at). The previous
+// single-stage assertions ("status=done within grace → finished")
+// became wrong as soon as we added the short / hero / publish stages
+// — a story_jobs.status='done' row whose short is still rendering is
+// NOT finished, and the dashboard now tells the truth.
+//
+// Plans:
+//   _plans/2026-06-28-live-runs-multistage-pipeline.md (this scope)
+//   _plans/2026-06-28-reddit-sources-live-runs-page.md (PR #129)
 
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -30,6 +40,7 @@ function isoFromNow(offsetMs: number): string {
 
 async function clear(): Promise<void> {
   await run("DELETE FROM story_job_events", []);
+  await run("DELETE FROM short_renders", []);
   await run("DELETE FROM story_jobs", []);
   await run("DELETE FROM reddit_source", []);
 }
@@ -44,7 +55,7 @@ async function seedSource(redditId: string, title = "t"): Promise<void> {
   );
 }
 
-async function seedJob(opts: {
+interface SeedJobOpts {
   id: string;
   redditId: string;
   status: string;
@@ -54,12 +65,19 @@ async function seedJob(opts: {
   progress?: number | null;
   error?: string | null;
   storyId?: string | null;
-}): Promise<void> {
+  withMedia?: number;
+  fullPipeline?: number;
+  finisherStatus?: string | null;
+  autoPublishStatus?: string | null;
+}
+
+async function seedJob(opts: SeedJobOpts): Promise<void> {
   await run(
     "INSERT INTO story_jobs " +
       "(id, reddit_id, status, progress, error, story_id, with_media, " +
-      " requested_by, requested_at, started_at, finished_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, 1, NULL, ?, ?, ?)",
+      " requested_by, requested_at, started_at, finished_at, full_pipeline, " +
+      " auto_publish_status, finisher_status) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
     [
       opts.id,
       opts.redditId,
@@ -67,6 +85,41 @@ async function seedJob(opts: {
       opts.progress ?? 0,
       opts.error ?? null,
       opts.storyId ?? null,
+      opts.withMedia ?? 1,
+      opts.requestedAt,
+      opts.startedAt ?? null,
+      opts.finishedAt ?? null,
+      opts.fullPipeline ?? 0,
+      opts.autoPublishStatus ?? null,
+      opts.finisherStatus ?? null,
+    ],
+  );
+}
+
+interface SeedShortOpts {
+  id: string;
+  storyId: string;
+  status: string;
+  phase?: string | null;
+  requestedAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  outputUrl?: string | null;
+}
+
+async function seedShort(opts: SeedShortOpts): Promise<void> {
+  await run(
+    "INSERT INTO short_renders " +
+      "(id, story_id, config_hash, narration_style, length_preset, status, phase, " +
+      " progress, error, output_url, props, requested_by, requested_at, started_at, finished_at) " +
+      "VALUES (?, ?, ?, 'suspense', 'standard', ?, ?, 0, NULL, ?, NULL, NULL, ?, ?, ?)",
+    [
+      opts.id,
+      opts.storyId,
+      `cfg-${opts.id}`,
+      opts.status,
+      opts.phase ?? null,
+      opts.outputUrl ?? null,
       opts.requestedAt,
       opts.startedAt ?? null,
       opts.finishedAt ?? null,
@@ -103,13 +156,13 @@ async function seedEvent(opts: {
 
 beforeEach(clear);
 
-describe("listActiveJobsWithEvents", () => {
+describe("listActiveJobsWithEvents — basics", () => {
   it("returns an empty array when nothing is in flight", async () => {
     const result = await listActiveJobsWithEvents({ now: NOW });
     expect(result).toEqual([]);
   });
 
-  it("returns queued and processing jobs as active", async () => {
+  it("surfaces queued and processing jobs as overall='queued'/'running'", async () => {
     await seedSource("a", "Title A");
     await seedSource("b", "Title B");
     await seedJob({
@@ -127,56 +180,185 @@ describe("listActiveJobsWithEvents", () => {
     });
 
     const result = await listActiveJobsWithEvents({ now: NOW });
-
     expect(result).toHaveLength(2);
-    // Ordered by requested_at DESC: a (newer) first.
     expect(result[0]).toMatchObject({
       job_id: "job-a",
       reddit_id: "a",
-      status: "queued",
       title: "Title A",
       subreddit: "AITAH",
+      overall: "queued",
     });
     expect(result[1]).toMatchObject({
       job_id: "job-b",
-      reddit_id: "b",
-      status: "processing",
+      overall: "running",
     });
     expect(result.every((j) => isJobActive(j))).toBe(true);
   });
+});
 
-  it("includes finished jobs within the grace window", async () => {
+describe("listActiveJobsWithEvents — multi-stage in-flight", () => {
+  it("keeps the row active when story is done but short is rendering", async () => {
+    // This is the lie PR #138 fixes: previously the row showed DONE
+    // because story_jobs.status='done', even though the short hadn't
+    // rendered. With the multi-stage view, the SHORT stage is RUNNING
+    // and the overall state is 'running'.
     await seedSource("a");
     await seedJob({
       id: "job-a",
       redditId: "a",
       status: "done",
+      storyId: "story-a",
       requestedAt: isoFromNow(-10 * 60 * 1000),
-      finishedAt: isoFromNow(-5 * 60 * 1000), // 5 min ago, inside 15min window
+      finishedAt: isoFromNow(-5 * 60 * 1000),
+    });
+    await seedShort({
+      id: "short-a",
+      storyId: "story-a",
+      status: "rendering",
+      requestedAt: isoFromNow(-4 * 60 * 1000),
+      startedAt: isoFromNow(-3 * 60 * 1000),
+    });
+
+    const [view] = await listActiveJobsWithEvents({ now: NOW });
+    expect(view.overall).toBe("running");
+    expect(isJobActive(view)).toBe(true);
+    const states = Object.fromEntries(
+      view.stages.map((s) => [s.id, s.state]),
+    );
+    expect(states.story).toBe("done");
+    expect(states.short).toBe("running");
+    expect(states.hero).toBe("pending");
+  });
+
+  it("keeps the row active when finisher is pending after short done", async () => {
+    await seedSource("a");
+    await seedJob({
+      id: "job-a",
+      redditId: "a",
+      status: "done",
+      storyId: "story-a",
+      requestedAt: isoFromNow(-10 * 60 * 1000),
+      finishedAt: isoFromNow(-7 * 60 * 1000),
+      finisherStatus: "pending",
+    });
+    await seedShort({
+      id: "short-a",
+      storyId: "story-a",
+      status: "done",
+      requestedAt: isoFromNow(-6 * 60 * 1000),
+      finishedAt: isoFromNow(-4 * 60 * 1000),
+      outputUrl: "https://example.com/short.mp4",
+    });
+
+    const [view] = await listActiveJobsWithEvents({ now: NOW });
+    expect(view.overall).toBe("running");
+    expect(view.stages.find((s) => s.id === "hero")?.state).toBe("pending");
+  });
+
+  it("keeps a full_pipeline row active until auto_publish settles", async () => {
+    await seedSource("a");
+    await seedJob({
+      id: "job-a",
+      redditId: "a",
+      status: "done",
+      storyId: "story-a",
+      fullPipeline: 1,
+      finisherStatus: "done",
+      autoPublishStatus: "pending",
+      requestedAt: isoFromNow(-12 * 60 * 1000),
+      finishedAt: isoFromNow(-10 * 60 * 1000),
+    });
+    await seedShort({
+      id: "short-a",
+      storyId: "story-a",
+      status: "done",
+      requestedAt: isoFromNow(-9 * 60 * 1000),
+      finishedAt: isoFromNow(-7 * 60 * 1000),
+      outputUrl: "https://example.com/short.mp4",
+    });
+
+    const [view] = await listActiveJobsWithEvents({ now: NOW });
+    expect(view.overall).toBe("running");
+    expect(view.stages.find((s) => s.id === "publish")?.state).toBe("running");
+  });
+});
+
+describe("listActiveJobsWithEvents — grace window applies to LAST stage", () => {
+  it("includes a fully-done job within 15 min of the latest stage settling", async () => {
+    // Story done 10 min ago, short done 5 min ago, finisher done.
+    // last_settled_at = short.finished_at (5 min ago) → within grace.
+    await seedSource("a");
+    await seedJob({
+      id: "job-a",
+      redditId: "a",
+      status: "done",
+      storyId: "story-a",
+      finisherStatus: "done",
+      requestedAt: isoFromNow(-15 * 60 * 1000),
+      finishedAt: isoFromNow(-10 * 60 * 1000),
+    });
+    await seedShort({
+      id: "short-a",
+      storyId: "story-a",
+      status: "done",
+      requestedAt: isoFromNow(-9 * 60 * 1000),
+      finishedAt: isoFromNow(-5 * 60 * 1000),
+      outputUrl: "https://example.com/short.mp4",
     });
 
     const result = await listActiveJobsWithEvents({ now: NOW });
-
     expect(result).toHaveLength(1);
-    expect(result[0].status).toBe("done");
+    expect(result[0].overall).toBe("done");
     expect(isJobFinished(result[0])).toBe(true);
   });
 
-  it("excludes finished jobs older than the grace window", async () => {
+  it("excludes a fully-done job whose last stage settled past the grace window", async () => {
     await seedSource("a");
     await seedJob({
       id: "job-a",
       redditId: "a",
       status: "done",
+      storyId: "story-a",
+      finisherStatus: "done",
       requestedAt: isoFromNow(-30 * 60 * 1000),
-      finishedAt: isoFromNow(-20 * 60 * 1000), // 20 min ago, outside 15min
+      finishedAt: isoFromNow(-25 * 60 * 1000),
+    });
+    await seedShort({
+      id: "short-a",
+      storyId: "story-a",
+      status: "done",
+      requestedAt: isoFromNow(-24 * 60 * 1000),
+      finishedAt: isoFromNow(-20 * 60 * 1000),
+      outputUrl: "https://example.com/short.mp4",
     });
 
     const result = await listActiveJobsWithEvents({ now: NOW });
     expect(result).toEqual([]);
   });
 
-  it("includes error and cancelled jobs in the grace window", async () => {
+  it("with_media=0: legacy story-only job settles immediately on story done", async () => {
+    await seedSource("a");
+    await seedJob({
+      id: "job-a",
+      redditId: "a",
+      status: "done",
+      storyId: "story-a",
+      withMedia: 0,
+      requestedAt: isoFromNow(-10 * 60 * 1000),
+      finishedAt: isoFromNow(-5 * 60 * 1000),
+    });
+
+    const [view] = await listActiveJobsWithEvents({ now: NOW });
+    expect(view.overall).toBe("done");
+    expect(isJobFinished(view)).toBe(true);
+    const states = Object.fromEntries(
+      view.stages.map((s) => [s.id, s.state]),
+    );
+    expect(states.short).toBe("skipped");
+    expect(states.hero).toBe("skipped");
+  });
+
+  it("error and cancelled jobs surface as overall='failed'/'cancelled'", async () => {
     await seedSource("a");
     await seedSource("b");
     await seedJob({
@@ -196,12 +378,17 @@ describe("listActiveJobsWithEvents", () => {
     });
 
     const result = await listActiveJobsWithEvents({ now: NOW });
-    const statuses = result.map((j) => j.status).sort();
-    expect(statuses).toEqual(["cancelled", "error"]);
-    const errJob = result.find((j) => j.status === "error");
+    const byOverall = Object.fromEntries(
+      result.map((r) => [r.job_id, r.overall]),
+    );
+    expect(byOverall["job-a"]).toBe("failed");
+    expect(byOverall["job-b"]).toBe("cancelled");
+    const errJob = result.find((j) => j.job_id === "job-a");
     expect(errJob?.error).toBe("LLM 500");
   });
+});
 
+describe("listActiveJobsWithEvents — events + caps", () => {
   it("attaches events oldest-first per job", async () => {
     await seedSource("a");
     await seedJob({
@@ -251,9 +438,6 @@ describe("listActiveJobsWithEvents", () => {
       status: "processing",
       requestedAt: isoFromNow(-1000),
     });
-    // Seed MAX_EVENTS_PER_JOB + 10 events spread across a window. The
-    // oldest 10 should drop; the most recent MAX should survive in
-    // chronological order.
     const total = MAX_EVENTS_PER_JOB + 10;
     for (let i = 0; i < total; i++) {
       await seedEvent({
@@ -267,15 +451,11 @@ describe("listActiveJobsWithEvents", () => {
 
     const result = await listActiveJobsWithEvents({ now: NOW });
     expect(result[0].events).toHaveLength(MAX_EVENTS_PER_JOB);
-    // First surviving event is phase-10 (the first 10 dropped); last is
-    // phase-(total-1).
     expect(result[0].events[0].event).toBe("phase-10");
     expect(result[0].events.at(-1)?.event).toBe(`phase-${total - 1}`);
   });
 
   it("caps total active jobs at MAX_ACTIVE_JOBS", async () => {
-    // Seed MAX + 5 active queued jobs. Only MAX should come back. The
-    // ORDER BY requested_at DESC means the newest survive.
     for (let i = 0; i < MAX_ACTIVE_JOBS + 5; i++) {
       const rid = `r-${String(i).padStart(3, "0")}`;
       await seedSource(rid);
@@ -289,13 +469,46 @@ describe("listActiveJobsWithEvents", () => {
 
     const result = await listActiveJobsWithEvents({ now: NOW });
     expect(result).toHaveLength(MAX_ACTIVE_JOBS);
-    // Newest (smallest negative offset) first.
     expect(result[0].job_id).toBe("job-0");
   });
 
-  it("survives a missing reddit_source row (defensive LEFT JOIN)", async () => {
-    // Job row references a reddit_id that doesn't exist in reddit_source.
-    // Shouldn't happen in practice but the LEFT JOIN keeps the row.
+  it("returns events as an empty array when no events are recorded", async () => {
+    await seedSource("a");
+    await seedJob({
+      id: "job-a",
+      redditId: "a",
+      status: "queued",
+      requestedAt: isoFromNow(-1000),
+    });
+
+    const result = await listActiveJobsWithEvents({ now: NOW });
+    expect(result[0].events).toEqual([]);
+  });
+
+  it("normalizes unknown event levels to 'info'", async () => {
+    await seedSource("a");
+    await seedJob({
+      id: "job-a",
+      redditId: "a",
+      status: "processing",
+      requestedAt: isoFromNow(-1000),
+    });
+    await seedEvent({
+      id: "ev-1",
+      jobId: "job-a",
+      redditId: "a",
+      ts: isoFromNow(-500),
+      event: "noisy",
+      level: "debug",
+    });
+
+    const result = await listActiveJobsWithEvents({ now: NOW });
+    expect(result[0].events[0].level).toBe("info");
+  });
+});
+
+describe("listActiveJobsWithEvents — defensive paths", () => {
+  it("survives a missing reddit_source row (LEFT JOIN)", async () => {
     await seedJob({
       id: "job-orphan",
       redditId: "ghost",
@@ -315,18 +528,18 @@ describe("listActiveJobsWithEvents", () => {
       id: "job-a",
       redditId: "a",
       status: "done",
+      storyId: "story-a",
+      withMedia: 0,
       requestedAt: isoFromNow(-10 * 60 * 1000),
-      finishedAt: isoFromNow(-2 * 60 * 1000), // 2 min ago
+      finishedAt: isoFromNow(-2 * 60 * 1000),
     });
 
-    // 1-minute grace excludes the 2-min-old finished job...
     const tight = await listActiveJobsWithEvents({
       now: NOW,
       graceMs: 1 * 60 * 1000,
     });
     expect(tight).toEqual([]);
 
-    // ...30-minute grace includes it.
     const loose = await listActiveJobsWithEvents({
       now: NOW,
       graceMs: 30 * 60 * 1000,
@@ -334,33 +547,7 @@ describe("listActiveJobsWithEvents", () => {
     expect(loose).toHaveLength(1);
   });
 
-  it("normalizes unknown event levels to 'info'", async () => {
-    await seedSource("a");
-    await seedJob({
-      id: "job-a",
-      redditId: "a",
-      status: "processing",
-      requestedAt: isoFromNow(-1000),
-    });
-    await seedEvent({
-      id: "ev-1",
-      jobId: "job-a",
-      redditId: "a",
-      ts: isoFromNow(-500),
-      event: "noisy",
-      level: "debug", // not in the enum
-    });
-
-    const result = await listActiveJobsWithEvents({ now: NOW });
-    expect(result[0].events[0].level).toBe("info");
-  });
-
-  it("exposes the default grace window as 15 minutes", () => {
-    expect(FINISHED_GRACE_MS).toBe(15 * 60 * 1000);
-  });
-
   it("queries against actual reddit_source rows in the join", async () => {
-    // Sanity check: a sourced row + a sourceless row in the same response.
     await seedSource("good", "Good Title");
     await seedJob({
       id: "job-good",
@@ -383,67 +570,13 @@ describe("listActiveJobsWithEvents", () => {
     expect(orphan?.title).toBeNull();
   });
 
-  it("returns events as an empty array when no events are recorded", async () => {
-    await seedSource("a");
-    await seedJob({
-      id: "job-a",
-      redditId: "a",
-      status: "queued",
-      requestedAt: isoFromNow(-1000),
-    });
-
-    const result = await listActiveJobsWithEvents({ now: NOW });
-    expect(result[0].events).toEqual([]);
+  it("exposes the default grace window as 15 minutes", () => {
+    expect(FINISHED_GRACE_MS).toBe(15 * 60 * 1000);
   });
 });
 
-describe("isJobActive / isJobFinished", () => {
-  it("recognises queued and processing as active", () => {
-    expect(
-      isJobActive({
-        job_id: "j",
-        reddit_id: "r",
-        status: "queued",
-        progress: null,
-        error: null,
-        story_id: null,
-        requested_at: NOW.toISOString(),
-        started_at: null,
-        finished_at: null,
-        title: null,
-        subreddit: null,
-        events: [],
-      }),
-    ).toBe(true);
-  });
-
-  it("recognises done / error / cancelled as finished", () => {
-    for (const status of ["done", "error", "cancelled"]) {
-      expect(
-        isJobFinished({
-          job_id: "j",
-          reddit_id: "r",
-          status,
-          progress: null,
-          error: null,
-          story_id: null,
-          requested_at: NOW.toISOString(),
-          started_at: null,
-          finished_at: NOW.toISOString(),
-          title: null,
-          subreddit: null,
-          events: [],
-        }),
-      ).toBe(true);
-    }
-  });
-});
-
-describe("listActiveJobsWithEvents cross-driver assumptions", () => {
-  // The SQL uses only portable constructs. This test is here so a future
-  // edit that adds DISTINCT ON or a window function gets caught — the
-  // assertions verify the shape we promise the client, not the SQL.
-  it("returns the documented row shape (no extra keys, no missing keys)", async () => {
+describe("listActiveJobsWithEvents — shape + ordering contract", () => {
+  it("returns the documented row shape (pipeline-aware keys)", async () => {
     await seedSource("a");
     await seedJob({
       id: "job-a",
@@ -457,18 +590,26 @@ describe("listActiveJobsWithEvents cross-driver assumptions", () => {
     const keys = Object.keys(result[0]).sort();
     expect(keys).toEqual(
       [
+        "auto_publish_status",
         "error",
         "events",
         "finished_at",
+        "full_pipeline",
+        "finisher_status",
         "job_id",
+        "last_settled_at",
+        "overall",
         "progress",
         "reddit_id",
         "requested_at",
+        "short",
+        "stages",
         "started_at",
         "status",
         "story_id",
         "subreddit",
         "title",
+        "with_media",
       ].sort(),
     );
   });
@@ -487,6 +628,8 @@ describe("listActiveJobsWithEvents cross-driver assumptions", () => {
       id: "finished-newer",
       redditId: "b",
       status: "done",
+      storyId: "story-b",
+      withMedia: 0,
       requestedAt: isoFromNow(-2000),
       finishedAt: isoFromNow(-100),
     });
@@ -506,7 +649,6 @@ describe("listActiveJobsWithEvents cross-driver assumptions", () => {
   });
 
   it("data sanity: no rows leak from prior tests", async () => {
-    // beforeEach cleared the tables; verify direct SELECTs see no rows.
     const jobs = await all<{ id: string }>("SELECT id FROM story_jobs", []);
     expect(jobs).toEqual([]);
     const events = await all<{ id: string }>(
@@ -514,5 +656,10 @@ describe("listActiveJobsWithEvents cross-driver assumptions", () => {
       [],
     );
     expect(events).toEqual([]);
+    const shorts = await all<{ id: string }>(
+      "SELECT id FROM short_renders",
+      [],
+    );
+    expect(shorts).toEqual([]);
   });
 });

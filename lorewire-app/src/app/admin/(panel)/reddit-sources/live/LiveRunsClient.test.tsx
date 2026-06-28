@@ -11,7 +11,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
-import type { ActiveJobView } from "@/lib/story-jobs-live-shared";
+import type {
+  ActiveJobView,
+  PipelineOverallState,
+  PipelineStage,
+} from "@/lib/story-jobs-live-shared";
 
 // The component pulls in a Server Action; stub it so the test doesn't
 // need a server runtime. The polling tick never fires from SSR anyway,
@@ -23,6 +27,13 @@ vi.mock("@/app/admin/actions", () => ({
 import LiveRunsClient from "./LiveRunsClient";
 
 const NOW = "2026-06-28T12:00:00.000Z";
+
+const DEFAULT_STAGES: PipelineStage[] = [
+  { id: "story", state: "pending", label: "Story" },
+  { id: "short", state: "pending", label: "Short" },
+  { id: "hero", state: "pending", label: "Hero & thumb" },
+  { id: "publish", state: "skipped", label: "Publish" },
+];
 
 function makeJob(over: Partial<ActiveJobView> = {}): ActiveJobView {
   return {
@@ -37,6 +48,14 @@ function makeJob(over: Partial<ActiveJobView> = {}): ActiveJobView {
     finished_at: null,
     title: "A real reddit title",
     subreddit: "AITAH",
+    with_media: 1,
+    full_pipeline: 0,
+    finisher_status: null,
+    auto_publish_status: null,
+    short: null,
+    stages: DEFAULT_STAGES,
+    overall: "queued" as PipelineOverallState,
+    last_settled_at: null,
     events: [],
     ...over,
   };
@@ -63,12 +82,18 @@ describe("LiveRunsClient", () => {
     const html = renderToString(
       <LiveRunsClient
         initialJobs={[
-          makeJob({ job_id: "j-a", reddit_id: "r-a", title: "Aaa" }),
+          makeJob({
+            job_id: "j-a",
+            reddit_id: "r-a",
+            title: "Aaa",
+            overall: "queued",
+          }),
           makeJob({
             job_id: "j-b",
             reddit_id: "r-b",
             title: "Bbb",
             status: "processing",
+            overall: "running",
           }),
         ]}
         hideFinished={false}
@@ -89,12 +114,14 @@ describe("LiveRunsClient", () => {
             reddit_id: "r-active",
             title: "Active job",
             status: "processing",
+            overall: "running",
           }),
           makeJob({
             job_id: "done",
             reddit_id: "r-done",
             title: "Done job",
             status: "done",
+            overall: "done",
             finished_at: NOW,
           }),
         ]}
@@ -114,6 +141,7 @@ describe("LiveRunsClient", () => {
             reddit_id: "r-done",
             title: "Done job",
             status: "done",
+            overall: "done",
             finished_at: NOW,
           }),
         ]}
@@ -127,20 +155,29 @@ describe("LiveRunsClient", () => {
     const html = renderToString(
       <LiveRunsClient
         initialJobs={[
-          makeJob({ job_id: "a", reddit_id: "ra", status: "queued" }),
-          makeJob({ job_id: "b", reddit_id: "rb", status: "processing" }),
+          makeJob({
+            job_id: "a",
+            reddit_id: "ra",
+            status: "queued",
+            overall: "queued",
+          }),
+          makeJob({
+            job_id: "b",
+            reddit_id: "rb",
+            status: "processing",
+            overall: "running",
+          }),
           makeJob({
             job_id: "c",
             reddit_id: "rc",
             status: "done",
+            overall: "done",
             finished_at: NOW,
           }),
         ]}
         hideFinished={false}
       />,
     );
-    // "<strong>2</strong> active" — the structure that visibly groups
-    // the running jobs apart from the recently-settled ones.
     expect(html).toContain("<strong>2</strong> active");
     expect(html).toContain("<strong>1</strong> recently finished");
   });
@@ -148,7 +185,7 @@ describe("LiveRunsClient", () => {
   it("does not render the recently-finished counter when hideFinished is true", () => {
     const html = renderToString(
       <LiveRunsClient
-        initialJobs={[makeJob({ status: "queued" })]}
+        initialJobs={[makeJob({ status: "queued", overall: "queued" })]}
         hideFinished={true}
       />,
     );
