@@ -634,39 +634,53 @@ function formatVoteCount(n: number): string {
   return `${n} votes`;
 }
 
-function Top10Row({
+// Top 10 cell — one item inside the Top 10 row's grid-cols-10 layout.
+// Sized off the grid column (% of cell width + viewport-scaled clamp on
+// the numeral) so 10 cells always fit the row without horizontal
+// scrolling. Numeral fixed at 42% of cell width keeps all 10 posters the
+// same size — without that, item 10's wider "10" would squeeze its
+// poster narrower than item 1's "1".
+function Top10Cell({
+  story,
+  rank,
   onOpen,
-  ids,
-  resolveStory,
 }: {
+  story: Story;
+  rank: number;
   onOpen: OpenFn;
-  ids: string[];
-  resolveStory: (id: string) => Story | null;
 }) {
-  // resolveStory checks the live catalog + static STORIES so a freshly-
-  // published id (in the DB but not yet baked into published.ts) still
-  // renders. Returning null on a miss filters the entry out so a stale
-  // curation row can't crash the rail.
   return (
-    <>
-      {ids.slice(0, 10).map((id, i) => {
-        const s = resolveStory(id);
-        if (!s) return null;
-        return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative shrink-0 flex items-end">
-            <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "1.75px rgba(255,255,255,.34)" }}>{i + 1}</span>
-            <div className="shrink-0 -ml-2" style={{ width: 100, height: 144, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}><PosterArt story={s} /></div>
-            {/* Slice H underline-stroke hover. Inset to the poster
-                bounds (the giant number doesn't get an underline
-                drawn under it — it's the poster that's the link). */}
-            <span
-              className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-              style={{ width: 100, transitionDuration: "180ms" }}
-            />
-          </button>
-        );
-      })}
-    </>
+    <button onClick={() => onOpen(story.id)} className="group relative flex items-end min-w-0">
+      <div className="shrink-0 flex items-end justify-end" style={{ width: "42%" }}>
+        <span
+          className="font-display font-black leading-[.7] select-none"
+          style={{
+            fontSize: "clamp(56px, 5vw, 200px)",
+            color: "transparent",
+            WebkitTextStroke: "clamp(1.5px, 0.13vw, 2.5px) rgba(255,255,255,.34)",
+          }}
+        >
+          {rank}
+        </span>
+      </div>
+      <div
+        className="relative flex-1 min-w-0 -ml-1"
+        style={{
+          aspectRatio: "164 / 236",
+          boxShadow: "0 8px 26px rgba(0,0,0,.4)",
+          borderRadius: 12,
+        }}
+      >
+        <PosterArt story={story} />
+      </div>
+      {/* Slice H underline-stroke hover — inset to the poster bounds
+          (the giant number doesn't get an underline drawn under it —
+          it's the poster that's the link). */}
+      <span
+        className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+        style={{ width: "58%", transitionDuration: "180ms" }}
+      />
+    </button>
   );
 }
 
@@ -1810,9 +1824,22 @@ function HomePage({
           </Rail>
         )}
         {top10Ids.length > 0 && (
-          <Rail title="Top 10 Today">
-            <Top10Row onOpen={onOpen} ids={top10Ids} resolveStory={resolveStory} />
-          </Rail>
+          // Top 10 bypasses the standard Rail (which is capped at
+          // max-w-[1600px] and falls back to horizontal scroll when
+          // 10 of its wider, numeral-adorned cards don't fit). Inline
+          // grid-cols-10 spans the full viewport so all 10 cells are
+          // always visible without inner scrolling — the row resizes
+          // with the viewport instead of clipping.
+          <section className="mt-11">
+            <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 max-w-[1600px] mx-auto mb-3.5">Top 10 Today</h2>
+            <div className="grid grid-cols-10 gap-2 px-4">
+              {top10Ids.slice(0, 10).map((id, i) => {
+                const s = resolveStory(id);
+                if (!s) return null;
+                return <Top10Cell key={id} story={s} rank={i + 1} onOpen={onOpen} />;
+              })}
+            </div>
+          </section>
         )}
         {/* 2026-06-26 slice E of _plans/2026-06-26-homepage-redesign-v1.md:
             when rotation is on (rotatingCategoryToday set), the homepage
