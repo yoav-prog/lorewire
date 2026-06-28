@@ -142,7 +142,7 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 // rectangular-streamer-grid; callers that need a different radius
 // pass `rounded` explicitly (Search result tiles still opt out
 // with `rounded={0}`).
-function PosterArt({ story, rounded = 12, showTitle = true, kicker = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean }) {
+function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; vig?: boolean }) {
   const c = CAT[story.cat];
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
@@ -165,7 +165,11 @@ function PosterArt({ story, rounded = 12, showTitle = true, kicker = true }: { s
       <div className="absolute inset-0" style={{ background: showImage ? "linear-gradient(180deg, rgba(0,0,0,0) 35%, rgba(0,0,0,.55) 100%)" : "radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)" }}></div>
       {!showImage && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
       {!showImage && <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize: 200, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
-      <div className="absolute inset-0 poster-vig"></div>
+      {/* vig adds the heavy bottom-up dark gradient that gives CSS titles
+          their contrast. Callers that render no CSS title (Top 10
+          thumbnails, where the title is baked into the artwork) opt
+          out with vig={false} so the baked title stays bright. */}
+      {vig && <div className="absolute inset-0 poster-vig"></div>}
       {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
       {story.dur && (
         <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
@@ -658,27 +662,26 @@ function Top10Row({
   // (max-w-[1600px] minus px-10). Each ~144px cell is a poster
   // (aspectRatio 164/236, ~144x208) with the giant outlined numeral
   // overlaid on the bottom-left corner (Netflix-mobile-style ranking
-  // badge), and a compact title caption rendered BELOW the poster.
-  // The poster's CSS title overlay is suppressed (showTitle={false})
-  // because at this thumbnail size it would clip mid-word and fight
-  // the numeral for the bottom-left real estate — the caption-below
-  // replaces it with line-clamp-2 + a fixed minHeight so 1-line and
-  // 2-line titles don't stagger neighbouring cells. Baked titles in
-  // the artwork remain visible. The standard Rail's overflow-x-auto
-  // is silently inert because the grid never overflows; chevrons stay
-  // for visual parity with the other rails.
+  // badge). No caption below the poster — at this thumbnail size the
+  // artwork carries the baked-in title and a separate caption is
+  // redundant. PosterArt is rendered with vig={false} so the heavy
+  // bottom-up vignette doesn't dim the baked title; showTitle={false}
+  // keeps the CSS title overlay off so it doesn't fight the numeral.
+  // The standard Rail's overflow-x-auto is silently inert because the
+  // grid never overflows; chevrons stay for visual parity with the
+  // other rails.
   return (
     <div className="grid grid-cols-10 gap-2 w-full">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative flex flex-col gap-2 min-w-0 text-left">
+          <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
             <div
               className="relative w-full"
               style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
             >
-              <PosterArt story={s} showTitle={false} />
+              <PosterArt story={s} showTitle={false} vig={false} />
               {/* Numeral overlay — bottom-left of the poster artwork,
                   rendered above (z-5) the artwork. White stroke + a
                   soft dark text-shadow so it stays legible over both
@@ -698,14 +701,7 @@ function Top10Row({
                 {i + 1}
               </span>
             </div>
-            <h3
-              className="font-display font-extrabold uppercase tracking-tightest leading-[1.05] text-ink line-clamp-2"
-              style={{ fontSize: 12, minHeight: 26 }}
-            >
-              {s.title}
-            </h3>
-            {/* Slice H underline-stroke hover. Sits below the title
-                caption now that the caption hangs below the poster. */}
+            {/* Slice H underline-stroke hover. */}
             <span
               className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
               style={{ transitionDuration: "180ms" }}
