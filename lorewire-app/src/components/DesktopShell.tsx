@@ -7,6 +7,11 @@ import {
   isPublishedStory,
   type Story,
 } from "@/lib/stories";
+import {
+  CategoryFilterChips,
+  filterStoriesByCategory,
+  useCategoryFilter,
+} from "@/components/CategoryFilterChips";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import WiresDesktop from "@/components/wires/WiresDesktop";
 // Stories rail + viewer intentionally NOT mounted on desktop — final
@@ -582,7 +587,7 @@ function Rail({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
-function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number; landscape?: boolean; voteCount?: number }) {
+function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number | string; progress?: number; landscape?: boolean; voteCount?: number }) {
   const { getRating } = useStoryRatings();
   // 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
   // hover treatment swaps from Netflix's scale-pop (transform:
@@ -594,7 +599,7 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
   // 180ms ease-out matches the spec; group-focus-visible mirrors the
   // hover so keyboard navigation gets the same affordance.
   return (
-    <button onClick={() => onOpen(story.id)} className="group relative shrink-0" style={{ width: w }}>
+    <button onClick={() => onOpen(story.id)} className="group relative shrink-0" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
       <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}>
         {/* showTitle={false} across every rail: every cinematic hero
             already has the title baked into the artwork, so the white
@@ -1924,6 +1929,8 @@ function GridPage({
   onOpen,
   resolveStory,
   headerExtras,
+  belowHeader,
+  emptyMessage,
 }: {
   title: string;
   sub?: string;
@@ -1934,6 +1941,13 @@ function GridPage({
    *  page to surface the sign-in chip as the persistent "save across
    *  devices" entry point. */
   headerExtras?: React.ReactNode;
+  /** Optional slot rendered as a full-width row between the header and
+   *  the grid — used on Browse for the category filter chip row. */
+  belowHeader?: React.ReactNode;
+  /** Override copy for the empty state. Browse uses this to explain
+   *  that a category filter just hid every card, vs the default
+   *  "Nothing here yet." which reads as "the catalog is empty." */
+  emptyMessage?: string;
 }) {
   // Resolve through the live+sample catalog, NOT byId — saved ids can be
   // real shorts the Wires feed saved that aren't in the baked sample
@@ -1949,17 +1963,79 @@ function GridPage({
         </div>
         {headerExtras ? <div className="shrink-0">{headerExtras}</div> : null}
       </div>
+      {belowHeader}
+      {/* aspect-ratio 3/4 mirrors the cinematic hero artwork, which is
+          generated at 3:4 portrait (pipeline/media.py line 524). Before
+          this row used a fixed 296px height that was almost square at
+          the 5-col desktop width, and object-cover cropped the baked
+          title at the bottom of every poster. */}
       <div className="grid grid-cols-5 gap-5 mt-9">
-        {items.map((s) => <div key={s.id} style={{ height: 296 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={296} /></div>)}
+        {items.map((s) => (
+          <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
+            <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+          </div>
+        ))}
       </div>
-      {items.length === 0 && <p className="font-body text-muted mt-12">Nothing here yet.</p>}
+      {items.length === 0 && <p className="font-body text-muted mt-12">{emptyMessage ?? "Nothing here yet."}</p>}
     </div>
   );
 }
 
-// Browse / Search list only stories the pipeline has actually produced
-// real content for (hero, short render, narration, or article body).
-// The bare STORIES catalog includes 16 sample placeholders; without this
+// Browse advertises the public catalog of real stories. The bare
+// STORIES array carries 16 sample placeholders the design was built
+// against; only entries with actual produced content (videoUrl /
+// heroImage / audioUrl / body) belong in the grid. Source is the
+// merged catalog so freshly-published live rows surface even before
+// src/data/published.ts is rebaked. Wraps GridPage so the URL-backed
+// category filter (?cat=Drama,Humor) can drive the visible set without
+// turning GridPage into a Browse-specific component.
+function BrowsePage({
+  catalog,
+  onOpen,
+  resolveStory,
+}: {
+  catalog: MergedCatalog;
+  onOpen: OpenFn;
+  resolveStory: (id: string) => Story | null;
+}) {
+  const { selected, toggle, clear } = useCategoryFilter();
+  const published = catalog.array.filter(isPublishedStory);
+  const visible = filterStoriesByCategory(published, selected);
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[browse render]", {
+    total_catalog: catalog.array.length,
+    published_count: published.length,
+    selected: Array.from(selected),
+    visible_count: visible.length,
+  });
+  const ids = visible.map((s) => s.id);
+  const sub =
+    selected.size === 0
+      ? `All true stories · ${published.length} titles`
+      : `${visible.length} of ${published.length} titles · ${Array.from(selected).join(", ")}`;
+  return (
+    <GridPage
+      title="Browse"
+      sub={sub}
+      ids={ids}
+      onOpen={onOpen}
+      resolveStory={resolveStory}
+      belowHeader={
+        <CategoryFilterChips
+          selected={selected}
+          onToggle={toggle}
+          onClear={clear}
+          variant="desktop"
+        />
+      }
+      emptyMessage="No stories in this category yet."
+    />
+  );
+}
+
+// Search lists only stories the pipeline has actually produced real
+// content for (hero, short render, narration, or article body). The
+// bare STORIES catalog includes 16 sample placeholders; without this
 // gate the public listings would advertise stories that open into empty
 // shells. The merged catalog (live DB rows + sample STORIES) is the
 // input so freshly-published shorts that haven't been baked back into
@@ -1975,7 +2051,11 @@ function SearchPage({ onOpen, query, catalog }: { onOpen: OpenFn; query: string;
       <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query ? `Results for "${query}"` : `Browse all · ${published.length} stories`}</p>
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none mb-9">{query || "Search"}</h1>
       <div className="grid grid-cols-5 gap-5">
-        {res.map((s) => <div key={s.id} style={{ height: 296 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={296} /></div>)}
+        {res.map((s) => (
+          <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
+            <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+          </div>
+        ))}
       </div>
       {res.length === 0 && <p className="font-body text-muted mt-12">No stories match &ldquo;{query}&rdquo;.</p>}
     </div>
@@ -2123,19 +2203,9 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
         />
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
-      {view === "Browse" && (() => {
-        // Browse advertises the public catalog of real stories. The bare
-        // STORIES array carries 16 sample placeholders the design was
-        // built against; only entries with actual produced content
-        // (videoUrl / heroImage / audioUrl / body) belong in the grid.
-        // Source is the merged catalog so freshly-published live rows
-        // surface even before src/data/published.ts is rebaked.
-        const browseStories = catalog.array.filter(isPublishedStory);
-        const ids = browseStories.map((s) => s.id);
-        // eslint-disable-next-line no-console -- rule 14
-        console.info("[browse render]", { total_catalog: catalog.array.length, published_count: browseStories.length });
-        return <GridPage title="Browse" sub={`All true stories · ${ids.length} titles`} ids={ids} onOpen={open} resolveStory={resolveStory} />;
-      })()}
+      {view === "Browse" && (
+        <BrowsePage catalog={catalog} onOpen={open} resolveStory={resolveStory} />
+      )}
       {view === "Today's Verdicts" && (() => {
         // Same published-only gate as Browse. New & Hot promises "fresh
         // threads this week" — that promise breaks the moment a sample
