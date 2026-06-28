@@ -634,55 +634,39 @@ function formatVoteCount(n: number): string {
   return `${n} votes`;
 }
 
-// Top 10 row — a Rail clone with the same chrome (h2 header, chevrons
-// on hover, edge fade gradients, mt-11 spacing, overflow-x-auto +
-// noscroll) but WITHOUT the standard Rail's max-w-[1600px] cap. On
-// wide-desktop viewports the original-sized cards (164x236 posters +
-// 200pt outlined numerals + minWidth 264) fit all 10 across the full
-// viewport width with a tighter gap, so overflow-x-auto silently
-// no-ops and the chevrons never need to scroll. On narrower viewports
-// the rail behaves like every other rail — overflow + chevron scroll.
-// Inlined (vs reusing Rail) because the max-w cap is the load-bearing
-// difference and other rails still want it.
-function Top10Rail({
+function Top10Row({
+  onOpen,
   ids,
   resolveStory,
-  onOpen,
 }: {
+  onOpen: OpenFn;
   ids: string[];
   resolveStory: (id: string) => Story | null;
-  onOpen: OpenFn;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [hover, setHover] = useState(false);
-  const scroll = (dir: number) => ref.current && ref.current.scrollBy({ left: dir * 720, behavior: "smooth" });
+  // resolveStory checks the live catalog + static STORIES so a freshly-
+  // published id (in the DB but not yet baked into published.ts) still
+  // renders. Returning null on a miss filters the entry out so a stale
+  // curation row can't crash the rail.
   return (
-    <section className="mt-11" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
-      <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 mb-3.5">Top 10 Today</h2>
-      <div className="relative">
-        <button onClick={() => scroll(-1)} className="absolute left-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-l absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevL size={22} /></span></button>
-        <div ref={ref} className="flex gap-2 overflow-x-auto noscroll px-10" style={{ scrollPaddingLeft: 40 }}>
-          {ids.slice(0, 10).map((id, i) => {
-            const s = resolveStory(id);
-            if (!s) return null;
-            return (
-              <button key={id} onClick={() => onOpen(id)} className="group relative shrink-0 flex items-end" style={{ minWidth: 264 }}>
-                <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
-                <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}><PosterArt story={s} /></div>
-                {/* Slice H underline-stroke hover. Inset to the poster
-                    bounds (the giant number doesn't get an underline
-                    drawn under it — it's the poster that's the link). */}
-                <span
-                  className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-                  style={{ width: 164, transitionDuration: "180ms" }}
-                />
-              </button>
-            );
-          })}
-        </div>
-        <button onClick={() => scroll(1)} className="absolute right-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-r absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevR size={22} /></span></button>
-      </div>
-    </section>
+    <>
+      {ids.slice(0, 10).map((id, i) => {
+        const s = resolveStory(id);
+        if (!s) return null;
+        return (
+          <button key={id} onClick={() => onOpen(id)} className="group relative shrink-0 flex items-end" style={{ minWidth: 264 }}>
+            <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
+            <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}><PosterArt story={s} /></div>
+            {/* Slice H underline-stroke hover. Inset to the poster
+                bounds (the giant number doesn't get an underline
+                drawn under it — it's the poster that's the link). */}
+            <span
+              className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+              style={{ width: 164, transitionDuration: "180ms" }}
+            />
+          </button>
+        );
+      })}
+    </>
   );
 }
 
@@ -1826,7 +1810,9 @@ function HomePage({
           </Rail>
         )}
         {top10Ids.length > 0 && (
-          <Top10Rail ids={top10Ids} resolveStory={resolveStory} onOpen={onOpen} />
+          <Rail title="Top 10 Today">
+            <Top10Row onOpen={onOpen} ids={top10Ids} resolveStory={resolveStory} />
+          </Rail>
         )}
         {/* 2026-06-26 slice E of _plans/2026-06-26-homepage-redesign-v1.md:
             when rotation is on (rotatingCategoryToday set), the homepage
