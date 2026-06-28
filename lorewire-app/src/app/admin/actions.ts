@@ -3255,6 +3255,39 @@ export async function listStoryJobEventsForRedditAction(
   return listStoryJobEventsForReddit(redditId);
 }
 
+// 2026-06-28 live runs page. /admin/reddit-sources/live polls this every
+// 2s to render every in-flight job + recently finished job (within the
+// 15-min grace window) with its event log inline. Read-only; admin-gated.
+// Result-size caps (50 jobs, 50 events/job) live in story-jobs-live.ts.
+// Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
+export async function listActiveJobsWithEventsAction(): Promise<
+  Awaited<
+    ReturnType<typeof import("@/lib/story-jobs-live").listActiveJobsWithEvents>
+  >
+> {
+  await requireCapability("content.manage");
+  const { listActiveJobsWithEvents } = await import("@/lib/story-jobs-live");
+  const result = await listActiveJobsWithEvents();
+  const totalEvents = result.reduce((acc, j) => acc + j.events.length, 0);
+  console.info("[reddit-sources live action] query", {
+    job_count: result.length,
+    total_events: totalEvents,
+  });
+  return result;
+}
+
+// 2026-06-28 sidebar live-runs badge. Polled at a lower cadence (~15s)
+// across every admin page so the count is visible without staying on
+// the live page. Returns a single integer; never a row payload.
+// Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
+export async function countActiveStoryJobsAction(): Promise<number> {
+  await requireCapability("content.manage");
+  const { countPendingStoryJobs } = await import("@/lib/story-jobs");
+  const count = await countPendingStoryJobs();
+  console.info("[sidebar live badge action] count", { count });
+  return count;
+}
+
 // --- Bulk content actions (2026-06-19) --------------------------------------
 // Plan: _plans/2026-06-19-content-bulk-actions.md.
 //
