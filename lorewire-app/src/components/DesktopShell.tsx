@@ -142,13 +142,31 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 // rectangular-streamer-grid; callers that need a different radius
 // pass `rounded` explicitly (Search result tiles still opt out
 // with `rounded={0}`).
-function PosterArt({ story, rounded = 12, showTitle = true, kicker = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean }) {
+function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, compact = false }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; compact?: boolean }) {
   const c = CAT[story.cat];
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
   // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
   // thumbnails) so the same words don't stack on top of themselves.
   const renderCssTitle = showTitle && !story.heroHasBakedTitle;
+  // `compact` rescales the overlay chrome (kicker, duration, title) for
+  // small thumbnails — Top 10 cells in particular pack 10 posters into
+  // the standard 1600px rail, so the default 19-23px title font clipped
+  // words mid-letter ("BREAKFA", "PROMIS"). Compact uses smaller fonts
+  // and tighter padding so the same artwork reads cleanly at thumbnail
+  // size without losing the title entirely.
+  const kickerCls = compact
+    ? "absolute left-2 top-2 font-mono text-[7px] uppercase tracking-[.16em] px-1 py-0.5 rounded"
+    : "font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded";
+  const durStyle = compact
+    ? "absolute right-1.5 top-1.5 font-mono text-[8px] tracking-wide px-1 py-0.5 rounded"
+    : "absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded";
+  const titleWrapperCls = compact
+    ? "absolute left-2 right-2 bottom-2"
+    : "absolute left-3.5 right-3.5 bottom-5";
+  const titleFontSize = compact
+    ? (story.title.length > 14 ? 10 : 12)
+    : (story.title.length > 16 ? 19 : 23);
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded, background: c }}>
       {showImage && (
@@ -166,13 +184,15 @@ function PosterArt({ story, rounded = 12, showTitle = true, kicker = true }: { s
       {!showImage && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
       {!showImage && <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize: 200, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
       <div className="absolute inset-0 poster-vig"></div>
-      {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
+      {kicker && (compact
+        ? <span className={kickerCls} style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span>
+        : <div className="absolute left-3 top-3"><span className={kickerCls} style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>)}
       {story.dur && (
-        <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
+        <div className={durStyle} style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
       )}
       {renderCssTitle && (
-        <div className="absolute left-3.5 right-3.5 bottom-5">
-          <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 23, color: "#F5F3EF" }}>{story.title}</h3>
+        <div className={titleWrapperCls}>
+          <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: titleFontSize, color: "#F5F3EF" }}>{story.title}</h3>
         </div>
       )}
     </div>
@@ -634,12 +654,14 @@ function formatVoteCount(n: number): string {
   return `${n} votes`;
 }
 
-// Top 10 cell — one item inside the Top 10 row's grid-cols-10 layout.
-// Sized off the grid column (% of cell width + viewport-scaled clamp on
-// the numeral) so 10 cells always fit the row without horizontal
-// scrolling. Numeral fixed at 42% of cell width keeps all 10 posters the
-// same size — without that, item 10's wider "10" would squeeze its
-// poster narrower than item 1's "1".
+// Top 10 cell — one item inside Top10Rail's grid-cols-10 layout.
+// Sized off the grid column (% subcolumns + clamp on the numeral
+// fontSize) so all 10 cells fit the rail's 1520px usable width
+// without horizontal scroll. Numeral fixed at 40% of the cell width
+// keeps every poster the same size — without that, item 10's wider
+// "10" would squeeze its poster narrower than item 1's "1".
+// The poster uses PosterArt's `compact` mode so the title renders at
+// 10-12px (vs 19-23px) and doesn't clip on the smaller thumbnail.
 function Top10Cell({
   story,
   rank,
@@ -651,13 +673,13 @@ function Top10Cell({
 }) {
   return (
     <button onClick={() => onOpen(story.id)} className="group relative flex items-end min-w-0">
-      <div className="shrink-0 flex items-end justify-end" style={{ width: "42%" }}>
+      <div className="shrink-0 flex items-end justify-end" style={{ width: "40%" }}>
         <span
           className="font-display font-black leading-[.7] select-none"
           style={{
-            fontSize: "clamp(56px, 5vw, 200px)",
+            fontSize: "clamp(48px, 3.8vw, 140px)",
             color: "transparent",
-            WebkitTextStroke: "clamp(1.5px, 0.13vw, 2.5px) rgba(255,255,255,.34)",
+            WebkitTextStroke: "clamp(1.25px, 0.1vw, 2px) rgba(255,255,255,.34)",
           }}
         >
           {rank}
@@ -671,16 +693,56 @@ function Top10Cell({
           borderRadius: 12,
         }}
       >
-        <PosterArt story={story} />
+        <PosterArt story={story} compact />
       </div>
       {/* Slice H underline-stroke hover — inset to the poster bounds
           (the giant number doesn't get an underline drawn under it —
           it's the poster that's the link). */}
       <span
         className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-        style={{ width: "58%", transitionDuration: "180ms" }}
+        style={{ width: "60%", transitionDuration: "180ms" }}
       />
     </button>
+  );
+}
+
+// Top 10 row — mirrors Rail's chrome (h2 header, chevron buttons,
+// edge fade gradients, mt-11 spacing) but uses grid-cols-10 inside
+// the max-w-[1600px] container so all 10 cells force-fit the row
+// without horizontal scrolling. Chevrons are kept for visual parity
+// with the other homepage rails; they don't bind a scroll handler
+// because there's nothing to scroll.
+function Top10Rail({
+  ids,
+  resolveStory,
+  onOpen,
+}: {
+  ids: string[];
+  resolveStory: (id: string) => Story | null;
+  onOpen: OpenFn;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <section className="mt-11" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+      <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 max-w-[1600px] mx-auto mb-3.5">Top 10 Today</h2>
+      <div className="relative">
+        <div className="absolute left-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity pointer-events-none" style={{ opacity: hover ? 1 : 0 }}>
+          <span className="rail-fade-l absolute inset-0"></span>
+          <span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevL size={22} /></span>
+        </div>
+        <div className="grid grid-cols-10 gap-2 px-10 max-w-[1600px] mx-auto">
+          {ids.slice(0, 10).map((id, i) => {
+            const s = resolveStory(id);
+            if (!s) return null;
+            return <Top10Cell key={id} story={s} rank={i + 1} onOpen={onOpen} />;
+          })}
+        </div>
+        <div className="absolute right-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity pointer-events-none" style={{ opacity: hover ? 1 : 0 }}>
+          <span className="rail-fade-r absolute inset-0"></span>
+          <span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevR size={22} /></span>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1824,22 +1886,7 @@ function HomePage({
           </Rail>
         )}
         {top10Ids.length > 0 && (
-          // Top 10 bypasses the standard Rail (which is capped at
-          // max-w-[1600px] and falls back to horizontal scroll when
-          // 10 of its wider, numeral-adorned cards don't fit). Inline
-          // grid-cols-10 spans the full viewport so all 10 cells are
-          // always visible without inner scrolling — the row resizes
-          // with the viewport instead of clipping.
-          <section className="mt-11">
-            <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 max-w-[1600px] mx-auto mb-3.5">Top 10 Today</h2>
-            <div className="grid grid-cols-10 gap-2 px-4">
-              {top10Ids.slice(0, 10).map((id, i) => {
-                const s = resolveStory(id);
-                if (!s) return null;
-                return <Top10Cell key={id} story={s} rank={i + 1} onOpen={onOpen} />;
-              })}
-            </div>
-          </section>
+          <Top10Rail ids={top10Ids} resolveStory={resolveStory} onOpen={onOpen} />
         )}
         {/* 2026-06-26 slice E of _plans/2026-06-26-homepage-redesign-v1.md:
             when rotation is on (rotatingCategoryToday set), the homepage
