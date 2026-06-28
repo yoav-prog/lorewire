@@ -647,26 +647,48 @@ function Top10Row({
   // published id (in the DB but not yet baked into published.ts) still
   // renders. Returning null on a miss filters the entry out so a stale
   // curation row can't crash the rail.
+  //
+  // Layout: a single grid-cols-10 child of the standard Rail's flex
+  // container, w-full so it fills the rail's 1520px usable width
+  // (max-w-[1600px] minus px-10). Each cell is ~144px wide; the poster
+  // takes ~70% anchored right (so single-digit numerals fit in the
+  // remaining ~43px of cell-left space) and the giant outlined numeral
+  // is absolutely positioned at the bottom-left at z-0. Single digits
+  // render fully visible to the left of the poster; the "0" of "10"
+  // tucks behind the poster's left edge (Netflix-style overlap). The
+  // standard Rail's overflow-x-auto is silently inert because the grid
+  // never overflows; chevrons stay for visual parity with the other
+  // rails.
   return (
-    <>
+    <div className="grid grid-cols-10 gap-2 w-full">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative shrink-0 flex items-end" style={{ minWidth: 264 }}>
-            <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
-            <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}><PosterArt story={s} /></div>
+          <button key={id} onClick={() => onOpen(id)} className="group relative flex items-end min-w-0">
+            <span
+              className="absolute left-0 bottom-0 font-display font-black leading-[.7] select-none pointer-events-none"
+              style={{ fontSize: 130, color: "transparent", WebkitTextStroke: "1.75px rgba(255,255,255,.34)", zIndex: 0 }}
+            >
+              {i + 1}
+            </span>
+            <div
+              className="relative ml-auto w-[70%]"
+              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12, zIndex: 10 }}
+            >
+              <PosterArt story={s} />
+            </div>
             {/* Slice H underline-stroke hover. Inset to the poster
                 bounds (the giant number doesn't get an underline
                 drawn under it — it's the poster that's the link). */}
             <span
               className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-              style={{ width: 164, transitionDuration: "180ms" }}
+              style={{ width: "70%", zIndex: 20, transitionDuration: "180ms" }}
             />
           </button>
         );
       })}
-    </>
+    </div>
   );
 }
 
