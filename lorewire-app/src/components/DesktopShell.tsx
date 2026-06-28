@@ -650,40 +650,51 @@ function Top10Row({
   //
   // Layout: a single grid-cols-10 child of the standard Rail's flex
   // container, w-full so it fills the rail's 1520px usable width
-  // (max-w-[1600px] minus px-10). Each cell is ~144px wide; the poster
-  // takes ~70% anchored right (so single-digit numerals fit in the
-  // remaining ~43px of cell-left space) and the giant outlined numeral
-  // is absolutely positioned at the bottom-left at z-0. Single digits
-  // render fully visible to the left of the poster; the "0" of "10"
-  // tucks behind the poster's left edge (Netflix-style overlap). The
-  // standard Rail's overflow-x-auto is silently inert because the grid
-  // never overflows; chevrons stay for visual parity with the other
-  // rails.
+  // (max-w-[1600px] minus px-10). Each ~144px cell is the poster — it
+  // fills the full cell width (aspectRatio 164/236, ~144x208) so each
+  // thumbnail reads close to the original 164x236 sizing. The giant
+  // outlined numeral is overlaid on the poster's bottom-left corner
+  // (Netflix-mobile-style ranking badge). showTitle is suppressed at
+  // this thumbnail size so the numeral doesn't fight a CSS title
+  // overlay; baked titles in the artwork remain. The standard Rail's
+  // overflow-x-auto is silently inert because the grid never
+  // overflows; chevrons stay for visual parity with the other rails.
   return (
     <div className="grid grid-cols-10 gap-2 w-full">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative flex items-end min-w-0">
-            <span
-              className="absolute left-0 bottom-0 font-display font-black leading-[.7] select-none pointer-events-none"
-              style={{ fontSize: 130, color: "transparent", WebkitTextStroke: "1.75px rgba(255,255,255,.34)", zIndex: 0 }}
-            >
-              {i + 1}
-            </span>
+          <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
             <div
-              className="relative ml-auto w-[70%]"
-              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12, zIndex: 10 }}
+              className="relative w-full"
+              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
             >
-              <PosterArt story={s} />
+              <PosterArt story={s} showTitle={false} />
+              {/* Numeral overlay — bottom-left of the poster artwork,
+                  rendered above (z-5) the artwork. White stroke + a
+                  soft dark text-shadow so it stays legible over both
+                  light and dark hero images. */}
+              <span
+                className="absolute font-display font-black leading-[.7] select-none pointer-events-none"
+                style={{
+                  left: 6,
+                  bottom: 4,
+                  fontSize: 110,
+                  color: "transparent",
+                  WebkitTextStroke: "2px rgba(255,255,255,.92)",
+                  textShadow: "0 2px 14px rgba(0,0,0,.6)",
+                  zIndex: 5,
+                }}
+              >
+                {i + 1}
+              </span>
             </div>
-            {/* Slice H underline-stroke hover. Inset to the poster
-                bounds (the giant number doesn't get an underline
-                drawn under it — it's the poster that's the link). */}
+            {/* Slice H underline-stroke hover. Spans the full poster
+                width since the poster IS the cell now. */}
             <span
-              className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-              style={{ width: "70%", zIndex: 20, transitionDuration: "180ms" }}
+              className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+              style={{ transitionDuration: "180ms" }}
             />
           </button>
         );
