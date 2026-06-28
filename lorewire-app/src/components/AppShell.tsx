@@ -832,14 +832,33 @@ function Home({
       {top10Ids && top10Ids.length > 0 && (
         <section className="mt-7">
           <RailHead>Top 10 Today</RailHead>
-          <div className="flex gap-1 px-4 overflow-x-auto noscroll pb-1">
+          {/* Mobile parity with desktop Top10Row: poster fills its own
+              cell, rank numeral is a solid white badge overlaid on the
+              bottom-left corner of the artwork. Mobile is horizontally
+              scrollable (no grid-cols-10 fit constraint) so cells stay
+              at the standard 132x192 portrait size. */}
+          <div className="flex gap-2 px-4 overflow-x-auto noscroll pb-1">
             {top10Ids.slice(0, 10).map((id, i) => {
               const s = resolveStory(id);
               if (!s) return null;
               return (
-                <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
-                  <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "2px rgba(255,255,255,.32)" }}>{i + 1}</span>
-                  <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={s} showTitle={false} /></div>
+                <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 active:scale-[.97] transition">
+                  <div className="relative w-[132px] h-[192px]">
+                    <PosterArt story={s} showTitle={false} />
+                    <span
+                      className="absolute font-display font-black leading-none select-none pointer-events-none"
+                      style={{
+                        left: 9,
+                        bottom: 7,
+                        fontSize: 64,
+                        color: "#ffffff",
+                        WebkitTextStroke: "1px rgba(0,0,0,.55)",
+                        textShadow: "0 2px 12px rgba(0,0,0,.85), 0 0 4px rgba(0,0,0,.6)",
+                      }}
+                    >
+                      {i + 1}
+                    </span>
+                  </div>
                 </button>
               );
             })}

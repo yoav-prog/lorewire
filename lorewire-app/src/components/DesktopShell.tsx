@@ -661,57 +661,47 @@ function Top10Row({
   //
   // Layout: a single grid-cols-10 child of the standard Rail's flex
   // container, w-full so it fills the rail's 1520px usable width
-  // (max-w-[1600px] minus px-10). Each ~144px cell holds the poster
-  // at ~80% width (~115x165, aspectRatio 164/236) anchored right via
-  // ml-auto. The giant outlined numeral sits to the LEFT of the
-  // poster (Netflix desktop top-10 style) — its right edge slightly
-  // tucked behind the poster's left edge (z-0 vs poster z-10) so the
-  // "0" of "10" reads as hiding behind the artwork. Single digits
-  // render fully visible. Thumbnail artwork is never overlaid by the
-  // numeral. showTitle is suppressed because the title is baked into
-  // the artwork at this size. The hover underline sits at -bottom-2
-  // scoped to the poster's 80% footprint so the stroke draws under
-  // the artwork rather than the numeral.
+  // (max-w-[1600px] minus px-10). Each ~144px cell is occupied by a
+  // FULL-width poster (aspectRatio 164/236, ~144x208) — biggest
+  // thumbnail size that fits 10 across without making the row wider.
+  // The rank numeral is a solid white badge overlaid on the poster's
+  // bottom-left corner (Netflix-mobile style) — small enough that it
+  // only covers a corner of the artwork yet fully readable for both
+  // single-digit ranks and "10". Drop shadow + thin dark outline keep
+  // it legible over both light and dark hero images. Numeral is
+  // entirely INSIDE the poster box, so no vertical overflow can
+  // trigger the Rail's overflow-y: auto scroll. showTitle is
+  // suppressed because the title is baked into the artwork.
   return (
     <div className="grid grid-cols-10 gap-2 w-full">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative flex items-end min-w-0">
-            {/* Numeral on the LEFT, shifted further left via left: -8
-                so it bleeds into the inter-cell gap (visually "more to
-                the side" than flush-left). z-0 so the poster (z-10)
-                covers the right-edge tuck. leading-none + bottom: 6
-                keeps the character box safely INSIDE the cell so
-                font-metric descent doesn't push the Rail into
-                overflow-y: auto scroll. Brighter stroke (2.5px / 0.85
-                alpha) for the "more visible" ask. */}
-            <span
-              className="absolute font-display font-black leading-none select-none pointer-events-none"
-              style={{
-                left: -8,
-                bottom: 6,
-                fontSize: 110,
-                color: "transparent",
-                WebkitTextStroke: "2.5px rgba(255,255,255,.85)",
-                zIndex: 0,
-              }}
-            >
-              {i + 1}
-            </span>
+          <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
             <div
-              className="relative ml-auto w-[80%]"
-              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12, zIndex: 10 }}
+              className="relative w-full"
+              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
             >
               <PosterArt story={s} showTitle={false} />
+              <span
+                className="absolute font-display font-black leading-none select-none pointer-events-none"
+                style={{
+                  left: 10,
+                  bottom: 8,
+                  fontSize: 78,
+                  color: "#ffffff",
+                  WebkitTextStroke: "1px rgba(0,0,0,.55)",
+                  textShadow: "0 2px 14px rgba(0,0,0,.85), 0 0 4px rgba(0,0,0,.6)",
+                }}
+              >
+                {i + 1}
+              </span>
             </div>
-            {/* Hover underline — scoped to the poster's 80% footprint
-                (the poster is what the click target visually points at;
-                the numeral is decorative). */}
+            {/* Hover underline — full poster width. */}
             <span
-              className="absolute right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-              style={{ width: "80%", zIndex: 20, transitionDuration: "180ms" }}
+              className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+              style={{ transitionDuration: "180ms" }}
             />
           </button>
         );
