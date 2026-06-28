@@ -315,6 +315,10 @@ describe("publishShortToTikTok — inbox mode happy path", () => {
     // 1 creator info + 1 init + 2 polls
     expect(stub.calls.length).toBe(4);
     expect(stub.calls[1].url).toContain("/inbox/video/init/");
+    // _plans/2026-06-28-explicit-thumbnail-uploads.md — the inbox
+    // init body now carries video_cover_timestamp_ms=0 so the draft
+    // preview shows the cold-open scene (matching the direct branch).
+    expect(stub.calls[1].body).toContain('"video_cover_timestamp_ms":0');
   });
 });
 
@@ -350,6 +354,9 @@ describe("publishShortToTikTok — direct mode happy path", () => {
     expect(result.row.post_mode).toBe("direct");
     expect(result.row.external_post_id).toBe("tt_post_id_abc");
     expect(stub.calls[1].url).toContain("/v2/post/publish/video/init/");
+    // Direct mode shipped with video_cover_timestamp_ms=0 from the
+    // start; lock the assertion in here so a refactor can't drop it.
+    expect(stub.calls[1].body).toContain('"video_cover_timestamp_ms":0');
   });
 });
 

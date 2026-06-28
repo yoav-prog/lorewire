@@ -654,6 +654,13 @@ async function initPublish(
         }
       : {
           title: args.caption,
+          // Pick the very first frame as the draft cover so the inbox
+          // preview shows the cold-open scene (per the hook-first splice
+          // PR #135) instead of TikTok's auto-pick. The direct branch
+          // above already sets this; mirror here so a draft and a live
+          // post agree on the cover. Per
+          // _plans/2026-06-28-explicit-thumbnail-uploads.md.
+          video_cover_timestamp_ms: 0,
           is_aigc: args.isAigc,
         };
   const body = JSON.stringify({
