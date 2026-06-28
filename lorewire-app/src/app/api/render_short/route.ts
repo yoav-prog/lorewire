@@ -62,6 +62,12 @@ const SHORT_END_HOLD_MS = 1500;
 interface CloudRunRenderResponse {
   url?: unknown;
   error?: unknown;
+  /** Actual rendered MP4 duration (ms) measured by Cloud Run's ffprobe
+   *  right after the splice and before upload. Added by
+   *  _plans/2026-06-29-actual-mp4-duration.md. Optional — an older
+   *  Cloud Run revision returns the legacy { url, elapsed_ms } shape
+   *  and we treat the value as null in that case. */
+  duration_ms?: unknown;
 }
 
 function namespacedLog(event: string, fields: Record<string, unknown>): void {
@@ -81,7 +87,10 @@ async function postToCloudRun(
   url: string,
   body: object,
   secret: string,
-): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; url: string; durationMs: number | null }
+  | { ok: false; error: string }
+> {
   try {
     const resp = await undiciFetch(url, {
       method: "POST",
@@ -109,7 +118,20 @@ async function postToCloudRun(
         error: `cloud-run returned malformed body: ${JSON.stringify(data).slice(0, 300)}`,
       };
     }
-    return { ok: true, url: data.url };
+    // duration_ms is optional and defensive: an older Cloud Run revision
+    // omits it; the renderer's ffprobe may have failed and returned null;
+    // a future shape change might send a non-number. Anything that isn't
+    // a positive finite number becomes null so the writer path falls
+    // back to the legacy body+intro+outro sum cleanly. Plan:
+    // _plans/2026-06-29-actual-mp4-duration.md.
+    const rawDuration = data.duration_ms;
+    const durationMs =
+      typeof rawDuration === "number" &&
+      Number.isFinite(rawDuration) &&
+      rawDuration > 0
+        ? rawDuration
+        : null;
+    return { ok: true, url: data.url, durationMs };
   } catch (e) {
     const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     return { ok: false, error: msg.slice(0, 500) };
@@ -357,8 +379,9 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     url_bytes: result.url.length,
     intro_segment_id: segments.intro_segment_id,
     outro_segment_id: segments.outro_segment_id,
+    assembled_duration_ms: result.durationMs,
   });
-  await finishShortRender(claimed.id, result.url);
+  await finishShortRender(claimed.id, result.url, result.durationMs);
   // Stamp the spliced segment ids onto short_config so the editor's render
   // plan can detect "intro/outro override changed since last render" and
   // surface Lane A on the override picker. Best-effort: a stamp failure

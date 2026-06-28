@@ -15,6 +15,7 @@
 import "server-only";
 import { all } from "@/lib/db";
 import {
+  assembledDurationMsFromPropsJson,
   bodyDurationMsFromPropsJson,
   formatDurationMs,
   fullDurationMsFromParts,
@@ -119,25 +120,30 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   return { ok: true, stories };
 }
 
-// Compute the FULL on-disk duration of each story's latest done short
-// (body + intro + outro segments) and format as "M:SS". Story ids whose
-// renders are missing / errored / lack a numeric body duration are absent
-// from the returned map so the caller's fallback path can decide what to
-// do.
+// Compute the public-facing duration of each story's latest done short and
+// format as "M:SS". Story ids whose renders are missing / errored / carry
+// neither an assembled nor a body duration are absent from the returned
+// map so the caller's fallback path can decide what to do.
 //
-// The intro/outro contribution comes from `stories.short_config.
-// _last_rendered_segments` — the stamp render_short/route.ts writes after a
-// successful render. When the stamp is missing (legacy rows, stamp write
-// failed) or the segment row was deleted, that side contributes 0 and we
-// fall back to body-only — never a worse badge than before this change.
+// Source preference (matches lib/short-render-queue.resolveStoryDurationFromProps
+// so the writer + reader can never drift):
+//   1. props.assembled_duration_ms — ground truth from Cloud Run's
+//      ffprobe of the final spliced MP4. Plan:
+//      _plans/2026-06-29-actual-mp4-duration.md.
+//   2. body + intro + outro sum from props.duration_ms +
+//      stories.short_config._last_rendered_segments. Legacy math, missing
+//      ~1.5 s of post-roll hold + any ffmpeg re-encode rounding.
+//   3. body-only — fallback when the stamp is missing (legacy rows,
+//      stamp write failed) or the segment row was deleted. Never a worse
+//      badge than before _plans/2026-06-29 shipped.
 async function loadShortDurationsForStories(
   storyIds: string[],
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (storyIds.length === 0) return out;
   const placeholders = storyIds.map(() => "?").join(", ");
-  // Fan out the three reads in parallel: body durations from the latest
-  // done render, the per-story stamp from stories.short_config, and the
+  // Fan out the three reads in parallel: render props (carries both
+  // assembled and body durations), per-story short_config stamp, and the
   // segment library rows. The segment query is conditional on the stamps
   // having referenced anything, so empty-stamp story sets pay one fewer
   // round trip.
@@ -154,16 +160,24 @@ async function loadShortDurationsForStories(
       storyIds,
     ),
   ]);
-  // Latest body duration per story id (dedupe by first-seen, matching the
-  // historical ORDER BY ... DESC + skip-if-seen contract).
-  const bodyMsByStory = new Map<string, number>();
+  // Latest props per story id (dedupe by first-seen, matching the
+  // historical ORDER BY ... DESC + skip-if-seen contract). Both
+  // assembled + body get pulled off the same row so the writer + reader
+  // see the same render.
+  interface PerStoryProps {
+    assembledMs: number | null;
+    bodyMs: number | null;
+  }
+  const propsByStory = new Map<string, PerStoryProps>();
   for (const r of renderRows) {
-    if (bodyMsByStory.has(r.story_id)) continue;
-    const bodyMs = bodyDurationMsFromPropsJson(r.props);
-    if (bodyMs !== null) bodyMsByStory.set(r.story_id, bodyMs);
+    if (propsByStory.has(r.story_id)) continue;
+    propsByStory.set(r.story_id, {
+      assembledMs: assembledDurationMsFromPropsJson(r.props),
+      bodyMs: bodyDurationMsFromPropsJson(r.props),
+    });
   }
   // Stamp per story id -> segment ids actually spliced into the assembled
-  // MP4. Null when no stamp; we treat that as body-only.
+  // MP4. Null when no stamp; we treat that as body-only (legacy sum path).
   const stampByStory = new Map<
     string,
     ReturnType<typeof parseLastRenderedSegments>
@@ -176,7 +190,8 @@ async function loadShortDurationsForStories(
     if (stamp?.outro_segment_id) segmentIds.add(stamp.outro_segment_id);
   }
   // Segment durations lookup. Only fire the query if any stamp referenced
-  // a segment id at all — most legacy rows won't.
+  // a segment id at all — most legacy rows won't, and post-_plans/2026-06-29
+  // rows that have assembled_duration_ms don't need it either.
   const segmentMsById = new Map<string, number>();
   if (segmentIds.size > 0) {
     const segIds = Array.from(segmentIds);
@@ -190,28 +205,35 @@ async function loadShortDurationsForStories(
       if (Number.isFinite(n) && n > 0) segmentMsById.set(s.id, n);
     }
   }
-  // Combine + format. A missing body row means the loader can't produce a
-  // badge at all for that story; a missing stamp / segment falls through
-  // to body-only via fullDurationMsFromParts' 0-coalescing.
+  // Pick the best source per story and format. Logs the chosen source so
+  // we can grep what fraction of badges are still on the legacy sum.
   for (const storyId of storyIds) {
-    const bodyMs = bodyMsByStory.get(storyId);
-    if (bodyMs === undefined) continue;
-    const stamp = stampByStory.get(storyId) ?? null;
-    const introMs = stamp?.intro_segment_id
-      ? segmentMsById.get(stamp.intro_segment_id) ?? 0
-      : 0;
-    const outroMs = stamp?.outro_segment_id
-      ? segmentMsById.get(stamp.outro_segment_id) ?? 0
-      : 0;
-    const totalMs = fullDurationMsFromParts(bodyMs, introMs, outroMs);
+    const props = propsByStory.get(storyId);
+    if (!props) continue;
+    let source: "assembled" | "sum" | "body_only";
+    let totalMs: number;
+    if (props.assembledMs !== null) {
+      source = "assembled";
+      totalMs = props.assembledMs;
+    } else if (props.bodyMs !== null) {
+      const stamp = stampByStory.get(storyId) ?? null;
+      const introMs = stamp?.intro_segment_id
+        ? segmentMsById.get(stamp.intro_segment_id) ?? 0
+        : 0;
+      const outroMs = stamp?.outro_segment_id
+        ? segmentMsById.get(stamp.outro_segment_id) ?? 0
+        : 0;
+      totalMs = fullDurationMsFromParts(props.bodyMs, introMs, outroMs);
+      source = introMs > 0 || outroMs > 0 ? "sum" : "body_only";
+    } else {
+      continue;
+    }
     const formatted = formatDurationMs(totalMs);
     if (formatted) {
       out.set(storyId, formatted);
       console.info("[homepage live catalog duration]", {
         story_id: storyId,
-        body_ms: bodyMs,
-        intro_ms: introMs,
-        outro_ms: outroMs,
+        source,
         total_ms: totalMs,
         formatted,
       });

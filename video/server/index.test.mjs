@@ -30,22 +30,51 @@ let baseUrl;
  *  layer handed downstream. Reset before each segments-parsing case. */
 let lastRenderCall = null;
 
+/** Captures the last (url) the probe stub received so the /probe-mp4
+ *  test set can assert what the HTTP layer forwarded into the helper. */
+let lastProbeCall = null;
+
 before(async () => {
   process.env.CRON_SECRET = SECRET;
+  // GCS_BUCKET feeds the /probe-mp4 URL allow-list — without it every
+  // probe request 400s, regardless of the URL.
+  process.env.GCS_BUCKET = "test-bucket";
   // Stubbed renderer: never touches Remotion or GCS. The HTTP layer
-  // only needs to know the contract — Promise<{ url, elapsed_ms }> —
-  // not the implementation.
+  // only needs to know the contract — Promise<{ url, elapsed_ms,
+  // duration_ms }> — not the implementation. duration_ms was added
+  // by _plans/2026-06-29-actual-mp4-duration.md; the stub returns a
+  // deterministic value so the response-shape test can assert it.
   const render = async (storyId, inputProps, segments) => {
     lastRenderCall = { storyId, inputProps, segments };
     if (storyId === "boom") {
       throw new Error("renderMedia failed: bad composition");
     }
+    if (storyId === "no-probe") {
+      // Renderer's ffprobe failed; the field surfaces as null and the
+      // dispatcher's writer falls back to the legacy sum.
+      return {
+        url: `https://storage.googleapis.com/test-bucket/${storyId}/video.mp4`,
+        elapsed_ms: 12345,
+        duration_ms: null,
+      };
+    }
     return {
       url: `https://storage.googleapis.com/test-bucket/${storyId}/video.mp4`,
       elapsed_ms: 12345,
+      duration_ms: 44321,
     };
   };
-  const app = createApp(render);
+  // Stubbed probe: never spawns ffprobe or hits the network. Mirrors
+  // the renderer's "deterministic value for the success path, named
+  // sentinel for the failure path" pattern.
+  const probeRemote = async (url) => {
+    lastProbeCall = { url };
+    if (url.includes("boom")) {
+      throw new Error("ffprobe failed: bad MP4");
+    }
+    return 44321;
+  };
+  const app = createApp(render, probeRemote);
   server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   const { port } = server.address();
@@ -136,7 +165,7 @@ describe("Cloud Run render service /render body validation", () => {
 });
 
 describe("Cloud Run render service /render success path", () => {
-  it("returns the URL + elapsed_ms from the renderer", async () => {
+  it("returns the URL + elapsed_ms + duration_ms from the renderer", async () => {
     const { status, body } = await post("/render", {
       auth: `Bearer ${SECRET}`,
       body: { storyId: "envelope", configHash: "abc", inputProps: {} },
@@ -147,6 +176,22 @@ describe("Cloud Run render service /render success path", () => {
       "https://storage.googleapis.com/test-bucket/envelope/video.mp4",
     );
     assert.equal(body.elapsed_ms, 12345);
+    // _plans/2026-06-29-actual-mp4-duration.md — the dispatcher reads
+    // this field and stamps it onto short_renders.props.assembled_duration_ms
+    // so every reader path can prefer it over body+intro+outro math.
+    assert.equal(body.duration_ms, 44321);
+  });
+
+  it("surfaces duration_ms=null when the renderer's ffprobe failed", async () => {
+    // ffprobe is best-effort: the render still ships and the dispatcher
+    // falls back to the legacy sum. Mirrors the renderAndUploadStory
+    // catch path in render.ts.
+    const { status, body } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: { storyId: "no-probe", configHash: "abc", inputProps: {} },
+    });
+    assert.equal(status, 200);
+    assert.equal(body.duration_ms, null);
   });
 });
 
@@ -294,5 +339,96 @@ describe("Cloud Run render service /render segments parsing", () => {
       outro,
       outroLeadInSec: 1.5,
     });
+  });
+});
+
+// _plans/2026-06-29-actual-mp4-duration.md. The /probe-mp4 endpoint is
+// the backfill path: an admin one-shot that hands existing MP4 URLs to
+// Cloud Run, gets back the actual ffprobed duration, and stamps it onto
+// short_renders.props.assembled_duration_ms. Auth is the same CRON_SECRET
+// bearer; the URL is gated through the same env-driven allow-list the
+// renderer's segment downloads use.
+describe("Cloud Run /probe-mp4 auth", () => {
+  it("returns 401 without an Authorization header", async () => {
+    const { status, body } = await post("/probe-mp4", {
+      body: {
+        url: "https://storage.googleapis.com/test-bucket/x/video.mp4",
+      },
+    });
+    assert.equal(status, 401);
+    assert.equal(body.error, "unauthorized");
+  });
+
+  it("returns 401 with the wrong token", async () => {
+    const { status } = await post("/probe-mp4", {
+      auth: "Bearer wrong",
+      body: {
+        url: "https://storage.googleapis.com/test-bucket/x/video.mp4",
+      },
+    });
+    assert.equal(status, 401);
+  });
+});
+
+describe("Cloud Run /probe-mp4 URL allow-list", () => {
+  it("returns 400 when the URL is missing or empty", async () => {
+    for (const body of [undefined, {}, { url: "" }, { url: 123 }]) {
+      const { status } = await post("/probe-mp4", {
+        auth: `Bearer ${SECRET}`,
+        body,
+      });
+      assert.equal(
+        status,
+        400,
+        `body=${JSON.stringify(body)} must be 400`,
+      );
+    }
+  });
+
+  it("returns 400 when the URL host is not on the allow-list", async () => {
+    // GCS_BUCKET is "test-bucket" in this suite, MEDIA_PUBLIC_BASE is
+    // unset. Any URL outside `storage.googleapis.com/test-bucket/...`
+    // must fail closed.
+    for (const url of [
+      "https://attacker.example/payload.mp4",
+      "https://storage.googleapis.com/other-bucket/x/video.mp4",
+      "http://storage.googleapis.com/test-bucket/x/video.mp4", // http (not https)
+      "file:///etc/passwd",
+      "not a url at all",
+    ]) {
+      const { status, body } = await post("/probe-mp4", {
+        auth: `Bearer ${SECRET}`,
+        body: { url },
+      });
+      assert.equal(status, 400, `url=${url} must be 400`);
+      assert.match(body.error, /allow-list/);
+    }
+  });
+});
+
+describe("Cloud Run /probe-mp4 success path", () => {
+  it("returns the probed duration_ms for an allow-listed URL", async () => {
+    lastProbeCall = null;
+    const url = "https://storage.googleapis.com/test-bucket/short.mp4";
+    const { status, body } = await post("/probe-mp4", {
+      auth: `Bearer ${SECRET}`,
+      body: { url },
+    });
+    assert.equal(status, 200);
+    assert.equal(body.duration_ms, 44321);
+    assert.deepEqual(lastProbeCall, { url });
+  });
+
+  it("returns 500 when the probe helper throws", async () => {
+    // The stub throws on URLs containing 'boom'. Mirrors the real
+    // probeRemoteMp4DurationMs failure path.
+    const { status, body } = await post("/probe-mp4", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        url: "https://storage.googleapis.com/test-bucket/boom.mp4",
+      },
+    });
+    assert.equal(status, 500);
+    assert.match(body.error, /ffprobe failed/);
   });
 });
