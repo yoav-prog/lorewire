@@ -555,17 +555,25 @@ function Hero({
 }
 
 /* ----------------------------- RAIL ----------------------------- */
-function Rail({ title, children }: { title: string; children: React.ReactNode }) {
+function Rail({ title, children, wrap = false }: { title: string; children: React.ReactNode; wrap?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState(false);
   const scroll = (dir: number) => ref.current && ref.current.scrollBy({ left: dir * 720, behavior: "smooth" });
+  // `wrap` opts out of horizontal-scroll rail behavior: items flow onto
+  // multiple lines so a row that doesn't fit (Top 10's wider, numeral-
+  // adorned cards) grows in height instead of scrolling. Chevron buttons
+  // are hidden in this mode because there's nothing to scroll.
   return (
     <section className="mt-11" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
       <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 max-w-[1600px] mx-auto mb-3.5">{title}</h2>
       <div className="relative">
-        <button onClick={() => scroll(-1)} className="absolute left-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-l absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevL size={22} /></span></button>
-        <div ref={ref} className="flex gap-3.5 overflow-x-auto noscroll px-10 max-w-[1600px] mx-auto" style={{ scrollPaddingLeft: 40 }}>{children}</div>
-        <button onClick={() => scroll(1)} className="absolute right-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-r absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevR size={22} /></span></button>
+        {!wrap && <button onClick={() => scroll(-1)} className="absolute left-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-l absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevL size={22} /></span></button>}
+        <div
+          ref={ref}
+          className={wrap ? "flex flex-wrap gap-x-3.5 gap-y-9 px-10 max-w-[1600px] mx-auto" : "flex gap-3.5 overflow-x-auto noscroll px-10 max-w-[1600px] mx-auto"}
+          style={wrap ? undefined : { scrollPaddingLeft: 40 }}
+        >{children}</div>
+        {!wrap && <button onClick={() => scroll(1)} className="absolute right-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-r absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevR size={22} /></span></button>}
       </div>
     </section>
   );
@@ -1805,12 +1813,12 @@ function HomePage({
             {continueIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} landscape />;
+              return <PosterCard key={id} story={s} onOpen={onOpen} />;
             })}
           </Rail>
         )}
         {top10Ids.length > 0 && (
-          <Rail title="Top 10 Today">
+          <Rail title="Top 10 Today" wrap>
             <Top10Row onOpen={onOpen} ids={top10Ids} resolveStory={resolveStory} />
           </Rail>
         )}
