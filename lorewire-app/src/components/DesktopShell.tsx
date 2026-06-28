@@ -650,22 +650,25 @@ function Top10Row({
   //
   // Layout: a single grid-cols-10 child of the standard Rail's flex
   // container, w-full so it fills the rail's 1520px usable width
-  // (max-w-[1600px] minus px-10). Each ~144px cell is the poster — it
-  // fills the full cell width (aspectRatio 164/236, ~144x208) so each
-  // thumbnail reads close to the original 164x236 sizing. The giant
-  // outlined numeral is overlaid on the poster's bottom-left corner
-  // (Netflix-mobile-style ranking badge). showTitle is suppressed at
-  // this thumbnail size so the numeral doesn't fight a CSS title
-  // overlay; baked titles in the artwork remain. The standard Rail's
-  // overflow-x-auto is silently inert because the grid never
-  // overflows; chevrons stay for visual parity with the other rails.
+  // (max-w-[1600px] minus px-10). Each ~144px cell is a poster
+  // (aspectRatio 164/236, ~144x208) with the giant outlined numeral
+  // overlaid on the bottom-left corner (Netflix-mobile-style ranking
+  // badge), and a compact title caption rendered BELOW the poster.
+  // The poster's CSS title overlay is suppressed (showTitle={false})
+  // because at this thumbnail size it would clip mid-word and fight
+  // the numeral for the bottom-left real estate — the caption-below
+  // replaces it with line-clamp-2 + a fixed minHeight so 1-line and
+  // 2-line titles don't stagger neighbouring cells. Baked titles in
+  // the artwork remain visible. The standard Rail's overflow-x-auto
+  // is silently inert because the grid never overflows; chevrons stay
+  // for visual parity with the other rails.
   return (
     <div className="grid grid-cols-10 gap-2 w-full">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
+          <button key={id} onClick={() => onOpen(id)} className="group relative flex flex-col gap-2 min-w-0 text-left">
             <div
               className="relative w-full"
               style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
@@ -690,8 +693,14 @@ function Top10Row({
                 {i + 1}
               </span>
             </div>
-            {/* Slice H underline-stroke hover. Spans the full poster
-                width since the poster IS the cell now. */}
+            <h3
+              className="font-display font-extrabold uppercase tracking-tightest leading-[1.05] text-ink line-clamp-2"
+              style={{ fontSize: 12, minHeight: 26 }}
+            >
+              {s.title}
+            </h3>
+            {/* Slice H underline-stroke hover. Sits below the title
+                caption now that the caption hangs below the poster. */}
             <span
               className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
               style={{ transitionDuration: "180ms" }}
