@@ -136,7 +136,7 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 const WiresI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
 
 /* ----------------------------- POSTER ART ----------------------------- */
-function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; rounded?: boolean; showTitle?: boolean }) {
+function PosterArt({ story, rounded = true, showTitle = true, vig = false }: { story: Story; rounded?: boolean; showTitle?: boolean; vig?: boolean }) {
   // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
   // thumbnails) — otherwise the typography stacks on top of itself.
   const renderCssTitle = showTitle && !story.heroHasBakedTitle;
@@ -162,7 +162,13 @@ function PosterArt({ story, rounded = true, showTitle = true }: { story: Story; 
       {!showImage && (
         <div className="absolute -right-3 -top-4 font-display font-black leading-none select-none" style={{ fontSize: 172, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>
       )}
-      <div className="absolute inset-0 poster-vig"></div>
+      {/* vig adds a heavy bottom-up dark gradient on top of the
+          line-160 gradient. Default off so baked-in titles in the
+          artwork stay bright across every mobile rail — parity with
+          desktop PosterArt's vig=false default. The line-160 gradient
+          (.55 opacity at the bottom) still provides enough contrast
+          for non-baked CSS titles. */}
+      {vig && <div className="absolute inset-0 poster-vig"></div>}
       <div className="absolute left-2.5 top-2.5">
         <span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.32)" }}>{story.cat}</span>
       </div>
@@ -575,7 +581,10 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { 
   const { getRating } = useStoryRatings();
   return (
     <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w }}>
-      <div style={{ height: h }}><PosterArt story={story} /></div>
+      {/* showTitle={false} across every rail (mobile parity with
+          desktop PosterCard): the baked title in the artwork carries
+          the rail; the white CSS overlay was just doubling up. */}
+      <div style={{ height: h }}><PosterArt story={story} showTitle={false} /></div>
       <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 28 }} />
       {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
           vote-count chip in the bottom-left corner of the poster. The
@@ -830,7 +839,7 @@ function Home({
               return (
                 <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 flex items-end active:scale-[.97] transition" style={{ minWidth: 170 }}>
                   <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-1" style={{ fontSize: 120, color: "transparent", WebkitTextStroke: "2px rgba(255,255,255,.32)" }}>{i + 1}</span>
-                  <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={s} /></div>
+                  <div className="shrink-0 w-[112px] h-[166px] -ml-2"><PosterArt story={s} showTitle={false} /></div>
                 </button>
               );
             })}

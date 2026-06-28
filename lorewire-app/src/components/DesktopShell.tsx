@@ -596,7 +596,12 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
   return (
     <button onClick={() => onOpen(story.id)} className="group relative shrink-0" style={{ width: w }}>
       <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}>
-        <PosterArt story={story} showTitle={!landscape} />
+        {/* showTitle={false} across every rail: every cinematic hero
+            already has the title baked into the artwork, so the white
+            CSS title overlay was just doubling up on the same words.
+            The landscape branch's separate <h3> is gone for the same
+            reason — baked title carries the rail. */}
+        <PosterArt story={story} showTitle={false} />
         <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 30 }} />
         {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
             vote-count chip in the bottom-left of the poster art. The
@@ -609,11 +614,6 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
             style={{ bottom: 10, fontSize: 10, padding: "2px 6px" }}
           >
             {formatVoteCount(voteCount)}
-          </div>
-        )}
-        {landscape && (
-          <div className="absolute left-3.5 right-3.5 bottom-5">
-            <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow text-ink" style={{ fontSize: 18 }}>{story.title}</h3>
           </div>
         )}
       </div>
@@ -661,35 +661,31 @@ function Top10Row({
   //
   // Layout: a single grid-cols-10 child of the standard Rail's flex
   // container, w-full so it fills the rail's 1520px usable width
-  // (max-w-[1600px] minus px-10). Each ~144px cell is a poster
-  // (aspectRatio 164/236, ~144x208). The giant outlined numeral sits
-  // BEHIND the poster (z-0 vs poster z-10), anchored to peek out from
-  // the bottom-left — its top ~30px is tucked behind the poster's
-  // bottom edge, the remaining ~40px hangs visibly below. Thumbnail
-  // artwork stays fully visible (numeral never overlays it). pb-14
-  // on the grid reserves room below the cells for the peek. showTitle
-  // is suppressed because the title is baked into the artwork at this
-  // size. The hover underline lives INSIDE the poster (bottom edge)
-  // here so it doesn't slice through the numeral the way the standard
-  // -bottom-2 stroke would. Standard Rail's overflow-x-auto is
-  // silently inert because the grid never overflows; chevrons stay
-  // for visual parity with the other rails.
+  // (max-w-[1600px] minus px-10). Each ~144px cell holds the poster
+  // at ~80% width (~115x165, aspectRatio 164/236) anchored right via
+  // ml-auto. The giant outlined numeral sits to the LEFT of the
+  // poster (Netflix desktop top-10 style) — its right edge slightly
+  // tucked behind the poster's left edge (z-0 vs poster z-10) so the
+  // "0" of "10" reads as hiding behind the artwork. Single digits
+  // render fully visible. Thumbnail artwork is never overlaid by the
+  // numeral. showTitle is suppressed because the title is baked into
+  // the artwork at this size. The hover underline sits at -bottom-2
+  // scoped to the poster's 80% footprint so the stroke draws under
+  // the artwork rather than the numeral.
   return (
-    <div className="grid grid-cols-10 gap-2 w-full pb-14">
+    <div className="grid grid-cols-10 gap-2 w-full">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
-            {/* Numeral peeks from behind the poster's bottom-left
-                corner. z-0 + bottom: -40 keeps it under the poster
-                visually while letting ~40px of the character hang
-                below the cell as the editorial flourish. */}
+          <button key={id} onClick={() => onOpen(id)} className="group relative flex items-end min-w-0">
+            {/* Numeral on the LEFT, bottom-aligned with the poster.
+                z-0 so the poster (z-10) covers any pixels where they
+                overlap on the right edge — that's the "slightly hide
+                behind the thumbnail" tuck. */}
             <span
-              className="absolute font-display font-black leading-[.7] select-none pointer-events-none"
+              className="absolute left-0 bottom-0 font-display font-black leading-[.7] select-none pointer-events-none"
               style={{
-                left: 6,
-                bottom: -40,
                 fontSize: 100,
                 color: "transparent",
                 WebkitTextStroke: "1.75px rgba(255,255,255,.55)",
@@ -699,18 +695,18 @@ function Top10Row({
               {i + 1}
             </span>
             <div
-              className="relative w-full"
+              className="relative ml-auto w-[80%]"
               style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12, zIndex: 10 }}
             >
               <PosterArt story={s} showTitle={false} />
-              {/* Hover underline — moved inside the poster's bottom
-                  edge so it doesn't cut through the numeral hanging
-                  below the cell. */}
-              <span
-                className="absolute left-2 right-2 bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-                style={{ transitionDuration: "180ms", zIndex: 20 }}
-              />
             </div>
+            {/* Hover underline — scoped to the poster's 80% footprint
+                (the poster is what the click target visually points at;
+                the numeral is decorative). */}
+            <span
+              className="absolute right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+              style={{ width: "80%", zIndex: 20, transitionDuration: "180ms" }}
+            />
           </button>
         );
       })}
