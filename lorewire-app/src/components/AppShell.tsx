@@ -823,7 +823,12 @@ function Home({
             {continueIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} w={150} h={96} />;
+              // Mobile parity with the desktop "You Didn't Vote Yet"
+              // rail (commit 70228bb): use the default portrait
+              // PosterCard (132x192) instead of the legacy landscape
+              // w=150 h=96 crop, which was clipping the baked-in
+              // titles off the top and bottom of the artwork.
+              return <PosterCard key={id} story={s} onOpen={onOpen} />;
             })}
           </div>
         </section>
