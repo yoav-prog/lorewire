@@ -94,11 +94,17 @@ export interface RenderResult {
  *  `PosterStillProps` shape; intentionally not imported across the
  *  package boundary to keep the HTTP layer testable without pulling
  *  Remotion into the test environment). Per
- *  _plans/2026-06-28-phase-2-social-poster-render.md. */
+ *  _plans/2026-06-28-phase-2-social-poster-render.md.
+ *
+ *  `text` is the climax-revealing line the helper already resolved
+ *  (cached `short_config.poster_text`, freshly-generated LLM line, or
+ *  fallback to the spoken hook). PosterStill does NOT pick — the
+ *  social-only LLM call lives upstream in
+ *  `lorewire-app/src/lib/short-poster.ts::ensureShortPoster` so video
+ *  script generation stays byte-identical to a pre-Phase-2 run. */
 export interface PosterInputProps {
   scene_1_url: string;
-  hook: string;
-  poster_text?: string;
+  text: string;
   brand_text?: string;
 }
 

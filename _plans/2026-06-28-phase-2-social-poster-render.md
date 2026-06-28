@@ -1,74 +1,123 @@
 # Phase 2 — deliberate social poster, rendered at publish time
 
-Date: 2026-06-28 (revised + implemented 2026-06-29)
+Date: 2026-06-28 (revised + implemented 2026-06-29; refactored 2026-06-29)
 Owner: Yoav
-Status: **IMPLEMENTED 2026-06-29** — code on `feat/social-poster-render`,
-all tests green (64 TS server + 34 Python narration + 91 vitest publisher
-suite). Awaiting Yoav approval to push + open PR.
+Status: **IMPLEMENTED 2026-06-29 (refactored for social-only isolation
+2026-06-29)** — code on `feat/social-poster-render`, all tests green.
+PR #140 open against `feat/multi-platform-shorts-publisher`.
 
-Mid-implementation scope addition 2026-06-29: a dedicated
-`script.poster_text` LLM field for the climax-revealing grid-tile line,
-SEPARATE from the spoken cold-open `hook`. Yoav previewed 4 PIL mockups
-with this content style and approved before the LLM prompt was wired.
-PosterStill prefers `poster_text` and falls back to `hook` for stories
-rendered before the prompt update.
+## Social-only refactor (2026-06-29)
 
-## Implementation summary (2026-06-29)
+Mid-implementation, Yoav flagged the architectural leak: the original
+2026-06-29 cut wired `poster_text` into the SCRIPT LLM call inside
+`pipeline/shorts_narration.py`. That meant a Phase 2 prompt block was
+sitting in the same system message that produced the spoken script,
+which could subtly nudge other outputs (script word choice, beat
+structure, hook tone). Phase 2 was supposed to be social-only — never
+touch the video/site path.
+
+Refactored 2026-06-29 to enforce the invariant:
+
+- **Reverted** `_poster_text_block`, the `poster_text` JSON-schema
+  field, and its inclusion in `system_parts` from
+  `pipeline/shorts_narration.py`. Video script generation is now
+  byte-identical to a pre-Phase-2 run.
+- **Reverted** the `poster_text` preservation in
+  `pipeline/shorts_render.py::build_short_props`. The `hook` field
+  preservation stays (cheap, useful as a fallback for the poster
+  helper).
+- **Reverted** `stripPosterTextFromProps` from
+  `lorewire-app/src/app/api/render_short/route.ts` and its tests.
+  `stripHookFromProps` stays.
+- **Reverted** `PosterTextBlockTests` from
+  `pipeline/tests/test_shorts_narration_structure.py`.
+- **Added** `poster_text?: string` as an optional field on
+  `ShortConfig` (`lorewire-app/src/lib/short-config.ts`). The site
+  render path doesn't read it — it's deliberately social-only.
+- **Added** `generatePosterText(storyId)` inside
+  `lorewire-app/src/lib/short-poster.ts`. A DEDICATED LLM call that
+  runs at publish time, separate from the script pipeline, with its
+  own focused prompt (8-14 words, climax-revealing, social-cover
+  voice).
+- **Rewrote** `ensureShortPoster` to: kill switch → load render inputs
+  → load cached `short_config.poster_text` → on miss, LLM-generate +
+  persist back → on LLM failure, fall back to spoken `hook` → guard
+  → hash → cache HEAD → POST Cloud Run.
+- **Simplified** `PosterStill.tsx` and the Cloud Run validator/render
+  shape: dropped the dual `hook` + `poster_text` precedence; both
+  collapse into a single `text` prop. The helper picks upstream; the
+  composition just renders.
+
+The social-only invariant is now load-bearing — anyone changing the
+poster prompt only touches `short-poster.ts::generatePosterText`, never
+the script pipeline.
+
+## Implementation summary (2026-06-29, post-refactor)
 
 Final file map. Branch: `feat/social-poster-render` off
 production-source `32b5457` (which already includes PRs #135, #137,
-plus the user's #136 + #138 parallel work merged on top).
+plus the user's #136 + #138 parallel work merged on top). PR #140
+targets `feat/multi-platform-shorts-publisher` per AGENTS.md inverted
+state.
 
-**Python pipeline (3 files):**
-- `pipeline/shorts_narration.py` — new `_poster_text_block()` +
-  `poster_text` in the output JSON schema. Teaches the script LLM
-  to write climax-revealing grid-tile text separate from the
-  oblique spoken hook.
+**Python pipeline (1 file touched):**
 - `pipeline/shorts_render.py` — `build_short_props` preserves
-  `hook` AND `poster_text` on the rendered props row.
-- `pipeline/tests/test_shorts_narration_structure.py` — 5 new
-  tests locking the poster-text block + schema field + ordering.
+  `hook` on the rendered props row (used by the poster helper as a
+  fallback text source when the LLM call fails).
+- No changes to `pipeline/shorts_narration.py` — video script
+  generation is byte-identical to a pre-Phase-2 run. The social-only
+  invariant lives here.
 
 **TypeScript dispatcher (1 file + tests):**
-- `lorewire-app/src/app/api/render_short/route.ts` — new
-  `stripHookFromProps` + `stripPosterTextFromProps` helpers; both
-  wired into the dispatcher so DoodleShort never sees phantom
-  props. Log line carries both strip flags.
-- `lorewire-app/src/app/api/render_short/route.test.ts` — 10 new
-  vitest cases.
+- `lorewire-app/src/app/api/render_short/route.ts` —
+  `stripHookFromProps` strips `hook` from inputProps before they
+  reach DoodleShort (which doesn't accept that prop). Log line
+  carries the strip flag.
+- `lorewire-app/src/app/api/render_short/route.test.ts` — vitest
+  cases lock the strip behavior.
+
+**Short config (1 file):**
+- `lorewire-app/src/lib/short-config.ts` — `ShortConfig` gains an
+  optional `poster_text?: string` field. Cached output of the helper's
+  dedicated LLM call; the site render path does NOT read it.
 
 **Remotion (2 files):**
 - `video/src/PosterStill.tsx` (new) — 1080×1920 still composition.
   Scene-1 top 70%, dark band bottom 30% (`#0F172A` + 8px red
-  `#DC2626` accent stripe), hook in Bebas Neue uppercase auto-sized
-  58–110pt, brand pill bottom-right. Prefers `poster_text`, falls
-  back to `hook`. Glyph-aware via auto-sizing.
+  `#DC2626` accent stripe), `text` in Bebas Neue uppercase auto-sized
+  58–110pt, brand pill bottom-right. Single `text` prop; the helper
+  resolves which line to use upstream.
 - `video/src/Root.tsx` — registered `PosterStill` alongside
   `DoodleShort` with `durationInFrames=1`.
 
 **Cloud Run endpoint (2 files + tests):**
-- `video/server/render.ts` — new
-  `renderPosterAndUploadStory` + `RenderPosterFn` type + new
-  `PosterInputProps` + `PosterRenderResult` shapes. Reuses bundle,
-  selectComposition, R2/GCS gate. Renders PNG via `renderStill`.
-- `video/server/index.ts` — new `POST /render-poster` route with
-  body validator (URL/hook/hash caps + hex format), auth, error
-  mapping. `createApp` accepts an optional `renderPoster` seam for
-  tests.
-- `video/server/index.test.mjs` — 11 new node:test cases (auth,
-  body validation for hash/url/hook, success path, error mapping).
+- `video/server/render.ts` — `renderPosterAndUploadStory` +
+  `RenderPosterFn` type + `PosterInputProps` (single `text` field) +
+  `PosterRenderResult` shapes. Reuses bundle, selectComposition,
+  R2/GCS gate. Renders PNG via `renderStill`.
+- `video/server/index.ts` — `POST /render-poster` route with body
+  validator (`scene_1_url` + `text` + optional `brand_text`; URL/text/
+  hash caps + hex format), auth, error mapping. `createApp` accepts
+  an optional `renderPoster` seam for tests.
+- `video/server/index.test.mjs` — node:test cases for auth, body
+  validation (including text-missing / text-too-long), success path,
+  and error mapping.
 
 **Helper (1 file + tests):**
-- `lorewire-app/src/lib/short-poster.ts` (new) —
-  `ensureShortPoster(storyId)` reads `short_renders.props`, runs
-  brand-safety + glyph + RTL guards, computes
-  `sha256(scene_1 + text + POSTER_VERSION).slice(0,16)`, HEADs the
-  cache URL with 2s timeout, POSTs to Cloud Run with 8s timeout.
-  Returns `{ url, alt, hash, source }` or `null`. Never throws.
-  Setting kill-switch `publisher.short_poster.enabled` (default ON).
-- `lorewire-app/src/lib/short-poster.test.ts` — 19 new vitest cases
-  covering happy paths, every guard rejection, missing-data fallbacks,
-  Cloud Run errors, and HEAD timeout.
+- `lorewire-app/src/lib/short-poster.ts` (new) — `ensureShortPoster`
+  flow: kill switch → load `scene_1_url` + `hook` fallback from
+  `short_renders.props` → load cached `short_config.poster_text` →
+  on miss, `generatePosterText` (DEDICATED LLM call) + persist back
+  → on LLM failure, fall back to spoken `hook` → brand-safety +
+  glyph + RTL guards → `sha256(scene_1 + text + POSTER_VERSION).slice(0,16)`
+  → HEAD cache (2s timeout) → POST Cloud Run (8s timeout). Returns
+  `{ url, alt, hash, source }` or `null`. Never throws. Setting kill-
+  switch `publisher.short_poster.enabled` (default ON).
+- `lorewire-app/src/lib/short-poster.test.ts` — vitest cases covering
+  cache hit, LLM generate + persist + render, hook fallback on LLM
+  failure, every guard rejection, missing-data paths, Cloud Run
+  errors, HEAD timeout, and payload shape (single `text` field, no
+  `hook`/`poster_text` leak).
 
 **Publishers (3 files):**
 - `lorewire-app/src/lib/publish-to-instagram.ts` — `runFullPipeline`

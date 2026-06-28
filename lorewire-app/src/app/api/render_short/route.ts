@@ -235,32 +235,6 @@ export function stripHookFromProps(inputProps: unknown): {
   return { hook: raw, propsStripped: stripped };
 }
 
-/** Strip the `poster_text` field from inputProps before they reach
- *  DoodleShort. Same rationale as stripHookFromProps: the Python
- *  pipeline preserves the climax-revealing line on `props` for the
- *  /render-poster endpoint, but DoodleShort doesn't accept it as a
- *  composition prop. Per the 2026-06-29 prompt-update scope addition
- *  to _plans/2026-06-28-phase-2-social-poster-render.md. */
-export function stripPosterTextFromProps(inputProps: unknown): {
-  posterText: string | null;
-  propsStripped: boolean;
-} {
-  if (!inputProps || typeof inputProps !== "object" || Array.isArray(inputProps)) {
-    return { posterText: null, propsStripped: false };
-  }
-  const obj = inputProps as Record<string, unknown>;
-  const raw = obj.poster_text;
-  let stripped = false;
-  if ("poster_text" in obj) {
-    delete obj.poster_text;
-    stripped = true;
-  }
-  if (typeof raw !== "string" || raw.length === 0) {
-    return { posterText: null, propsStripped: stripped };
-  }
-  return { posterText: raw, propsStripped: stripped };
-}
-
 async function serve(req: NextRequest): Promise<NextResponse> {
   if (!isAuthorized(req)) {
     namespacedLog("auth_fail", {
@@ -342,12 +316,6 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // directly from `short_renders.props` via its own helper.
   const { propsStripped: hookStripped } = stripHookFromProps(inputProps);
 
-  // Same pattern for `poster_text` — the climax-revealing line generated
-  // by the script LLM (2026-06-29 prompt update) lives on props for the
-  // poster renderer to read. DoodleShort never sees it.
-  const { propsStripped: posterTextStripped } =
-    stripPosterTextFromProps(inputProps);
-
   // Resolve the 9:16 intro/outro so Cloud Run splices them around the short,
   // same as the long-form render (shorts are always 9:16). Body-only if none.
   const story = await getStory(claimed.story_id);
@@ -391,7 +359,6 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     hook_end_sec: segments.hookEndSec,
     hook_end_stripped: hookEndStripped,
     hook_stripped: hookStripped,
-    poster_text_stripped: posterTextStripped,
   });
 
   // Cloud Run writes the MP4 to GCS key `<storyId>/video.mp4`. We must NOT pass

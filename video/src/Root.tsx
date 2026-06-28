@@ -76,7 +76,7 @@ const PosterStillLoose = PosterStill as unknown as React.ComponentType<LooseProp
 // --props is passed. The pipeline render always supplies real props.
 const POSTER_DEFAULT_PROPS: PosterStillProps = {
   scene_1_url: "",
-  hook: "Her refusal ended everything.",
+  text: "Her refusal ended everything.",
   brand_text: "LORE WIRE",
 };
 

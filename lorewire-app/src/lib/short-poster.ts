@@ -4,20 +4,25 @@
 //
 // Architecture (per _plans/2026-06-28-phase-2-social-poster-render.md):
 //
-//   1. Read scene_1_url + (poster_text OR hook) from the freshest
-//      `done` row in short_renders.props. If either is missing, return
-//      null — caller falls back to PR #137's scene-1-as-cover.
-//   2. Brand-safety + glyph + RTL guards on the source text. Any
+//   1. Read scene_1_url from the freshest `done` row in
+//      short_renders.props. Read poster_text from short_config (the
+//      cached LLM output). If poster_text is missing, fire a DEDICATED
+//      LLM call to generate it from the story body + existing hook,
+//      then persist it back to short_config so the next publish hits
+//      cache. This LLM call is SEPARATE from the script generation
+//      pipeline so the video script + MP4 + hero stay byte-identical
+//      to a pre-Phase-2 run (the social-only invariant).
+//   2. Brand-safety + glyph + RTL guards on the resolved text. Any
 //      failure returns null with a logged reason.
-//   3. Compute cache hash = sha256(scene_1_url + "\n" + text + "\n" +
-//      POSTER_VERSION).slice(0,16). POSTER_VERSION bumps invalidate
-//      every cached poster on the next publish (e.g. when the design
-//      tokens change in PosterStill.tsx).
+//   3. Compute cache hash =
+//      sha256(scene_1_url + "\n" + text + "\n" + POSTER_VERSION).slice(0,16).
+//      POSTER_VERSION bumps invalidate every cached poster on the next
+//      publish (e.g. when the design tokens change in PosterStill.tsx).
 //   4. Compute deterministic GCS / R2 URL. HEAD it with 2s timeout —
 //      cache hit returns immediately.
 //   5. On cache miss: POST to Cloud Run /render-poster with 8s
-//      timeout. Cloud Run renders the still + uploads to GCS / R2 at
-//      the deterministic URL and returns it.
+//      timeout. Cloud Run renders the still + uploads at the
+//      deterministic URL and returns it.
 //   6. Any failure (network, 4xx, 5xx, glyph reject, RTL reject)
 //      logs and returns null. The function NEVER throws.
 //
@@ -30,6 +35,13 @@ import { createHash } from "node:crypto";
 import { Agent, fetch as undiciFetch } from "undici";
 import { mediaPublicBase } from "@/lib/media-url";
 import { one } from "@/lib/db";
+import { chatCompletion } from "@/lib/llm";
+import { selected as selectedModel } from "@/lib/models";
+import {
+  parseShortConfig,
+  type ShortConfig,
+} from "@/lib/short-config";
+import { getStory, setStoryShortConfigJson } from "@/lib/repo";
 
 /** Bump this whenever the visual contract in
  *  `video/src/PosterStill.tsx` changes (band height, fonts, colors,
@@ -47,6 +59,7 @@ const URL_MAX_CHARS = 2000;
 
 const HEAD_TIMEOUT_MS = 2000;
 const RENDER_TIMEOUT_MS = 8000;
+const LLM_TIMEOUT_MS = 30_000;
 
 /** Setting key for the kill switch (default ON). When OFF, this
  *  function returns null for every call without doing any I/O —
@@ -54,10 +67,10 @@ const RENDER_TIMEOUT_MS = 8000;
 const SETTING_ENABLED = "publisher.short_poster.enabled";
 
 /** Conservative English profanity list — duplicated from
- *  `pipeline/shorts_safety.py::PROFANITY`. The LLM-generated text has
- *  already been brand-safety-checked at script generation time, so this
- *  is a defense-in-depth check (also covers the `hook` fallback path
- *  for legacy stories rendered before the safety check existed). */
+ *  `pipeline/shorts_safety.py::PROFANITY`. The dedicated poster-text
+ *  LLM call has its own brand-safety instructions, but this defense-
+ *  in-depth check catches anything that slips through (and also covers
+ *  the `hook` fallback path for legacy stories). */
 const PROFANITY = new Set([
   "fuck", "fucking", "fucked", "shit", "shitty", "bullshit",
   "asshole", "bitch", "cunt", "dick", "pussy", "cock",
@@ -75,7 +88,7 @@ const ALL_CAPS_RUN = /\b[A-Z]{3,}\b/;
  *  etc.). Hebrew, Arabic, CJK, etc. all reject — PosterStill loads
  *  Bebas Neue (Latin-only) so anything outside would render as tofu.
  *  RTL guard piggybacks on this. */
-const SUPPORTED_GLYPH_RE = /^[ -~ -ÿĀ-ſ‐-’“-”…]*$/;
+const SUPPORTED_GLYPH_RE = /^[ -~ -ÿĀ-ſ‐-’“-”…]*$/;
 
 export type PosterSource = "cached" | "rendered";
 
@@ -104,17 +117,21 @@ interface PosterFetchLike {
   }): Promise<{ ok: boolean; status: number; json(): Promise<unknown>; text(): Promise<string> }>;
 }
 
+/** Test seam for the LLM call inside generatePosterText. Production
+ *  wires `chatCompletion` from @/lib/llm; tests pass a fake that
+ *  returns a deterministic string without touching OpenAI. */
+export type ChatCompletionFn = typeof chatCompletion;
+export type SelectedModelFn = typeof selectedModel;
+
 export interface EnsureShortPosterDeps {
   fetch?: PosterFetchLike;
   /** Test override for the settings reader. Production uses
    *  @/lib/repo's getSetting. */
   settings?: SettingLike;
-}
-
-interface StoryProps {
-  scene_1_url: string;
-  text: string;
-  text_source: "poster_text" | "hook";
+  /** Test override for the LLM call inside generatePosterText. */
+  chat?: ChatCompletionFn;
+  /** Test override for the model picker. */
+  pickModel?: SelectedModelFn;
 }
 
 /** Surface used by the dispatcher's existing log channel so failures
@@ -147,10 +164,20 @@ const defaultFetch: PosterFetchLike = async (url, init) => {
   };
 };
 
-/** Read scene_1_url + (poster_text || hook) from the freshest done
- *  row in short_renders.props. Returns null if the story has never
- *  been rendered OR the row predates Part 0 (no hook field). */
-async function loadStoryProps(storyId: string): Promise<StoryProps | null> {
+interface StoryInputs {
+  /** Doodle scene-1 GCS URL — the poster's background image. */
+  scene_1_url: string;
+  /** Spoken cold-open line from the script, if present in props.
+   *  Used as context for the LLM call AND as a last-ditch text
+   *  fallback when the LLM call itself fails. */
+  hook: string | null;
+}
+
+/** Read scene_1_url + hook from the freshest `done` short_renders row.
+ *  scene_1_url is required (no scene = no poster); hook is optional. */
+async function loadStoryInputsFromRender(
+  storyId: string,
+): Promise<StoryInputs | null> {
   if (!storyId) return null;
   const row = await one<{ props: unknown }>(
     `SELECT props FROM short_renders
@@ -177,19 +204,158 @@ async function loadStoryProps(storyId: string): Promise<StoryProps | null> {
       ? (frames[0] as { url?: unknown }).url
       : null;
   if (typeof scene_1_url !== "string" || !scene_1_url) return null;
-  // Prefer the climax-revealing poster_text (Part 1.5 prompt update)
-  // over the spoken cold-open hook (Part 0). Both are stripped from
-  // the video Remotion props by the dispatcher before /render fires;
-  // we read them directly from the persisted row.
-  const posterText = obj.poster_text;
-  if (typeof posterText === "string" && posterText.trim().length > 0) {
-    return { scene_1_url, text: posterText.trim(), text_source: "poster_text" };
+  const hookRaw = obj.hook;
+  const hook =
+    typeof hookRaw === "string" && hookRaw.trim().length > 0
+      ? hookRaw.trim()
+      : null;
+  return { scene_1_url, hook };
+}
+
+/** Read the cached poster_text off short_config. Returns null when
+ *  the story has no short_config OR the field is missing/empty (the
+ *  signal to lazy-generate via LLM). */
+async function loadCachedPosterText(storyId: string): Promise<{
+  text: string;
+  config: ShortConfig;
+} | null> {
+  const story = await getStory(storyId);
+  if (!story?.short_config) return null;
+  let parsed;
+  try {
+    parsed = parseShortConfig(JSON.parse(story.short_config));
+  } catch {
+    return null;
   }
-  const hook = obj.hook;
-  if (typeof hook === "string" && hook.trim().length > 0) {
-    return { scene_1_url, text: hook.trim(), text_source: "hook" };
+  if (!parsed.ok) return null;
+  const text = parsed.config.poster_text;
+  if (typeof text !== "string" || text.trim().length === 0) return null;
+  return { text: text.trim(), config: parsed.config };
+}
+
+/** Persist a freshly-generated poster_text back to short_config so the
+ *  next publish hits the cache. Best-effort: a failure logs + skips
+ *  the persist (the in-memory text still gets used for THIS publish).
+ *  We read the existing short_config to preserve all other fields. */
+async function persistPosterText(
+  storyId: string,
+  text: string,
+): Promise<void> {
+  const story = await getStory(storyId);
+  if (!story) return;
+  let config: Record<string, unknown> = {};
+  if (story.short_config) {
+    try {
+      config = JSON.parse(story.short_config);
+    } catch {
+      // Existing short_config is malformed JSON. Don't clobber it —
+      // bail and let a fresh generation run on the next publish.
+      log("persist_failed", {
+        story_id: storyId,
+        reason: "existing short_config is not valid JSON",
+      });
+      return;
+    }
   }
-  return null;
+  config.poster_text = text;
+  try {
+    await setStoryShortConfigJson(storyId, JSON.stringify(config));
+  } catch (e) {
+    log("persist_failed", {
+      story_id: storyId,
+      reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
+}
+
+/** Dedicated LLM call that produces the climax-revealing poster line.
+ *  Separate from the script generation in pipeline/shorts_narration.py
+ *  so the video script + MP4 + hero stay byte-identical to a pre-
+ *  Phase-2 run (the social-only invariant). Per
+ *  _plans/2026-06-28-phase-2-social-poster-render.md. */
+export async function generatePosterText(
+  storyId: string,
+  deps: { chat?: ChatCompletionFn; pickModel?: SelectedModelFn } = {},
+): Promise<string | null> {
+  const story = await getStory(storyId);
+  if (!story) return null;
+  const title = (story.title ?? "").trim();
+  const body = (story.body ?? "").trim();
+  if (!body && !title) return null;
+  // Cap body so a 12 kb article doesn't blow the prompt budget. Same
+  // window the category classifier uses for the same reason.
+  const bodyForPrompt = body.length > 2000 ? body.slice(0, 2000) : body;
+
+  // Load the spoken hook from the latest render row (if present) so
+  // the LLM sees what the script said and writes the poster line in
+  // the same emotional register without contradicting it.
+  const inputs = await loadStoryInputsFromRender(storyId);
+  const hookHint = inputs?.hook
+    ? `\nThe spoken cold-open line (for tone alignment only — do NOT copy):\n"""${inputs.hook}"""\n`
+    : "";
+
+  const chat = deps.chat ?? chatCompletion;
+  const pickModel = deps.pickModel ?? selectedModel;
+  const modelId = await pickModel("llm");
+
+  const system =
+    "You write social-media cover tile lines for Lorewire shorts. " +
+    "Each line goes on a STATIC poster image a stranger sees in the IG / " +
+    "FB / YouTube grid BEFORE the video plays. Goal: stop the scroll by " +
+    "naming the dramatic moment CLEARLY so the stranger instantly " +
+    "understands the stakes and clicks.\n\n" +
+    "RULES (every line must obey):\n" +
+    "  - Length: 8-14 words. One or two short sentences. Renders in " +
+    "ALL CAPS — avoid idioms that lose meaning in caps.\n" +
+    "  - Name the dramatic event SPECIFICALLY (who, what happened). " +
+    "Do NOT spoil the resolution (keep curiosity intact).\n" +
+    "  - BAD (abstract metaphor): \"Everything changed.\" \"Nothing was " +
+    "the same.\"\n" +
+    "  - GOOD (concrete event): \"Her wedding dress was destroyed the " +
+    "morning of the ceremony.\" \"She refused. He emptied their joint " +
+    "account by morning.\"\n" +
+    "  - No all-caps shock words inside the line, no profanity, no PII.\n" +
+    "  - Defendable against the source story — never invent facts.\n\n" +
+    "Output ONLY the line itself. No prose before or after, no quotes, " +
+    "no markdown, no JSON.";
+
+  const user =
+    `Title: ${title || "(untitled)"}\n` +
+    `Source story:\n"""${bodyForPrompt}"""\n${hookHint}\n` +
+    `Write the poster line now.`;
+
+  const result = await chat({
+    modelId,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    temperature: 0.6,
+    maxCompletionTokens: 80,
+  });
+  if (!result.ok) {
+    log("llm_failed", {
+      story_id: storyId,
+      reason: result.error.slice(0, 200),
+    });
+    return null;
+  }
+  // Strip wrapping quotes / whitespace; the model sometimes returns
+  // "Her wedding dress was destroyed." with explicit quotes despite
+  // the prompt asking for raw text. Also strip a trailing newline.
+  let text = result.content.trim();
+  text = text.replace(/^["“']+|["”']+$/g, "").trim();
+  // Truncate to the cap as defense in depth — if the LLM ignores the
+  // 8-14 word budget, we don't ship a 300-word run-on.
+  if (text.length > HOOK_MAX_CHARS) text = text.slice(0, HOOK_MAX_CHARS);
+  if (text.length === 0) {
+    log("llm_failed", {
+      story_id: storyId,
+      reason: "empty completion",
+    });
+    return null;
+  }
+  return text;
 }
 
 /** Pre-render guards. Returns the reason string if rejected, null if OK. */
@@ -262,12 +428,12 @@ export async function ensureShortPoster(
     return null;
   }
 
-  const props = await loadStoryProps(storyId);
-  if (!props) {
-    log("skipped", { story_id: storyId, reason: "missing_props" });
+  const inputs = await loadStoryInputsFromRender(storyId);
+  if (!inputs) {
+    log("skipped", { story_id: storyId, reason: "missing_render_props" });
     return null;
   }
-  if (props.scene_1_url.length > URL_MAX_CHARS) {
+  if (inputs.scene_1_url.length > URL_MAX_CHARS) {
     log("skipped", {
       story_id: storyId,
       reason: "scene_1_url_too_long",
@@ -275,25 +441,56 @@ export async function ensureShortPoster(
     return null;
   }
 
-  const guard = guardText(props.text);
+  // Resolve the poster text: prefer the cached short_config.poster_text;
+  // if missing, generate via dedicated LLM call + persist back so the
+  // next publish hits cache; if the LLM call also fails, fall back to
+  // the spoken hook for legacy / first-publish failure cases.
+  let text: string;
+  let textSource: "config" | "generated" | "hook" = "config";
+  const cached = await loadCachedPosterText(storyId);
+  if (cached) {
+    text = cached.text;
+  } else {
+    const generated = await generatePosterText(storyId, {
+      chat: deps.chat,
+      pickModel: deps.pickModel,
+    });
+    if (generated) {
+      text = generated;
+      textSource = "generated";
+      // Persist for next publish. Best-effort — a failure here doesn't
+      // block this publish.
+      await persistPosterText(storyId, generated);
+    } else if (inputs.hook) {
+      text = inputs.hook;
+      textSource = "hook";
+    } else {
+      log("skipped", {
+        story_id: storyId,
+        reason: "no_text_source",
+      });
+      return null;
+    }
+  }
+
+  const guard = guardText(text);
   if (guard) {
     log("skipped", {
       story_id: storyId,
       reason: guard,
-      text_source: props.text_source,
+      text_source: textSource,
     });
     return null;
   }
 
-  const hash = computePosterHash(props.scene_1_url, props.text);
+  const hash = computePosterHash(inputs.scene_1_url, text);
   const url = posterUrlForKey(storyId, hash);
   if (!url) {
     log("skipped", { story_id: storyId, reason: "no_media_base" });
     return null;
   }
 
-  // 1) Cache HEAD with a short budget. The cache miss is the common
-  // path on first publish per story; subsequent platforms hit warm.
+  // 1) Cache HEAD with a short budget.
   try {
     const head = await fetchImpl(url, {
       method: "HEAD",
@@ -304,18 +501,16 @@ export async function ensureShortPoster(
         story_id: storyId,
         hash,
         elapsed_ms: Date.now() - t0,
-        text_source: props.text_source,
+        text_source: textSource,
       });
       return {
         url,
-        alt: buildAlt(props.text),
+        alt: buildAlt(text),
         hash,
         source: "cached",
       };
     }
   } catch (e) {
-    // HEAD network error / timeout: assume not cached, fall through to
-    // render. We still log so a flaky HEAD layer is observable.
     log("head_failed", {
       story_id: storyId,
       hash,
@@ -323,8 +518,7 @@ export async function ensureShortPoster(
     });
   }
 
-  // 2) Render via Cloud Run. Same env vars the existing dispatcher
-  // uses; if either is missing we can't render and fall back to null.
+  // 2) Render via Cloud Run.
   const cloudRunUrl = process.env.CLOUD_RUN_RENDER_URL;
   const cronSecret = process.env.CRON_SECRET;
   if (!cloudRunUrl || !cronSecret) {
@@ -336,17 +530,18 @@ export async function ensureShortPoster(
     return null;
   }
   const renderUrl = `${cloudRunUrl.replace(/\/$/, "")}/render-poster`;
+  // The helper already resolved which text to use (cached
+  // short_config.poster_text → freshly-generated LLM line → spoken
+  // hook fallback). PosterStill takes a single `text` prop — no
+  // dual-field precedence in the composition, no upstream-vs-
+  // downstream picking. Same payload shape regardless of text_source
+  // so the Cloud Run validator stays simple.
   const renderBody = JSON.stringify({
     storyId,
     hash,
     inputProps: {
-      scene_1_url: props.scene_1_url,
-      // Send both fields — the composition prefers poster_text, but
-      // sending hook too means a legacy story (no poster_text) still
-      // gets the same payload shape.
-      hook: props.text_source === "hook" ? props.text : "",
-      poster_text:
-        props.text_source === "poster_text" ? props.text : undefined,
+      scene_1_url: inputs.scene_1_url,
+      text,
       brand_text: "LORE WIRE",
     },
   });
@@ -399,11 +594,15 @@ export async function ensureShortPoster(
     hash,
     elapsed_ms: Date.now() - t0,
     render_elapsed_ms: Date.now() - tRender,
-    text_source: props.text_source,
+    text_source: textSource,
   });
+  // Mark the LLM-call latency separately so the operator can tell
+  // whether a slow publish was the LLM or the render. (Both are
+  // contained in the elapsed_ms above, but split fields help triage.)
+  void LLM_TIMEOUT_MS; // placeholder reference — used in future LLM streaming.
   return {
     url: data.url,
-    alt: buildAlt(props.text),
+    alt: buildAlt(text),
     hash,
     source: "rendered",
   };

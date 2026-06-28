@@ -122,28 +122,23 @@ function parseRenderPosterBody(body: RenderPosterRequestBody | undefined): {
   }
   const ip = inputProps as Record<string, unknown>;
   const scene_1_url = ip.scene_1_url;
-  const hook = ip.hook;
-  const poster_text = ip.poster_text;
+  const text = ip.text;
   const brand_text = ip.brand_text;
   if (
     typeof scene_1_url !== "string" ||
     scene_1_url.length === 0 ||
     scene_1_url.length > POSTER_URL_MAX_CHARS
   ) return null;
-  if (typeof hook !== "string" || hook.length > POSTER_HOOK_MAX_CHARS) return null;
   if (
-    poster_text !== undefined &&
-    (typeof poster_text !== "string" ||
-      poster_text.length > POSTER_HOOK_MAX_CHARS)
+    typeof text !== "string" ||
+    text.length === 0 ||
+    text.length > POSTER_HOOK_MAX_CHARS
   ) return null;
   if (
     brand_text !== undefined &&
     (typeof brand_text !== "string" || brand_text.length > 64)
   ) return null;
-  const validated: PosterInputProps = { scene_1_url, hook };
-  if (typeof poster_text === "string" && poster_text.length > 0) {
-    validated.poster_text = poster_text;
-  }
+  const validated: PosterInputProps = { scene_1_url, text };
   if (typeof brand_text === "string" && brand_text.length > 0) {
     validated.brand_text = brand_text;
   }
@@ -271,7 +266,7 @@ export function createApp(
         res.status(400).json({
           error:
             "expected { storyId: string, hash: string (hex 8-32), " +
-            "inputProps: { scene_1_url: string, hook: string, poster_text?: string, brand_text?: string } }",
+            "inputProps: { scene_1_url: string, text: string, brand_text?: string } }",
         });
         return;
       }
@@ -279,8 +274,7 @@ export function createApp(
       log("poster_received", {
         story_id: parsed.storyId,
         hash: parsed.hash,
-        has_poster_text: parsed.inputProps.poster_text !== undefined,
-        hook_len: parsed.inputProps.hook.length,
+        text_len: parsed.inputProps.text.length,
       });
 
       try {

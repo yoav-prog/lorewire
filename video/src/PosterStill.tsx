@@ -81,17 +81,16 @@ const BRAND_MARGIN = 36;
 // the inputProps body against the same caps documented here before
 // calling selectComposition.
 //
-// Text precedence: `poster_text` wins over `hook` when present. The
-// LLM generates `poster_text` as a climax-revealing line specifically
-// for the static grid tile (see _poster_text_block in
-// pipeline/shorts_narration.py); `hook` is the spoken cold-open and
-// is oblique by design. For legacy stories rendered before the
-// 2026-06-29 prompt update, `poster_text` is empty and we fall back
-// to `hook` so the poster still renders something readable.
+// `text` is the climax-revealing line the helper already resolved
+// before calling Cloud Run — `lib/short-poster.ts::ensureShortPoster`
+// picks between the cached `short_config.poster_text` (LLM-generated
+// at publish time), a freshly-generated line, or the spoken hook as
+// a last-ditch fallback. PosterStill itself does NOT pick; it just
+// renders. This keeps the social-only LLM call upstream and the
+// composition trivially deterministic.
 export interface PosterStillProps {
   scene_1_url: string;
-  hook: string;
-  poster_text?: string;
+  text: string;
   brand_text?: string;
 }
 
@@ -140,15 +139,12 @@ function charsPerLineForSize(fontSize: number): number {
 
 export const PosterStill: React.FC<PosterStillProps> = ({
   scene_1_url,
-  hook,
-  poster_text,
+  text,
   brand_text,
 }) => {
-  // Prefer the climax-revealing poster line; fall back to the spoken
-  // hook for legacy stories. Normalize uppercase + trim once so the
-  // auto-sizer sees the exact glyph string that will render.
-  const sourceText = (poster_text || hook || "").trim();
-  const hookText = sourceText.toUpperCase();
+  // Normalize uppercase + trim once so the auto-sizer sees the exact
+  // glyph string that will render.
+  const hookText = (text || "").trim().toUpperCase();
   const brandText = (brand_text || BRAND_TEXT).toUpperCase();
   const fontSize = pickFontSize(hookText);
   const charsPerLine = charsPerLineForSize(fontSize);

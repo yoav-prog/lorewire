@@ -325,8 +325,7 @@ const VALID_POSTER_BODY = {
   hash: VALID_HASH,
   inputProps: {
     scene_1_url: "https://media.lorewire.com/envelope-short/frame-00.png",
-    hook: "Eight hundred dollars. Gone.",
-    poster_text: "Her wedding dress was destroyed the morning of the ceremony.",
+    text: "Her wedding dress was destroyed the morning of the ceremony.",
     brand_text: "LORE WIRE",
   },
 };
@@ -399,12 +398,25 @@ describe("Cloud Run render service /render-poster body validation", () => {
     }
   });
 
-  it("returns 400 when hook is too long", async () => {
+  it("returns 400 when text is missing or empty", async () => {
+    for (const badText of [undefined, "", null, 42]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          ...VALID_POSTER_BODY,
+          inputProps: { ...VALID_POSTER_BODY.inputProps, text: badText },
+        },
+      });
+      assert.equal(status, 400, `text=${JSON.stringify(badText)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when text is too long", async () => {
     const { status } = await post("/render-poster", {
       auth: `Bearer ${SECRET}`,
       body: {
         ...VALID_POSTER_BODY,
-        inputProps: { ...VALID_POSTER_BODY.inputProps, hook: "x".repeat(281) },
+        inputProps: { ...VALID_POSTER_BODY.inputProps, text: "x".repeat(281) },
       },
     });
     assert.equal(status, 400);
@@ -429,12 +441,12 @@ describe("Cloud Run render service /render-poster success path", () => {
     assert.equal(lastPosterRenderCall.storyId, STORY);
     assert.equal(lastPosterRenderCall.hash, VALID_HASH);
     assert.equal(
-      lastPosterRenderCall.inputProps.poster_text,
+      lastPosterRenderCall.inputProps.text,
       "Her wedding dress was destroyed the morning of the ceremony.",
     );
   });
 
-  it("normalizes a missing optional poster_text to undefined", async () => {
+  it("normalizes a missing optional brand_text to undefined", async () => {
     lastPosterRenderCall = null;
     const { status } = await post("/render-poster", {
       auth: `Bearer ${SECRET}`,
@@ -442,12 +454,11 @@ describe("Cloud Run render service /render-poster success path", () => {
         ...VALID_POSTER_BODY,
         inputProps: {
           scene_1_url: VALID_POSTER_BODY.inputProps.scene_1_url,
-          hook: VALID_POSTER_BODY.inputProps.hook,
+          text: VALID_POSTER_BODY.inputProps.text,
         },
       },
     });
     assert.equal(status, 200);
-    assert.equal(lastPosterRenderCall.inputProps.poster_text, undefined);
     assert.equal(lastPosterRenderCall.inputProps.brand_text, undefined);
   });
 });

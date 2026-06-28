@@ -135,6 +135,15 @@ export interface ShortConfig {
    *  it (parsed into CaptionStyleProps) so edits show live; the render path
    *  picks it up on the next Lane A/B/C run. */
   caption_style?: ShortCaptionStyleOverride;
+  /** The climax-revealing line rendered on the social-cover poster (Phase 2,
+   *  per _plans/2026-06-28-phase-2-social-poster-render.md). DELIBERATELY
+   *  social-only — the site render path does not read this field. Generated
+   *  by a dedicated LLM call inside `ensureShortPoster` on first publish per
+   *  story (separate from the script LLM so the video script stays byte-
+   *  identical to a pre-Phase-2 run); admin may overwrite manually in a
+   *  future editor surface. Empty / unset → the helper lazy-generates +
+   *  persists back here on the next publish. */
+  poster_text?: string;
   _locks?: ShortLockMap;
   _edit_session?: ShortEditSession;
   /** Resolved intro/outro segment ids the LAST successful render spliced.
@@ -346,6 +355,12 @@ export function parseShortConfig(raw: unknown): ShortParseResult {
       config.caption_style = override;
     }
   }
+
+  // Phase 2 social-poster line, generated lazily by ensureShortPoster's
+  // dedicated LLM call. Optional; empty / missing means "regen on next
+  // social publish". Per _plans/2026-06-28-phase-2-social-poster-render.md.
+  const posterText = readOptString(raw, "poster_text");
+  if (posterText !== undefined) config.poster_text = posterText;
 
   return { ok: true, config };
 }
