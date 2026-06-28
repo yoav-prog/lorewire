@@ -142,7 +142,7 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 // rectangular-streamer-grid; callers that need a different radius
 // pass `rounded` explicitly (Search result tiles still opt out
 // with `rounded={0}`).
-function PosterArt({ story, rounded = 12, showTitle = true, kicker = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean }) {
+function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig = false }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; vig?: boolean }) {
   const c = CAT[story.cat];
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
@@ -165,7 +165,13 @@ function PosterArt({ story, rounded = 12, showTitle = true, kicker = true }: { s
       <div className="absolute inset-0" style={{ background: showImage ? "linear-gradient(180deg, rgba(0,0,0,0) 35%, rgba(0,0,0,.55) 100%)" : "radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)" }}></div>
       {!showImage && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
       {!showImage && <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize: 200, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
-      <div className="absolute inset-0 poster-vig"></div>
+      {/* vig is the heavy bottom-up dark gradient that used to stack on
+          top of the line-165 gradient. Default is now off so baked titles
+          in the artwork stay bright across every rail. The line-165
+          gradient (.55 opacity at the bottom) still provides enough
+          contrast for non-baked CSS titles. Callers can opt back in with
+          vig={true} if a specific surface needs the deeper darkening. */}
+      {vig && <div className="absolute inset-0 poster-vig"></div>}
       {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
       {story.dur && (
         <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
@@ -564,7 +570,12 @@ function Rail({ title, children }: { title: string; children: React.ReactNode })
       <h2 className="font-display font-bold uppercase tracking-tightest text-[19px] text-ink px-10 max-w-[1600px] mx-auto mb-3.5">{title}</h2>
       <div className="relative">
         <button onClick={() => scroll(-1)} className="absolute left-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-l absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevL size={22} /></span></button>
-        <div ref={ref} className="flex gap-3.5 overflow-x-auto noscroll px-10 max-w-[1600px] mx-auto" style={{ scrollPaddingLeft: 40 }}>{children}</div>
+        {/* pb-3 reserves room for the cards' -bottom-2 hover underline
+            stroke. Without it, overflow-x: auto forces overflow-y: auto
+            (CSS spec), so the underline 8px below each card triggers a
+            vertical scroll and the hover affordance is hidden until the
+            user scrolls within the rail. */}
+        <div ref={ref} className="flex gap-3.5 overflow-x-auto noscroll px-10 pb-3 max-w-[1600px] mx-auto" style={{ scrollPaddingLeft: 40 }}>{children}</div>
         <button onClick={() => scroll(1)} className="absolute right-0 top-0 bottom-0 z-20 w-16 flex items-center justify-center text-ink transition-opacity" style={{ opacity: hover ? 1 : 0 }}><span className="rail-fade-r absolute inset-0"></span><span className="relative w-9 h-9 rounded-full bg-bg/70 border border-line flex items-center justify-center"><ChevR size={22} /></span></button>
       </div>
     </section>
@@ -585,7 +596,12 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
   return (
     <button onClick={() => onOpen(story.id)} className="group relative shrink-0" style={{ width: w }}>
       <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}>
-        <PosterArt story={story} showTitle={!landscape} />
+        {/* showTitle={false} across every rail: every cinematic hero
+            already has the title baked into the artwork, so the white
+            CSS title overlay was just doubling up on the same words.
+            The landscape branch's separate <h3> is gone for the same
+            reason — baked title carries the rail. */}
+        <PosterArt story={story} showTitle={false} />
         <RatingBadge value={getRating(story.id) ?? 0} className="absolute right-2 z-10" style={{ top: 30 }} />
         {/* 2026-06-26 slice H of _plans/2026-06-26-homepage-redesign-v1.md:
             vote-count chip in the bottom-left of the poster art. The
@@ -598,11 +614,6 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
             style={{ bottom: 10, fontSize: 10, padding: "2px 6px" }}
           >
             {formatVoteCount(voteCount)}
-          </div>
-        )}
-        {landscape && (
-          <div className="absolute left-3.5 right-3.5 bottom-5">
-            <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow text-ink" style={{ fontSize: 18 }}>{story.title}</h3>
           </div>
         )}
       </div>
@@ -647,26 +658,55 @@ function Top10Row({
   // published id (in the DB but not yet baked into published.ts) still
   // renders. Returning null on a miss filters the entry out so a stale
   // curation row can't crash the rail.
+  //
+  // Layout: a single grid-cols-10 child of the standard Rail's flex
+  // container, w-full so it fills the rail's 1520px usable width
+  // (max-w-[1600px] minus px-10). Each ~144px cell is occupied by a
+  // FULL-width poster (aspectRatio 164/236, ~144x208) — biggest
+  // thumbnail size that fits 10 across without making the row wider.
+  // The rank numeral is a solid white badge overlaid on the poster's
+  // bottom-left corner (Netflix-mobile style) — small enough that it
+  // only covers a corner of the artwork yet fully readable for both
+  // single-digit ranks and "10". Drop shadow + thin dark outline keep
+  // it legible over both light and dark hero images. Numeral is
+  // entirely INSIDE the poster box, so no vertical overflow can
+  // trigger the Rail's overflow-y: auto scroll. showTitle is
+  // suppressed because the title is baked into the artwork.
   return (
-    <>
+    <div className="grid grid-cols-10 gap-2 w-full">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative shrink-0 flex items-end" style={{ minWidth: 264 }}>
-            <span className="font-display font-black leading-[.7] select-none shrink-0 -mr-2" style={{ fontSize: 200, color: "transparent", WebkitTextStroke: "2.5px rgba(255,255,255,.34)" }}>{i + 1}</span>
-            <div className="shrink-0 -ml-3" style={{ width: 164, height: 236, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}><PosterArt story={s} /></div>
-            {/* Slice H underline-stroke hover. Inset to the poster
-                bounds (the giant number doesn't get an underline
-                drawn under it — it's the poster that's the link). */}
+          <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
+            <div
+              className="relative w-full"
+              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
+            >
+              <PosterArt story={s} showTitle={false} />
+              <span
+                className="absolute font-display font-black leading-none select-none pointer-events-none"
+                style={{
+                  left: 10,
+                  bottom: 8,
+                  fontSize: 78,
+                  color: "#ffffff",
+                  WebkitTextStroke: "1px rgba(0,0,0,.55)",
+                  textShadow: "0 2px 14px rgba(0,0,0,.85), 0 0 4px rgba(0,0,0,.6)",
+                }}
+              >
+                {i + 1}
+              </span>
+            </div>
+            {/* Hover underline — full poster width. */}
             <span
-              className="absolute right-0 bottom-[-8px] h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-              style={{ width: 164, transitionDuration: "180ms" }}
+              className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+              style={{ transitionDuration: "180ms" }}
             />
           </button>
         );
       })}
-    </>
+    </div>
   );
 }
 

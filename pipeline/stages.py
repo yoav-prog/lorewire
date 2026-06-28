@@ -658,10 +658,13 @@ def make_thumbnail_prompt(
             f"editorial poster for a short documentary titled \"{title}\". "
             f"{style_band} "
             f"Scene context from the story: {opening} "
-            f"Render the title \"{title}\" prominently in bold confident "
-            f"typography, integrated into the composition (not floating on a "
-            f"separate layer). {orientation}. High-resolution magazine-cover "
-            f"finish. No watermarks, no signatures, no extra text beyond the title."
+            f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
+            f"bold typography (white or near-white characters with a strong dark "
+            f"shadow or outline against the background so the words stay clearly "
+            f"legible even at small thumbnail sizes), integrated into the "
+            f"composition (not floating on a separate layer). {orientation}. "
+            f"High-resolution magazine-cover finish. No watermarks, no signatures, "
+            f"no extra text beyond the title."
         )
 
     if character_base_url:
@@ -676,20 +679,26 @@ def make_thumbnail_prompt(
             f"cinematic editorial poster for a short documentary titled "
             f"\"{title}\". {style_band} "
             f"Composition focused on this scene from the story: {opening} "
-            f"Render the title \"{title}\" prominently in bold confident "
-            f"typography, integrated into the composition (not floating on a "
-            f"separate layer). {orientation}. High-resolution magazine-cover "
-            f"finish. No watermarks, no signatures, no extra text beyond the title."
+            f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
+            f"bold typography (white or near-white characters with a strong dark "
+            f"shadow or outline against the background so the words stay clearly "
+            f"legible even at small thumbnail sizes), integrated into the "
+            f"composition (not floating on a separate layer). {orientation}. "
+            f"High-resolution magazine-cover finish. No watermarks, no signatures, "
+            f"no extra text beyond the title."
         )
 
     return (
         f"Cinematic editorial poster for a short documentary titled \"{title}\". "
         f"{style_band} "
         f"Composition focused on this scene from the story: {opening} "
-        f"Render the title \"{title}\" prominently in bold confident "
-        f"typography, integrated into the composition (not floating on a "
-        f"separate layer). {orientation}. High-resolution magazine-cover "
-        f"finish. No watermarks, no signatures, no extra text beyond the title."
+        f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
+        f"bold typography (white or near-white characters with a strong dark "
+        f"shadow or outline against the background so the words stay clearly "
+        f"legible even at small thumbnail sizes), integrated into the "
+        f"composition (not floating on a separate layer). {orientation}. "
+        f"High-resolution magazine-cover finish. No watermarks, no signatures, "
+        f"no extra text beyond the title."
     )
 
 
