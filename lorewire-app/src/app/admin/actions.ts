@@ -3720,13 +3720,19 @@ export async function bulkReclassifyStoriesAction() {
 // loop is sequential so the per-story budget gate sees the running total —
 // parallel would race on the cap (same reasoning as RebuildAllButton).
 
-export type BulkRegenTarget = "hero" | "scenes" | "voice" | "pipeline";
+export type BulkRegenTarget =
+  | "hero"
+  | "scenes"
+  | "voice"
+  | "pipeline"
+  | "short";
 
 const BULK_REGEN_TARGETS: ReadonlySet<BulkRegenTarget> = new Set([
   "hero",
   "scenes",
   "voice",
   "pipeline",
+  "short",
 ]);
 
 export interface BulkRegenResult {
@@ -3823,7 +3829,7 @@ export async function bulkRegenerateContentAction(
         }
         revalidatePath(`/admin/stories/${item.id}`);
         revalidatePath(`/admin/videos/${item.id}`);
-      } else {
+      } else if (target === "pipeline") {
         // pipeline — needs reddit_id to enqueue a story_jobs row. Stories
         // imported pre-pipeline (manual seeds, legacy migrations) may not
         // have one; we surface that explicitly instead of failing silently.
@@ -3852,6 +3858,37 @@ export async function bulkRegenerateContentAction(
           continue;
         }
         revalidatePath("/admin/reddit-sources");
+      } else {
+        // short — re-render the existing short with the current narration
+        // prompt (clarity bar + POV + hook-charge rules, locked 2026-06-28).
+        // See _plans/2026-06-28-bulk-regen-shorts.md. Goes through the same
+        // primitive the per-story Restart button uses, with `force: true` so
+        // props are cleared and the LLM is called again — that's the only
+        // way the new prompt rules reach the script.
+        if (!(story.body ?? "").trim()) {
+          failed.push({ ...item, reason: "empty-body" });
+          continue;
+        }
+        const { enqueueShortRender } = await import(
+          "@/lib/short-render-queue"
+        );
+        try {
+          await enqueueShortRender(
+            item.id,
+            null,
+            null,
+            session.userId,
+            { force: true },
+          );
+        } catch (err) {
+          // enqueueShortRender only throws on DB / invariant failures; race
+          // with an in-flight render is handled inside and surfaces as an
+          // idempotent_hit event (the row stays as-is, no double-charge).
+          const reason = err instanceof Error ? err.message : String(err);
+          failed.push({ ...item, reason });
+          continue;
+        }
+        revalidatePath(`/admin/videos/${item.id}`);
       }
 
       ok.push(item);

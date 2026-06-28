@@ -255,6 +255,16 @@ const REGEN_TARGET_META: Record<
     perStoryHint: "≈ $0.50 per story (LLM + TTS + images + assembly)",
     body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Only stories with a reddit_source can be re-run; pre-pipeline manual seeds are skipped.",
   },
+  // 2026-06-28 short re-render target. Re-runs the full shorts pipeline so
+  // the LLM is called against the CURRENT shorts_narration prompt — the only
+  // way the latest brand-voice rules (clarity bar + POV + hook charge) reach
+  // an existing short's script. See _plans/2026-06-28-bulk-regen-shorts.md.
+  short: {
+    label: "Short video (to latest voice)",
+    verb: "Regenerate short video",
+    perStoryHint: "≈ $1.13 per story (LLM + ~22 images + voice + render)",
+    body: "Re-runs the full short pipeline using the current brand voice rules: fresh script (third-person narrator, hook names the loss directly), fresh scene art, fresh narration, fresh MP4. Replaces the existing MP4 when done. In-flight renders are skipped.",
+  },
 };
 
 export function ContentList({ rows }: { rows: ContentRow[] }) {
@@ -527,6 +537,18 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
       if (r.badge === null || r.badge === "Drama") n += 1;
     }
     return n;
+  }, [rows]);
+
+  // 2026-06-28: rows eligible for the "Regenerate all published shorts"
+  // one-click — published stories. ContentRow doesn't carry video_url, so
+  // we lean on status as the proxy: a published story has, by convention,
+  // already been through the short pipeline. Edge cases (published with
+  // no short) are caught by the cost-preview modal so the operator can
+  // bail. See _plans/2026-06-28-bulk-regen-shorts.md.
+  const publishedShortsItems = useMemo<BulkContentItem[]>(() => {
+    return rows
+      .filter((r) => r.kind === "story" && r.status === "published")
+      .map((r) => ({ kind: "story", id: r.id }));
   }, [rows]);
 
   function requestRegen(target: BulkRegenTarget) {
@@ -824,6 +846,35 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           onDismiss={() => setRefreshResult(null)}
         />
       )}
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-2">
+        <span className="font-mono text-[11px] text-muted">
+          <span className="text-ink">{publishedShortsItems.length}</span> publish
+          {publishedShortsItems.length === 1 ? "ed story" : "ed stories"} on the
+          latest voice rules?
+          {publishedShortsItems.length === 0 ? " Nothing to refresh." : ""}
+        </span>
+        <button
+          type="button"
+          onClick={() => {
+            if (publishedShortsItems.length === 0) return;
+            console.info("[content list regen request]", {
+              target: "short",
+              count: publishedShortsItems.length,
+              source: "regen-all-button",
+            });
+            setRegenResult(null);
+            setRegenConfirm({ target: "short", items: publishedShortsItems });
+          }}
+          disabled={pending || publishedShortsItems.length === 0}
+          title="Re-render every published story's short using the current brand voice rules (third-person narrator, hook names the loss directly). Cost is surfaced before commit."
+          className="rounded-md border border-accent/50 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending
+            ? "Working…"
+            : `Regenerate ALL published shorts (${publishedShortsItems.length})`}
+        </button>
+      </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-2">
         <span className="font-mono text-[11px] text-muted">
