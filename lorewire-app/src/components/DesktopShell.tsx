@@ -142,7 +142,7 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 // rectangular-streamer-grid; callers that need a different radius
 // pass `rounded` explicitly (Search result tiles still opt out
 // with `rounded={0}`).
-function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig = true }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; vig?: boolean }) {
+function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig = false }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; vig?: boolean }) {
   const c = CAT[story.cat];
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
@@ -165,10 +165,12 @@ function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig =
       <div className="absolute inset-0" style={{ background: showImage ? "linear-gradient(180deg, rgba(0,0,0,0) 35%, rgba(0,0,0,.55) 100%)" : "radial-gradient(130% 100% at 78% 12%, rgba(255,255,255,.16), rgba(0,0,0,.35) 70%)" }}></div>
       {!showImage && <div className="absolute inset-0 grain opacity-40 mix-blend-overlay"></div>}
       {!showImage && <div className="absolute -right-4 -top-5 font-display font-black leading-none select-none" style={{ fontSize: 200, color: "rgba(255,255,255,.10)" }}>{story.glyph}</div>}
-      {/* vig adds the heavy bottom-up dark gradient that gives CSS titles
-          their contrast. Callers that render no CSS title (Top 10
-          thumbnails, where the title is baked into the artwork) opt
-          out with vig={false} so the baked title stays bright. */}
+      {/* vig is the heavy bottom-up dark gradient that used to stack on
+          top of the line-165 gradient. Default is now off so baked titles
+          in the artwork stay bright across every rail. The line-165
+          gradient (.55 opacity at the bottom) still provides enough
+          contrast for non-baked CSS titles. Callers can opt back in with
+          vig={true} if a specific surface needs the deeper darkening. */}
       {vig && <div className="absolute inset-0 poster-vig"></div>}
       {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
       {story.dur && (
@@ -660,52 +662,55 @@ function Top10Row({
   // Layout: a single grid-cols-10 child of the standard Rail's flex
   // container, w-full so it fills the rail's 1520px usable width
   // (max-w-[1600px] minus px-10). Each ~144px cell is a poster
-  // (aspectRatio 164/236, ~144x208) with the giant outlined numeral
-  // overlaid on the bottom-left corner (Netflix-mobile-style ranking
-  // badge). No caption below the poster — at this thumbnail size the
-  // artwork carries the baked-in title and a separate caption is
-  // redundant. PosterArt is rendered with vig={false} so the heavy
-  // bottom-up vignette doesn't dim the baked title; showTitle={false}
-  // keeps the CSS title overlay off so it doesn't fight the numeral.
-  // The standard Rail's overflow-x-auto is silently inert because the
-  // grid never overflows; chevrons stay for visual parity with the
-  // other rails.
+  // (aspectRatio 164/236, ~144x208). The giant outlined numeral sits
+  // BEHIND the poster (z-0 vs poster z-10), anchored to peek out from
+  // the bottom-left — its top ~30px is tucked behind the poster's
+  // bottom edge, the remaining ~40px hangs visibly below. Thumbnail
+  // artwork stays fully visible (numeral never overlays it). pb-14
+  // on the grid reserves room below the cells for the peek. showTitle
+  // is suppressed because the title is baked into the artwork at this
+  // size. The hover underline lives INSIDE the poster (bottom edge)
+  // here so it doesn't slice through the numeral the way the standard
+  // -bottom-2 stroke would. Standard Rail's overflow-x-auto is
+  // silently inert because the grid never overflows; chevrons stay
+  // for visual parity with the other rails.
   return (
-    <div className="grid grid-cols-10 gap-2 w-full">
+    <div className="grid grid-cols-10 gap-2 w-full pb-14">
       {ids.slice(0, 10).map((id, i) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
           <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
+            {/* Numeral peeks from behind the poster's bottom-left
+                corner. z-0 + bottom: -40 keeps it under the poster
+                visually while letting ~40px of the character hang
+                below the cell as the editorial flourish. */}
+            <span
+              className="absolute font-display font-black leading-[.7] select-none pointer-events-none"
+              style={{
+                left: 6,
+                bottom: -40,
+                fontSize: 100,
+                color: "transparent",
+                WebkitTextStroke: "1.75px rgba(255,255,255,.55)",
+                zIndex: 0,
+              }}
+            >
+              {i + 1}
+            </span>
             <div
               className="relative w-full"
-              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
+              style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12, zIndex: 10 }}
             >
-              <PosterArt story={s} showTitle={false} vig={false} />
-              {/* Numeral overlay — bottom-left of the poster artwork,
-                  rendered above (z-5) the artwork. White stroke + a
-                  soft dark text-shadow so it stays legible over both
-                  light and dark hero images. */}
+              <PosterArt story={s} showTitle={false} />
+              {/* Hover underline — moved inside the poster's bottom
+                  edge so it doesn't cut through the numeral hanging
+                  below the cell. */}
               <span
-                className="absolute font-display font-black leading-[.7] select-none pointer-events-none"
-                style={{
-                  left: 6,
-                  bottom: 4,
-                  fontSize: 110,
-                  color: "transparent",
-                  WebkitTextStroke: "2px rgba(255,255,255,.92)",
-                  textShadow: "0 2px 14px rgba(0,0,0,.6)",
-                  zIndex: 5,
-                }}
-              >
-                {i + 1}
-              </span>
+                className="absolute left-2 right-2 bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
+                style={{ transitionDuration: "180ms", zIndex: 20 }}
+              />
             </div>
-            {/* Slice H underline-stroke hover. */}
-            <span
-              className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
-              style={{ transitionDuration: "180ms" }}
-            />
           </button>
         );
       })}
