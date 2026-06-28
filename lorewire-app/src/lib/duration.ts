@@ -53,6 +53,29 @@ export function bodyDurationMsFromPropsJson(
   }
 }
 
+// Pull the ACTUAL assembled MP4 duration (ms, number | null) out of a
+// short_renders.props JSON blob. Written by finishShortRender after the
+// Cloud Run renderer ffprobes the spliced MP4. When present, this is
+// ground truth — body + intro + outro + any splice tail pad / re-encode
+// rounding — and every reader path (homepage backfill, applyShortToStory,
+// the admin backfill route) should prefer it over the legacy body+intro+
+// outro sum. Returns null when the field is absent / malformed / non-
+// positive so callers can fall through to the legacy math. Plan:
+// _plans/2026-06-29-actual-mp4-duration.md.
+export function assembledDurationMsFromPropsJson(
+  props: string | null | undefined,
+): number | null {
+  if (!props) return null;
+  try {
+    const parsed = JSON.parse(props) as { assembled_duration_ms?: unknown };
+    const n = Number(parsed.assembled_duration_ms);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
 // Shape of the stamp render_short/route.ts writes onto
 // stories.short_config after a successful render. Records the intro/outro
 // segment ids actually spliced into the assembled MP4 so the read side can
