@@ -12,8 +12,8 @@
     "dev:server": "tsx watch server/start.ts",
     "start:server": "node dist/server/start.js",
     "build:image": "docker build -t lorewire-render:dev .",
-    "//deploy comment": "Reuses the GCS service account as the Cloud Run runtime identity via --service-account; GCS credentials resolve through ADC (metadata server) — no PEM env vars on the running container. Runtime env vars are CRON_SECRET + GCS_BUCKET at minimum; ALSO required when R2 is the active media writer (R2_MEDIA_WRITE_ENABLED=true): R2_ACCOUNT_ID (or R2_ENDPOINT), R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_MEDIA_BUCKET, MEDIA_PUBLIC_BASE. See README-cloud-run-setup.md for the flip checklist. 8 vCPU/16 GB sized for 1920x1080 renders to stay under Vercel's 800 s cron timeout (2 vCPU runs ~3-5 fps and busts the timeout on a 3700-frame envelope).",
-    "deploy:cloud-run": "gcloud run deploy lorewire-render --source . --region ${CLOUD_RUN_REGION:-us-central1} --memory 16Gi --cpu 8 --timeout 3600 --no-allow-unauthenticated --service-account $GCS_CLIENT_EMAIL --update-env-vars CRON_SECRET=$CRON_SECRET --update-env-vars GCS_BUCKET=$GCS_BUCKET"
+    "//deploy comment": "Reuses the GCS service account as the Cloud Run runtime identity via --service-account; GCS credentials resolve through ADC (metadata server) — no PEM env vars on the running container. Runtime env vars are CRON_SECRET + GCS_BUCKET at minimum; ALSO forwarded when R2 is the active media writer (R2_MEDIA_WRITE_ENABLED=true): R2_ACCOUNT_ID (or R2_ENDPOINT), R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_MEDIA_BUCKET, MEDIA_PUBLIC_BASE. See README-cloud-run-setup.md for the flip checklist. 8 vCPU/16 GB sized for 1920x1080 renders to stay under Vercel's 800 s cron timeout (2 vCPU runs ~3-5 fps and busts the timeout on a 3700-frame envelope). The Node wrapper reads .env.local + builds the gcloud argv with real values so the script works identically on bash / PowerShell / Windows cmd — the prior inline `${VAR:-default}` form was bash-only and silently broke on PowerShell.",
+    "deploy:cloud-run": "node scripts/deploy-cloud-run.mjs"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.10.0",
