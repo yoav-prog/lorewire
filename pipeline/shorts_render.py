@@ -47,12 +47,117 @@ SHORT_CAPTION_POSITION_Y = 0.72
 # render` path.
 SHORT_END_HOLD_MS = 1500
 
+# Hook-first splice (per _plans/2026-06-28-hook-before-brand-intro.md). The
+# splice in `pipeline/segments.py` / `video/server/render.ts` reorders to
+# [body_hook][intro][body_rest][outro] when `props["hook_end_ms"]` is set to
+# a positive value. We compute it by aligning the script's `hook` field to
+# the TTS word timestamps so the body splits exactly on the last syllable
+# of the cold-open line.
+#
+# HOOK_END_PAD_MS: tiny trailing pad after the last hook word so the syllable
+# fully lands before the brand stinger jumps in. 80ms = ~2-3 frames at 30fps;
+# small enough to feel like a clean break, large enough to absorb the
+# alignment provider's typical end-of-word jitter.
+HOOK_END_PAD_MS = 80
+# HOOK_FALLBACK_MS: used only when alignment can't be matched to the hook
+# tokens (drift, homophone correction, empty alignment but non-empty hook).
+# Sized to the cold-open word budget in shorts_narration.py — beat 1 caps at
+# 8 words and ~2.33 w/s = ~3.4s, so 2500ms is the midpoint of the 1.5-3s
+# target range. Logged loudly when used so the operator can tune the prompt.
+HOOK_FALLBACK_MS = 2500
+
 ProgressFn = Callable[[str, int, int], None]
 
 
 def _story_body(row: dict) -> str:
     """Text the script is written from. Prefer the body; fall back to summary."""
     return (row.get("body") or row.get("summary") or "").strip()
+
+
+_HOOK_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize_for_hook_match(text: str) -> list[str]:
+    """Lowercased word tokens with all non-alphanumeric stripped. Mirrors what
+    every TTS alignment provider normalizes to in the `word` field, so a
+    naive equality compare matches across "Hook." vs "hook" vs "Hook?" and
+    survives the "don't"/"dont" apostrophe-parity gap (the apostrophe is
+    removed BEFORE the alphanumeric split so "don't" lowercases to "dont"
+    as one token, not "don" + "t"). Pure."""
+    if not text:
+        return []
+    # Strip apostrophes (smart + plain) first so contractions become one
+    # token. Without this, "don't" → ["don", "t"] (two tokens) and a hook
+    # like "DON'T LOOK" wouldn't match alignment word "dont" (one token).
+    no_apos = text.lower().replace("'", "").replace("’", "")
+    return _HOOK_TOKEN_RE.findall(no_apos)
+
+
+def compute_hook_end_ms(
+    hook: str | None,
+    words: list[dict] | None,
+    *,
+    pad_ms: int = HOOK_END_PAD_MS,
+    fallback_ms: int = HOOK_FALLBACK_MS,
+) -> tuple[int, str]:
+    """Find the millisecond timestamp at which the spoken cold-open hook ends
+    in the narration. Returns `(hook_end_ms, source)` where `source` is one
+    of:
+      - ``"aligned"``: every hook token matched a TTS word in order; the
+        timestamp is the last matched word's end + `pad_ms`.
+      - ``"fallback"``: hook had tokens but the alignment couldn't be matched
+        (drift, homophone, empty alignment); returns `fallback_ms`.
+      - ``"empty"``: no hook tokens (missing / blank); returns 0 so callers
+        can gate the splice reorder off (splice falls through to legacy
+        [intro][body][outro]).
+
+    The matcher walks the alignment in order. Each hook token must appear in
+    the same order to count as a match — partial alignment (3 of 4 hook
+    tokens matched) falls back rather than picking a wrong word, because a
+    too-early cut clips the hook mid-syllable.
+
+    Pure. The caller (`build_short_props`) decides whether to write the
+    value to `props["hook_end_ms"]` and how to log the `source`.
+
+    Per _plans/2026-06-28-hook-before-brand-intro.md.
+    """
+    hook_tokens = _tokenize_for_hook_match(hook or "")
+    if not hook_tokens:
+        return 0, "empty"
+    if not words:
+        return fallback_ms, "fallback"
+
+    # Walk alignment in order, matching hook tokens. The alignment's `word`
+    # field carries the TTS provider's spoken-form word (e.g. "Eight" or
+    # "eight,") so normalize the same way the hook is normalized. A
+    # candidate match only counts when the alignment entry carries a valid
+    # `end` timestamp — without it we can't compute a real boundary, and
+    # silently falling back to a stale `last_end_ms` would cut the body
+    # at a wrong frame. So missing/garbled `end` ⇒ the entry is skipped
+    # ⇒ the hook token stays unmatched ⇒ we fall back at the end.
+    last_end_ms: int | None = None
+    hook_idx = 0
+    for w in words:
+        if hook_idx >= len(hook_tokens):
+            break
+        if not isinstance(w, dict):
+            continue
+        end_sec = w.get("end")
+        if not isinstance(end_sec, (int, float)):
+            continue
+        norm = _tokenize_for_hook_match(w.get("word") or "")
+        # Some alignment providers return multi-syllable strings; flatten so
+        # one alignment entry can satisfy one hook token at a time.
+        for piece in norm:
+            if hook_idx >= len(hook_tokens):
+                break
+            if piece == hook_tokens[hook_idx]:
+                hook_idx += 1
+                last_end_ms = int(round(end_sec * 1000))
+
+    if hook_idx >= len(hook_tokens) and last_end_ms is not None:
+        return max(0, last_end_ms + pad_ms), "aligned"
+    return fallback_ms, "fallback"
 
 
 def _cache_bust(url: str, token: str) -> str:
@@ -251,6 +356,24 @@ def build_short_props(
         if not caption_chunks:
             print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
             return None
+
+        # Compute the cold-open hook boundary so the splice can reorder to
+        # [body_hook][intro][body_rest][outro] — the manager directive in
+        # _plans/2026-06-28-hook-before-brand-intro.md. The dispatcher reads
+        # `hook_end_ms` off `props`, converts to seconds, and POSTs it to
+        # Cloud Run as `segments.hookEndSec`. Computed here (not in the
+        # dispatcher) because the alignment data is only in scope at this
+        # point of the pipeline. Zero means "splice falls through to legacy
+        # ordering" — preserves back-compat for rows with no hook or no
+        # alignment.
+        hook_end_ms, hook_end_source = compute_hook_end_ms(
+            assets.script.get("hook"),
+            vres.get("words") or [],
+        )
+        print(
+            f"[short id={safe_id} hook_boundary] computed "
+            f"hook_end_ms={hook_end_ms} source={hook_end_source}"
+        )
         # The composition body MUST cover the WHOLE narration MP3, or the
         # concatenated outro clips the closing words. The last caption's end_ms
         # is a proxy that undershoots on some providers (it tracks the last
@@ -418,6 +541,15 @@ def build_short_props(
             # below this guarantees the closing word always finishes before
             # the outro music cuts in.
             "end_hold_ms": SHORT_END_HOLD_MS,
+            # Hook-first splice boundary (ms). The Vercel dispatcher reads
+            # this off `props`, converts to seconds, and POSTs it as
+            # `segments.hookEndSec` to Cloud Run so the splice can reorder
+            # to [body_hook][intro][body_rest][outro]. Cloud Run also strips
+            # this key from inputProps before handing them to Remotion so
+            # the composition never sees a phantom prop. Zero means "no
+            # reorder, splice falls through to legacy [intro][body][outro]".
+            # See _plans/2026-06-28-hook-before-brand-intro.md.
+            "hook_end_ms": hook_end_ms,
             # The i2i character reference. Persisted (NOT as a visible frame)
             # so defaultShortConfig seeds short_config.character_base_url and
             # Lane C per-scene regen can re-pose the SAME character. The base

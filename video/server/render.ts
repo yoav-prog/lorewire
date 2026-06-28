@@ -101,6 +101,17 @@ export interface SpliceSegments {
    *  the `video.outro_lead_in_ms` setting and POSTs the resolved value
    *  here so this service stays config-free. */
   outroLeadInSec?: number;
+  /** Seconds at which the body's cold-open hook ends. When > 0 AND an
+   *  intro is present, the splice reorders to hook-first:
+   *  [body_hook][intro][body_rest][outro] so the cold-open spoken hook
+   *  lands BEFORE the brand stinger. Per
+   *  _plans/2026-06-28-hook-before-brand-intro.md (manager directive:
+   *  the first 1.5-3 s the viewer hears must be the story, not the
+   *  brand). The dispatcher computes this from the alignment data
+   *  (last spoken word of `script.hook`) and POSTs it here so this
+   *  service stays content-free. Undefined or 0 leaves the splice on
+   *  the legacy [intro][body][outro] ordering. */
+  hookEndSec?: number;
 }
 
 /** Test-side seam so the HTTP layer can stub the heavy lifting
@@ -432,10 +443,24 @@ async function spliceWithSegments(opts: {
     return;
   }
 
+  // Hook-first reorder is only meaningful when an intro will sit in front
+  // of the body; without an intro, [body][outro] already plays the hook at
+  // t=0. The flag is also gated on a positive seconds value (the
+  // dispatcher sends 0 / undefined when it can't compute a boundary —
+  // e.g. alignment drift, missing hook string — in which case the splice
+  // falls through to the legacy ordering).
+  const hookEndSec =
+    hasIntro && typeof segments.hookEndSec === "number"
+      ? Math.max(0, segments.hookEndSec)
+      : 0;
+  const hookFirstActive = hookEndSec > 0 && hasIntro;
+
   spliceLog("start", {
     story_id: storyId,
     has_intro: hasIntro,
     has_outro: hasOutro,
+    hook_first: hookFirstActive,
+    hook_end_sec: hookEndSec,
   });
   const splicedStarted = Date.now();
 
@@ -482,8 +507,14 @@ async function spliceWithSegments(opts: {
   const argv = buildConcatArgv(inputs, splicedPath, {
     bodyIndex,
     bodyTailPadSec: padSec,
+    hookEndSec,
   });
-  spliceLog("ffmpeg", { story_id: storyId, argv, body_tail_pad_sec: padSec });
+  spliceLog("ffmpeg", {
+    story_id: storyId,
+    argv,
+    body_tail_pad_sec: padSec,
+    hook_end_sec: hookEndSec,
+  });
   await runFfmpeg(argv, storyId);
 
   // Replace the body file with the spliced one. fs.rename is atomic
