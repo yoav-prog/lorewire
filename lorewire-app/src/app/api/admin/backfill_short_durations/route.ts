@@ -22,8 +22,12 @@
 // NULL / "" or equals the formatted body-only value. A hand-typed
 // admin override is preserved.
 //
-// Auth: session-based admin check, same as every other route under
-// /api/admin. NOT the CRON_SECRET bearer.
+// Auth: EITHER an admin session (content.manage capability), OR a
+// CRON_SECRET bearer token. The bearer path exists so an operator who
+// has already probed every URL out-of-band can POST the resulting
+// {storyId: durationMs} map back without needing an admin browser
+// session — the route just skips the probe step and goes straight to
+// the writes. Same auth posture as /api/render_short.
 //
 // Two methods:
 //
@@ -36,6 +40,13 @@
 //   POST /api/admin/backfill_short_durations        → actually writes
 //        the updates AND issues `/probe-mp4` calls for rows that need
 //        them. Returns counts + per-row outcomes.
+//
+//        Optional body shape (CRON_SECRET-auth use case):
+//          { preProbedDurations: { [story_id]: duration_ms, ... } }
+//        When supplied, every story_id in the map skips the probe and
+//        uses the supplied ms directly. Stories absent from the map
+//        fall through to the normal probe → sum chain. Plan:
+//        _plans/2026-06-29-actual-mp4-duration.md.
 
 import { NextResponse } from "next/server";
 import { Agent, fetch as undiciFetch } from "undici";
@@ -70,7 +81,11 @@ function namespacedLog(event: string, fields: Record<string, unknown>): void {
   );
 }
 
-type RowSource = "assembled-cached" | "assembled-probed" | "sum";
+type RowSource =
+  | "assembled-cached"
+  | "assembled-probed"
+  | "assembled-preprobed"
+  | "sum";
 
 type RowOutcome =
   | {
@@ -213,7 +228,20 @@ async function probeMp4DurationMs(url: string): Promise<number | null> {
   }
 }
 
-async function runBackfill(dryRun: boolean): Promise<BackfillResult> {
+/** Pre-probed duration map: `{ story_id → duration_ms }`. When the
+ *  CRON_SECRET caller supplies this, every story_id present here skips
+ *  the live `/probe-mp4` call and uses the supplied ms directly. The
+ *  result still flows through the same write path (merge into
+ *  short_renders.props + safe-overwrite gate on stories.duration), so
+ *  the on-disk state is indistinguishable from a row that probed
+ *  itself. Use case: operator probed all URLs out-of-band, doesn't want
+ *  the route to spend Cloud Run minutes re-probing. */
+type PreProbedDurations = Record<string, number>;
+
+async function runBackfill(
+  dryRun: boolean,
+  preProbed: PreProbedDurations = {},
+): Promise<BackfillResult> {
   const candidates = await loadCandidates();
   const outcomes: RowOutcome[] = [];
   let updated = 0;
@@ -228,15 +256,47 @@ async function runBackfill(dryRun: boolean): Promise<BackfillResult> {
       const bodyOnly = bodyMs !== null ? formatDurationMs(bodyMs) : null;
 
       // Resolve the canonical duration through the source-preference
-      // chain: cached assembled → fresh probe → legacy sum. Each
-      // branch carries the source tag so the response makes clear
-      // which path each row took, and so live ops can grep.
+      // chain: cached assembled → pre-probed supplied by caller →
+      // fresh /probe-mp4 → legacy sum. Each branch carries the source
+      // tag so the response makes clear which path each row took, and
+      // so live ops can grep.
       let computed: string | null = null;
       let source: RowSource | null = null;
       const cachedAssembledMs = assembledDurationMsFromPropsJson(c.props);
+      const preProbedMsRaw = preProbed[c.id];
+      const preProbedMs =
+        typeof preProbedMsRaw === "number" &&
+        Number.isFinite(preProbedMsRaw) &&
+        preProbedMsRaw > 0
+          ? preProbedMsRaw
+          : null;
       if (cachedAssembledMs !== null) {
         computed = formatDurationMs(cachedAssembledMs);
         source = "assembled-cached";
+      } else if (preProbedMs !== null) {
+        // Operator supplied this story's MP4 duration in the request
+        // body. Skip the network round-trip entirely and merge the
+        // value onto props as if we had probed it.
+        if (!dryRun) {
+          try {
+            const mergedProps = mergeAssembledDurationIntoProps(
+              c.props,
+              Math.round(preProbedMs),
+            );
+            await run(
+              "UPDATE short_renders SET props = ? WHERE id = ?",
+              [mergedProps, c.renderId],
+            );
+          } catch (e) {
+            namespacedLog("merge_props_failed", {
+              story_id: c.id,
+              render_id: c.renderId,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }
+        computed = formatDurationMs(preProbedMs);
+        source = "assembled-preprobed";
       } else if (c.videoUrl && c.videoUrl.length > 0) {
         // The row's MP4 exists in storage. Probe it via Cloud Run.
         // Dry-run mode never issues the probe (it would still cost
@@ -386,8 +446,32 @@ async function runBackfill(dryRun: boolean): Promise<BackfillResult> {
   };
 }
 
+/** Auth either as an admin session OR as a CRON_SECRET bearer. Returns
+ *  null when authorized; returns a 401/403 NextResponse when not, so the
+ *  caller can return it directly. Mirrors the dual-auth pattern in
+ *  /api/render_short — same security trade we already accept for other
+ *  operator-only routes. */
+async function authorizeOrReject(req: Request): Promise<NextResponse | null> {
+  const authHeader =
+    req.headers.get("authorization") ?? req.headers.get("Authorization");
+  const cronSecret = process.env.CRON_SECRET ?? "";
+  if (cronSecret !== "" && authHeader === `Bearer ${cronSecret}`) {
+    return null;
+  }
+  try {
+    await requireCapability("content.manage");
+    return null;
+  } catch (e) {
+    // requireCapability throws on missing capability; convert that to a
+    // 403 so the bearer-auth path doesn't get masked by a 500.
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json({ error: msg || "forbidden" }, { status: 403 });
+  }
+}
+
 export async function GET(req: Request): Promise<NextResponse> {
-  await requireCapability("content.manage");
+  const rejection = await authorizeOrReject(req);
+  if (rejection) return rejection;
   const url = new URL(req.url);
   const dry = url.searchParams.get("dry") === "1";
   if (!dry) {
@@ -403,9 +487,43 @@ export async function GET(req: Request): Promise<NextResponse> {
   return NextResponse.json({ dry_run: true, ...result });
 }
 
-export async function POST(): Promise<NextResponse> {
-  await requireCapability("content.manage");
-  const result = await runBackfill(false);
+/** Parse `preProbedDurations` out of a JSON request body, defensively.
+ *  Returns `{}` for any malformed shape so the caller's runBackfill
+ *  falls through to the legacy probe path on every row — no surprise
+ *  writes from a typoed payload. */
+function parsePreProbedDurations(raw: unknown): PreProbedDurations {
+  const out: PreProbedDurations = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  const map = (raw as { preProbedDurations?: unknown }).preProbedDurations;
+  if (!map || typeof map !== "object" || Array.isArray(map)) return out;
+  for (const [id, ms] of Object.entries(map as Record<string, unknown>)) {
+    if (typeof id !== "string" || id.length === 0) continue;
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    out[id] = n;
+  }
+  return out;
+}
+
+export async function POST(req: Request): Promise<NextResponse> {
+  const rejection = await authorizeOrReject(req);
+  if (rejection) return rejection;
+  // Body is optional — an admin clicking "run backfill" from the UI
+  // sends no body and we fall through to the legacy probe-per-row
+  // path. The CRON_SECRET caller sends preProbedDurations to skip the
+  // probe step entirely.
+  let body: unknown = null;
+  try {
+    body = await req.json();
+  } catch {
+    // No body / not JSON. Leave body=null; parsePreProbedDurations
+    // returns {} and runBackfill probes every row, same as before.
+  }
+  const preProbed = parsePreProbedDurations(body);
+  namespacedLog("post_received", {
+    pre_probed_count: Object.keys(preProbed).length,
+  });
+  const result = await runBackfill(false, preProbed);
   return NextResponse.json({ dry_run: false, ...result });
 }
 
