@@ -350,3 +350,93 @@ describe("loadLiveCatalog duration backfill", () => {
     expect(story?.duration).toBe("1:23");
   });
 });
+
+describe("loadLiveCatalog prefers props.assembled_duration_ms (_plans/2026-06-29)", () => {
+  it("uses the ffprobed assembled duration when present, ignoring the body+segments sum", async () => {
+    // Production case from The Dress Disaster: body narration is 0:35
+    // and intro+outro adds another ~7s, but the actual rendered MP4
+    // plays for 0:44 because the splice adds tail pad + re-encode
+    // rounding. assembled_duration_ms is the ground truth and the
+    // reader must honor it.
+    await seedSegment({ id: "intro-m", kind: "intro", durationMs: 4_000 });
+    await seedSegment({ id: "outro-m", kind: "outro", durationMs: 3_000 });
+    await seedStory("short-m", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-m",
+        outro_segment_id: "outro-m",
+      },
+    });
+    await seedShortRender({
+      id: "render-m",
+      storyId: "short-m",
+      status: "done",
+      props: { duration_ms: 35_000, assembled_duration_ms: 44_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-m");
+    expect(story?.duration).toBe("0:44");
+  });
+
+  it("uses assembled_duration_ms even when no stamp exists (newer renders skip the segment lookup)", async () => {
+    // A render row that carries assembled_duration_ms doesn't need a
+    // _last_rendered_segments stamp at all — the probed value is
+    // already the post-splice length. Useful for the no-stamp legacy
+    // path: ship a re-render and the value lands without backfilling
+    // anything else.
+    await seedStory("short-n");
+    await seedShortRender({
+      id: "render-n",
+      storyId: "short-n",
+      status: "done",
+      props: { duration_ms: 35_000, assembled_duration_ms: 44_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-n");
+    expect(story?.duration).toBe("0:44");
+  });
+
+  it("ignores a non-positive or malformed assembled_duration_ms and falls back to the sum", async () => {
+    // Defensive: a zero / negative / NaN value must not be honored —
+    // drop back to the legacy body+intro+outro sum so the badge stays
+    // sane on a malformed write.
+    await seedSegment({ id: "intro-o", kind: "intro", durationMs: 4_000 });
+    await seedStory("short-o", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-o",
+        outro_segment_id: null,
+      },
+    });
+    await seedShortRender({
+      id: "render-o",
+      storyId: "short-o",
+      status: "done",
+      props: { duration_ms: 30_000, assembled_duration_ms: 0 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-o");
+    expect(story?.duration).toBe("0:34");
+  });
+
+  it("admin-set stories.duration still wins over the assembled value", async () => {
+    // A hand-typed override is intentional and must not be overwritten
+    // even when we have ground truth from ffprobe.
+    await seedStory("short-p", { duration: "1:23" });
+    await seedShortRender({
+      id: "render-p",
+      storyId: "short-p",
+      status: "done",
+      props: { duration_ms: 35_000, assembled_duration_ms: 44_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-p");
+    expect(story?.duration).toBe("1:23");
+  });
+});

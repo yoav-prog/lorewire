@@ -87,6 +87,16 @@ export interface RenderResult {
    *  the response body so the cron log carries timing without an
    *  extra log line. */
   elapsed_ms: number;
+  /** Actual duration (ms) of the assembled MP4, measured with
+   *  `ffprobe` right after the splice and before the upload. This is
+   *  ground truth — body narration + intro + outro + any tail pad,
+   *  reflected as the final file actually plays. The dispatcher
+   *  writes this onto `short_renders.props.assembled_duration_ms` so
+   *  the public badge math stops drifting from reality. Null when
+   *  probing failed (best-effort; the render still ships, the reader
+   *  falls back to the legacy body+intro+outro sum). See
+   *  _plans/2026-06-29-actual-mp4-duration.md. */
+  duration_ms: number | null;
 }
 
 /** Phase 2 poster renderer body. Input props the PosterStill
@@ -278,6 +288,36 @@ export async function renderAndUploadStory(
     gcsBucket,
   });
 
+  // Probe the FINAL assembled MP4 (after the splice, before upload) so
+  // the dispatcher can persist the real playback length. Body-only
+  // math from props.duration_ms misses the splice's intro + outro +
+  // tail pad + ffmpeg re-encode rounding; only ffprobe-on-the-actual-
+  // file is ground truth. Best-effort: if probing fails the render
+  // still ships and we surface `null` so the reader paths can fall
+  // back to the legacy sum. See _plans/2026-06-29-actual-mp4-duration.md.
+  const assembledDurationMs = await probeMp4DurationMs(tmpPath).catch(
+    (e: unknown) => {
+      console.warn(
+        "[cloud-run render duration_probe fail]",
+        JSON.stringify({
+          story_id: storyId,
+          path: tmpPath,
+          error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+        }),
+      );
+      return null;
+    },
+  );
+  if (assembledDurationMs !== null) {
+    console.info(
+      "[cloud-run render duration_probe]",
+      JSON.stringify({
+        story_id: storyId,
+        duration_ms: assembledDurationMs,
+      }),
+    );
+  }
+
   const key = `${sanitizeForFs(storyId)}/video.mp4`;
   // CRITICAL: every short re-render writes to the SAME key (one canonical
   // MP4 per story). Force a revalidate-on-every-play Cache-Control so the
@@ -337,7 +377,11 @@ export async function renderAndUploadStory(
     );
   }
 
-  return { url: publicUrl, elapsed_ms: Date.now() - started };
+  return {
+    url: publicUrl,
+    elapsed_ms: Date.now() - started,
+    duration_ms: assembledDurationMs,
+  };
 }
 
 // Strip filesystem-hostile chars from a story id before using it in
@@ -714,4 +758,214 @@ async function spliceWithSegments(opts: {
     story_id: storyId,
     in_ms: Date.now() - splicedStarted,
   });
+}
+
+// ─── duration probe (ffprobe wrapper + remote variant) ───────────────────────
+//
+// _plans/2026-06-29-actual-mp4-duration.md.
+//
+// ffprobe is shipped alongside ffmpeg in the runtime image (apt-get
+// install ffmpeg). Both helpers shell out via spawn with a fixed argv
+// so input paths / URLs are never interpreted by a shell.
+
+/** Max bytes the /probe-mp4 endpoint will download before bailing.
+ *  Our shorts top out at ~5 MB; this guards against a misconfigured
+ *  caller pointing at a multi-GB file. */
+const MAX_PROBE_BYTES = 200 * 1024 * 1024;
+/** Max wall-clock time the /probe-mp4 download is allowed to take. */
+const PROBE_DOWNLOAD_TIMEOUT_MS = 60_000;
+
+/** Run `ffprobe -show_format -of json <path>` and pull the
+ *  `format.duration` field (decimal seconds). Returns milliseconds
+ *  rounded to the nearest integer. Throws on non-zero exit, missing
+ *  duration, or unparseable JSON. */
+export function probeMp4DurationMs(localPath: string): Promise<number> {
+  const argv = [
+    "ffprobe",
+    "-v",
+    "error",
+    "-show_format",
+    "-of",
+    "json",
+    localPath,
+  ];
+  return new Promise((resolve, reject) => {
+    const proc = spawn(argv[0], argv.slice(1), {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdoutBuf = "";
+    let stderrBuf = "";
+    proc.stdout.on("data", (chunk: Buffer) => {
+      stdoutBuf += chunk.toString("utf8");
+      if (stdoutBuf.length > 16384) stdoutBuf = stdoutBuf.slice(-16384);
+    });
+    proc.stderr.on("data", (chunk: Buffer) => {
+      stderrBuf += chunk.toString("utf8");
+      if (stderrBuf.length > 4096) stderrBuf = stderrBuf.slice(-4096);
+    });
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(
+          new Error(
+            `ffprobe exited with code ${code}: ${stderrBuf.trim() || "no stderr"}`,
+          ),
+        );
+        return;
+      }
+      let parsed: { format?: { duration?: unknown } };
+      try {
+        parsed = JSON.parse(stdoutBuf) as typeof parsed;
+      } catch (e) {
+        reject(
+          new Error(
+            `ffprobe stdout was not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+        );
+        return;
+      }
+      const raw = parsed.format?.duration;
+      const seconds = typeof raw === "string" ? parseFloat(raw) : Number(raw);
+      if (!Number.isFinite(seconds) || seconds <= 0) {
+        reject(
+          new Error(
+            `ffprobe returned no usable duration: format.duration=${JSON.stringify(raw)}`,
+          ),
+        );
+        return;
+      }
+      resolve(Math.round(seconds * 1000));
+    });
+  });
+}
+
+/** Download an MP4 from a public URL into /tmp, probe it, and clean
+ *  up. Used by the admin backfill route to retroactively repair
+ *  stories whose `stories.duration` was written before this plan
+ *  shipped. The caller is responsible for the allow-list check —
+ *  this helper only enforces size + time caps as defense-in-depth. */
+export async function probeRemoteMp4DurationMs(url: string): Promise<number> {
+  const startedAt = Date.now();
+  const stamp = Date.now();
+  const tmpPath = path.join("/tmp", `probe-${stamp}-${Math.random().toString(36).slice(2, 10)}.mp4`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_DOWNLOAD_TIMEOUT_MS);
+  let bytesWritten = 0;
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) {
+      throw new Error(`fetch returned HTTP ${resp.status}`);
+    }
+    if (!resp.body) {
+      throw new Error("fetch returned no body");
+    }
+    const declaredLen = Number(resp.headers.get("content-length") ?? "");
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_PROBE_BYTES) {
+      throw new Error(
+        `content-length ${declaredLen} exceeds ${MAX_PROBE_BYTES} cap`,
+      );
+    }
+    const handle = await fs.open(tmpPath, "w");
+    try {
+      // Stream the body straight to disk so we never buffer the whole
+      // MP4 in RAM. The byte counter trips the cap mid-stream.
+      const reader = (resp.body as ReadableStream<Uint8Array>).getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytesWritten += value.byteLength;
+        if (bytesWritten > MAX_PROBE_BYTES) {
+          throw new Error(
+            `download exceeded ${MAX_PROBE_BYTES} byte cap mid-stream`,
+          );
+        }
+        await handle.write(value);
+      }
+    } finally {
+      await handle.close();
+    }
+    const downloadedAt = Date.now();
+    const durationMs = await probeMp4DurationMs(tmpPath);
+    const probedAt = Date.now();
+    console.info(
+      "[cloud-run probe_mp4]",
+      JSON.stringify({
+        url_host: safeUrlHost(url),
+        bytes: bytesWritten,
+        ms_to_download: downloadedAt - startedAt,
+        ms_to_probe: probedAt - downloadedAt,
+        duration_ms: durationMs,
+      }),
+    );
+    return durationMs;
+  } finally {
+    clearTimeout(timer);
+    fs.unlink(tmpPath).catch((e) => {
+      console.warn(
+        "[cloud-run probe_mp4 cleanup-fail]",
+        JSON.stringify({
+          path: tmpPath,
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      );
+    });
+  }
+}
+
+function safeUrlHost(raw: string): string {
+  try {
+    return new URL(raw).host;
+  } catch {
+    return "<malformed>";
+  }
+}
+
+/** Decide whether `url` is in the allow-list of hosts the probe
+ *  endpoint is willing to download from. Reads the same env vars the
+ *  writer paths use so the read side and write side stay in lockstep:
+ *
+ *    - `https://storage.googleapis.com/${GCS_BUCKET}/...` (legacy
+ *      GCS upload target)
+ *    - `${MEDIA_PUBLIC_BASE}/...` (R2 delivery URL when the media
+ *      bucket cutover is active)
+ *
+ *  Anything else returns false → the endpoint 400s instead of
+ *  invoking ffmpeg on attacker-controlled bytes. */
+export function isProbeUrlAllowed(
+  url: string,
+  env: { GCS_BUCKET?: string; MEDIA_PUBLIC_BASE?: string },
+): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "https:") return false;
+  const bucket = env.GCS_BUCKET ?? "";
+  if (
+    bucket &&
+    parsed.host === "storage.googleapis.com" &&
+    parsed.pathname.startsWith(`/${bucket}/`)
+  ) {
+    return true;
+  }
+  const base = env.MEDIA_PUBLIC_BASE ?? "";
+  if (base) {
+    let baseUrl: URL;
+    try {
+      baseUrl = new URL(base);
+    } catch {
+      return false;
+    }
+    if (
+      parsed.host === baseUrl.host &&
+      parsed.pathname.startsWith(
+        baseUrl.pathname === "/" ? "/" : `${baseUrl.pathname.replace(/\/$/, "")}/`,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }

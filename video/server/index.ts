@@ -13,6 +13,8 @@
 import express, { type Request, type Response } from "express";
 
 import {
+  isProbeUrlAllowed,
+  probeRemoteMp4DurationMs,
   renderAndUploadStory,
   renderPosterAndUploadStory,
   type PosterInputProps,
@@ -20,6 +22,12 @@ import {
   type RenderPosterFn,
   type SpliceSegments,
 } from "./render.js";
+
+/** Seam over the remote-probe helper so tests can inject a deterministic
+ *  stub without spinning up ffprobe or hitting the network. Production
+ *  wires the real implementation; tests pass a fake that resolves to a
+ *  known value. Mirrors the existing `RenderFn` pattern. */
+export type ProbeRemoteFn = (url: string) => Promise<number>;
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -171,10 +179,14 @@ function parseRenderBody(body: RenderRequestBody | undefined): {
 // that resolves instantly with a fake URL.
 //
 // Phase 2 adds a parallel `renderPoster` seam for the social-poster
-// endpoint. Same pattern, same testability story.
+// endpoint (_plans/2026-06-28-phase-2-social-poster-render.md). The
+// `probeRemote` seam for the /probe-mp4 endpoint was added by
+// _plans/2026-06-29-actual-mp4-duration.md. Three independent seams,
+// one factory.
 export function createApp(
   render: RenderFn = renderAndUploadStory,
   renderPoster: RenderPosterFn = renderPosterAndUploadStory,
+  probeRemote: ProbeRemoteFn = probeRemoteMp4DurationMs,
 ) {
   const app = express();
   app.use(express.json({ limit: "2mb" }));
@@ -224,10 +236,12 @@ export function createApp(
           story_id: parsed.storyId,
           url_bytes: result.url.length,
           elapsed_ms: result.elapsed_ms,
+          duration_ms: result.duration_ms,
         });
         res.status(200).json({
           url: result.url,
           elapsed_ms: result.elapsed_ms,
+          duration_ms: result.duration_ms,
         });
       } catch (e) {
         // The dispatcher's failRender writes whatever's in `error`
@@ -301,6 +315,60 @@ export function createApp(
           hash: parsed.hash,
           error: msg,
         });
+        res.status(500).json({ error: msg });
+      }
+    })();
+  });
+
+  // _plans/2026-06-29-actual-mp4-duration.md.
+  //
+  // Probe a remote MP4 with ffprobe and return its actual duration in
+  // milliseconds. Used by the admin backfill route in the Next app to
+  // retroactively repair stories whose `stories.duration` was
+  // body-only (the legacy writer wrote body + intro + outro math that
+  // missed the splice's tail pad / re-encode rounding / hook-first
+  // reorder).
+  //
+  // Security: CRON_SECRET bearer (same as /render). The URL must
+  // resolve to one of the configured media hosts — GCS_BUCKET on
+  // storage.googleapis.com, or MEDIA_PUBLIC_BASE when the R2 cutover
+  // is active. Any other URL fails closed with 400, so this endpoint
+  // can never be turned into a generic "download whatever and run
+  // ffmpeg on it" SSRF lever. The download itself is capped at 200 MB
+  // / 60 s in probeRemoteMp4DurationMs.
+  app.post("/probe-mp4", (req: Request, res: Response) => {
+    void (async () => {
+      if (!isAuthorized(req)) {
+        log("probe_mp4_auth_fail", {
+          ip: req.header("x-forwarded-for") ?? "unknown",
+        });
+        res.status(401).json({ error: "unauthorized" });
+        return;
+      }
+      const url = (req.body as { url?: unknown } | undefined)?.url;
+      if (typeof url !== "string" || url.length === 0) {
+        log("probe_mp4_bad_request", {});
+        res.status(400).json({ error: "expected { url: string }" });
+        return;
+      }
+      if (
+        !isProbeUrlAllowed(url, {
+          GCS_BUCKET: process.env.GCS_BUCKET,
+          MEDIA_PUBLIC_BASE: process.env.MEDIA_PUBLIC_BASE,
+        })
+      ) {
+        log("probe_mp4_url_rejected", { url });
+        res.status(400).json({
+          error: "url is not on the allow-list (GCS_BUCKET / MEDIA_PUBLIC_BASE)",
+        });
+        return;
+      }
+      try {
+        const duration_ms = await probeRemote(url);
+        res.status(200).json({ duration_ms });
+      } catch (e) {
+        const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        log("probe_mp4_fail", { url, error: msg });
         res.status(500).json({ error: msg });
       }
     })();

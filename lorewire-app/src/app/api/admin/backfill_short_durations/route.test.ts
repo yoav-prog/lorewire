@@ -36,6 +36,7 @@ async function seedStory(
   id: string,
   opts: {
     duration?: string | null;
+    videoUrl?: string | null;
     lastRenderedSegments?: {
       intro_segment_id: string | null;
       outro_segment_id: string | null;
@@ -47,13 +48,14 @@ async function seedStory(
     : null;
   await run(
     "INSERT INTO stories (id, slug, title, category, summary, status, duration, " +
-      "short_config, created_at, published_at) " +
-      "VALUES (?, ?, ?, 'Drama', 'syn', 'published', ?, ?, ?, ?)",
+      "video_url, short_config, created_at, published_at) " +
+      "VALUES (?, ?, ?, 'Drama', 'syn', 'published', ?, ?, ?, ?, ?)",
     [
       id,
       `slug-${id}`,
       `Title ${id}`,
       opts.duration ?? null,
+      opts.videoUrl ?? null,
       shortConfig,
       "2026-06-20T00:00:00.000Z",
       "2026-06-20T00:00:00.000Z",
@@ -65,8 +67,21 @@ async function seedShortRender(opts: {
   id: string;
   storyId: string;
   durationMs: number | null;
+  /** Optional: stamp `assembled_duration_ms` onto the props blob so
+   *  the route's cached-assembled path can pick it up without
+   *  having to hit Cloud Run. */
+  assembledDurationMs?: number;
   finishedAt?: string;
 }): Promise<void> {
+  let propsJson: string | null = null;
+  if (opts.durationMs !== null || opts.assembledDurationMs !== undefined) {
+    const props: Record<string, unknown> = {};
+    if (opts.durationMs !== null) props.duration_ms = opts.durationMs;
+    if (opts.assembledDurationMs !== undefined) {
+      props.assembled_duration_ms = opts.assembledDurationMs;
+    }
+    propsJson = JSON.stringify(props);
+  }
   await run(
     "INSERT INTO short_renders (id, story_id, config_hash, status, progress, " +
       "props, requested_at, finished_at) " +
@@ -75,9 +90,7 @@ async function seedShortRender(opts: {
       opts.id,
       opts.storyId,
       opts.id,
-      opts.durationMs === null
-        ? null
-        : JSON.stringify({ duration_ms: opts.durationMs }),
+      propsJson,
       opts.finishedAt ?? "2026-06-20T01:00:00.000Z",
     ],
   );
@@ -360,6 +373,70 @@ describe("/api/admin/backfill_short_durations", () => {
     await POST();
     // 42s body (latest) + 4s intro + 3s outro = 49s.
     expect(await readDuration("s-h")).toBe("0:49");
+  });
+
+  it("uses the cached props.assembled_duration_ms when present, skipping the probe call entirely (_plans/2026-06-29)", async () => {
+    // Render finished AFTER _plans/2026-06-29 shipped — Cloud Run probed
+    // the spliced MP4 and the dispatcher merged assembled_duration_ms
+    // onto props. Backfill must publish 0:44 (the real MP4 length) and
+    // tag the outcome with source='assembled-cached' so the response
+    // makes clear which path each row took.
+    await seedStory("s-cached", {
+      duration: "0:35",
+      videoUrl: "https://gcs/bucket/short.mp4",
+    });
+    await seedShortRender({
+      id: "r-cached",
+      storyId: "s-cached",
+      durationMs: 35_000,
+      assembledDurationMs: 44_000,
+    });
+    const resp = await POST();
+    const body = (await resp.json()) as BackfillResult;
+    expect(body.updated).toBe(1);
+    expect(body.probed).toBe(0);
+    const outcome = body.outcomes[0];
+    if (outcome.outcome === "updated") {
+      expect(outcome.to).toBe("0:44");
+      expect(outcome.source).toBe("assembled-cached");
+    }
+    expect(await readDuration("s-cached")).toBe("0:44");
+  });
+
+  it("dry-run flags 'would-probe' for rows with a video_url but no cached assembled", async () => {
+    // Pre-_plans/2026-06-29 row: video_url is set but props has no
+    // assembled_duration_ms. POST would call Cloud Run /probe-mp4;
+    // dry-run must SKIP the row with reason='would-probe-dry-run' so
+    // admins can size the eventual probe cost without firing it.
+    await seedSegment({ id: "intro-w", kind: "intro", durationMs: 4_000 });
+    await seedStory("s-would-probe", {
+      duration: "0:42",
+      videoUrl: "https://gcs/bucket/short.mp4",
+      lastRenderedSegments: {
+        intro_segment_id: "intro-w",
+        outro_segment_id: null,
+      },
+    });
+    await seedShortRender({
+      id: "r-would-probe",
+      storyId: "s-would-probe",
+      durationMs: 42_000,
+    });
+    const resp = await GET(
+      makeReq("http://localhost/api/admin/backfill_short_durations?dry=1"),
+    );
+    const body = (await resp.json()) as BackfillResult & { dry_run: true };
+    expect(body.dry_run).toBe(true);
+    expect(body.updated).toBe(0);
+    expect(body.skipped).toBe(1);
+    expect(body.probed).toBe(0);
+    const outcome = body.outcomes[0];
+    if (outcome.outcome === "skipped") {
+      expect(outcome.reason).toBe("would-probe-dry-run");
+      expect(outcome.would_probe).toBe(true);
+    }
+    // No DB changes during dry-run.
+    expect(await readDuration("s-would-probe")).toBe("0:42");
   });
 
   it("aggregates results across many candidates in a single response", async () => {

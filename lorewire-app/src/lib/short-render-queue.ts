@@ -16,6 +16,7 @@ import "server-only";
 import { createHash, randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import {
+  assembledDurationMsFromPropsJson,
   bodyDurationMsFromPropsJson,
   formatDurationMs,
   fullDurationMsFromParts,
@@ -270,18 +271,84 @@ export async function updateShortRenderProgress(
 export async function finishShortRender(
   renderId: string,
   outputUrl: string,
+  /** Optional: the actual rendered MP4 duration in ms, as measured by
+   *  Cloud Run's ffprobe right after the splice and before upload.
+   *  When supplied, gets merged onto `short_renders.props` as
+   *  `assembled_duration_ms`, becoming the source of truth for every
+   *  downstream duration display (homepage rail badges, applyShortToStory's
+   *  stories.duration write, the backfill route). Body-only sum stays as
+   *  the fallback when this isn't available — e.g. an older Cloud Run
+   *  revision that doesn't return the field, or a probe that failed
+   *  (renderer logs the failure but still ships the URL). Plan:
+   *  _plans/2026-06-29-actual-mp4-duration.md. */
+  assembledDurationMs: number | null = null,
 ): Promise<void> {
   const now = new Date().toISOString();
-  await run(
-    `UPDATE short_renders SET status = 'done', progress = 1.0, phase = 'done',
-       output_url = ?, finished_at = ?
-     WHERE id = ? AND status = 'rendering'`,
-    [outputUrl, now, renderId],
-  );
+  // Merge the probed duration onto the props row in a single write that
+  // also flips status to 'done'. Read-modify-write at the application
+  // layer (rather than a SQL-side JSON patch) because the props column
+  // is TEXT on both SQLite + Postgres drivers — keeping JSON shaping in
+  // TS avoids dialect-specific JSON ops and matches the pattern every
+  // other props mutator uses.
+  if (assembledDurationMs !== null && Number.isFinite(assembledDurationMs) && assembledDurationMs > 0) {
+    const existing = await one<{ props: string | null }>(
+      `SELECT props FROM short_renders WHERE id = ?`,
+      [renderId],
+    );
+    const mergedProps = mergeAssembledDurationIntoProps(
+      existing?.props ?? null,
+      Math.round(assembledDurationMs),
+    );
+    await run(
+      `UPDATE short_renders SET status = 'done', progress = 1.0, phase = 'done',
+         output_url = ?, finished_at = ?, props = ?
+       WHERE id = ? AND status = 'rendering'`,
+      [outputUrl, now, mergedProps, renderId],
+    );
+  } else {
+    await run(
+      `UPDATE short_renders SET status = 'done', progress = 1.0, phase = 'done',
+         output_url = ?, finished_at = ?
+       WHERE id = ? AND status = 'rendering'`,
+      [outputUrl, now, renderId],
+    );
+  }
+  console.info("[short finish duration]", {
+    render_id: renderId,
+    assembled_duration_ms: assembledDurationMs,
+  });
   await logShortRenderEvent(renderId, "finished", {
     message: "Short render done",
-    payload: { url: outputUrl },
+    payload: { url: outputUrl, assembled_duration_ms: assembledDurationMs },
   });
+}
+
+/** Merge `assembled_duration_ms` into a short_renders.props JSON blob,
+ *  preserving every other field. Returns the new JSON string. Defensive
+ *  on malformed / null input: a NULL or non-object props row becomes a
+ *  fresh `{ assembled_duration_ms }` object so the value still lands —
+ *  the caller has just told us the canonical render duration, dropping
+ *  it because the existing row was malformed would be the wrong trade.
+ *  Exported for unit-testability; the only production caller is
+ *  finishShortRender. */
+export function mergeAssembledDurationIntoProps(
+  existingPropsJson: string | null | undefined,
+  assembledDurationMs: number,
+): string {
+  let base: Record<string, unknown> = {};
+  if (existingPropsJson) {
+    try {
+      const parsed = JSON.parse(existingPropsJson) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Fall through to the fresh-object path — better to record the
+      // measured duration than to drop it because the row was unparseable.
+    }
+  }
+  base.assembled_duration_ms = assembledDurationMs;
+  return JSON.stringify(base);
 }
 
 export async function failShortRender(
@@ -307,13 +374,12 @@ export async function failShortRender(
 // at its own GCS key (<story>/video.mp4 vs <story>-short/video.mp4), so this is
 // just a pointer swap and is reversible by re-rendering the long-form video.
 //
-// Also writes stories.duration (M:SS) as the FULL assembled length — body +
-// intro + outro segments — so the rail thumbnail badge matches what the
-// `<video>` element reports. The intro/outro contribution comes from the
-// `_last_rendered_segments` stamp render_short/route.ts writes onto
-// stories.short_config after a successful render; when the stamp is missing
-// or a segment row was deleted, that side contributes 0 and we fall back to
-// body-only (legacy-safe). Overwrites unconditionally — stories.duration's
+// Also writes stories.duration (M:SS) using the actual rendered MP4 length
+// (props.assembled_duration_ms, written by finishShortRender after Cloud Run
+// ffprobes the spliced file). When the assembled value is absent (older
+// renders that predate _plans/2026-06-29-actual-mp4-duration.md, or a probe
+// that failed), falls back to the legacy body+intro+outro sum from
+// _last_rendered_segments. Overwrites unconditionally — stories.duration's
 // contract is "duration of whatever currently plays at video_url", not
 // "admin's free-form note". Pass `null` for `propsJson` to skip the duration
 // write entirely.
@@ -323,10 +389,7 @@ export async function applyShortToStory(
   propsJson: string | null = null,
 ): Promise<void> {
   const now = new Date().toISOString();
-  const bodyMs = bodyDurationMsFromPropsJson(propsJson);
-  const duration = bodyMs !== null
-    ? await formatFullDurationForStory(storyId, bodyMs)
-    : null;
+  const duration = await resolveStoryDurationFromProps(storyId, propsJson);
   if (duration) {
     await run(
       `UPDATE stories SET video_url = ?, duration = ?, updated_at = ? WHERE id = ?`,
@@ -341,6 +404,40 @@ export async function applyShortToStory(
   }
 }
 
+/** Resolve the M:SS duration string for `stories.duration` from a
+ *  short_renders.props JSON blob.
+ *
+ *  Source preference (matches every other reader path in this codebase):
+ *    1. `assembled_duration_ms` — the actual MP4 length probed by Cloud
+ *       Run after the splice. Ground truth when present.
+ *    2. Legacy body+intro+outro sum via `formatFullDurationForStory`.
+ *       Falls back to body-only when the `_last_rendered_segments`
+ *       stamp is missing.
+ *    3. null when props has neither a body nor an assembled value
+ *       (queued / errored row, malformed JSON).
+ *
+ *  Exported alongside `applyShortToStory` so the backfill route can
+ *  reuse the same precedence — every caller that writes stories.duration
+ *  flows through one resolver, no precedence drift. Plan:
+ *  _plans/2026-06-29-actual-mp4-duration.md. */
+export async function resolveStoryDurationFromProps(
+  storyId: string,
+  propsJson: string | null,
+): Promise<string | null> {
+  const assembledMs = assembledDurationMsFromPropsJson(propsJson);
+  if (assembledMs !== null) {
+    console.info("[short apply duration]", {
+      story_id: storyId,
+      source: "assembled",
+      total_ms: assembledMs,
+    });
+    return formatDurationMs(assembledMs);
+  }
+  const bodyMs = bodyDurationMsFromPropsJson(propsJson);
+  if (bodyMs === null) return null;
+  return formatFullDurationForStory(storyId, bodyMs);
+}
+
 // Resolve "body_ms + spliced intro/outro" to a M:SS string for the writer
 // path AND the one-shot backfill route. Mirrors the read-side fan-out in
 // homepage-data.loadShortDurationsForStories but for a single story:
@@ -352,6 +449,11 @@ export async function applyShortToStory(
 // the exact same derivation to retroactively repair stories.duration
 // rows that were written body-only before lib/duration's stamp-aware
 // helpers existed.
+//
+// This is the LEGACY-SUM path. Newer code should prefer
+// `resolveStoryDurationFromProps`, which checks for the ffprobed
+// assembled_duration_ms first and only falls through to this sum when
+// the assembled value is absent.
 export async function formatFullDurationForStory(
   storyId: string,
   bodyMs: number,
@@ -385,6 +487,7 @@ export async function formatFullDurationForStory(
   const totalMs = fullDurationMsFromParts(bodyMs, introMs, outroMs);
   console.info("[short apply duration]", {
     story_id: storyId,
+    source: "sum",
     body_ms: bodyMs,
     intro_ms: introMs,
     outro_ms: outroMs,

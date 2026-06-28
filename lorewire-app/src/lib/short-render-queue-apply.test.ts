@@ -311,3 +311,83 @@ describe("applyShortToStory with spliced intro/outro segments", () => {
     expect(row?.duration).toBe("0:45");
   });
 });
+
+describe("applyShortToStory prefers props.assembled_duration_ms (_plans/2026-06-29)", () => {
+  it("uses the ffprobed assembled duration when the renderer recorded one", async () => {
+    // The dispatcher (render_short/route.ts) captured 44_000 ms from
+    // Cloud Run's ffprobe of the spliced MP4 and finishShortRender
+    // merged it onto props.assembled_duration_ms. body_ms is 35_000
+    // (narration only). Writer must publish 0:44 — the real MP4 length —
+    // not 0:35.
+    await seedSegment({ id: "intro-e", kind: "intro", durationMs: 4_000 });
+    await seedSegment({ id: "outro-e", kind: "outro", durationMs: 3_000 });
+    await seedStory("s-assem-a", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-e",
+        outro_segment_id: "outro-e",
+      },
+    });
+    await applyShortToStory(
+      "s-assem-a",
+      "https://gcs/bucket/short.mp4",
+      JSON.stringify({
+        duration_ms: 35_000,
+        assembled_duration_ms: 44_000,
+      }),
+    );
+    const row = await one<StoryRow>(
+      "SELECT id, duration FROM stories WHERE id = ?",
+      ["s-assem-a"],
+    );
+    // 0:44 (assembled) beats the 0:42 the legacy sum would have produced.
+    expect(row?.duration).toBe("0:44");
+  });
+
+  it("falls back to the body+intro+outro sum when assembled is absent", async () => {
+    // Pre-_plans/2026-06-29 render row: no assembled_duration_ms in props.
+    // Writer must still produce the sum, matching the pre-2026-06-29 contract.
+    await seedSegment({ id: "intro-f", kind: "intro", durationMs: 4_000 });
+    await seedSegment({ id: "outro-f", kind: "outro", durationMs: 3_000 });
+    await seedStory("s-assem-b", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-f",
+        outro_segment_id: "outro-f",
+      },
+    });
+    await applyShortToStory(
+      "s-assem-b",
+      "https://gcs/bucket/short.mp4",
+      JSON.stringify({ duration_ms: 35_000 }),
+    );
+    const row = await one<StoryRow>(
+      "SELECT id, duration FROM stories WHERE id = ?",
+      ["s-assem-b"],
+    );
+    expect(row?.duration).toBe("0:42");
+  });
+
+  it("ignores a non-positive or malformed assembled_duration_ms and falls through to the sum", async () => {
+    // Defensive: a zero / negative / non-numeric assembled value must not
+    // be honored — drop back to the legacy sum so the badge stays sane.
+    await seedSegment({ id: "intro-g", kind: "intro", durationMs: 4_000 });
+    await seedStory("s-assem-c", {
+      lastRenderedSegments: {
+        intro_segment_id: "intro-g",
+        outro_segment_id: null,
+      },
+    });
+    await applyShortToStory(
+      "s-assem-c",
+      "https://gcs/bucket/short.mp4",
+      JSON.stringify({
+        duration_ms: 30_000,
+        assembled_duration_ms: 0,
+      }),
+    );
+    const row = await one<StoryRow>(
+      "SELECT id, duration FROM stories WHERE id = ?",
+      ["s-assem-c"],
+    );
+    expect(row?.duration).toBe("0:34");
+  });
+});
