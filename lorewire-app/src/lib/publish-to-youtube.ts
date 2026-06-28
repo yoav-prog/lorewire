@@ -34,6 +34,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
+import { ensureShortPoster } from "@/lib/short-poster";
 import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
 
 // --- Types -----------------------------------------------------------------
@@ -1173,15 +1174,23 @@ export async function publishShortToYouTube(
     ...credentialsFingerprint(),
   });
 
-  // Resolve the per-story cover image. Skipped silently when the story
-  // has no short_config (legacy) or no scene-1; the publish proceeds
-  // without an explicit thumbnail and YouTube auto-picks. Per
-  // _plans/2026-06-28-explicit-thumbnail-uploads.md.
+  // Resolve the per-story cover image. Phase 2 (per
+  // _plans/2026-06-28-phase-2-social-poster-render.md) prefers the
+  // deliberate poster from ensureShortPoster; falls back to PR #137's
+  // scene-1 URL when the poster path returns null (legacy story,
+  // brand-safety guard hit, Cloud Run error). Note: YouTube custom
+  // thumbnails are gated on channel verification (probe 2026-06-29
+  // returned HTTP 403); the uploadCustomThumbnail call will keep
+  // returning 403 and the publish falls back to YouTube's smart-picker
+  // until Yoav verifies the channel. Phase 2's improvement materialises
+  // automatically on first publish after verification — no code change.
   const uploadCustomThumbnail =
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
-  const thumbnailUrl = uploadCustomThumbnail
-    ? await resolveShortThumbnailUrl(args.storyId)
-    : null;
+  let thumbnailUrl: string | null = null;
+  if (uploadCustomThumbnail) {
+    const poster = await ensureShortPoster(args.storyId);
+    thumbnailUrl = poster?.url ?? (await resolveShortThumbnailUrl(args.storyId));
+  }
 
   return runUploadPipeline(row, {
     fetchImpl,
@@ -1517,14 +1526,18 @@ export async function attemptYouTubePublishForRow(
   });
   const uploadCaptions =
     ((await getSetting(SETTING_UPLOAD_CAPTIONS)) ?? "1") !== "0";
-  // Re-resolve the custom thumbnail on retry — short_config might have
-  // been edited between the original attempt and the retry, so we want
-  // the freshest scene-1 URL. Same setting gate as the fresh path.
+  // Re-resolve the cover on retry — short_renders.props or short_config
+  // might have been edited between the original attempt and the retry,
+  // so we want the freshest poster (Phase 2) or scene-1 URL. Same
+  // setting gate as the fresh-publish path.
   const uploadCustomThumbnailToggle =
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
-  const thumbnailUrl = uploadCustomThumbnailToggle
-    ? await resolveShortThumbnailUrl(row.story_id)
-    : null;
+  let thumbnailUrl: string | null = null;
+  if (uploadCustomThumbnailToggle) {
+    const poster = await ensureShortPoster(row.story_id);
+    thumbnailUrl =
+      poster?.url ?? (await resolveShortThumbnailUrl(row.story_id));
+  }
   return runUploadPipeline(row, {
     fetchImpl,
     getAccessToken,

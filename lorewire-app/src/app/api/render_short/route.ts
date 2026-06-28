@@ -227,6 +227,36 @@ export function extractHookEndSecFromProps(inputProps: unknown): {
   return { hookEndSec: raw / 1000, propsStripped: stripped };
 }
 
+/** Strip the `hook` field from inputProps before they reach the
+ *  DoodleShort Remotion composition. The Python pipeline preserves
+ *  `script.hook` on the props dict so the SEPARATE poster render
+ *  pipeline (/render-poster, called from `ensureShortPoster`) can
+ *  read it — but DoodleShort itself doesn't accept a `hook` prop,
+ *  and Remotion's prop validator treats unknown fields as a phantom
+ *  composition prop. Same pattern as extractHookEndSecFromProps.
+ *  Per _plans/2026-06-28-phase-2-social-poster-render.md (Part 0).
+ *  Exported for pure-logic tests; the dispatcher is the only
+ *  production caller. */
+export function stripHookFromProps(inputProps: unknown): {
+  hook: string | null;
+  propsStripped: boolean;
+} {
+  if (!inputProps || typeof inputProps !== "object" || Array.isArray(inputProps)) {
+    return { hook: null, propsStripped: false };
+  }
+  const obj = inputProps as Record<string, unknown>;
+  const raw = obj.hook;
+  let stripped = false;
+  if ("hook" in obj) {
+    delete obj.hook;
+    stripped = true;
+  }
+  if (typeof raw !== "string" || raw.length === 0) {
+    return { hook: null, propsStripped: stripped };
+  }
+  return { hook: raw, propsStripped: stripped };
+}
+
 async function serve(req: NextRequest): Promise<NextResponse> {
   if (!isAuthorized(req)) {
     namespacedLog("auth_fail", {
@@ -297,6 +327,17 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   const { hookEndSec, propsStripped: hookEndStripped } =
     extractHookEndSecFromProps(inputProps);
 
+  // Strip the `hook` string from inputProps. Python's build_short_props
+  // (Part 0 of _plans/2026-06-28-phase-2-social-poster-render.md) preserves
+  // the spoken cold-open line on the props dict so the SEPARATE poster
+  // renderer (`/render-poster`, called from `ensureShortPoster`) can
+  // surface it as graphic typography on the social cover. The video render
+  // path (this dispatcher) does NOT need it — DoodleShort doesn't accept a
+  // `hook` prop and Remotion treats unknown fields as a phantom composition
+  // prop. We strip but don't forward — the poster renderer reads `hook`
+  // directly from `short_renders.props` via its own helper.
+  const { propsStripped: hookStripped } = stripHookFromProps(inputProps);
+
   // Resolve the 9:16 intro/outro so Cloud Run splices them around the short,
   // same as the long-form render (shorts are always 9:16). Body-only if none.
   const story = await getStory(claimed.story_id);
@@ -339,6 +380,7 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     outro_present: Boolean(segments.outro),
     hook_end_sec: segments.hookEndSec,
     hook_end_stripped: hookEndStripped,
+    hook_stripped: hookStripped,
   });
 
   // Cloud Run writes the MP4 to GCS key `<storyId>/video.mp4`. We must NOT pass

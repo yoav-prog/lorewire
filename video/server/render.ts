@@ -18,6 +18,7 @@ import path from "node:path";
 import { bundle } from "@remotion/bundler";
 import {
   renderMedia,
+  renderStill,
   selectComposition,
   type RenderMediaOptions,
 } from "@remotion/renderer";
@@ -32,6 +33,7 @@ import {
 } from "./r2.js";
 
 const COMPOSITION_ID = "DoodleShort";
+const POSTER_COMPOSITION_ID = "PosterStill";
 
 /** Maximum size of a single intro/outro segment download, in bytes. Set
  *  generously — normalized 4 s segments at the 1080p contract weigh in
@@ -97,6 +99,34 @@ export interface RenderResult {
   duration_ms: number | null;
 }
 
+/** Phase 2 poster renderer body. Input props the PosterStill
+ *  composition consumes (mirrors `video/src/PosterStill.tsx`'s
+ *  `PosterStillProps` shape; intentionally not imported across the
+ *  package boundary to keep the HTTP layer testable without pulling
+ *  Remotion into the test environment). Per
+ *  _plans/2026-06-28-phase-2-social-poster-render.md.
+ *
+ *  `text` is the climax-revealing line the helper already resolved
+ *  (cached `short_config.poster_text`, freshly-generated LLM line, or
+ *  fallback to the spoken hook). PosterStill does NOT pick — the
+ *  social-only LLM call lives upstream in
+ *  `lorewire-app/src/lib/short-poster.ts::ensureShortPoster` so video
+ *  script generation stays byte-identical to a pre-Phase-2 run. */
+export interface PosterInputProps {
+  scene_1_url: string;
+  text: string;
+  brand_text?: string;
+}
+
+/** Result shape of /render-poster. URL points to the uploaded PNG;
+ *  `hash` is echoed back so the dispatcher can stamp it into the
+ *  helper's cache record without re-deriving. */
+export interface PosterRenderResult {
+  url: string;
+  elapsed_ms: number;
+  hash: string;
+}
+
 /** Resolved intro / outro public GCS URLs the dispatcher picked for this
  *  story. Either may be null — null means "no segment for that end" (the
  *  resolver chose to skip, or no global active is set). Phase 3 of
@@ -132,6 +162,16 @@ export type RenderFn = (
   inputProps: unknown,
   segments?: SpliceSegments,
 ) => Promise<RenderResult>;
+
+/** Phase 2 — same seam pattern for the poster renderer. The HTTP
+ *  layer stubs this for tests; production wires
+ *  `renderPosterAndUploadStory`. Caller supplies the cache hash so
+ *  one place (the helper) owns invalidation logic. */
+export type RenderPosterFn = (
+  storyId: string,
+  hash: string,
+  inputProps: PosterInputProps,
+) => Promise<PosterRenderResult>;
 
 /** Real implementation. Production server passes this through to the
  *  HTTP handler; tests pass a stub.
@@ -353,6 +393,135 @@ export async function renderAndUploadStory(
 function sanitizeForFs(storyId: string): string {
   const cleaned = storyId.replace(/[^A-Za-z0-9_-]/g, "");
   return cleaned.length > 0 ? cleaned : "unknown";
+}
+
+// ─── Phase 2: social poster renderer ─────────────────────────────────────────
+//
+// _plans/2026-06-28-phase-2-social-poster-render.md (Part 2).
+//
+// renderStill against the `PosterStill` composition registered in
+// video/src/Root.tsx. Same bundle handle + same R2 / GCS gate as the
+// video renderer — every operational concern (auth, sanitization, upload)
+// is shared with `renderAndUploadStory` above. The poster differs in only
+// three ways: it's a single still (PNG, not MP4), the GCS key is
+// content-hash-keyed (`{storyId}-short/poster-{hash}.png`, immutable cache
+// allowed), and there's no splice / segment plumbing.
+
+export async function renderPosterAndUploadStory(
+  storyId: string,
+  hash: string,
+  inputProps: PosterInputProps,
+): Promise<PosterRenderResult> {
+  const started = Date.now();
+  const gcsBucket = process.env.GCS_BUCKET;
+  if (!gcsBucket) {
+    throw new Error("GCS_BUCKET not configured");
+  }
+
+  // Same bundle handle the video render uses — Webpack bundles both
+  // compositions (DoodleShort + PosterStill) in one pass.
+  const serveUrl = await getOrCreateBundle();
+
+  console.info(
+    "[cloud-run poster select]",
+    JSON.stringify({
+      story_id: storyId,
+      composition: POSTER_COMPOSITION_ID,
+      hash,
+    }),
+  );
+  const composition = await selectComposition({
+    serveUrl,
+    id: POSTER_COMPOSITION_ID,
+    inputProps: inputProps as unknown as Record<string, unknown>,
+  });
+
+  // /tmp filename includes the hash so a concurrent retry for the same
+  // story (different hash) doesn't clobber an in-flight render.
+  const tmpPath = path.join(
+    "/tmp",
+    `${sanitizeForFs(storyId)}-poster-${hash}.png`,
+  );
+
+  console.info(
+    "[cloud-run poster render] start",
+    JSON.stringify({
+      story_id: storyId,
+      hash,
+      output: tmpPath,
+      width: composition.width,
+      height: composition.height,
+    }),
+  );
+  await renderStill({
+    composition,
+    serveUrl,
+    output: tmpPath,
+    imageFormat: "png",
+    inputProps: inputProps as unknown as Record<string, unknown>,
+  });
+  const renderEnd = Date.now();
+  console.info(
+    "[cloud-run poster render] done",
+    JSON.stringify({
+      story_id: storyId,
+      hash,
+      elapsed_ms: renderEnd - started,
+    }),
+  );
+
+  // Upload key includes the hash so the URL is deterministic per
+  // (story, content). The publisher's HEAD-check uses the same path.
+  const key = `${sanitizeForFs(storyId)}-short/poster-${hash}.png`;
+  // Unlike the MP4 (which overwrites the same key on every re-render and
+  // needs revalidation), the poster URL changes per content hash — the
+  // BYTES at a given URL never change once written. Long-immutable cache
+  // is safe and matches the IG / FB / YT thumbnail-host expectation.
+  const pngCacheControl = "public, max-age=31536000, immutable";
+
+  let publicUrl: string;
+  if (isR2MediaActive()) {
+    const bytes = await fs.readFile(tmpPath);
+    await putR2Object(mediaBucket(), key, new Uint8Array(bytes), {
+      contentType: "image/png",
+      cacheControl: pngCacheControl,
+    });
+    publicUrl = publicMediaUrl(key);
+    console.info(
+      "[cloud-run poster upload]",
+      JSON.stringify({ target: "r2", key, url: publicUrl }),
+    );
+  } else {
+    const storage = new Storage();
+    await storage.bucket(gcsBucket).upload(tmpPath, {
+      destination: key,
+      contentType: "image/png",
+      predefinedAcl: "publicRead",
+      metadata: { cacheControl: pngCacheControl },
+    });
+    publicUrl = `https://storage.googleapis.com/${gcsBucket}/${key}`;
+    console.info(
+      "[cloud-run poster upload]",
+      JSON.stringify({ target: "gcs", key, url: publicUrl }),
+    );
+  }
+
+  // Best-effort cleanup of the staging PNG. Same pattern as the MP4
+  // renderer — Cloud Run /tmp is 512 MiB shared across requests, so
+  // leaking 150 KB per invocation would fill it in ~3500 renders.
+  try {
+    await fs.unlink(tmpPath);
+  } catch (e) {
+    console.warn(
+      "[cloud-run poster cleanup-fail]",
+      JSON.stringify({
+        path: tmpPath,
+        error: e instanceof Error ? e.message : String(e),
+      }),
+    );
+  }
+
+  return { url: publicUrl, elapsed_ms: Date.now() - started, hash };
 }
 
 // ─── Phase 3: intro/outro splice ─────────────────────────────────────────────

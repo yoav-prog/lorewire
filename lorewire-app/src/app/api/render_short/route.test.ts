@@ -6,7 +6,7 @@
 // _plans/2026-06-28-hook-before-brand-intro.md.
 
 import { describe, expect, it } from "vitest";
-import { extractHookEndSecFromProps } from "./route";
+import { extractHookEndSecFromProps, stripHookFromProps } from "./route";
 
 describe("extractHookEndSecFromProps", () => {
   it("returns hookEndSec in seconds when hook_end_ms is a positive number", () => {
@@ -54,3 +54,56 @@ describe("extractHookEndSecFromProps", () => {
     expect(JSON.stringify(props)).toBe(before);
   });
 });
+
+// _plans/2026-06-28-phase-2-social-poster-render.md (Part 0).
+// The dispatcher strips the `hook` field from inputProps before they
+// reach DoodleShort (which doesn't accept that prop). The poster
+// renderer reads `hook` from `short_renders.props` via its own
+// helper — never through the video render path.
+describe("stripHookFromProps", () => {
+  it("returns the hook string and strips the key when present", () => {
+    const props = {
+      hook: "Eight hundred dollars. Gone.",
+      voiceover_url: "x.mp3",
+    };
+    const result = stripHookFromProps(props);
+    expect(result.hook).toBe("Eight hundred dollars. Gone.");
+    expect(result.propsStripped).toBe(true);
+    expect("hook" in props).toBe(false);
+    // Everything else passes through.
+    expect(props.voiceover_url).toBe("x.mp3");
+  });
+
+  it("returns null when hook is missing", () => {
+    const props = { voiceover_url: "x.mp3" };
+    const result = stripHookFromProps(props);
+    expect(result.hook).toBeNull();
+    expect(result.propsStripped).toBe(false);
+  });
+
+  it("returns null but still strips the key when hook is empty / wrong type", () => {
+    for (const bad of ["", 123, null, false, []]) {
+      const props: Record<string, unknown> = { hook: bad };
+      const result = stripHookFromProps(props);
+      expect(result.hook, `value=${JSON.stringify(bad)}`).toBeNull();
+      expect(result.propsStripped, `value=${JSON.stringify(bad)}`).toBe(true);
+      expect("hook" in props).toBe(false);
+    }
+  });
+
+  it("returns null when inputProps is not an object", () => {
+    for (const bad of [null, undefined, 42, "props", []]) {
+      const result = stripHookFromProps(bad);
+      expect(result.hook, `value=${JSON.stringify(bad)}`).toBeNull();
+      expect(result.propsStripped, `value=${JSON.stringify(bad)}`).toBe(false);
+    }
+  });
+
+  it("does not mutate inputProps when hook is absent", () => {
+    const props = { voiceover_url: "x.mp3", end_hold_ms: 1500 };
+    const before = JSON.stringify(props);
+    stripHookFromProps(props);
+    expect(JSON.stringify(props)).toBe(before);
+  });
+});
+
