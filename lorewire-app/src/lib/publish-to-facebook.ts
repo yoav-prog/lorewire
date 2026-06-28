@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
+import { ensureShortPoster } from "@/lib/short-poster";
 import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
 
 // --- Types -----------------------------------------------------------------
@@ -595,11 +596,17 @@ export async function publishShortToFacebook(
   // missing — postVideo falls through to the url-encoded path and FB
   // auto-picks the cover. Per
   // _plans/2026-06-28-explicit-thumbnail-uploads.md.
+  // Phase 2 (per _plans/2026-06-28-phase-2-social-poster-render.md)
+  // prefers the deliberate poster from ensureShortPoster; falls back
+  // to PR #137's scene-1 URL when the poster path returns null.
   const uploadCustomThumbnail =
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
-  const thumbnailUrl = uploadCustomThumbnail
-    ? await resolveShortThumbnailUrl(args.storyId)
-    : null;
+  let thumbnailUrl: string | null = null;
+  if (uploadCustomThumbnail) {
+    const poster = await ensureShortPoster(args.storyId);
+    thumbnailUrl =
+      poster?.url ?? (await resolveShortThumbnailUrl(args.storyId));
+  }
 
   const started = now.valueOf();
   const result = await postVideo(
@@ -679,14 +686,18 @@ export async function attemptFacebookPublishForRow(
     render_id: row.render_id,
     attempt: (row.attempts ?? 0) + 1,
   });
-  // Re-resolve the cover at retry time so a short_config edit between
-  // attempts picks up the freshest scene-1 URL. Same gate as the
+  // Re-resolve the cover at retry time so a short_renders.props or
+  // short_config edit between attempts picks up the freshest poster
+  // (Phase 2) or scene-1 URL (PR #137 fallback). Same gate as the
   // fresh-publish path; null → falls through to url-encoded body.
   const uploadCustomThumbnail =
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
-  const thumbnailUrl = uploadCustomThumbnail
-    ? await resolveShortThumbnailUrl(row.story_id)
-    : null;
+  let thumbnailUrl: string | null = null;
+  if (uploadCustomThumbnail) {
+    const poster = await ensureShortPoster(row.story_id);
+    thumbnailUrl =
+      poster?.url ?? (await resolveShortThumbnailUrl(row.story_id));
+  }
   const started = Date.now();
   const result = await postVideo(
     row.page_id,

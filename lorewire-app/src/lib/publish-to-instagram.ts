@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
+import { ensureShortPoster } from "@/lib/short-poster";
 
 // --- Types -----------------------------------------------------------------
 
@@ -342,12 +343,13 @@ async function createContainer(
   videoUrl: string,
   caption: string,
   fetchImpl: IgFetchLike,
+  posterUrl: string | null = null,
 ): Promise<
   | { ok: true; containerId: string }
   | { ok: false; error: NormalizedIgError }
 > {
   const token = process.env.FB_PAGE_ACCESS_TOKEN ?? "";
-  const body = new URLSearchParams({
+  const params: Record<string, string> = {
     access_token: token,
     media_type: "REELS",
     video_url: videoUrl,
@@ -360,7 +362,16 @@ async function createContainer(
     // first frame either way. Per
     // _plans/2026-06-28-explicit-thumbnail-uploads.md.
     thumb_offset: "0",
-  }).toString();
+  };
+  // Phase 2: when a deliberate poster is available, ALSO send cover_url.
+  // v22 Reels containers accept cover_url for a static override; if IG
+  // ignores the field (some historical versions did) thumb_offset=0 still
+  // produces the right cover via the splice fix. Belt-and-suspenders. Per
+  // _plans/2026-06-28-phase-2-social-poster-render.md (Part 4).
+  if (posterUrl) {
+    params.cover_url = posterUrl;
+  }
+  const body = new URLSearchParams(params).toString();
   const url = `${IG_BASE}/${encodeURIComponent(igAccountId)}/media`;
   let resp: IgFetchResponse;
   try {
@@ -700,6 +711,20 @@ async function runFullPipeline(
   const t0 = Date.now();
   let containerId = row.container_id;
 
+  // Phase 2 (per _plans/2026-06-28-phase-2-social-poster-render.md):
+  // resolve the per-story poster URL BEFORE creating the container so
+  // the cover_url can land in the same POST. Best-effort: a null return
+  // (no poster generated / Cloud Run failed / brand-safety guard) just
+  // means the cover falls back to thumb_offset=0 = frame 0 of the MP4,
+  // which is the cold-open scene per PR #135's splice fix.
+  const poster = await ensureShortPoster(row.story_id);
+  log("cover", {
+    story_id: row.story_id,
+    render_id: row.render_id,
+    source: poster ? poster.source : "scene_1",
+    hash: poster?.hash ?? null,
+  });
+
   // Step 1: create container if we don't already have one
   if (!containerId) {
     const created = await createContainer(
@@ -707,6 +732,7 @@ async function runFullPipeline(
       row.video_url,
       row.caption,
       fetchImpl,
+      poster?.url ?? null,
     );
     if (!created.ok) {
       await markFailed(row.id, created.error);

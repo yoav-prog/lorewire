@@ -267,6 +267,73 @@ class ClarityBlockTests(unittest.TestCase):
         self.assertIn("never invented drama", prompt)
 
 
+class PosterTextBlockTests(unittest.TestCase):
+    """The 2026-06-29 prompt-update for Phase 2 social posters. See
+    _plans/2026-06-28-phase-2-social-poster-render.md.
+
+    What we lock down: the prompt names a dedicated POSTER TEXT block,
+    explains it as DIFFERENT from the spoken hook (oblique for spoken
+    vs. clear for static grid), surfaces a concrete contrast example
+    against beat 1, and the output JSON schema carries the new
+    `poster_text` field. If any of these regresses the LLM will silently
+    revert to using the spoken hook as the cover text — which is the
+    failure mode the manager flagged on the IG grid.
+    """
+
+    def _prompt(self) -> str:
+        return sn.build_extraction_prompt(
+            sn.DEFAULT_STYLE_ID,
+            source="Test source story body.",
+            target_seconds=50,
+        )
+
+    def test_poster_text_block_header_present(self) -> None:
+        prompt = self._prompt()
+        self.assertIn("POSTER TEXT", prompt)
+
+    def test_poster_text_distinguished_from_spoken_hook(self) -> None:
+        # The block has to explicitly say "DIFFERENT from the spoken
+        # hook" or the LLM defaults to re-using beat 1 verbatim. The
+        # contrast example is what teaches it the style.
+        prompt = self._prompt()
+        self.assertIn("STATIC", prompt)
+        self.assertIn("oblique", prompt)
+        self.assertIn("climax-revealing", prompt)
+        # The two concrete contrast examples must be present so the LLM
+        # sees the spoken-vs-poster pairing it should imitate.
+        self.assertIn("Her wedding dress was destroyed", prompt)
+        self.assertIn(
+            "Her wedding dress was destroyed the morning of the ceremony",
+            prompt,
+        )
+        self.assertIn("Her refusal ended everything", prompt)
+
+    def test_poster_text_in_output_schema(self) -> None:
+        prompt = self._prompt()
+        # Schema must explicitly declare the field so the LLM's strict-
+        # JSON output includes it. Without this, downstream pipeline
+        # silently sees `null` and falls back to the spoken hook.
+        self.assertIn('"poster_text"', prompt)
+        self.assertIn("8-14 word", prompt)
+
+    def test_poster_text_block_sits_before_output_schema(self) -> None:
+        # Order matters: every content block must precede OUTPUT so the
+        # LLM reads the schema as the last instruction.
+        prompt = self._prompt()
+        i_poster = prompt.find("POSTER TEXT")
+        i_output = prompt.find("OUTPUT")
+        self.assertGreater(i_poster, -1)
+        self.assertGreater(i_output, -1)
+        self.assertLess(i_poster, i_output)
+
+    def test_poster_text_forbids_fabrication(self) -> None:
+        # The poster line must be defensible against the source story
+        # — same anti-invention rule the script body carries.
+        prompt = self._prompt()
+        self.assertIn("no fabrication beyond the source", prompt)
+        self.assertIn("isn't in the source story", prompt)
+
+
 class RegistryShapeTests(unittest.TestCase):
     """The picker + worker contract: list_styles() returns at least one row
     with the documented shape, and get_style() resolves unknown ids without

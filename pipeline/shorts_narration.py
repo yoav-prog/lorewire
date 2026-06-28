@@ -317,6 +317,51 @@ def _tone_block() -> str:
     )
 
 
+def _poster_text_block() -> str:
+    """Instructions for the social-cover poster line. The poster is a
+    STATIC tile (1080x1920 PNG) shown in the social grid before the
+    video ever plays. It's read in isolation, at thumb-scroll speed,
+    by a stranger who hasn't heard a syllable of the script — a
+    completely different audience situation than the spoken cold-open
+    hook (beat 1). Per
+    _plans/2026-06-28-phase-2-social-poster-render.md, scope addition
+    locked 2026-06-29."""
+    return (
+        "POSTER TEXT — for the social-cover grid tile (NOT the spoken hook):\n"
+        "  The cover poster is the STATIC image a stranger sees on an IG / FB / "
+        "YouTube grid BEFORE the video plays. It's read once, at thumb-scroll "
+        "speed, with zero context. The spoken hook (beat 1, the COLD OPEN) is "
+        "designed to be MYSTERIOUS — to lure a viewer who's already pressed "
+        "play to keep watching. The poster line is the OPPOSITE: it must name "
+        "the dramatic moment CLEARLY so a stranger on the grid instantly "
+        "understands the stakes and clicks.\n"
+        "  Length: 8-14 words. One or two short sentences. Will render in ALL "
+        "CAPS so avoid idioms that lose meaning in caps.\n"
+        "  CONTRAST WITH THE SPOKEN HOOK — concrete examples from the same "
+        "source:\n"
+        "    Source: bride's wedding dress is destroyed the morning of the "
+        "ceremony by the mother-in-law.\n"
+        "      Spoken hook (beat 1, oblique): \"Her wedding dress was destroyed.\"\n"
+        "      Poster text (clear, climax-revealing): \"Her wedding dress was "
+        "destroyed the morning of the ceremony.\"\n"
+        "    Source: woman refuses husband's ultimatum, he empties the joint "
+        "account.\n"
+        "      Spoken hook: \"Her refusal ended everything.\"\n"
+        "      Poster text: \"She refused. He emptied their joint account by "
+        "morning.\"\n"
+        "  THE TEST: a stranger reading ONLY this line on a grid tile must "
+        "instantly know (a) what specific event happened and (b) who is "
+        "involved. They should NOT know the resolution — curiosity stays "
+        "intact. \"She found out…\" + the discovery is good. \"Everything "
+        "changed\" or \"Nothing was the same\" is BAD (abstract metaphor "
+        "tells the stranger nothing).\n"
+        "  SAME BRAND-SAFETY + ANTI-INVENTION RULES as the script: no "
+        "all-caps shock language inside the line (the renderer adds caps), "
+        "no profanity, no PII, no fabrication beyond the source. If a fact "
+        "in the poster line isn't in the source story, do not write it.\n"
+    )
+
+
 def _output_schema_block() -> str:
     """The JSON the LLM must return. `short_script` and `payoff` are preserved
     for back-compat with downstream code that already reads them."""
@@ -331,6 +376,7 @@ def _output_schema_block() -> str:
         '  "cta": "<the closing line, beat 5>",\n'
         '  "short_script": "<beats 1-5 concatenated with single spaces — the canonical spoken text>",\n'
         '  "cold_open_visual_brief": "<one sentence describing the climax frame the cold open implies — what is happening, who is there, what the camera sees>",\n'
+        '  "poster_text": "<8-14 word climax-revealing line for the static social grid tile, written for a stranger reading at scroll speed; SEPARATE from the spoken hook>",\n'
         '  "payoff": "<return line followed by CTA line, single space between — kept for downstream back-compat>",\n'
         '  "word_count": <integer word count of short_script>,\n'
         '  "tone_knob": "<one of: calm-curious | tense | wry | warm-sad>",\n'
@@ -379,6 +425,7 @@ def build_extraction_prompt(
         _brand_safety_block(),
         _poll_block(),
         _tone_block(),
+        _poster_text_block(),
         _output_schema_block(),
     ]
     if elaborate:

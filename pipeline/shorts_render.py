@@ -550,6 +550,28 @@ def build_short_props(
             # reorder, splice falls through to legacy [intro][body][outro]".
             # See _plans/2026-06-28-hook-before-brand-intro.md.
             "hook_end_ms": hook_end_ms,
+            # The spoken cold-open hook line (beat 1 of the script, capped
+            # at 8 words at generation time). Preserved here so the social
+            # publisher's poster renderer has a back-compat fallback when
+            # the newer `poster_text` field isn't present (legacy stories
+            # rendered before the 2026-06-29 prompt update). See
+            # _plans/2026-06-28-phase-2-social-poster-render.md (Part 0).
+            # Cloud Run's dispatcher strip removes this key before it
+            # reaches the DoodleShort Remotion composition so the video
+            # render never receives a phantom prop. The /render-poster
+            # endpoint is the only intentional consumer (via the
+            # ensureShortPoster helper).
+            "hook": (assets.script.get("hook") or "").strip(),
+            # The CLIMAX-REVEALING line written for the static social-grid
+            # tile (8-14 words, named the dramatic event clearly for a
+            # stranger reading at scroll speed). SEPARATE from `hook`,
+            # which is the spoken video cold-open and is oblique/mysterious
+            # by design. The poster renderer prefers `poster_text` over
+            # `hook` when present. Per the prompt update in
+            # pipeline/shorts_narration.py::_poster_text_block. Empty
+            # string for stories rendered before the prompt update — the
+            # publisher falls back to `hook`, then to scene-1.
+            "poster_text": (assets.script.get("poster_text") or "").strip(),
             # The i2i character reference. Persisted (NOT as a visible frame)
             # so defaultShortConfig seeds short_config.character_base_url and
             # Lane C per-scene regen can re-pose the SAME character. The base

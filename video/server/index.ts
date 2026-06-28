@@ -14,7 +14,10 @@ import express, { type Request, type Response } from "express";
 
 import {
   renderAndUploadStory,
+  renderPosterAndUploadStory,
+  type PosterInputProps,
   type RenderFn,
+  type RenderPosterFn,
   type SpliceSegments,
 } from "./render.js";
 
@@ -89,6 +92,64 @@ function parseSegments(raw: unknown): SpliceSegments {
   return out;
 }
 
+// ─── Phase 2 social poster body parser
+// ─── _plans/2026-06-28-phase-2-social-poster-render.md
+
+/** Hard caps so a malformed body can't blow up the request handler.
+ *  Validated server-side as defense in depth — the helper that calls
+ *  /render-poster also enforces these. */
+const POSTER_HOOK_MAX_CHARS = 280;
+const POSTER_URL_MAX_CHARS = 2000;
+const POSTER_HASH_RE = /^[a-f0-9]{8,32}$/;
+
+interface RenderPosterRequestBody {
+  storyId?: unknown;
+  hash?: unknown;
+  inputProps?: unknown;
+}
+
+function parseRenderPosterBody(body: RenderPosterRequestBody | undefined): {
+  storyId: string;
+  hash: string;
+  inputProps: PosterInputProps;
+} | null {
+  if (!body || typeof body !== "object") return null;
+  const { storyId, hash, inputProps } = body;
+  if (typeof storyId !== "string" || storyId.length === 0) return null;
+  if (typeof hash !== "string" || !POSTER_HASH_RE.test(hash)) return null;
+  if (!inputProps || typeof inputProps !== "object" || Array.isArray(inputProps)) {
+    return null;
+  }
+  const ip = inputProps as Record<string, unknown>;
+  const scene_1_url = ip.scene_1_url;
+  const hook = ip.hook;
+  const poster_text = ip.poster_text;
+  const brand_text = ip.brand_text;
+  if (
+    typeof scene_1_url !== "string" ||
+    scene_1_url.length === 0 ||
+    scene_1_url.length > POSTER_URL_MAX_CHARS
+  ) return null;
+  if (typeof hook !== "string" || hook.length > POSTER_HOOK_MAX_CHARS) return null;
+  if (
+    poster_text !== undefined &&
+    (typeof poster_text !== "string" ||
+      poster_text.length > POSTER_HOOK_MAX_CHARS)
+  ) return null;
+  if (
+    brand_text !== undefined &&
+    (typeof brand_text !== "string" || brand_text.length > 64)
+  ) return null;
+  const validated: PosterInputProps = { scene_1_url, hook };
+  if (typeof poster_text === "string" && poster_text.length > 0) {
+    validated.poster_text = poster_text;
+  }
+  if (typeof brand_text === "string" && brand_text.length > 0) {
+    validated.brand_text = brand_text;
+  }
+  return { storyId, hash, inputProps: validated };
+}
+
 function parseRenderBody(body: RenderRequestBody | undefined): {
   storyId: string;
   configHash: string;
@@ -113,7 +174,13 @@ function parseRenderBody(body: RenderRequestBody | undefined): {
 // the HTTP layer without spinning up Remotion. Production wires the
 // real `renderAndUploadStory` from ./render.ts; tests pass a fake
 // that resolves instantly with a fake URL.
-export function createApp(render: RenderFn = renderAndUploadStory) {
+//
+// Phase 2 adds a parallel `renderPoster` seam for the social-poster
+// endpoint. Same pattern, same testability story.
+export function createApp(
+  render: RenderFn = renderAndUploadStory,
+  renderPoster: RenderPosterFn = renderPosterAndUploadStory,
+) {
   const app = express();
   app.use(express.json({ limit: "2mb" }));
 
@@ -175,6 +242,69 @@ export function createApp(render: RenderFn = renderAndUploadStory) {
         const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         log("render_fail", {
           story_id: parsed.storyId,
+          error: msg,
+        });
+        res.status(500).json({ error: msg });
+      }
+    })();
+  });
+
+  // Phase 2 social poster endpoint. Per
+  // _plans/2026-06-28-phase-2-social-poster-render.md. Mirrors /render's
+  // auth + body-validation + error-mapping shape but invokes the
+  // renderStill path (PNG, single-frame) instead of renderMedia (MP4).
+  app.post("/render-poster", (req: Request, res: Response) => {
+    void (async () => {
+      if (!isAuthorized(req)) {
+        log("poster_auth_fail", {
+          ip: req.header("x-forwarded-for") ?? "unknown",
+        });
+        res.status(401).json({ error: "unauthorized" });
+        return;
+      }
+
+      const parsed = parseRenderPosterBody(req.body);
+      if (!parsed) {
+        log("poster_bad_request", {
+          body_keys: req.body ? Object.keys(req.body) : null,
+        });
+        res.status(400).json({
+          error:
+            "expected { storyId: string, hash: string (hex 8-32), " +
+            "inputProps: { scene_1_url: string, hook: string, poster_text?: string, brand_text?: string } }",
+        });
+        return;
+      }
+
+      log("poster_received", {
+        story_id: parsed.storyId,
+        hash: parsed.hash,
+        has_poster_text: parsed.inputProps.poster_text !== undefined,
+        hook_len: parsed.inputProps.hook.length,
+      });
+
+      try {
+        const result = await renderPoster(
+          parsed.storyId,
+          parsed.hash,
+          parsed.inputProps,
+        );
+        log("poster_done", {
+          story_id: parsed.storyId,
+          hash: result.hash,
+          url_bytes: result.url.length,
+          elapsed_ms: result.elapsed_ms,
+        });
+        res.status(200).json({
+          url: result.url,
+          elapsed_ms: result.elapsed_ms,
+          hash: result.hash,
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        log("poster_render_fail", {
+          story_id: parsed.storyId,
+          hash: parsed.hash,
           error: msg,
         });
         res.status(500).json({ error: msg });

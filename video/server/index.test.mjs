@@ -29,6 +29,9 @@ let baseUrl;
  *  received so the segments-parsing tests can assert what the HTTP
  *  layer handed downstream. Reset before each segments-parsing case. */
 let lastRenderCall = null;
+/** Captures the (storyId, hash, inputProps) tuple for /render-poster.
+ *  Reset before each poster-parsing case. */
+let lastPosterRenderCall = null;
 
 before(async () => {
   process.env.CRON_SECRET = SECRET;
@@ -45,7 +48,19 @@ before(async () => {
       elapsed_ms: 12345,
     };
   };
-  const app = createApp(render);
+  // Phase 2 stub for /render-poster. Same shape as the video stub.
+  const renderPoster = async (storyId, hash, inputProps) => {
+    lastPosterRenderCall = { storyId, hash, inputProps };
+    if (storyId === "poster-boom") {
+      throw new Error("renderStill failed: bad composition");
+    }
+    return {
+      url: `https://storage.googleapis.com/test-bucket/${storyId}-short/poster-${hash}.png`,
+      elapsed_ms: 678,
+      hash,
+    };
+  };
+  const app = createApp(render, renderPoster);
   server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   const { port } = server.address();
@@ -294,5 +309,156 @@ describe("Cloud Run render service /render segments parsing", () => {
       outro,
       outroLeadInSec: 1.5,
     });
+  });
+});
+
+// _plans/2026-06-28-phase-2-social-poster-render.md.
+// The /render-poster endpoint mirrors /render's HTTP layer (auth + body
+// validation + error mapping) but invokes the renderStill seam instead
+// of renderMedia. These tests stub the renderer so we're testing the
+// HTTP layer end-to-end without spinning up Remotion.
+
+const STORY = "envelope";
+const VALID_HASH = "a1b2c3d4e5f60718";
+const VALID_POSTER_BODY = {
+  storyId: STORY,
+  hash: VALID_HASH,
+  inputProps: {
+    scene_1_url: "https://media.lorewire.com/envelope-short/frame-00.png",
+    hook: "Eight hundred dollars. Gone.",
+    poster_text: "Her wedding dress was destroyed the morning of the ceremony.",
+    brand_text: "LORE WIRE",
+  },
+};
+
+describe("Cloud Run render service /render-poster auth", () => {
+  it("returns 401 when Authorization header missing", async () => {
+    const { status, body } = await post("/render-poster", {
+      body: VALID_POSTER_BODY,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.error, "unauthorized");
+  });
+
+  it("returns 401 when token is wrong", async () => {
+    const { status } = await post("/render-poster", {
+      auth: "Bearer wrong",
+      body: VALID_POSTER_BODY,
+    });
+    assert.equal(status, 401);
+  });
+});
+
+describe("Cloud Run render service /render-poster body validation", () => {
+  it("returns 400 when body is missing", async () => {
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+    });
+    assert.equal(status, 400);
+    assert.match(body.error, /storyId/);
+  });
+
+  it("returns 400 when storyId is missing", async () => {
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, storyId: undefined },
+    });
+    assert.equal(status, 400);
+  });
+
+  it("returns 400 when hash doesn't match the required hex format", async () => {
+    for (const badHash of ["", "../escape", "Z" + VALID_HASH.slice(1), "abc", "a".repeat(33)]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: { ...VALID_POSTER_BODY, hash: badHash },
+      });
+      assert.equal(status, 400, `hash=${JSON.stringify(badHash)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when inputProps is missing or non-object", async () => {
+    for (const bad of [null, "props", 42, []]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: { ...VALID_POSTER_BODY, inputProps: bad },
+      });
+      assert.equal(status, 400, `inputProps=${JSON.stringify(bad)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when scene_1_url is missing or too long", async () => {
+    for (const badUrl of ["", "x".repeat(2001), null, 42]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          ...VALID_POSTER_BODY,
+          inputProps: { ...VALID_POSTER_BODY.inputProps, scene_1_url: badUrl },
+        },
+      });
+      assert.equal(status, 400, `scene_1_url=${JSON.stringify(badUrl)?.slice(0, 30)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when hook is too long", async () => {
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        ...VALID_POSTER_BODY,
+        inputProps: { ...VALID_POSTER_BODY.inputProps, hook: "x".repeat(281) },
+      },
+    });
+    assert.equal(status, 400);
+  });
+});
+
+describe("Cloud Run render service /render-poster success path", () => {
+  it("returns the URL + elapsed_ms + hash from the renderer", async () => {
+    lastPosterRenderCall = null;
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: VALID_POSTER_BODY,
+    });
+    assert.equal(status, 200);
+    assert.equal(
+      body.url,
+      `https://storage.googleapis.com/test-bucket/${STORY}-short/poster-${VALID_HASH}.png`,
+    );
+    assert.equal(body.elapsed_ms, 678);
+    assert.equal(body.hash, VALID_HASH);
+    // The renderer saw the (storyId, hash, inputProps) tuple intact.
+    assert.equal(lastPosterRenderCall.storyId, STORY);
+    assert.equal(lastPosterRenderCall.hash, VALID_HASH);
+    assert.equal(
+      lastPosterRenderCall.inputProps.poster_text,
+      "Her wedding dress was destroyed the morning of the ceremony.",
+    );
+  });
+
+  it("normalizes a missing optional poster_text to undefined", async () => {
+    lastPosterRenderCall = null;
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        ...VALID_POSTER_BODY,
+        inputProps: {
+          scene_1_url: VALID_POSTER_BODY.inputProps.scene_1_url,
+          hook: VALID_POSTER_BODY.inputProps.hook,
+        },
+      },
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.inputProps.poster_text, undefined);
+    assert.equal(lastPosterRenderCall.inputProps.brand_text, undefined);
+  });
+});
+
+describe("Cloud Run render service /render-poster error mapping", () => {
+  it("returns 500 with the error message when the renderer throws", async () => {
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, storyId: "poster-boom" },
+    });
+    assert.equal(status, 500);
+    assert.match(body.error, /renderStill failed/);
   });
 });
