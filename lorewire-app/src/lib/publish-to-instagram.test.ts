@@ -161,6 +161,10 @@ describe("publishShortToInstagram auto path", () => {
     expect(calls[0].method).toBe("POST");
     expect(calls[0].body).toContain("media_type=REELS");
     expect(calls[0].body).toContain("video_url=");
+    // _plans/2026-06-28-explicit-thumbnail-uploads.md — the container
+    // POST must carry thumb_offset=0 so the Reels cover is frame 0
+    // (the story's cold-open scene per the hook-first splice).
+    expect(calls[0].body).toContain("thumb_offset=0");
     // Step 2: GET /{container-id}?fields=status_code
     expect(calls[1].url).toContain("ig_container_42");
     expect(calls[1].url).toContain("fields=status_code");

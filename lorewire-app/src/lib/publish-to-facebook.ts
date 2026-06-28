@@ -18,6 +18,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
+import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
 
 // --- Types -----------------------------------------------------------------
 
@@ -92,7 +93,15 @@ export type FbFetchLike = (
   init?: {
     method?: string;
     headers?: Record<string, string>;
-    body?: string;
+    /** undici fetch accepts string, FormData, Uint8Array, etc. for the
+     *  body. We widen this from `string` (the original shape) to
+     *  `BodyInit` so the postVideo path can attach a multipart payload
+     *  carrying the optional `thumb` image. The default fetch wrapper
+     *  passes the body straight through to undici, which handles every
+     *  BodyInit variant. Test stubs that only assert URL+method are
+     *  unaffected — they can still accept a string body via the union.
+     *  Per _plans/2026-06-28-explicit-thumbnail-uploads.md. */
+    body?: BodyInit;
   },
 ) => Promise<FbFetchResponse>;
 
@@ -109,6 +118,14 @@ export interface PublishDeps {
  *  here — single source of truth, no drift. */
 export const SETTING_AUTO_PUBLISH = "publisher.facebook.auto_publish";
 export const SETTING_CAPTION_TEMPLATE = "publisher.facebook.caption_template";
+/** Toggle for the custom-thumbnail upload step (PR following
+ *  _plans/2026-06-28-explicit-thumbnail-uploads.md). When ON (default),
+ *  postVideo switches to a multipart body and attaches the story's
+ *  scene-1 image as the `thumb` part so FB shows it as the post cover
+ *  instead of FB's auto-picked frame. Admin can flip off if the
+ *  multipart path becomes flaky or the thumbnails look wrong. */
+export const SETTING_UPLOAD_CUSTOM_THUMBNAIL =
+  "publisher.facebook.upload_custom_thumbnail";
 
 export const DEFAULT_CAPTION_TEMPLATE =
   "{{hook}}\n\n📖 Read the full story: {{article_url}}";
@@ -295,27 +312,109 @@ function normalizeFbError(
   };
 }
 
+/** Fetch the cover image bytes from a public URL (typically a story's
+ *  scene-1 GCS object) and return a Blob suitable for multipart upload.
+ *  Returns null on any failure — the caller falls back to the url-
+ *  encoded path and FB picks the cover automatically. Per
+ *  _plans/2026-06-28-explicit-thumbnail-uploads.md. */
+async function fetchThumbnailBlob(
+  thumbnailUrl: string,
+  fetchImpl: FbFetchLike,
+): Promise<{ blob: Blob; mime: string } | null> {
+  let resp: FbFetchResponse;
+  try {
+    resp = await fetchImpl(thumbnailUrl, { method: "GET" });
+  } catch {
+    return null;
+  }
+  if (!resp.ok) return null;
+  let bytes: Uint8Array;
+  try {
+    // The FbFetchResponse contract surfaces .text() / .json() but the
+    // real undici Response also exposes .arrayBuffer(). Cast pragmatically
+    // — the defaultFetch wrapper forwards the undici Response in full.
+    const r = resp as unknown as Response;
+    const buf = await r.arrayBuffer();
+    bytes = new Uint8Array(buf);
+  } catch {
+    return null;
+  }
+  if (bytes.byteLength === 0) return null;
+  // Pull the upstream mime if it's a real image/* value. Scene-1 GCS
+  // objects are usually image/png; image/webp is also accepted by FB.
+  const r = resp as unknown as Response;
+  const upstreamCt =
+    (typeof r.headers?.get === "function" && r.headers.get("content-type")) ||
+    "";
+  const mime = upstreamCt.startsWith("image/") ? upstreamCt : "image/png";
+  // Blob extension picks the right serialization for FormData boundaries.
+  return { blob: new Blob([bytes as BlobPart], { type: mime }), mime };
+}
+
 async function postVideo(
   pageId: string,
   videoUrl: string,
   caption: string,
   fetchImpl: FbFetchLike,
+  thumbnailUrl: string | null = null,
 ): Promise<
   | { ok: true; externalPostId: string }
   | { ok: false; error: NormalizedFbError }
 > {
   const token = process.env.FB_PAGE_ACCESS_TOKEN ?? "";
-  const body = new URLSearchParams({
-    access_token: token,
-    file_url: videoUrl,
-    description: caption,
-  }).toString();
+  // When a thumbnail URL is supplied, attempt the multipart path: same
+  // endpoint, same fields, plus a `thumb` Blob carrying the cover. If
+  // the thumbnail fetch fails (network, 404, zero bytes), fall through
+  // to the url-encoded path — better to publish without a cover than
+  // not publish at all. Per
+  // _plans/2026-06-28-explicit-thumbnail-uploads.md.
+  let body: BodyInit;
+  let headers: Record<string, string>;
+  let thumbAttached = false;
+  if (thumbnailUrl) {
+    const fetched = await fetchThumbnailBlob(thumbnailUrl, fetchImpl);
+    if (fetched) {
+      const form = new FormData();
+      form.append("access_token", token);
+      form.append("file_url", videoUrl);
+      form.append("description", caption);
+      // The Graph API thumb param accepts a multipart file. We send the
+      // blob with a filename so FB infers the format from the mime.
+      const ext = fetched.mime.split("/")[1] || "png";
+      form.append("thumb", fetched.blob, `cover.${ext}`);
+      body = form;
+      // undici sets the multipart boundary automatically; do NOT preset
+      // Content-Type here or the boundary header will be wrong.
+      headers = {};
+      thumbAttached = true;
+    } else {
+      // Fetch failed — fall through to the url-encoded path.
+      body = new URLSearchParams({
+        access_token: token,
+        file_url: videoUrl,
+        description: caption,
+      }).toString();
+      headers = { "Content-Type": "application/x-www-form-urlencoded" };
+    }
+  } else {
+    body = new URLSearchParams({
+      access_token: token,
+      file_url: videoUrl,
+      description: caption,
+    }).toString();
+    headers = { "Content-Type": "application/x-www-form-urlencoded" };
+  }
+  log("attempt_video", {
+    page_id_present: pageId.length > 0,
+    video_url_host: hostOf(videoUrl),
+    thumb_attached: thumbAttached,
+  });
   const url = `${GRAPH_VIDEO_BASE}/${encodeURIComponent(pageId)}/videos`;
   let resp: FbFetchResponse;
   try {
     resp = await fetchImpl(url, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers,
       body,
     });
   } catch (e) {
@@ -491,8 +590,25 @@ export async function publishShortToFacebook(
     ...tokenFingerprint(),
   });
 
+  // Resolve the per-story cover for FB's thumb param. Skipped when the
+  // setting is off, the story has no short_config, or scene-1 is
+  // missing — postVideo falls through to the url-encoded path and FB
+  // auto-picks the cover. Per
+  // _plans/2026-06-28-explicit-thumbnail-uploads.md.
+  const uploadCustomThumbnail =
+    ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
+  const thumbnailUrl = uploadCustomThumbnail
+    ? await resolveShortThumbnailUrl(args.storyId)
+    : null;
+
   const started = now.valueOf();
-  const result = await postVideo(pageId, args.videoUrl, caption, fetchImpl);
+  const result = await postVideo(
+    pageId,
+    args.videoUrl,
+    caption,
+    fetchImpl,
+    thumbnailUrl,
+  );
   const latency = Date.now() - started;
 
   if (result.ok) {
@@ -563,12 +679,21 @@ export async function attemptFacebookPublishForRow(
     render_id: row.render_id,
     attempt: (row.attempts ?? 0) + 1,
   });
+  // Re-resolve the cover at retry time so a short_config edit between
+  // attempts picks up the freshest scene-1 URL. Same gate as the
+  // fresh-publish path; null → falls through to url-encoded body.
+  const uploadCustomThumbnail =
+    ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
+  const thumbnailUrl = uploadCustomThumbnail
+    ? await resolveShortThumbnailUrl(row.story_id)
+    : null;
   const started = Date.now();
   const result = await postVideo(
     row.page_id,
     row.video_url,
     row.caption,
     fetchImpl,
+    thumbnailUrl,
   );
   const latency = Date.now() - started;
   if (result.ok) {

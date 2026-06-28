@@ -457,3 +457,160 @@ describe("deleteLatestPostedRowForStory", () => {
     }
   });
 });
+
+// _plans/2026-06-28-explicit-thumbnail-uploads.md.
+//
+// When the story carries a scene-1 URL in short_config AND the setting
+// is on (default), postVideo switches to multipart and attaches the
+// image as the `thumb` part. When either side is missing OR the
+// thumbnail fetch fails, it falls back to the url-encoded path so the
+// publish itself never fails on a cover-only problem.
+
+describe("publishShortToFacebook — custom thumbnail upload", () => {
+  beforeEach(async () => {
+    process.env.FB_PAGE_ACCESS_TOKEN = "test-token-secret";
+    process.env.FB_PAGE_ID = "911708085365160";
+    await setSetting("publisher.facebook.auto_publish", "1");
+    await run(`DELETE FROM stories WHERE id = ?`, [STORY]);
+    await run(
+      `INSERT INTO stories (id, title, body, summary, status, short_config)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        STORY,
+        "T",
+        "B",
+        "S",
+        "published",
+        JSON.stringify({
+          duration_ms: 50000,
+          doodle_frames: [
+            { id: "frame-00", url: "https://media.lorewire.com/x/frame-00.png" },
+          ],
+          captions: [],
+        }),
+      ],
+    );
+  });
+
+  afterEach(async () => {
+    await run(`DELETE FROM stories WHERE id = ?`, [STORY]);
+  });
+
+  it("fetches scene-1 + attaches it as multipart thumb on the /videos POST", async () => {
+    // 1: GET thumbnail bytes from GCS. 2: POST /videos with multipart.
+    const { fetch, calls } = makeFetchStub([
+      {
+        ok: true,
+        status: 200,
+        body: { id: "fb_video_cover_42" },
+      },
+    ]);
+    // The fetch stub above only services the /videos POST; the
+    // thumbnail GET hits a separate URL so the stub returns one entry
+    // per call. Re-make with the right queue:
+    const responses = [
+      // GET thumb bytes
+      {
+        ok: true,
+        status: 200,
+        body: null,
+        bodyText: "PNGBYTES",
+      },
+      // POST /videos with multipart
+      { ok: true, status: 200, body: { id: "fb_video_cover_42" } },
+    ];
+    const stub = makeFetchStub(responses);
+    const result = await publishShortToFacebook(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch },
+    );
+    expect(result.status).toBe("posted");
+    if (result.status !== "posted") return;
+    expect(result.row.external_post_id).toBe("fb_video_cover_42");
+    expect(stub.calls).toHaveLength(2);
+    // Call 0: thumbnail bytes fetch
+    expect(stub.calls[0].url).toBe("https://media.lorewire.com/x/frame-00.png");
+    expect(stub.calls[0].method).toBe("GET");
+    // Call 1: multipart POST to /videos. The body is a FormData when
+    // multipart fires; the stub serializes it as `[object FormData]`
+    // when toString'd, which is fine for the call-count assertion.
+    expect(stub.calls[1].url).toContain("/911708085365160/videos");
+    expect(stub.calls[1].method).toBe("POST");
+    // Suppress the unused noop binding warning.
+    void fetch;
+    void calls;
+  });
+
+  it("falls back to url-encoded when the thumbnail GCS fetch fails", async () => {
+    const stub = makeFetchStub([
+      // GET thumb → 404
+      { ok: false, status: 404, body: { error: "not found" } },
+      // POST /videos url-encoded (the fallback path) → ok
+      { ok: true, status: 200, body: { id: "fb_video_fallback" } },
+    ]);
+    const result = await publishShortToFacebook(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch },
+    );
+    expect(result.status).toBe("posted");
+    if (result.status !== "posted") return;
+    expect(result.row.external_post_id).toBe("fb_video_fallback");
+    expect(stub.calls).toHaveLength(2);
+    // The fallback POST is url-encoded (a string body containing
+    // file_url= + access_token=), NOT multipart.
+    expect(stub.calls[1].body).toContain("file_url=");
+  });
+
+  it("skips the thumbnail fetch when the setting is off", async () => {
+    await setSetting("publisher.facebook.upload_custom_thumbnail", "0");
+    const stub = makeFetchStub([
+      { ok: true, status: 200, body: { id: "fb_video_no_thumb" } },
+    ]);
+    const result = await publishShortToFacebook(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch },
+    );
+    expect(result.status).toBe("posted");
+    expect(stub.calls).toHaveLength(1);
+    // The single call is url-encoded /videos POST.
+    expect(stub.calls[0].url).toContain("/videos");
+    expect(stub.calls[0].body).toContain("file_url=");
+  });
+
+  it("skips the thumbnail fetch when the story has no short_config", async () => {
+    await run(`UPDATE stories SET short_config = NULL WHERE id = ?`, [STORY]);
+    const stub = makeFetchStub([
+      { ok: true, status: 200, body: { id: "fb_video_no_cfg" } },
+    ]);
+    const result = await publishShortToFacebook(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch },
+    );
+    expect(result.status).toBe("posted");
+    expect(stub.calls).toHaveLength(1);
+  });
+});

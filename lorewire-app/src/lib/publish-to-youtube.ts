@@ -34,6 +34,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
+import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
 
 // --- Types -----------------------------------------------------------------
 
@@ -153,6 +154,15 @@ export const SETTING_PRIVACY_DEFAULT = "publisher.youtube.privacy_default";
 export const SETTING_MADE_FOR_KIDS = "publisher.youtube.made_for_kids";
 export const SETTING_SYNTHETIC_MEDIA = "publisher.youtube.synthetic_media";
 export const SETTING_UPLOAD_CAPTIONS = "publisher.youtube.upload_captions";
+/** Toggle for the custom-thumbnail upload step (PR following
+ *  _plans/2026-06-28-explicit-thumbnail-uploads.md). When ON (default),
+ *  publishShortToYouTube fetches the story's scene-1 image and calls
+ *  videos.thumbnails.set so YouTube's smart-picker can't choose the
+ *  brand intro. Admin can flip off if the channel consistently hits
+ *  the 403 "channel lacks custom-thumbnail privilege" outcome, which
+ *  is the documented YouTube behaviour for unverified channels. */
+export const SETTING_UPLOAD_CUSTOM_THUMBNAIL =
+  "publisher.youtube.upload_custom_thumbnail";
 
 /** Per-category tag overrides key — same shape as
  *  `shorts.auto.category.<cat>`. */
@@ -772,6 +782,101 @@ async function uploadVideoBytes(
 /** Best-effort attach an SRT caption track to a freshly-uploaded
  *  video. Failure here MUST NOT mark the row failed — the video is
  *  already live; we just log and move on. */
+/** Custom-thumbnail sidecar.
+ *  Fetches a thumbnail image from a public URL (typically the story's
+ *  scene-1 GCS object) and POSTs it to videos.thumbnails.set with
+ *  uploadType=media. Per
+ *  _plans/2026-06-28-explicit-thumbnail-uploads.md, this is the only
+ *  reliable way to override YouTube's smart-picker — frame 0 of the
+ *  MP4 is not enough because YouTube scores frames for visual
+ *  distinctiveness and tends to pick bright-color frames (e.g. the
+ *  brand intro) over story content.
+ *
+ *  Best-effort: a 403 (channel lacks custom-thumbnail privilege),
+ *  429 (rate limit) or any other failure is REPORTED via the return
+ *  value and the caller logs without blocking the publish. Channels
+ *  without the privilege are common (it's gated on YouTube's account-
+ *  verification step), so 403 is a steady-state outcome not a bug.
+ */
+async function uploadCustomThumbnail(args: {
+  accessToken: string;
+  videoId: string;
+  thumbnailUrl: string;
+  fetchImpl: YtFetchLike;
+}): Promise<
+  | { ok: true }
+  | { ok: false; reason: string; status?: number }
+> {
+  let fetchResp: YtFetchResponse;
+  try {
+    fetchResp = await args.fetchImpl(args.thumbnailUrl, { method: "GET" });
+  } catch (e) {
+    return {
+      ok: false,
+      reason: `thumbnail fetch failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (!fetchResp.ok) {
+    return {
+      ok: false,
+      reason: `thumbnail fetch HTTP ${fetchResp.status}`,
+      status: fetchResp.status,
+    };
+  }
+  let buf: ArrayBuffer;
+  try {
+    buf = await fetchResp.arrayBuffer();
+  } catch (e) {
+    return {
+      ok: false,
+      reason: `thumbnail read failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  // YouTube docs accept JPEG and PNG up to 2 MB (Shorts thumbs in
+  // practice are well under). Anything bigger gets a 400 invalidImage.
+  // We trust the source (our own GCS) but cap defensively.
+  const bytes = new Uint8Array(buf);
+  if (bytes.byteLength === 0) {
+    return { ok: false, reason: "thumbnail fetch returned zero bytes" };
+  }
+  // YouTube infers the mime from the body but accepts an explicit
+  // Content-Type. Pull from the upstream response when it's a real
+  // image/* value; otherwise default to image/png (scene-1 GCS objects
+  // are PNG or WebP — both accepted).
+  const upstreamCt = fetchResp.headers?.get?.("content-type") ?? "";
+  const contentType = upstreamCt.startsWith("image/")
+    ? upstreamCt
+    : "image/png";
+  const setUrl =
+    `${YT_UPLOAD_BASE}/thumbnails/set?videoId=` +
+    `${encodeURIComponent(args.videoId)}&uploadType=media`;
+  let resp: YtFetchResponse;
+  try {
+    resp = await args.fetchImpl(setUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${args.accessToken}`,
+        "Content-Type": contentType,
+      },
+      body: bytes,
+    });
+  } catch (e) {
+    return {
+      ok: false,
+      reason: `thumbnails.set failed: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    return {
+      ok: false,
+      reason: `thumbnails.set HTTP ${resp.status}: ${text.slice(0, 200)}`,
+      status: resp.status,
+    };
+  }
+  return { ok: true };
+}
+
 async function uploadCaptionsSidecar(args: {
   accessToken: string;
   videoId: string;
@@ -1068,11 +1173,23 @@ export async function publishShortToYouTube(
     ...credentialsFingerprint(),
   });
 
+  // Resolve the per-story cover image. Skipped silently when the story
+  // has no short_config (legacy) or no scene-1; the publish proceeds
+  // without an explicit thumbnail and YouTube auto-picks. Per
+  // _plans/2026-06-28-explicit-thumbnail-uploads.md.
+  const uploadCustomThumbnail =
+    ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
+  const thumbnailUrl = uploadCustomThumbnail
+    ? await resolveShortThumbnailUrl(args.storyId)
+    : null;
+
   return runUploadPipeline(row, {
     fetchImpl,
     getAccessToken,
     captionsUrl: args.captionsUrl ?? null,
     uploadCaptions,
+    thumbnailUrl,
+    uploadCustomThumbnail,
   });
 }
 
@@ -1081,6 +1198,15 @@ interface PipelineDeps {
   getAccessToken: AccessTokenProvider;
   captionsUrl: string | null;
   uploadCaptions: boolean;
+  /** Public URL of the image to upload as the video's custom thumbnail
+   *  (typically the story's scene-1 GCS object). Null = skip the
+   *  thumbnails.set step entirely; YouTube auto-picks the cover.
+   *  Per _plans/2026-06-28-explicit-thumbnail-uploads.md. */
+  thumbnailUrl: string | null;
+  /** Setting toggle (publisher.youtube.upload_custom_thumbnail). When
+   *  false, skip the thumbnail upload even if `thumbnailUrl` is set —
+   *  lets an admin disable a 403-loop without code change. */
+  uploadCustomThumbnail: boolean;
 }
 
 async function runUploadPipeline(
@@ -1254,6 +1380,49 @@ async function runUploadPipeline(
     total_latency_ms: Date.now() - t0,
   });
 
+  // Step 5.5 (best-effort): custom thumbnail upload. Per
+  // _plans/2026-06-28-explicit-thumbnail-uploads.md. YouTube's
+  // smart-picker tends to choose visually-distinctive frames (the
+  // brand intro wins for our content) regardless of t=0, so this
+  // is the only reliable cover-control for YouTube. Failures NEVER
+  // block the publish — 403 (channel lacks privilege) is a steady-
+  // state outcome for unverified channels, not a bug.
+  if (deps.uploadCustomThumbnail && deps.thumbnailUrl && accessToken) {
+    const tThumb = Date.now();
+    const thumb = await uploadCustomThumbnail({
+      accessToken,
+      videoId: uploaded.externalVideoId,
+      thumbnailUrl: deps.thumbnailUrl,
+      fetchImpl: deps.fetchImpl,
+    });
+    if (thumb.ok) {
+      log("custom_thumbnail_ok", {
+        story_id: row.story_id,
+        render_id: row.render_id,
+        external_video_id: uploaded.externalVideoId,
+        latency_ms: Date.now() - tThumb,
+      });
+    } else {
+      log("custom_thumbnail_failed", {
+        story_id: row.story_id,
+        render_id: row.render_id,
+        external_video_id: uploaded.externalVideoId,
+        reason: thumb.reason,
+        http_status: thumb.status,
+        latency_ms: Date.now() - tThumb,
+      });
+    }
+  } else {
+    log("custom_thumbnail_skipped", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      external_video_id: uploaded.externalVideoId,
+      reason: !deps.uploadCustomThumbnail
+        ? "upload_custom_thumbnail setting off"
+        : "no thumbnail URL resolved (story missing short_config / scene-1)",
+    });
+  }
+
   // Step 6 (best-effort): captions sidecar.
   if (deps.uploadCaptions && deps.captionsUrl) {
     const tCap = Date.now();
@@ -1348,11 +1517,21 @@ export async function attemptYouTubePublishForRow(
   });
   const uploadCaptions =
     ((await getSetting(SETTING_UPLOAD_CAPTIONS)) ?? "1") !== "0";
+  // Re-resolve the custom thumbnail on retry — short_config might have
+  // been edited between the original attempt and the retry, so we want
+  // the freshest scene-1 URL. Same setting gate as the fresh path.
+  const uploadCustomThumbnailToggle =
+    ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
+  const thumbnailUrl = uploadCustomThumbnailToggle
+    ? await resolveShortThumbnailUrl(row.story_id)
+    : null;
   return runUploadPipeline(row, {
     fetchImpl,
     getAccessToken,
     captionsUrl: null, // we don't snapshot the captions URL on the row
     uploadCaptions,
+    thumbnailUrl,
+    uploadCustomThumbnail: uploadCustomThumbnailToggle,
   });
 }
 

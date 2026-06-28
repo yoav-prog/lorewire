@@ -352,6 +352,14 @@ async function createContainer(
     media_type: "REELS",
     video_url: videoUrl,
     caption,
+    // Pick the very first frame of the MP4 as the Reels cover. With the
+    // hook-first splice (PR #135) frame 0 IS the story's cold-open scene,
+    // so this is the explicit-contract version of "use scene 1 as the
+    // grid tile" without burning extra bandwidth on a cover_url multipart
+    // upload. v22 documents thumb_offset in ms; "0" matches the very
+    // first frame either way. Per
+    // _plans/2026-06-28-explicit-thumbnail-uploads.md.
+    thumb_offset: "0",
   }).toString();
   const url = `${IG_BASE}/${encodeURIComponent(igAccountId)}/media`;
   let resp: IgFetchResponse;

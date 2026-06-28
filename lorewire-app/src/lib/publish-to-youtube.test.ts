@@ -562,3 +562,145 @@ describe("attemptYouTubePublishForRow", () => {
     expect((retry.row.attempts ?? 0)).toBeGreaterThanOrEqual(2);
   });
 });
+
+// _plans/2026-06-28-explicit-thumbnail-uploads.md.
+//
+// YouTube's smart-picker reliably picks the brand intro over the
+// story scene, so the publisher uploads scene-1 explicitly via
+// thumbnails.set after the video finishes uploading. The step is
+// best-effort: a 403 (channel lacks custom-thumbnail privilege) is
+// a steady-state outcome on unverified channels and MUST NOT block
+// the publish.
+
+describe("publishShortToYouTube — custom thumbnail upload", () => {
+  beforeEach(async () => {
+    await setSetting("publisher.youtube.auto_publish", "1");
+    await run(`DELETE FROM stories WHERE id = ?`, [STORY]);
+    // Seed a story whose short_config carries a scene-1 URL so the
+    // resolver returns it. The thumbnail bytes are stubbed at the
+    // fetch layer below so no actual network fires.
+    await run(
+      `INSERT INTO stories (id, title, body, summary, status, short_config)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        STORY,
+        "T",
+        "B",
+        "S",
+        "published",
+        JSON.stringify({
+          duration_ms: 50000,
+          doodle_frames: [
+            { id: "frame-00", url: "https://media.lorewire.com/x/frame-00.png" },
+          ],
+          captions: [],
+        }),
+      ],
+    );
+  });
+
+  afterEach(async () => {
+    await run(`DELETE FROM stories WHERE id = ?`, [STORY]);
+  });
+
+  it("uploads scene-1 as the custom thumbnail after the video posts (2 extra calls)", async () => {
+    const stub = makeFetchStub([
+      ...happyPathResponses(),
+      // 5. GET the thumbnail bytes from GCS.
+      {
+        ok: true,
+        status: 200,
+        arrayBuffer: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+        headers: { "content-type": "image/png" },
+      },
+      // 6. POST to thumbnails.set with the bytes.
+      { ok: true, status: 200, body: { default: { url: "https://i.ytimg.com/x" } } },
+    ]);
+    const result = await publishShortToYouTube(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch, getAccessToken: async () => "access-token-stub" },
+    );
+    expect(result.status).toBe("posted");
+    expect(stub.calls.length).toBe(6);
+    expect(stub.calls[4].url).toBe("https://media.lorewire.com/x/frame-00.png");
+    expect(stub.calls[4].method).toBe("GET");
+    expect(stub.calls[5].url).toContain("/thumbnails/set?videoId=video-id-xyz");
+    expect(stub.calls[5].url).toContain("uploadType=media");
+    expect(stub.calls[5].method).toBe("POST");
+  });
+
+  it("logs and continues when thumbnails.set returns 403 (channel lacks privilege)", async () => {
+    const stub = makeFetchStub([
+      ...happyPathResponses(),
+      // Thumbnail bytes fetch ok…
+      {
+        ok: true,
+        status: 200,
+        arrayBuffer: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+        headers: { "content-type": "image/png" },
+      },
+      // …but YouTube rejects the set with 403 (unverified channel).
+      { ok: false, status: 403, body: { error: { code: 403, message: "forbidden" } } },
+    ]);
+    const result = await publishShortToYouTube(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch, getAccessToken: async () => "access-token-stub" },
+    );
+    // 403 on the cover is a soft fail — the video itself posted, so the
+    // row is 'posted' and the external id is set. The cover step is
+    // logged separately ("custom_thumbnail_failed") but never reverts
+    // the publish.
+    expect(result.status).toBe("posted");
+    if (result.status !== "posted") return;
+    expect(result.row.external_video_id).toBe("video-id-xyz");
+    expect(stub.calls.length).toBe(6);
+  });
+
+  it("skips the thumbnail upload when the setting is off", async () => {
+    await setSetting("publisher.youtube.upload_custom_thumbnail", "0");
+    const stub = makeFetchStub(happyPathResponses());
+    const result = await publishShortToYouTube(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch, getAccessToken: async () => "access-token-stub" },
+    );
+    expect(result.status).toBe("posted");
+    // No extra calls beyond the 4-step happy path.
+    expect(stub.calls.length).toBe(4);
+  });
+
+  it("skips the thumbnail upload when the story has no short_config", async () => {
+    // Strip the short_config so the resolver returns null.
+    await run(`UPDATE stories SET short_config = NULL WHERE id = ?`, [STORY]);
+    const stub = makeFetchStub(happyPathResponses());
+    const result = await publishShortToYouTube(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch, getAccessToken: async () => "access-token-stub" },
+    );
+    expect(result.status).toBe("posted");
+    expect(stub.calls.length).toBe(4);
+  });
+});
