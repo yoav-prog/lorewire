@@ -87,6 +87,21 @@ describe("isItemActive", () => {
     expect(isItemActive("/admin/videos-spike/abc", items.spike)).toBe(true);
     expect(isItemActive("/admin/videos/abc", items.spike)).toBe(false);
   });
+
+  it("notPrefixes carves a nested sub-route out of the parent's active range", () => {
+    // Pattern used by Reddit Sources to keep /admin/reddit-sources/live
+    // exclusively highlighting the nested Live runs entry.
+    const parent: SidebarItem = {
+      href: "/admin/reddit-sources",
+      label: "Reddit Sources",
+      activePrefixes: ["/admin/reddit-sources"],
+      notPrefixes: ["/admin/reddit-sources/live"],
+    };
+    expect(isItemActive("/admin/reddit-sources", parent)).toBe(true);
+    expect(isItemActive("/admin/reddit-sources/abc123", parent)).toBe(true);
+    expect(isItemActive("/admin/reddit-sources/live", parent)).toBe(false);
+    expect(isItemActive("/admin/reddit-sources/live/", parent)).toBe(false);
+  });
 });
 
 describe("buildGroups", () => {
@@ -108,8 +123,9 @@ describe("buildGroups", () => {
     // The ungrouped block grew from the original three (Overview, Content,
     // Settings) as the studio added Reddit Sources (2026-06-14), Homepage
     // curation (2026-06-16), Polls (2026-06-18), the Users area (2026-06-22,
-    // capability-gated), Comments (2026-06-22, gated under content.manage), and
-    // the one-time Migrate + Compress media tools (2026-06-22). Each insertion
+    // capability-gated), Comments (2026-06-22, gated under content.manage), the
+    // Live runs aggregator (2026-06-28, nested under Reddit Sources), and the
+    // one-time Migrate + Compress media tools (2026-06-22). Each insertion
     // sits between Content and the trailing Settings / Migrate / Compress block.
     // With no caps passed, every item shows. This test pins membership + order.
     for (const dev of [false, true]) {
@@ -119,6 +135,7 @@ describe("buildGroups", () => {
         "Overview",
         "Content",
         "Reddit Sources",
+        "Live runs",
         "Homepage",
         "Polls",
         "Users",
@@ -160,6 +177,7 @@ describe("buildGroups — capability filtering", () => {
     );
     expect(labels).toContain("Content");
     expect(labels).toContain("Reddit Sources");
+    expect(labels).toContain("Live runs");
     expect(labels).toContain("Homepage");
     expect(labels).toContain("Polls");
     expect(labels).toContain("Comments");

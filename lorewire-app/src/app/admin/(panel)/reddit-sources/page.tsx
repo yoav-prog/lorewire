@@ -383,31 +383,45 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
     );
   }
   if (enqueued > 0 || (sp.enqueued !== undefined && skippedActive > 0)) {
-    // 2026-06-16: banner copy now spells out who drains the queue. In
+    // 2026-06-16: banner copy spells out who drains the queue. In
     // production the Vercel cron at /api/drain_story_jobs ticks every
-    // 2 minutes; in local dev the cron doesn't fire and the admin has to
-    // run the worker themselves. The page can't tell which it is from
-    // here (server actions run on the same Vercel runtime), so the copy
-    // surfaces BOTH options and links to the per-row timeline where the
-    // admin can see for sure whether claims are landing.
+    // 2 minutes; in local dev the cron doesn't fire and the admin has
+    // to run the worker themselves. 2026-06-28 update: the primary CTA
+    // is now the aggregated Live runs page — one screen, every in-flight
+    // job, full event logs — so the admin doesn't have to drill into
+    // every row to follow progress.
     return (
-      <div className="rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-[12px] text-accent">
-        Enqueued <strong>{enqueued}</strong> row
-        {enqueued === 1 ? "" : "s"} for processing.
-        {skippedActive > 0 && (
-          <>
-            {" "}
-            Skipped {skippedActive} that already had an active job.
-          </>
-        )}{" "}
-        On Vercel the cron at <code>/api/drain_story_jobs</code> drains
-        every 2 minutes; in local dev run{" "}
-        <code className="font-mono">python -m pipeline.story_jobs_worker</code>{" "}
-        from the repo root, or{" "}
-        <code className="font-mono">
-          npm --prefix lorewire-app run dev:drain
-        </code>{" "}
-        to mirror the cron. Click into any row to watch its live timeline.
+      <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-[12px] text-accent">
+        <p>
+          Enqueued <strong>{enqueued}</strong> row
+          {enqueued === 1 ? "" : "s"} for processing.
+          {skippedActive > 0 && (
+            <>
+              {" "}
+              Skipped {skippedActive} that already had an active job.
+            </>
+          )}
+        </p>
+        <p>
+          <Link
+            href="/admin/reddit-sources/live"
+            className="font-mono text-[12px] font-semibold uppercase tracking-wider text-accent underline-offset-2 hover:underline"
+          >
+            Watch live →
+          </Link>
+        </p>
+        <p className="text-[11px] opacity-80">
+          On Vercel the cron at <code>/api/drain_story_jobs</code> drains
+          every 2 minutes; in local dev run{" "}
+          <code className="font-mono">
+            python -m pipeline.story_jobs_worker
+          </code>{" "}
+          from the repo root, or{" "}
+          <code className="font-mono">
+            npm --prefix lorewire-app run dev:drain
+          </code>{" "}
+          to mirror the cron.
+        </p>
       </div>
     );
   }
