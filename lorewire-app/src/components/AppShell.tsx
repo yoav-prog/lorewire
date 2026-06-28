@@ -9,6 +9,11 @@ import {
   type Story,
 } from "@/lib/stories";
 import {
+  CategoryFilterChips,
+  filterStoriesByCategory,
+  useCategoryFilter,
+} from "@/components/CategoryFilterChips";
+import {
   ALL_PILL,
   CATEGORY_RAILS,
   POLL_RAIL_KINDS,
@@ -577,10 +582,10 @@ function Billboard({
 }
 
 /* ----------------------------- POSTER CARD (rail) ----------------------------- */
-function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number; progress?: number; voteCount?: number }) {
+function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number | string; progress?: number; voteCount?: number }) {
   const { getRating } = useStoryRatings();
   return (
-    <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w }}>
+    <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
       {/* showTitle={false} across every rail (mobile parity with
           desktop PosterCard): the baked title in the artwork carries
           the rail; the white CSS overlay was just doubling up. */}
@@ -2103,34 +2108,61 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
 }
 
 /* ----------------------------- SEARCH ----------------------------- */
-// Mirrors DesktopShell's SearchPage: only stories the pipeline has
-// actually produced content for (hero, short render, narration, or
-// article body) belong in the public listing. Reads off the merged
-// live + sample catalog so freshly-published live rows surface without
-// waiting for src/data/published.ts to be rebaked.
+// Mirrors DesktopShell's SearchPage + Browse page: only stories the
+// pipeline has actually produced content for (hero, short render,
+// narration, or article body) belong in the public listing. Reads off
+// the merged live + sample catalog so freshly-published live rows
+// surface without waiting for src/data/published.ts to be rebaked.
+//
+// Mobile has no dedicated Browse tab — Search is the catalog browser
+// when the query box is empty, so the URL-backed category filter
+// (?cat=Drama,Humor) lives here too. The chip row is hidden once a
+// text query is active to keep the screen focused on results.
 function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog }) {
   const [q, setQ] = useState("");
+  const { selected, toggle, clear } = useCategoryFilter();
   const published = catalog.array.filter(isPublishedStory);
+  const categoryFiltered = filterStoriesByCategory(published, selected);
   const query = q.trim().toLowerCase();
   const res = query
-    ? published.filter((s) => (s.title + s.cat).toLowerCase().includes(query))
-    : published;
+    ? categoryFiltered.filter((s) => (s.title + s.cat).toLowerCase().includes(query))
+    : categoryFiltered;
+  const emptyCopy = query
+    ? `No stories match “${q}”.`
+    : "No stories in this category yet.";
   return (
     <div className="pt-14 px-4 pb-28">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-3">Search</h1>
-      <div className="flex items-center gap-2 rounded-[10px] px-3 py-2.5 mb-5" style={{ background: "#15141A", border: "1px solid rgba(255,255,255,.085)" }}>
+      <div className="flex items-center gap-2 rounded-[10px] px-3 py-2.5 mb-3" style={{ background: "#15141A", border: "1px solid rgba(255,255,255,.085)" }}>
         <span className="text-muted"><SearchI size={18} /></span>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Stories, categories, vibes..." className="bg-transparent outline-none flex-1 font-body text-[14px] text-ink placeholder:text-muted" />
       </div>
       {q === "" && (
-        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mb-3">Browse all &middot; {published.length} stories</p>
+        <>
+          <CategoryFilterChips
+            selected={selected}
+            onToggle={toggle}
+            onClear={clear}
+            variant="mobile"
+          />
+          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-4 mb-3">
+            {selected.size === 0
+              ? `Browse all · ${published.length} stories`
+              : `${res.length} of ${published.length} · ${Array.from(selected).join(", ")}`}
+          </p>
+        </>
       )}
+      {/* aspect-ratio 3/4 matches the cinematic hero artwork
+          (pipeline/media.py line 524) so the baked title at the bottom
+          of every poster isn't cropped by object-cover. */}
       <div className="grid grid-cols-2 gap-3">
         {res.map((s) => (
-          <div key={s.id} style={{ height: 160 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={160} /></div>
+          <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
+            <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+          </div>
         ))}
       </div>
-      {res.length === 0 && <p className="font-body text-muted text-center mt-10">No stories match &ldquo;{q}&rdquo;.</p>}
+      {res.length === 0 && <p className="font-body text-muted text-center mt-10">{emptyCopy}</p>}
     </div>
   );
 }
@@ -2237,7 +2269,11 @@ function MyList({
         <p className="font-body text-muted mt-10 text-center">Nothing saved yet. Tap <span className="text-ink">+ My List</span> on any story.</p>
       ) : (
         <div className="grid grid-cols-2 gap-3">
-          {items.map((s) => <div key={s.id} style={{ height: 180 }}><PosterCard story={s} onOpen={onOpen} w={"100%"} h={180} /></div>)}
+          {items.map((s) => (
+            <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
+              <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+            </div>
+          ))}
         </div>
       )}
     </div>
