@@ -741,6 +741,97 @@ class ThumbnailPromptCharacterRefTests(unittest.TestCase):
         self.assertIn("(i2i)", i2i)
 
 
+class BuildArticlePromptTests(unittest.TestCase):
+    """The article prompt mirrors the short's _clarity_block.
+    See _plans/2026-06-28-content-clarity-bar.md.
+
+    What we lock down: the prompt names the clarity bar, the four anchor
+    concepts (retell-by-end, concrete event, curiosity question, sharp
+    specifics from the source), and still carries the existing "don't
+    moralize / don't invent" rules and the headline + research brief.
+    """
+
+    IDEA = {"headline": "AITA for invoicing my coworkers?"}
+    RESEARCH = {"brief": "Three to six beats of the office gift fund story."}
+
+    def _prompt(self) -> str:
+        return stages._build_article_prompt(self.IDEA, self.RESEARCH)
+
+    def test_clarity_bar_present(self) -> None:
+        self.assertIn("Clarity bar", self._prompt())
+
+    def test_clarity_anchors_are_named(self) -> None:
+        prompt = self._prompt()
+        for anchor in (
+            "retell what happened",          # comprehension bar
+            "concrete events that HAPPENED", # plot anchor
+            "curiosity question",            # question anchor
+            "sharp specifics",               # pepper-without-invention
+        ):
+            self.assertIn(anchor, prompt, f"clarity anchor {anchor!r} missing")
+
+    def test_existing_brand_rules_still_present(self) -> None:
+        # The clarity bar is added ON TOP of the existing rules; the
+        # don't-moralize and don't-invent guards must still appear or the
+        # article voice drifts back to verdict-rendering.
+        prompt = self._prompt()
+        self.assertIn("Do NOT analyze, moralize, or render a verdict", prompt)
+        self.assertIn("do not invent anything beyond the research", prompt)
+
+    def test_article_pov_third_person_rule(self) -> None:
+        # Added 2026-06-28 alongside the shorts _pov_block. The article
+        # narrator is also a third-person storyteller — never the OP.
+        # Same fallback rule for unknown gender: 'they' or a role-noun.
+        prompt = self._prompt()
+        self.assertIn("third-person storyteller", prompt)
+        self.assertIn("NEVER the character", prompt)
+        self.assertIn("translate every 'I/me/my' into third person", prompt)
+        self.assertIn("default to 'they' or a role-noun", prompt)
+        self.assertIn("NEVER guess a gender", prompt)
+
+    def test_article_demands_naming_loss_directly(self) -> None:
+        # Mirror of the shorts cold-open principle: name the THING, not the
+        # artifact of it. Without this the article's opening sentence drifts
+        # to symptoms ("the envelope was empty") instead of the loss
+        # ("$800 in cash, gone").
+        prompt = self._prompt()
+        self.assertIn("NAME THE THING DIRECTLY, NOT THE ARTIFACT OF IT", prompt)
+        self.assertIn("symptom", prompt)
+        self.assertIn("felt thing", prompt)
+
+    def test_clarity_bar_demands_open_on_stranger_stakes(self) -> None:
+        # Mirror of the cold-open tightening in shorts_narration. The
+        # article's first line must land on a stakes event a stranger
+        # can feel — loss / discovery / confrontation / transgression /
+        # rupture — not a routine action. Same fix as the short on
+        # 2026-06-28 after the "I sent them an invoice" weak hook.
+        prompt = self._prompt()
+        for token in (
+            "stranger",
+            "highest-stakes",
+            "WAIT, WHAT",
+            "loss",
+            "discovery",
+            "transgression",
+        ):
+            self.assertIn(token, prompt, f"article stakes anchor {token!r} missing")
+
+    def test_hook_carve_out_preserved(self) -> None:
+        # The article keeps the existing hook-first opener. After the
+        # 2026-06-28 tightening the carve-out is the explicit "open on
+        # the highest-stakes moment" directive — that line IS the hook
+        # instruction, replacing the looser "open on a vivid moment
+        # (keep the hook)" wording.
+        prompt = self._prompt()
+        self.assertIn("open on the highest-stakes moment", prompt)
+        self.assertIn("opening line IS the catch", prompt)
+
+    def test_headline_and_research_carry_through(self) -> None:
+        prompt = self._prompt()
+        self.assertIn(self.IDEA["headline"], prompt)
+        self.assertIn(self.RESEARCH["brief"], prompt)
+
+
 class ClassifyCategoryTests(unittest.TestCase):
     """LLM category classifier (_plans/2026-06-21-category-classifier-and-pills.md).
     Stubs `pipeline.llm.chat` so we exercise the closed-enum guard, the

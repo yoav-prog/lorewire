@@ -228,6 +228,43 @@ def research(idea: dict, post: dict, dry_run: bool) -> dict:
     return {"rules": RESEARCH_RULES, "brief": llm.chat(prompt, 1500), "source": post.get("url", "")}
 
 
+def _build_article_prompt(idea: dict, research: dict) -> str:
+    """Compose the article prompt. Extracted so the prompt content is
+    unit-testable without monkeypatching llm.chat. Kept in sync with the
+    short's _clarity_block in shorts_narration — change both together.
+    See _plans/2026-06-28-content-clarity-bar.md."""
+    return (
+        "You write for LoreWire, where true internet stories are retold as short, "
+        "vivid narratives. Retell the story below in about 350 to 450 words: open "
+        "with a hook, move scene by scene, keep it punchy and entertaining, and let "
+        "the facts carry it. Do NOT analyze, moralize, or render a verdict ('it's "
+        "not hard to see why...', 'the lesson here'), and do not invent anything "
+        "beyond the research. Return only the article text.\n\n"
+        "Clarity bar: open on the highest-stakes moment a STRANGER with zero "
+        "context can feel — a loss, a discovery, a confrontation, a transgression "
+        "caught in the act, a rupture. NOT a routine action. NAME THE THING "
+        "DIRECTLY, NOT THE ARTIFACT OF IT — the specific loss, the specific "
+        "transgression, the specific betrayal. An empty envelope is the symptom; "
+        "missing money is what a stranger feels. Go for the felt thing. The opening "
+        "line IS the catch of the story — if a stranger read only it, they must "
+        "think 'WAIT, WHAT?' — not 'huh, why?' or 'OK, and?'. By the end, an "
+        "everyday reader with no background on the story should be able to retell "
+        "what happened. Always anchor to concrete events that HAPPENED — never "
+        "abstract reflection or 'people are talking about'. Always plant a real "
+        "curiosity question early and pay it off in the body. If the source is "
+        "dry, lift it with sharp specifics: a vivid sensory detail, a real quote, "
+        "a small human moment from the source. Never invent drama beyond the "
+        "research.\n\n"
+        "POV: narrator is a third-person storyteller, NEVER the character. Source "
+        "posts are mostly first person ('I invoiced my coworkers'); translate every "
+        "'I/me/my' into third person — 'she', 'he', 'they', or a role-noun ('the "
+        "poster', 'the coworker', 'the wife'). When gender is not established, "
+        "default to 'they' or a role-noun. NEVER guess a gender.\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Research:\n{research['brief']}"
+    )
+
+
 def write_article(idea: dict, research: dict, dry_run: bool) -> str:
     if dry_run:
         return (
@@ -238,17 +275,7 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
         )
     from pipeline import llm
 
-    prompt = (
-        "You write for LoreWire, where true internet stories are retold as short, "
-        "vivid narratives. Retell the story below in about 350 to 450 words: open "
-        "with a hook, move scene by scene, keep it punchy and entertaining, and let "
-        "the facts carry it. Do NOT analyze, moralize, or render a verdict ('it's "
-        "not hard to see why...', 'the lesson here'), and do not invent anything "
-        "beyond the research. Return only the article text.\n\n"
-        f"Headline: {idea['headline']}\n\n"
-        f"Research:\n{research['brief']}"
-    )
-    return _clean_typography(llm.chat(prompt, 1200))
+    return _clean_typography(llm.chat(_build_article_prompt(idea, research), 1200))
 
 
 # --- image prompts ------------------------------------------------------------

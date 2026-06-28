@@ -158,9 +158,30 @@ def _structure_block(target_seconds: int) -> str:
     return (
         "STRUCTURE — five beats, every short, in this order:\n"
         f"  1. COLD OPEN ({COLD_OPEN_MIN_WORDS}-{COLD_OPEN_MAX_WORDS} words). Drop the viewer "
-        "INSIDE the climax. Action or sensory detail only. No setup, no judgment, no "
-        "'imagine if', no question. The line must work even from a viewer who has zero "
-        "context — they should think 'I need to know how we got here', NOT 'I don't get it'.\n"
+        "INSIDE the highest-stakes moment a STRANGER with zero context can feel — a loss, "
+        "a discovery, a confrontation, a transgression caught in the act, a rupture, a "
+        "betrayal. NOT just 'an event that happened.' The hook IS the catch of the story — "
+        "the thing that makes someone outside it lean in. If a stranger heard only this one "
+        "line, they must think 'WAIT, WHAT?' — not 'huh, why?' and not 'OK, and?'.\n"
+        "     NAME THE THING DIRECTLY, NOT THE ARTIFACT OF IT. The hook must name the "
+        "WORST/MOST CHARGED thing about the story directly — the specific loss, the specific "
+        "transgression, the specific betrayal. Not a symptom, not a side effect, not what "
+        "you SAW. What you FELT. An empty envelope is what you see; missing money is what "
+        "you feel. The hook goes for the felt thing — no decoding required.\n"
+        "     CONCRETE TEST — same source, weak to strong:\n"
+        "       Source: a coworker collected $800 in cash for a boss's retirement gift, the "
+        "envelope vanished over the weekend, they then invoiced colleagues for their share.\n"
+        "       WEAK (routine action, stakes invisible): 'She emailed invoices to the floor.' "
+        "Office life — a stranger has no reason to care.\n"
+        "       STILL WEAK (artifact, not the loss itself): 'The envelope was empty Monday "
+        "morning.' The empty envelope is the SYMPTOM. A stranger has to mentally connect "
+        "'empty envelope' to '$800 is gone' — that mental step is one step too many.\n"
+        "       STRONG (names the loss directly): 'Eight hundred dollars in cash. Gone.' "
+        "The amount, the medium, the fact. The punch is on the line, no decoding required.\n"
+        "     Action or sensory detail only. No setup, no judgment, no 'imagine if', no "
+        "question. The line must work even from a viewer who has zero context — they should "
+        "think 'I need to know how we got here', NOT 'I don't get it' AND NOT 'I get it "
+        "but I don't care'.\n"
         f"  2. REWIND CUE ({REWIND_MIN_WORDS}-{REWIND_MAX_WORDS} words). One short spoken "
         "pivot that signals time-jump. Examples: 'This started six days earlier.' "
         "'Here's how she got there.' 'Twelve hours before that text.' Concrete time anchor "
@@ -180,6 +201,56 @@ def _structure_block(target_seconds: int) -> str:
         f"(~{WORDS_PER_SECOND} words / second × {target_seconds}s). "
         f"HARD CAP at {round(target_words * (1 + LENGTH_OVERRUN_FRACTION))} words "
         "(+20% ceiling). Going over is rejected.\n"
+    )
+
+
+def _pov_block() -> str:
+    """How the narrator speaks. Lorewire shorts are TOLD by an outside
+    storyteller — the narrator is never the protagonist. Source posts are
+    mostly written in first person; the script must translate that into
+    third person. Added 2026-06-28 after a render's narrator spoke as 'I'."""
+    return (
+        "POV — narrator is a third-person storyteller, never the character:\n"
+        "  - The narrator TELLS the story. The narrator is NEVER the "
+        "protagonist. Even when the source post is written in first person "
+        "('I did X, my coworker did Y'), the script translates every "
+        "'I/me/my' into third person.\n"
+        "  - Use 'she', 'he', or 'they' depending on what the source "
+        "establishes about the person. When gender is not established, "
+        "default to 'they' or a role-noun ('the coworker', 'the poster', "
+        "'the office admin', 'the wife'). NEVER guess a gender.\n"
+        "  - The CTA / poll handoff (beat 5) is the ONLY place the narrator "
+        "may speak to the viewer directly ('Would you do the same?', "
+        "'Vote on the handoff'). The body of the script is observational — "
+        "third-person past tense, no first-person 'I'.\n"
+    )
+
+
+def _clarity_block() -> str:
+    """Bar the script as a whole must clear, on top of the hook-first
+    structure. See _plans/2026-06-28-content-clarity-bar.md. The cold open
+    still opens on the climax (owned by _structure_block); this block makes
+    the LLM responsible for the viewer being able to retell the plot by the
+    time the return beat lands. Kept in sync with the article prompt in
+    stages._build_article_prompt — change both together."""
+    return (
+        "CLARITY — the script as a whole, not beat by beat:\n"
+        "  - The COLD OPEN still opens on the climax (see STRUCTURE). Clarity "
+        "does NOT mean leading with context. It means that by the end of the "
+        "RETURN beat, an everyday viewer with no background on the story — "
+        "not online in this niche, not following the source community — could "
+        "retell what happened in plain words. The hook earns the climax; the "
+        "build delivers the plot.\n"
+        "  - Always anchor the script to a concrete event that HAPPENED — a "
+        "specific action, moment, or reveal. Never abstract reflection, never "
+        "'people are talking about'. The viewer must finish knowing exactly "
+        "what occurred.\n"
+        "  - Always plant a real curiosity question the viewer needs answered. "
+        "Cold open raises it; build pays it off; CTA hands it to the poll. "
+        "If a beat doesn't deepen the question or move toward the answer, cut it.\n"
+        "  - If the source is dry or procedural, lift it with sharp specifics: "
+        "a vivid sensory detail, a real quote, a small human moment FROM the "
+        "source. Defendable against the source — never invented drama.\n"
     )
 
 
@@ -303,6 +374,8 @@ def build_extraction_prompt(
         "You never manufacture drama — the source stories already have it; your job is "
         "to surface it sharply.",
         _structure_block(target_seconds),
+        _pov_block(),
+        _clarity_block(),
         _brand_safety_block(),
         _poll_block(),
         _tone_block(),
