@@ -1805,7 +1805,7 @@ function HomePage({
             {continueIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} w={300} h={170} landscape />;
+              return <PosterCard key={id} story={s} onOpen={onOpen} />;
             })}
           </Rail>
         )}
