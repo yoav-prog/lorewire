@@ -35,6 +35,12 @@ export function SubmissionModerationActions({
   const [category, setCategory] = useState<string>(() =>
     REJECT_OPTIONS.some(([k]) => k === suggested) ? (suggested as string) : "borderline",
   );
+  // The "Other" (borderline) path opens a free-text note the author sees
+  // verbatim. Empty = the generic "Other" message. Only sent when Other is
+  // picked; the server trims + caps the length (CUSTOM_REASON_MAX) and is
+  // authoritative, so the maxLength below is just a UI hint.
+  const [customNote, setCustomNote] = useState("");
+  const isOther = category === "borderline";
 
   function run(fn: () => Promise<void>): void {
     setErr(null);
@@ -81,13 +87,33 @@ export function SubmissionModerationActions({
         </select>
         <button
           type="button"
-          onClick={() => run(() => rejectSubmissionAction(submissionId, category))}
+          onClick={() =>
+            run(() =>
+              rejectSubmissionAction(
+                submissionId,
+                category,
+                isOther ? customNote : undefined,
+              ),
+            )
+          }
           disabled={running}
           className="rounded-md border border-cat-entitled/40 bg-cat-entitled/10 px-3 py-1.5 text-[12px] font-semibold text-cat-entitled transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
         >
           Reject
         </button>
       </div>
+      {isOther && (
+        <textarea
+          value={customNote}
+          onChange={(e) => setCustomNote(e.target.value)}
+          disabled={running}
+          rows={2}
+          maxLength={500}
+          aria-label="Custom rejection note shown to the submitter"
+          placeholder="Optional note the submitter will see. Leave blank for the generic message."
+          className="w-full max-w-md rounded-md border border-line bg-bg px-2 py-1.5 text-[12px] text-ink focus:border-ink focus:outline-none disabled:opacity-50"
+        />
+      )}
       {err && (
         <p className="text-right font-mono text-[10px] text-cat-entitled">{err}</p>
       )}

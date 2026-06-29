@@ -11,7 +11,11 @@ import { requireCapability } from "@/lib/dal";
 import { setSetting } from "@/lib/repo";
 import { adminUnpublishSubmission, setSubmissionStatus } from "@/lib/submissions";
 import { approveAndPromote } from "@/lib/submission-promote";
-import { categoryToReasonKey } from "@/lib/submission-reasons";
+import {
+  CUSTOM_REASON_CATEGORY,
+  CUSTOM_REASON_MAX,
+  categoryToReasonKey,
+} from "@/lib/submission-reasons";
 import { resolveReportsForStory } from "@/lib/submission-reports";
 
 /** Approve and make the video: promote to a story + poll and enqueue the short
@@ -31,20 +35,26 @@ export async function approvePollOnlyAction(id: string): Promise<void> {
   revalidatePath("/admin/submissions");
 }
 
-/** Reject with a reason. The category is normalized to a reason-taxonomy key so
- *  the author sees the matching user-safe message and can fix and resubmit. */
+/** Reject with a reason. With a `customMessage` (the free-text "Other" path) the
+ *  reviewer's own note is stored under the `custom` sentinel and shown to the
+ *  author verbatim; otherwise the category is normalized to a taxonomy key so the
+ *  author sees the matching user-safe message. Either way it's resubmittable. */
 export async function rejectSubmissionAction(
   id: string,
   category: string,
+  customMessage?: string,
 ): Promise<void> {
   const session = await requireCapability("content.manage");
+  const custom = (customMessage ?? "").trim().slice(0, CUSTOM_REASON_MAX);
   await setSubmissionStatus(
     id,
     "rejected",
-    {
-      category: categoryToReasonKey(category),
-      reason: "Rejected by a reviewer.",
-    },
+    custom
+      ? { category: CUSTOM_REASON_CATEGORY, reason: custom }
+      : {
+          category: categoryToReasonKey(category),
+          reason: "Rejected by a reviewer.",
+        },
     session.userId,
   );
   revalidatePath("/admin/submissions");

@@ -213,3 +213,25 @@ export function resolveReason(
   const text = lang === "he" ? entry.he : entry.en;
   return { ...text, key, resubmittable: entry.resubmittable };
 }
+
+// The "Other" path lets a reviewer write the rejection note themselves when the
+// fixed taxonomy doesn't fit. Such a reject carries the sentinel category
+// `custom` and stores the note in reject_reason; unlike the AI/audit reason, this
+// note is authored to be shown, so the dashboard renders it verbatim. Cap it to a
+// sentence or two so it stays in line with the taxonomy messages.
+export const CUSTOM_REASON_CATEGORY = "custom";
+export const CUSTOM_REASON_MAX = 500;
+
+/** Frame a reviewer's free-text rejection note the same friendly way as the
+ *  taxonomy reasons. The note itself is shown verbatim; only the title and the
+ *  call to action are canned. */
+export function customReason(message: string, lang: string): ReasonText {
+  const he = lang === "he";
+  return {
+    title: he ? "הערה מהבודק/ת שלנו" : "A note from our reviewer",
+    message,
+    fix: he
+      ? "בצעו את השינוי הזה ושלחו שוב."
+      : "Make that change and send it back in.",
+  };
+}

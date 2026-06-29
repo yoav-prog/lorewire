@@ -16,7 +16,11 @@ import {
   reconcilePublishedSubmissions,
   type SubmissionRow,
 } from "@/lib/submissions";
-import { resolveReason } from "@/lib/submission-reasons";
+import {
+  CUSTOM_REASON_CATEGORY,
+  customReason,
+  resolveReason,
+} from "@/lib/submission-reasons";
 import { readUserSession } from "@/lib/user-session";
 import { SubmissionDeleteButton } from "./SubmissionDeleteButton";
 
@@ -71,9 +75,12 @@ function SubmissionCard({
   const state = stateOf(s.status);
   const dir = s.lang === "he" ? "rtl" : "ltr";
   const editable = s.status === "draft" || s.status === "rejected";
-  const reason = s.reject_category
-    ? resolveReason(s.reject_category, s.lang ?? "en")
-    : null;
+  const reason =
+    s.reject_category === CUSTOM_REASON_CATEGORY
+      ? customReason(s.reject_reason ?? "", s.lang ?? "en")
+      : s.reject_category
+        ? resolveReason(s.reject_category, s.lang ?? "en")
+        : null;
 
   return (
     <li className="rounded-md border border-line bg-surface px-4 py-3">
