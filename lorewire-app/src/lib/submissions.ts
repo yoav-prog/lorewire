@@ -13,7 +13,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { all, one, run } from "@/lib/db";
-import { getSetting } from "@/lib/repo";
+import { getSetting, setStatus } from "@/lib/repo";
 import { getUserById } from "@/lib/users";
 
 // Closed enum carried in code (the DB column is plain TEXT). Lifecycle:
@@ -207,6 +207,29 @@ export async function reconcilePublishedSubmissions(
         AND story_id IN (SELECT id FROM stories WHERE status = 'published')`,
     [new Date().toISOString(), userId],
   );
+}
+
+/** Self-takedown: the submitter removes their own submission. If it reached a
+ *  story, pull it off the public site (archive the story + disable its poll) and
+ *  mark the submission 'erased'. Verifies ownership; idempotent. The vote
+ *  aggregate stays (anonymised counts), but the story leaves rails + the reader,
+ *  matching how an archived story behaves. */
+export async function eraseSubmission(
+  submissionId: string,
+  userId: string,
+): Promise<boolean> {
+  const s = await getSubmissionById(submissionId);
+  if (!s || s.user_id !== userId) return false;
+  if (s.status === "erased") return true;
+  if (s.story_id) {
+    await setStatus(s.story_id, "archived");
+    await run(
+      `UPDATE polls SET enabled = 0, updated_at = ? WHERE story_id = ?`,
+      [new Date().toISOString(), s.story_id],
+    );
+  }
+  await setSubmissionStatus(submissionId, "erased", {}, "author");
+  return true;
 }
 
 // --- per-user cap --------------------------------------------------------

@@ -9,9 +9,11 @@
 
 import { requireCapability } from "@/lib/dal";
 import Breadcrumb from "@/app/admin/Breadcrumb";
+import { getSetting } from "@/lib/repo";
 import { listSubmissionQueue, type SubmissionRow } from "@/lib/submissions";
 import type { SubmissionJudgeOutput } from "@/lib/submission-moderation";
 import { SubmissionModerationActions } from "./SubmissionModerationActions";
+import { SubmissionsKillSwitch } from "./SubmissionsKillSwitch";
 
 export const dynamic = "force-dynamic";
 
@@ -45,6 +47,7 @@ export default async function SubmissionsModerationPage() {
   const rows = await listSubmissionQueue(200);
   const quarantined = rows.filter((r) => r.status === "quarantined");
   const pending = rows.filter((r) => r.status === "pending_review");
+  const submissionsEnabled = (await getSetting("submissions.enabled")) !== "0";
 
   return (
     <div className="space-y-5">
@@ -61,6 +64,8 @@ export default async function SubmissionsModerationPage() {
           send it back with a reason they can fix.
         </p>
       </header>
+
+      <SubmissionsKillSwitch enabled={submissionsEnabled} />
 
       {quarantined.length > 0 && (
         <section className="space-y-3">

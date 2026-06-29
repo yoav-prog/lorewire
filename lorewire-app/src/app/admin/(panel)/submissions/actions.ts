@@ -8,6 +8,7 @@
 
 import { revalidatePath } from "next/cache";
 import { requireCapability } from "@/lib/dal";
+import { setSetting } from "@/lib/repo";
 import { setSubmissionStatus } from "@/lib/submissions";
 import { approveAndPromote } from "@/lib/submission-promote";
 import { categoryToReasonKey } from "@/lib/submission-reasons";
@@ -45,5 +46,16 @@ export async function rejectSubmissionAction(
     },
     session.userId,
   );
+  revalidatePath("/admin/submissions");
+}
+
+/** Site-wide kill switch for new submissions. Off stops new submissions from
+ *  entering the queue (and any render spend); existing submissions and published
+ *  stories are unaffected. */
+export async function setSubmissionsEnabledAction(
+  enabled: boolean,
+): Promise<void> {
+  await requireCapability("content.manage");
+  await setSetting("submissions.enabled", enabled ? "1" : "0");
   revalidatePath("/admin/submissions");
 }

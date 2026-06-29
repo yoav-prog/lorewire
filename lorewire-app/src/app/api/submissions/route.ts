@@ -12,6 +12,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { readActiveUserSession } from "@/lib/member-session";
+import { getSetting } from "@/lib/repo";
 import { screenSubmission } from "@/lib/submission-moderation";
 import {
   createSubmission,
@@ -59,6 +60,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const session = await readActiveUserSession();
   if (!session) {
     return NextResponse.json({ error: "not signed in" }, { status: 401 });
+  }
+
+  // Kill switch: when off, no new submissions enter the queue (and no render
+  // spend). Existing submissions and published stories are unaffected.
+  if ((await getSetting("submissions.enabled")) === "0") {
+    return NextResponse.json(
+      { error: "Submissions are paused right now. Check back soon." },
+      { status: 403 },
+    );
   }
 
   let raw: SubmissionBody;
