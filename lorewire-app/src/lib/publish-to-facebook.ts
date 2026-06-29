@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
-import { ensureShortPoster } from "@/lib/short-poster";
+import { ensureOgPoster, ensureShortPoster } from "@/lib/short-poster";
 import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
 
 // --- Types -----------------------------------------------------------------
@@ -603,7 +603,14 @@ export async function publishShortToFacebook(
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
   let thumbnailUrl: string | null = null;
   if (uploadCustomThumbnail) {
-    const poster = await ensureShortPoster(args.storyId);
+    // Phase 3: kick off the landscape OG poster in parallel with the
+    // portrait. Both share the same LLM call (cached after first); the
+    // OG result is a side effect (stamps short_config) and doesn't
+    // affect this publish. Both are best-effort, never throw.
+    const [poster] = await Promise.all([
+      ensureShortPoster(args.storyId),
+      ensureOgPoster(args.storyId),
+    ]);
     thumbnailUrl =
       poster?.url ?? (await resolveShortThumbnailUrl(args.storyId));
   }
@@ -694,7 +701,12 @@ export async function attemptFacebookPublishForRow(
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
   let thumbnailUrl: string | null = null;
   if (uploadCustomThumbnail) {
-    const poster = await ensureShortPoster(row.story_id);
+    // Phase 3: parallel landscape OG poster. Same pattern as the
+    // fresh-publish path above.
+    const [poster] = await Promise.all([
+      ensureShortPoster(row.story_id),
+      ensureOgPoster(row.story_id),
+    ]);
     thumbnailUrl =
       poster?.url ?? (await resolveShortThumbnailUrl(row.story_id));
   }

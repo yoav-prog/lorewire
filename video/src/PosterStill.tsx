@@ -266,3 +266,185 @@ export const PosterStill: React.FC<PosterStillProps> = ({
     </AbsoluteFill>
   );
 };
+
+// ─── Phase 3 landscape variant ────────────────────────────────────────────────
+//
+// _plans/2026-06-29-phase-3-og-poster-cards.md.
+//
+// Side-by-side composition for the 1200×630 landscape OG-card surface
+// (Twitter / X, Facebook, LinkedIn, Slack, Discord, iMessage, WhatsApp).
+// Scene-1 on the left ~55%, dark band on the right ~45% carrying the
+// hook text + brand pill. Same visual register as the portrait — band
+// + brand pill + condensed-caps Bebas Neue — just rotated.
+//
+// CRITICAL: this composition does NOT share `pickFontSize` /
+// `charsPerLineForSize` with the portrait. Phase 2's heuristics are
+// hardcoded for the portrait's 940 px text width; landscape's text
+// region is 540 px wide. The Phase 3 council pass flagged that
+// reusing them silently overflows the band. Forked into
+// `pickFontSizeLandscape` + `charsPerLineForSizeLandscape` with their
+// own empirical tiers, validated against the 10-payload PIL preview
+// per the local-first protocol.
+
+export const LANDSCAPE_WIDTH = 1200;
+export const LANDSCAPE_HEIGHT = 630;
+
+// Geometry. Left 55% is scene-1, right 45% is the dark band. The 8 px
+// red accent stripe sits on the band's LEFT edge (where it meets the
+// scene) — same brand signal as portrait, rotated.
+const LS_SCENE_WIDTH = Math.round(LANDSCAPE_WIDTH * 0.55); // 660
+const LS_BAND_WIDTH = LANDSCAPE_WIDTH - LS_SCENE_WIDTH;    // 540
+const LS_BAND_LEFT = LS_SCENE_WIDTH;
+const LS_ACCENT_STRIPE_W = 8;
+const LS_HOOK_PADDING_X = 32; // narrower band → tighter padding
+const LS_HOOK_MAX_LINES = 4;  // taller band → one more line fits
+
+// Empirical landscape size tiers. Tuned for ~540 px text region
+// after padding. Will be re-validated against 10 real payloads during
+// the local-first PIL preview pass; tweak these numbers BEFORE
+// shipping if the preview shows tight fits.
+function pickFontSizeLandscape(text: string): number {
+  const len = text.length;
+  if (len <= 12) return 96;
+  if (len <= 24) return 80;
+  if (len <= 40) return 66;
+  if (len <= 60) return 54;
+  return 44;
+}
+
+function charsPerLineForSizeLandscape(fontSize: number): number {
+  // 540 px band width, 32 px each side padding leaves ~476 px for
+  // glyphs. Average condensed-caps glyph advance ~ fontSize * 0.42.
+  return Math.max(6, Math.floor(476 / (fontSize * 0.42)));
+}
+
+export interface PosterStillLandscapeProps {
+  scene_1_url: string;
+  text: string;
+  brand_text?: string;
+}
+
+export const PosterStillLandscape: React.FC<PosterStillLandscapeProps> = ({
+  scene_1_url,
+  text,
+  brand_text,
+}) => {
+  // Normalize uppercase + trim once so the auto-sizer sees the exact
+  // glyph string that will render.
+  const hookText = (text || "").trim().toUpperCase();
+  const brandText = (brand_text || BRAND_TEXT).toUpperCase();
+  const fontSize = pickFontSizeLandscape(hookText);
+  const charsPerLine = charsPerLineForSizeLandscape(fontSize);
+  const lines = wrapLines(hookText, charsPerLine).slice(0, LS_HOOK_MAX_LINES);
+  // Same ellipsis-on-overflow as portrait so silent truncation can't
+  // hide behind the band edge.
+  if (
+    lines.length === LS_HOOK_MAX_LINES &&
+    wrapLines(hookText, charsPerLine).length > LS_HOOK_MAX_LINES
+  ) {
+    const last = lines[LS_HOOK_MAX_LINES - 1].replace(/\s+\S*$/, "");
+    lines[LS_HOOK_MAX_LINES - 1] = last.length > 0 ? `${last}…` : "…";
+  }
+
+  return (
+    <AbsoluteFill style={{ background: COLOR_BAND_BG }}>
+      {/* Left region: scene-1 doodle, anchored center so character
+          faces stay visible after a horizontal landscape crop. */}
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: LS_SCENE_WIDTH,
+          height: LANDSCAPE_HEIGHT,
+          overflow: "hidden",
+        }}
+      >
+        <Img
+          src={scene_1_url}
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            objectPosition: "center 25%",
+          }}
+        />
+      </div>
+
+      {/* Red accent stripe along the band's LEFT edge (rotation of
+          the portrait's top-edge stripe). */}
+      <div
+        style={{
+          position: "absolute",
+          left: LS_BAND_LEFT,
+          top: 0,
+          width: LS_ACCENT_STRIPE_W,
+          height: LANDSCAPE_HEIGHT,
+          background: COLOR_ACCENT,
+        }}
+      />
+
+      {/* Solid title band. */}
+      <div
+        style={{
+          position: "absolute",
+          left: LS_BAND_LEFT + LS_ACCENT_STRIPE_W,
+          top: 0,
+          width: LS_BAND_WIDTH - LS_ACCENT_STRIPE_W,
+          height: LANDSCAPE_HEIGHT,
+          background: COLOR_BAND_BG,
+        }}
+      />
+
+      {/* Hook text — centered vertically + horizontally in the band,
+          reserving the bottom-right for the brand pill. */}
+      <div
+        style={{
+          position: "absolute",
+          left: LS_BAND_LEFT + LS_ACCENT_STRIPE_W + LS_HOOK_PADDING_X,
+          top: 0,
+          width:
+            LS_BAND_WIDTH - LS_ACCENT_STRIPE_W - LS_HOOK_PADDING_X * 2,
+          height: LANDSCAPE_HEIGHT - 80 /* pill row reserve */,
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "flex-start",
+          textAlign: "left",
+          fontFamily: HOOK_FONT_FAMILY,
+          fontSize,
+          lineHeight: HOOK_LINE_HEIGHT,
+          color: COLOR_TEXT,
+          letterSpacing: 1.0,
+        }}
+      >
+        {lines.map((line, i) => (
+          <div key={i} style={{ width: "100%" }}>
+            {line}
+          </div>
+        ))}
+      </div>
+
+      {/* Brand pill bottom-right of the BAND (not the canvas) — same
+          visual signature as portrait, scaled to the band's footprint. */}
+      <div
+        style={{
+          position: "absolute",
+          right: BRAND_MARGIN - 8 /* tighter, narrower band */,
+          bottom: BRAND_MARGIN - 8,
+          background: COLOR_PILL_BG,
+          color: COLOR_PILL_TEXT,
+          fontFamily: BRAND_FONT_FAMILY,
+          fontWeight: 700,
+          fontSize: BRAND_FONT_SIZE - 4,
+          letterSpacing: 1.3,
+          padding: `${BRAND_PILL_PADY - 2}px ${BRAND_PILL_PADX - 4}px`,
+          borderRadius: BRAND_PILL_RADIUS - 4,
+          lineHeight: 1,
+        }}
+      >
+        {brandText}
+      </div>
+    </AbsoluteFill>
+  );
+};

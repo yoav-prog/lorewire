@@ -144,6 +144,39 @@ export interface ShortConfig {
    *  future editor surface. Empty / unset → the helper lazy-generates +
    *  persists back here on the next publish. */
   poster_text?: string;
+  /** Resolved URL of the LAST successful landscape (1200×630) poster
+   *  render, content-hash-keyed AND query-string-versioned
+   *  (`...png?v={hash}`). Stamped by `ensureOgPoster` after a successful
+   *  Cloud Run round-trip. Empty / missing means "render on next publish
+   *  or via one-shot backfill script". Read by `generateMetadata` on
+   *  `/v/[slug]/page.tsx` as the canonical `og:image` + `twitter:image`
+   *  for external link unfurls (Twitter / X, Facebook, LinkedIn, Slack,
+   *  Discord, iMessage, WhatsApp). Per
+   *  _plans/2026-06-29-phase-3-og-poster-cards.md.
+   *
+   *  Query-string versioning is REQUIRED, not cosmetic: Twitter's Card
+   *  Validator was deprecated in 2025; query-string change is the only
+   *  working cache-busting mechanism for X. Other platforms (FB, LinkedIn,
+   *  Slack, Discord, iMessage, WhatsApp) also treat different query
+   *  strings as different resources. */
+  og_poster_landscape_url?: string;
+  /** Per-story kill switch for the Phase 3 OG poster path. When true,
+   *  `generateMetadata` ignores `og_poster_landscape_url` and falls back
+   *  to `hero_image` → `seo.defaultOgImage`. Lets admin remove a
+   *  specific embarrassing poster (typo, mis-cropped scene, wrong tone)
+   *  WITHOUT bumping `POSTER_VERSION` globally — which would invalidate
+   *  every cached poster across the entire catalog (a DoS trigger
+   *  flagged by the council Contrarian pass). */
+  og_poster_disabled?: boolean;
+  /** ISO-8601 timestamp of the LAST `ensureOgPoster` attempt for this
+   *  story. Stamped by the helper EVERY attempt (success or guarded
+   *  failure). The one-shot backfill script reads this to skip
+   *  guard-rejected stories (profanity, glyph, missing scene_1) that
+   *  would otherwise re-attempt forever. Re-attempt window: 7 days
+   *  (a guard-rejected story with a fresh edit gets retried on the
+   *  next cycle, not stuck forever). Per the Contrarian's Failure
+   *  Mode #1 in the council pass. */
+  og_poster_attempted_at?: string;
   _locks?: ShortLockMap;
   _edit_session?: ShortEditSession;
   /** Resolved intro/outro segment ids the LAST successful render spliced.
@@ -187,6 +220,11 @@ function readOptString(obj: Record<string, unknown>, key: string): string | unde
 function readOptNumber(obj: Record<string, unknown>, key: string): number | undefined {
   const v = obj[key];
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+function readOptBool(obj: Record<string, unknown>, key: string): boolean | undefined {
+  const v = obj[key];
+  return typeof v === "boolean" ? v : undefined;
 }
 
 function parseFrame(raw: unknown, idx: number): ShortFrame | string {
@@ -361,6 +399,23 @@ export function parseShortConfig(raw: unknown): ShortParseResult {
   // social publish". Per _plans/2026-06-28-phase-2-social-poster-render.md.
   const posterText = readOptString(raw, "poster_text");
   if (posterText !== undefined) config.poster_text = posterText;
+
+  // Phase 3 OG-poster state. Three independent optional fields so the
+  // metadata path can read a stamped URL O(1) without re-deriving the
+  // hash on every OG bot fetch. Per
+  // _plans/2026-06-29-phase-3-og-poster-cards.md.
+  const ogPosterLandscapeUrl = readOptString(raw, "og_poster_landscape_url");
+  if (ogPosterLandscapeUrl !== undefined) {
+    config.og_poster_landscape_url = ogPosterLandscapeUrl;
+  }
+  const ogPosterDisabled = readOptBool(raw, "og_poster_disabled");
+  if (ogPosterDisabled !== undefined) {
+    config.og_poster_disabled = ogPosterDisabled;
+  }
+  const ogPosterAttemptedAt = readOptString(raw, "og_poster_attempted_at");
+  if (ogPosterAttemptedAt !== undefined) {
+    config.og_poster_attempted_at = ogPosterAttemptedAt;
+  }
 
   return { ok: true, config };
 }

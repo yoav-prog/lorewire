@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Lorewire poster — outsider test</title>
+<style>
+  /* Twitter-feed approximation. NOT a Twitter trademark/clone — just enough
+     visual context that outsiders see the Lorewire posters IN A FEED, not
+     in isolation. */
+  :root {
+    --bg: #000;
+    --card-bg: #16181c;
+    --border: #2f3336;
+    --text: #e7e9ea;
+    --text-dim: #71767b;
+    --link: #1d9bf0;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .feed {
+    max-width: 600px;
+    margin: 0 auto;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+  .tweet {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 48px 1fr;
+    gap: 12px;
+  }
+  .avatar {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #5b6cf5, #8b5cf6);
+    flex-shrink: 0;
+  }
+  .tweet header {
+    display: flex; align-items: baseline; gap: 4px;
+    font-size: 15px;
+  }
+  .tweet header .name { font-weight: 700; color: var(--text); }
+  .tweet header .handle, .tweet header .dot, .tweet header .when {
+    color: var(--text-dim); font-weight: 400;
+  }
+  .tweet .body { font-size: 15px; line-height: 20px; margin-top: 2px; white-space: pre-wrap; }
+  .tweet .card {
+    margin-top: 12px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    background: var(--card-bg);
+  }
+  .tweet .card .img-wrap {
+    width: 100%;
+    aspect-ratio: 1.91 / 1; /* Twitter summary_large_image — landscape, center-cropped */
+    background: #000 center/cover no-repeat;
+    border-bottom: 1px solid var(--border);
+  }
+  .tweet .card .meta {
+    padding: 12px 14px;
+    font-size: 14px;
+  }
+  .tweet .card .meta .host { color: var(--text-dim); }
+  .tweet .card .meta .title { color: var(--text); margin-top: 4px; }
+  .tweet footer {
+    display: flex; gap: 64px;
+    margin-top: 12px;
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+
+  /* Section header — clear separation between Twitter context (landscape
+     crop) and Discord/iMessage context (full portrait). */
+  .section-head {
+    padding: 24px 16px 12px;
+    border-bottom: 1px solid var(--border);
+    background: #0a0a0a;
+  }
+  .section-head h2 { margin: 0 0 4px; font-size: 18px; }
+  .section-head p { margin: 0; color: var(--text-dim); font-size: 13px; }
+
+  /* Portrait full-bleed card (Discord / iMessage / WhatsApp). */
+  .portrait-card {
+    margin: 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--card-bg);
+  }
+  .portrait-card .img-wrap {
+    width: 100%;
+    aspect-ratio: 9 / 16; /* Discord renders the full portrait */
+    background: #000 center/cover no-repeat;
+  }
+  .portrait-card .meta { padding: 10px 12px; font-size: 13px; color: var(--text-dim); }
+
+  /* Outsider-instruction overlay at the top. */
+  .instructions {
+    padding: 16px 20px;
+    background: #0d1f2d;
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    border-bottom: 1px solid var(--border);
+  }
+  .instructions h1 { margin: 0 0 8px; font-size: 16px; }
+  .instructions p { margin: 0 0 6px; }
+  .instructions .ask { font-weight: 700; color: #fff; }
+  .placeholder {
+    background: repeating-linear-gradient(45deg, #1a1a1a, #1a1a1a 12px, #222 12px, #222 24px);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<main class="feed">
+
+  <div class="instructions">
+    <h1>What is this?</h1>
+    <p>You're looking at three story links unfurling in two different chat surfaces. The images are from a new content brand.</p>
+    <p class="ask">Three questions — please answer honestly:</p>
+    <ol>
+      <li>Glance at each card for about a second (the way you'd actually scroll). <strong>What kind of account / publisher does this look like?</strong> A real news / editorial brand, or an AI content farm, or something else? Say what comes to mind.</li>
+      <li>Would you <strong>click any of these</strong> if they showed up in your feed? Why or why not?</li>
+      <li>What does the <strong>red logo pill</strong> and the <strong>dark text band</strong> remind you of?</li>
+    </ol>
+    <p style="color: var(--text-dim); margin-top: 12px;">Please don't search the brand — your first-glance reaction is what we need.</p>
+  </div>
+
+  <!-- ============ TWITTER / X CONTEXT (landscape cropped card) ============ -->
+  <div class="section-head">
+    <h2>Twitter / X feed</h2>
+    <p>These are how the links would appear in a Twitter post (summary_large_image card, landscape crop).</p>
+  </div>
+
+  <!-- Filler tweet 1 for context -->
+  <article class="tweet">
+    <div class="avatar"></div>
+    <div>
+      <header><span class="name">Local news desk</span><span class="handle"> @localnewsdesk</span><span class="dot"> · </span><span class="when">2h</span></header>
+      <div class="body">City council voted 7-2 last night to keep the late-night bus line running through next summer. Details in tomorrow's edition.</div>
+      <footer><span>132</span><span>48</span><span>411</span></footer>
+    </div>
+  </article>
+
+  <!-- ===== Lorewire poster card #1 (landscape crop) ===== -->
+  <article class="tweet">
+    <div class="avatar"></div>
+    <div>
+      <header><span class="name">Someone you follow</span><span class="handle"> @someone</span><span class="dot"> · </span><span class="when">1h</span></header>
+      <div class="body">Just read this — wild.</div>
+      <div class="card">
+        <div class="img-wrap placeholder" style="background-image: url('./outsider-test-images/poster-1-portrait.png');">drop poster-1-portrait.png into ./outsider-test-images/</div>
+        <div class="meta">
+          <div class="host">lorewire.com</div>
+          <div class="title">Story 1 — title here</div>
+        </div>
+      </div>
+      <footer><span>8</span><span>3</span><span>27</span></footer>
+    </div>
+  </article>
+
+  <!-- Filler tweet for context -->
+  <article class="tweet">
+    <div class="avatar"></div>
+    <div>
+      <header><span class="name">A friend</span><span class="handle"> @afriend</span><span class="dot"> · </span><span class="when">3h</span></header>
+      <div class="body">Reminder that the open-source license clause we argued about last week is in fact in the contract. I checked.</div>
+      <footer><span>22</span><span>1</span><span>3</span></footer>
+    </div>
+  </article>
+
+  <!-- ===== Lorewire poster card #2 (landscape crop) ===== -->
+  <article class="tweet">
+    <div class="avatar"></div>
+    <div>
+      <header><span class="name">Random account</span><span class="handle"> @random</span><span class="dot"> · </span><span class="when">4h</span></header>
+      <div class="body">My sister sent me this.</div>
+      <div class="card">
+        <div class="img-wrap placeholder" style="background-image: url('./outsider-test-images/poster-2-portrait.png');">drop poster-2-portrait.png into ./outsider-test-images/</div>
+        <div class="meta">
+          <div class="host">lorewire.com</div>
+          <div class="title">Story 2 — title here</div>
+        </div>
+      </div>
+      <footer><span>14</span><span>0</span><span>5</span></footer>
+    </div>
+  </article>
+
+  <!-- Filler tweet -->
+  <article class="tweet">
+    <div class="avatar"></div>
+    <div>
+      <header><span class="name">Tech writer</span><span class="handle"> @writer</span><span class="dot"> · </span><span class="when">6h</span></header>
+      <div class="body">Quietly impressed by how the new public-transit app handles offline mode. The little things matter.</div>
+      <footer><span>5</span><span>2</span><span>18</span></footer>
+    </div>
+  </article>
+
+  <!-- ===== Lorewire poster card #3 (landscape crop) ===== -->
+  <article class="tweet">
+    <div class="avatar"></div>
+    <div>
+      <header><span class="name">Forwarded from</span><span class="handle"> @forwarded</span><span class="dot"> · </span><span class="when">8h</span></header>
+      <div class="body">Saw this earlier. Sharing.</div>
+      <div class="card">
+        <div class="img-wrap placeholder" style="background-image: url('./outsider-test-images/poster-3-portrait.png');">drop poster-3-portrait.png into ./outsider-test-images/</div>
+        <div class="meta">
+          <div class="host">lorewire.com</div>
+          <div class="title">Story 3 — title here</div>
+        </div>
+      </div>
+      <footer><span>3</span><span>0</span><span>9</span></footer>
+    </div>
+  </article>
+
+  <!-- ============ DISCORD / iMESSAGE CONTEXT (full portrait) ============ -->
+  <div class="section-head">
+    <h2>Discord / iMessage / WhatsApp unfurl</h2>
+    <p>The same links unfurled in a chat app that renders the full portrait image (no crop).</p>
+  </div>
+
+  <div class="portrait-card">
+    <div class="img-wrap placeholder" style="background-image: url('./outsider-test-images/poster-1-portrait.png');">drop poster-1-portrait.png</div>
+    <div class="meta">lorewire.com · Story 1</div>
+  </div>
+
+  <div class="portrait-card">
+    <div class="img-wrap placeholder" style="background-image: url('./outsider-test-images/poster-2-portrait.png');">drop poster-2-portrait.png</div>
+    <div class="meta">lorewire.com · Story 2</div>
+  </div>
+
+  <div class="portrait-card">
+    <div class="img-wrap placeholder" style="background-image: url('./outsider-test-images/poster-3-portrait.png');">drop poster-3-portrait.png</div>
+    <div class="meta">lorewire.com · Story 3</div>
+  </div>
+
+</main>
+</body>
+</html>

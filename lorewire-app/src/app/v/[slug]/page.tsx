@@ -15,6 +15,8 @@ import type { Metadata } from "next";
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
 import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
 import { getSetting } from "@/lib/repo";
+import { parseShortConfig } from "@/lib/short-config";
+import { OG_POSTER_HEIGHT, OG_POSTER_WIDTH } from "@/lib/short-poster";
 import {
   aspectDims,
   isVideoAspect,
@@ -89,11 +91,55 @@ export async function generateMetadata({
   const title = buildPageTitle(pageTitle, seo.titleTemplate, seo.siteName);
   const description =
     story.summary ?? seo.defaultMetaDescription;
-  const ogImage = story.hero_image ?? seo.defaultOgImage ?? undefined;
+  const heroImage = story.hero_image ?? seo.defaultOgImage ?? undefined;
   const videoUrl = story.video_url ?? undefined;
   const noindex = story.noindex === 1;
   const videoAspect = await resolveStoryAspect(story.video_config);
   const videoDims = aspectDims(videoAspect);
+
+  // Phase 3 OG-poster surface (_plans/2026-06-29-phase-3-og-poster-cards.md).
+  // Reads the stamped landscape URL off short_config — O(1), no
+  // request-path render call (OG bots time out at 3-5s; LLM + Cloud Run
+  // render takes 6-10s, so generation runs in publisher hook + backfill
+  // script only). Respects the per-story kill switch (`og_poster_disabled`)
+  // so a bad poster can be removed without bumping POSTER_VERSION globally.
+  // When the URL is missing or disabled, falls back to hero_image →
+  // defaultOgImage — the pre-Phase-3 chain, unchanged.
+  let ogPosterUrl: string | undefined;
+  if (story.short_config) {
+    try {
+      const parsed = parseShortConfig(JSON.parse(story.short_config));
+      if (
+        parsed.ok &&
+        parsed.config.og_poster_landscape_url &&
+        !parsed.config.og_poster_disabled
+      ) {
+        ogPosterUrl = parsed.config.og_poster_landscape_url;
+      }
+    } catch {
+      // malformed short_config — fall through to hero chain
+    }
+  }
+  const ogImage = ogPosterUrl ?? heroImage;
+  // og:image:width / og:image:height are non-negotiable per the
+  // crawler-doc audit: WhatsApp silently drops the preview on first
+  // share without them; Facebook benefits too (synchronous render).
+  // Set ONLY when we have a designed poster; the legacy hero fallback
+  // has unknown dimensions so we let the crawler sniff bytes.
+  const ogImageWidth = ogPosterUrl ? OG_POSTER_WIDTH : undefined;
+  const ogImageHeight = ogPosterUrl ? OG_POSTER_HEIGHT : undefined;
+  // Force summary_large_image when the poster is present so Twitter
+  // renders the 1200×630 designed landscape correctly. Without the
+  // override, Twitter would respect seo.twitterCardType (often
+  // "summary" by default), which renders as a small square thumb.
+  const twitterCardType = ogPosterUrl
+    ? "summary_large_image"
+    : seo.twitterCardType;
+  // twitter:image explicit removes Twitterbot's array-order ambiguity
+  // — verified via the crawler-doc audit: Twitter looks for
+  // twitter:image first, falls back to og:image, so an explicit
+  // setting is the surest way to control what X picks.
+  const twitterImage = ogPosterUrl ?? heroImage;
 
   return {
     title,
@@ -108,7 +154,16 @@ export async function generateMetadata({
       type: videoUrl ? "video.other" : "article",
       url: canonical,
       siteName: seo.siteName,
-      images: ogImage ? [{ url: ogImage }] : undefined,
+      images: ogImage
+        ? [
+            {
+              url: ogImage,
+              width: ogImageWidth,
+              height: ogImageHeight,
+              alt: `Lorewire: ${pageTitle}`,
+            },
+          ]
+        : undefined,
       videos: videoUrl
         ? [
             {
@@ -121,10 +176,10 @@ export async function generateMetadata({
         : undefined,
     },
     twitter: {
-      card: seo.twitterCardType,
+      card: twitterCardType,
       title,
       description,
-      images: ogImage ? [ogImage] : undefined,
+      images: twitterImage ? [twitterImage] : undefined,
       site: seo.twitterHandle || undefined,
     },
     verification: {

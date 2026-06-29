@@ -17,6 +17,7 @@ import {
   probeRemoteMp4DurationMs,
   renderAndUploadStory,
   renderPosterAndUploadStory,
+  type PosterAspect,
   type PosterInputProps,
   type RenderFn,
   type RenderPosterFn,
@@ -113,18 +114,31 @@ const POSTER_HASH_RE = /^[a-f0-9]{8,32}$/;
 interface RenderPosterRequestBody {
   storyId?: unknown;
   hash?: unknown;
+  aspect?: unknown;
   inputProps?: unknown;
 }
 
 function parseRenderPosterBody(body: RenderPosterRequestBody | undefined): {
   storyId: string;
   hash: string;
+  aspect: PosterAspect;
   inputProps: PosterInputProps;
 } | null {
   if (!body || typeof body !== "object") return null;
-  const { storyId, hash, inputProps } = body;
+  const { storyId, hash, aspect: rawAspect, inputProps } = body;
   if (typeof storyId !== "string" || storyId.length === 0) return null;
   if (typeof hash !== "string" || !POSTER_HASH_RE.test(hash)) return null;
+  // Aspect is optional for Phase 2 back-compat — a stale dispatcher that
+  // doesn't yet send the field gets the portrait Phase 2 behavior. Any
+  // value other than the two allowed enums fails closed with 400.
+  let aspect: PosterAspect;
+  if (rawAspect === undefined || rawAspect === "portrait") {
+    aspect = "portrait";
+  } else if (rawAspect === "landscape") {
+    aspect = "landscape";
+  } else {
+    return null;
+  }
   if (!inputProps || typeof inputProps !== "object" || Array.isArray(inputProps)) {
     return null;
   }
@@ -150,7 +164,7 @@ function parseRenderPosterBody(body: RenderPosterRequestBody | undefined): {
   if (typeof brand_text === "string" && brand_text.length > 0) {
     validated.brand_text = brand_text;
   }
-  return { storyId, hash, inputProps: validated };
+  return { storyId, hash, aspect, inputProps: validated };
 }
 
 function parseRenderBody(body: RenderRequestBody | undefined): {
@@ -280,6 +294,7 @@ export function createApp(
         res.status(400).json({
           error:
             "expected { storyId: string, hash: string (hex 8-32), " +
+            "aspect?: \"portrait\" | \"landscape\" (default portrait), " +
             "inputProps: { scene_1_url: string, text: string, brand_text?: string } }",
         });
         return;
@@ -288,6 +303,7 @@ export function createApp(
       log("poster_received", {
         story_id: parsed.storyId,
         hash: parsed.hash,
+        aspect: parsed.aspect,
         text_len: parsed.inputProps.text.length,
       });
 
@@ -296,6 +312,7 @@ export function createApp(
           parsed.storyId,
           parsed.hash,
           parsed.inputProps,
+          parsed.aspect,
         );
         log("poster_done", {
           story_id: parsed.storyId,
