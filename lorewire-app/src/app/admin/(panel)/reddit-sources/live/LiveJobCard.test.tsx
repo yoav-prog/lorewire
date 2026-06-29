@@ -246,3 +246,68 @@ describe("LiveJobCard — events + tail", () => {
     expect(html).toContain("Open detail page");
   });
 });
+
+describe("LiveJobCard — stuck badge + stop", () => {
+  // A long-dead requested_at guarantees the run is past STUCK_THRESHOLD_MS
+  // regardless of the test wall clock.
+  const ANCIENT = "2000-01-01T00:00:00.000Z";
+  const noop = () => {};
+
+  it("flags an active run past the threshold as STUCK", () => {
+    const html = renderToString(
+      <LiveJobCard
+        job={makeJob({
+          requested_at: ANCIENT,
+          status: "processing",
+          overall: "running",
+        })}
+        onStop={noop}
+      />,
+    );
+    expect(html).toContain(">Stuck<");
+  });
+
+  it("renders a per-run Stop button when active and onStop is wired", () => {
+    const html = renderToString(
+      <LiveJobCard
+        job={makeJob({ status: "processing", overall: "running" })}
+        onStop={noop}
+      />,
+    );
+    expect(html).toContain("Cancel every in-flight stage of this run.");
+    expect(html).toMatch(/>Stop</);
+  });
+
+  it("omits the Stop button when onStop is absent (SSR / read-only)", () => {
+    const html = renderToString(
+      <LiveJobCard job={makeJob({ status: "processing", overall: "running" })} />,
+    );
+    expect(html).not.toContain("Cancel every in-flight stage of this run.");
+  });
+
+  it("does not flag a settled run as STUCK however old it is", () => {
+    const html = renderToString(
+      <LiveJobCard
+        job={makeJob({
+          requested_at: ANCIENT,
+          status: "done",
+          overall: "done",
+          finished_at: ANCIENT,
+          last_settled_at: ANCIENT,
+        })}
+        onStop={noop}
+      />,
+    );
+    expect(html).not.toContain(">Stuck<");
+  });
+
+  it("omits the Stop button on a settled run even when onStop is wired", () => {
+    const html = renderToString(
+      <LiveJobCard
+        job={makeJob({ status: "done", overall: "done", finished_at: NOW })}
+        onStop={noop}
+      />,
+    );
+    expect(html).not.toContain("Cancel every in-flight stage of this run.");
+  });
+});
