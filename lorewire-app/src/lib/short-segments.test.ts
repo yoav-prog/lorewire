@@ -140,4 +140,39 @@ describe("resolveShortSegments", () => {
     expect(out.outro.segment?.label).toBe("Global outro");
     expect(out.outro.source).toBe("story");
   });
+
+  // Regression: a short is ALWAYS 9:16, but the story's long-form
+  // video_config.aspect can be 16:9. The resolver must force 9:16 and not
+  // inherit the long-form aspect — otherwise a story-pinned 9:16 intro is
+  // dropped as aspect-mismatch and the short renders body-only.
+  it("keeps a story-pinned 9:16 intro even when the long-form video is 16:9", async () => {
+    const introId = await seedSegment({ kind: "intro", aspect: "9:16", label: "Tall intro" });
+    const story = {
+      intro_segment_id: introId,
+      outro_segment_id: null,
+      skip_intro: 0,
+      skip_outro: 0,
+      video_config: JSON.stringify({ aspect: "16:9" }),
+    };
+    const out = await resolveShortSegments(null, story);
+    expect(out.intro.segment?.label).toBe("Tall intro");
+    expect(out.intro.reason).toBe("pinned");
+    expect(out.intro.source).toBe("story");
+  });
+
+  it("resolves the global-active 9:16 intro even when the long-form video is 16:9", async () => {
+    const introId = await seedSegment({ kind: "intro", aspect: "9:16", label: "Brand intro" });
+    await setSetting("video.active_intro_id_9x16", introId);
+    const story = {
+      intro_segment_id: null,
+      outro_segment_id: null,
+      skip_intro: 0,
+      skip_outro: 0,
+      video_config: JSON.stringify({ aspect: "16:9" }),
+    };
+    const out = await resolveShortSegments(null, story);
+    expect(out.intro.segment?.label).toBe("Brand intro");
+    expect(out.intro.reason).toBe("global-active");
+    expect(out.intro.source).toBe("story");
+  });
 });

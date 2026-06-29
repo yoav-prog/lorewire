@@ -21,6 +21,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { Agent, fetch as undiciFetch } from "undici";
 import {
+  applyShortToStory,
   claimNextShortRender,
   failShortRender,
   finishShortRender,
@@ -424,6 +425,31 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     assembled_duration_ms: result.durationMs,
   });
   await finishShortRender(claimed.id, result.url, result.durationMs);
+  // Point the story at the freshly-rendered short (stories.video_url +
+  // duration) so the site + admin show it. Auto-renders previously left this to
+  // a manual admin click, so a regenerated short never replaced the old
+  // video_url — the new MP4 landed in R2 but the story kept pointing at the
+  // prior render. Best-effort: a failure must NOT break the render response.
+  // claimed.props predates the assembled duration finishShortRender just
+  // persisted, so fold result.durationMs in for an accurate stories.duration.
+  let applyProps = claimed.props;
+  if (result.durationMs && claimed.props) {
+    try {
+      applyProps = JSON.stringify({
+        ...(JSON.parse(claimed.props) as Record<string, unknown>),
+        assembled_duration_ms: result.durationMs,
+      });
+    } catch {
+      // Unparseable props: keep claimed.props; duration falls to the legacy sum.
+    }
+  }
+  await applyShortToStory(claimed.story_id, result.url, applyProps).catch((err) => {
+    namespacedLog("apply_to_story_failed", {
+      render_id: claimed.id,
+      story_id: claimed.story_id,
+      err: String(err),
+    });
+  });
   // Stamp the spliced segment ids onto short_config so the editor's render
   // plan can detect "intro/outro override changed since last render" and
   // surface Lane A on the override picker. Best-effort: a stamp failure
