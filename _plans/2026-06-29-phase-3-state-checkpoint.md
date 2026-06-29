@@ -8,34 +8,42 @@ Plan: [`_plans/2026-06-29-phase-3-og-poster-cards.md`](2026-06-29-phase-3-og-pos
 
 ## TL;DR (skip the rest if you only have 30 seconds)
 
-Phase 3a code is **written and tested locally** — 17 files changed
-(12 modified + 5 new), 83/83 new Phase 3 vitest tests passing, full
-test sweep at 2282/2288 (the 6 failures are 2 pre-existing baseline
-failures × 3 runs; not caused by Phase 3). **Nothing is committed
-yet** — work is uncommitted on local branch `feat/social-poster-render`
-(which is stale on origin; PR #140 already merged + branch deleted).
+Phase 3a code is **written, tested, committed, and pushed** to
+`origin/feat/phase-3-og-posters` at commit `37fb171`. Vercel built a
+Preview on push (production untouched — production tracks
+`feat/multi-platform-shorts-publisher`). 18 files (13 modified +
+5 new), 83/83 new Phase 3 vitest tests passing, full test sweep
+at 2282/2288 (the 6 failures are 2 pre-existing baseline failures
+× 3 runs; not caused by Phase 3).
 
-Next action: create a fresh `feat/phase-3-og-posters` branch off
-`origin/feat/multi-platform-shorts-publisher`, commit, push, open
-PR. Then two-stage deploy: Cloud Run first, Vercel merge second.
-**Do NOT click manual Vercel UI promotion buttons.**
+**Next action on the new machine**: clone repo, `git fetch origin
+&& git checkout feat/phase-3-og-posters`, re-run the test baseline
+(should match 2282/2288, same 2 pre-existing failures), then open
+PR targeting `feat/multi-platform-shorts-publisher` after explicit
+Yoav go-ahead. Then two-stage deploy: Cloud Run first, PR merge
+second, backfill third. **Do NOT click manual Vercel UI promotion
+buttons.**
 
 ## State of the world (2026-06-29)
 
 ### Branches
 
 - **Production-source branch (Vercel deploys this)**:
-  `feat/multi-platform-shorts-publisher` at commit `c49bb5d` after
+  `feat/multi-platform-shorts-publisher` at commit `75d1adb` after
   PR #140 (Phase 2 social posters) + PR #141 (actual MP4 duration)
-  merged. Per `lorewire-app/AGENTS.md` the project is in INVERTED
-  state — `main` is behind production.
-- **Local branch (where the uncommitted Phase 3a work lives)**:
-  `feat/social-poster-render`. This branch is at the post-merge
-  state and contains the uncommitted Phase 3a diff. The remote
-  `feat/social-poster-render` was deleted after PR #140 merged; do
-  NOT push this branch.
-- **Plan-named target branch**: `feat/phase-3-og-posters` (does not
-  exist yet — create on resume).
+  + PR #142 (backfill preprobed durations) merged. Per
+  `lorewire-app/AGENTS.md` the project is in INVERTED state —
+  `main` is behind production.
+- **Phase 3a branch (THIS work)**:
+  `origin/feat/phase-3-og-posters` at commit `37fb171`. Branched
+  off `origin/feat/multi-platform-shorts-publisher` at `75d1adb`.
+  Vercel builds a Preview on this branch (NOT production). No PR
+  yet — that's the next-step action on the resume machine after
+  Yoav signs off.
+- **Stale local branch (ignore)**: `feat/social-poster-render` was
+  the working branch during development. Its remote was deleted
+  after PR #140 merged. Do NOT push or check this out on the
+  resume machine.
 
 ### What ships in Phase 3a
 
@@ -89,19 +97,20 @@ Open a new Claude session in the repo root (`c:/Projects/lorewire-app`). Paste t
 ```
 Resume Phase 3a per _plans/2026-06-29-phase-3-state-checkpoint.md.
 
-Status: all code written + tested locally on stale branch
-feat/social-poster-render. Uncommitted. Plan + Outsider gate +
-crawler-doc audit + council pass + chairman verdict already done.
+Status: all code written + tested + committed + pushed to
+origin/feat/phase-3-og-posters at commit 37fb171. Plan + Outsider
+gate + crawler-doc audit + council pass + chairman verdict
+already done.
 
-Next step is: create feat/phase-3-og-posters off
-origin/feat/multi-platform-shorts-publisher, commit the diff,
-push, open PR. Then two-stage deploy (Cloud Run first, PR merge
-second, backfill third).
+Next steps: re-run the test baseline locally to confirm
+2282/2288 (2 pre-existing failures: aspect.test.ts +
+bulk-content-actions.test.ts), then open PR targeting
+feat/multi-platform-shorts-publisher with my explicit go-ahead.
+Then two-stage deploy (Cloud Run first, PR merge second,
+backfill third).
 
-Confirm the test baseline still has 2 pre-existing failures
-(aspect.test.ts + bulk-content-actions.test.ts) and zero new
-failures from Phase 3, then proceed to commit + push with my
-explicit go-ahead.
+If the baseline shows any failures other than those 2, stop and
+investigate before opening the PR.
 ```
 
 Claude will read this checkpoint, read the plan, verify tests, then walk you through the deploy sequence below.
@@ -110,43 +119,44 @@ Claude will read this checkpoint, read the plan, verify tests, then walk you thr
 
 Per `lorewire-app/AGENTS.md` + CLAUDE.md rule 19.
 
-### Stage 0 — bring local branch state forward
+### Stage 0 — clone + check out (DONE on this machine; redo on the new one)
 
 ```bash
+# On a fresh machine:
+git clone https://github.com/yoav-prog/lorewire.git c:/Projects/lorewire-app
 cd c:/Projects/lorewire-app
 git fetch origin
-git checkout -b feat/phase-3-og-posters origin/feat/multi-platform-shorts-publisher
-# Uncommitted Phase 3 changes from feat/social-poster-render carry over.
-git status --short  # should show the 17 files from the table above
+git checkout feat/phase-3-og-posters
+# Should land at commit 37fb171 with no uncommitted changes.
+git log --oneline -1   # confirms 37fb171
+git status --short     # confirms clean tree
 ```
 
-### Stage 1 — commit + push the PR branch
+### Stage 1 — verify tests still pass
 
 ```bash
-git add _plans/2026-06-29-phase-3-og-poster-cards.md \
-        _plans/2026-06-29-phase-3-state-checkpoint.md \
-        lorewire-app/src/app/api/admin/backfill_og_posters/ \
-        lorewire-app/src/app/v/[slug]/page.tsx \
-        lorewire-app/src/lib/publish-to-facebook.ts \
-        lorewire-app/src/lib/publish-to-instagram.ts \
-        lorewire-app/src/lib/publish-to-youtube.ts \
-        lorewire-app/src/lib/short-config.test.ts \
-        lorewire-app/src/lib/short-config.ts \
-        lorewire-app/src/lib/short-poster-og.test.ts \
-        lorewire-app/src/lib/short-poster.ts \
-        scripts/outsider-poster-test.html \
-        scripts/OUTSIDER_POSTER_TEST.md \
-        video/server/index.test.mjs \
-        video/server/index.ts \
-        video/server/render.ts \
-        video/src/PosterStill.tsx \
-        video/src/Root.tsx
-git commit -m "Phase 3a: landscape OG poster for story page link unfurls"
-# Full message draft saved at the end of this doc.
-git push origin feat/phase-3-og-posters
+cd lorewire-app
+npm install
+npx vitest run \
+  src/lib/short-poster-og.test.ts \
+  src/lib/short-config.test.ts \
+  src/lib/short-poster.test.ts \
+  src/app/api/admin/backfill_og_posters/route.test.ts
+# Expected: 83 passed.
+
+cd ../video
+npm install
+npm run test:server
+# Expected: 76 passed.
+
+cd ../lorewire-app
+npx vitest run
+# Expected: 2282 passed, 2 failed (pre-existing baseline:
+# aspect.test.ts + bulk-content-actions.test.ts). Anything else
+# is a regression — investigate before continuing.
 ```
 
-Then open the PR:
+### Stage 2 — open the PR (after explicit Yoav approval)
 
 ```bash
 gh pr create \
@@ -158,7 +168,7 @@ gh pr create \
 EOF
 ```
 
-### Stage 2 — Cloud Run deploys FIRST (before the PR merge)
+### Stage 3 — Cloud Run deploys FIRST (before the PR merge)
 
 The merge auto-deploys Vercel. If Vercel goes first while Cloud
 Run is still on the Phase 2 binary, the helper's POST with
@@ -197,7 +207,7 @@ curl -X POST https://<cloud-run-url>/render-poster \
 Should return 200 + `{ url, elapsed_ms, hash }`. Confirm the PNG
 appears at the URL.
 
-### Stage 3 — merge the PR
+### Stage 4 — merge the PR
 
 ```bash
 gh pr checks <PR#>      # confirm Vercel preview built green
@@ -209,7 +219,7 @@ Vercel will auto-deploy the merge commit. **Do NOT click any
 Vercel UI** — per AGENTS.md, manual promotion bypasses the
 Production Branch tracking and has caused takedowns before.
 
-### Stage 4 — one-shot backfill
+### Stage 5 — one-shot backfill
 
 After Vercel deploy completes:
 
@@ -231,7 +241,7 @@ Each request bounded at 100 stories, default 30. The route returns
 counts + per-row outcomes. Tail Vercel logs and grep for
 `[backfill og-poster run]` and `[og poster ensure]` namespaces.
 
-### Stage 5 — manual smoke
+### Stage 6 — manual smoke
 
 1. Visit a backfilled story page. View source. Confirm:
    - `<meta property="og:image" content="…poster-landscape-{hash}.png?v={hash}">`
