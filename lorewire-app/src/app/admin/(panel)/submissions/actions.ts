@@ -9,9 +9,10 @@
 import { revalidatePath } from "next/cache";
 import { requireCapability } from "@/lib/dal";
 import { setSetting } from "@/lib/repo";
-import { setSubmissionStatus } from "@/lib/submissions";
+import { adminUnpublishSubmission, setSubmissionStatus } from "@/lib/submissions";
 import { approveAndPromote } from "@/lib/submission-promote";
 import { categoryToReasonKey } from "@/lib/submission-reasons";
+import { resolveReportsForStory } from "@/lib/submission-reports";
 
 /** Approve and make the video: promote to a story + poll and enqueue the short
  *  render (budget-gated). Throws a visible error if the daily render budget is
@@ -57,5 +58,24 @@ export async function setSubmissionsEnabledAction(
 ): Promise<void> {
   await requireCapability("content.manage");
   await setSetting("submissions.enabled", enabled ? "1" : "0");
+  revalidatePath("/admin/submissions");
+}
+
+/** Act on a victim report: take the story off the public site (archive + unpublish
+ *  the submission) and mark its open reports actioned. */
+export async function takeDownReportedAction(
+  submissionId: string,
+  storyId: string,
+): Promise<void> {
+  const session = await requireCapability("content.manage");
+  await adminUnpublishSubmission(submissionId, session.userId);
+  await resolveReportsForStory(storyId, "actioned");
+  revalidatePath("/admin/submissions");
+}
+
+/** Dismiss a victim report: keep the story up, clear its open reports. */
+export async function dismissReportedAction(storyId: string): Promise<void> {
+  await requireCapability("content.manage");
+  await resolveReportsForStory(storyId, "dismissed");
   revalidatePath("/admin/submissions");
 }

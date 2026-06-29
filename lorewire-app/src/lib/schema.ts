@@ -1141,6 +1141,27 @@ export const SUBMISSION_EVENTS: Table = {
   ],
 };
 
+// 2026-06-29 user-submission victim reports
+// (_plans/2026-06-29-user-submitted-stories.md, Phase 4). A public "this is about
+// me / report" path for people who recognise themselves in a published submission
+// story — they have no account, so this is unauthenticated (origin-gated +
+// rate-limited by ip_ua_hash). An admin reviews open reports and either takes the
+// story down (archive + unpublish the submission) or dismisses. `status` is
+// 'open' | 'actioned' | 'dismissed'. `ip_ua_hash` is one-way (rate-limit + dedup
+// only). App-owned; no pipeline mirror.
+export const SUBMISSION_REPORTS: Table = {
+  name: "submission_reports",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "submission_id", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "ip_ua_hash", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-23 Facebook auto-publish for shorts
 // (_plans/2026-06-23-facebook-auto-publish.md). One row per attempt to
 // publish a rendered short to the LoreWire Facebook Page. Survives
@@ -1458,6 +1479,7 @@ export const TABLES: Table[] = [
   COMMENT_MODERATION_EVENTS,
   SUBMISSIONS,
   SUBMISSION_EVENTS,
+  SUBMISSION_REPORTS,
   FACEBOOK_POSTS,
   INSTAGRAM_POSTS,
   INSTAGRAM_STORIES,
@@ -1743,4 +1765,10 @@ export const POST_TABLE_DDL: string[] = [
   // set of submission-origin stories.
   "CREATE INDEX IF NOT EXISTS idx_stories_submission_id " +
     "ON stories(submission_id) WHERE submission_id IS NOT NULL",
+  // 2026-06-29 victim reports: the admin queue reads open reports oldest-first;
+  // the report endpoint rate-limits by counting recent rows per reporter bucket.
+  "CREATE INDEX IF NOT EXISTS idx_submission_reports_status " +
+    "ON submission_reports(status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_submission_reports_ipua " +
+    "ON submission_reports(ip_ua_hash, created_at)",
 ];

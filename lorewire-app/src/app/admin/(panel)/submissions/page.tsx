@@ -10,10 +10,16 @@
 import { requireCapability } from "@/lib/dal";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import { getSetting } from "@/lib/repo";
-import { listSubmissionQueue, type SubmissionRow } from "@/lib/submissions";
+import {
+  getSubmissionById,
+  listSubmissionQueue,
+  type SubmissionRow,
+} from "@/lib/submissions";
+import { listOpenSubmissionReports } from "@/lib/submission-reports";
 import type { SubmissionJudgeOutput } from "@/lib/submission-moderation";
 import { SubmissionModerationActions } from "./SubmissionModerationActions";
 import { SubmissionsKillSwitch } from "./SubmissionsKillSwitch";
+import { ReportActions } from "./ReportActions";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +54,13 @@ export default async function SubmissionsModerationPage() {
   const quarantined = rows.filter((r) => r.status === "quarantined");
   const pending = rows.filter((r) => r.status === "pending_review");
   const submissionsEnabled = (await getSetting("submissions.enabled")) !== "0";
+  const reports = await listOpenSubmissionReports(200);
+  const reportCards = await Promise.all(
+    reports.map(async (r) => ({
+      r,
+      sub: r.submission_id ? await getSubmissionById(r.submission_id) : null,
+    })),
+  );
 
   return (
     <div className="space-y-5">
@@ -66,6 +79,61 @@ export default async function SubmissionsModerationPage() {
       </header>
 
       <SubmissionsKillSwitch enabled={submissionsEnabled} />
+
+      {reportCards.length > 0 && (
+        <section className="space-y-3">
+          <div className="rounded-xl border border-cat-entitled/40 bg-cat-entitled/10 px-4 py-3">
+            <p className="text-[13px] font-semibold text-cat-entitled">
+              Reported by the public ({reportCards.length})
+            </p>
+            <p className="mt-1 text-[12px] text-muted">
+              Someone says a published story is about them or has a problem. Take
+              it down to pull it off the public site, or dismiss.
+            </p>
+          </div>
+          <div className="space-y-3">
+            {reportCards.map(({ r, sub }) => (
+              <div
+                key={r.id}
+                className="rounded-xl border border-line bg-surface p-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1 space-y-2">
+                    {sub && (
+                      <>
+                        <h3
+                          dir={sub.lang === "he" ? "rtl" : "ltr"}
+                          className="text-[14px] font-semibold text-ink"
+                        >
+                          {sub.title}
+                        </h3>
+                        <p
+                          dir={sub.lang === "he" ? "rtl" : "ltr"}
+                          className="text-[13px] text-muted"
+                        >
+                          {sub.dilemma_question}
+                        </p>
+                      </>
+                    )}
+                    <p className="text-[12px] italic text-muted">
+                      Report: {r.reason}
+                    </p>
+                    <p className="font-mono text-[10px] text-muted">
+                      {ago(r.created_at)}
+                    </p>
+                  </div>
+                  {r.submission_id && r.story_id && (
+                    <ReportActions
+                      submissionId={r.submission_id}
+                      storyId={r.story_id}
+                    />
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {quarantined.length > 0 && (
         <section className="space-y-3">
