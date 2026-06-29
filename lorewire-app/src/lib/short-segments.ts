@@ -21,8 +21,6 @@
 import "server-only";
 import {
   pickSegmentPure,
-  resolveSegmentsForStory,
-  type ResolvedSegments,
   type SegmentKind,
   type SegmentPick,
   type SegmentResolverStory,
@@ -87,10 +85,13 @@ async function pickOne(
       return { ...pick, source: "short_config" };
     }
   }
-  // No short_config override -> walk the general chain (story columns +
-  // global active).
-  const fallback: ResolvedSegments = await resolveSegmentsForStory(story, "9:16");
-  const pick = kind === "intro" ? fallback.intro : fallback.outro;
+  // No short_config override -> story columns + global active. A short is
+  // ALWAYS 9:16, so resolve against that aspect directly. Going through
+  // resolveSegmentsForStory derived the aspect from the LONG-FORM
+  // video_config.aspect, which made a 9:16 pinned/active intro fail the aspect
+  // filter on a story whose long-form video is 16:9 — dropping the intro and
+  // rendering the short body-only (so hook-first never engaged either).
+  const pick = await pickSegmentPure(kind, story, "9:16", getSetting, getSegment);
   return { ...pick, source: "story" };
 }
 
