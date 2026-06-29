@@ -19,6 +19,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   isJobActive,
+  isJobStuck,
+  jobElapsedMs,
   type ActiveJobView,
   type PipelineOverallState,
   type PipelineStage,
@@ -56,15 +58,26 @@ const STAGE_TONE: Record<PipelineStageState, string> = {
     "border-line/40 bg-transparent text-muted/60",
 };
 
-export default function LiveJobCard({ job }: { job: ActiveJobView }) {
+export default function LiveJobCard({
+  job,
+  onStop,
+}: {
+  job: ActiveJobView;
+  /** Stop handler wired by LiveRunsClient. Absent (e.g. the SSR unit
+   *  tests) means the per-run Stop button isn't rendered. */
+  onStop?: (jobId: string) => void | Promise<void>;
+}) {
   const [open, setOpen] = useState(false);
   const active = isJobActive(job);
+  const now = useTickingNow(active);
+  const stuck = isJobStuck(job, now);
+  const elapsedMs = jobElapsedMs(job, now);
   const latest = job.events.at(-1) ?? null;
 
   return (
     <article
       className={`rounded-xl border bg-surface p-4 ${
-        active ? "border-accent/30" : "border-line"
+        active ? (stuck ? "border-danger/40" : "border-accent/30") : "border-line"
       }`}
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
@@ -89,7 +102,11 @@ export default function LiveJobCard({ job }: { job: ActiveJobView }) {
         </div>
         <div className="flex flex-shrink-0 flex-wrap items-center gap-2">
           <OverallChip overall={job.overall} />
-          <ElapsedChip job={job} />
+          {stuck && <StuckBadge />}
+          <ElapsedChip active={active} elapsedMs={elapsedMs} stuck={stuck} />
+          {active && onStop && (
+            <StopRunButton jobId={job.job_id} onStop={onStop} />
+          )}
         </div>
       </header>
 
@@ -200,29 +217,96 @@ function StageGlyph({ state }: { state: PipelineStageState }) {
   );
 }
 
-function ElapsedChip({ job }: { job: ActiveJobView }) {
-  // For active jobs: time since requested_at, ticking.
-  // For finished jobs: wall-clock from requested_at to last_settled_at
-  //   (or finished_at as a fallback for legacy story-only paths).
-  const active = isJobActive(job);
+/** Ticking wall-clock, refreshed once a second while the run is active
+ *  and frozen once it settles (no point burning a timer on a finished
+ *  card). One timer per card; shared by the elapsed chip and the stuck
+ *  check so they never disagree about "now". */
+function useTickingNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
     const handle = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(handle);
   }, [active]);
+  return now;
+}
 
-  const start = new Date(job.requested_at).getTime();
-  const endIso = active
-    ? null
-    : (job.last_settled_at ?? job.finished_at);
-  const end = endIso ? new Date(endIso).getTime() : now;
-  const elapsedSec = Math.max(0, Math.floor((end - start) / 1000));
-  const label = formatElapsedSeconds(elapsedSec);
+function ElapsedChip({
+  active,
+  elapsedMs,
+  stuck,
+}: {
+  active: boolean;
+  elapsedMs: number;
+  stuck: boolean;
+}) {
+  // Active: time since requested_at, ticking. Settled: the frozen total
+  // wall-clock (requested_at → last_settled_at). Computed by the shared
+  // jobElapsedMs helper in the parent so the value drives both the chip
+  // and the stuck flag.
+  const label = formatElapsedSeconds(Math.floor(elapsedMs / 1000));
   return (
-    <span className="inline-block rounded-full border border-line px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted">
+    <span
+      className={`inline-block rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+        stuck ? "border-danger/40 text-danger" : "border-line text-muted"
+      }`}
+    >
       {active ? label : `${label} total`}
     </span>
+  );
+}
+
+/** Loud marker on a run that's been in flight past STUCK_THRESHOLD_MS —
+ *  almost always a zombie (worker / render died without writing a
+ *  terminal status). Drives the admin's eye to the Stop button. */
+function StuckBadge() {
+  return (
+    <span
+      title="In flight far longer than a healthy run takes. Its worker or render almost certainly died. Stop it to clear the card."
+      className="inline-flex items-center gap-1 rounded-full border border-danger/50 bg-danger/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-danger"
+    >
+      <span aria-hidden>⚠</span>
+      <span>Stuck</span>
+    </span>
+  );
+}
+
+/** Per-run Stop. Confirms (spend already incurred is non-refundable),
+ *  then calls the parent handler which fires the server action and
+ *  refetches. Local busy state guards against a double click. */
+function StopRunButton({
+  jobId,
+  onStop,
+}: {
+  jobId: string;
+  onStop: (jobId: string) => void | Promise<void>;
+}) {
+  const [stopping, setStopping] = useState(false);
+  async function handleClick() {
+    if (stopping) return;
+    const ok = window.confirm(
+      "Stop this run?\n\n" +
+        "Whatever stage is still in flight (story / short / hero / publish) gets cancelled so the run drops off the live list.\n\n" +
+        "If the article was already written it is kept. A run still in the story stage resets to 'imported' so you can re-queue it. Any spend already incurred is non-refundable.",
+    );
+    if (!ok) return;
+    setStopping(true);
+    try {
+      await onStop(jobId);
+    } finally {
+      setStopping(false);
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={stopping}
+      title="Cancel every in-flight stage of this run."
+      className="rounded-md border border-danger/40 bg-danger/10 px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-danger hover:opacity-80 disabled:opacity-50"
+    >
+      {stopping ? "Stopping…" : "Stop"}
+    </button>
   );
 }
 

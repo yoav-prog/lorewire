@@ -12,14 +12,18 @@
 //
 // Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   isJobActive,
   isJobFinished,
   type ActiveJobView,
 } from "@/lib/story-jobs-live-shared";
-import { listActiveJobsWithEventsAction } from "@/app/admin/actions";
+import {
+  listActiveJobsWithEventsAction,
+  stopAllActiveLiveRunsAction,
+  stopLiveRunAction,
+} from "@/app/admin/actions";
 import LiveJobCard from "./LiveJobCard";
 
 const POLL_MS = 2000;
@@ -35,7 +39,34 @@ export default function LiveRunsClient({
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number>(() => Date.now());
   const [polling, setPolling] = useState<boolean>(true);
+  const [stoppingAll, setStoppingAll] = useState<boolean>(false);
   const cancelledRef = useRef(false);
+
+  // One fetch, shared by the poll loop and the manual refresh-after-stop
+  // path so a Stop reflects immediately instead of waiting up to POLL_MS.
+  // Stable (no deps) so the mount effect runs exactly once.
+  const refresh = useCallback(async () => {
+    try {
+      const t0 = performance.now();
+      const rows = await listActiveJobsWithEventsAction();
+      if (cancelledRef.current) return;
+      const durationMs = Math.round(performance.now() - t0);
+      const eventCount = rows.reduce((acc, j) => acc + j.events.length, 0);
+      console.info("[reddit-sources live poll]", {
+        job_count: rows.length,
+        event_count: eventCount,
+        duration_ms: durationMs,
+      });
+      setJobs(rows);
+      setError(null);
+      setLastUpdate(Date.now());
+    } catch (e) {
+      if (cancelledRef.current) return;
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn("[reddit-sources live poll error]", { err: msg });
+      setError(msg);
+    }
+  }, []);
 
   // Mount log + visibility-driven start/stop loop. The "first tick fires
   // POLL_MS after mount" shape means the SSR snapshot drives the initial
@@ -49,33 +80,10 @@ export default function LiveRunsClient({
 
     let timer: ReturnType<typeof setInterval> | null = null;
 
-    async function tick() {
-      try {
-        const t0 = performance.now();
-        const rows = await listActiveJobsWithEventsAction();
-        if (cancelledRef.current) return;
-        const durationMs = Math.round(performance.now() - t0);
-        const eventCount = rows.reduce((acc, j) => acc + j.events.length, 0);
-        console.info("[reddit-sources live poll]", {
-          job_count: rows.length,
-          event_count: eventCount,
-          duration_ms: durationMs,
-        });
-        setJobs(rows);
-        setError(null);
-        setLastUpdate(Date.now());
-      } catch (e) {
-        if (cancelledRef.current) return;
-        const msg = e instanceof Error ? e.message : String(e);
-        console.warn("[reddit-sources live poll error]", { err: msg });
-        setError(msg);
-      }
-    }
-
     function startTimer() {
       if (timer != null) return;
       timer = setInterval(() => {
-        void tick();
+        void refresh();
       }, POLL_MS);
       setPolling(true);
     }
@@ -100,15 +108,50 @@ export default function LiveRunsClient({
       stopTimer();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-    // initialJobs is only read once at mount for the log; hideFinished is
-    // read here but the tick re-runs on every interval regardless of the
-    // param, so the dep is stable enough for the lint rule's purposes.
+    // initialJobs/hideFinished are read here only for the mount log;
+    // refresh is a stable useCallback so this effect runs once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refresh]);
 
-  const visibleJobs = hideFinished ? jobs.filter((j) => isJobActive(j)) : jobs;
-  const activeCount = jobs.filter((j) => isJobActive(j)).length;
+  // Per-run Stop: fire the action, surface any error, then refetch so the
+  // card settles (or drops) without waiting for the next poll tick.
+  const handleStopRun = useCallback(
+    async (jobId: string) => {
+      try {
+        const r = await stopLiveRunAction(jobId);
+        if (!r.ok) setError(r.error ?? "Stop failed.");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const activeJobs = jobs.filter((j) => isJobActive(j));
+  const activeCount = activeJobs.length;
   const finishedCount = jobs.filter((j) => isJobFinished(j)).length;
+  const visibleJobs = hideFinished ? activeJobs : jobs;
+
+  const handleStopAll = useCallback(async () => {
+    if (stoppingAll || activeCount === 0) return;
+    const ok = window.confirm(
+      `Stop all ${activeCount} active run${activeCount === 1 ? "" : "s"}?\n\n` +
+        "Every in-flight stage gets cancelled so they all drop off the live list.\n\n" +
+        "Finished articles are kept. Runs still in the story stage reset to 'imported'. Any spend already incurred is non-refundable.",
+    );
+    if (!ok) return;
+    setStoppingAll(true);
+    try {
+      const r = await stopAllActiveLiveRunsAction();
+      console.info("[reddit-sources live stop-all]", r);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStoppingAll(false);
+    }
+    await refresh();
+  }, [activeCount, stoppingAll, refresh]);
 
   return (
     <div className="space-y-4">
@@ -119,6 +162,8 @@ export default function LiveRunsClient({
         lastUpdate={lastUpdate}
         polling={polling}
         error={error}
+        onStopAll={handleStopAll}
+        stoppingAll={stoppingAll}
       />
 
       {visibleJobs.length === 0 ? (
@@ -127,7 +172,7 @@ export default function LiveRunsClient({
         <ul className="space-y-3">
           {visibleJobs.map((job) => (
             <li key={job.job_id}>
-              <LiveJobCard job={job} />
+              <LiveJobCard job={job} onStop={handleStopRun} />
             </li>
           ))}
         </ul>
@@ -145,6 +190,8 @@ function StatusBar({
   lastUpdate,
   polling,
   error,
+  onStopAll,
+  stoppingAll,
 }: {
   activeCount: number;
   finishedCount: number;
@@ -152,6 +199,8 @@ function StatusBar({
   lastUpdate: number;
   polling: boolean;
   error: string | null;
+  onStopAll: () => void | Promise<void>;
+  stoppingAll: boolean;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -187,11 +236,24 @@ function StatusBar({
         )}
         <span>updated {ageSec}s ago</span>
       </div>
-      {error && (
-        <span className="font-mono text-[11px] text-danger" role="status">
-          poll error — retrying. {error}
-        </span>
-      )}
+      <div className="flex items-center gap-3">
+        {error && (
+          <span className="font-mono text-[11px] text-danger" role="status">
+            poll error, retrying. {error}
+          </span>
+        )}
+        {activeCount > 0 && (
+          <button
+            type="button"
+            onClick={onStopAll}
+            disabled={stoppingAll}
+            title="Cancel every active run."
+            className="rounded-md border border-danger/40 bg-danger/10 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-danger hover:opacity-80 disabled:opacity-50"
+          >
+            {stoppingAll ? "Stopping…" : `Stop all ${activeCount}`}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

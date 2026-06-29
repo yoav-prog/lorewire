@@ -22,6 +22,12 @@ import type {
 // but the import must resolve.
 vi.mock("@/app/admin/actions", () => ({
   listActiveJobsWithEventsAction: vi.fn(async () => []),
+  stopLiveRunAction: vi.fn(async () => ({ ok: true, stoppedStages: [] })),
+  stopAllActiveLiveRunsAction: vi.fn(async () => ({
+    ok: true,
+    scanned: 0,
+    stopped: 0,
+  })),
 }));
 
 import LiveRunsClient from "./LiveRunsClient";
@@ -190,6 +196,40 @@ describe("LiveRunsClient", () => {
       />,
     );
     expect(html).not.toContain("recently finished");
+  });
+
+  it("renders a Stop all button when there are active runs", () => {
+    const html = renderToString(
+      <LiveRunsClient
+        initialJobs={[
+          makeJob({ status: "processing", overall: "running" }),
+          makeJob({
+            job_id: "b",
+            reddit_id: "rb",
+            status: "queued",
+            overall: "queued",
+          }),
+        ]}
+        hideFinished={false}
+      />,
+    );
+    expect(html).toContain("Stop all 2");
+  });
+
+  it("does not render a Stop all button when nothing is active", () => {
+    const html = renderToString(
+      <LiveRunsClient
+        initialJobs={[
+          makeJob({
+            status: "done",
+            overall: "done",
+            finished_at: NOW,
+          }),
+        ]}
+        hideFinished={false}
+      />,
+    );
+    expect(html).not.toContain("Stop all");
   });
 
   it("renders the Tip footer with the inverse toggle link", () => {
