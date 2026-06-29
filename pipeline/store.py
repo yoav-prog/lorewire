@@ -59,6 +59,12 @@ SCHEMA_STATEMENTS = [
     # suppresses its CSS title overlay when this flag is 1. Stored as INTEGER
     # for portability across SQLite (no native BOOLEAN) and Postgres.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_has_baked_title INTEGER DEFAULT 0",
+    # 2026-06-29 user submissions: non-Reddit origin marker (mirrors the TS
+    # schema). The pipeline only READS it (store.story_submission_id) to gate the
+    # image-output safety check; it is deliberately NOT in _COLUMNS, so the
+    # full-row story upsert never writes this TS-owned column. Plan:
+    # _plans/2026-06-29-user-submitted-stories.md.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS submission_id TEXT",
     # Wave 3 Phase 3 PropSlideIn: per-story prop list as JSON, written by the
     # pipeline when the prop_slide motion beat is enabled. Shape:
     #   [{"url": "https://.../prop-N.png", "label": "envelope", "side": "left"}, ...]
@@ -895,6 +901,29 @@ def fetch_story(story_id: str) -> dict | None:
     with _sqlite_conn() as c:
         row = c.execute(f"SELECT {cols} FROM stories WHERE id=?", (story_id,)).fetchone()
         return dict(row) if row else None
+
+
+def story_submission_id(story_id: str) -> str | None:
+    """The `submission_id` origin marker for a story (None for Reddit-sourced
+    stories). A standalone read, deliberately NOT part of _COLUMNS, so the
+    pipeline's full-row story upsert never writes this TS-owned column. The render
+    pipeline uses it to gate the image-output safety check to submission content.
+    """
+    if not story_id:
+        return None
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT submission_id FROM stories WHERE id = %s", (story_id,)
+                )
+                row = cur.fetchone()
+                return dict(row).get("submission_id") if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT submission_id FROM stories WHERE id=?", (story_id,)
+        ).fetchone()
+        return dict(row).get("submission_id") if row else None
 
 
 def upsert_poll_if_absent(
