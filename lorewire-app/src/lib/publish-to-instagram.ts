@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
-import { ensureShortPoster } from "@/lib/short-poster";
+import { ensureOgPoster, ensureShortPoster } from "@/lib/short-poster";
 
 // --- Types -----------------------------------------------------------------
 
@@ -712,12 +712,25 @@ async function runFullPipeline(
   let containerId = row.container_id;
 
   // Phase 2 (per _plans/2026-06-28-phase-2-social-poster-render.md):
-  // resolve the per-story poster URL BEFORE creating the container so
-  // the cover_url can land in the same POST. Best-effort: a null return
-  // (no poster generated / Cloud Run failed / brand-safety guard) just
-  // means the cover falls back to thumb_offset=0 = frame 0 of the MP4,
-  // which is the cold-open scene per PR #135's splice fix.
-  const poster = await ensureShortPoster(row.story_id);
+  // resolve the per-story portrait poster URL BEFORE creating the
+  // container so the cover_url can land in the same POST. Best-effort:
+  // a null return (no poster generated / Cloud Run failed / brand-
+  // safety guard) just means the cover falls back to thumb_offset=0 =
+  // frame 0 of the MP4, which is the cold-open scene per PR #135's
+  // splice fix.
+  //
+  // Phase 3 (per _plans/2026-06-29-phase-3-og-poster-cards.md): also
+  // kick off the LANDSCAPE 1200×630 OG-card render in parallel. Both
+  // helpers share the same LLM call (cached after first) so the
+  // marginal cost is one extra Cloud Run render. The OG result is NOT
+  // used by THIS publish — it's a side effect that stamps
+  // `short_config.og_poster_landscape_url` for the next OG bot fetch /
+  // page render. Best-effort: failure logs and returns null without
+  // throwing, so it can't block the IG publish.
+  const [poster] = await Promise.all([
+    ensureShortPoster(row.story_id),
+    ensureOgPoster(row.story_id),
+  ]);
   log("cover", {
     story_id: row.story_id,
     render_id: row.render_id,

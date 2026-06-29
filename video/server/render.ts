@@ -34,6 +34,7 @@ import {
 
 const COMPOSITION_ID = "DoodleShort";
 const POSTER_COMPOSITION_ID = "PosterStill";
+const POSTER_LANDSCAPE_COMPOSITION_ID = "PosterStillLandscape";
 
 /** Maximum size of a single intro/outro segment download, in bytes. Set
  *  generously — normalized 4 s segments at the 1080p contract weigh in
@@ -163,14 +164,24 @@ export type RenderFn = (
   segments?: SpliceSegments,
 ) => Promise<RenderResult>;
 
+/** Aspect routing for `/render-poster`. Phase 2 only knew portrait;
+ *  Phase 3 (_plans/2026-06-29-phase-3-og-poster-cards.md) adds
+ *  landscape for the OG card surface. Default stays `"portrait"` so
+ *  a stale dispatcher that doesn't yet send the field gets the
+ *  Phase 2 behavior unchanged. */
+export type PosterAspect = "portrait" | "landscape";
+
 /** Phase 2 — same seam pattern for the poster renderer. The HTTP
  *  layer stubs this for tests; production wires
  *  `renderPosterAndUploadStory`. Caller supplies the cache hash so
- *  one place (the helper) owns invalidation logic. */
+ *  one place (the helper) owns invalidation logic. Phase 3 adds the
+ *  `aspect` arg; portrait calls keep the existing 3-arg shape via
+ *  the default. */
 export type RenderPosterFn = (
   storyId: string,
   hash: string,
   inputProps: PosterInputProps,
+  aspect?: PosterAspect,
 ) => Promise<PosterRenderResult>;
 
 /** Real implementation. Production server passes this through to the
@@ -411,6 +422,7 @@ export async function renderPosterAndUploadStory(
   storyId: string,
   hash: string,
   inputProps: PosterInputProps,
+  aspect: PosterAspect = "portrait",
 ): Promise<PosterRenderResult> {
   const started = Date.now();
   const gcsBucket = process.env.GCS_BUCKET;
@@ -418,29 +430,36 @@ export async function renderPosterAndUploadStory(
     throw new Error("GCS_BUCKET not configured");
   }
 
-  // Same bundle handle the video render uses — Webpack bundles both
-  // compositions (DoodleShort + PosterStill) in one pass.
+  // Same bundle handle the video render uses — Webpack bundles all
+  // three compositions (DoodleShort + PosterStill + PosterStillLandscape)
+  // in one pass.
   const serveUrl = await getOrCreateBundle();
+
+  const compositionId =
+    aspect === "landscape"
+      ? POSTER_LANDSCAPE_COMPOSITION_ID
+      : POSTER_COMPOSITION_ID;
 
   console.info(
     "[cloud-run poster select]",
     JSON.stringify({
       story_id: storyId,
-      composition: POSTER_COMPOSITION_ID,
+      composition: compositionId,
+      aspect,
       hash,
     }),
   );
   const composition = await selectComposition({
     serveUrl,
-    id: POSTER_COMPOSITION_ID,
+    id: compositionId,
     inputProps: inputProps as unknown as Record<string, unknown>,
   });
 
-  // /tmp filename includes the hash so a concurrent retry for the same
-  // story (different hash) doesn't clobber an in-flight render.
+  // /tmp filename includes aspect so a concurrent portrait + landscape
+  // render of the same story can't clobber each other.
   const tmpPath = path.join(
     "/tmp",
-    `${sanitizeForFs(storyId)}-poster-${hash}.png`,
+    `${sanitizeForFs(storyId)}-poster-${aspect}-${hash}.png`,
   );
 
   console.info(
@@ -472,7 +491,13 @@ export async function renderPosterAndUploadStory(
 
   // Upload key includes the hash so the URL is deterministic per
   // (story, content). The publisher's HEAD-check uses the same path.
-  const key = `${sanitizeForFs(storyId)}-short/poster-${hash}.png`;
+  // Portrait keeps the Phase 2 key shape (poster-{hash}.png) for
+  // back-compat; landscape gets a distinct prefix so the two aspects
+  // can't collide on the same hash by accident.
+  const key =
+    aspect === "landscape"
+      ? `${sanitizeForFs(storyId)}-short/poster-landscape-${hash}.png`
+      : `${sanitizeForFs(storyId)}-short/poster-${hash}.png`;
   // Unlike the MP4 (which overwrites the same key on every re-render and
   // needs revalidation), the poster URL changes per content hash — the
   // BYTES at a given URL never change once written. Long-immutable cache

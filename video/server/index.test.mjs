@@ -67,14 +67,21 @@ before(async () => {
       duration_ms: 44321,
     };
   };
-  // Phase 2 stub for /render-poster. Same shape as the video stub.
-  const renderPoster = async (storyId, hash, inputProps) => {
-    lastPosterRenderCall = { storyId, hash, inputProps };
+  // Phase 2 stub for /render-poster, extended for Phase 3 aspect
+  // routing. The fourth arg (`aspect`) is optional in production
+  // (default "portrait"); the stub captures it so the aspect-routing
+  // tests can assert what the HTTP layer forwarded into the renderer.
+  const renderPoster = async (storyId, hash, inputProps, aspect) => {
+    lastPosterRenderCall = { storyId, hash, inputProps, aspect };
     if (storyId === "poster-boom") {
       throw new Error("renderStill failed: bad composition");
     }
+    // Landscape returns a distinct key shape (the GCS write uses
+    // `poster-landscape-{hash}.png`); the response URL mirrors that
+    // so the tests can assert routing reached the right composition.
+    const keyPrefix = aspect === "landscape" ? "poster-landscape-" : "poster-";
     return {
-      url: `https://storage.googleapis.com/test-bucket/${storyId}-short/poster-${hash}.png`,
+      url: `https://storage.googleapis.com/test-bucket/${storyId}-short/${keyPrefix}${hash}.png`,
       elapsed_ms: 678,
       hash,
     };
@@ -516,6 +523,58 @@ describe("Cloud Run render service /render-poster error mapping", () => {
     });
     assert.equal(status, 500);
     assert.match(body.error, /renderStill failed/);
+  });
+});
+
+// Phase 3 aspect routing. Per
+// _plans/2026-06-29-phase-3-og-poster-cards.md. The validator accepts
+// `aspect: "portrait" | "landscape"` (default "portrait" for back-
+// compat with stale dispatchers), forwards it to the renderer, and
+// rejects anything else with 400.
+describe("Cloud Run render service /render-poster aspect param", () => {
+  it("defaults to portrait when aspect is missing (Phase 2 back-compat)", async () => {
+    lastPosterRenderCall = null;
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: VALID_POSTER_BODY, // no aspect field
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.aspect, "portrait");
+    // GCS key shape is the Phase 2 key (no -landscape- segment).
+    assert.match(body.url, /-short\/poster-[a-f0-9]+\.png$/);
+  });
+
+  it("routes aspect=portrait explicitly", async () => {
+    lastPosterRenderCall = null;
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, aspect: "portrait" },
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.aspect, "portrait");
+  });
+
+  it("routes aspect=landscape to the landscape composition", async () => {
+    lastPosterRenderCall = null;
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, aspect: "landscape" },
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.aspect, "landscape");
+    // GCS key has the -landscape- segment so portrait and landscape
+    // can't collide on the same hash.
+    assert.match(body.url, /-short\/poster-landscape-[a-f0-9]+\.png$/);
+  });
+
+  it("returns 400 when aspect is an unrecognized string", async () => {
+    for (const bad of ["square", "PORTRAIT", "landscape ", 123, true, null]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: { ...VALID_POSTER_BODY, aspect: bad },
+      });
+      assert.equal(status, 400, `aspect=${JSON.stringify(bad)} must reject`);
+    }
   });
 });
 

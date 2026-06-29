@@ -607,3 +607,478 @@ export async function ensureShortPoster(
     source: "rendered",
   };
 }
+
+// ─── Phase 3: OG / Twitter landscape poster ───────────────────────────────────
+//
+// _plans/2026-06-29-phase-3-og-poster-cards.md.
+//
+// `ensureOgPoster` is a SECOND, parallel helper to ensureShortPoster.
+// Same LLM call (`generatePosterText`), same brand-safety / glyph /
+// RTL guards, same Cloud Run /render-poster endpoint — but:
+//   - Requests `aspect: "landscape"` (1200×630, not 1080×1920).
+//   - Reads / writes its OWN cached state on short_config
+//     (`og_poster_landscape_url`, `og_poster_disabled`, `og_poster_attempted_at`)
+//     so the Phase 2 portrait path stays byte-identical (no regression
+//     for the IG / FB / YT publishers).
+//   - Embeds a query-string version (`?v={hash}`) in the returned URL.
+//     Twitter's Card Validator was deprecated in 2025; query-string
+//     change is the only working cache-busting mechanism for X. Other
+//     crawlers (FB, LinkedIn, Slack, Discord, iMessage, WhatsApp) also
+//     treat a different query string as a different resource.
+//   - Stamps `og_poster_attempted_at` on EVERY attempt (success or
+//     guarded failure) so the one-shot backfill script can skip
+//     stories that just failed instead of re-attempting them every
+//     run (per the council Contrarian's Failure Mode #1).
+//
+// Returns a shape that maps cleanly into Next.js metadata:
+// `{ url, width, height, alt, hash, source }`.
+
+/** Setting key for the OG kill switch (default ON). Independent from
+ *  the Phase 2 publisher kill switch so an OG-specific issue (a
+ *  crawler bug, a viral takedown) can revert ONLY the OG path. */
+const SETTING_OG_ENABLED = "og.short_poster.enabled";
+
+/** How long after a guarded failure (profanity / glyph / RTL / missing
+ *  scene_1) we wait before re-attempting the same story. 7 days lets
+ *  an admin edit / re-publish recover lazily, but stops the backfill
+ *  script from burning Cloud Run cycles on the same broken stories
+ *  every hour. Per Contrarian Failure Mode #1. */
+const OG_REATTEMPT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Landscape dimensions — duplicated here from `video/src/PosterStill.tsx`'s
+ *  `LANDSCAPE_WIDTH` / `LANDSCAPE_HEIGHT` to avoid pulling the Remotion
+ *  composition file into the Next bundle. The values are baked into the
+ *  composition contract; if you change them, change both places (a unit
+ *  test pins parity). */
+export const OG_POSTER_WIDTH = 1200;
+export const OG_POSTER_HEIGHT = 630;
+
+export interface OgPoster {
+  /** Public URL of the landscape poster PNG, query-string-versioned
+   *  (`...png?v={hash}`) for platform cache-busting. */
+  url: string;
+  alt: string;
+  hash: string;
+  width: typeof OG_POSTER_WIDTH;
+  height: typeof OG_POSTER_HEIGHT;
+  source: PosterSource;
+}
+
+export interface EnsureOgPosterDeps {
+  fetch?: PosterFetchLike;
+  settings?: SettingLike;
+  chat?: ChatCompletionFn;
+  pickModel?: SelectedModelFn;
+  /** Test seam for the persistence call. Production uses
+   *  `setStoryShortConfigJson` from @/lib/repo; tests pass a fake
+   *  that records what was written. */
+  persistConfig?: (storyId: string, configJson: string) => Promise<void>;
+  /** Test seam for `now()` so the attempted_at window math is
+   *  deterministic. Defaults to `Date.now`. */
+  now?: () => number;
+}
+
+function ogLog(event: string, fields: Record<string, unknown>): void {
+  // eslint-disable-next-line no-console -- rule 14: namespaced observability
+  console.info(`[og poster ${event}]`, JSON.stringify(fields));
+}
+
+/** Compute the landscape cache hash. Includes the literal "landscape"
+ *  string so portrait and landscape can't collide on the same
+ *  scene_1+text — even if a future POSTER_VERSION bump happens to land
+ *  on the same hash. */
+export function computeOgPosterHash(scene_1_url: string, text: string): string {
+  return createHash("sha256")
+    .update(scene_1_url)
+    .update("\n")
+    .update(text)
+    .update("\n")
+    .update("landscape")
+    .update("\n")
+    .update(POSTER_VERSION)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/** Build the deterministic public URL for the landscape poster PNG.
+ *  Mirrors the GCS key Cloud Run writes to in video/server/render.ts
+ *  for `aspect: "landscape"`. The returned URL does NOT yet carry the
+ *  `?v={hash}` query string — that's added by the caller (so the HEAD
+ *  cache check can probe the raw bytes without the query string, which
+ *  most CDNs ignore for object lookup). */
+function ogPosterUrlForKey(storyId: string, hash: string): string {
+  const key = `${sanitizeStoryId(storyId)}-short/poster-landscape-${hash}.png`;
+  const base = mediaPublicBase();
+  if (base) return `${base}/${key}`;
+  const bucket = process.env.GCS_BUCKET;
+  if (!bucket) return "";
+  return `https://storage.googleapis.com/${bucket}/${key}`;
+}
+
+/** Append the cache-busting query string. Per the crawler-doc audit:
+ *  Twitter's Card Validator is deprecated (2025) and there's no API
+ *  purge mechanism; query-string change is the only working cache-
+ *  busting method. Other platforms also accept it. */
+function versionedUrl(baseUrl: string, hash: string): string {
+  return `${baseUrl}?v=${hash}`;
+}
+
+/** Read the cached OG poster state off short_config. Returns:
+ *   - { url, disabled, attemptedAtIso, config } when the row has a
+ *     short_config we can parse;
+ *   - null when the row / short_config is missing or unparseable.
+ *
+ *  Caller decides what to do with each field. Disabled stories get
+ *  short-circuited before any I/O. */
+async function loadCachedOgPosterState(storyId: string): Promise<{
+  url: string | undefined;
+  disabled: boolean;
+  attemptedAtIso: string | undefined;
+  config: Record<string, unknown>;
+} | null> {
+  const story = await getStory(storyId);
+  if (!story?.short_config) return null;
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(story.short_config);
+  } catch {
+    return null;
+  }
+  if (!parsedJson || typeof parsedJson !== "object" || Array.isArray(parsedJson)) {
+    return null;
+  }
+  const config = parsedJson as Record<string, unknown>;
+  const url =
+    typeof config.og_poster_landscape_url === "string"
+      ? config.og_poster_landscape_url
+      : undefined;
+  const disabled = config.og_poster_disabled === true;
+  const attemptedAtIso =
+    typeof config.og_poster_attempted_at === "string"
+      ? config.og_poster_attempted_at
+      : undefined;
+  return { url, disabled, attemptedAtIso, config };
+}
+
+/** Persist the OG poster state back to short_config. Writes whichever
+ *  of `og_poster_landscape_url` / `og_poster_attempted_at` are passed
+ *  (skip with `undefined` to leave a field untouched). Best-effort:
+ *  a failure logs + skips so the in-memory result still flows to the
+ *  caller for THIS request. */
+async function persistOgPosterState(
+  storyId: string,
+  patch: {
+    url?: string;
+    attemptedAtIso?: string;
+  },
+  deps: { persistConfig?: (storyId: string, configJson: string) => Promise<void> },
+): Promise<void> {
+  const cached = await loadCachedOgPosterState(storyId);
+  const config: Record<string, unknown> = cached?.config ?? {};
+  if (patch.url !== undefined) {
+    config.og_poster_landscape_url = patch.url;
+  }
+  if (patch.attemptedAtIso !== undefined) {
+    config.og_poster_attempted_at = patch.attemptedAtIso;
+  }
+  try {
+    if (deps.persistConfig) {
+      await deps.persistConfig(storyId, JSON.stringify(config));
+    } else {
+      await setStoryShortConfigJson(storyId, JSON.stringify(config));
+    }
+  } catch (e) {
+    ogLog("persist_failed", {
+      story_id: storyId,
+      reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
+}
+
+export async function ensureOgPoster(
+  storyId: string,
+  deps: EnsureOgPosterDeps = {},
+): Promise<OgPoster | null> {
+  const fetchImpl = deps.fetch ?? defaultFetch;
+  const settings = deps.settings ?? (await import("@/lib/repo"));
+  const now = deps.now ?? Date.now;
+
+  const t0 = now();
+
+  // Kill switch — admin can flip OFF without code change if a 2026
+  // crawler bug or a viral takedown demands reverting the OG path
+  // without touching the publisher cover path. Default ON.
+  const enabledRaw = (await settings.getSetting(SETTING_OG_ENABLED)) ?? "1";
+  if (enabledRaw === "0") {
+    ogLog("ensure_skipped", { story_id: storyId, reason: "setting_off" });
+    return null;
+  }
+
+  // Per-story kill switch. The metadata reader respects this too, but
+  // checking here saves work when the backfill script revisits a
+  // disabled story.
+  const cached = await loadCachedOgPosterState(storyId);
+  if (cached?.disabled) {
+    ogLog("ensure_skipped", {
+      story_id: storyId,
+      reason: "disabled_per_story",
+    });
+    return null;
+  }
+
+  // Render inputs (scene_1_url + spoken hook fallback) come from the
+  // shared portrait-helper loader so both paths see the same picks.
+  const inputs = await loadStoryInputsFromRender(storyId);
+  if (!inputs) {
+    ogLog("ensure_skipped", {
+      story_id: storyId,
+      reason: "missing_render_props",
+    });
+    return null;
+  }
+  if (inputs.scene_1_url.length > URL_MAX_CHARS) {
+    ogLog("ensure_skipped", {
+      story_id: storyId,
+      reason: "scene_1_url_too_long",
+    });
+    return null;
+  }
+
+  // Resolve poster text — same flow as portrait. Cache > LLM generate +
+  // persist > spoken hook fallback. Sharing the LLM call means a story's
+  // first publish to ANY surface (social or OG) generates the text once,
+  // and both surfaces see it.
+  const cachedText = await loadCachedPosterText(storyId);
+  let text: string;
+  let textSource: "config" | "generated" | "hook" = "config";
+  if (cachedText) {
+    text = cachedText.text;
+  } else {
+    const generated = await generatePosterText(storyId, {
+      chat: deps.chat,
+      pickModel: deps.pickModel,
+    });
+    if (generated) {
+      text = generated;
+      textSource = "generated";
+      await persistPosterText(storyId, generated);
+    } else if (inputs.hook) {
+      text = inputs.hook;
+      textSource = "hook";
+    } else {
+      ogLog("ensure_skipped", {
+        story_id: storyId,
+        reason: "no_text_source",
+      });
+      // Stamp attempted_at so the backfill script doesn't immediately
+      // retry this story (we just spent an LLM call to learn it can't
+      // be rendered today).
+      const nowIso = new Date(now()).toISOString();
+      await persistOgPosterState(
+        storyId,
+        { attemptedAtIso: nowIso },
+        { persistConfig: deps.persistConfig },
+      );
+      return null;
+    }
+  }
+
+  // Guards. Reuse the portrait helper's text guard (same brand-safety,
+  // glyph, RTL rules). On rejection: stamp attempted_at so the
+  // backfill script's 7-day window kicks in, then return null.
+  const guard = guardText(text);
+  if (guard) {
+    const nowIso = new Date(now()).toISOString();
+    ogLog("ensure_skipped", {
+      story_id: storyId,
+      reason: guard,
+      text_source: textSource,
+    });
+    await persistOgPosterState(
+      storyId,
+      { attemptedAtIso: nowIso },
+      { persistConfig: deps.persistConfig },
+    );
+    return null;
+  }
+
+  // Hash + URL. The HEAD cache check probes the raw URL (no query
+  // string — most CDNs ignore query strings for object lookup, so the
+  // bytes-at-URL check is the same with or without `?v=`). The returned
+  // URL DOES include `?v=` for platform cache invalidation.
+  const hash = computeOgPosterHash(inputs.scene_1_url, text);
+  const baseUrl = ogPosterUrlForKey(storyId, hash);
+  if (!baseUrl) {
+    ogLog("ensure_skipped", { story_id: storyId, reason: "no_media_base" });
+    return null;
+  }
+  const url = versionedUrl(baseUrl, hash);
+
+  // 1) HEAD the raw URL — cache hit returns immediately.
+  try {
+    const head = await fetchImpl(baseUrl, {
+      method: "HEAD",
+      signal: timeoutSignal(HEAD_TIMEOUT_MS),
+    });
+    if (head.ok) {
+      const nowIso = new Date(now()).toISOString();
+      ogLog("cached", {
+        story_id: storyId,
+        hash,
+        elapsed_ms: now() - t0,
+        text_source: textSource,
+      });
+      // Stamp the URL + attempted_at so the metadata reader picks up
+      // the cache hit on the next page load (it would have worked
+      // without this stamp because we return the URL, but stamping
+      // means a future OG bot fetch reads it O(1) from short_config
+      // without re-running ensureOgPoster).
+      await persistOgPosterState(
+        storyId,
+        { url, attemptedAtIso: nowIso },
+        { persistConfig: deps.persistConfig },
+      );
+      return {
+        url,
+        alt: buildAlt(text),
+        hash,
+        width: OG_POSTER_WIDTH,
+        height: OG_POSTER_HEIGHT,
+        source: "cached",
+      };
+    }
+  } catch (e) {
+    ogLog("head_failed", {
+      story_id: storyId,
+      hash,
+      reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
+
+  // 2) Render via Cloud Run with aspect=landscape.
+  const cloudRunUrl = process.env.CLOUD_RUN_RENDER_URL;
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cloudRunUrl || !cronSecret) {
+    ogLog("ensure_skipped", {
+      story_id: storyId,
+      hash,
+      reason: "cloud_run_env_missing",
+    });
+    return null;
+  }
+  const renderUrl = `${cloudRunUrl.replace(/\/$/, "")}/render-poster`;
+  const renderBody = JSON.stringify({
+    storyId,
+    hash,
+    aspect: "landscape",
+    inputProps: {
+      scene_1_url: inputs.scene_1_url,
+      text,
+      brand_text: "LORE WIRE",
+    },
+  });
+  let renderResp;
+  const tRender = now();
+  try {
+    renderResp = await fetchImpl(renderUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cronSecret}`,
+      },
+      body: renderBody,
+      signal: timeoutSignal(RENDER_TIMEOUT_MS),
+    });
+  } catch (e) {
+    // Stamp attempted_at on render-failure too — a transient Cloud Run
+    // outage shouldn't trigger immediate retry on every story in the
+    // backfill window.
+    const nowIso = new Date(now()).toISOString();
+    ogLog("render_failed", {
+      story_id: storyId,
+      hash,
+      reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+      elapsed_ms: now() - tRender,
+    });
+    await persistOgPosterState(
+      storyId,
+      { attemptedAtIso: nowIso },
+      { persistConfig: deps.persistConfig },
+    );
+    return null;
+  }
+  if (!renderResp.ok) {
+    const bodyText = await renderResp.text().catch(() => "");
+    const nowIso = new Date(now()).toISOString();
+    ogLog("render_failed", {
+      story_id: storyId,
+      hash,
+      http_status: renderResp.status,
+      reason: bodyText.slice(0, 200),
+      elapsed_ms: now() - tRender,
+    });
+    await persistOgPosterState(
+      storyId,
+      { attemptedAtIso: nowIso },
+      { persistConfig: deps.persistConfig },
+    );
+    return null;
+  }
+  const data = (await renderResp.json().catch(() => null)) as
+    | { url?: unknown; hash?: unknown }
+    | null;
+  if (!data || typeof data.url !== "string" || data.url.length === 0) {
+    const nowIso = new Date(now()).toISOString();
+    ogLog("render_failed", {
+      story_id: storyId,
+      hash,
+      reason: "200 but missing url",
+      elapsed_ms: now() - tRender,
+    });
+    await persistOgPosterState(
+      storyId,
+      { attemptedAtIso: nowIso },
+      { persistConfig: deps.persistConfig },
+    );
+    return null;
+  }
+  // Cloud Run returns the base URL; we add `?v=` here so the stamped
+  // URL is platform-cache-bustable on every share.
+  const versioned = versionedUrl(data.url, hash);
+  const nowIso = new Date(now()).toISOString();
+  ogLog("rendered", {
+    story_id: storyId,
+    hash,
+    elapsed_ms: now() - t0,
+    render_elapsed_ms: now() - tRender,
+    text_source: textSource,
+  });
+  await persistOgPosterState(
+    storyId,
+    { url: versioned, attemptedAtIso: nowIso },
+    { persistConfig: deps.persistConfig },
+  );
+  return {
+    url: versioned,
+    alt: buildAlt(text),
+    hash,
+    width: OG_POSTER_WIDTH,
+    height: OG_POSTER_HEIGHT,
+    source: "rendered",
+  };
+}
+
+/** The one-shot backfill script's gate: should this story be
+ *  re-attempted right now? Returns true when the story has never
+ *  been attempted OR the last attempt is older than
+ *  `OG_REATTEMPT_WINDOW_MS`. The script reads `og_poster_attempted_at`
+ *  off short_config and feeds it here, so we don't re-query the DB. */
+export function shouldReattemptOgPoster(
+  attemptedAtIso: string | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!attemptedAtIso) return true;
+  const attemptedAt = Date.parse(attemptedAtIso);
+  if (!Number.isFinite(attemptedAt)) return true;
+  return now - attemptedAt >= OG_REATTEMPT_WINDOW_MS;
+}

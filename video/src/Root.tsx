@@ -11,9 +11,13 @@ import React from "react";
 import { Composition, registerRoot, type CalculateMetadataFunction } from "remotion";
 import { DoodleShort } from "./DoodleShort";
 import {
+  LANDSCAPE_HEIGHT,
+  LANDSCAPE_WIDTH,
   POSTER_HEIGHT,
   POSTER_WIDTH,
   PosterStill,
+  PosterStillLandscape,
+  type PosterStillLandscapeProps,
   type PosterStillProps,
 } from "./PosterStill";
 import type { ShortVideoConfig } from "./types";
@@ -71,10 +75,21 @@ const DEFAULT_PROPS: ShortVideoConfig = {
 
 const DoodleShortLoose = DoodleShort as unknown as React.ComponentType<LooseProps>;
 const PosterStillLoose = PosterStill as unknown as React.ComponentType<LooseProps>;
+const PosterStillLandscapeLoose =
+  PosterStillLandscape as unknown as React.ComponentType<LooseProps>;
 
 // PosterStill defaults — only used by Remotion Studio preview when no
 // --props is passed. The pipeline render always supplies real props.
 const POSTER_DEFAULT_PROPS: PosterStillProps = {
+  scene_1_url: "",
+  text: "Her refusal ended everything.",
+  brand_text: "LORE WIRE",
+};
+
+// Phase 3 landscape OG-card defaults. Same shape as the portrait, just
+// rendered into the 1200×630 PosterStillLandscape composition. Studio-
+// preview only; production always supplies real props.
+const POSTER_LANDSCAPE_DEFAULT_PROPS: PosterStillLandscapeProps = {
   scene_1_url: "",
   text: "Her refusal ended everything.",
   brand_text: "LORE WIRE",
@@ -102,6 +117,19 @@ const Root: React.FC = () => (
       height={POSTER_HEIGHT}
       durationInFrames={1}
       defaultProps={POSTER_DEFAULT_PROPS as unknown as LooseProps}
+    />
+    {/* Phase 3 landscape OG-card composition. Same renderStill seam,
+        different aspect. Selected by the Cloud Run /render-poster
+        endpoint when `aspect: "landscape"` is requested. Per
+        _plans/2026-06-29-phase-3-og-poster-cards.md. */}
+    <Composition
+      id="PosterStillLandscape"
+      component={PosterStillLandscapeLoose}
+      fps={FPS}
+      width={LANDSCAPE_WIDTH}
+      height={LANDSCAPE_HEIGHT}
+      durationInFrames={1}
+      defaultProps={POSTER_LANDSCAPE_DEFAULT_PROPS as unknown as LooseProps}
     />
   </>
 );

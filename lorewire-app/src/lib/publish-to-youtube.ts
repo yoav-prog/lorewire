@@ -34,7 +34,7 @@ import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
-import { ensureShortPoster } from "@/lib/short-poster";
+import { ensureOgPoster, ensureShortPoster } from "@/lib/short-poster";
 import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
 
 // --- Types -----------------------------------------------------------------
@@ -1188,7 +1188,12 @@ export async function publishShortToYouTube(
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
   let thumbnailUrl: string | null = null;
   if (uploadCustomThumbnail) {
-    const poster = await ensureShortPoster(args.storyId);
+    // Phase 3: parallel landscape OG poster. Same shared LLM call as
+    // the portrait helper; OG result is a side effect.
+    const [poster] = await Promise.all([
+      ensureShortPoster(args.storyId),
+      ensureOgPoster(args.storyId),
+    ]);
     thumbnailUrl = poster?.url ?? (await resolveShortThumbnailUrl(args.storyId));
   }
 
@@ -1534,7 +1539,11 @@ export async function attemptYouTubePublishForRow(
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
   let thumbnailUrl: string | null = null;
   if (uploadCustomThumbnailToggle) {
-    const poster = await ensureShortPoster(row.story_id);
+    // Phase 3: parallel landscape OG poster.
+    const [poster] = await Promise.all([
+      ensureShortPoster(row.story_id),
+      ensureOgPoster(row.story_id),
+    ]);
     thumbnailUrl =
       poster?.url ?? (await resolveShortThumbnailUrl(row.story_id));
   }
