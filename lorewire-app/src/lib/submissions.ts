@@ -191,6 +191,16 @@ export async function listSubmissionQueue(
   );
 }
 
+/** Count of submissions awaiting admin attention (the review queue), for the
+ *  sidebar badge. */
+export async function countSubmissionQueue(): Promise<number> {
+  const row = await one<{ n: number }>(
+    `SELECT COUNT(*) AS n FROM submissions
+      WHERE status IN ('pending_review', 'quarantined')`,
+  );
+  return Number(row?.n ?? 0);
+}
+
 /** Lazy publish sync for the pilot (which uses manual one-click publish, so there
  *  is no render-completion cron): flip a user's 'rendering' submissions to
  *  'published' once an admin has published the promoted story. Idempotent and

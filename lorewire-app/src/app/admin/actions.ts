@@ -3355,6 +3355,17 @@ export async function countActiveStoryJobsAction(): Promise<number> {
   return count;
 }
 
+// 2026-06-29 sidebar submissions badge. Same shape as the live-runs badge: a
+// single integer, polled across admin pages so the count of submissions awaiting
+// review is glanceable. Plan: _plans/2026-06-29-user-submitted-stories.md.
+export async function countSubmissionQueueAction(): Promise<number> {
+  await requireCapability("content.manage");
+  const { countSubmissionQueue } = await import("@/lib/submissions");
+  const count = await countSubmissionQueue();
+  console.info("[sidebar submissions badge action] count", { count });
+  return count;
+}
+
 // --- Bulk content actions (2026-06-19) --------------------------------------
 // Plan: _plans/2026-06-19-content-bulk-actions.md.
 //
