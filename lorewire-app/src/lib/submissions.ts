@@ -25,6 +25,7 @@ export type SubmissionStatus =
   | "pending_text_check"
   | "pending_review"
   | "rejected"
+  | "quarantined"
   | "approved"
   | "rendering"
   | "published"
@@ -48,6 +49,7 @@ export interface SubmissionRow {
   reject_reason: string | null;
   moderation_source: string | null;
   moderation_confidence: number | null;
+  ai_signal: string | null;
   resubmit_count: number | null;
   story_id: string | null;
   approved_by: string | null;
@@ -60,7 +62,7 @@ export interface SubmissionRow {
 const SUBMISSION_COLS =
   "id, user_id, display_name, lang, title, body, dilemma_question, " +
   "option_a_text, option_b_text, status, reject_category, reject_reason, " +
-  "moderation_source, moderation_confidence, resubmit_count, story_id, " +
+  "moderation_source, moderation_confidence, ai_signal, resubmit_count, story_id, " +
   "approved_by, approved_at, render_choice, created_at, updated_at";
 
 // "Active" = consuming a review/render slot. Drives the per-user pending cap.
@@ -172,6 +174,20 @@ export async function listUserSubmissions(
     `SELECT ${SUBMISSION_COLS} FROM submissions
       WHERE user_id = ? ORDER BY created_at DESC`,
     [userId],
+  );
+}
+
+/** The admin review queue: submissions awaiting a human decision
+ *  (pending_review) plus the non-discretionary quarantine, oldest first (FIFO). */
+export async function listSubmissionQueue(
+  limit = 200,
+): Promise<SubmissionRow[]> {
+  return all<SubmissionRow>(
+    `SELECT ${SUBMISSION_COLS} FROM submissions
+      WHERE status IN ('pending_review', 'quarantined')
+      ORDER BY created_at ASC
+      LIMIT ?`,
+    [limit],
   );
 }
 
@@ -398,6 +414,7 @@ export interface SubmissionStatusFields {
   reason?: string | null;
   moderationSource?: string | null;
   moderationConfidence?: number | null;
+  aiSignal?: string | null;
   storyId?: string | null;
   approvedBy?: string | null;
   renderChoice?: string | null;
@@ -425,6 +442,7 @@ export async function setSubmissionStatus(
     reason: fields.reason ?? current.reject_reason,
     source: fields.moderationSource ?? current.moderation_source,
     confidence: fields.moderationConfidence ?? current.moderation_confidence,
+    aiSignal: fields.aiSignal ?? current.ai_signal,
     storyId: fields.storyId ?? current.story_id,
     approvedBy: fields.approvedBy ?? current.approved_by,
     renderChoice: fields.renderChoice ?? current.render_choice,
@@ -435,7 +453,7 @@ export async function setSubmissionStatus(
   await run(
     `UPDATE submissions SET
         status = ?, reject_category = ?, reject_reason = ?,
-        moderation_source = ?, moderation_confidence = ?, story_id = ?,
+        moderation_source = ?, moderation_confidence = ?, ai_signal = ?, story_id = ?,
         approved_by = ?, approved_at = ?, render_choice = ?, updated_at = ?
       WHERE id = ?`,
     [
@@ -444,6 +462,7 @@ export async function setSubmissionStatus(
       next.reason,
       next.source,
       next.confidence,
+      next.aiSignal,
       next.storyId,
       next.approvedBy,
       approvedAt,
