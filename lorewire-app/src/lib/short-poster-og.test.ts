@@ -17,7 +17,7 @@
 //   * cache hit returns versioned URL + stamps short_config
 //   * cache miss → POST aspect="landscape" → renders → stamps URL+attempted_at
 //   * LLM generation persists poster_text + stamps og_poster_*
-//   * guard rejections (glyph / RTL / profanity / all-caps / too long)
+//   * guard rejections (glyph / RTL / profanity / too long)
 //     still stamp og_poster_attempted_at so backfill skips them
 //   * Cloud Run failure stamps attempted_at (so backfill respects window)
 //   * payload shape: aspect="landscape", single `text` field
