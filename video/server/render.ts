@@ -24,7 +24,13 @@ import {
 } from "@remotion/renderer";
 import { Storage } from "@google-cloud/storage";
 
-import { buildConcatArgv } from "./ffmpeg.js";
+import {
+  buildConcatArgv,
+  HOOK_FIRST_FADE_SEC,
+  HOOK_FIRST_HOOK_GAP_SEC,
+  HOOK_FIRST_INTRO_GAP_SEC,
+  HOOK_FIRST_TAIL_HOLD_SEC,
+} from "./ffmpeg.js";
 import {
   isR2MediaActive,
   mediaBucket,
@@ -746,6 +752,13 @@ async function spliceWithSegments(opts: {
     bodyIndex,
     bodyTailPadSec: padSec,
     hookEndSec,
+    // The paced seams (fade-to-black + silent beat each side of the intro) are
+    // intrinsic to the hook-first reorder; 0 keeps the legacy hard cut for every
+    // non-hook-first render. Per _plans/2026-06-29-hook-first-clean-pacing.md.
+    fadeSec: hookFirstActive ? HOOK_FIRST_FADE_SEC : 0,
+    hookGapSec: hookFirstActive ? HOOK_FIRST_HOOK_GAP_SEC : 0,
+    introGapSec: hookFirstActive ? HOOK_FIRST_INTRO_GAP_SEC : 0,
+    tailHoldSec: hookFirstActive ? HOOK_FIRST_TAIL_HOLD_SEC : 0,
   });
   spliceLog("ffmpeg", {
     story_id: storyId,

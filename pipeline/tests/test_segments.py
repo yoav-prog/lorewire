@@ -432,6 +432,92 @@ class FfmpegCmdShapeTests(unittest.TestCase):
         )
         self.assertNotIn("-c:a", argv)
 
+    # ── Paced hook-first seams (fade-to-black + silent beat each side of the
+    # ── intro). _plans/2026-06-29-hook-first-clean-pacing.md. Mirrored in
+    # ── video/server/ffmpeg.test.mjs.
+
+    def test_splice_cmd_hook_first_paced_holds_frame_then_fades(self):
+        # body_hook freezes its last clean frame at hook_end (2.5) while the audio
+        # runs tail_hold (0.3) longer (so the last word finishes), then fades to
+        # black + silent beat; the intro holds a silent beat; body_rest fades in.
+        # The physical clips split at hook_end + tail_hold = 2.8.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5,
+            fade_sec=0.45, hook_gap_sec=1.1, intro_gap_sec=0.9, tail_hold_sec=0.3,
+        )
+        # body_hook runs to the split point; body_rest resumes there.
+        self.assertEqual(argv[2:8], ["-ss", "0", "-t", "2.8", "-i", "body.mp4"])
+        self.assertEqual(argv[10:14], ["-ss", "2.8", "-i", "body.mp4"])
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS,"
+            "tpad=stop_mode=clone:stop_duration=0.75,"
+            "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];"
+            "[0:a:0]apad=pad_dur=1.55[pa0];"
+            "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];"
+            "[1:a:0]apad=pad_dur=0.9[pa1];"
+            "[2:v:0]fade=t=in:st=0:d=0.45[pv2];"
+            "[2:a:0]afade=t=in:d=0.45[pa2];"
+            "[pv0][pa0][pv1][pa1][pv2][pa2][3:v:0][3:a:0]"
+            "concat=n=4:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_hook_first_paced_body_rest_keeps_outro_lead_in(self):
+        # body_rest fades back in AND keeps the outro lead-in pad on its tail.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5, body_tail_pad_sec=1.5,
+            fade_sec=0.45, hook_gap_sec=1.1, intro_gap_sec=0.9, tail_hold_sec=0.3,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertIn(
+            "[2:v:0]fade=t=in:st=0:d=0.45,tpad=stop_mode=clone:stop_duration=1.5[pv2];"
+            "[2:a:0]afade=t=in:d=0.45,apad=pad_dur=1.5[pa2];",
+            argv[fc_idx + 1],
+        )
+
+    def test_splice_cmd_hook_first_unpaced_is_byte_identical_legacy(self):
+        # All seam durations 0 -> the legacy hook-first filter, byte-for-byte
+        # (no [pv]/[pa] labels), so the pacing is strictly opt-in.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5, body_tail_pad_sec=1.5,
+            fade_sec=0.0, hook_gap_sec=0.0, intro_gap_sec=0.0,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];"
+            "[2:a:0]apad=pad_dur=1.5[ba];"
+            "[0:v:0][0:a:0][1:v:0][1:a:0][bv][ba][3:v:0][3:a:0]"
+            "concat=n=4:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_hook_first_paced_video_only_drops_audio(self):
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            has_audio=False,
+            body_index=1, hook_end_sec=2.5,
+            fade_sec=0.45, hook_gap_sec=1.1, intro_gap_sec=0.9, tail_hold_sec=0.3,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS,"
+            "tpad=stop_mode=clone:stop_duration=0.75,"
+            "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];"
+            "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];"
+            "[2:v:0]fade=t=in:st=0:d=0.45[pv2];"
+            "[pv0][pv1][pv2][3:v:0]concat=n=4:v=1:a=0[v]",
+        )
+        self.assertNotIn("apad", argv[fc_idx + 1])
+
 
 class OutroLeadInResolverTests(unittest.TestCase):
     """The setting-driven default for `outro_lead_in_sec`. Unset →
