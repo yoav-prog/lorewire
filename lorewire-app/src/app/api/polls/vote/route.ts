@@ -30,6 +30,7 @@
 // Plan: _plans/2026-06-17-engagement-polls.md (§7 + §9 + §15).
 
 import { NextResponse, type NextRequest } from "next/server";
+import { readActiveUserSession } from "@/lib/member-session";
 import { getOrIssueVoteToken } from "@/lib/poll-cookie";
 import {
   checkAndRecord,
@@ -172,6 +173,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const cookieToken = await getOrIssueVoteToken();
 
+  // Attribute the vote to the account when signed in (suspended-aware → null,
+  // which records anonymously). Logged-out votes stay anonymous, anchored to
+  // the cookie exactly as before — this only adds the user_id when we have one.
+  const session = await readActiveUserSession();
+
   const result = await recordVote({
     pollId: poll.id,
     storyId: poll.story_id,
@@ -179,6 +185,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     category: poll.category,
     side: body.side,
     cookieToken,
+    userId: session?.userId ?? null,
     ipUaHash: hash,
   });
   if (!result.ok) {

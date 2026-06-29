@@ -6,7 +6,7 @@
 // Plan: _plans/2026-06-17-engagement-polls.md.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { run } from "@/lib/db";
+import { one, run } from "@/lib/db";
 import {
   CATEGORY_POLL_PRESETS,
   computeArticlePollAggregate,
@@ -574,6 +574,100 @@ describe("recordVote", () => {
     } finally {
       oneSpy.mockRestore();
     }
+  });
+
+  // 2026-06-29 contributor profiles: a signed-in vote is attributed to the
+  // account AT VOTE TIME (the reconciliation step only backfills votes cast
+  // BEFORE sign-in). Idempotency then spans (poll_id, user_id) too, so one
+  // account gets one vote per poll across every browser. Anonymous voting is
+  // unchanged. Plan: _plans/2026-06-29-contributor-profiles-gamification.md.
+  it("attributes a signed-in vote to the user_id", async () => {
+    const pollId = await seedPoll("test-poll-vote-user-1");
+    const r = await recordVote({
+      pollId,
+      storyId: "test-poll-vote-user-1",
+      category: "Drama",
+      side: "A",
+      cookieToken: "cookie-u1",
+      userId: "user-1",
+      ipUaHash: null,
+    });
+    expect(r.inserted).toBe(true);
+    const row = await one<{ user_id: string | null }>(
+      "SELECT user_id FROM poll_votes WHERE poll_id = ? AND cookie_token = ?",
+      [pollId, "cookie-u1"],
+    );
+    expect(row?.user_id).toBe("user-1");
+  });
+
+  it("leaves user_id NULL for an anonymous vote", async () => {
+    const pollId = await seedPoll("test-poll-vote-anon-1");
+    await recordVote({
+      pollId,
+      storyId: "test-poll-vote-anon-1",
+      category: "Drama",
+      side: "A",
+      cookieToken: "cookie-anon",
+      ipUaHash: null,
+    });
+    const row = await one<{ user_id: string | null }>(
+      "SELECT user_id FROM poll_votes WHERE poll_id = ? AND cookie_token = ?",
+      [pollId, "cookie-anon"],
+    );
+    expect(row?.user_id ?? null).toBeNull();
+  });
+
+  it("same account from a second browser (new cookie) is an idempotent no-op", async () => {
+    const pollId = await seedPoll("test-poll-vote-user-2");
+    const first = await recordVote({
+      pollId,
+      storyId: "test-poll-vote-user-2",
+      category: "Drama",
+      side: "A",
+      cookieToken: "cookie-browser-1",
+      userId: "user-2",
+      ipUaHash: null,
+    });
+    const second = await recordVote({
+      pollId,
+      storyId: "test-poll-vote-user-2",
+      category: "Drama",
+      side: "B", // different browser AND a flipped side; first vote still stands
+      cookieToken: "cookie-browser-2",
+      userId: "user-2",
+      ipUaHash: null,
+    });
+    expect(first.inserted).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(second.inserted).toBe(false);
+    const count = await one<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM poll_votes WHERE poll_id = ? AND user_id = ?",
+      [pollId, "user-2"],
+    );
+    expect(Number(count?.n)).toBe(1);
+  });
+
+  it("two different accounts each get a row on the same poll", async () => {
+    const pollId = await seedPoll("test-poll-vote-user-3");
+    const a = await recordVote({
+      pollId,
+      storyId: "test-poll-vote-user-3",
+      category: "Drama",
+      side: "A",
+      cookieToken: "cookie-ua",
+      userId: "user-A",
+      ipUaHash: null,
+    });
+    const b = await recordVote({
+      pollId,
+      storyId: "test-poll-vote-user-3",
+      category: "Drama",
+      side: "B",
+      cookieToken: "cookie-ub",
+      userId: "user-B",
+      ipUaHash: null,
+    });
+    expect(a.inserted && b.inserted).toBe(true);
   });
 });
 
