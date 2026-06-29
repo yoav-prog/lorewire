@@ -273,6 +273,11 @@ export const USERS: Table = {
     { name: "totp_secret", type: "TEXT" },
     { name: "mfa_enabled", type: "INTEGER" },
     { name: "totp_backup_codes", type: "TEXT" },
+    // 2026-06-29 contributor profiles. Opt-out for the public profile at
+    // /u/[id]: NULL/0 = public (default), 1 = hidden (the page 404s and the
+    // story byline / comment author render as plain text, no link). Plan:
+    // _plans/2026-06-29-contributor-profiles-gamification.md.
+    { name: "profile_hidden", type: "INTEGER" },
   ],
 };
 

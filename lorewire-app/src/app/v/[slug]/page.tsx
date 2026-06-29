@@ -33,6 +33,7 @@ import {
   toResultView,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
+import { getSubmissionAttribution } from "@/lib/submissions";
 import { SubmissionReportLink } from "./SubmissionReportLink";
 
 // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
@@ -204,6 +205,13 @@ export default async function StoryReader({
   const videoAspect = await resolveStoryAspect(story.video_config);
   const videoCssRatio = aspectDims(videoAspect).cssRatio;
 
+  // User-submitted stories carry no Reddit source; instead we attribute them to
+  // the submitter, linking to their public contributor profile (unless they've
+  // hidden it or are suspended, in which case the name shows as plain text).
+  const attribution = story.submission_id
+    ? await getSubmissionAttribution(story.submission_id)
+    : null;
+
   // Phase 2 of _plans/2026-06-17-engagement-polls.md. The widget
   // lives between video and body — high enough that a phone user
   // sees it after the play, low enough that the question doesn't
@@ -326,8 +334,27 @@ export default async function StoryReader({
         )}
 
         {story.submission_id && (
-          <footer className="border-t border-line pt-4">
-            <SubmissionReportLink storyId={story.id} />
+          <footer className="border-t border-line pt-4 text-[13px] text-muted">
+            {attribution && (
+              <p>
+                Submitted by{" "}
+                {attribution.profilePublic ? (
+                  <Link
+                    href={`/u/${attribution.userId}`}
+                    className="font-medium text-ink underline decoration-line hover:decoration-accent"
+                  >
+                    {attribution.displayName}
+                  </Link>
+                ) : (
+                  <span className="font-medium text-ink">
+                    {attribution.displayName}
+                  </span>
+                )}
+              </p>
+            )}
+            <div className={attribution ? "mt-2" : undefined}>
+              <SubmissionReportLink storyId={story.id} />
+            </div>
           </footer>
         )}
 

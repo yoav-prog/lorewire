@@ -70,6 +70,9 @@ export interface UserRow {
   totp_secret: string | null;
   mfa_enabled: number | null;
   totp_backup_codes: string | null;
+  // 2026-06-29 contributor profiles. 1 = the user hid their public profile;
+  // NULL/0 = public (default).
+  profile_hidden: number | null;
 }
 
 export type UserStatus = "active" | "suspended";
@@ -341,6 +344,24 @@ export async function updateUserProfile(
     fields: sets.map((s) => s.split(" ")[0]),
   });
   return updated;
+}
+
+/** Show or hide the user's public contributor profile (/u/[id]). Hidden = the
+ *  page 404s and the story byline / comment author render as plain text. Opt-out
+ *  only; the default is visible. 2026-06-29 contributor profiles. */
+export async function setProfileVisibility(
+  userId: string,
+  hidden: boolean,
+): Promise<void> {
+  if (!userId) return;
+  await run("UPDATE users SET profile_hidden = ? WHERE id = ?", [
+    hidden ? 1 : 0,
+    userId,
+  ]);
+  console.info("[auth users profile visibility]", {
+    user_id_hash: hashForLog(userId),
+    hidden,
+  });
 }
 
 /** First 8 hex chars of a one-way hash. Safe to log per rule 13 (no
