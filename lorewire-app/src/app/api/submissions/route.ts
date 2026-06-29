@@ -12,6 +12,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { readActiveUserSession } from "@/lib/member-session";
+import { screenSubmission } from "@/lib/submission-moderation";
 import {
   createSubmission,
   parseSubmissionInput,
@@ -72,9 +73,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   try {
     const input = parseSubmissionInput(raw);
-    const submission = id
+    let submission = id
       ? await updateSubmission({ id, userId: session.userId, input, action })
       : await createSubmission({ userId: session.userId, input, action });
+    // Screen newly-submitted text inline: clear violations auto-reject with a
+    // reason, the rest enters the human queue. A draft save doesn't get screened.
+    if (action === "submit" && submission.status === "pending_review") {
+      const screened = await screenSubmission(submission);
+      if (screened) submission = screened;
+    }
     return NextResponse.json({
       ok: true,
       submission: { id: submission.id, status: submission.status },

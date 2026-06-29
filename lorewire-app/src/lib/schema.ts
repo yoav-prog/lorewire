@@ -1101,6 +1101,9 @@ export const SUBMISSIONS: Table = {
     // 'tier1' | 'tier2' | 'auto' | 'timeout'. Phase 1 writes 'human' / null.
     { name: "moderation_source", type: "TEXT" },
     { name: "moderation_confidence", type: "REAL" },
+    // The judge's full structured read (JSON), stored for the admin queue and the
+    // Phase 5 training corpus. Null until the moderator runs.
+    { name: "ai_signal", type: "TEXT" },
     // Bumped each time the author edits a rejected submission and resends it.
     { name: "resubmit_count", type: "INTEGER" },
     // The promoted story once approved; NULL until then.

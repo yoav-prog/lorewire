@@ -139,6 +139,16 @@ const STATIC_GROUPS: SidebarGroup[] = [
         capability: "content.manage",
       },
       {
+        // User-submitted dilemmas awaiting a human decision — the human side of
+        // the submission moderator. content.manage like comments; the page + its
+        // server actions enforce the same capability. Plan:
+        // _plans/2026-06-29-user-submitted-stories.md.
+        href: "/admin/submissions",
+        label: "Submissions",
+        activePrefixes: ["/admin/submissions"],
+        capability: "content.manage",
+      },
+      {
         href: "/admin/settings",
         label: "Settings",
         // All four config URLs land on the Settings hub with the right

@@ -10,6 +10,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { listUserSubmissions, type SubmissionRow } from "@/lib/submissions";
+import { resolveReason } from "@/lib/submission-reasons";
 import { readUserSession } from "@/lib/user-session";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +25,7 @@ const STATE: Record<string, { label: string; tone: string }> = {
   pending_text_check: { label: "In review", tone: "text-muted" },
   pending_review: { label: "In review", tone: "text-muted" },
   rejected: { label: "Needs another look", tone: "text-danger" },
+  quarantined: { label: "Not accepted", tone: "text-danger" },
   approved: { label: "Approved — making your video", tone: "text-ink" },
   rendering: { label: "Approved — making your video", tone: "text-ink" },
   published: { label: "Live", tone: "text-accent" },
@@ -49,6 +51,9 @@ function SubmissionCard({ s }: { s: SubmissionRow }) {
   const state = stateOf(s.status);
   const dir = s.lang === "he" ? "rtl" : "ltr";
   const editable = s.status === "draft" || s.status === "rejected";
+  const reason = s.reject_category
+    ? resolveReason(s.reject_category, s.lang ?? "en")
+    : null;
 
   return (
     <li className="rounded-md border border-line bg-surface px-4 py-3">
@@ -65,6 +70,18 @@ function SubmissionCard({ s }: { s: SubmissionRow }) {
       <p dir={dir} className="mt-1 text-sm text-muted">
         {s.dilemma_question}
       </p>
+
+      {reason && (
+        <div
+          dir={dir}
+          className="mt-2 rounded-md border border-line bg-bg px-3 py-2 text-[13px]"
+        >
+          <p className="font-medium text-ink">{reason.title}</p>
+          <p className="mt-0.5 text-muted">{reason.message}</p>
+          {reason.fix && <p className="mt-1 text-muted">{reason.fix}</p>}
+        </div>
+      )}
+
       <div className="mt-2 flex items-center gap-3 text-[12px] text-muted">
         <span>{formatDate(s.created_at)}</span>
         {editable && (
@@ -72,7 +89,7 @@ function SubmissionCard({ s }: { s: SubmissionRow }) {
             href={`/submissions/new?id=${s.id}`}
             className="font-mono uppercase tracking-[.15em] text-ink hover:underline"
           >
-            Edit
+            {s.status === "rejected" ? "Fix & resubmit" : "Edit"}
           </Link>
         )}
       </div>
