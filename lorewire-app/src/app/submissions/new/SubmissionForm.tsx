@@ -1,10 +1,10 @@
 "use client";
 
 // Client form backing the submission page. Posts to POST /api/submissions with
-// the lw_user cookie. The UI chrome is English (the app has no UI-translation
-// layer); the story + dilemma CONTENT can be English or Hebrew and the content
-// fields flip to RTL when Hebrew is chosen, the same convention articles use.
-// Two actions: save a draft, or submit for review.
+// the lw_user cookie. English-only for the pilot — the moderation, the reason
+// taxonomy and the viewer already handle Hebrew, so re-enabling it later is just
+// restoring the language toggle and the per-field `dir`. Two actions: save a
+// draft, or submit for review.
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
@@ -37,11 +37,8 @@ export default function SubmissionForm({
   const [question, setQuestion] = useState(initial?.question ?? "");
   const [optionA, setOptionA] = useState(initial?.optionA ?? "");
   const [optionB, setOptionB] = useState(initial?.optionB ?? "");
-  const [lang, setLang] = useState<"en" | "he">(initial?.lang ?? "en");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const dir = lang === "he" ? "rtl" : "ltr";
 
   async function send(action: "submit" | "draft") {
     setBusy(true);
@@ -59,7 +56,7 @@ export default function SubmissionForm({
           question,
           optionA,
           optionB,
-          lang,
+          lang: "en",
         }),
       });
       const data = (await res.json().catch(() => null)) as
@@ -92,37 +89,10 @@ export default function SubmissionForm({
         </p>
       )}
 
-      <div>
-        <span className={LABEL}>Story language</span>
-        <div className="mt-1 flex gap-2">
-          {(
-            [
-              ["en", "English"],
-              ["he", "עברית"],
-            ] as const
-          ).map(([value, display]) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setLang(value)}
-              className={
-                "rounded-md border px-3 py-1.5 text-sm " +
-                (lang === value
-                  ? "border-ink bg-ink text-bg"
-                  : "border-line text-muted hover:border-ink hover:text-ink")
-              }
-            >
-              {display}
-            </button>
-          ))}
-        </div>
-      </div>
-
       <label className="block">
         <span className={LABEL}>Title</span>
         <input
           type="text"
-          dir={dir}
           maxLength={120}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -135,7 +105,6 @@ export default function SubmissionForm({
       <label className="block">
         <span className={LABEL}>Your story</span>
         <textarea
-          dir={dir}
           rows={6}
           maxLength={5000}
           value={body}
@@ -154,7 +123,6 @@ export default function SubmissionForm({
         <span className={LABEL}>The dilemma</span>
         <input
           type="text"
-          dir={dir}
           maxLength={200}
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
@@ -169,7 +137,6 @@ export default function SubmissionForm({
           <span className={LABEL}>Option A</span>
           <input
             type="text"
-            dir={dir}
             maxLength={60}
             value={optionA}
             onChange={(e) => setOptionA(e.target.value)}
@@ -182,7 +149,6 @@ export default function SubmissionForm({
           <span className={LABEL}>Option B</span>
           <input
             type="text"
-            dir={dir}
             maxLength={60}
             value={optionB}
             onChange={(e) => setOptionB(e.target.value)}
