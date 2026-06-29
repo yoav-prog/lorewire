@@ -235,8 +235,7 @@ def build_plan_prompt(
         "valid JSON."
     )
     source_block = (
-        f"\nSOURCE ARTICLE (mine this for the protagonist's real demographics):\n"
-        f"\"\"\"\n{source.strip()}\n\"\"\"\n\n"
+        f"\n{shorts_narration.wrap_untrusted('SOURCE ARTICLE (mine this for the protagonist demographics)', source)}\n\n"
         if source.strip()
         else ""
     )
