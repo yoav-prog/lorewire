@@ -478,20 +478,33 @@ describe("ensureShortPoster — guard rejections", () => {
     expect(stub.calls).toHaveLength(0);
   });
 
-  it("rejects all-caps shock words 3+ chars", async () => {
+  it("allows all-caps text (the composition uppercases it anyway)", async () => {
     await seedStory(STORY, {
-      props: baseProps,
-      posterTextOnConfig: "YOU WILL NEVER BELIEVE what happened next.",
+      props: {
+        doodle_frames: [{ id: "frame-00", url: "https://media.lorewire.com/x/frame-00.png" }],
+        hook: "Eight hundred dollars. Gone.",
+      },
+      posterTextOnConfig: "YOU WILL NEVER BELIEVE WHAT HAPPENED NEXT.",
     });
-    const stub = makeFetchStub([]);
+    const stub = makeFetchStub([
+      { ok: false, status: 404 }, // HEAD miss
+      { ok: true, status: 200, body: {
+        url: "https://media.lorewire.com/story-poster-test-1-short/poster-caps1.png",
+        elapsed_ms: 700,
+        hash: "caps1",
+      } },
+    ]);
     const result = await ensureShortPoster(STORY, {
       fetch: stub.fetch,
       settings: makeSettings("1"),
       chat: noopChat.chat,
       pickModel: pickModelStub,
     });
-    expect(result).toBeNull();
-    expect(stub.calls).toHaveLength(0);
+    // All-caps now passes the guard -> proceeds to render (HEAD miss then POST).
+    expect(result).not.toBeNull();
+    expect(stub.calls).toHaveLength(2);
+    const sent = JSON.parse(stub.calls[1].body ?? "{}");
+    expect(sent.inputProps.text).toBe("YOU WILL NEVER BELIEVE WHAT HAPPENED NEXT.");
   });
 
   it("rejects profanity", async () => {
