@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { Capability } from "@/lib/authz";
 import SidebarLiveBadge from "./SidebarLiveBadge";
+import SidebarSubmissionsBadge from "./SidebarSubmissionsBadge";
 
 // Studio sidebar. Three primary destinations: Overview, Content, Settings.
 // Plus an optional Dev zone surfaced only when NODE_ENV !== 'production'
@@ -147,6 +148,7 @@ const STATIC_GROUPS: SidebarGroup[] = [
         label: "Submissions",
         activePrefixes: ["/admin/submissions"],
         capability: "content.manage",
+        slot: <SidebarSubmissionsBadge />,
       },
       {
         href: "/admin/settings",
