@@ -179,6 +179,13 @@ export default function SignInChip({
           >
             My List
           </a>
+          <a
+            href="/submissions"
+            role="menuitem"
+            className="block px-3 py-2 text-sm text-ink hover:bg-ink/5 focus:bg-ink/5 focus:outline-none"
+          >
+            Your submissions
+          </a>
           <button
             type="button"
             role="menuitem"
