@@ -11,8 +11,12 @@ import type { StoryRow } from "@/lib/repo";
 // Mirror the full StoryRow shape so callers don't get a partial type lie.
 // The reader page filters down to the fields it actually renders; this keeps
 // the typing honest and avoids a parallel PublicStoryRow that drifts.
+// submission_id is the origin marker for user-submitted stories. It drives the
+// public "Submitted by" byline + the victim-report link footer in /v/[slug]; it
+// was missing from this list, so both rendered against an undefined value (the
+// report footer never showed). Keep it selected here.
 const PUBLIC_COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex";
+  "id, reddit_id, submission_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex";
 
 export interface PublicStoryListRow {
   id: string;

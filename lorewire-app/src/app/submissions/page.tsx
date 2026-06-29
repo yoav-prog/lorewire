@@ -9,6 +9,8 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
+import { ContributorCard } from "@/components/ContributorCard";
+import { getContributionStats } from "@/lib/contributions";
 import { getAggregateByStoryId } from "@/lib/polls";
 import { getStory } from "@/lib/repo";
 import {
@@ -22,6 +24,7 @@ import {
   resolveReason,
 } from "@/lib/submission-reasons";
 import { readUserSession } from "@/lib/user-session";
+import { getUserById } from "@/lib/users";
 import { SubmissionDeleteButton } from "./SubmissionDeleteButton";
 
 interface PublishedView {
@@ -156,7 +159,12 @@ export default async function SubmissionsPage() {
   // Lazy publish sync (the pilot has no completion cron), then enrich published
   // submissions with their public slug + current vote split.
   await reconcilePublishedSubmissions(session.userId);
-  const submissions = await listUserSubmissions(session.userId);
+  const [user, stats, submissions] = await Promise.all([
+    getUserById(session.userId),
+    getContributionStats(session.userId),
+    listUserSubmissions(session.userId),
+  ]);
+  const profileHidden = Number(user?.profile_hidden) === 1;
   const cards = await Promise.all(
     submissions.map(async (s) => {
       if (s.status !== "published" || !s.story_id) {
@@ -196,6 +204,35 @@ export default async function SubmissionsPage() {
         >
           New submission
         </Link>
+      </div>
+
+      <div className="mt-6">
+        <ContributorCard
+          name={user?.name?.trim() || "You"}
+          pictureUrl={user?.picture_url ?? null}
+          memberSince={user?.created_at ?? null}
+          stats={stats}
+        />
+        <p className="mt-2 text-center text-[12px] text-muted">
+          {profileHidden ? (
+            <>
+              Your public profile is hidden.{" "}
+              <Link
+                href="/auth/account"
+                className="text-ink underline decoration-line hover:decoration-accent"
+              >
+                Manage visibility
+              </Link>
+            </>
+          ) : (
+            <Link
+              href={`/u/${session.userId}`}
+              className="text-ink underline decoration-line hover:decoration-accent"
+            >
+              View your public profile →
+            </Link>
+          )}
+        </p>
       </div>
 
       {cards.length === 0 ? (

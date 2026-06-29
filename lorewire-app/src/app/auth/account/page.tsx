@@ -9,6 +9,7 @@
 //
 // Plan: _plans/2026-06-19-anonymous-first-auth.md §UI surfaces.
 
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { getUserById } from "@/lib/users";
@@ -16,6 +17,7 @@ import { readUserSession } from "@/lib/user-session";
 import AccountForm from "./AccountForm";
 import DeleteAccount from "./DeleteAccount";
 import ExportData from "./ExportData";
+import ProfileVisibility from "./ProfileVisibility";
 
 export const dynamic = "force-dynamic";
 
@@ -35,12 +37,12 @@ export default async function AccountPage() {
 
   return (
     <div className="mx-auto max-w-xl px-6 py-10">
-      <a
+      <Link
         href="/"
         className="inline-flex items-center gap-1 text-[12px] font-mono uppercase tracking-[.2em] text-muted hover:text-ink"
       >
         ← Back
-      </a>
+      </Link>
       <h1 className="mt-4 font-display text-2xl font-bold uppercase tracking-tight text-ink">
         Account &amp; preferences
       </h1>
@@ -54,6 +56,8 @@ export default async function AccountPage() {
         initialName={user.name}
         initialPictureUrl={user.picture_url}
       />
+
+      <ProfileVisibility initialHidden={Number(user.profile_hidden) === 1} />
 
       <ExportData />
 

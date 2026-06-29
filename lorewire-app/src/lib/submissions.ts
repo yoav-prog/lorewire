@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 
 import { all, one, run } from "@/lib/db";
 import { getSetting, setStatus } from "@/lib/repo";
-import { getUserById } from "@/lib/users";
+import { getUserById, isSuspended } from "@/lib/users";
 
 // Closed enum carried in code (the DB column is plain TEXT). Lifecycle:
 //   draft -> pending_text_check -> pending_review -> rejected | approved
@@ -177,6 +177,30 @@ export async function listUserSubmissions(
   );
 }
 
+/** Who submitted the story behind a published submission, for the public "Submitted
+ *  by" byline. Takes the story's submission_id. `profilePublic` is false when the
+ *  submitter is suspended or has hidden their profile, so the caller shows the name
+ *  as plain text instead of a link. Returns null for a non-submission story. */
+export async function getSubmissionAttribution(
+  submissionId: string,
+): Promise<{ userId: string; displayName: string; profilePublic: boolean } | null> {
+  if (!submissionId) return null;
+  const row = await one<{
+    user_id: string;
+    display_name: string;
+    status: string | null;
+    profile_hidden: number | null;
+  }>(
+    `SELECT s.user_id, s.display_name, u.status, u.profile_hidden
+       FROM submissions s JOIN users u ON u.id = s.user_id
+      WHERE s.id = ?`,
+    [submissionId],
+  );
+  if (!row) return null;
+  const profilePublic = !isSuspended(row.status) && Number(row.profile_hidden) !== 1;
+  return { userId: row.user_id, displayName: row.display_name, profilePublic };
+}
+
 /** The admin review queue: submissions awaiting a human decision
  *  (pending_review) plus the non-discretionary quarantine, oldest first (FIFO). */
 export async function listSubmissionQueue(
@@ -321,9 +345,11 @@ async function resolveDisplayName(userId: string): Promise<string> {
   const user = await getUserById(userId);
   const name = user?.name?.trim();
   if (name) return name;
-  // Fall back to the email local-part so a published credit is never blank.
-  const local = (user?.email ?? "").split("@")[0]?.trim();
-  return local || "Anonymous";
+  // No account name: use a neutral credit. We deliberately do NOT fall back to
+  // the email local-part — display_name is shown publicly (the "Submitted by"
+  // byline on /v/[slug]), so an email-derived credit would leak PII the user
+  // never chose to publish (rule 13).
+  return "Anonymous";
 }
 
 async function insertEvent(
