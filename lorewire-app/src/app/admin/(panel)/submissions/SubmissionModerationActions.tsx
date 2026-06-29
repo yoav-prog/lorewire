@@ -7,7 +7,11 @@
 // action revalidates /admin/submissions, so the row drops out on the next paint.
 
 import { useState, useTransition } from "react";
-import { approveSubmissionAction, rejectSubmissionAction } from "./actions";
+import {
+  approveAndRenderAction,
+  approvePollOnlyAction,
+  rejectSubmissionAction,
+} from "./actions";
 
 const REJECT_OPTIONS = [
   ["real_person", "Names a real person"],
@@ -48,11 +52,19 @@ export function SubmissionModerationActions({
       <div className="flex flex-wrap items-center justify-end gap-2">
         <button
           type="button"
-          onClick={() => run(() => approveSubmissionAction(submissionId))}
+          onClick={() => run(() => approveAndRenderAction(submissionId))}
           disabled={running}
           className="rounded-md border border-cat-wholesome/40 bg-cat-wholesome/10 px-3 py-1.5 text-[12px] font-semibold text-cat-wholesome transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
         >
-          Approve
+          Approve &amp; video
+        </button>
+        <button
+          type="button"
+          onClick={() => run(() => approvePollOnlyAction(submissionId))}
+          disabled={running}
+          className="rounded-md border border-line px-3 py-1.5 text-[12px] font-semibold text-muted transition-opacity hover:border-ink hover:text-ink disabled:cursor-wait disabled:opacity-50"
+        >
+          Poll only
         </button>
         <select
           value={category}

@@ -16,6 +16,7 @@ export type StoryStatus =
 export interface StoryRow {
   id: string;
   reddit_id: string | null;
+  submission_id: string | null;
   slug: string | null;
   category: string | null;
   title: string | null;
@@ -418,6 +419,44 @@ export async function updateStory(
   await run(`UPDATE stories SET ${sets.join(", ")} WHERE id = ?`, params);
 }
 
+export interface CreateStoryInput {
+  id: string;
+  slug: string;
+  category: string | null;
+  title: string;
+  summary: string;
+  body: string;
+  status: StoryStatus;
+  /** Set for a story promoted from a user submission (non-Reddit origin). */
+  submissionId: string | null;
+}
+
+// Insert a new story row. The Python pipeline owns the Reddit ingestion path and
+// its own upsert; this is the TS-side create used by user-submission promotion
+// (lib/submission-promote). Only the core authored fields are set — the media and
+// config columns stay NULL until the render pipeline fills them.
+export async function createStory(input: CreateStoryInput): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    `INSERT INTO stories
+       (id, submission_id, slug, category, title, summary, body, status,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.id,
+      input.submissionId,
+      input.slug,
+      input.category,
+      input.title,
+      input.summary,
+      input.body,
+      input.status,
+      now,
+      now,
+    ],
+  );
+}
+
 // Promotion to public-facing statuses ("ready" / "published") refuses
 // stories whose Reddit identity is a dry-run fixture. The render path
 // already suppresses the embed when reddit_id / source_url disagree
@@ -439,10 +478,11 @@ const FIXTURE_DRY_RUN_BODY_MARKER = "[DRY RUN ARTICLE]";
 async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
   const row = await one<{
     reddit_id: string | null;
+    submission_id: string | null;
     source_url: string | null;
     body: string | null;
   }>(
-    "SELECT reddit_id, source_url, body FROM stories WHERE id = ?",
+    "SELECT reddit_id, submission_id, source_url, body FROM stories WHERE id = ?",
     [id],
   );
   if (!row) {
@@ -450,6 +490,10 @@ async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
       `[stories repo] cannot publish missing story id=${id}`,
     );
   }
+  // User-submission origin: vetted by moderation + human approval, not a Reddit
+  // dry-run fixture. The guard below targets fixture Reddit rows and does not
+  // apply here. Plan: 2026-06-29-user-submitted-stories.md (Phase 3).
+  if (row.submission_id) return;
   const redditId = row.reddit_id?.toLowerCase() ?? "";
   if (!redditId || FIXTURE_PLACEHOLDER_IDS.has(redditId)) {
     throw new Error(

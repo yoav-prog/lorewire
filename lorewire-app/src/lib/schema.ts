@@ -24,6 +24,11 @@ export const STORIES: Table = {
   columns: [
     { name: "id", type: "TEXT", pk: true },
     { name: "reddit_id", type: "TEXT" },
+    // 2026-06-29 user submissions: when set, this story was promoted from a user
+    // submission (lib/submissions). Its presence marks a non-Reddit origin and
+    // exempts the story from the reddit-fixture publish gate (repo.ts
+    // assertStoryReadyForPublicStatus). Plan: 2026-06-29-user-submitted-stories.md.
+    { name: "submission_id", type: "TEXT" },
     { name: "slug", type: "TEXT" },
     { name: "category", type: "TEXT" },
     { name: "title", type: "TEXT" },
@@ -1734,4 +1739,8 @@ export const POST_TABLE_DDL: string[] = [
   // Per-submission audit timeline (the statement-of-reasons / resubmit record).
   "CREATE INDEX IF NOT EXISTS idx_submission_events_submission " +
     "ON submission_events(submission_id, created_at)",
+  // Find the promoted story for a submission (Phase 3). Partial: only the small
+  // set of submission-origin stories.
+  "CREATE INDEX IF NOT EXISTS idx_stories_submission_id " +
+    "ON stories(submission_id) WHERE submission_id IS NOT NULL",
 ];
