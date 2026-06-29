@@ -232,6 +232,25 @@ export async function eraseSubmission(
   return true;
 }
 
+/** Admin victim-takedown: pull a submission's story off the public site without an
+ *  ownership check (admin authority, e.g. acting on a victim report). Archives the
+ *  story + disables its poll and marks the submission 'unpublished'. */
+export async function adminUnpublishSubmission(
+  submissionId: string,
+  actor: string,
+): Promise<void> {
+  const s = await getSubmissionById(submissionId);
+  if (!s) return;
+  if (s.story_id) {
+    await setStatus(s.story_id, "archived");
+    await run(
+      `UPDATE polls SET enabled = 0, updated_at = ? WHERE story_id = ?`,
+      [new Date().toISOString(), s.story_id],
+    );
+  }
+  await setSubmissionStatus(submissionId, "unpublished", {}, actor);
+}
+
 // --- per-user cap --------------------------------------------------------
 
 async function settingInt(key: string, fallback: number): Promise<number> {

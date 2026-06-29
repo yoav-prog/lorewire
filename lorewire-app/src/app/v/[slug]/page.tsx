@@ -33,6 +33,7 @@ import {
   toResultView,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
+import { SubmissionReportLink } from "./SubmissionReportLink";
 
 // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
 // rendered aspect for a story so the reader's <video> container CSS
@@ -322,6 +323,12 @@ export default async function StoryReader({
               <p key={i}>{p}</p>
             ))}
           </div>
+        )}
+
+        {story.submission_id && (
+          <footer className="border-t border-line pt-4">
+            <SubmissionReportLink storyId={story.id} />
+          </footer>
         )}
 
         {story.source_url && (
