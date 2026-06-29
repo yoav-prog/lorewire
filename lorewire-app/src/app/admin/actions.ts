@@ -3276,6 +3276,73 @@ export async function listActiveJobsWithEventsAction(): Promise<
   return result;
 }
 
+// 2026-06-29 live runs Stop. The live page polls listActiveJobsWithEvents
+// and shows a card per in-flight run; these two actions back the per-run
+// "Stop" button and the "Stop all" button. Both settle WHATEVER stage is
+// in flight (story / short / hero / publish) via stopLiveRun — the
+// list-page Stop only knows the story stage, so it can't clear a run whose
+// article finished but whose short render zombied (the 128h cards).
+// content.manage-gated like every other write here.
+
+export interface StopLiveRunActionResult {
+  ok: boolean;
+  error?: string;
+  /** Stages that were actually in flight and got cancelled. */
+  stoppedStages: string[];
+}
+
+export async function stopLiveRunAction(
+  jobId: string,
+): Promise<StopLiveRunActionResult> {
+  const session = await requireCapability("content.manage");
+  if (!jobId) return { ok: false, error: "missing-job-id", stoppedStages: [] };
+  const { stopLiveRun } = await import("@/lib/story-jobs");
+  const r = await stopLiveRun(jobId);
+  console.info("[live runs stop]", {
+    job_id: jobId,
+    ok: r.ok,
+    stopped_stages: r.stopped_stages,
+    user_id: session.userId,
+  });
+  revalidatePath("/admin/reddit-sources/live");
+  revalidatePath("/admin/reddit-sources");
+  return { ok: r.ok, error: r.error, stoppedStages: r.stopped_stages };
+}
+
+export interface StopAllLiveRunsActionResult {
+  ok: boolean;
+  /** Active runs considered this pass. */
+  scanned: number;
+  /** Runs that had at least one stage settled. */
+  stopped: number;
+}
+
+export async function stopAllActiveLiveRunsAction(): Promise<StopAllLiveRunsActionResult> {
+  const session = await requireCapability("content.manage");
+  // Recompute the active set server-side off the same snapshot the live
+  // page reads, so "stop all" can't be widened by a stale client payload.
+  const { listActiveJobsWithEvents } = await import("@/lib/story-jobs-live");
+  const { isJobActive } = await import("@/lib/story-jobs-live-shared");
+  const { stopLiveRun } = await import("@/lib/story-jobs");
+  const active = (await listActiveJobsWithEvents()).filter((j) => isJobActive(j));
+  let stopped = 0;
+  // Sequential: this is a rare, deliberate action over at most
+  // MAX_ACTIVE_JOBS rows, and serial writes keep the per-stage logging
+  // and any future per-row failure easy to reason about.
+  for (const job of active) {
+    const r = await stopLiveRun(job.job_id);
+    if (r.ok && r.stopped_stages.length > 0) stopped += 1;
+  }
+  console.info("[live runs stop-all]", {
+    scanned: active.length,
+    stopped,
+    user_id: session.userId,
+  });
+  revalidatePath("/admin/reddit-sources/live");
+  revalidatePath("/admin/reddit-sources");
+  return { ok: true, scanned: active.length, stopped };
+}
+
 // 2026-06-28 sidebar live-runs badge. Polled at a lower cadence (~15s)
 // across every admin page so the count is visible without staying on
 // the live page. Returns a single integer; never a row payload.

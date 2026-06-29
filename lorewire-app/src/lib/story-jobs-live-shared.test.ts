@@ -10,12 +10,15 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  STUCK_THRESHOLD_MS,
   computeLastSettledAt,
   computeOverallState,
   computePipelineState,
   isJobActive,
   isJobFinished,
+  isJobStuck,
   isPipelineInFlight,
+  jobElapsedMs,
   type ActiveJobView,
   type PipelineStateInput,
 } from "@/lib/story-jobs-live-shared";
@@ -135,16 +138,27 @@ describe("computePipelineState — short stage", () => {
     ).toBe("done");
   });
 
-  it("short error/cancelled → failed", () => {
-    for (const s of ["error", "cancelled"]) {
-      expect(
-        statesById(
-          computePipelineState(
-            input({ story_status: "done", short: { status: s, phase: null } }),
-          ),
-        ).short,
-      ).toBe("failed");
-    }
+  it("short error → failed", () => {
+    expect(
+      statesById(
+        computePipelineState(
+          input({ story_status: "done", short: { status: "error", phase: null } }),
+        ),
+      ).short,
+    ).toBe("failed");
+  });
+
+  it("short cancelled → cancelled (admin stop, distinct from error)", () => {
+    expect(
+      statesById(
+        computePipelineState(
+          input({
+            story_status: "done",
+            short: { status: "cancelled", phase: null },
+          }),
+        ),
+      ).short,
+    ).toBe("cancelled");
   });
 
   it("short running carries the phase as sub_label", () => {
@@ -267,6 +281,33 @@ describe("computePipelineState — hero stage", () => {
         ),
       ).hero,
     ).toBe("failed");
+  });
+
+  it("short cancelled → hero skipped (nothing to finish from)", () => {
+    expect(
+      statesById(
+        computePipelineState(
+          input({
+            story_status: "done",
+            short: { status: "cancelled", phase: null },
+          }),
+        ),
+      ).hero,
+    ).toBe("skipped");
+  });
+
+  it("short done + finisher cancelled → hero cancelled (admin stop)", () => {
+    expect(
+      statesById(
+        computePipelineState(
+          input({
+            story_status: "done",
+            short: { status: "done", phase: "done" },
+            finisher_status: "cancelled",
+          }),
+        ),
+      ).hero,
+    ).toBe("cancelled");
   });
 });
 
@@ -391,11 +432,61 @@ describe("computePipelineState — publish stage", () => {
       ).publish,
     ).toBe("failed");
   });
+
+  it("hero done + auto_publish cancelled → publish cancelled (admin stop)", () => {
+    expect(
+      statesById(
+        computePipelineState(
+          input({
+            story_status: "done",
+            full_pipeline: 1,
+            short: { status: "done", phase: "done" },
+            finisher_status: "done",
+            auto_publish_status: "cancelled",
+          }),
+        ),
+      ).publish,
+    ).toBe("cancelled");
+  });
 });
 
 describe("computeOverallState", () => {
   it("story cancelled → cancelled (highest precedence)", () => {
     const stages = computePipelineState(input({ story_status: "cancelled" }));
+    expect(computeOverallState(stages)).toBe("cancelled");
+  });
+
+  it("short cancelled (story done) → cancelled, not failed", () => {
+    const stages = computePipelineState(
+      input({
+        story_status: "done",
+        short: { status: "cancelled", phase: null },
+      }),
+    );
+    expect(computeOverallState(stages)).toBe("cancelled");
+  });
+
+  it("finisher cancelled → cancelled", () => {
+    const stages = computePipelineState(
+      input({
+        story_status: "done",
+        short: { status: "done", phase: "done" },
+        finisher_status: "cancelled",
+      }),
+    );
+    expect(computeOverallState(stages)).toBe("cancelled");
+  });
+
+  it("auto_publish cancelled → cancelled", () => {
+    const stages = computePipelineState(
+      input({
+        story_status: "done",
+        full_pipeline: 1,
+        short: { status: "done", phase: "done" },
+        finisher_status: "done",
+        auto_publish_status: "cancelled",
+      }),
+    );
     expect(computeOverallState(stages)).toBe("cancelled");
   });
 
@@ -587,5 +678,93 @@ describe("isJobActive / isJobFinished consumer contract", () => {
       const v = view(o);
       expect(isJobActive(v) && isJobFinished(v)).toBe(false);
     }
+  });
+});
+
+describe("jobElapsedMs / isJobStuck", () => {
+  const REQUESTED = "2026-06-28T12:00:00.000Z";
+  const REQUESTED_MS = new Date(REQUESTED).getTime();
+
+  function view(over: Partial<ActiveJobView> = {}): ActiveJobView {
+    return {
+      job_id: "j",
+      reddit_id: "r",
+      status: "processing",
+      progress: null,
+      error: null,
+      story_id: null,
+      requested_at: REQUESTED,
+      started_at: null,
+      finished_at: null,
+      title: null,
+      subreddit: null,
+      with_media: 1,
+      full_pipeline: 0,
+      finisher_status: null,
+      auto_publish_status: null,
+      short: null,
+      stages: [],
+      overall: "running",
+      last_settled_at: null,
+      events: [],
+      ...over,
+    };
+  }
+
+  it("active job measures requested_at → now", () => {
+    const now = REQUESTED_MS + 90_000;
+    expect(jobElapsedMs(view({ overall: "running" }), now)).toBe(90_000);
+  });
+
+  it("settled job measures requested_at → last_settled_at (ignores now)", () => {
+    const settled = "2026-06-28T12:05:00.000Z"; // +5 min
+    const now = REQUESTED_MS + 999_999_999;
+    expect(
+      jobElapsedMs(
+        view({ overall: "done", last_settled_at: settled }),
+        now,
+      ),
+    ).toBe(5 * 60_000);
+  });
+
+  it("settled job falls back to finished_at when last_settled_at is null", () => {
+    const finished = "2026-06-28T12:02:00.000Z";
+    expect(
+      jobElapsedMs(
+        view({ overall: "failed", last_settled_at: null, finished_at: finished }),
+        REQUESTED_MS + 999,
+      ),
+    ).toBe(2 * 60_000);
+  });
+
+  it("never returns a negative span", () => {
+    expect(jobElapsedMs(view({ overall: "running" }), REQUESTED_MS - 5000)).toBe(0);
+  });
+
+  it("returns 0 on an unparseable requested_at", () => {
+    expect(jobElapsedMs(view({ requested_at: "not-a-date" }), REQUESTED_MS)).toBe(0);
+  });
+
+  it("active job past the threshold is stuck", () => {
+    const now = REQUESTED_MS + STUCK_THRESHOLD_MS + 1000;
+    expect(isJobStuck(view({ overall: "running" }), now)).toBe(true);
+  });
+
+  it("active job under the threshold is not stuck", () => {
+    const now = REQUESTED_MS + STUCK_THRESHOLD_MS - 1000;
+    expect(isJobStuck(view({ overall: "running" }), now)).toBe(false);
+  });
+
+  it("settled job is never stuck however long it took", () => {
+    const now = REQUESTED_MS + STUCK_THRESHOLD_MS * 100;
+    expect(
+      isJobStuck(view({ overall: "done", last_settled_at: REQUESTED }), now),
+    ).toBe(false);
+  });
+
+  it("honours a custom threshold", () => {
+    const now = REQUESTED_MS + 60_000;
+    expect(isJobStuck(view({ overall: "running" }), now, 30_000)).toBe(true);
+    expect(isJobStuck(view({ overall: "running" }), now, 120_000)).toBe(false);
   });
 });

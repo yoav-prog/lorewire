@@ -7,6 +7,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
+import { logShortRenderEvent } from "@/lib/short-render-queue";
 
 export type StoryJobStatus = "queued" | "processing" | "done" | "error";
 
@@ -387,6 +388,153 @@ export async function bulkCancelActiveStoryJobs(
   result.reset_to_imported = activeList.length;
 
   return result;
+}
+
+// ---------- stop a single live run (every in-flight stage) ----------
+
+/** Pipeline stages stopLiveRun can settle, in execution order. */
+export type LiveRunStage = "story" | "short" | "hero" | "publish";
+
+export interface StopLiveRunResult {
+  ok: boolean;
+  error?: string;
+  job_id: string;
+  /** Stages that were actually in flight and got cancelled by this call.
+   *  Empty when the run had already settled (idempotent no-op). */
+  stopped_stages: LiveRunStage[];
+}
+
+/**
+ * Stop one run shown on the live page. Unlike bulkCancelActiveStoryJobs
+ * (which only knows the STORY stage), this settles WHATEVER stage is
+ * actually in flight so the run leaves the active list:
+ *
+ *   - story queued/processing → cancelled, and the reddit_source resets
+ *     to 'imported' (story_id cleared) so it returns to the candidate
+ *     pool — same semantics as the list-page Stop.
+ *   - short queued/generating/rendering → cancelled. This force-cancels a
+ *     'rendering' row, which cancelShortRender deliberately refuses (Cloud
+ *     Run normally owns that window). A row stuck in 'rendering' for hours
+ *     is the exact zombie this feature exists to clear — the renderer died
+ *     without ever calling back, so there's no clean abort to wait for.
+ *   - hero finisher pending/running → cancelled.
+ *   - auto-publish pending → cancelled.
+ *
+ * A run whose article already finished keeps it — only the stuck
+ * downstream stage is cancelled. Spend already incurred is not refundable
+ * (the confirm dialog says so). Idempotent: a settled run returns ok with
+ * an empty stopped_stages.
+ *
+ * The cron claim queries all gate on the live status ('pending' finisher,
+ * 'pending' auto_publish, queued/generating/rendering short), so writing
+ * 'cancelled' both removes the row from the live view AND guarantees no
+ * cron re-claims it.
+ */
+export async function stopLiveRun(jobId: string): Promise<StopLiveRunResult> {
+  if (!jobId) {
+    return { ok: false, error: "missing-job-id", job_id: jobId, stopped_stages: [] };
+  }
+  // Targeted select: finisher_status isn't part of StoryJobRow/COLS, and
+  // we only need the lifecycle columns to decide which stages to settle.
+  const job = await one<{
+    id: string;
+    reddit_id: string;
+    status: string;
+    story_id: string | null;
+    finisher_status: string | null;
+    auto_publish_status: string | null;
+  }>(
+    `SELECT id, reddit_id, status, story_id, finisher_status, auto_publish_status ` +
+      `FROM story_jobs WHERE id = ?`,
+    [jobId],
+  );
+  if (!job) {
+    return { ok: false, error: "job-not-found", job_id: jobId, stopped_stages: [] };
+  }
+
+  const now = new Date().toISOString();
+  const stopped: LiveRunStage[] = [];
+
+  // 1. Story stage. Mirror the list-page Stop: cancel the job and reset
+  //    the source so it can be re-queued.
+  if (job.status === "queued" || job.status === "processing") {
+    await run(
+      `UPDATE story_jobs SET status = 'cancelled', finished_at = ? ` +
+        `WHERE id = ? AND status IN ('queued', 'processing')`,
+      [now, jobId],
+    );
+    await run(
+      `UPDATE reddit_source SET status = 'imported', story_id = NULL ` +
+        `WHERE reddit_id = ? AND status IN ('queued', 'processing')`,
+      [job.reddit_id],
+    );
+    stopped.push("story");
+    await logStoryJobEvent(jobId, job.reddit_id, "stopped", {
+      message: "Stopped by admin from live runs (story stage)",
+      payload: { stage: "story", previous_status: job.status },
+    });
+  }
+
+  // 2. Short stage — the latest render for this story. Force-cancel,
+  //    including a 'rendering' zombie.
+  if (job.story_id) {
+    const short = await one<{ id: string; status: string; phase: string | null }>(
+      `SELECT id, status, phase FROM short_renders ` +
+        `WHERE story_id = ? ORDER BY requested_at DESC LIMIT 1`,
+      [job.story_id],
+    );
+    if (
+      short &&
+      (short.status === "queued" ||
+        short.status === "generating" ||
+        short.status === "rendering")
+    ) {
+      await run(
+        `UPDATE short_renders SET status = 'cancelled', finished_at = ? ` +
+          `WHERE id = ? AND status IN ('queued', 'generating', 'rendering')`,
+        [now, short.id],
+      );
+      stopped.push("short");
+      await logShortRenderEvent(short.id, "cancelled", {
+        message: "Stopped by admin from live runs",
+        payload: {
+          previous_status: short.status,
+          previous_phase: short.phase,
+          forced: short.status === "rendering",
+        },
+      });
+    }
+  }
+
+  // 3. Hero finisher stage.
+  if (job.finisher_status === "pending" || job.finisher_status === "running") {
+    await run(
+      `UPDATE story_jobs SET finisher_status = 'cancelled' ` +
+        `WHERE id = ? AND finisher_status IN ('pending', 'running')`,
+      [jobId],
+    );
+    stopped.push("hero");
+    await logStoryJobEvent(jobId, job.reddit_id, "stopped", {
+      message: "Stopped by admin from live runs (hero finisher stage)",
+      payload: { stage: "hero", previous_status: job.finisher_status },
+    });
+  }
+
+  // 4. Auto-publish stage.
+  if (job.auto_publish_status === "pending") {
+    await run(
+      `UPDATE story_jobs SET auto_publish_status = 'cancelled' ` +
+        `WHERE id = ? AND auto_publish_status = 'pending'`,
+      [jobId],
+    );
+    stopped.push("publish");
+    await logStoryJobEvent(jobId, job.reddit_id, "stopped", {
+      message: "Stopped by admin from live runs (publish stage)",
+      payload: { stage: "publish", previous_status: job.auto_publish_status },
+    });
+  }
+
+  return { ok: true, job_id: jobId, stopped_stages: stopped };
 }
 
 // ---------- reads for the admin UI ----------

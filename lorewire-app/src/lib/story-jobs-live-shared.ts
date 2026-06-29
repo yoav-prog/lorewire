@@ -16,6 +16,18 @@ export const MAX_ACTIVE_JOBS = 50;
 export const MAX_EVENTS_PER_JOB = 50;
 export const FINISHED_GRACE_MS = 15 * 60 * 1000;
 
+/**
+ * How long an active run may stay in flight before the card flags it as
+ * STUCK. A healthy full run (story → short → hero → publish) settles in a
+ * handful of minutes even with the cron cadences stacked; two hours is
+ * generous headroom. Anything past it is almost always a zombie — a
+ * worker or Cloud Run render that died without writing a terminal status,
+ * leaving the row to climb the clock forever (the 128h / 190h cards that
+ * prompted this). Surfacing it as STUCK is the visual half of the fix;
+ * the Stop button is the action half.
+ */
+export const STUCK_THRESHOLD_MS = 2 * 60 * 60 * 1000;
+
 export const ACTIVE_STATUSES = ["queued", "processing"] as const;
 export const FINISHED_STATUSES = ["done", "error", "cancelled"] as const;
 
@@ -170,6 +182,38 @@ export function isJobFinished(view: ActiveJobView): boolean {
 }
 
 /**
+ * Wall-clock the run has been alive, in ms. For an active job that's the
+ * span from requested_at to now (it's still ticking); for a settled job
+ * it's requested_at to the last settlement (last_settled_at, falling back
+ * to finished_at for the legacy story-only path). Shared by the card's
+ * elapsed chip and the stuck check so both read the same clock. Returns 0
+ * on an unparseable requested_at rather than a negative or NaN span.
+ */
+export function jobElapsedMs(view: ActiveJobView, nowMs: number): number {
+  const start = new Date(view.requested_at).getTime();
+  if (Number.isNaN(start)) return 0;
+  const endIso = isJobActive(view)
+    ? null
+    : (view.last_settled_at ?? view.finished_at);
+  const end = endIso ? new Date(endIso).getTime() : nowMs;
+  if (Number.isNaN(end)) return 0;
+  return Math.max(0, end - start);
+}
+
+/**
+ * True when a run is still active AND has been in flight past
+ * STUCK_THRESHOLD_MS — i.e. a zombie the admin should stop. Settled jobs
+ * are never "stuck" however long they took (the time is just history).
+ */
+export function isJobStuck(
+  view: ActiveJobView,
+  nowMs: number,
+  thresholdMs: number = STUCK_THRESHOLD_MS,
+): boolean {
+  return isJobActive(view) && jobElapsedMs(view, nowMs) >= thresholdMs;
+}
+
+/**
  * Normalises the raw `level` column from story_job_events to the
  * documented enum. Anything unrecognised falls back to 'info' so the
  * client never has to defend against unknown levels — the worker
@@ -211,7 +255,8 @@ const STORY_CANCELLED = "cancelled";
 
 const SHORT_RUNNING = new Set(["queued", "generating", "rendering"]);
 const SHORT_DONE = "done";
-const SHORT_ERROR = new Set(["error", "cancelled"]);
+const SHORT_ERROR = "error";
+const SHORT_CANCELLED = "cancelled";
 
 /**
  * Derive the per-stage pipeline state from the raw row. The output
@@ -277,7 +322,18 @@ function computeShortStage(
   if (short.status === SHORT_DONE) {
     return { id: "short", state: "done", label: "Short" };
   }
-  if (SHORT_ERROR.has(short.status)) {
+  // 'cancelled' is the admin-stop signal (live-runs Stop), kept distinct
+  // from 'error' so the card reads "Stopped" rather than "Failed" and the
+  // overall chip can surface the deliberate stop.
+  if (short.status === SHORT_CANCELLED) {
+    return {
+      id: "short",
+      state: "cancelled",
+      label: "Short",
+      sub_label: short.status,
+    };
+  }
+  if (short.status === SHORT_ERROR) {
     return {
       id: "short",
       state: "failed",
@@ -314,7 +370,8 @@ function computeHeroStage(
   if (shortState === "pending" || shortState === "running") {
     return { id: "hero", state: "pending", label: "Hero & thumb" };
   }
-  if (shortState === "failed") {
+  // Short failed or was stopped → nothing to finish from.
+  if (shortState === "failed" || shortState === "cancelled") {
     return { id: "hero", state: "skipped", label: "Hero & thumb" };
   }
   // Short done. Now drive off finisher_status.
@@ -324,6 +381,10 @@ function computeHeroStage(
   }
   if (f === "failed") {
     return { id: "hero", state: "failed", label: "Hero & thumb" };
+  }
+  // Admin stopped the run while the finisher was the in-flight stage.
+  if (f === "cancelled") {
+    return { id: "hero", state: "cancelled", label: "Hero & thumb" };
   }
   if (f === "running") {
     return { id: "hero", state: "running", label: "Hero & thumb" };
@@ -359,6 +420,10 @@ function computePublishStage(
   if (a === "failed") {
     return { id: "publish", state: "failed", label: "Publish" };
   }
+  // Admin stopped the run while auto-publish was the in-flight stage.
+  if (a === "cancelled") {
+    return { id: "publish", state: "cancelled", label: "Publish" };
+  }
   if (a === "pending") {
     return { id: "publish", state: "running", label: "Publish" };
   }
@@ -372,17 +437,22 @@ function computePublishStage(
  * headline chip and the counters at the top of the page.
  *
  * Order of precedence:
- *   1. cancelled → story stage cancelled
+ *   1. cancelled → ANY stage cancelled (the admin stopped the run; whichever
+ *                  stage was in flight when Stop landed is marked cancelled)
  *   2. failed    → any applicable stage failed
  *   3. running   → any stage running
  *   4. queued    → story stage pending and nothing further started
  *   5. done      → every applicable stage settled green
+ *
+ * A deliberate stop wins over `failed` so a run the admin killed reads
+ * "Stopped" rather than "Failed" — downstream stages of a real failure
+ * settle to `skipped`, never `cancelled`, so the two can't collide.
  */
 export function computeOverallState(
   stages: PipelineStage[],
 ): PipelineOverallState {
   const story = stages.find((s) => s.id === "story");
-  if (story?.state === "cancelled") return "cancelled";
+  if (stages.some((s) => s.state === "cancelled")) return "cancelled";
   if (stages.some((s) => s.state === "failed")) return "failed";
   if (stages.some((s) => s.state === "running")) return "running";
   // No running, no failed. If the story stage is still pending (not
