@@ -157,6 +157,14 @@ interface ResolvedSpliceSegments {
    *  computes from the alignment data; null when the pipeline can't
    *  compute a boundary (legacy short_renders rows, alignment drift). */
   hookEndSec: number | null;
+  /** Seconds the hook clip's audio holds past the splice cut (over a frozen
+   *  frame) so the last hook word finishes before the fade. Sized PER VIDEO by
+   *  the Python pipeline to the gap before the next spoken word — 0 when the
+   *  hook butts straight into the next line, so the hold never bleeds that
+   *  line's first word into the pre-intro clip. Null for rows that predate the
+   *  field; the splice then uses its own constant fallback hold. Per
+   *  _plans/2026-06-29-hook-first-clean-pacing.md. */
+  hookTailHoldSec: number | null;
 }
 
 /** Resolve the 9:16 intro/outro for a short, defensively (everything-null on any
@@ -173,6 +181,7 @@ async function resolveShortSegmentsSafe(
     intro_segment_id: null,
     outro_segment_id: null,
     hookEndSec: null,
+    hookTailHoldSec: null,
   };
   if (!story) return empty;
   try {
@@ -187,10 +196,11 @@ async function resolveShortSegmentsSafe(
       outro: resolved.outro.segment?.normalized_url ?? null,
       intro_segment_id: resolved.intro.segment?.id ?? null,
       outro_segment_id: resolved.outro.segment?.id ?? null,
-      // hookEndSec is populated from inputProps.hook_end_ms by the
-      // caller below; the segment resolver doesn't know about the
-      // hook (it's a script-side concept, not a per-story setting).
+      // hookEndSec / hookTailHoldSec are populated from inputProps by the
+      // caller below; the segment resolver doesn't know about the hook
+      // (it's a script-side concept, not a per-story setting).
       hookEndSec: null,
+      hookTailHoldSec: null,
     };
   } catch {
     return empty;
@@ -226,6 +236,36 @@ export function extractHookEndSecFromProps(inputProps: unknown): {
     return { hookEndSec: null, propsStripped: stripped };
   }
   return { hookEndSec: raw / 1000, propsStripped: stripped };
+}
+
+/** Extract the hook-first audio tail-hold (seconds) from inputProps. The
+ *  Python pipeline sizes `hook_tail_hold_ms` per video to the gap before the
+ *  next spoken word so the splice's hold finishes the hook word without
+ *  bleeding the next sentence into the pre-intro clip. Strips the key from
+ *  inputProps (phantom-prop guard, same as the hook_end key). Unlike
+ *  hook_end_ms, 0 is a VALID value here (a hook that runs straight into the
+ *  next line -> no hold), so only missing / non-finite / negative falls back
+ *  to null (the splice then uses its own constant hold). Per
+ *  _plans/2026-06-29-hook-first-clean-pacing.md. Exported for pure-logic
+ *  tests; the dispatcher is the only production caller. */
+export function extractHookTailHoldSecFromProps(inputProps: unknown): {
+  hookTailHoldSec: number | null;
+  propsStripped: boolean;
+} {
+  if (!inputProps || typeof inputProps !== "object" || Array.isArray(inputProps)) {
+    return { hookTailHoldSec: null, propsStripped: false };
+  }
+  const obj = inputProps as Record<string, unknown>;
+  const raw = obj.hook_tail_hold_ms;
+  let stripped = false;
+  if ("hook_tail_hold_ms" in obj) {
+    delete obj.hook_tail_hold_ms;
+    stripped = true;
+  }
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) {
+    return { hookTailHoldSec: null, propsStripped: stripped };
+  }
+  return { hookTailHoldSec: raw / 1000, propsStripped: stripped };
 }
 
 /** Strip the `hook` field from inputProps before they reach the
@@ -328,6 +368,14 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   const { hookEndSec, propsStripped: hookEndStripped } =
     extractHookEndSecFromProps(inputProps);
 
+  // Per-video audio tail-hold for the hook-first splice (how long the hook
+  // clip's audio holds past the cut so the last word finishes). Sized by the
+  // pipeline to the gap before the next spoken word, so a hook with no pause
+  // gets 0 and the splice never clips into the next sentence. Stripped from
+  // inputProps too. Per _plans/2026-06-29-hook-first-clean-pacing.md.
+  const { hookTailHoldSec, propsStripped: hookTailStripped } =
+    extractHookTailHoldSecFromProps(inputProps);
+
   // Strip the `hook` string from inputProps. Python's build_short_props
   // (Part 0 of _plans/2026-06-28-phase-2-social-poster-render.md) preserves
   // the spoken cold-open line on the props dict so the SEPARATE poster
@@ -348,6 +396,10 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // the gate here keeps the outgoing POST shape honest.
   if (hookEndSec !== null && segments.intro) {
     segments.hookEndSec = hookEndSec;
+    // Forward the per-video hold alongside the boundary (only meaningful when
+    // the reorder actually happens). Null leaves the splice on its constant
+    // fallback hold — safe for rows rendered before this field existed.
+    segments.hookTailHoldSec = hookTailHoldSec;
   }
 
   // Walk inputProps and rewrite any persisted legacy GCS URLs onto
@@ -381,6 +433,8 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     outro_present: Boolean(segments.outro),
     hook_end_sec: segments.hookEndSec,
     hook_end_stripped: hookEndStripped,
+    hook_tail_hold_sec: segments.hookTailHoldSec,
+    hook_tail_stripped: hookTailStripped,
     hook_stripped: hookStripped,
   });
 
