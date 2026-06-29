@@ -9,18 +9,23 @@
 import { revalidatePath } from "next/cache";
 import { requireCapability } from "@/lib/dal";
 import { setSubmissionStatus } from "@/lib/submissions";
+import { approveAndPromote } from "@/lib/submission-promote";
 import { categoryToReasonKey } from "@/lib/submission-reasons";
 
-/** Approve: the submission is cleared by a person. It moves to `approved`; the
- *  render-on-approval that turns it into a published short lands in Phase 3. */
-export async function approveSubmissionAction(id: string): Promise<void> {
+/** Approve and make the video: promote to a story + poll and enqueue the short
+ *  render (budget-gated). Throws a visible error if the daily render budget is
+ *  reached, so the reviewer can fall back to poll-only or wait. */
+export async function approveAndRenderAction(id: string): Promise<void> {
   const session = await requireCapability("content.manage");
-  await setSubmissionStatus(
-    id,
-    "approved",
-    { approvedBy: session.userId },
-    session.userId,
-  );
+  await approveAndPromote(id, "video", session.userId);
+  revalidatePath("/admin/submissions");
+}
+
+/** Approve as poll-only: promote to a story + poll and publish it without
+ *  spending on a render (the cost release valve). */
+export async function approvePollOnlyAction(id: string): Promise<void> {
+  const session = await requireCapability("content.manage");
+  await approveAndPromote(id, "poll_only", session.userId);
   revalidatePath("/admin/submissions");
 }
 
