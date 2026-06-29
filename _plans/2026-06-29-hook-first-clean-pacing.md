@@ -148,3 +148,69 @@ compromised.
   `[segments splice] mode=hook_first_paced gap_ms=... fade_ms=...` (Change 2).
 - Settings: two silence durations + fade length (Change 2), defaults from the
   prototype.
+
+---
+
+## Follow-up: per-video audio tail-hold (added 2026-06-29, shipped on fix/hook-tail-hold-dynamic)
+
+### The bug this fixes
+
+The pacing above held the hook clip's AUDIO a FIXED `HOOK_FIRST_TAIL_HOLD_SEC`
+(0.3s) past the cut so the last word finishes over a frozen frame. That assumed
+every hook is followed by a pause. It is not. On story `1l39ygh` (hook "Cold
+water hit her face again", next line "Twenty years earlier" with NO pause) the
+fixed 0.3s reached past the word boundary into the next sentence: you heard
+"Twenty..." start, the intro cut it, and `body_rest` resumed mid-sentence. Both
+halves clipped. The fixed hold is only safe when the real gap >= the hold.
+
+### The fix
+
+Size the hold PER VIDEO to the real gap before the next spoken word, from the
+word-level alignment the pipeline already has:
+
+- `next_word_start_after_hook_ms(hook, words)` (pipeline/shorts_render.py): walks
+  the alignment the same way `compute_hook_end_ms` does and returns the START
+  (ms) of the first spoken word AFTER the hook. None when the hook can't be
+  matched or is the last thing spoken.
+- `compute_hook_tail_hold_ms(hook, words, hook_end_ms)`: hold =
+  `clamp(next_word_start - hook_end_ms, 0, HOOK_TAIL_HOLD_MAX_MS=300)`. Gap 0
+  (hook butts into the next line) -> 0 hold, so the cut lands exactly on the word
+  boundary and never clips the next sentence. Gap with a pause -> hold up to the
+  cap. No alignment match -> the constant max (legacy fallback).
+- `build_short_props` stores it on `props["hook_tail_hold_ms"]` next to
+  `hook_end_ms`.
+
+### Plumbing (mirrors hook_end_ms end to end)
+
+- Dispatcher (`api/render_short/route.ts`): `extractHookTailHoldSecFromProps`
+  pulls + strips `hook_tail_hold_ms` (0 is VALID here, unlike hook_end_ms where 0
+  means "no hook") and forwards `segments.hookTailHoldSec` only when the reorder
+  is active (`hookEndSec != null && intro`).
+- Cloud Run parse (`video/server/index.ts:parseSegments`): accepts
+  `hookTailHoldSec >= 0`; missing/negative leaves it unset.
+- Cloud Run render (`video/server/render.ts`): `tailHoldSec =
+  segments.hookTailHoldSec ?? HOOK_FIRST_TAIL_HOLD_SEC` (per-video value, else
+  the constant) -> `buildConcatArgv`. The argv math in `ffmpeg.ts` is unchanged,
+  so byte-equivalence with `pipeline/segments.py` holds for any given hold value.
+- `pipeline/segments.py:splice` gains an optional `hook_tail_hold_sec` (None ->
+  constant) for parity; no live shorts caller passes it (shorts splice only on
+  Cloud Run; video.py is long-form and never opts into hook-first).
+
+### Tests
+
+- Python `HookTailHoldTests` (test_shorts_render.py): next-word lookup (found /
+  last-word / no-match / empty); hold = 0 on the no-pause 1l39ygh shape, capped
+  on a 500ms pause, verbatim on a 150ms gap, max-fallback when no next word,
+  clamps a negative gap to 0.
+- TS `extractHookTailHoldSecFromProps` (route.test.ts): 0 survives as a real
+  value, positive -> seconds + strip, missing -> null, malformed -> null+strip.
+- TS `parseSegments` (index.test.mjs): `hookTailHoldSec` passes through incl. 0;
+  drops negative / non-finite / wrong-type.
+
+### Deploy
+
+Same split as Change 1/2: the Python compute + dispatcher forward ship via the
+Vercel production branch; the render.ts/index.ts change needs a Cloud Run
+redeploy. Until Cloud Run is redeployed, it falls back to the constant hold
+(safe, just the old behavior). Old shorts keep their baked hold until
+regenerated.

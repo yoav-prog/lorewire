@@ -6,7 +6,11 @@
 // _plans/2026-06-28-hook-before-brand-intro.md.
 
 import { describe, expect, it } from "vitest";
-import { extractHookEndSecFromProps, stripHookFromProps } from "./route";
+import {
+  extractHookEndSecFromProps,
+  extractHookTailHoldSecFromProps,
+  stripHookFromProps,
+} from "./route";
 
 describe("extractHookEndSecFromProps", () => {
   it("returns hookEndSec in seconds when hook_end_ms is a positive number", () => {
@@ -52,6 +56,56 @@ describe("extractHookEndSecFromProps", () => {
     const before = JSON.stringify(props);
     extractHookEndSecFromProps(props);
     expect(JSON.stringify(props)).toBe(before);
+  });
+});
+
+// _plans/2026-06-29-hook-first-clean-pacing.md. The pipeline sizes the
+// hook-first audio hold per video so it never bleeds into the next sentence.
+// 0 is a VALID value here (a hook with no pause after it) — the key
+// difference from hook_end_ms, where 0 means "no hook".
+describe("extractHookTailHoldSecFromProps", () => {
+  it("returns hookTailHoldSec in seconds when hook_tail_hold_ms is positive", () => {
+    const props = { hook_tail_hold_ms: 300, voiceover_url: "x.mp3" };
+    const result = extractHookTailHoldSecFromProps(props);
+    expect(result.hookTailHoldSec).toBe(0.3);
+    expect(result.propsStripped).toBe(true);
+    expect("hook_tail_hold_ms" in props).toBe(false);
+    expect(props.voiceover_url).toBe("x.mp3");
+  });
+
+  it("keeps 0 as a real value (hook butts straight into the next line)", () => {
+    const props: Record<string, unknown> = { hook_tail_hold_ms: 0 };
+    const result = extractHookTailHoldSecFromProps(props);
+    // 0 must NOT collapse to null — that would let the splice fall back to its
+    // constant hold and re-introduce the next-sentence clip on no-pause hooks.
+    expect(result.hookTailHoldSec).toBe(0);
+    expect(result.propsStripped).toBe(true);
+    expect("hook_tail_hold_ms" in props).toBe(false);
+  });
+
+  it("returns null when hook_tail_hold_ms is missing", () => {
+    const props = { voiceover_url: "x.mp3" };
+    const result = extractHookTailHoldSecFromProps(props);
+    expect(result.hookTailHoldSec).toBeNull();
+    expect(result.propsStripped).toBe(false);
+  });
+
+  it("returns null but still strips the key when the value is malformed", () => {
+    for (const bad of [-100, NaN, Infinity, "300", null, false]) {
+      const props: Record<string, unknown> = { hook_tail_hold_ms: bad };
+      const result = extractHookTailHoldSecFromProps(props);
+      expect(result.hookTailHoldSec, `value=${JSON.stringify(bad)}`).toBeNull();
+      expect(result.propsStripped, `value=${JSON.stringify(bad)}`).toBe(true);
+      expect("hook_tail_hold_ms" in props).toBe(false);
+    }
+  });
+
+  it("returns null when inputProps is not an object", () => {
+    for (const bad of [null, undefined, 42, "props", []]) {
+      const result = extractHookTailHoldSecFromProps(bad);
+      expect(result.hookTailHoldSec, `value=${JSON.stringify(bad)}`).toBeNull();
+      expect(result.propsStripped, `value=${JSON.stringify(bad)}`).toBe(false);
+    }
   });
 });
 

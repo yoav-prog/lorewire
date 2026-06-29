@@ -75,6 +75,7 @@ function parseSegments(raw: unknown): SpliceSegments {
     outro?: unknown;
     outroLeadInSec?: unknown;
     hookEndSec?: unknown;
+    hookTailHoldSec?: unknown;
   };
   const intro =
     typeof obj.intro === "string" && obj.intro.length > 0 ? obj.intro : null;
@@ -97,6 +98,16 @@ function parseSegments(raw: unknown): SpliceSegments {
     obj.hookEndSec > 0
   ) {
     out.hookEndSec = obj.hookEndSec;
+  }
+  // Per-video hook-first tail-hold. Unlike hookEndSec, 0 is a VALID value
+  // (a hook with no pause before the next line -> no hold), so accept >= 0;
+  // missing / negative leaves it unset and the splice uses its constant hold.
+  if (
+    typeof obj.hookTailHoldSec === "number" &&
+    Number.isFinite(obj.hookTailHoldSec) &&
+    obj.hookTailHoldSec >= 0
+  ) {
+    out.hookTailHoldSec = obj.hookTailHoldSec;
   }
   return out;
 }
