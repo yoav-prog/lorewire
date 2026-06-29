@@ -305,6 +305,219 @@ class FfmpegCmdShapeTests(unittest.TestCase):
             "concat=n=3:v=1:a=0[v]",
         )
 
+    # ── Hook-first splice reorder
+    # ── _plans/2026-06-28-hook-before-brand-intro.md
+    # ── Mirrors the TypeScript buildConcatArgv tests in
+    # ── video/server/ffmpeg.test.mjs.
+
+    def test_splice_cmd_hook_first_reorders_to_body_hook_intro_body_rest_outro(self):
+        # intro(0) + body(1) + outro(2) with hook_end_sec=2.5. The body
+        # appears twice in the physical argv (with different -ss/-t),
+        # and the concat filter sees four streams in playback order:
+        # body_hook → intro → body_rest → outro.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5,
+        )
+        # Four inputs in the physical argv (body listed twice).
+        self.assertEqual(sum(1 for x in argv if x == "-i"), 4)
+        # Inspect the leading argv to confirm the per-input flag shape.
+        ffmpeg_prefix_len = 2  # ["ffmpeg", "-y"]
+        self.assertEqual(
+            argv[ffmpeg_prefix_len:ffmpeg_prefix_len + 6],
+            ["-ss", "0", "-t", "2.5", "-i", "body.mp4"],
+        )
+        self.assertEqual(
+            argv[ffmpeg_prefix_len + 6:ffmpeg_prefix_len + 8],
+            ["-i", "intro.mp4"],
+        )
+        self.assertEqual(
+            argv[ffmpeg_prefix_len + 8:ffmpeg_prefix_len + 12],
+            ["-ss", "2.5", "-i", "body.mp4"],
+        )
+        self.assertEqual(
+            argv[ffmpeg_prefix_len + 12:ffmpeg_prefix_len + 14],
+            ["-i", "outro.mp4"],
+        )
+        # Concat filter references the four physical inputs in playback order.
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0][0:a:0][1:v:0][1:a:0][2:v:0][2:a:0][3:v:0][3:a:0]"
+            "concat=n=4:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_hook_first_with_tail_pad_pads_body_rest(self):
+        # The outro still needs the silence-before-outro contract, so
+        # tpad/apad attach to body_rest (physical index = body_index + 1 = 2).
+        # body_hook lands directly into the intro with no pad.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5, body_tail_pad_sec=1.5,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];"
+            "[2:a:0]apad=pad_dur=1.5[ba];"
+            "[0:v:0][0:a:0][1:v:0][1:a:0][bv][ba][3:v:0][3:a:0]"
+            "concat=n=4:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_hook_first_without_outro_drops_pad(self):
+        # intro + body only — body_rest is the last input, so no pad
+        # applies (padding the tail of the final clip just lengthens
+        # the output for no reason).
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5, body_tail_pad_sec=1.5,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0][0:a:0][1:v:0][1:a:0][2:v:0][2:a:0]"
+            "concat=n=3:v=1:a=1[v][a]",
+        )
+        # tpad/apad must be absent — body_rest has nothing after it.
+        self.assertNotIn("tpad", argv[fc_idx + 1])
+        self.assertNotIn("apad", argv[fc_idx + 1])
+
+    def test_splice_cmd_hook_first_inactive_when_hook_end_zero(self):
+        # Opt-in: hook_end_sec=0 must produce byte-identical argv to the
+        # pre-hook-first call. No surprises for callers that haven't
+        # migrated.
+        baseline = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, body_tail_pad_sec=1.5,
+        )
+        zero = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, body_tail_pad_sec=1.5, hook_end_sec=0.0,
+        )
+        self.assertEqual(zero, baseline)
+
+    def test_splice_cmd_hook_first_inactive_when_no_intro(self):
+        # Nothing to push behind the hook — falls through to the legacy
+        # ordering. body_index=0 means the body is already first.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=0, hook_end_sec=2.5,
+        )
+        # Body is NOT duplicated — only 2 inputs total.
+        self.assertEqual(sum(1 for x in argv if x == "-i"), 2)
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_hook_first_video_only_drops_audio_streams(self):
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            has_audio=False,
+            body_index=1, hook_end_sec=2.5, body_tail_pad_sec=1.5,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];"
+            "[0:v:0][1:v:0][bv][3:v:0]concat=n=4:v=1:a=0[v]",
+        )
+        self.assertNotIn("-c:a", argv)
+
+    # ── Paced hook-first seams (fade-to-black + silent beat each side of the
+    # ── intro). _plans/2026-06-29-hook-first-clean-pacing.md. Mirrored in
+    # ── video/server/ffmpeg.test.mjs.
+
+    def test_splice_cmd_hook_first_paced_holds_frame_then_fades(self):
+        # body_hook freezes its last clean frame at hook_end (2.5) while the audio
+        # runs tail_hold (0.3) longer (so the last word finishes), then fades to
+        # black + silent beat; the intro holds a silent beat; body_rest fades in.
+        # The physical clips split at hook_end + tail_hold = 2.8.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5,
+            fade_sec=0.45, hook_gap_sec=1.1, intro_gap_sec=0.9, tail_hold_sec=0.3,
+        )
+        # body_hook runs to the split point; body_rest resumes there.
+        self.assertEqual(argv[2:8], ["-ss", "0", "-t", "2.8", "-i", "body.mp4"])
+        self.assertEqual(argv[10:14], ["-ss", "2.8", "-i", "body.mp4"])
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS,"
+            "tpad=stop_mode=clone:stop_duration=0.75,"
+            "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];"
+            "[0:a:0]apad=pad_dur=1.55[pa0];"
+            "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];"
+            "[1:a:0]apad=pad_dur=0.9[pa1];"
+            "[2:v:0]fade=t=in:st=0:d=0.45[pv2];"
+            "[2:a:0]afade=t=in:d=0.45[pa2];"
+            "[pv0][pa0][pv1][pa1][pv2][pa2][3:v:0][3:a:0]"
+            "concat=n=4:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_hook_first_paced_body_rest_keeps_outro_lead_in(self):
+        # body_rest fades back in AND keeps the outro lead-in pad on its tail.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5, body_tail_pad_sec=1.5,
+            fade_sec=0.45, hook_gap_sec=1.1, intro_gap_sec=0.9, tail_hold_sec=0.3,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertIn(
+            "[2:v:0]fade=t=in:st=0:d=0.45,tpad=stop_mode=clone:stop_duration=1.5[pv2];"
+            "[2:a:0]afade=t=in:d=0.45,apad=pad_dur=1.5[pa2];",
+            argv[fc_idx + 1],
+        )
+
+    def test_splice_cmd_hook_first_unpaced_is_byte_identical_legacy(self):
+        # All seam durations 0 -> the legacy hook-first filter, byte-for-byte
+        # (no [pv]/[pa] labels), so the pacing is strictly opt-in.
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            body_index=1, hook_end_sec=2.5, body_tail_pad_sec=1.5,
+            fade_sec=0.0, hook_gap_sec=0.0, intro_gap_sec=0.0,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];"
+            "[2:a:0]apad=pad_dur=1.5[ba];"
+            "[0:v:0][0:a:0][1:v:0][1:a:0][bv][ba][3:v:0][3:a:0]"
+            "concat=n=4:v=1:a=1[v][a]",
+        )
+
+    def test_splice_cmd_hook_first_paced_video_only_drops_audio(self):
+        argv = segments._ffmpeg_splice_cmd(
+            [Path("intro.mp4"), Path("body.mp4"), Path("outro.mp4")],
+            Path("out.mp4"),
+            has_audio=False,
+            body_index=1, hook_end_sec=2.5,
+            fade_sec=0.45, hook_gap_sec=1.1, intro_gap_sec=0.9, tail_hold_sec=0.3,
+        )
+        fc_idx = argv.index("-filter_complex")
+        self.assertEqual(
+            argv[fc_idx + 1],
+            "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS,"
+            "tpad=stop_mode=clone:stop_duration=0.75,"
+            "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];"
+            "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];"
+            "[2:v:0]fade=t=in:st=0:d=0.45[pv2];"
+            "[pv0][pv1][pv2][3:v:0]concat=n=4:v=1:a=0[v]",
+        )
+        self.assertNotIn("apad", argv[fc_idx + 1])
+
 
 class OutroLeadInResolverTests(unittest.TestCase):
     """The setting-driven default for `outro_lead_in_sec`. Unset →

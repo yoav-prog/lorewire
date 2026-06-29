@@ -1,10 +1,11 @@
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { STAGES, STAGE_LABEL, options, allSelected } from "@/lib/models";
 import { setModelAction } from "@/app/admin/actions";
 import SettingsShell from "@/app/admin/SettingsShell";
+import SettingsSection from "@/app/admin/SettingsSection";
 
 export default async function ModelsPage() {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   // One settings query for every stage, then build the view model in sync.
   const currentByStage = await allSelected();
@@ -21,19 +22,13 @@ export default async function ModelsPage() {
       title="Models"
       description="Pick the AI model for each pipeline stage. Selection is stored in the database and read by the pipeline at run time. API keys stay in the environment."
     >
-      <div className="space-y-5">
+      <div className="space-y-3">
         {stages.map(({ stage, label, opts, current }) => (
-          <section
+          <SettingsSection
             key={stage}
-            className="rounded-xl border border-line bg-surface p-5"
+            title={label}
+            status={{ ok: true, label: current }}
           >
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="font-mono text-[12px] uppercase tracking-wider text-muted">
-                {label}
-              </h2>
-              <span className="font-mono text-[11px] text-ink">{current}</span>
-            </div>
-
             <form
               action={setModelAction}
               className="flex flex-wrap items-center gap-2"
@@ -76,7 +71,7 @@ export default async function ModelsPage() {
                 </li>
               ))}
             </ul>
-          </section>
+          </SettingsSection>
         ))}
       </div>
     </SettingsShell>

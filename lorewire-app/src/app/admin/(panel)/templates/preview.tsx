@@ -65,7 +65,7 @@ export function CaptionTemplatePreview({ defaults }: Props) {
   const fontWeight = getNum("caption.font_weight", 900);
   const paddingX = getNum("caption.padding_x", 64);
   const sizeScale = getNum("caption.size_scale", 1);
-  const positionY = getNum("caption.position_y", 0.55);
+  const positionY = getNum("caption.position_y", 0.68);
   const wordHighlight = get("caption.word_highlight", "karaoke");
 
   // The preview frame is 320x180 (16:9-ish) scaled to look like a video

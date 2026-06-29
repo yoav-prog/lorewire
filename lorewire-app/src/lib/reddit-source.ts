@@ -70,6 +70,13 @@ export interface RedditSourceRow {
   source_hint: string | null;
   needs_expansion: number;
   fingerprint: string | null;
+  // 2026-06-24 Full Pipeline toggle (plan:
+  // _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). When 1, the
+  // worker runs every stage end-to-end AND the TS auto-publish drain
+  // flips the resulting story to status='published' on success (web +
+  // Facebook). Default 0 = existing review-then-manual-publish behaviour.
+  // Propagated onto story_jobs.full_pipeline at enqueue.
+  full_pipeline: number;
 }
 
 const REFRESH_COLS = [
@@ -84,7 +91,7 @@ const REFRESH_COLS = [
 ] as const;
 
 const ALL_COLS =
-  "reddit_id, subreddit, date_written, title, full_text, comments, url, summary, length_chars, status, story_id, notes, first_synced, last_synced, strength, category, headline, source_hint, needs_expansion, fingerprint";
+  "reddit_id, subreddit, date_written, title, full_text, comments, url, summary, length_chars, status, story_id, notes, first_synced, last_synced, strength, category, headline, source_hint, needs_expansion, fingerprint, full_pipeline";
 
 // ---------- CSV parse ----------
 
@@ -288,6 +295,12 @@ export interface RedditSourceFilters {
   // _plans/2026-06-23-ideasdb-priority-import.md). Lets the admin focus on
   // strong / medium priority rows that the IdeasDB sheet flagged.
   strength?: RedditSourceStrength | RedditSourceStrength[];
+  // 2026-06-24 Full Pipeline filter. Matches the per-row toggle in the
+  // table: 'on' = full_pipeline=1 (auto-publish on full success),
+  // 'off' = full_pipeline=0 (review-then-manual-publish). Passing both
+  // values (or none) is equivalent to no filter — same convention as
+  // the status / strength filters above.
+  full_pipeline?: "on" | "off" | Array<"on" | "off">;
 }
 
 export type RedditSourceOrderBy =
@@ -378,8 +391,67 @@ function buildWhere(
       params.push(...arr);
     }
   }
+  if (f.full_pipeline) {
+    const arr = Array.isArray(f.full_pipeline)
+      ? f.full_pipeline
+      : [f.full_pipeline];
+    // Both values selected (or none) = no filter; only emit SQL when the
+    // operator narrowed to a single state, matching status / strength.
+    if (arr.length === 1) {
+      parts.push("full_pipeline = ?");
+      params.push(arr[0] === "on" ? 1 : 0);
+    }
+  }
 
   return { where: parts.length ? parts.join(" AND ") : "1=1", params };
+}
+
+// Minimal-column candidate row used by the global admin search bar's
+// in-process scorer (plan:
+// _plans/2026-06-19-global-admin-search.md). Wider than RedditSourceRow
+// would be pulling unused columns; narrower than the search needs (body
+// is `full_text`, which we DO need for snippet fallback when summary is
+// empty). last_synced is the recency tiebreaker.
+export interface RedditSourceSearchCandidate {
+  reddit_id: string;
+  subreddit: string;
+  title: string;
+  summary: string | null;
+  full_text: string;
+  last_synced: string;
+}
+
+/** Fetch up to `limit` reddit_source rows where every token lands in at
+ * least one of (title, summary, subreddit, full_text). Each token is
+ * parameter-bound — no value ever touches string concatenation. Designed
+ * for the global admin search bar: the caller scores + ranks the result
+ * in JS. */
+export async function listRedditSourcesForSearch(
+  tokens: string[],
+  limit = 200,
+): Promise<RedditSourceSearchCandidate[]> {
+  if (tokens.length === 0) return [];
+  const cappedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  // AND across tokens, OR across fields: every typed token must land
+  // somewhere, but they can land in different columns ("leaf" in title,
+  // "blower" in full_text still wins).
+  for (const t of tokens) {
+    parts.push(
+      "(LOWER(title) LIKE ? OR LOWER(COALESCE(summary, '')) LIKE ? " +
+      "OR LOWER(subreddit) LIKE ? OR LOWER(full_text) LIKE ?)",
+    );
+    const like = `%${t}%`;
+    params.push(like, like, like, like);
+  }
+  const where = parts.join(" AND ");
+  return all<RedditSourceSearchCandidate>(
+    `SELECT reddit_id, subreddit, title, summary, full_text, last_synced ` +
+    `FROM reddit_source WHERE ${where} ` +
+    `ORDER BY last_synced DESC LIMIT ?`,
+    [...params, cappedLimit],
+  );
 }
 
 export async function listRedditSources(
@@ -645,6 +717,13 @@ interface StoryReadinessInput {
   status: string | null;
   body: string | null;
   hero_image: string | null;
+  // 2026-06-19 (plan:
+  // _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+  // video_url is no longer checked here. Reddit-source stories don't
+  // auto-render long-form MP4s any more; the short carries the visual
+  // payload, the article reads from hero + scenes. Kept on the interface
+  // (rather than removed) so callers passing it as part of a wider story
+  // shape don't break — the field is just ignored.
   video_url: string | null;
 }
 
@@ -680,9 +759,9 @@ export function evaluatePublishReadiness(
   if (!story.hero_image) {
     missing.push("hero image is missing");
   }
-  if (!story.video_url) {
-    missing.push("video has not been rendered yet");
-  }
+  // 2026-06-19: video_url is no longer a publish prerequisite. See the
+  // comment on StoryReadinessInput above and
+  // _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md.
   if (story.status === "published") {
     missing.push("story is already published");
   }
@@ -813,6 +892,45 @@ export async function bulkSetRedditSourceStatus(
     await run(
       `UPDATE reddit_source SET ${sets.join(", ")} WHERE reddit_id IN (${placeholders})`,
       params,
+    );
+    updated += batch.length;
+  }
+  return updated;
+}
+
+// ---------- Full Pipeline toggle (2026-06-24) ----------
+
+// Per-source opt-in for end-to-end run + auto-publish on success. The
+// toggle is persisted on reddit_source (not story_jobs) so the admin
+// can flip it before processing — propagation onto the job row happens
+// at enqueue inside bulkEnqueueStoryJobs. Bulk variant matches the
+// shape of bulkSetRedditSourceStatus so the admin footer can reuse the
+// same selection model.
+export async function setRedditSourceFullPipeline(
+  redditId: string,
+  value: boolean,
+): Promise<void> {
+  if (!redditId) {
+    throw new Error("setRedditSourceFullPipeline requires reddit_id");
+  }
+  await run(
+    "UPDATE reddit_source SET full_pipeline = ? WHERE reddit_id = ?",
+    [value ? 1 : 0, redditId],
+  );
+}
+
+export async function bulkSetRedditSourceFullPipeline(
+  redditIds: string[],
+  value: boolean,
+): Promise<number> {
+  if (redditIds.length === 0) return 0;
+  let updated = 0;
+  for (let i = 0; i < redditIds.length; i += 500) {
+    const batch = redditIds.slice(i, i + 500);
+    const placeholders = batch.map(() => "?").join(", ");
+    await run(
+      `UPDATE reddit_source SET full_pipeline = ? WHERE reddit_id IN (${placeholders})`,
+      [value ? 1 : 0, ...batch],
     );
     updated += batch.length;
   }

@@ -24,6 +24,24 @@ import type { ShortRenderRow } from "@/lib/short-render-queue";
 
 const POLL_MS = 2500;
 
+// Belt-and-braces companion to the server-side Cache-Control: every short
+// re-render overwrites the SAME GCS key (one canonical MP4 per story), so
+// without a per-render query param a browser cache that ignores the
+// no-cache header would happily replay the previous MP4. We append the
+// render row id (stable, monotonic per render) so each Lane A/B/C run
+// gets a distinct URL the cache can't conflate with the prior one.
+// finished_at is a fine fallback when id isn't suitable, but id is stable
+// across the editor's re-renders of the same row.
+function withRenderCacheBuster(
+  url: string,
+  row: { id: string; finished_at?: string | null },
+): string {
+  const tag = row.finished_at ?? row.id;
+  if (!tag) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}v=${encodeURIComponent(tag)}`;
+}
+
 const PHASE_LABEL: Record<string, string> = {
   script: "Writing script…",
   plan: "Planning scenes…",
@@ -189,14 +207,14 @@ export function RenderStatusPanel({
       {row.status === "done" && row.output_url && (
         <div className="flex flex-wrap items-center gap-3">
           <video
-            src={row.output_url}
+            src={withRenderCacheBuster(row.output_url, row)}
             controls
             playsInline
             className="aspect-[9/16] w-32 self-start rounded-md border border-line bg-black"
           />
           <div className="flex flex-col gap-1 text-[12px]">
             <a
-              href={row.output_url}
+              href={withRenderCacheBuster(row.output_url, row)}
               download
               className="font-mono text-[11px] text-accent underline"
             >

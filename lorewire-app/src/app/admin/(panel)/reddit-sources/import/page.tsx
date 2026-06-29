@@ -9,14 +9,14 @@
 // for a lazy user) the bar is "drop the CSV, see what changed, move on."
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import RedditSourceImportForm from "./RedditSourceImportForm";
 import { countRedditSources } from "@/lib/reddit-source";
 
 export const dynamic = "force-dynamic";
 
 export default async function RedditSourceImportPage() {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const totalRows = await countRedditSources();
 
   return (

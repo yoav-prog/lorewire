@@ -1,0 +1,1366 @@
+// Server-side storage helpers for the engagement-poll surface.
+// Constants, types, validation, and the pure divisiveness math live
+// next door in lib/polls-shared.ts and are RE-EXPORTED from here so
+// existing server callers can keep importing from "@/lib/polls" while
+// client components import from "@/lib/polls-shared" without dragging
+// the postgres driver into the browser bundle.
+//
+// Anti-pattern this fixes (2026-06-18): when a client component
+// imported even a *type* from a module marked `import "server-only"`,
+// Turbopack pulled the whole module — and its transitive db driver —
+// into the client bundle, breaking the Vercel build. The split
+// mirrors lib/homepage-curation-shared.ts (the precedent in this repo).
+//
+// Plan: _plans/2026-06-17-engagement-polls.md.
+
+import "server-only";
+import { randomUUID } from "node:crypto";
+import { all, one, run } from "@/lib/db";
+import { getSetting } from "@/lib/repo";
+import {
+  DEFAULT_PUBLIC_FLOOR,
+  divisiveness,
+  isPollSide,
+  MINORITY_VOTE_DEFAULT_THRESHOLD,
+  minorityVoteThresholdSettingKey,
+  parseMinorityVoteThreshold,
+  toResultView,
+  validatePollInputs,
+  type PollAggregateRow,
+  type PollRow,
+  type PollSide,
+  type RailCardRow,
+  type WirePollData,
+} from "@/lib/polls-shared";
+
+// Re-export the entire client-safe surface so legacy server callers
+// keep working through this module. Client components must import
+// directly from "@/lib/polls-shared".
+export {
+  CATEGORY_POLL_PRESETS,
+  DEFAULT_PUBLIC_FLOOR,
+  divisiveness,
+  getPresetForCategory,
+  HERO_VERDICT_DIVIDED_THRESHOLD,
+  HOMEPAGE_RAIL_LIMIT,
+  isPollSide,
+  isRailEnabledValue,
+  MINORITY_VOTE_DEFAULT_THRESHOLD,
+  minorityVoteThresholdSettingKey,
+  parseMinorityVoteThreshold,
+  pctA,
+  pctBComplement,
+  POLL_OPTION_MAX,
+  POLL_QUESTION_MAX,
+  POLL_RAIL_KINDS,
+  QUESTION_CARD_DURATION_MS,
+  railEnabledSettingKey,
+  renderHeroVerdictBadge,
+  toResultView,
+  validatePollInputs,
+  type HeroVerdictBadge,
+  type HomepagePollRails,
+  type PollAggregateRow,
+  type PollPreset,
+  type PollRailKind,
+  type PollResultView,
+  type PollRow,
+  type PollSide,
+  type PollValidation,
+  type RailCardRow,
+  type StoryCategory,
+  type WirePollData,
+} from "@/lib/polls-shared";
+
+// ─── Settings-driven floor ────────────────────────────────────────────────────
+
+/** Resolve the public floor (minimum total votes before percentages
+ *  reveal) from settings. Admin override key is `polls.public_floor`;
+ *  unset/blank/malformed values fall through to DEFAULT_PUBLIC_FLOOR.
+ *  Negative values also fall through — a negative floor would expose
+ *  percentages on zero-vote polls, which is the misleading shape the
+ *  floor exists to prevent.
+ *
+ *  The constant DEFAULT_PUBLIC_FLOOR stays as the in-code default so
+ *  call sites that don't need runtime overrides (admin overview copy,
+ *  tests) can use it directly without an await. */
+export async function resolvePublicFloor(): Promise<number> {
+  const raw = await getSetting("polls.public_floor");
+  if (!raw) return DEFAULT_PUBLIC_FLOOR;
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_PUBLIC_FLOOR;
+  return n;
+}
+
+/** Resolve the minimum number of minority-side votes a viewer must
+ *  have before the homepage "You Voted With the Minority" rail surfaces.
+ *  Reads `homepage.minority_vote_threshold` from settings; falls back
+ *  to MINORITY_VOTE_DEFAULT_THRESHOLD on any unset / malformed /
+ *  non-positive value (see parseMinorityVoteThreshold for the trust
+ *  boundary).
+ *
+ *  Plan: _plans/2026-06-26-homepage-redesign-v1.md (slice A). */
+export async function resolveMinorityVoteThreshold(): Promise<number> {
+  const raw = await getSetting(minorityVoteThresholdSettingKey());
+  return parseMinorityVoteThreshold(raw);
+}
+
+// ─── Reads ────────────────────────────────────────────────────────────────────
+
+const POLL_COLS =
+  "id, story_id, article_id, question, option_a_text, option_b_text, enabled, category, created_at, updated_at";
+
+export async function getPollByStoryId(
+  storyId: string,
+): Promise<PollRow | null> {
+  if (!storyId) return null;
+  return one<PollRow>(
+    `SELECT ${POLL_COLS} FROM polls WHERE story_id = ?`,
+    [storyId],
+  );
+}
+
+/** Read the article-attached poll for an article id. Mirrors
+ *  getPollByStoryId. 2026-06-18 standalone-article polls (plan §15). */
+export async function getPollByArticleId(
+  articleId: string,
+): Promise<PollRow | null> {
+  if (!articleId) return null;
+  return one<PollRow>(
+    `SELECT ${POLL_COLS} FROM polls WHERE article_id = ?`,
+    [articleId],
+  );
+}
+
+export async function getPollById(id: string): Promise<PollRow | null> {
+  if (!id) return null;
+  return one<PollRow>(`SELECT ${POLL_COLS} FROM polls WHERE id = ?`, [id]);
+}
+
+const AGG_COLS =
+  "story_id, poll_id, category, votes_a, votes_b, total_votes, divisiveness, agreement, last_vote_at, refreshed_at";
+
+export async function getAggregateByStoryId(
+  storyId: string,
+): Promise<PollAggregateRow | null> {
+  if (!storyId) return null;
+  return one<PollAggregateRow>(
+    `SELECT ${AGG_COLS} FROM poll_aggregates WHERE story_id = ?`,
+    [storyId],
+  );
+}
+
+// ─── Batch reads (Wires feed) ─────────────────────────────────────────────────
+//
+// The Wires feed loads up to 50 stories per page; resolving each
+// story's poll + aggregate + this-cookie-voted-side one row at a time
+// would N+1 the feed. These helpers take the full id list and answer
+// in three round trips total (polls IN (…), poll_aggregates IN (…),
+// poll_votes WHERE cookie AND poll_id IN (…)).
+//
+// Plan: _plans/2026-06-25-wires-poll-wrapper.md.
+
+/** Batch sibling of `getPollByStoryId`. Returns one entry per id that
+ *  has an ENABLED poll attached — disabled polls are filtered out at
+ *  the SQL level so the caller doesn't have to re-check the flag. Ids
+ *  with no row simply don't appear in the map. Empty input → empty
+ *  map (no SQL round trip). */
+export async function getPollsByStoryIds(
+  storyIds: string[],
+): Promise<Map<string, PollRow>> {
+  if (storyIds.length === 0) return new Map();
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<PollRow>(
+    `SELECT ${POLL_COLS} FROM polls
+     WHERE enabled = 1 AND story_id IN (${placeholders})`,
+    storyIds,
+  );
+  const out = new Map<string, PollRow>();
+  for (const r of rows) {
+    if (r.story_id) out.set(r.story_id, r);
+  }
+  return out;
+}
+
+/** Batch sibling of `getAggregateByStoryId`. Same shape rules as
+ *  `getPollsByStoryIds`: empty input → empty map, missing rows simply
+ *  absent. */
+export async function getAggregatesByStoryIds(
+  storyIds: string[],
+): Promise<Map<string, PollAggregateRow>> {
+  if (storyIds.length === 0) return new Map();
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<PollAggregateRow>(
+    `SELECT ${AGG_COLS} FROM poll_aggregates WHERE story_id IN (${placeholders})`,
+    storyIds,
+  );
+  const out = new Map<string, PollAggregateRow>();
+  for (const r of rows) out.set(r.story_id, r);
+  return out;
+}
+
+/** Batch sibling of `getVoteSideForCookie`. Returns one entry per poll
+ *  this cookie has voted on. Empty input, missing cookie, or an
+ *  unrecognised side all collapse to an empty map. */
+export async function getVoteSidesForCookieAndPolls(
+  pollIds: string[],
+  cookieToken: string | null,
+): Promise<Map<string, PollSide>> {
+  if (pollIds.length === 0 || !cookieToken) return new Map();
+  const placeholders = pollIds.map(() => "?").join(", ");
+  const rows = await all<{ poll_id: string; side: string }>(
+    `SELECT poll_id, side FROM poll_votes
+     WHERE cookie_token = ? AND poll_id IN (${placeholders})`,
+    [cookieToken, ...pollIds],
+  );
+  const out = new Map<string, PollSide>();
+  for (const r of rows) {
+    if (isPollSide(r.side)) out.set(r.poll_id, r.side);
+  }
+  return out;
+}
+
+/** Compose the three batch reads into the per-story bundle the Wires
+ *  panel consumes. Story ids without an enabled poll are simply absent
+ *  from the result — callers set `poll: null` on those rows.
+ *
+ *  `floor` is passed through so call sites that have already resolved
+ *  the settings value don't pay for a second lookup, but it defaults
+ *  to `DEFAULT_PUBLIC_FLOOR` so callers that don't care still get safe
+ *  pre-floor behavior. */
+export async function getWirePollsForStories(
+  storyIds: string[],
+  cookieToken: string | null,
+  floor: number = DEFAULT_PUBLIC_FLOOR,
+): Promise<Map<string, WirePollData>> {
+  if (storyIds.length === 0) return new Map();
+  const polls = await getPollsByStoryIds(storyIds);
+  const pollIds = Array.from(polls.values()).map((p) => p.id);
+  const [aggregates, voteSides] = await Promise.all([
+    getAggregatesByStoryIds(storyIds),
+    getVoteSidesForCookieAndPolls(pollIds, cookieToken),
+  ]);
+  const out = new Map<string, WirePollData>();
+  for (const [storyId, poll] of polls) {
+    const agg = aggregates.get(storyId) ?? null;
+    out.set(storyId, {
+      pollId: poll.id,
+      question: poll.question,
+      optionA: poll.option_a_text,
+      optionB: poll.option_b_text,
+      // Pre-vote with zero votes: callers pass null so the panel
+      // skips the "X votes — split reveals…" copy. Once any vote
+      // lands we paint the floor-aware result view (percentages
+      // stay hidden below the floor).
+      initialResult: agg ? toResultView(agg, floor) : null,
+      initialVotedSide: voteSides.get(poll.id) ?? null,
+    });
+  }
+  console.info("[wires poll panel batch resolve]", {
+    requested: storyIds.length,
+    with_poll: polls.size,
+    with_aggregate: aggregates.size,
+    with_vote: voteSides.size,
+  });
+  return out;
+}
+
+// ─── Writes (admin) ───────────────────────────────────────────────────────────
+
+/** Subject discriminator is the presence of `storyId` vs `articleId`.
+ *  Runtime enforces exactly-one-set; the type allows both as optional
+ *  so existing call sites that pass only `storyId` keep typechecking
+ *  without a wave of edits. 2026-06-18 standalone-article polls
+ *  (plan §15). */
+export interface UpsertPollInput {
+  storyId?: string;
+  articleId?: string;
+  question: string;
+  optionA: string;
+  optionB: string;
+  enabled: boolean;
+  /** Category snapshot from the parent row at write time —
+   *  denormalised for fast rail queries. For story polls this is the
+   *  story's `category`; for article polls it's the article's `type`
+   *  (news / feature / listicle / review). Null is fine; rail queries
+   *  treat null as "uncategorised." */
+  category: string | null;
+}
+
+export interface UpsertPollResult {
+  ok: boolean;
+  pollId: string;
+  created: boolean;
+  error?: string;
+}
+
+/** Insert-or-update one row in polls keyed by the subject id. Lookup-
+ *  then-write rather than ON CONFLICT so the same code path covers
+ *  both subject kinds without needing per-subject conflict-target
+ *  syntax (Postgres requires the target column to be specified on the
+ *  ON CONFLICT clause). The partial unique indexes guarantee no two
+ *  rows can share a subject id; the lookup is cheap.
+ *
+ *  Runtime invariant: exactly one of (storyId, articleId) must be
+ *  set. Both null = caller forgot the subject; both set = caller bug
+ *  (a poll can't span both kinds). */
+export async function upsertPoll(
+  input: UpsertPollInput,
+): Promise<UpsertPollResult> {
+  const v = validatePollInputs({
+    question: input.question,
+    optionA: input.optionA,
+    optionB: input.optionB,
+  });
+  if (!v.ok) {
+    return { ok: false, pollId: "", created: false, error: v.error };
+  }
+  const storyId = (input.storyId ?? "").trim() || null;
+  const articleId = (input.articleId ?? "").trim() || null;
+  if (!storyId && !articleId) {
+    return {
+      ok: false,
+      pollId: "",
+      created: false,
+      error: "subject required (storyId or articleId)",
+    };
+  }
+  if (storyId && articleId) {
+    return {
+      ok: false,
+      pollId: "",
+      created: false,
+      error: "exactly one of storyId / articleId allowed",
+    };
+  }
+  const now = new Date().toISOString();
+  const existing = storyId
+    ? await getPollByStoryId(storyId)
+    : await getPollByArticleId(articleId ?? "");
+  if (existing) {
+    await run(
+      `UPDATE polls
+       SET question = ?, option_a_text = ?, option_b_text = ?, enabled = ?, category = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        v.cleaned.question,
+        v.cleaned.optionA,
+        v.cleaned.optionB,
+        input.enabled ? 1 : 0,
+        input.category,
+        now,
+        existing.id,
+      ],
+    );
+    console.info("[polls repo] update", {
+      poll_id: existing.id,
+      story_id: storyId,
+      article_id: articleId,
+      enabled: input.enabled,
+    });
+    return { ok: true, pollId: existing.id, created: false };
+  }
+  const id = randomUUID();
+  await run(
+    `INSERT INTO polls (id, story_id, article_id, question, option_a_text, option_b_text, enabled, category, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      storyId,
+      articleId,
+      v.cleaned.question,
+      v.cleaned.optionA,
+      v.cleaned.optionB,
+      input.enabled ? 1 : 0,
+      input.category,
+      now,
+      now,
+    ],
+  );
+  console.info("[polls repo] create", {
+    poll_id: id,
+    story_id: storyId,
+    article_id: articleId,
+    enabled: input.enabled,
+  });
+  return { ok: true, pollId: id, created: true };
+}
+
+// ─── Writes (vote) ────────────────────────────────────────────────────────────
+
+export interface RecordVoteInput {
+  pollId: string;
+  /** Denormalised subject id. Exactly one of (storyId, articleId) is
+   *  populated at runtime, matching the poll's subject. Both fields
+   *  are optional in the TYPE so existing call sites that pass only
+   *  storyId keep working without edits — runtime check enforces
+   *  the invariant. The caller usually resolves them from the poll
+   *  row's `story_id` / `article_id` fields. */
+  storyId?: string | null;
+  articleId?: string | null;
+  category: string | null;
+  side: PollSide;
+  cookieToken: string;
+  /** Signed-in voter's user id, or null/undefined for an anonymous vote. When
+   *  set, the vote is attributed to the account AT VOTE TIME (the reconciliation
+   *  step only backfills votes cast BEFORE sign-in). Idempotency then spans both
+   *  the (poll_id, cookie_token) and the (poll_id, user_id) partial unique
+   *  indexes, so one signed-in user gets one vote per poll across every browser. */
+  userId?: string | null;
+  /** Hex SHA-256 of (ip || '\n' || ua), kept only for the rate-limit
+   *  bucket lookup and pruned by retention. Null disables the bucket. */
+  ipUaHash: string | null;
+}
+
+export interface RecordVoteResult {
+  ok: boolean;
+  /** True when this insert created a new row (the cookie hadn't voted
+   *  yet). False when the same cookie had already voted — the call is
+   *  a no-op by design so stale tabs don't 409 the user. */
+  inserted: boolean;
+  error?: string;
+}
+
+/** Inserts a vote row, idempotent on (poll_id, cookie_token) — the
+ *  partial unique index `idx_poll_votes_poll_cookie` is what makes
+ *  the same browser re-clicking accepted-and-noop. The aggregate
+ *  refresh cron picks the new row up within 5 minutes. */
+export async function recordVote(
+  input: RecordVoteInput,
+): Promise<RecordVoteResult> {
+  if (!input.pollId || !input.cookieToken) {
+    return { ok: false, inserted: false, error: "missing required fields" };
+  }
+  // Subject id: exactly one of storyId / articleId must be set. The
+  // both-undefined case = the caller forgot to pass the subject; the
+  // both-set case = a coding bug. Coerce undefined → null up front
+  // so the SQLite driver doesn't choke (it accepts null but rejects
+  // undefined as a parameter value).
+  const storyId = input.storyId ?? null;
+  const articleId = input.articleId ?? null;
+  const userId = input.userId ?? null;
+  if (!storyId && !articleId) {
+    return {
+      ok: false,
+      inserted: false,
+      error: "subject required (storyId or articleId)",
+    };
+  }
+  if (storyId && articleId) {
+    return {
+      ok: false,
+      inserted: false,
+      error: "exactly one of storyId / articleId allowed",
+    };
+  }
+  if (!isPollSide(input.side)) {
+    return { ok: false, inserted: false, error: "side must be 'A' or 'B'" };
+  }
+  // Pre-check: if a row already exists for this (poll, cookie) — or, for a
+  // signed-in voter, this (poll, user) — the matching partial unique index
+  // would reject the insert; rather than catch the driver exception we read
+  // first. Cheap (single-row index probe) and gives the caller a precise
+  // `inserted` boolean for the response shape + observability log. The dup
+  // identity spans BOTH keys for a signed-in voter so a second browser (new
+  // cookie, same account) is an idempotent no-op, not a second vote.
+  const dupWhere = userId
+    ? "poll_id = ? AND (cookie_token = ? OR user_id = ?)"
+    : "poll_id = ? AND cookie_token = ?";
+  const dupParams = userId
+    ? [input.pollId, input.cookieToken, userId]
+    : [input.pollId, input.cookieToken];
+  const existing = await one<{ id: string }>(
+    `SELECT id FROM poll_votes WHERE ${dupWhere} LIMIT 1`,
+    dupParams,
+  );
+  if (existing) {
+    console.info("[polls vote duplicate]", {
+      poll_id: input.pollId,
+      story_id: storyId,
+      article_id: articleId,
+      side: input.side,
+      cookie_prefix: input.cookieToken.slice(0, 8),
+    });
+    return { ok: true, inserted: false };
+  }
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  try {
+    await run(
+      `INSERT INTO poll_votes (id, poll_id, story_id, article_id, category, side, cookie_token, ip_ua_hash, created_at, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        input.pollId,
+        storyId,
+        articleId,
+        input.category,
+        input.side,
+        input.cookieToken,
+        input.ipUaHash,
+        now,
+        userId,
+      ],
+    );
+  } catch (err) {
+    // Race window: two concurrent same-cookie votes both passed the
+    // SELECT-then-INSERT check above, the second hits the unique
+    // index `idx_poll_votes_poll_cookie` and the driver throws. The
+    // user-visible outcome should be "already voted" idempotent
+    // success — the first INSERT already landed, this one is a no-op.
+    // Driver-agnostic check: re-read the row. If it now exists, the
+    // race lost cleanly. If it doesn't, the INSERT failed for some
+    // other reason and we surface the original error. Same dual identity
+    // as the pre-check so a (poll, user) collision from a concurrent vote
+    // on another browser also coalesces to idempotent success.
+    const after = await one<{ id: string }>(
+      `SELECT id FROM poll_votes WHERE ${dupWhere} LIMIT 1`,
+      dupParams,
+    );
+    if (after) {
+      console.info("[polls vote race-coalesced]", {
+        poll_id: input.pollId,
+        story_id: storyId,
+        article_id: articleId,
+        cookie_prefix: input.cookieToken.slice(0, 8),
+        winner_id: after.id,
+      });
+      return { ok: true, inserted: false };
+    }
+    console.warn("[polls vote insert failed]", {
+      poll_id: input.pollId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      ok: false,
+      inserted: false,
+      error: err instanceof Error ? err.message : "insert failed",
+    };
+  }
+  console.info("[polls vote]", {
+    poll_id: input.pollId,
+    story_id: storyId,
+    article_id: articleId,
+    side: input.side,
+    cookie_prefix: input.cookieToken.slice(0, 8),
+  });
+  return { ok: true, inserted: true };
+}
+
+// ─── Aggregate refresh ────────────────────────────────────────────────────────
+
+/** Recompute the aggregate row for ONE story by counting the live
+ *  poll_votes. Idempotent; safe to run on a story with no votes (writes
+ *  zeros). The Vercel cron at /api/polls/refresh calls this in a loop
+ *  over stories whose `last_vote_at` is older than `refreshed_at`. */
+export async function refreshPollAggregateForStory(
+  storyId: string,
+): Promise<void> {
+  if (!storyId) return;
+  const poll = await getPollByStoryId(storyId);
+  if (!poll) return;
+  const counts = await all<{ side: string; c: number }>(
+    "SELECT side, COUNT(*) AS c FROM poll_votes WHERE poll_id = ? GROUP BY side",
+    [poll.id],
+  );
+  let votesA = 0;
+  let votesB = 0;
+  for (const row of counts) {
+    const c = Number(row.c) || 0;
+    if (row.side === "A") votesA = c;
+    else if (row.side === "B") votesB = c;
+  }
+  const total = votesA + votesB;
+  const div = divisiveness(votesA, votesB);
+  const last = await one<{ last_vote_at: string | null }>(
+    "SELECT MAX(created_at) AS last_vote_at FROM poll_votes WHERE poll_id = ?",
+    [poll.id],
+  );
+  const now = new Date().toISOString();
+  const existing = await getAggregateByStoryId(storyId);
+  if (existing) {
+    await run(
+      `UPDATE poll_aggregates
+       SET poll_id = ?, category = ?, votes_a = ?, votes_b = ?, total_votes = ?,
+           divisiveness = ?, agreement = ?, last_vote_at = ?, refreshed_at = ?
+       WHERE story_id = ?`,
+      [
+        poll.id,
+        poll.category,
+        votesA,
+        votesB,
+        total,
+        div,
+        1 - div,
+        last?.last_vote_at ?? null,
+        now,
+        storyId,
+      ],
+    );
+  } else {
+    await run(
+      `INSERT INTO poll_aggregates (story_id, poll_id, category, votes_a, votes_b, total_votes, divisiveness, agreement, last_vote_at, refreshed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        storyId,
+        poll.id,
+        poll.category,
+        votesA,
+        votesB,
+        total,
+        div,
+        1 - div,
+        last?.last_vote_at ?? null,
+        now,
+      ],
+    );
+  }
+  console.info("[polls aggregate refresh]", {
+    story_id: storyId,
+    poll_id: poll.id,
+    total,
+    divisiveness: Number(div.toFixed(4)),
+  });
+}
+
+/** Live-compute the aggregate for an article poll. 2026-06-18
+ *  standalone-article polls. Article polls bypass the poll_aggregates
+ *  projection (no cron-refresh row, no rail surfacing) because we
+ *  expect low volume per article — a single GROUP BY against the
+ *  hot index `idx_poll_votes_poll_id` answers the widget read in
+ *  the same single-digit ms a row fetch would.
+ *
+ *  Returns an in-memory `PollAggregateRow` shape so existing
+ *  consumers (the widget's toResultView call site) don't branch on
+ *  subject kind. story_id stays null because article polls never
+ *  populate it. */
+export async function computeArticlePollAggregate(
+  poll: PollRow,
+): Promise<PollAggregateRow> {
+  const articleId = poll.article_id ?? "";
+  const counts = await all<{ side: string; c: number }>(
+    "SELECT side, COUNT(*) AS c FROM poll_votes WHERE poll_id = ? GROUP BY side",
+    [poll.id],
+  );
+  let votesA = 0;
+  let votesB = 0;
+  for (const row of counts) {
+    const c = Number(row.c) || 0;
+    if (row.side === "A") votesA = c;
+    else if (row.side === "B") votesB = c;
+  }
+  const total = votesA + votesB;
+  const div = divisiveness(votesA, votesB);
+  const last = await one<{ last_vote_at: string | null }>(
+    "SELECT MAX(created_at) AS last_vote_at FROM poll_votes WHERE poll_id = ?",
+    [poll.id],
+  );
+  console.info("[polls article aggregate compute]", {
+    article_id: articleId,
+    poll_id: poll.id,
+    total,
+    divisiveness: Number(div.toFixed(4)),
+  });
+  return {
+    story_id: "", // PollAggregateRow contract — empty for article polls
+    poll_id: poll.id,
+    category: poll.category,
+    votes_a: votesA,
+    votes_b: votesB,
+    total_votes: total,
+    divisiveness: div,
+    agreement: 1 - div,
+    last_vote_at: last?.last_vote_at ?? null,
+    refreshed_at: new Date().toISOString(),
+  };
+}
+
+/** Look up the side this cookie voted for on this poll, if any. Used
+ *  by the server-rendered PollWidget to decide whether to render the
+ *  pre-vote buttons or the post-vote percentages on first paint —
+ *  without a second hop after hydration. Returns null when the cookie
+ *  hasn't voted on this poll (including the common "no cookie set
+ *  yet" case where the caller passes an empty string). */
+export async function getVoteSideForCookie(
+  pollId: string,
+  cookieToken: string | null,
+): Promise<PollSide | null> {
+  if (!pollId || !cookieToken) return null;
+  const row = await one<{ side: string }>(
+    "SELECT side FROM poll_votes WHERE poll_id = ? AND cookie_token = ?",
+    [pollId, cookieToken],
+  );
+  if (!row) return null;
+  return isPollSide(row.side) ? row.side : null;
+}
+
+/** Count polls where this cookie voted on the side that is currently
+ *  the MINORITY at the live `poll_aggregates` counts. Powers the
+ *  threshold gate for the homepage "You Voted With the Minority" rail
+ *  (slice A of _plans/2026-06-26-homepage-redesign-v1.md).
+ *
+ *  Semantic: "currently the minority" — strictly less than half of
+ *  total_votes. Ties (50/50) don't count as minority, matching the
+ *  same `votes_a * 2 < total_votes` predicate `topUnpopular` uses for
+ *  rail surfacing, so the gate and the rail agree on "minority."
+ *
+ *  Floor: only polls with `total_votes >= DEFAULT_PUBLIC_FLOOR` count
+ *  toward the threshold. A cookie that voted on a 1-vote poll and is
+ *  technically the "100% side" wouldn't naturally count anyway, but
+ *  the floor is the cleaner expression of "established poll" and
+ *  matches `RAIL_MIN_VOTES`.
+ *
+ *  Returns 0 for an absent / empty cookie — the rail can't personalize
+ *  for an unidentified viewer. */
+export async function countMinorityVotesByCookie(
+  cookieToken: string | null,
+): Promise<number> {
+  if (!cookieToken) return 0;
+  const row = await one<{ c: number }>(
+    `SELECT COUNT(*) AS c
+     FROM poll_votes v
+     JOIN poll_aggregates pa ON pa.poll_id = v.poll_id
+     WHERE v.cookie_token = ?
+       AND pa.total_votes >= ?
+       AND (
+         (v.side = 'A' AND pa.votes_a * 2 < pa.total_votes)
+         OR (v.side = 'B' AND pa.votes_b * 2 < pa.total_votes)
+       )`,
+    [cookieToken, RAIL_MIN_VOTES],
+  );
+  const c = Number(row?.c) || 0;
+  console.info("[polls minority count]", {
+    cookie_prefix: cookieToken.slice(0, 8),
+    count: c,
+    floor: RAIL_MIN_VOTES,
+  });
+  return c;
+}
+
+/** Resolve enabled-poll questions for the given story ids. Powers the
+ *  homepage hero's question-hint overlay (slice D of
+ *  _plans/2026-06-26-homepage-redesign-v1.md): the SSR seed pre-fetches
+ *  the question text so the carousel can paint each slide's hint on
+ *  the first byte without an extra round-trip.
+ *
+ *  Hybrid spoiler tradeoff (locked with Yoav 2026-06-26): only the
+ *  question text is surfaced, never the option labels. The hint is
+ *  meant to set up the dilemma; revealing options dilutes the
+ *  emotional payoff of watching the short.
+ *
+ *  Returns a plain Record (not a Map) so the value can serialise
+ *  cleanly through the SSR seed without a manual Array.from round-trip.
+ *  Disabled polls are filtered out at the SQL level so the caller
+ *  doesn't have to re-check the flag.
+ *
+ *  Empty input → empty Record (no SQL round trip). */
+export async function getEnabledPollQuestionsByStoryIds(
+  storyIds: string[],
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  if (storyIds.length === 0) return out;
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<{ story_id: string; question: string }>(
+    `SELECT story_id, question FROM polls
+     WHERE enabled = 1 AND story_id IN (${placeholders})`,
+    storyIds,
+  );
+  for (const r of rows) {
+    if (r.story_id && r.question) out[r.story_id] = r.question;
+  }
+  console.info("[polls hero questions]", {
+    requested: storyIds.length,
+    resolved: Object.keys(out).length,
+  });
+  return out;
+}
+
+/** List the story ids this cookie has voted on. Powers the homepage
+ *  "You Didn't Vote Yet" rail filter (slice C of
+ *  _plans/2026-06-26-homepage-redesign-v1.md) — the Continue Watching
+ *  source gives "watched", this list gives "voted", and the rail is
+ *  the set difference.
+ *
+ *  Story-poll rows only — article-poll votes don't appear here
+ *  because article votes have story_id NULL and the homepage rail
+ *  surfaces story cards. Returns a deduplicated, unordered list;
+ *  callers wrap in a Set for the O(1) `has` the filter needs.
+ *
+ *  Returns [] for an absent / empty cookie — there's nothing to
+ *  filter against for a viewer with no vote history. */
+export async function listVotedStoryIdsByCookie(
+  cookieToken: string | null,
+): Promise<string[]> {
+  if (!cookieToken) return [];
+  const rows = await all<{ story_id: string }>(
+    "SELECT DISTINCT story_id FROM poll_votes " +
+      "WHERE cookie_token = ? AND story_id IS NOT NULL",
+    [cookieToken],
+  );
+  const ids = rows.map((r) => r.story_id);
+  console.info("[polls voted story ids]", {
+    cookie_prefix: cookieToken.slice(0, 8),
+    count: ids.length,
+  });
+  return ids;
+}
+
+// ─── Public rails: divisive / agreed / unpopular ──────────────────────────────
+//
+// `RailCardRow` is the shared card shape consumed by both the public
+// /c/<surface> pages and the homepage PollRail. It lives in
+// polls-shared (re-exported above) so client components can import the
+// type without dragging the server-only db driver into the bundle.
+
+/** Default minimum total_votes a row must have before it can appear on
+ *  a public rail. Below this the percentages would be misleading
+ *  (1/0 reads 100/0 on a fresh poll), so we keep the card off the rail
+ *  entirely rather than show "<20 votes" copy on every entry. The
+ *  number tracks DEFAULT_PUBLIC_FLOOR so the rail floor matches the
+ *  on-widget floor. */
+export const RAIL_MIN_VOTES = DEFAULT_PUBLIC_FLOOR;
+
+/** Default rail page size. Plan §F8 paginates 20 per page. */
+export const RAIL_DEFAULT_LIMIT = 20;
+
+export interface RailQueryOpts {
+  /** Optional category filter — when set, only stories in that
+   *  category surface. Used by the post-vote follow-up: we keep the
+   *  reader in the same emotional register they just voted on. */
+  category?: string | null;
+  /** Exclude a specific story (the one the user is currently on). The
+   *  follow-up link uses this so the next card isn't the same story. */
+  excludeStoryId?: string | null;
+  /** Page size. Default RAIL_DEFAULT_LIMIT. */
+  limit?: number;
+}
+
+const RAIL_BASE_SELECT = `
+  SELECT
+    pa.story_id        AS story_id,
+    s.slug             AS slug,
+    s.title            AS title,
+    pa.category        AS category,
+    s.hero_image       AS hero_image,
+    p.question         AS question,
+    p.option_a_text    AS option_a_text,
+    p.option_b_text    AS option_b_text,
+    pa.votes_a         AS votes_a,
+    pa.votes_b         AS votes_b,
+    pa.total_votes     AS total_votes,
+    pa.divisiveness    AS divisiveness
+  FROM poll_aggregates pa
+  JOIN polls p ON p.id = pa.poll_id
+  JOIN stories s ON s.id = pa.story_id
+  WHERE p.enabled = 1
+    AND s.status = 'published'
+    AND s.slug IS NOT NULL
+    AND (s.noindex IS NULL OR s.noindex = 0)
+    AND pa.total_votes >= ?`;
+
+interface RawRailRow {
+  story_id: string;
+  slug: string | null;
+  title: string | null;
+  category: string | null;
+  hero_image: string | null;
+  question: string;
+  option_a_text: string;
+  option_b_text: string;
+  votes_a: number;
+  votes_b: number;
+  total_votes: number;
+  divisiveness: number;
+}
+
+function shapeRailRow(r: RawRailRow): RailCardRow {
+  return {
+    storyId: r.story_id,
+    slug: r.slug,
+    title: r.title,
+    category: r.category,
+    heroImage: r.hero_image,
+    question: r.question,
+    optionAText: r.option_a_text,
+    optionBText: r.option_b_text,
+    votesA: Number(r.votes_a) || 0,
+    votesB: Number(r.votes_b) || 0,
+    totalVotes: Number(r.total_votes) || 0,
+    divisiveness: Number(r.divisiveness) || 0,
+  };
+}
+
+/** Stories whose audience is most split — divisiveness DESC,
+ *  total_votes DESC as the tie-breaker so a 50/50 with 1k votes
+ *  outranks a 50/50 with 30. Drops any story below the rail floor
+ *  so a brand-new poll with 1 vote can't accidentally top the rail. */
+export async function topDivisive(
+  opts: RailQueryOpts = {},
+): Promise<RailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const where: string[] = [];
+  const params: unknown[] = [RAIL_MIN_VOTES];
+  if (opts.category) {
+    where.push("AND pa.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeStoryId) {
+    where.push("AND pa.story_id <> ?");
+    params.push(opts.excludeStoryId);
+  }
+  const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+    ORDER BY pa.divisiveness DESC, pa.total_votes DESC
+    LIMIT ${limit}`;
+  const rows = await all<RawRailRow>(sql, params);
+  console.info("[polls rail query]", {
+    rail: "divisive",
+    category: opts.category ?? null,
+    exclude: opts.excludeStoryId ?? null,
+    limit,
+    result_count: rows.length,
+  });
+  return rows.map(shapeRailRow);
+}
+
+/** Stories where the audience overwhelmingly agreed — sorts by
+ *  divisiveness ASC (lowest = most lopsided), with total_votes DESC
+ *  as the tie-breaker so a 95/5 with 1k votes outranks a 95/5 with 30.
+ *  Same floor logic as topDivisive. */
+export async function topAgreed(
+  opts: RailQueryOpts = {},
+): Promise<RailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const where: string[] = [];
+  const params: unknown[] = [RAIL_MIN_VOTES];
+  if (opts.category) {
+    where.push("AND pa.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeStoryId) {
+    where.push("AND pa.story_id <> ?");
+    params.push(opts.excludeStoryId);
+  }
+  const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+    ORDER BY pa.divisiveness ASC, pa.total_votes DESC
+    LIMIT ${limit}`;
+  const rows = await all<RawRailRow>(sql, params);
+  console.info("[polls rail query]", {
+    rail: "agreed",
+    category: opts.category ?? null,
+    exclude: opts.excludeStoryId ?? null,
+    limit,
+    result_count: rows.length,
+  });
+  return rows.map(shapeRailRow);
+}
+
+export interface UnpopularQueryOpts extends RailQueryOpts {
+  /** When set, the rail returns stories where THIS cookie voted on
+   *  the losing side — the V3 "you had an unpopular opinion" signal.
+   *  When null, falls back to "stories where the smaller side is <
+   *  15%" so the public surface never reads empty for a brand-new
+   *  visitor without any vote history. */
+  cookieToken?: string | null;
+}
+
+/** Stories where the requester's side was the minority. With a cookie
+ *  token we can compute this precisely from poll_votes; without one
+ *  (a fresh visitor with no vote history) we fall back to "stories
+ *  where the smaller side polled under 15%" so the rail is never
+ *  empty on first visit. The lossy fallback ships the same vibe as
+ *  the cookie-personalized version: every entry is a "most people
+ *  picked the other side" story.  */
+export async function topUnpopular(
+  opts: UnpopularQueryOpts = {},
+): Promise<RailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const where: string[] = [];
+  const params: unknown[] = [RAIL_MIN_VOTES];
+  if (opts.category) {
+    where.push("AND pa.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeStoryId) {
+    where.push("AND pa.story_id <> ?");
+    params.push(opts.excludeStoryId);
+  }
+
+  if (opts.cookieToken) {
+    // Personalized path: only include stories the cookie has voted on
+    // AND where that vote landed on the smaller side. We join the vote
+    // row in and add a server-side guard that the chosen side polled
+    // under 50% of total_votes.
+    const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+      AND EXISTS (
+        SELECT 1 FROM poll_votes v
+        WHERE v.poll_id = p.id
+          AND v.cookie_token = ?
+          AND (
+            (v.side = 'A' AND pa.votes_a * 2 < pa.total_votes)
+            OR (v.side = 'B' AND pa.votes_b * 2 < pa.total_votes)
+          )
+      )
+      ORDER BY pa.divisiveness ASC, pa.total_votes DESC
+      LIMIT ${limit}`;
+    const rows = await all<RawRailRow>(sql, [...params, opts.cookieToken]);
+    console.info("[polls rail query]", {
+      rail: "unpopular",
+      mode: "personalized",
+      category: opts.category ?? null,
+      exclude: opts.excludeStoryId ?? null,
+      limit,
+      result_count: rows.length,
+    });
+    return rows.map(shapeRailRow);
+  }
+
+  // Fallback: any story where the smaller side polled under 15%. SQL
+  // booleans differ across SQLite + Postgres but the arithmetic
+  // form (votes_a * 100 < total_votes * 15 OR symmetric) works
+  // identically on both.
+  const sql = `${RAIL_BASE_SELECT} ${where.join(" ")}
+    AND (
+      pa.votes_a * 100 < pa.total_votes * 15
+      OR pa.votes_b * 100 < pa.total_votes * 15
+    )
+    ORDER BY pa.divisiveness ASC, pa.total_votes DESC
+    LIMIT ${limit}`;
+  const rows = await all<RawRailRow>(sql, params);
+  console.info("[polls rail query]", {
+    rail: "unpopular",
+    mode: "fallback",
+    category: opts.category ?? null,
+    exclude: opts.excludeStoryId ?? null,
+    limit,
+    result_count: rows.length,
+  });
+  return rows.map(shapeRailRow);
+}
+
+// ─── Article rails: divisive / agreed / unpopular ────────────────────────────
+//
+// Mirrors the story-rail surface but for polls attached to articles.
+// Article polls don't have a projection row in `poll_aggregates` (we
+// compute live by design — see computeArticlePollAggregate), so the
+// rail queries compute counts inline via a GROUP BY against
+// `poll_votes`. Volume is low enough that the cost is negligible;
+// the `idx_poll_votes_poll_id` index makes the GROUP BY tight.
+
+/** A card row on the public article-rail pages. Self-contained —
+ *  carries every field the card renders so the page never has to
+ *  look the article up in a static catalog. */
+export interface ArticleRailCardRow {
+  pollId: string;
+  articleId: string;
+  slug: string | null;
+  title: string | null;
+  /** Snapshot of the article TYPE at the time the poll was authored
+   *  (news / feature / listicle / review). Powers the per-type
+   *  filter and the card chip. */
+  category: string | null;
+  heroImage: string | null;
+  language: string | null;
+  question: string;
+  optionAText: string;
+  optionBText: string;
+  votesA: number;
+  votesB: number;
+  totalVotes: number;
+  divisiveness: number;
+}
+
+export interface ArticleRailQueryOpts {
+  /** Optional filter by article TYPE (e.g. "feature", "review"). */
+  category?: string | null;
+  /** Exclude a specific article (the one the reader is currently
+   *  on). Used by a future post-vote follow-up on the article reader. */
+  excludeArticleId?: string | null;
+  limit?: number;
+}
+
+interface RawArticleRailRow {
+  poll_id: string;
+  article_id: string;
+  slug: string | null;
+  title: string | null;
+  category: string | null;
+  hero_image: string | null;
+  language: string | null;
+  question: string;
+  option_a_text: string;
+  option_b_text: string;
+  votes_a: number;
+  votes_b: number;
+}
+
+const ARTICLE_RAIL_BASE_SELECT = `
+  SELECT
+    p.id                AS poll_id,
+    p.article_id        AS article_id,
+    ar.slug             AS slug,
+    ar.title            AS title,
+    p.category          AS category,
+    ar.hero_image       AS hero_image,
+    ar.language         AS language,
+    p.question          AS question,
+    p.option_a_text     AS option_a_text,
+    p.option_b_text     AS option_b_text,
+    COALESCE(SUM(CASE WHEN pv.side = 'A' THEN 1 ELSE 0 END), 0) AS votes_a,
+    COALESCE(SUM(CASE WHEN pv.side = 'B' THEN 1 ELSE 0 END), 0) AS votes_b
+  FROM polls p
+  JOIN articles ar ON ar.id = p.article_id
+  LEFT JOIN poll_votes pv ON pv.poll_id = p.id
+  WHERE p.enabled = 1
+    AND p.article_id IS NOT NULL
+    AND ar.status = 'published'
+    AND ar.slug IS NOT NULL
+    AND (ar.noindex IS NULL OR ar.noindex = 0)`;
+
+function shapeArticleRailRow(r: RawArticleRailRow): ArticleRailCardRow {
+  const votesA = Number(r.votes_a) || 0;
+  const votesB = Number(r.votes_b) || 0;
+  return {
+    pollId: r.poll_id,
+    articleId: r.article_id,
+    slug: r.slug,
+    title: r.title,
+    category: r.category,
+    heroImage: r.hero_image,
+    language: r.language,
+    question: r.question,
+    optionAText: r.option_a_text,
+    optionBText: r.option_b_text,
+    votesA,
+    votesB,
+    totalVotes: votesA + votesB,
+    divisiveness: divisiveness(votesA, votesB),
+  };
+}
+
+/** Fetch every eligible article-poll row with its live counts and
+ *  enforce the rail floor in JS. Sorting + limiting happens at the
+ *  caller. Article-poll volume is the assumption-of-the-feature;
+ *  fetching all eligible rows + sorting in JS is fine until we have
+ *  evidence that the rail surface has thousands of entries. */
+async function listArticleRailRows(
+  opts: ArticleRailQueryOpts,
+): Promise<ArticleRailCardRow[]> {
+  const extra: string[] = [];
+  const params: unknown[] = [];
+  if (opts.category) {
+    extra.push("AND p.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeArticleId) {
+    extra.push("AND p.article_id <> ?");
+    params.push(opts.excludeArticleId);
+  }
+  const sql =
+    `${ARTICLE_RAIL_BASE_SELECT} ${extra.join(" ")}
+     GROUP BY p.id, p.article_id, ar.slug, ar.title, p.category,
+              ar.hero_image, ar.language, p.question,
+              p.option_a_text, p.option_b_text`;
+  const rows = await all<RawArticleRailRow>(sql, params);
+  return rows
+    .map(shapeArticleRailRow)
+    .filter((r) => r.totalVotes >= RAIL_MIN_VOTES);
+}
+
+/** Article polls whose audience is most split — divisiveness DESC,
+ *  total_votes DESC as the tie-breaker. Same floor + visibility
+ *  rules as the story rails. */
+export async function topArticleDivisive(
+  opts: ArticleRailQueryOpts = {},
+): Promise<ArticleRailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const eligible = await listArticleRailRows(opts);
+  eligible.sort(
+    (a, b) => b.divisiveness - a.divisiveness || b.totalVotes - a.totalVotes,
+  );
+  console.info("[polls rail query]", {
+    rail: "article-divisive",
+    category: opts.category ?? null,
+    exclude: opts.excludeArticleId ?? null,
+    limit,
+    eligible: eligible.length,
+  });
+  return eligible.slice(0, limit);
+}
+
+/** Article polls where the audience overwhelmingly agreed —
+ *  divisiveness ASC (most lopsided first), total_votes DESC tie-
+ *  breaker. */
+export async function topArticleAgreed(
+  opts: ArticleRailQueryOpts = {},
+): Promise<ArticleRailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const eligible = await listArticleRailRows(opts);
+  eligible.sort(
+    (a, b) => a.divisiveness - b.divisiveness || b.totalVotes - a.totalVotes,
+  );
+  console.info("[polls rail query]", {
+    rail: "article-agreed",
+    category: opts.category ?? null,
+    exclude: opts.excludeArticleId ?? null,
+    limit,
+    eligible: eligible.length,
+  });
+  return eligible.slice(0, limit);
+}
+
+export interface ArticleUnpopularQueryOpts extends ArticleRailQueryOpts {
+  /** When set, the rail returns articles where THIS cookie voted on
+   *  the minority side. When null, falls back to "smaller side under
+   *  15%" so a fresh visitor never sees an empty rail. */
+  cookieToken?: string | null;
+}
+
+/** Article-poll equivalent of topUnpopular. Personalized mode joins
+ *  poll_votes to find where the cookie's chosen side was the minority;
+ *  fallback mode surfaces any article where the smaller side polled
+ *  under 15%. */
+export async function topArticleUnpopular(
+  opts: ArticleUnpopularQueryOpts = {},
+): Promise<ArticleRailCardRow[]> {
+  const limit = Math.max(1, Math.min(100, opts.limit ?? RAIL_DEFAULT_LIMIT));
+  const extra: string[] = [];
+  const params: unknown[] = [];
+  if (opts.category) {
+    extra.push("AND p.category = ?");
+    params.push(opts.category);
+  }
+  if (opts.excludeArticleId) {
+    extra.push("AND p.article_id <> ?");
+    params.push(opts.excludeArticleId);
+  }
+
+  if (opts.cookieToken) {
+    // Personalized mode: fetch every eligible article-rail row, then
+    // fetch the cookie's vote map (poll_id → side), then filter in JS
+    // to rows where the cookie's side was the minority. Cheaper than
+    // expressing the minority-check inside a nested SQL HAVING (which
+    // tripped SQLite's "misuse of aggregate function" rule) — and
+    // easier to read.
+    const eligible = await listArticleRailRows(opts);
+    const voteRows = await all<{ poll_id: string; side: string }>(
+      "SELECT poll_id, side FROM poll_votes WHERE cookie_token = ?",
+      [opts.cookieToken],
+    );
+    const cookieSideByPoll = new Map<string, PollSide>();
+    for (const v of voteRows) {
+      if (isPollSide(v.side)) cookieSideByPoll.set(v.poll_id, v.side);
+    }
+    const filtered = eligible.filter((r) => {
+      const side = cookieSideByPoll.get(r.pollId);
+      if (!side) return false; // cookie didn't vote on this poll
+      const total = r.votesA + r.votesB;
+      if (total <= 0) return false;
+      return side === "A"
+        ? r.votesA * 2 < total
+        : r.votesB * 2 < total;
+    });
+    filtered.sort(
+      (a, b) =>
+        a.divisiveness - b.divisiveness || b.totalVotes - a.totalVotes,
+    );
+    console.info("[polls rail query]", {
+      rail: "article-unpopular",
+      mode: "personalized",
+      category: opts.category ?? null,
+      limit,
+      eligible: filtered.length,
+    });
+    return filtered.slice(0, limit);
+  }
+
+  // Fallback: any article whose smaller side polled under 15%.
+  const eligible = (await listArticleRailRows(opts)).filter((r) => {
+    const total = r.totalVotes;
+    if (total <= 0) return false;
+    return r.votesA * 100 < total * 15 || r.votesB * 100 < total * 15;
+  });
+  eligible.sort(
+    (a, b) =>
+      a.divisiveness - b.divisiveness || b.totalVotes - a.totalVotes,
+  );
+  console.info("[polls rail query]", {
+    rail: "article-unpopular",
+    mode: "fallback",
+    category: opts.category ?? null,
+    limit,
+    eligible: eligible.length,
+  });
+  return eligible.slice(0, limit);
+}
+
+// ─── Admin overview ───────────────────────────────────────────────────────────
+
+export interface PollOverviewRow {
+  poll: PollRow;
+  /** Aggregate may be null for a freshly-created poll whose first
+   *  refresh tick hasn't run yet. UI renders "—" in that case. */
+  aggregate: PollAggregateRow | null;
+  /** Joined from stories so the overview table doesn't N+1. */
+  storyTitle: string | null;
+  storyCategory: string | null;
+}
+
+/** Read every poll + its aggregate + the parent story's title in one
+ *  trip. Used by /admin/polls. Ordered newest-edit-first so the row
+ *  the admin just touched bubbles to the top.
+ *
+ *  Article polls (story_id NULL) surface here too — their aggregate
+ *  is computed live per row (small overhead per row; this overview
+ *  isn't a hot path). storyTitle / storyCategory stay null for
+ *  article polls; the page renders an "Article poll" link instead. */
+export async function listPollOverview(): Promise<PollOverviewRow[]> {
+  const polls = await all<PollRow>(
+    `SELECT ${POLL_COLS} FROM polls ORDER BY COALESCE(updated_at, created_at) DESC`,
+  );
+  if (polls.length === 0) return [];
+  // Only story polls need the join — article polls have null story_id
+  // and don't have a row in poll_aggregates either. Filter out the
+  // nulls before the SELECT so the IN clause stays clean.
+  const storyIds = polls
+    .map((p) => p.story_id)
+    .filter((id): id is string => id !== null);
+  let aggs: PollAggregateRow[] = [];
+  let stories: Array<{
+    id: string;
+    title: string | null;
+    category: string | null;
+  }> = [];
+  if (storyIds.length > 0) {
+    const placeholders = storyIds.map(() => "?").join(", ");
+    [aggs, stories] = await Promise.all([
+      all<PollAggregateRow>(
+        `SELECT ${AGG_COLS} FROM poll_aggregates WHERE story_id IN (${placeholders})`,
+        storyIds,
+      ),
+      all<{ id: string; title: string | null; category: string | null }>(
+        `SELECT id, title, category FROM stories WHERE id IN (${placeholders})`,
+        storyIds,
+      ),
+    ]);
+  }
+  const aggByStory = new Map(aggs.map((a) => [a.story_id, a]));
+  const storyById = new Map(stories.map((s) => [s.id, s]));
+  // For article polls we compute the aggregate live. Done in a loop
+  // so the await sequence is explicit; volume is small (one overview
+  // page, capped by total poll count).
+  const out: PollOverviewRow[] = [];
+  for (const p of polls) {
+    let aggregate: PollAggregateRow | null = null;
+    let storyTitle: string | null = null;
+    let storyCategory: string | null = null;
+    if (p.story_id) {
+      aggregate = aggByStory.get(p.story_id) ?? null;
+      storyTitle = storyById.get(p.story_id)?.title ?? null;
+      storyCategory = storyById.get(p.story_id)?.category ?? null;
+    } else if (p.article_id) {
+      aggregate = await computeArticlePollAggregate(p);
+    }
+    out.push({ poll: p, aggregate, storyTitle, storyCategory });
+  }
+  return out;
+}

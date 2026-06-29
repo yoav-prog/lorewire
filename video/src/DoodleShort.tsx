@@ -41,6 +41,7 @@ function assetSrc(url: string): string {
 }
 import { useCompositionScale } from "./scale";
 import type {
+  QuestionCard,
   ShortCaptionChunk,
   ShortCaptionWord,
   ShortVideoConfig,
@@ -74,6 +75,13 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
   const clipEndMs = config.clip_end_ms ?? config.duration_ms;
   const clipStartFrames = Math.round((clipStartMs / 1000) * fps);
   const elapsedMs = (frame / fps) * 1000 + clipStartMs;
+  // Post-roll hold (see composition-metadata.ts): the LAST frame holds on
+  // screen this many ms past the narration so the final word lands before the
+  // outro. calculateMetadata already grew durationInFrames by the same amount;
+  // here we stretch only the last frame's window to fill that tail (otherwise
+  // the held time would render as the blank #ffffff background). Only shorts
+  // set it; 0 keeps every other render unchanged.
+  const endHoldMs = Math.max(0, config.end_hold_ms ?? 0);
 
   // Wave 3 Phase 1: resolve the caption template once so every chunk render
   // shares the same style object. Missing fields fall back to the original
@@ -95,7 +103,7 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
       const nextStartMs = nextFrame
         ? config.captions[nextFrame.caption_chunk_start_index]?.start_ms ??
           clipEndMs
-        : clipEndMs;
+        : clipEndMs + endHoldMs;
       const absoluteFromFrames = Math.max(0, Math.round((startMs / 1000) * fps));
       const lengthFrames = Math.max(
         1,
@@ -275,6 +283,35 @@ export const DoodleShort: React.FC<ShortVideoConfig> = (config) => {
             @ {config.channel_name}
           </div>
         </div>
+      )}
+
+      {config.question_card && (
+        // Phase 3 of _plans/2026-06-17-engagement-polls.md. The build
+        // step has already padded duration_ms by card_ms so the
+        // composition's `durationInFrames` includes the tail. The
+        // card always lives at the very end (last `cardFrames` frames)
+        // regardless of clip_start_ms / clip_end_ms — its purpose is
+        // "the final beat the viewer sees" and the trim semantics
+        // don't change that. Drawn as an AbsoluteFill so it covers
+        // whatever final scene frame is still playing underneath.
+        (() => {
+          const card = config.question_card;
+          const cardFrames = Math.max(1, Math.round((card.card_ms / 1000) * fps));
+          const fromFrames = Math.max(0, durationInFrames - cardFrames);
+          return (
+            <Sequence
+              from={fromFrames}
+              durationInFrames={cardFrames}
+              name="question-card"
+            >
+              <QuestionCardLayer
+                card={card}
+                scaleW={scaleW}
+                scaleH={scaleH}
+              />
+            </Sequence>
+          );
+        })()
       )}
     </AbsoluteFill>
   );
@@ -505,6 +542,99 @@ const DoodleCaption: React.FC<{
           </span>
         ))}
       </div>
+    </div>
+  );
+};
+
+// Phase 3 of _plans/2026-06-17-engagement-polls.md. The burnt-in
+// question end card. Mirrors the on-site PollWidget's hierarchy
+// (question on top, two option chips below, small CTA footer) so
+// the same viewer who sees this on TikTok recognizes the layout
+// when they land on lorewire.com/v/<slug>. Pure visuals — no
+// interactivity, no audio. Fade-in across the first ~12 frames so
+// the cut from the final story scene feels intentional rather than
+// abrupt.
+const QuestionCardLayer: React.FC<{
+  card: QuestionCard;
+  scaleW: (px: number) => number;
+  scaleH: (px: number) => number;
+}> = ({ card, scaleW, scaleH }) => {
+  const frame = useCurrentFrame();
+  // 12 frames at 30fps ≈ 400ms fade-in. Capped at 1 so the card sits
+  // fully opaque for the rest of its window.
+  const opacity = Math.min(1, frame / 12);
+  return (
+    <AbsoluteFill
+      style={{
+        background: "#0f172a",
+        color: "#fbfaf4",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "center",
+        alignItems: "center",
+        padding: `${scaleH(120)}px ${scaleW(80)}px`,
+        opacity,
+      }}
+    >
+      <div
+        style={{
+          fontSize: scaleW(72),
+          fontWeight: 800,
+          textAlign: "center",
+          lineHeight: 1.1,
+          letterSpacing: -0.5,
+          maxWidth: "90%",
+        }}
+      >
+        {card.question}
+      </div>
+      <div
+        style={{
+          marginTop: scaleH(72),
+          display: "flex",
+          flexDirection: "column",
+          gap: scaleH(28),
+          width: "min(86%, 720px)",
+        }}
+      >
+        <OptionChip label={card.option_a} scaleW={scaleW} scaleH={scaleH} />
+        <OptionChip label={card.option_b} scaleW={scaleW} scaleH={scaleH} />
+      </div>
+      <div
+        style={{
+          marginTop: scaleH(96),
+          fontSize: scaleW(28),
+          fontWeight: 600,
+          letterSpacing: 0.5,
+          textTransform: "uppercase",
+          opacity: 0.85,
+        }}
+      >
+        Vote at lorewire.com/v/{card.slug}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+const OptionChip: React.FC<{
+  label: string;
+  scaleW: (px: number) => number;
+  scaleH: (px: number) => number;
+}> = ({ label, scaleW, scaleH }) => {
+  return (
+    <div
+      style={{
+        background: "rgba(251, 250, 244, 0.08)",
+        border: `${Math.max(2, scaleW(3))}px solid #fbfaf4`,
+        borderRadius: scaleW(20),
+        padding: `${scaleH(28)}px ${scaleW(40)}px`,
+        fontSize: scaleW(44),
+        fontWeight: 700,
+        textAlign: "center",
+        letterSpacing: 0.2,
+      }}
+    >
+      {label}
     </div>
   );
 };

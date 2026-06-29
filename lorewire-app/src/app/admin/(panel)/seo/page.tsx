@@ -11,9 +11,10 @@
 // AI writes the metadata: site identity, social-card defaults, Schema.org
 // organization payload, and the two big-search-engine verification metas.
 
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import SettingsShell from "@/app/admin/SettingsShell";
+import SettingsSection from "@/app/admin/SettingsSection";
 import {
   SettingChipGroup,
   SettingColor,
@@ -65,7 +66,7 @@ const TITLE_TEMPLATE_PRESETS = [
 ];
 
 export default async function SeoPage() {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   const [
     siteName,
@@ -110,7 +111,7 @@ export default async function SeoPage() {
       description="Sitewide defaults used by every public page when its own meta fields are empty. Per-piece overrides land on the article or video editor."
     >
       <div className="space-y-8">
-        <Section
+        <SettingsSection
           title="Site identity"
           description="Used in the title bar, the social card, and every Schema.org JSON-LD blob."
         >
@@ -143,7 +144,7 @@ export default async function SeoPage() {
             label="Default meta description"
             hint="Fallback description for pages without their own. Keep under 160 characters for Google to render the whole thing."
             initial={defaultMetaDescription ?? ""}
-            placeholder="Netflix for true internet stories. Watch the short, read the article."
+            placeholder="Every internet story ends with your verdict. Watch the short, decide who's right, see what the crowd said."
           />
           <SettingColor
             settingKey="seo.theme_color"
@@ -152,9 +153,9 @@ export default async function SeoPage() {
             initial={themeColor ?? ""}
             placeholder="#0A0A0C"
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Social cards"
           description="What Twitter, Facebook, LinkedIn, iMessage, and Slack show when someone shares a link."
         >
@@ -182,9 +183,9 @@ export default async function SeoPage() {
             initial={twitterHandle ?? ""}
             placeholder="@LoreWire"
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Organization (Schema.org)"
           description="Identity payload Google uses for the knowledge panel and for tying authored pieces back to your brand."
         >
@@ -211,9 +212,9 @@ export default async function SeoPage() {
             placeholder="https://twitter.com/LoreWire, https://www.linkedin.com/company/lorewire"
             multiline
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Search engine verification"
           description="Verification meta tags so Google Search Console and Bing Webmaster Tools accept the property."
         >
@@ -231,9 +232,9 @@ export default async function SeoPage() {
             initial={bingVerification ?? ""}
             placeholder="ABCDEF1234567890ABCDEF1234567890"
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Sitemap"
           description="Controls what /sitemap.xml exposes to crawlers."
         >
@@ -249,7 +250,7 @@ export default async function SeoPage() {
             unit=" days"
             tickValue={0}
           />
-        </Section>
+        </SettingsSection>
       </div>
     </SettingsShell>
   );
@@ -269,26 +270,3 @@ function SitemapToggleHint({ sitemapDrafts }: { sitemapDrafts: string }) {
   );
 }
 
-function Section({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section>
-      <div className="mb-3">
-        <h2 className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
-          {title}
-        </h2>
-        {description && (
-          <p className="mt-0.5 text-[13px] text-muted">{description}</p>
-        )}
-      </div>
-      <div className="space-y-3">{children}</div>
-    </section>
-  );
-}

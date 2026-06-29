@@ -300,3 +300,136 @@ describe("planShortRender — intro/outro segment changes", () => {
     expect(plan.diffs.segments).toBe(true);
   });
 });
+
+// ─── Lane A: poll question card change (Phase 3 polish) ──────────────────────
+
+describe("planShortRender — poll question card change", () => {
+  const noSegments = {
+    intro_segment_id: null,
+    outro_segment_id: null,
+  };
+
+  // Helper: a baseline whose props carry a question_card. Mirrors what
+  // pipeline/shorts_render.py:build_short_props emits when the story has
+  // an enabled poll.
+  function baselineWithCard() {
+    return JSON.stringify({
+      ...baseProps(),
+      question_card: {
+        question: "Who's wrong?",
+        option_a: "Wife",
+        option_b: "Husband",
+        slug: "wife-vs-husband",
+        card_ms: 2500,
+      },
+    });
+  }
+
+  it("noop when undefined (back-compat: legacy callers don't break)", () => {
+    const plan = planShortRender(configFromProps(), baselineWithCard(), noSegments);
+    // No currentPoll passed → planner skips the check, falls through to noop.
+    expect(plan.lane).toBe("noop");
+    expect(plan.diffs.poll).toBe(false);
+  });
+
+  it("Lane A when current poll text differs from the baked card", () => {
+    const plan = planShortRender(
+      configFromProps(),
+      baselineWithCard(),
+      noSegments,
+      { question: "Who's right?", option_a: "Wife", option_b: "Husband" },
+    );
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.poll).toBe(true);
+    expect(plan.reason).toMatch(/poll question changed/i);
+  });
+
+  it("Lane A when an option label diverges", () => {
+    const plan = planShortRender(
+      configFromProps(),
+      baselineWithCard(),
+      noSegments,
+      { question: "Who's wrong?", option_a: "The wife", option_b: "Husband" },
+    );
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.poll).toBe(true);
+  });
+
+  it("Lane A when a poll was added since the last render", () => {
+    // Baseline had NO question_card; now a poll exists. The card needs
+    // to appear on the next render.
+    const baselineNoCard = JSON.stringify(baseProps());
+    const plan = planShortRender(
+      configFromProps(),
+      baselineNoCard,
+      noSegments,
+      { question: "Who's wrong?", option_a: "A", option_b: "B" },
+    );
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.poll).toBe(true);
+  });
+
+  it("Lane A when a poll was removed since the last render", () => {
+    // Baseline had a card; now currentPoll is null (poll disabled or
+    // deleted). The card should disappear on the next render.
+    const plan = planShortRender(
+      configFromProps(),
+      baselineWithCard(),
+      noSegments,
+      null,
+    );
+    expect(plan.lane).toBe("A");
+    expect(plan.diffs.poll).toBe(true);
+  });
+
+  it("noop when current poll matches the baked card exactly", () => {
+    const plan = planShortRender(
+      configFromProps(),
+      baselineWithCard(),
+      noSegments,
+      { question: "Who's wrong?", option_a: "Wife", option_b: "Husband" },
+    );
+    expect(plan.lane).toBe("noop");
+    expect(plan.diffs.poll).toBe(false);
+  });
+
+  it("noop when both current and baseline have no poll", () => {
+    const plan = planShortRender(
+      configFromProps(),
+      JSON.stringify(baseProps()),
+      noSegments,
+      null,
+    );
+    expect(plan.lane).toBe("noop");
+    expect(plan.diffs.poll).toBe(false);
+  });
+
+  it("trims whitespace on both sides before comparing", () => {
+    // Admin saved trailing whitespace; renderer trimmed before baking;
+    // the planner shouldn't surface a spurious Lane A trigger.
+    const plan = planShortRender(
+      configFromProps(),
+      baselineWithCard(),
+      noSegments,
+      {
+        question: "  Who's wrong?  ",
+        option_a: "Wife ",
+        option_b: " Husband",
+      },
+    );
+    expect(plan.lane).toBe("noop");
+    expect(plan.diffs.poll).toBe(false);
+  });
+
+  it("script change (Lane B) preempts poll change but still surfaces the poll diff", () => {
+    const cfg = configFromProps({ script: "EDITED script" });
+    const plan = planShortRender(cfg, baselineWithCard(), noSegments, {
+      question: "DIFFERENT question",
+      option_a: "Wife",
+      option_b: "Husband",
+    });
+    expect(plan.lane).toBe("B");
+    expect(plan.diffs.script).toBe(true);
+    expect(plan.diffs.poll).toBe(true);
+  });
+});

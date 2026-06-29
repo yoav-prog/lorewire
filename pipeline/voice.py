@@ -17,17 +17,40 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from pipeline import config, google_auth, models, store
 
+# Chirp 3 HD pause tags ([pause], [pause short], [pause long]). They are only
+# honored in the Chirp markup field; every other engine (ElevenLabs, Gemini-TTS)
+# would read them aloud, so those paths strip them first.
+_PAUSE_MARKUP_RE = re.compile(
+    r"\s*\[(?:pause(?:\s+\w+)?|(?:short|medium|long)\s+pause|extremely\s+fast|"
+    r"whispering|laughing|sigh|sarcasm)\]\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_pause_markup(text: str) -> str:
+    """Remove TTS control tags (both the Chirp `[pause long]` and the Gemini
+    `[long pause]` / `[extremely fast]` families), collapsing each to a single
+    space, for engines that don't support markup (e.g. ElevenLabs would read
+    them aloud)."""
+    return _PAUSE_MARKUP_RE.sub(" ", text).strip()
+
 ELEVEN_BASE = "https://api.elevenlabs.io/v1"
 ELEVEN_DEFAULT_MODEL = "eleven_turbo_v2_5"
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 GOOGLE_STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
-GOOGLE_DEFAULT_VOICE = "en-US-Chirp3-HD-Aoede"
+# Autonoe is the codified shorts narrator (warm, even-paced female Chirp 3 HD).
+# It is the default for every Chirp 3 HD render now that long-form is retired and
+# shorts are the only consumer; the shorts path also pins it explicitly so an
+# admin DB override can't silently change the house voice (see
+# shorts_narration.SHORTS_VOICE_NAME).
+GOOGLE_DEFAULT_VOICE = "en-US-Chirp3-HD-Autonoe"
 GOOGLE_DEFAULT_LANGUAGE = "en-US"
 
 # Gemini-TTS goes through the SAME text:synthesize endpoint with voice.model_name set
@@ -60,6 +83,10 @@ def synthesize(
     dest_audio: Path,
     override_provider: str | None = None,
     override_voice_id: str | None = None,
+    *,
+    speaking_rate: float | None = None,
+    use_markup: bool = False,
+    style_prompt: str | None = None,
 ) -> dict:
     """Render narration to `dest_audio` and return word-level timings.
 
@@ -77,6 +104,15 @@ def synthesize(
     Both override args independently default to None so existing callers
     (fresh-pipeline path) keep the global-setting behaviour byte-for-byte.
     The Phase 4 regen action threads per-story values through here.
+
+    `speaking_rate`, `use_markup`, and `style_prompt` are the shorts voice
+    knobs. `speaking_rate` -> audioConfig.speakingRate (Chirp 3 HD pace,
+    0.25-2.0). `use_markup` routes the text through Chirp's input.markup field so
+    `[pause long]` takes effect. `style_prompt` is the Gemini-TTS natural-language
+    delivery instruction (input.prompt) — this is what steers a young-creator
+    read; Gemini also reads inline markup (`[long pause]`, `[extremely fast]`)
+    straight from input.text. All three are ignored on the ElevenLabs path and
+    default to off/None, so other callers are unaffected.
     """
     selected = override_provider or models.get_selected("voice")
     provider, _, _tier = selected.partition("/")
@@ -89,10 +125,15 @@ def synthesize(
         return _google_synthesize(
             text, dest_audio, selected,
             voice_id_override=override_voice_id,
+            speaking_rate=speaking_rate,
+            use_markup=use_markup,
+            style_prompt=style_prompt,
         )
     if provider == "elevenlabs":
+        # ElevenLabs has no pause-markup field; drop any tags so they aren't
+        # read aloud (the rate/markup knobs are Chirp-only and no-op here).
         return _elevenlabs_synthesize(
-            text, dest_audio, voice_id_override=override_voice_id,
+            _strip_pause_markup(text), dest_audio, voice_id_override=override_voice_id,
         )
     raise NotImplementedError(
         f"voice provider {provider!r} (model {selected!r}) is in the registry but not wired."
@@ -188,12 +229,12 @@ def _elevenlabs_synthesize(
 # Google groups voices by name prefix. The selected model id picks the tier;
 # the specific voice name (e.g. en-US-Chirp3-HD-Aoede) lives in settings.
 _GOOGLE_TIER_FALLBACK_VOICE = {
-    "chirp3-hd": "en-US-Chirp3-HD-Aoede",
+    "chirp3-hd": "en-US-Chirp3-HD-Autonoe",
     "neural2": "en-US-Neural2-F",
     "standard": "en-US-Standard-F",
     # Gemini-TTS expects bare voice names (see _gemini_voice_name).
-    "gemini-25-flash-tts": "en-US-Chirp3-HD-Aoede",
-    "gemini-31-flash-tts": "en-US-Chirp3-HD-Aoede",
+    "gemini-25-flash-tts": "en-US-Chirp3-HD-Autonoe",
+    "gemini-31-flash-tts": "en-US-Chirp3-HD-Autonoe",
 }
 
 
@@ -235,7 +276,6 @@ def _gemini_voice_name(voice_name: str) -> str:
     through to the raw value when the pattern doesn't match so an admin who
     sets a bare name directly still works.
     """
-    import re
     match = re.search(r"Chirp3-HD-(.+)$", voice_name, re.IGNORECASE)
     return match.group(1) if match else voice_name
 
@@ -270,24 +310,32 @@ def _google_synthesize(
     dest_audio: Path,
     selected: str,
     voice_id_override: str | None = None,
+    *,
+    speaking_rate: float | None = None,
+    use_markup: bool = False,
+    style_prompt: str | None = None,
 ) -> dict:
     voice_name_setting = _google_voice_name(selected, voice_id_override)
     language_code = _google_language_code(voice_name_setting)
     tier = _google_tier(selected)
 
     if _is_gemini_tier(tier):
-        payload = _build_gemini_payload(text, voice_name_setting, language_code, tier)
+        # Gemini-TTS steers delivery via a natural-language style prompt
+        # (input.prompt) and reads inline markup ([long pause], [extremely fast],
+        # ...) straight from input.text, so the text passes through untouched.
+        # speaking_rate is a Chirp/standard audioConfig knob and does not apply
+        # here — Gemini pace is carried by the style prompt.
+        payload = _build_gemini_payload(
+            text, voice_name_setting, language_code, tier,
+            style_prompt=style_prompt,
+        )
         billed_chars = payload["_billed_chars"]
         payload.pop("_billed_chars")
     else:
-        # Google's synchronous text:synthesize endpoint accepts up to 5000 bytes for
-        # non-Gemini voices. Our articles top out around 2500 chars (~2.5 KB ASCII),
-        # so we render in one call and let the LLM rewrite keep us under the ceiling.
-        payload = {
-            "input": {"text": text},
-            "voice": {"languageCode": language_code, "name": voice_name_setting},
-            "audioConfig": {"audioEncoding": "MP3"},
-        }
+        payload = _build_chirp_payload(
+            text, voice_name_setting, language_code,
+            speaking_rate=speaking_rate, use_markup=use_markup,
+        )
         billed_chars = len(text)
 
     data = _google_post(GOOGLE_TTS_URL, payload)
@@ -306,8 +354,43 @@ def _google_synthesize(
     return {"audio": str(dest_audio), "words": words, "provider": "google"}
 
 
+def _build_chirp_payload(
+    text: str,
+    voice_name: str,
+    language_code: str,
+    *,
+    speaking_rate: float | None = None,
+    use_markup: bool = False,
+) -> dict:
+    """Synth payload for the non-Gemini Google tiers (Chirp 3 HD, Neural2,
+    Standard). Pure so the shorts codification is unit-testable without a TTS
+    call (mirrors _build_gemini_payload).
+
+    Two optional controls the shorts voice layer leans on:
+      - `speaking_rate` -> audioConfig.speakingRate (Chirp 3 HD pace, 0.25-2.0).
+        Omitted entirely when None or 1.0 so other callers keep the exact
+        legacy payload (no field added, no behaviour change).
+      - `use_markup` routes the text through input.markup instead of input.text.
+        Per Google's Chirp 3 HD docs, pause tags ([pause long] etc.) ONLY take
+        effect in the markup field; in the text field they are read aloud.
+
+    Google's synchronous text:synthesize endpoint accepts up to 5000 bytes for
+    these voices; a short script is well under that, so one call renders it.
+    """
+    audio_config: dict = {"audioEncoding": "MP3"}
+    if speaking_rate is not None and speaking_rate != 1.0:
+        audio_config["speakingRate"] = speaking_rate
+    input_field = {"markup": text} if use_markup else {"text": text}
+    return {
+        "input": input_field,
+        "voice": {"languageCode": language_code, "name": voice_name},
+        "audioConfig": audio_config,
+    }
+
+
 def _build_gemini_payload(
-    text: str, voice_name_setting: str, language_code: str, tier: str
+    text: str, voice_name_setting: str, language_code: str, tier: str,
+    *, style_prompt: str | None = None,
 ) -> dict:
     """Construct the synth payload for a Gemini-TTS request.
 
@@ -322,10 +405,16 @@ def _build_gemini_payload(
          (text + prompt) cannot exceed 8000 bytes and each field is capped
          at 4000 bytes. Both fields count toward billing.
 
+    `style_prompt` is the per-call delivery instruction (e.g. the shorts
+    voiceover preset's prompt). When None it falls back to the global
+    `voice.google_style_prompt` setting so existing callers are unchanged.
+
     The function attaches a `_billed_chars` key the caller pops before
     POSTing — it's the combined char count that drives cost tracking.
     """
-    style_prompt = (store.get_setting("voice.google_style_prompt") or "").strip()
+    if style_prompt is None:
+        style_prompt = store.get_setting("voice.google_style_prompt") or ""
+    style_prompt = style_prompt.strip()
     text_bytes = len(text.encode("utf-8"))
     prompt_bytes = len(style_prompt.encode("utf-8")) if style_prompt else 0
     if text_bytes > GEMINI_TEXT_BYTE_LIMIT:
@@ -481,6 +570,88 @@ def _probe_mp3_duration(mp3_bytes: bytes) -> float:
         return frames * SAMPLES_PER_FRAME / SAMPLE_RATE if frames > 0 else 0.0
     except Exception:
         return 0.0
+
+
+# MPEG audio frame tables for a general, pure-stdlib MP3 duration probe (no
+# ffmpeg/ffprobe, so it runs inside the Vercel drain). Unlike
+# _probe_mp3_duration above (hard-wired to Google's 24 kHz mono MPEG-2 Layer
+# III), this reads version + sample rate + bitrate off every frame header, so
+# it is correct for ElevenLabs (MPEG-1, 44.1 kHz) as well as Google.
+_MPEG_VERSION = {0b00: "2.5", 0b10: "2", 0b11: "1"}   # 0b01 is reserved
+_MPEG_LAYER = {0b01: 3, 0b10: 2, 0b11: 1}             # 0b00 is reserved
+_MP3_SAMPLE_RATES = {
+    "1": [44100, 48000, 32000, None],
+    "2": [22050, 24000, 16000, None],
+    "2.5": [11025, 12000, 8000, None],
+}
+# Bitrate (kbps) indexed by the 4-bit field. Keyed by (version_group, layer)
+# where version_group is "1" for MPEG-1 and "2" for MPEG-2 / 2.5 (they share
+# the lower-rate tables).
+_MP3_BITRATES = {
+    ("1", 1): [None, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, None],
+    ("1", 2): [None, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, None],
+    ("1", 3): [None, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, None],
+    ("2", 1): [None, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256, None],
+    ("2", 2): [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
+    ("2", 3): [None, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, None],
+}
+_MP3_SAMPLES_PER_FRAME = {
+    ("1", 1): 384, ("1", 2): 1152, ("1", 3): 1152,
+    ("2", 1): 384, ("2", 2): 1152, ("2", 3): 576,
+    ("2.5", 1): 384, ("2.5", 2): 1152, ("2.5", 3): 576,
+}
+
+
+def audio_duration_ms(path) -> int:
+    """Real duration of a synthesized MP3 in milliseconds, summed from the MPEG
+    frame headers. Pure stdlib so it runs in the Vercel Python drain (no
+    ffprobe). Handles MPEG-1/2/2.5 across all three layers, so it is correct for
+    every TTS provider we use. Returns 0 on any failure so callers fall back to
+    their caption-derived duration cleanly.
+
+    Shorts use this as the FLOOR for the composition length: the rendered body
+    must be at least as long as the narration, or the concatenated outro clips
+    the closing words (the last-caption end_ms can undershoot the real audio).
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return 0
+    total_seconds = 0.0
+    i = 0
+    n = len(data)
+    while i < n - 4:
+        # 11-bit frame sync (0xFFE) marks a frame header.
+        if data[i] != 0xFF or (data[i + 1] & 0xE0) != 0xE0:
+            i += 1
+            continue
+        version = _MPEG_VERSION.get((data[i + 1] >> 3) & 0b11)
+        layer = _MPEG_LAYER.get((data[i + 1] >> 1) & 0b11)
+        if version is None or layer is None:
+            i += 1
+            continue
+        vgroup = "1" if version == "1" else "2"
+        bitrate_idx = (data[i + 2] >> 4) & 0x0F
+        srate_idx = (data[i + 2] >> 2) & 0b11
+        padding = (data[i + 2] >> 1) & 0x01
+        bitrate_kbps = _MP3_BITRATES.get((vgroup, layer), [None] * 16)[bitrate_idx]
+        sample_rate = _MP3_SAMPLE_RATES[version][srate_idx]
+        if not bitrate_kbps or not sample_rate:
+            i += 1
+            continue
+        if layer == 1:
+            frame_size = (12 * bitrate_kbps * 1000 // sample_rate + padding) * 4
+        else:
+            # Layer II always 144; Layer III is 144 on MPEG-1, 72 on MPEG-2/2.5.
+            coeff = 72 if (layer == 3 and version != "1") else 144
+            frame_size = coeff * bitrate_kbps * 1000 // sample_rate + padding
+        if frame_size <= 0:
+            i += 1
+            continue
+        total_seconds += _MP3_SAMPLES_PER_FRAME[(version, layer)] / sample_rate
+        i += frame_size
+    return int(round(total_seconds * 1000))
 
 
 def _parse_google_duration(value) -> float:

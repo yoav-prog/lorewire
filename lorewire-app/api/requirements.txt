@@ -6,3 +6,23 @@
 # worker have different libpq + JWT signers, which is a fun bug.
 google-auth>=2.50,<3
 psycopg[binary]>=3.1,<4
+# pipeline/text_normalize.py imports num2words. drain_short_renders.py
+# imports pipeline → shorts_lane_b → narration → text_normalize, so the
+# Vercel serverless function bundle must ship num2words or the cron dies
+# on cold start with ModuleNotFoundError before doing any work.
+num2words>=0.5,<1
+# S3 client for Cloudflare R2 (media migration — viewer-facing media moves off
+# GCS to R2 to kill egress cost). R2 speaks the S3 API; boto3 is the standard
+# client. Used by pipeline/gcs.py:_r2_upload when the R2_* vars +
+# MEDIA_PUBLIC_BASE + R2_MEDIA_WRITE_ENABLED are all set; until then the drain
+# keeps uploading to GCS. Drift here means the Vercel cron silently falls back
+# to GCS even when the flag is on — exactly the 2026-06-23 failure mode where
+# short_renders.props ended up with storage.googleapis.com URLs the dispatcher
+# rewrote to media.lorewire.com URLs against missing R2 objects.
+boto3>=1.34,<2
+# Image (re)compression: re-encode generated PNGs to WebP before upload so media
+# is ~10-20x smaller at the same visual quality (pipeline/gcs.py
+# _maybe_compress_image). Native libwebp ships in the Pillow wheels. Drift here
+# means the Vercel cron uploads original PNGs (2-3 MB) instead of WebP (~250 KB)
+# so storage + edge cache fills 10x faster than necessary.
+Pillow>=10,<12

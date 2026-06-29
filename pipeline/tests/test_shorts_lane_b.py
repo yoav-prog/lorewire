@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pipeline import shorts_lane_b, store
+from pipeline import shorts_lane_b, shorts_narration, store
 
 
 class _LaneBTestCase(unittest.TestCase):
@@ -56,6 +56,74 @@ class _LaneBTestCase(unittest.TestCase):
                     "2026-06-16T00:01:00.000Z",
                 ),
             )
+
+
+class SyncShortConfigCaptionsTests(unittest.TestCase):
+    """After a Lane B voice re-render, the new captions must be mirrored into
+    the editor's short_config so the editor preview + Captions tab match the
+    new voiceover (the MP4 already reads props and is correct). Only the three
+    voice-driven fields sync; everything else in short_config is preserved.
+    See _plans/2026-06-17-shorts-editor-and-character-bugs.md."""
+
+    def test_syncs_three_fields_and_preserves_rest(self):
+        existing = {
+            "doodle_frames": [{"id": "frame-00", "url": "u0", "caption_chunk_start_index": 0}],
+            "captions": [{"start_ms": 0, "end_ms": 100, "text": "OLD"}],
+            "caption_style": {"highlight": "yellow"},
+            "voiceover_url": "old.mp3",
+            "duration_ms": 100,
+            "character_base_url": "https://gcs/base.png",
+        }
+        props = {
+            "captions": [
+                {"start_ms": 0, "end_ms": 500, "text": "new one", "words": [{"word": "new"}]},
+                {"start_ms": 500, "end_ms": 1000, "text": "two"},
+            ],
+            "voiceover_url": "new.mp3",
+            "duration_ms": 1000,
+        }
+        captured: dict = {}
+        with mock.patch.object(
+            shorts_lane_b.store, "fetch_story",
+            return_value={"short_config": json.dumps(existing)},
+        ), mock.patch.object(
+            shorts_lane_b.store, "update_story_short_config",
+            side_effect=lambda sid, cfg: captured.update(cfg=cfg),
+        ):
+            ok = shorts_lane_b.sync_short_config_captions("s1", props)
+        self.assertTrue(ok)
+        cfg = captured["cfg"]
+        self.assertEqual([c["text"] for c in cfg["captions"]], ["new one", "two"])
+        # Per-word boundaries are dropped — short_config doesn't store them.
+        self.assertNotIn("words", cfg["captions"][0])
+        self.assertEqual(cfg["voiceover_url"], "new.mp3")
+        self.assertEqual(cfg["duration_ms"], 1000)
+        # Untouched fields survive.
+        self.assertEqual(cfg["doodle_frames"], existing["doodle_frames"])
+        self.assertEqual(cfg["caption_style"], {"highlight": "yellow"})
+        self.assertEqual(cfg["character_base_url"], "https://gcs/base.png")
+
+    def test_noop_when_no_short_config(self):
+        with mock.patch.object(
+            shorts_lane_b.store, "fetch_story", return_value={"short_config": None},
+        ), mock.patch.object(
+            shorts_lane_b.store, "update_story_short_config",
+        ) as upd:
+            self.assertFalse(
+                shorts_lane_b.sync_short_config_captions("s1", {"captions": []})
+            )
+            upd.assert_not_called()
+
+    def test_noop_when_story_missing(self):
+        with mock.patch.object(
+            shorts_lane_b.store, "fetch_story", return_value=None,
+        ), mock.patch.object(
+            shorts_lane_b.store, "update_story_short_config",
+        ) as upd:
+            self.assertFalse(
+                shorts_lane_b.sync_short_config_captions("s1", {"captions": []})
+            )
+            upd.assert_not_called()
 
 
 class ValidationTests(_LaneBTestCase):
@@ -250,9 +318,8 @@ class HappyPathTests(_LaneBTestCase):
         ]
 
         with (
-            mock.patch.object(
-                shorts_lane_b.voice,
-                "synthesize",
+            mock.patch(
+                "pipeline.voice.synthesize",
                 return_value={"words": fake_words, "audio": "voice.mp3", "provider": "g"},
             ) as mock_synth,
             mock.patch.object(
@@ -265,12 +332,20 @@ class HappyPathTests(_LaneBTestCase):
                 claimed, Path(self._tmpdir.name), remote=True,
             )
 
-        # Voice was synthesized with the new script + no override.
+        # Voice was synthesized with the new script. With no editor voice
+        # override and no category on the story, Lane B inherits the resolved
+        # voiceover — the seeded House Voice default (shorts_narration constants).
         mock_synth.assert_called_once()
         call_args = mock_synth.call_args
         self.assertEqual(call_args.args[0], "Brand new narration text")
-        self.assertIsNone(call_args.kwargs.get("override_provider"))
-        self.assertIsNone(call_args.kwargs.get("override_voice_id"))
+        self.assertEqual(
+            call_args.kwargs.get("override_provider"),
+            shorts_narration.SHORTS_VOICE_PROVIDER,
+        )
+        self.assertEqual(
+            call_args.kwargs.get("override_voice_id"),
+            shorts_narration.SHORTS_VOICE_NAME,
+        )
 
         # Built props REUSE the baseline frames + meta, REPLACE voice +
         # captions + duration_ms.
@@ -285,6 +360,44 @@ class HappyPathTests(_LaneBTestCase):
         self.assertGreater(built.props["duration_ms"], 1000)
         # Captions came from the chunker over the new alignment.
         self.assertGreater(len(built.props["captions"]), 0)
+
+    def test_duration_floors_at_real_audio_length(self):
+        # Last aligned word ends at 2.4s, but the real MP3 is 5s. The
+        # re-rendered body must cover the FULL audio so the spliced outro can't
+        # clip the new narration — duration floors at the probe value.
+        self._seed_baseline("baseline-d", "story-d", self._baseline_props())
+        claimed = {
+            "id": "lane-b-dur",
+            "story_id": "story-d",
+            "lane_inputs": json.dumps(
+                {
+                    "source_render_id": "baseline-d",
+                    "script": "Brand new narration text",
+                    "voice": None,
+                },
+            ),
+        }
+        fake_words = [
+            {"word": "Brand", "start": 0.0, "end": 0.6},
+            {"word": "text", "start": 1.9, "end": 2.4},
+        ]
+        with (
+            mock.patch.object(
+                shorts_lane_b.voice, "synthesize",
+                return_value={"words": fake_words, "audio": "voice.mp3", "provider": "g"},
+            ),
+            mock.patch.object(
+                shorts_lane_b.voice, "audio_duration_ms", return_value=5000,
+            ),
+            mock.patch.object(
+                shorts_lane_b.gcs, "publish",
+                side_effect=lambda local, key, fallback: f"https://gcs/{key}",
+            ),
+        ):
+            built = shorts_lane_b.build_short_props_lane_b(
+                claimed, Path(self._tmpdir.name), remote=True,
+            )
+        self.assertEqual(built.props["duration_ms"], 5000)
 
     def test_passes_voice_override_through_to_synthesize(self):
         self._seed_baseline("baseline-v", "story-2", self._baseline_props())
@@ -301,9 +414,8 @@ class HappyPathTests(_LaneBTestCase):
         }
 
         with (
-            mock.patch.object(
-                shorts_lane_b.voice,
-                "synthesize",
+            mock.patch(
+                "pipeline.voice.synthesize",
                 return_value={"words": [{"word": "x", "start": 0, "end": 0.3}],
                               "audio": "voice.mp3", "provider": "e"},
             ) as mock_synth,
@@ -368,8 +480,8 @@ class CaptionStyleOverrideTests(_LaneBTestCase):
             }),
         }
         with (
-            mock.patch.object(
-                shorts_lane_b.voice, "synthesize",
+            mock.patch(
+                "pipeline.voice.synthesize",
                 return_value={
                     "words": [{"word": "a", "start": 0, "end": 0.5}],
                     "audio": "x", "provider": "g",

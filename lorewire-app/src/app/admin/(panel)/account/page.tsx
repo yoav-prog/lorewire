@@ -10,10 +10,11 @@
 // home.
 
 import { logout } from "@/app/admin/actions";
-import { currentUser, requireAdmin } from "@/lib/dal";
+import { currentUser, requireStaff } from "@/lib/dal";
+import MfaSetup from "./MfaSetup";
 
 export default async function AccountPage() {
-  await requireAdmin();
+  await requireStaff();
   const user = await currentUser();
 
   return (
@@ -68,6 +69,15 @@ export default async function AccountPage() {
           In-app change is queued for follow-up — track it in{" "}
           <code className="font-mono text-ink">_plans/</code>.
         </p>
+      </section>
+
+      <section className="rounded-xl border border-line bg-surface p-5">
+        <h2 className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
+          Two-factor authentication
+        </h2>
+        <div className="mt-3">
+          <MfaSetup enabled={Boolean(user?.mfa_enabled)} />
+        </div>
       </section>
 
       <section className="rounded-xl border border-line bg-surface p-5">

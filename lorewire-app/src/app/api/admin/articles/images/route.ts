@@ -14,7 +14,7 @@
 
 import { NextResponse } from "next/server";
 import { randomBytes } from "node:crypto";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getArticle } from "@/lib/repo";
 import { uploadBuffer } from "@/lib/gcs";
 
@@ -86,7 +86,7 @@ function badRequest(error: string): NextResponse {
 }
 
 export async function POST(req: Request): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("content.manage");
 
   let form: FormData;
   try {

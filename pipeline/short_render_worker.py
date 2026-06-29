@@ -188,31 +188,6 @@ def run_one_tick(render_fn: RenderFn | None = None) -> bool:
         message="Short render done", payload={"url": output_url},
     )
     print(f"[short queue done] render={render_id} url={output_url}")
-
-    # 2026-06-16 short-only Reddit-import auto-apply
-    # (_plans/2026-06-16-reddit-default-to-shorts.md). The Reddit-import
-    # short-only flow skips the long-form video render entirely, so without
-    # this call stories.video_url stays NULL forever and the publish gate
-    # blocks. Gated on requested_by so the existing auto-short pipeline
-    # (which expects long-form to be THE story's video) is untouched: the
-    # auto path tags rows with requested_by='auto' and a manual admin
-    # click uses the session email, neither of which trip this branch.
-    # The IS NULL clause inside the helper is the race guard against a
-    # concurrent long-form render winning.
-    story_id = claimed.get("story_id")
-    if claimed.get("requested_by") == "reddit-import" and story_id:
-        flipped = store.set_story_video_url_if_null(story_id, output_url)
-        if flipped:
-            print(
-                f"[short queue auto-apply] story_id={story_id} "
-                f"url={output_url} reason=reddit-import-short-only"
-            )
-        else:
-            print(
-                f"[short queue auto-apply-skip] story_id={story_id} "
-                f"reason=video_url-already-set"
-            )
-
     return True
 
 

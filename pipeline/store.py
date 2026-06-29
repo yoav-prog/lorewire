@@ -59,6 +59,12 @@ SCHEMA_STATEMENTS = [
     # suppresses its CSS title overlay when this flag is 1. Stored as INTEGER
     # for portability across SQLite (no native BOOLEAN) and Postgres.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_has_baked_title INTEGER DEFAULT 0",
+    # 2026-06-29 user submissions: non-Reddit origin marker (mirrors the TS
+    # schema). The pipeline only READS it (store.story_submission_id) to gate the
+    # image-output safety check; it is deliberately NOT in _COLUMNS, so the
+    # full-row story upsert never writes this TS-owned column. Plan:
+    # _plans/2026-06-29-user-submitted-stories.md.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS submission_id TEXT",
     # Wave 3 Phase 3 PropSlideIn: per-story prop list as JSON, written by the
     # pipeline when the prop_slide motion beat is enabled. Shape:
     #   [{"url": "https://.../prop-N.png", "label": "envelope", "side": "left"}, ...]
@@ -119,6 +125,17 @@ SCHEMA_STATEMENTS = [
     # chain lives in pipeline/voice.py:synthesize.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_provider TEXT",
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS voice_id TEXT",
+    # 2026-06-19 hero + thumbnail derived from the short's scenes (plan:
+    # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    # Thumbnail is a sibling of hero, kept in its own three orientations
+    # because the multi-platform shorts publisher needs distinct framing
+    # per surface — 3:4 for the in-app card, 16:9 for YouTube, 1:1 for
+    # Instagram. NULL across the board on legacy rows; the public reader's
+    # fallback chain prefers hero when a thumbnail variant is missing so
+    # nothing breaks before the finisher fills these in.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image_landscape TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS thumbnail_image_square TEXT",
     # 2026-06-17 hero style registry (_plans/2026-06-17-hero-style-registry.md).
     # Closed-enum key from pipeline.stages.HERO_STYLES, NULL = "let the
     # resolver pick" (per-category default → global default → deterministic
@@ -212,6 +229,28 @@ SCHEMA_STATEMENTS = [
         payload     TEXT
     )""",
     "CREATE INDEX IF NOT EXISTS idx_short_render_events_render_id ON short_render_events(render_id, ts)",
+    # 2026-06-16 story_jobs per-row event timeline. Mirrors short_render_events
+    # for the story_jobs queue. The worker writes one row per phase transition
+    # (claimed, idea_done, research_done, article_done, title_done, media_done,
+    # video_render_enqueued, forced_short, auto_short_enqueued, finished,
+    # failed); the reddit-source detail page reads via list_story_job_events
+    # and renders a live timeline so the admin can see what's happening to a
+    # row without tailing the worker terminal. Plan:
+    # _plans/2026-06-16-story-job-event-timeline.md. The reddit_id column is
+    # denormalised so the detail page can look events up by its URL parameter
+    # without joining through story_jobs.
+    """CREATE TABLE IF NOT EXISTS story_job_events (
+        id          TEXT PRIMARY KEY,
+        job_id      TEXT NOT NULL,
+        reddit_id   TEXT NOT NULL,
+        ts          TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        event       TEXT NOT NULL,
+        message     TEXT,
+        payload     TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_story_job_events_reddit_id ON story_job_events(reddit_id, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_story_job_events_job_id ON story_job_events(job_id, ts)",
     # 2026-06-12 asset re-render: image regen queue. The admin clicks
     # Regenerate on any of a story's or article's image assets; the Next
     # server action inserts a row here and the local
@@ -330,51 +369,14 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_sub_len  ON reddit_source(subreddit, length_chars)",
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_comments ON reddit_source(comments)",
     "CREATE INDEX IF NOT EXISTS idx_reddit_source_date     ON reddit_source(date_written)",
-    # 2026-06-23 IdeasDB priority import (see
-    # _plans/2026-06-23-ideasdb-priority-import.md).
-    # Curated story ideas from Yoav's IdeasDB sheet are imported into the
-    # same reddit_source pool — matched rows get a strength flip, unmatched
-    # rows insert as idea-only seeds with synthetic reddit_id (idea_<sha>).
-    # `strength` drives queue ordering: claim_next_story_job JOINs and
-    # ORDERs by strength DESC (no denormalization onto story_jobs — the
-    # join cost is zero at ~1 claim/min, the stale-write bug is real).
-    # `needs_expansion=1` tells the worker to run expand_seed_to_post
-    # before the existing stages (idea-only seeds start with full_text='').
-    # `fingerprint` is the secondary match key for re-imports when Source
-    # is missing or non-reddit, so light headline edits don't fork seeds.
-    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS strength        TEXT NOT NULL DEFAULT 'none'",
-    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS category        TEXT",
-    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS headline        TEXT",
-    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS source_hint     TEXT",
-    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS needs_expansion INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS fingerprint     TEXT",
-    "CREATE INDEX IF NOT EXISTS idx_reddit_source_strength    ON reddit_source(strength)",
-    "CREATE INDEX IF NOT EXISTS idx_reddit_source_fingerprint ON reddit_source(fingerprint)",
-    # Audit log for every IdeasDB import run (dry-run included). One row
-    # per CLI invocation. `diff_json` holds the per-row diff envelope
-    # ({reddit_id, action, before, after, warnings} list) — compact JSON,
-    # truncated past ~1 MB with a notes warning. Lets us answer "what
-    # did this import actually change?" after the fact without rerunning.
-    """CREATE TABLE IF NOT EXISTS ideas_import_log (
-        run_id              TEXT PRIMARY KEY,
-        started_at          TEXT NOT NULL,
-        finished_at         TEXT,
-        csv_path            TEXT,
-        dry_run             INTEGER NOT NULL,
-        rows_total          INTEGER NOT NULL DEFAULT 0,
-        rows_skipped_list   INTEGER NOT NULL DEFAULT 0,
-        rows_skipped_done   INTEGER NOT NULL DEFAULT 0,
-        rows_added          INTEGER NOT NULL DEFAULT 0,
-        rows_updated        INTEGER NOT NULL DEFAULT 0,
-        rows_strength_only  INTEGER NOT NULL DEFAULT 0,
-        rows_status_changed INTEGER NOT NULL DEFAULT 0,
-        rows_unchanged      INTEGER NOT NULL DEFAULT 0,
-        rows_warned         INTEGER NOT NULL DEFAULT 0,
-        seeds_vanished      INTEGER NOT NULL DEFAULT 0,
-        notes               TEXT,
-        diff_json           TEXT
-    )""",
-    "CREATE INDEX IF NOT EXISTS idx_ideas_import_log_started ON ideas_import_log(started_at)",
+    # 2026-06-24 Full Pipeline toggle (plan:
+    # _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). Per-source
+    # opt-in: when 1, the worker runs every stage end-to-end AND the TS
+    # auto-publish drain flips stories.status to 'published' on success
+    # (web + Facebook). When 0 (default), existing review-then-manual-publish
+    # behaviour is preserved. Propagated onto story_jobs.full_pipeline at
+    # enqueue time so the worker reads it without joining back.
+    "ALTER TABLE reddit_source ADD COLUMN IF NOT EXISTS full_pipeline INTEGER DEFAULT 0",
     # 2026-06-14 Phase 3 of _plans/2026-06-14-reddit-db-sync.md.
     # Per-attempt queue: each "Process N" click in the admin inserts one row
     # per selected reddit_source, the local pipeline/story_jobs_worker.py
@@ -394,15 +396,36 @@ SCHEMA_STATEMENTS = [
         requested_by  TEXT,
         requested_at  TEXT NOT NULL,
         started_at    TEXT,
-        finished_at   TEXT,
-        output_format TEXT
+        finished_at   TEXT
     )""",
-    # 2026-06-16 per-batch output override for Reddit imports. NULL = the
-    # worker resolves at claim time against the `reddit.default_output`
-    # setting (default 'short'); 'short' / 'long' pin the row's output
-    # format and survive a later setting change. See
-    # _plans/2026-06-16-reddit-default-to-shorts.md.
-    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS output_format TEXT",
+    # 2026-06-24 Full Pipeline toggle: propagated from reddit_source at
+    # enqueue. The worker reads this flag when finishing a job; when 1, it
+    # sets auto_publish_status='pending' so the TS auto-publish drain can
+    # pick the story up. NULL/0 = existing review-then-manual-publish.
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS full_pipeline INTEGER DEFAULT 0",
+    # 2026-06-24 Full Pipeline auto-publish lane. Lifecycle:
+    # NULL (default) -> 'pending' (worker/finisher requested after all stages succeeded)
+    #               -> 'done' (TS drain successfully flipped story to published)
+    #               -> 'failed' (publish gate rejected; admin must inspect)
+    # The TS cron at /api/auto_publish_full_pipeline polls for 'pending'.
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS auto_publish_status TEXT",
+    # Drain hot path: oldest pending first.
+    "CREATE INDEX IF NOT EXISTS idx_story_jobs_auto_publish_status ON story_jobs(auto_publish_status, finished_at)",
+    # 2026-06-24 stage-split: the worker no longer inline-waits for the
+    # short and runs the hero+thumb finisher synchronously — Vercel's
+    # 800s function ceiling killed that path for fresh sources where the
+    # short hadn't already rendered (incident 2026-06-24). Worker now
+    # marks the job 'pending' here after enqueueing the short, then
+    # returns. The /api/run_hero_thumbnail_finisher cron polls for
+    # 'pending' rows whose short is 'done', runs the finisher, sets
+    # 'done', and (when full_pipeline=1) chains into the auto-publish
+    # lane via request_story_job_auto_publish. Lifecycle:
+    # NULL (default; with_media=False jobs that don't need a finisher)
+    #   -> 'pending' (worker enqueued short, finisher hasn't run)
+    #   -> 'done' (finisher succeeded; auto-publish kicked off if armed)
+    #   -> 'failed' (finisher hit an unrecoverable error)
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS finisher_status TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_story_jobs_finisher_status ON story_jobs(finisher_status, finished_at)",
     # Worker hot path: oldest queued first. Mirrors the index on
     # image_renders(status, requested_at).
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_status_requested ON story_jobs(status, requested_at)",
@@ -456,6 +479,24 @@ SCHEMA_STATEMENTS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_renders_one_active "
     "ON voice_renders(story_id, text_hash, voice_provider, voice_id) "
     "WHERE status IN ('queued', 'processing')",
+    # Named voiceover presets the admin manages (model + voice + style prompt +
+    # pace + hook pause). The shorts pipeline resolves one per category, falling
+    # back to the global default and then the shorts_narration code constants.
+    # speaking_rate is a no-op on the Gemini path (Gemini steers pace via the
+    # style prompt); it applies on a Chirp 3 HD preset.
+    # Mirror in lorewire-app/src/lib/schema.ts.
+    """CREATE TABLE IF NOT EXISTS voiceovers (
+        id              TEXT PRIMARY KEY,
+        name            TEXT NOT NULL,
+        provider        TEXT NOT NULL,
+        voice_id        TEXT NOT NULL,
+        style_prompt    TEXT,
+        speaking_rate   REAL,
+        hook_pause      INTEGER NOT NULL DEFAULT 1,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_voiceovers_name ON voiceovers(name)",
 ]
 
 _COLUMNS = [
@@ -473,6 +514,11 @@ _COLUMNS = [
     # above for resolution chain). Both NULL on fresh-pipeline writes —
     # the picker UI lands them via setStoryVoiceAction in Phase 3.
     "voice_provider", "voice_id",
+    # 2026-06-19 scene-derived thumbnail set (plan:
+    # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    # Written by media.generate_hero_and_thumbnail_from_short after the
+    # short finishes; NULL on fresh-pipeline writes until that finisher runs.
+    "thumbnail_image", "thumbnail_image_landscape", "thumbnail_image_square",
     # 2026-06-17 hero style registry per-story override. NULL on
     # fresh-pipeline writes — the picker UI lands it via the story
     # edit page's "Hero style" dropdown. Resolution chain lives in
@@ -533,6 +579,7 @@ def init() -> None:
                     cur.execute(stmt)
             conn.commit()
         _seed_active_segment_aspect()
+        _seed_default_voiceover()
         return
     with _sqlite_conn() as c:
         for stmt in SCHEMA_STATEMENTS:
@@ -545,6 +592,7 @@ def init() -> None:
                     continue
                 raise
     _seed_active_segment_aspect()
+    _seed_default_voiceover()
 
 
 # Sentinel distinguishing "segment row absent" from "row present, aspect NULL"
@@ -615,6 +663,124 @@ def _seed_active_segment_aspect() -> None:
             )
         except Exception as e:
             print(f"[store] seed per-aspect active {kind} failed: {e!r}")
+
+
+# --- Voiceover presets -------------------------------------------------------
+
+_VOICEOVER_COLUMNS = [
+    "id", "name", "provider", "voice_id", "style_prompt",
+    "speaking_rate", "hook_pause", "created_at", "updated_at",
+]
+
+
+def _voiceover_from_row(row) -> dict:
+    d = dict(row)
+    d["hook_pause"] = bool(d.get("hook_pause"))
+    return d
+
+
+def list_voiceovers() -> list[dict]:
+    """All saved voiceover presets, alphabetical by name (admin list order)."""
+    cols = ", ".join(_VOICEOVER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {cols} FROM voiceovers ORDER BY name")
+                return [_voiceover_from_row(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        rows = c.execute(f"SELECT {cols} FROM voiceovers ORDER BY name").fetchall()
+        return [_voiceover_from_row(r) for r in rows]
+
+
+def get_voiceover(voiceover_id: str) -> dict | None:
+    cols = ", ".join(_VOICEOVER_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT {cols} FROM voiceovers WHERE id = %s", (voiceover_id,))
+                row = cur.fetchone()
+                return _voiceover_from_row(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            f"SELECT {cols} FROM voiceovers WHERE id = ?", (voiceover_id,),
+        ).fetchone()
+        return _voiceover_from_row(row) if row else None
+
+
+def save_voiceover(vo: dict) -> str:
+    """Upsert a voiceover preset. Generates id + created_at when the incoming
+    dict has none (a create); preserves created_at on an edit. Returns the id."""
+    now = _now_iso()
+    vid = (vo.get("id") or "").strip() or uuid.uuid4().hex
+    rate = vo.get("speaking_rate")
+    row = (
+        vid,
+        (vo.get("name") or "").strip(),
+        (vo.get("provider") or "").strip(),
+        (vo.get("voice_id") or "").strip(),
+        ((vo.get("style_prompt") or "").strip() or None),
+        (float(rate) if rate not in (None, "") else None),
+        (1 if vo.get("hook_pause") else 0),
+        (vo.get("created_at") or now),
+        now,
+    )
+    insert = (
+        "INSERT INTO voiceovers "
+        "(id, name, provider, voice_id, style_prompt, speaking_rate, hook_pause, created_at, updated_at) "
+        "VALUES ({p}) "
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, provider=excluded.provider, "
+        "voice_id=excluded.voice_id, style_prompt=excluded.style_prompt, "
+        "speaking_rate=excluded.speaking_rate, hook_pause=excluded.hook_pause, "
+        "updated_at=excluded.updated_at"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(insert.format(p=", ".join(["%s"] * 9)), row)
+            conn.commit()
+        return vid
+    with _sqlite_conn() as c:
+        c.execute(insert.format(p=", ".join(["?"] * 9)), row)
+    return vid
+
+
+def delete_voiceover(voiceover_id: str) -> None:
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM voiceovers WHERE id = %s", (voiceover_id,))
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute("DELETE FROM voiceovers WHERE id = ?", (voiceover_id,))
+
+
+def _seed_default_voiceover() -> None:
+    """Idempotent one-shot: create the House Voice preset and point
+    `voiceovers.default` at it so the admin has an editable starting row and the
+    shorts pipeline resolves a preset out of the box. No-op once a default is set
+    (admin's pick is never overridden). Best-effort: a failure must not crash
+    startup — the resolver falls back to the shorts_narration code constants.
+    """
+    try:
+        if (get_setting("voiceovers.default") or "").strip():
+            return
+        if list_voiceovers():
+            return
+        from pipeline import shorts_narration as sn
+        vid = save_voiceover({
+            "id": "house-voice",
+            "name": "House Voice",
+            "provider": sn.SHORTS_VOICE_PROVIDER,
+            "voice_id": sn.SHORTS_VOICE_NAME,
+            "style_prompt": sn.SHORTS_STYLE_PROMPT,
+            "speaking_rate": sn.SHORTS_SPEAKING_RATE,
+            "hook_pause": sn.SHORTS_HOOK_PAUSE,
+        })
+        set_setting("voiceovers.default", vid)
+        print(f"[store] seeded default voiceover 'House Voice' -> {vid}")
+    except Exception as e:
+        print(f"[store] seed default voiceover failed: {e!r}")
 
 
 # Pulls `IF NOT EXISTS` out of ADD COLUMN clauses because SQLite doesn't
@@ -735,6 +901,160 @@ def fetch_story(story_id: str) -> dict | None:
     with _sqlite_conn() as c:
         row = c.execute(f"SELECT {cols} FROM stories WHERE id=?", (story_id,)).fetchone()
         return dict(row) if row else None
+
+
+def story_submission_id(story_id: str) -> str | None:
+    """The `submission_id` origin marker for a story (None for Reddit-sourced
+    stories). A standalone read, deliberately NOT part of _COLUMNS, so the
+    pipeline's full-row story upsert never writes this TS-owned column. The render
+    pipeline uses it to gate the image-output safety check to submission content.
+    """
+    if not story_id:
+        return None
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT submission_id FROM stories WHERE id = %s", (story_id,)
+                )
+                row = cur.fetchone()
+                return dict(row).get("submission_id") if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT submission_id FROM stories WHERE id=?", (story_id,)
+        ).fetchone()
+        return dict(row).get("submission_id") if row else None
+
+
+def upsert_poll_if_absent(
+    story_id: str,
+    question: str,
+    option_a_text: str,
+    option_b_text: str,
+    *,
+    category: str | None = None,
+    article_id: str | None = None,
+) -> bool:
+    """Insert a poll for `story_id` only when no poll row exists for that
+    story yet. Returns True if a row was inserted, False if a poll already
+    exists (in any enabled state) or the inputs are unusable.
+
+    Used by the shorts pipeline's hook-first restructure
+    (_plans/2026-06-21-shorts-hook-first-restructure.md §5.3): the script
+    LLM drafts a poll alongside the narration, and the orchestrator plants
+    it on disk so the burnt-in card has something to render and the
+    article reader has something to show. "If absent" semantics protect a
+    poll the admin already saved by hand — we never silently clobber
+    edited content.
+
+    The polls table itself is authored by the TS schema
+    (lorewire-app/src/lib/schema.ts); we only write into it. Best-effort:
+    if the table does not exist (first-boot ordering against a freshly
+    migrated DB) the insert swallows the OperationalError and returns
+    False — caller can log it and the burnt-in card will sit out the
+    render rather than fail it.
+    """
+    sid = (story_id or "").strip()
+    q = (question or "").strip()
+    a = (option_a_text or "").strip()
+    b = (option_b_text or "").strip()
+    if not sid or not q or not a or not b:
+        return False
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    new_id = str(uuid.uuid4())
+
+    if _is_postgres():
+        try:
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM polls WHERE story_id = %s LIMIT 1",
+                        (sid,),
+                    )
+                    if cur.fetchone():
+                        return False
+                    cur.execute(
+                        "INSERT INTO polls (id, story_id, article_id, question, "
+                        "option_a_text, option_b_text, enabled, category, "
+                        "created_at, updated_at) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s, %s)",
+                        (
+                            new_id, sid, article_id, q, a, b,
+                            (category or "").strip() or None, now, now,
+                        ),
+                    )
+                    return True
+        except Exception as e:  # noqa: BLE001 — best-effort write
+            print(f"[poll draft] story={sid} pg insert FAILED: {e}")
+            return False
+    try:
+        with _sqlite_conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM polls WHERE story_id = ? LIMIT 1",
+                (sid,),
+            ).fetchone()
+            if row:
+                return False
+            c.execute(
+                "INSERT INTO polls (id, story_id, article_id, question, "
+                "option_a_text, option_b_text, enabled, category, "
+                "created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                (
+                    new_id, sid, article_id, q, a, b,
+                    (category or "").strip() or None, now, now,
+                ),
+            )
+            return True
+    except sqlite3.OperationalError as e:
+        print(f"[poll draft] story={sid} sqlite insert FAILED: {e}")
+        return False
+
+
+def fetch_enabled_poll_for_story(story_id: str) -> dict | None:
+    """Phase 3 of _plans/2026-06-17-engagement-polls.md. Returns the poll
+    row for `story_id` only when one exists AND `enabled = 1`.
+
+    Used by pipeline/shorts_render.py to decide whether to bake the
+    burnt-in question end card into the short. A missing or disabled
+    poll resolves to None and the short renders byte-identical to
+    pre-poll behavior. Best-effort: if the polls table doesn't exist
+    yet (first-boot ordering against a freshly-migrated DB) the lookup
+    swallows the OperationalError and returns None — the renderer just
+    won't emit the card on that one render.
+
+    The TS-side schema (lorewire-app/src/lib/schema.ts) is the source
+    of truth for the polls table; this reader only consumes it. See the
+    homepage_curation precedent for the "TS authors, Python reads"
+    split.
+    """
+    if not story_id:
+        return None
+    cols = (
+        "id, story_id, question, option_a_text, option_b_text, enabled, category"
+    )
+    if _is_postgres():
+        try:
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT {cols} FROM polls WHERE story_id = %s AND enabled = 1",
+                        (story_id,),
+                    )
+                    row = cur.fetchone()
+                    return dict(row) if row else None
+        except Exception:
+            return None
+    try:
+        with _sqlite_conn() as c:
+            row = c.execute(
+                f"SELECT {cols} FROM polls WHERE story_id = ? AND enabled = 1",
+                (story_id,),
+            ).fetchone()
+            return dict(row) if row else None
+    except sqlite3.OperationalError:
+        return None
 
 
 # --- video_segments helpers ---------------------------------------------------
@@ -1864,10 +2184,23 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
     # Per stalled status: give up rows that have exhausted their attempts, then
     # revive (and increment) the rest. The two WHERE clauses are disjoint
     # (COALESCE(attempts,0) >= cap vs < cap), so a row is handled by exactly one.
+    # We SELECT the affected ids before each UPDATE so the timeline can show
+    # which specific rows were reset (or finally given up). The select+update
+    # split adds no real race risk: only the drain ticks call this and they
+    # serialize via the cron's per-minute schedule + the advisory lock.
+    gave_up: list[tuple[str, str]] = []
+    revived: list[tuple[str, str, int]] = []
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
+                    cur.execute(
+                        "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                        f"WHERE status='{status}' AND started_at IS NOT NULL "
+                        "AND started_at < %s AND COALESCE(attempts, 0) >= %s",
+                        (cutoff, cap),
+                    )
+                    give_up_rows = cur.fetchall()
                     cur.execute(
                         "UPDATE short_renders SET status='error', error=%s, finished_at=%s "
                         f"WHERE status='{status}' AND started_at IS NOT NULL "
@@ -1875,6 +2208,14 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                         (give_up_msg, now, cutoff, cap),
                     )
                     total += cur.rowcount
+                    gave_up.extend((row[0], status) for row in give_up_rows)
+                    cur.execute(
+                        "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                        f"WHERE status='{status}' AND started_at IS NOT NULL "
+                        "AND started_at < %s AND COALESCE(attempts, 0) < %s",
+                        (cutoff, cap),
+                    )
+                    revive_rows = cur.fetchall()
                     cur.execute(
                         "UPDATE short_renders SET status='queued', started_at=NULL, "
                         "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
@@ -1883,26 +2224,70 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                         (cutoff, cap),
                     )
                     total += cur.rowcount
+                    revived.extend((row[0], status, int(row[1])) for row in revive_rows)
             conn.commit()
-        return int(total)
-    with _sqlite_conn() as c:
-        for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
-            cur = c.execute(
-                "UPDATE short_renders SET status='error', error=?, finished_at=? "
-                f"WHERE status='{status}' AND started_at IS NOT NULL "
-                "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
-                (give_up_msg, now, cutoff, cap),
+    else:
+        with _sqlite_conn() as c:
+            for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
+                give_up_rows = c.execute(
+                    "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
+                    (cutoff, cap),
+                ).fetchall()
+                cur = c.execute(
+                    "UPDATE short_renders SET status='error', error=?, finished_at=? "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
+                    (give_up_msg, now, cutoff, cap),
+                )
+                total += cur.rowcount
+                gave_up.extend((row[0], status) for row in give_up_rows)
+                revive_rows = c.execute(
+                    "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) < ?",
+                    (cutoff, cap),
+                ).fetchall()
+                cur = c.execute(
+                    "UPDATE short_renders SET status='queued', started_at=NULL, "
+                    "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
+                    f"WHERE status='{status}' AND started_at IS NOT NULL "
+                    "AND started_at < ? AND COALESCE(attempts, 0) < ?",
+                    (cutoff, cap),
+                )
+                total += cur.rowcount
+                revived.extend((row[0], status, int(row[1])) for row in revive_rows)
+    # Per-row timeline events so the admin sees a stuck row come unstuck. Done
+    # outside the transaction so a logging hiccup doesn't roll back the reset
+    # itself; log_short_render_event already fire-and-swallows.
+    for render_id, stalled_status in gave_up:
+        try:
+            log_short_render_event(
+                render_id,
+                "reaper_gave_up",
+                level="error",
+                message=give_up_msg,
+                payload={"stalled_status": stalled_status, "attempts_cap": cap},
             )
-            total += cur.rowcount
-            cur = c.execute(
-                "UPDATE short_renders SET status='queued', started_at=NULL, "
-                "error=NULL, attempts=COALESCE(attempts, 0) + 1 "
-                f"WHERE status='{status}' AND started_at IS NOT NULL "
-                "AND started_at < ? AND COALESCE(attempts, 0) < ?",
-                (cutoff, cap),
+        except Exception:
+            pass
+    for render_id, stalled_status, prev_attempts in revived:
+        try:
+            log_short_render_event(
+                render_id,
+                "reaper_revived",
+                level="warn",
+                message=f"Reset from stuck {stalled_status} to queued",
+                payload={
+                    "stalled_status": stalled_status,
+                    "previous_attempts": prev_attempts,
+                    "new_attempts": prev_attempts + 1,
+                },
             )
-            total += cur.rowcount
-        return int(total)
+        except Exception:
+            pass
+    return int(total)
 
 
 class _AdvisoryLock:
@@ -2028,6 +2413,16 @@ def use_render_context(render_id: str) -> _RenderContext:
     return _RenderContext(render_id)
 
 
+def current_render_id() -> str | None:
+    """Public read of the bound render id (or None when no context is
+    active). Lets regen helpers in `pipeline.media` recover prior-tick
+    state from `image_render_events` after a Vercel function kill —
+    without reaching into the private contextvar. Returns None on the
+    local pipeline path (no queue context), which callers should
+    treat as "no resumable state available, run fresh."""
+    return _current_render_id.get()
+
+
 def log_render_event(
     event: str,
     message: str | None = None,
@@ -2097,6 +2492,34 @@ def list_render_events(render_id: str, limit: int = 200) -> list[dict]:
         ]
 
 
+def first_render_event(render_id: str, event: str) -> dict | None:
+    """Return the oldest event of the given type for a render row, or
+    None when no such event exists. Used by resumable regen paths to
+    recover decisions a prior tick made (e.g. the hero+thumb finisher
+    re-uses the picker's scene choice across kill-and-reclaim cycles
+    so all five i2i variants share the same seed). Targeted query so
+    it stays bounded as events accumulate across many reclaims."""
+    sql_pg = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = %s AND event = %s "
+        "ORDER BY ts ASC LIMIT 1"
+    )
+    sql_sqlite = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = ? AND event = ? "
+        "ORDER BY ts ASC LIMIT 1"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_pg, (render_id, event))
+                row = cur.fetchone()
+                return dict(row) if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(sql_sqlite, (render_id, event)).fetchone()
+        return dict(row) if row else None
+
+
 def update_story_hero(story_id: str, hero_url: str) -> None:
     """Patch a single column. Used by the image regen worker after a hero
     regen completes so the public reader sees the new image immediately."""
@@ -2139,6 +2562,157 @@ def update_story_hero_landscape(story_id: str, hero_url: str) -> None:
             "UPDATE stories SET hero_image_landscape = ?, updated_at = ? "
             "WHERE id = ?",
             (hero_url, now, story_id),
+        )
+
+
+def update_story_cost_cents(story_id: str, cents: int) -> None:
+    """Patch stories.cost_cents alone, leaving every other column intact.
+
+    Used by the story-jobs worker after the hero+thumbnail finisher
+    completes, so the per-story spend bar reflects the finisher's i2i
+    cost without doing a full upsert. The full upsert would CLOBBER
+    columns the finisher already wrote directly (video_url, images,
+    thumbnail_image, etc.) — the worker's in-memory row dict is stale
+    on those by design. Plan:
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md.
+    """
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET cost_cents = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (int(cents), now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET cost_cents = ?, updated_at = ? WHERE id = ?",
+            (int(cents), now, story_id),
+        )
+
+
+def update_story_video_url(story_id: str, url: str) -> None:
+    """Point stories.video_url at a URL. Mirror of the TS
+    `applyShortToStory` helper at lib/short-render-queue.ts:303 —
+    same pointer-swap semantics, called from the Python hero+thumbnail
+    finisher so the short is auto-applied as the story video the
+    moment it finishes (no manual button click). Plan:
+    _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET video_url = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET video_url = ?, updated_at = ? WHERE id = ?",
+            (url, now, story_id),
+        )
+
+
+def update_story_duration(story_id: str, duration: str) -> None:
+    """Patch stories.duration (M:SS string). Written by the hero+thumbnail
+    finisher alongside `update_story_video_url` so the public rail thumbnail
+    badge ("DRAMA / 0:42") reflects the actual length of whatever currently
+    plays at stories.video_url. Overwrites unconditionally for the same reason
+    video_url overwrites: this column's contract is "duration of the currently-
+    applied video", not "admin's free-form note". Mirror of the TS
+    `applyShortToStory` write at lib/short-render-queue.ts."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET duration = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (duration, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET duration = ?, updated_at = ? WHERE id = ?",
+            (duration, now, story_id),
+        )
+
+
+def update_story_thumbnail(story_id: str, url: str) -> None:
+    """Patch stories.thumbnail_image (3:4 portrait). Written by the
+    hero+thumbnail finisher after a short completes. Sibling of
+    `update_story_hero` — kept separate from the hero column so the
+    public reader can render an in-app card thumbnail distinct from
+    the article header."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET thumbnail_image = %s, updated_at = %s "
+                    "WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET thumbnail_image = ?, updated_at = ? WHERE id = ?",
+            (url, now, story_id),
+        )
+
+
+def update_story_thumbnail_landscape(story_id: str, url: str) -> None:
+    """Patch stories.thumbnail_image_landscape (16:9). The YouTube /
+    desktop social variant; rendered from the same scene + character
+    pair as the portrait so the three thumbnail orientations stay
+    visually coherent."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET thumbnail_image_landscape = %s, "
+                    "updated_at = %s WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET thumbnail_image_landscape = ?, updated_at = ? "
+            "WHERE id = ?",
+            (url, now, story_id),
+        )
+
+
+def update_story_thumbnail_square(story_id: str, url: str) -> None:
+    """Patch stories.thumbnail_image_square (1:1). Instagram-friendly
+    framing for the multi-platform shorts publisher. Same scene +
+    character inputs as the other two thumbnail variants."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET thumbnail_image_square = %s, "
+                    "updated_at = %s WHERE id = %s",
+                    (url, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET thumbnail_image_square = ?, updated_at = ? "
+            "WHERE id = ?",
+            (url, now, story_id),
         )
 
 
@@ -2287,46 +2861,6 @@ def read_short_caption_style(story: dict) -> dict:
             out[k] = v
         # Unknown keys are silently dropped.
     return out
-
-
-def set_story_video_url_if_null(story_id: str, video_url: str) -> bool:
-    """Point stories.video_url at a freshly-rendered short, but only when
-    the story doesn't already have one.
-
-    The Reddit-import short-only flow
-    (_plans/2026-06-16-reddit-default-to-shorts.md) skips the long-form
-    video render entirely. Without this call, stories.video_url stays NULL
-    and evaluatePublishReadiness blocks Publish with "video has not been
-    rendered yet", defeating the set-and-forget promise of Process N.
-
-    The WHERE video_url IS NULL clause is the race guard: if a concurrent
-    long-form render lands first (it shouldn't for short-only rows, but
-    the auto-short pipeline can still call us when shorts.auto.enabled is
-    on), the long-form wins and this UPDATE no-ops.
-
-    Returns True when the row was actually flipped, False on a no-op
-    (already had a video_url, or row missing). The caller logs the
-    distinction so the worker output spells out which branch ran.
-    """
-    now = _now_iso()
-    if _is_postgres():
-        with _pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE stories SET video_url = %s, updated_at = %s "
-                    "WHERE id = %s AND video_url IS NULL",
-                    (video_url, now, story_id),
-                )
-                flipped = cur.rowcount > 0
-            conn.commit()
-        return flipped
-    with _sqlite_conn() as c:
-        cur = c.execute(
-            "UPDATE stories SET video_url = ?, updated_at = ? "
-            "WHERE id = ? AND video_url IS NULL",
-            (video_url, now, story_id),
-        )
-        return (cur.rowcount or 0) > 0
 
 
 def read_story_pipeline_cache(story: dict) -> dict:
@@ -2572,29 +3106,13 @@ _REDDIT_SOURCE_COLUMNS = [
     "reddit_id", "subreddit", "date_written", "title", "full_text",
     "comments", "url", "summary", "length_chars", "status", "story_id",
     "notes", "first_synced", "last_synced",
-    # 2026-06-23 IdeasDB priority import (see
-    # _plans/2026-06-23-ideasdb-priority-import.md). Owned by the
-    # ideas importer (pipeline/ideas_import.py), NOT by the reddit
-    # CSV sync — that's why they're absent from _REDDIT_SOURCE_SYNC_REFRESH
-    # below. Reddit CSV re-syncs leave these alone.
-    "strength", "category", "headline", "source_hint",
-    "needs_expansion", "fingerprint",
 ]
 # Sync only refreshes content fields. Status/story_id/notes/first_synced
 # belong to the admin and to the row's first appearance — never overwritten.
-# IdeasDB-managed columns (strength, category, headline, source_hint,
-# needs_expansion, fingerprint) are also excluded — those are owned by
-# pipeline/ideas_import.py and would get clobbered by a reddit CSV re-sync.
 _REDDIT_SOURCE_SYNC_REFRESH = [
     "subreddit", "date_written", "title", "full_text", "comments",
     "url", "summary", "length_chars", "last_synced",
 ]
-# 2026-06-23 columns owned by the IdeasDB importer. update_ideas_fields()
-# accepts patches against this allow-list; nothing else can sneak through.
-_REDDIT_SOURCE_IDEAS_COLUMNS = frozenset({
-    "strength", "category", "headline", "source_hint",
-    "needs_expansion", "fingerprint",
-})
 # Allow-list for set_reddit_source_status patches. Mirrors the
 # set_segment_status pattern so a typo can't smuggle a write into the wrong
 # column.
@@ -2607,23 +3125,11 @@ def upsert_reddit_source(row: dict) -> str:
     refreshed (content actually changed), or 'unchanged' when the row was
     already identical.
 
-    `row` must carry every column in `_REDDIT_SOURCE_COLUMNS` EXCEPT the
-    IdeasDB-managed columns, which get default values here so legacy
-    callers (pipeline/reddit_db_sync.py from before 2026-06-23, tests that
-    build a row dict without ideas fields) don't need to know about them.
-    The defaults match "legacy reddit-sourced row" semantics: strength=none,
-    no headline/category/source_hint, needs_expansion=0, no fingerprint.
+    `row` must carry every column in `_REDDIT_SOURCE_COLUMNS`; the parser
+    builds a complete dict so the caller never has to remember which fields
+    are mandatory.
     """
     rid = row["reddit_id"]
-    # Defensive defaults: never raise from a missing IdeasDB-owned column.
-    # Mutating the input dict is acceptable here — every caller that cares
-    # about idempotency builds a fresh dict per upsert.
-    row.setdefault("strength", "none")
-    row.setdefault("category", None)
-    row.setdefault("headline", None)
-    row.setdefault("source_hint", None)
-    row.setdefault("needs_expansion", 0)
-    row.setdefault("fingerprint", None)
     existing = fetch_reddit_source(rid)
     if existing is None:
         cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
@@ -2862,138 +3368,6 @@ def set_reddit_source_status(
         )
 
 
-# 2026-06-23 IdeasDB priority import. Focused updater for the columns
-# the ideas importer owns. Mirrors set_reddit_source_status's
-# allow-list-and-patch shape so a typo can't smuggle a write into a
-# reddit-sync-managed column (title, full_text, etc.). See
-# _plans/2026-06-23-ideasdb-priority-import.md for the merge contract
-# this updater serves.
-def update_ideas_fields(reddit_id: str, **fields: Any) -> None:
-    """Patch the IdeasDB-owned columns on an existing reddit_source row.
-    Allowed: strength, category, headline, source_hint, needs_expansion,
-    fingerprint. Anything else raises — the reddit CSV sync owns the
-    rest of the row.
-    """
-    if not reddit_id:
-        raise ValueError("update_ideas_fields requires reddit_id")
-    if not fields:
-        return  # no-op when nothing to update
-    bad = set(fields) - _REDDIT_SOURCE_IDEAS_COLUMNS
-    if bad:
-        raise ValueError(
-            f"update_ideas_fields: unknown columns: {sorted(bad)}"
-        )
-    if _is_postgres():
-        assigns = ", ".join(f"{c} = %({c})s" for c in fields)
-        with _pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"UPDATE reddit_source SET {assigns} WHERE reddit_id = %(reddit_id)s",
-                    {**fields, "reddit_id": reddit_id},
-                )
-            conn.commit()
-        return
-    assigns = ", ".join(f"{c} = :{c}" for c in fields)
-    with _sqlite_conn() as c:
-        c.execute(
-            f"UPDATE reddit_source SET {assigns} WHERE reddit_id = :reddit_id",
-            {**fields, "reddit_id": reddit_id},
-        )
-
-
-def list_ideas_touched_seeds() -> list[dict]:
-    """Return every reddit_source row that the IdeasDB importer has touched
-    (i.e. `fingerprint IS NOT NULL`). The fingerprint is set unconditionally
-    by every ideas-importer write, including idea-only seeds whose `Source`
-    cell was blank (source_hint NULL), so it's the most reliable "touched"
-    signal.
-
-    Used by the vanish-detection pass: anything in this list that isn't in
-    the latest import is a seed that disappeared from the Sheet between
-    runs. Per the merge contract, vanish is a NO-OP — we just count and
-    surface it in the diff. The Sheet is a working document, so deletions
-    there don't authorize destructive action here.
-    """
-    cols = "reddit_id, headline, source_hint, fingerprint, strength, status"
-    if _is_postgres():
-        with _pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT {cols} FROM reddit_source WHERE fingerprint IS NOT NULL"
-                )
-                return [dict(r) for r in cur.fetchall()]
-    with _sqlite_conn() as c:
-        return [
-            dict(r) for r in c.execute(
-                f"SELECT {cols} FROM reddit_source WHERE fingerprint IS NOT NULL"
-            ).fetchall()
-        ]
-
-
-def fetch_reddit_source_by_fingerprint(fingerprint: str) -> dict | None:
-    """Secondary match-key lookup for the IdeasDB importer. Returns the
-    first row whose `fingerprint` equals the argument, or None. Used when
-    a row's Source field doesn't carry a reddit_id we already have
-    (external_search_*, Supplemental Concept, multi-token gibberish);
-    the importer falls back to fingerprint match to avoid creating a
-    duplicate seed for a lightly-edited headline.
-
-    `fingerprint` collisions across truly distinct ideas are possible but
-    rare given headline-plus-category as the input. The dry-run diff
-    surfaces every fingerprint match so the operator can spot a wrong
-    merge before --apply.
-    """
-    if not fingerprint:
-        return None
-    cols = ", ".join(_REDDIT_SOURCE_COLUMNS)
-    if _is_postgres():
-        with _pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT {cols} FROM reddit_source WHERE fingerprint = %s LIMIT 1",
-                    (fingerprint,),
-                )
-                row = cur.fetchone()
-                return dict(row) if row else None
-    with _sqlite_conn() as c:
-        row = c.execute(
-            f"SELECT {cols} FROM reddit_source WHERE fingerprint = ? LIMIT 1",
-            (fingerprint,),
-        ).fetchone()
-        return dict(row) if row else None
-
-
-def insert_ideas_import_log(log: dict) -> None:
-    """Persist one row to ideas_import_log. Called by both dry-run and
-    --apply paths so every CLI invocation leaves a forensic trail.
-    `log` carries all columns; the schema-side defaults handle anything
-    the caller forgot."""
-    cols = [
-        "run_id", "started_at", "finished_at", "csv_path", "dry_run",
-        "rows_total", "rows_skipped_list", "rows_skipped_done",
-        "rows_added", "rows_updated", "rows_strength_only",
-        "rows_status_changed", "rows_unchanged", "rows_warned",
-        "seeds_vanished", "notes", "diff_json",
-    ]
-    col_list = ", ".join(cols)
-    if _is_postgres():
-        placeholders = ", ".join(f"%({c})s" for c in cols)
-        with _pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"INSERT INTO ideas_import_log ({col_list}) VALUES ({placeholders})",
-                    log,
-                )
-            conn.commit()
-        return
-    placeholders = ", ".join(f":{c}" for c in cols)
-    with _sqlite_conn() as c:
-        c.execute(
-            f"INSERT INTO ideas_import_log ({col_list}) VALUES ({placeholders})",
-            log,
-        )
-
-
 def fetch_reddit_source_snapshot(reddit_ids: list[str]) -> dict[str, dict]:
     """Return a `{reddit_id: row_dict}` map for every id in `reddit_ids` that
     exists in the table. Only the columns the sync's diff needs are SELECTed
@@ -3136,7 +3510,15 @@ def list_reddit_source_subreddits() -> list[str]:
 _STORY_JOB_COLUMNS = [
     "id", "reddit_id", "status", "progress", "error", "story_id",
     "with_media", "requested_by", "requested_at", "started_at", "finished_at",
-    "output_format",
+    # 2026-06-24 Full Pipeline toggle. `full_pipeline` arrives on the
+    # row from the enqueue path; the worker reads it at finish time to
+    # decide whether to flip `auto_publish_status` to 'pending'.
+    # `auto_publish_status` is always None on a fresh row.
+    "full_pipeline", "auto_publish_status",
+    # 2026-06-24 stage-split: the worker sets `finisher_status='pending'`
+    # after enqueueing the short and returns; a separate cron runs the
+    # finisher when the short is done.
+    "finisher_status",
 ]
 
 
@@ -3173,7 +3555,7 @@ def enqueue_story_job(
     *,
     with_media: bool = True,
     requested_by: str | None = None,
-    output_format: str | None = None,
+    full_pipeline: bool = False,
 ) -> dict | None:
     """Insert a queued story_job. Returns the inserted row, or None when an
     active job (queued or processing) already exists for this reddit_id —
@@ -3192,13 +3574,6 @@ def enqueue_story_job(
     """
     if has_active_story_job(reddit_id):
         return None
-    # Closed enum at the storage boundary: anything other than 'short' /
-    # 'long' lands as NULL so a stale caller can't sneak a typo past the
-    # worker's resolver (which would then fall through to the default
-    # and bypass the per-row override the admin actually picked).
-    normalized_output: str | None = (
-        output_format if output_format in ("short", "long") else None
-    )
     now = _now_iso()
     row = {
         "id": job_id,
@@ -3212,7 +3587,15 @@ def enqueue_story_job(
         "requested_at": now,
         "started_at": None,
         "finished_at": None,
-        "output_format": normalized_output,
+        # 2026-06-24 Full Pipeline propagation. The TS enqueue path
+        # writes the source's value here; the Python enqueue (used by
+        # the worker's --reddit ad-hoc dispatch + tests) defaults to
+        # False so legacy callers don't accidentally arm auto-publish.
+        "full_pipeline": 1 if full_pipeline else 0,
+        "auto_publish_status": None,
+        # 2026-06-24 stage-split: NULL until the worker enqueues the
+        # short, then 'pending' for the finisher cron to claim.
+        "finisher_status": None,
     }
     cols = ", ".join(_STORY_JOB_COLUMNS)
     conflict_clause = (
@@ -3246,21 +3629,10 @@ def enqueue_story_job(
 
 
 def claim_next_story_job(text_only_only: bool = False) -> dict | None:
-    """Atomically claim the highest-priority queued story_job and flip it to
+    """Atomically claim the oldest queued story_job and flip it to
     'processing'. Returns the claimed row, or None when empty. Mirrors
     claim_next_render's FOR UPDATE SKIP LOCKED on Postgres and the
     conditional UPDATE on SQLite.
-
-    Ordering (2026-06-23, IdeasDB priority import — see
-    _plans/2026-06-23-ideasdb-priority-import.md):
-      1. reddit_source.strength DESC (strong > medium > none) — JOIN-based,
-         read live so a strength flip on the seed reorders the queue on the
-         next claim without re-enqueuing the job. No denormalization onto
-         story_jobs (the council called this out as a stale-write bug).
-      2. story_jobs.requested_at ASC — FIFO within each strength tier.
-
-    Postgres uses `FOR UPDATE OF sj SKIP LOCKED` so the lock applies only
-    to the story_jobs row (the LEFT JOIN to reddit_source is read-only).
 
     `text_only_only`: when True, only rows with `with_media=0` are
     eligible. Used by the Vercel cron drain whose runtime can't render
@@ -3273,30 +3645,18 @@ def claim_next_story_job(text_only_only: bool = False) -> dict | None:
     claim what it can't process; with_media=True rows wait patiently
     for the local worker.
     """
-    cols = ", ".join(f"sj.{c}" for c in _STORY_JOB_COLUMNS)
+    cols = ", ".join(_STORY_JOB_COLUMNS)
     now = _now_iso()
-    extra_where = " AND sj.with_media = 0" if text_only_only else ""
-    # CASE-based weight is portable across SQLite (no FIELD()) and Postgres
-    # (no string-typed enum ordering). COALESCE because a job whose
-    # reddit_source row was deleted (shouldn't happen — there's no
-    # cascade — but defensive) still claims at the bottom tier.
-    strength_weight = (
-        "CASE COALESCE(rs.strength, 'none') "
-        "WHEN 'strong' THEN 2 WHEN 'medium' THEN 1 ELSE 0 END"
-    )
+    extra_where = " AND with_media = 0" if text_only_only else ""
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
-                inner_extra = extra_where.replace("sj.", "sj2.")
                 cur.execute(
-                    "UPDATE story_jobs sj SET status = 'processing', "
-                    "started_at = %s WHERE sj.id = ("
-                    "SELECT sj2.id FROM story_jobs sj2 "
-                    "LEFT JOIN reddit_source rs ON rs.reddit_id = sj2.reddit_id "
-                    f"WHERE sj2.status = 'queued'{inner_extra} "
-                    f"ORDER BY {strength_weight} DESC, "
-                    "sj2.requested_at ASC LIMIT 1 FOR UPDATE OF sj2 SKIP LOCKED"
-                    f") RETURNING {', '.join(_STORY_JOB_COLUMNS)}",
+                    f"UPDATE story_jobs SET status = 'processing', "
+                    "started_at = %s WHERE id = ("
+                    f"SELECT id FROM story_jobs WHERE status = 'queued'{extra_where} "
+                    "ORDER BY requested_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+                    f") RETURNING {cols}",
                     (now,),
                 )
                 row = cur.fetchone()
@@ -3304,10 +3664,8 @@ def claim_next_story_job(text_only_only: bool = False) -> dict | None:
         return dict(row) if row else None
     with _sqlite_conn() as c:
         row = c.execute(
-            "SELECT sj.id FROM story_jobs sj "
-            "LEFT JOIN reddit_source rs ON rs.reddit_id = sj.reddit_id "
-            f"WHERE sj.status='queued'{extra_where} "
-            f"ORDER BY {strength_weight} DESC, sj.requested_at ASC LIMIT 1"
+            f"SELECT id FROM story_jobs WHERE status='queued'{extra_where} "
+            "ORDER BY requested_at ASC LIMIT 1"
         ).fetchone()
         if not row:
             return None
@@ -3318,9 +3676,8 @@ def claim_next_story_job(text_only_only: bool = False) -> dict | None:
         )
         if c.total_changes == 0:
             return None
-        cols_no_prefix = ", ".join(_STORY_JOB_COLUMNS)
         claimed = c.execute(
-            f"SELECT {cols_no_prefix} FROM story_jobs WHERE id=?", (row["id"],)
+            f"SELECT {cols} FROM story_jobs WHERE id=?", (row["id"],)
         ).fetchone()
         return dict(claimed) if claimed else None
 
@@ -3374,6 +3731,158 @@ def finish_story_job(job_id: str, story_id: str) -> None:
             "story_id=?, finished_at=? "
             "WHERE id=? AND status IN ('queued', 'processing')",
             (story_id, now, job_id),
+        )
+
+
+def mark_finisher_pending(job_id: str) -> None:
+    """2026-06-24 stage-split: the worker flips a finished job's
+    `finisher_status` to 'pending' once the short has been enqueued.
+    Lets the /api/run_hero_thumbnail_finisher cron claim the row when
+    the short eventually reaches status='done' without the worker
+    having to inline-wait (which exceeded Vercel's 800s function
+    ceiling on fresh sources). Conditional on the row currently being
+    NULL so a manual flip to 'done' / 'failed' from the cron can't be
+    bounced back by a late worker write."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET finisher_status='pending' "
+                    "WHERE id=%s AND finisher_status IS NULL",
+                    (job_id,),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET finisher_status='pending' "
+            "WHERE id=? AND finisher_status IS NULL",
+            (job_id,),
+        )
+
+
+def claim_finisher_job() -> dict | None:
+    """Atomically claim ONE story_job whose finisher is pending AND whose
+    short_renders row has reached status='done'. Returns the joined row
+    (story_jobs columns + the short's output_url) or None when the queue
+    is idle. The /api/run_hero_thumbnail_finisher cron calls this per
+    tick. Postgres path uses FOR UPDATE SKIP LOCKED so concurrent crons
+    can't double-claim; SQLite uses a conditional UPDATE with a single
+    short_renders lookup since SKIP LOCKED is a no-op there."""
+    cols = ", ".join(f"j.{c}" for c in _STORY_JOB_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE story_jobs SET finisher_status='running' "
+                    "WHERE id = ("
+                    f"  SELECT j.id FROM story_jobs j "
+                    "   JOIN short_renders s ON s.story_id = j.story_id "
+                    "   WHERE j.finisher_status = 'pending' "
+                    "     AND s.status = 'done' "
+                    "     AND s.output_url IS NOT NULL "
+                    "   ORDER BY j.finished_at ASC NULLS LAST LIMIT 1 "
+                    "   FOR UPDATE SKIP LOCKED"
+                    ") "
+                    f"RETURNING {cols.replace('j.', '')}",
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return dict(row) if row else None
+    with _sqlite_conn() as c:
+        candidate = c.execute(
+            "SELECT j.id FROM story_jobs j "
+            "  JOIN short_renders s ON s.story_id = j.story_id "
+            " WHERE j.finisher_status = 'pending' "
+            "   AND s.status = 'done' "
+            "   AND s.output_url IS NOT NULL "
+            " ORDER BY j.finished_at ASC LIMIT 1"
+        ).fetchone()
+        if not candidate:
+            return None
+        c.execute(
+            "UPDATE story_jobs SET finisher_status='running' "
+            "WHERE id=? AND finisher_status='pending'",
+            (candidate["id"],),
+        )
+        if c.total_changes == 0:
+            return None
+        claimed = c.execute(
+            f"SELECT {', '.join(_STORY_JOB_COLUMNS)} FROM story_jobs WHERE id=?",
+            (candidate["id"],),
+        ).fetchone()
+        return dict(claimed) if claimed else None
+
+
+def set_finisher_status(job_id: str, status: str) -> None:
+    """Terminal-state writer for the finisher cron. `status` is one of
+    'done' / 'failed' — the cron writes 'done' after the i2i loop lands
+    and 'failed' on an unrecoverable error. Unconditional so a row in
+    any current state is updated (the cron is the only writer of these
+    terminal values after `claim_finisher_job` flipped it to 'running')."""
+    if status not in {"done", "failed"}:
+        raise ValueError(f"set_finisher_status: invalid status {status!r}")
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET finisher_status=%s WHERE id=%s",
+                    (status, job_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET finisher_status=? WHERE id=?",
+            (status, job_id),
+        )
+
+
+def count_pending_finisher_jobs() -> int:
+    """Pure read: how many `finisher_status='pending'` rows exist (not
+    filtered by short readiness; useful as a backpressure signal for
+    cron monitoring). Mirrors `count_pending_story_jobs`."""
+    sql = "SELECT COUNT(*) AS n FROM story_jobs WHERE finisher_status='pending'"
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                row = cur.fetchone()
+            return int((row or {}).get("n") or 0)
+    with _sqlite_conn() as c:
+        row = c.execute(sql).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def request_story_job_auto_publish(job_id: str) -> None:
+    """2026-06-24 Full Pipeline auto-publish request. Sets
+    `auto_publish_status='pending'` on a finished job so the TS drain at
+    /api/auto_publish_full_pipeline can claim it.
+
+    Called by the worker AFTER finish_story_job succeeds — the row must
+    be in status='done' for the drain's eligibility query to see it. The
+    UPDATE is conditional on status='done' so a job that finished but was
+    later moved to a different terminal state (cancelled, error via a
+    follow-up reaper) can't be re-armed. Idempotent: re-calling on a row
+    already at 'pending' is a no-op (the drain itself flips to 'done'
+    or 'failed', so we never overwrite those states either)."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE story_jobs SET auto_publish_status='pending' "
+                    "WHERE id=%s AND status='done' "
+                    "AND auto_publish_status IS NULL",
+                    (job_id,),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE story_jobs SET auto_publish_status='pending' "
+            "WHERE id=? AND status='done' "
+            "AND auto_publish_status IS NULL",
+            (job_id,),
         )
 
 
@@ -3521,6 +4030,123 @@ def latest_story_job_for_reddit(reddit_id: str) -> dict | None:
             (reddit_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+# --- story_job_events helpers (2026-06-16 per-row timeline) -------------------
+# Mirrors log_short_render_event + list_short_render_events. The worker calls
+# log_story_job_event at every meaningful step in _default_process; the admin
+# detail page reads via list_story_job_events_for_reddit. Plan:
+# _plans/2026-06-16-story-job-event-timeline.md.
+
+
+def log_story_job_event(
+    job_id: str,
+    reddit_id: str,
+    event: str,
+    *,
+    message: str | None = None,
+    level: str = "info",
+    payload: dict | None = None,
+) -> None:
+    """Insert one row into story_job_events. Fire-and-swallow: any error is
+    caught and dropped on the floor (observability MUST NEVER break the
+    worker). Mirrors log_short_render_event.
+
+    `event` is a short machine-readable enum (idea_done, article_done,
+    finished, failed, ...); `message` is the human-readable line for the
+    timeline; `payload` is a JSON-serialisable dict for any structured
+    context the timeline UI wants to render (token counts, scene counts,
+    urls, etc.). Payload is JSON-encoded then capped at 2KB so a runaway
+    log site can't bomb storage.
+    """
+    try:
+        ev_id = uuid.uuid4().hex
+        ts = _now_iso()
+        payload_str = json.dumps(payload) if payload is not None else None
+        if payload_str is not None and len(payload_str) > 2000:
+            # Truncate the JSON value rather than dropping the event. We
+            # still want a row landing on the timeline; the payload just
+            # gets a marker so the reader knows it was capped.
+            payload_str = json.dumps({"truncated": True, "size": len(payload_str)})
+        message_capped = (message or None) and message[:2000]
+        if _is_postgres():
+            with _pg_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO story_job_events "
+                        "(id, job_id, reddit_id, ts, level, event, message, payload) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (ev_id, job_id, reddit_id, ts, level, event,
+                         message_capped, payload_str),
+                    )
+                conn.commit()
+            return
+        with _sqlite_conn() as c:
+            c.execute(
+                "INSERT INTO story_job_events "
+                "(id, job_id, reddit_id, ts, level, event, message, payload) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ev_id, job_id, reddit_id, ts, level, event,
+                 message_capped, payload_str),
+            )
+    except Exception:
+        # Never propagate. A failing observability sink crashing the worker
+        # would be the worst possible regression on the very feature
+        # we're shipping. Mirror log_short_render_event's swallow.
+        pass
+
+
+_STORY_JOB_EVENT_COLUMNS = [
+    "id", "job_id", "reddit_id", "ts", "level", "event", "message", "payload",
+]
+
+
+def list_story_job_events(job_id: str, *, limit: int = 200) -> list[dict]:
+    """Read every event for one job_id, oldest first. The timeline UI
+    renders top-down chronological. Limit defaults to 200 (an order of
+    magnitude over the ~15-20 events a normal job emits) so a bug that
+    fires a runaway log can't blow up the page render."""
+    cols = ", ".join(_STORY_JOB_EVENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM story_job_events "
+                    "WHERE job_id = %s ORDER BY ts ASC, id ASC LIMIT %s",
+                    (job_id, limit),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        rows = c.execute(
+            f"SELECT {cols} FROM story_job_events "
+            "WHERE job_id = ? ORDER BY ts ASC, id ASC LIMIT ?",
+            (job_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_story_job_events_for_reddit(reddit_id: str, *, limit: int = 200) -> list[dict]:
+    """Read every event for the LATEST job on this reddit_id. The detail
+    page route is /admin/reddit-sources/[reddit_id], so this is the
+    page-friendly reader. If no job has ever run for this reddit_id,
+    returns an empty list."""
+    cols = ", ".join(_STORY_JOB_EVENT_COLUMNS)
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {cols} FROM story_job_events "
+                    "WHERE reddit_id = %s ORDER BY ts ASC, id ASC LIMIT %s",
+                    (reddit_id, limit),
+                )
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        rows = c.execute(
+            f"SELECT {cols} FROM story_job_events "
+            "WHERE reddit_id = ? ORDER BY ts ASC, id ASC LIMIT ?",
+            (reddit_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def count_pending_story_jobs() -> int:

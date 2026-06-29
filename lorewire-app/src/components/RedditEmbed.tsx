@@ -2,23 +2,22 @@
 
 // Reddit's official embed widget: drops a styled card with the post's title,
 // score, and a link through. Uses their CDN script at embed.reddit.com which
-// hydrates the blockquote in place. Falls back to a plain link footer when
-// the source URL doesn't look like a real post (e.g. fixture placeholders),
-// so the demo envelope row doesn't render a broken embed.
+// hydrates the blockquote in place. Callers gate rendering through
+// `resolveRedditEmbedTarget` (lib/reddit-thread) so a story with a wrong or
+// placeholder source URL doesn't show a mismatched thread under the body.
 
 import { useEffect, useRef } from "react";
 
 const WIDGET_SRC = "https://embed.reddit.com/widgets.js";
 
-// Real post ids on Reddit are alphanumeric and 5+ chars. We exclude obvious
-// placeholder strings so the demo doesn't try to embed a non-existent post.
-export function isRealRedditUrl(url: string | undefined | null): boolean {
-  if (!url) return false;
-  const match = url.match(/reddit\.com\/r\/[^/]+\/comments\/([a-z0-9]{5,})/i);
-  if (!match) return false;
-  const id = match[1].toLowerCase();
-  return !["example", "test", "placeholder", "demo"].includes(id);
-}
+// Re-exported so existing call sites keep importing from this file. The
+// stricter validation lives in lib/reddit-thread so it can be unit-tested
+// without pulling React into the test runner.
+export {
+  isRealRedditUrl,
+  resolveRedditEmbedTarget,
+  type RedditEmbedTarget,
+} from "@/lib/reddit-thread";
 
 interface Props {
   url: string;

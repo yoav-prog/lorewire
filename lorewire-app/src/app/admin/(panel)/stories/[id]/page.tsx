@@ -1,37 +1,27 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
+import { getStory, getSetting, getUserById, listSegments } from "@/lib/repo";
+import { readForeignSession } from "@/lib/short-edit-session";
 import {
-  getStory,
-  getSetting,
-  listSegments,
-  type SegmentKind,
-  type SegmentRow,
-} from "@/lib/repo";
-import {
-  loadHeroStyleSettings,
-  saveStory,
-  saveStoryHeroStyleAction,
-  setStoryOverrideAction,
-  setStoryNoindexAction,
-} from "@/app/admin/actions";
-import { HeroStylePicker } from "@/app/admin/(panel)/_components/HeroStylePicker";
-import { resolveHeroStyleFromContext } from "@/lib/hero-styles-resolver";
-import { heroStyleSourceLabel } from "@/lib/hero-styles";
-import { statusClass } from "@/app/admin/ui";
+  getLatestFacebookPostForStoryAction,
+  getLatestInstagramPostForStoryAction,
+  getLatestTikTokPostForStoryAction,
+  getLatestYouTubePostForStoryAction,
+  getSeoMetadataForStoryAction,
+  loadShortEditorState,
+  listArticlesLinkedToStoryAction,
+  type LinkedArticleSummary,
+  type SeoMetadataState,
+} from "@/app/admin/(panel)/shorts/[id]/actions";
+import { loadHeroStyleSettings } from "@/app/admin/actions";
 import Breadcrumb from "@/app/admin/Breadcrumb";
-import {
-  MediaRegenPanel,
-  type MediaAssetSpec,
-} from "@/app/admin/(panel)/_components/MediaRegenPanel";
+import { type MediaAssetSpec } from "@/app/admin/(panel)/_components/MediaRegenPanel";
 import {
   GranularRegenGrid,
   type GranularItem,
 } from "@/app/admin/(panel)/_components/GranularRegenGrid";
-import { WorldBiblePanel } from "@/app/admin/(panel)/_components/WorldBiblePanel";
-import { CategoryChipGroup } from "./CategoryChipGroup";
-import { StatusStepIndicator } from "./StatusStepIndicator";
-import { StoryAspectControl } from "./StoryAspectControl";
+import { getPollByStoryId, getPresetForCategory } from "@/lib/polls";
 import {
   activeSegmentSettingKey,
   isVideoAspect,
@@ -39,28 +29,104 @@ import {
   type VideoAspect,
 } from "@/lib/aspect";
 import { resolveSceneCount, readSceneCountMode } from "@/lib/scene-count";
-import { VoicePicker } from "@/components/voice-picker/VoicePicker";
 import { listVoices } from "@/lib/voice-library";
-
-const FIELD =
-  "w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent";
-const LABEL =
-  "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
+import { one } from "@/lib/db";
+import { latestShortRenderForStory } from "@/lib/short-render-queue";
+import { OverviewTab } from "./OverviewTab";
+import { StoryActionBar } from "./StoryActionBar";
+import { StoryRail } from "./StoryRail";
+import { StoryTabBar } from "./StoryTabBar";
+import { StoryShortTabsClient } from "./StoryShortTabsClient";
+import {
+  asShortClientTab,
+  isRailTab,
+  isShortClientTab,
+  resolveStoryTab,
+} from "./tabs";
 
 export default async function EditStory({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ tab?: string | string[] }>;
 }) {
-  await requireAdmin();
-  const { id } = await params;
+  const session = await requireCapability("content.manage");
+  const [{ id }, sp] = await Promise.all([params, searchParams]);
+  const activeTab = resolveStoryTab(sp.tab);
   const s = await getStory(id);
   if (!s) notFound();
+
+  // eslint-disable-next-line no-console -- rule 14 (observability)
+  console.info("[unified editor mount]", { storyId: s.id, activeTab });
+
+  // Latest short render — loaded on every tab so the StoryActionBar can
+  // surface "is a render in progress?" + last-rendered-at regardless of
+  // which tab is active. Cheap: one indexed query. When isShortClientTab
+  // is true, loadShortClientTabState reuses this value rather than
+  // re-fetching it.
+  const latestRender = await latestShortRenderForStory(id).catch((err) => {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[unified editor page] latestShortRenderForStory failed", {
+      err: String(err),
+    });
+    return null;
+  });
+
+  // Lazy-load short editor state only when the active tab needs it. The
+  // 7 non-overview tabs all render through StoryShortTabsClient and
+  // share the same chrome (RenderAfterEditsBanner / RenderStatusPanel /
+  // EditSessionBanner / preview player), so the load fires for any of
+  // them. Overview pays zero short-related round trips.
+  //
+  // Defensive try/catch around the loader: if anything inside the
+  // composite load (loadShortEditorState + voices + linked articles +
+  // platform posts + SEO + foreign-session resolution) throws, the
+  // whole page server-renders a 500 and the user can't get past the
+  // tab click. After 2026-06-25 production hot fix, an uncaught throw
+  // degrades to a NoShortYetCard with the actual error message so the
+  // editor stays reachable AND the failure is visible inline.
+  type ShortLoadResult = Awaited<
+    ReturnType<typeof loadShortClientTabState>
+  >;
+  let shortLoad: ShortLoadResult | null = null;
+  if (isShortClientTab(activeTab)) {
+    try {
+      shortLoad = await loadShortClientTabState(id, session.userId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      // eslint-disable-next-line no-console -- rule 14 (must surface root cause)
+      console.error("[unified editor page] loadShortClientTabState threw", {
+        storyId: id,
+        activeTab,
+        message,
+        stack,
+      });
+      shortLoad = { ok: false, error: `editor-load-threw: ${message}` };
+    }
+  }
 
   // Hero style snapshot (global default + every per-category default +
   // every pre-generated thumbnail URL) — one round trip drives the
   // picker render + the resolver caption below.
   const heroStyleSettings = await loadHeroStyleSettings();
+
+  // Comments state for the per-story toggle. The comments key for this
+  // story is article.id when there's a linked published article,
+  // else story.id — same resolution the public /api/comments/count and
+  // the SSR seed do, so the admin's toggle controls the EXACT thread
+  // the reader sees. siteWideEnabled is read so the toggle can
+  // surface the "kill switch is off" caveat when it's relevant.
+  const linkedArticleRow = await one<{ id: string }>(
+    "SELECT id FROM articles WHERE story_id = ? AND status = 'published' LIMIT 1",
+    [s.id],
+  );
+  const commentsArticleId = linkedArticleRow?.id ?? s.id;
+  const commentsClosed =
+    (await getSetting(`comments.article_off.${commentsArticleId}`)) === "1";
+  const siteCommentsEnabled =
+    (await getSetting("comments.enabled")) !== "0";
 
   let gallery: string[] = [];
   try {
@@ -76,19 +142,19 @@ export default async function EditStory({
   // the editor shows the right starting value (Phase 4 of
   // _plans/2026-06-12-video-aspect-ratio.md).
   //
-  // `voicePickerEnabled` gates the Phase 3 picker (per
-  // `_plans/2026-06-14-voiceover-picker.md`). The setting defaults to off
-  // ("0") so the picker is dark until the admin flips it on AND the
-  // Phase 2.b bake script has populated preview MP3s — that's the
-  // contract: don't ship UI that plays broken audio.
-  const [intros, outros, defaultAspectRaw, voicePickerEnabledRaw] =
-    await Promise.all([
-      listSegments("intro"),
-      listSegments("outro"),
-      getSetting("video.default_aspect"),
-      getSetting("voice.picker_enabled"),
-    ]);
-  const voicePickerEnabled = String(voicePickerEnabledRaw ?? "0") !== "0";
+  // The legacy story-level VoicePicker was removed from the rail in
+  // cut 6 — the Voice tab is the canonical per-short voice surface.
+  // voice.picker_enabled setting + listVoices load are gone with it.
+  const [intros, outros, defaultAspectRaw, poll] = await Promise.all([
+    listSegments("intro"),
+    listSegments("outro"),
+    getSetting("video.default_aspect"),
+    // Phase 1 of _plans/2026-06-17-engagement-polls.md. Either the
+    // existing poll row OR null; the editor seeds null rows with the
+    // category preset so the form is never empty on first author.
+    getPollByStoryId(id),
+  ]);
+  const pollPreset = getPresetForCategory(s.category);
 
   // Resolve the aspect for THIS story's display. The chain is:
   //   per-story video_config.aspect -> global default -> legacy 9:16.
@@ -165,6 +231,17 @@ export default async function EditStory({
       hint: "Redraws the hero + landscape using the short's character as an i2i reference. Same poster style, same protagonist as the Watch tab.",
     },
     {
+      // 2026-06-19 finisher: i2i hero + thumbnail (3:4, 16:9, 1:1) using
+      // the short's character AND a picker-chosen scene as references.
+      // Story-jobs worker now runs this automatically after every short
+      // completes; this button backfills legacy stories that already have
+      // a short but no thumbnail. Five paid kie calls per click. Plan:
+      // _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md.
+      asset: "hero_thumbnail_from_short",
+      label: "Generate hero + thumbnail from short",
+      hint: "Builds hero (3:4 + 16:9) AND thumbnail (3:4 + 16:9 + 1:1) using the short's character plus a picker-chosen dramatic scene. Five i2i calls. Used to backfill stories that pre-date the auto-finisher.",
+    },
+    {
       asset: "scenes",
       label: sceneCountLabel,
       hint: sceneCountHint,
@@ -219,362 +296,298 @@ export default async function EditStory({
     });
   }
 
-  // Pull the voice library only when the picker flag is on. The library
-  // does a 24h-memoized live ElevenLabs fetch under the hood; pulling it
-  // when the picker is dark wastes a round trip on every story render.
-  const voices = voicePickerEnabled ? await listVoices() : [];
+  // Cut 7: editing tabs (Scenes / Captions / Style / Script / Voice)
+  // render full-width canvas with no rail. Overview / Publish / Render
+  // keep the rail because they're metadata/decision surfaces, not
+  // editing ones. isRailTab() encodes the split — see tabs.ts.
+  const showRail = isRailTab(activeTab);
 
-  // In-flight regen state. Drives the "Synthesizing voiceover..."
-  // pending UI and the disabled regen button — a second click during a
-  // running synth would double-spend TTS credit on identical output.
-  const [latestVoiceRender, voiceRegenInFlight] = voicePickerEnabled
-    ? await Promise.all([
-        (await import("@/lib/voice-render-queue")).latestVoiceRenderForStory(
-          s.id,
-        ),
-        (await import("@/lib/voice-render-queue")).hasActiveVoiceRender(s.id),
-      ])
-    : [null, false];
-  const lastVoiceRegenError =
-    latestVoiceRender && latestVoiceRender.status === "error"
-      ? latestVoiceRender.error
-      : null;
+  const tabContent = (
+    <>
+      {activeTab === "overview" && (
+        <OverviewTab
+          story={s}
+          initialAspect={initialAspect}
+          aspectIsOverride={aspectIsOverride}
+        />
+      )}
+      {isShortClientTab(activeTab) &&
+        (shortLoad?.ok ? (
+          <StoryShortTabsClient
+            storyId={s.id}
+            // Safe narrow: we entered this branch because activeTab
+            // passed isShortClientTab(); asShortClientTab() can't
+            // return null here. The non-null assertion makes the
+            // exhaustive switch happy without an `as`.
+            activeTab={asShortClientTab(activeTab)!}
+            initialConfig={shortLoad.config}
+            initialRender={shortLoad.latestRender}
+            voices={shortLoad.voices}
+            foreignOwnerEmail={shortLoad.foreignOwnerEmail}
+            linkedArticles={shortLoad.linkedArticles}
+            initialFacebookPost={shortLoad.initialFacebookPost}
+            initialInstagramPost={shortLoad.initialInstagramPost}
+            initialYouTubePost={shortLoad.initialYouTubePost}
+            initialTikTokPost={shortLoad.initialTikTokPost}
+            initialSeoMetadata={shortLoad.initialSeoMetadata}
+            sceneGranularSlot={
+              sceneGranular.length > 0 ? (
+                <GranularRegenGrid
+                  ownerKind="story"
+                  ownerId={s.id}
+                  title="Per-image regen"
+                  description="Redo a single scene without touching the rest."
+                  items={sceneGranular}
+                />
+              ) : null
+            }
+          />
+        ) : (
+          <NoShortYetCard
+            error={shortLoad?.error ?? "unknown"}
+            storyId={s.id}
+          />
+        ))}
+    </>
+  );
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <Breadcrumb trail={[{ href: "/admin/content", label: "Inbox" }]} />
-      <div className="flex items-center justify-end gap-3">
-        <span
-          className={`rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider ${statusClass(
-            s.status,
-          )}`}
-        >
-          {s.status ?? "draft"}
-        </span>
-      </div>
 
-      <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
-        {/* Editor */}
-        <form action={saveStory} className="space-y-4">
-          <input type="hidden" name="id" value={s.id} />
+      <StoryActionBar
+        storyId={s.id}
+        activeTab={activeTab}
+        initialStatus={s.status}
+        initialRender={latestRender}
+        initialNoindex={Boolean(s.noindex)}
+      />
 
-          <div>
-            <label className={LABEL}>Title</label>
-            <input name="title" defaultValue={s.title ?? ""} className={FIELD} />
-          </div>
+      <StoryTabBar storyId={s.id} activeTab={activeTab} />
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_180px]">
-            <div>
-              <label className={LABEL}>Category</label>
-              <CategoryChipGroup
-                name="category"
-                initial={s.category ?? "Entitled"}
-              />
-            </div>
-            <div>
-              <label className={LABEL}>Duration</label>
-              <input
-                name="duration"
-                defaultValue={s.duration ?? ""}
-                placeholder="2:14"
-                className={FIELD}
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className={LABEL}>Aspect ratio</label>
-            <StoryAspectControl
-              storyId={s.id}
-              initialAspect={initialAspect}
-              globalDefault={!aspectIsOverride}
-            />
-          </div>
-
-          <div>
-            <label className={LABEL}>Source URL</label>
-            <input
-              name="source_url"
-              defaultValue={s.source_url ?? ""}
-              className={FIELD}
-            />
-          </div>
-
-          <div>
-            <label className={LABEL}>Synopsis</label>
-            <textarea
-              name="summary"
-              defaultValue={s.summary ?? ""}
-              rows={2}
-              className={FIELD}
-            />
-          </div>
-
-          <div>
-            <label className={LABEL}>Article body</label>
-            <textarea
-              name="body"
-              defaultValue={s.body ?? ""}
-              rows={16}
-              className={`${FIELD} font-body leading-relaxed`}
-            />
-          </div>
-
-          <div>
-            <label className={LABEL}>Read-along script</label>
-            <textarea
-              name="teleprompter"
-              defaultValue={s.teleprompter ?? ""}
-              rows={6}
-              className={FIELD}
-            />
-          </div>
-
-          <button
-            type="submit"
-            className="rounded-lg bg-accent px-5 py-2.5 font-semibold text-bg transition-opacity hover:opacity-90"
-          >
-            Save changes
-          </button>
-        </form>
-
-        {/* Sidebar */}
-        <aside className="space-y-4">
-          <div className="rounded-xl border border-line bg-surface p-4">
-            <div className={`${LABEL} mb-3`}>Status</div>
-            <StatusStepIndicator storyId={s.id} currentStatus={s.status} />
-          </div>
-
-          <div className="rounded-xl border border-line bg-surface p-4">
-            <div className={LABEL}>Search visibility</div>
-            <p className="mb-2 text-[12px] text-muted">
-              {s.noindex
-                ? "Hidden from search engines. /v/${slug} emits noindex,nofollow."
-                : "Indexable. /v/${slug} can be crawled and ranked."}
-            </p>
-            <form action={setStoryNoindexAction}>
-              <input type="hidden" name="id" value={s.id} />
-              <input
-                type="hidden"
-                name="noindex"
-                value={s.noindex ? "0" : "1"}
-              />
-              <button className="rounded-md border border-line px-2.5 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
-                {s.noindex ? "Show in search engines" : "Hide from search engines"}
-              </button>
-            </form>
-          </div>
-
-          <MediaRegenPanel
-            ownerKind="story"
-            ownerId={s.id}
-            assets={storyAssets}
-          />
-
-          {/* Hero & poster style picker (step 5 of
-              _plans/2026-06-17-hero-style-registry.md). Reuses the same
-              shared HeroStylePicker the settings page renders, but
-              points its form at saveStoryHeroStyleAction so the value
-              lands on `stories.hero_style_id` (NULL = "use the
-              resolver chain"). The caption surfaces the resolved
-              style + the layer that produced it — the explicit
-              "show the resolution source" ask. The "Restyle hero from
-              short character" button on MediaRegenPanel above uses
-              the SAME resolution to pick which style to render. */}
-          {(() => {
-            const ctx = {
-              pinnedId: s.hero_style_id,
-              category: s.category ?? "Drama",
-              storyId: s.id,
-              globalStyleId: heroStyleSettings.globalStyleId,
-              categoryDefaults: heroStyleSettings.categoryDefaults,
-            };
-            const resolved = resolveHeroStyleFromContext(ctx);
-            const captionPrefix =
-              s.hero_style_id
-                ? `Pinned to "${resolved.style.label}"`
-                : `Currently resolves to "${resolved.style.label}"`;
-            const sourceLine = heroStyleSourceLabel(
-              resolved.source,
-              s.category ?? "Drama",
-              resolved.whitelist,
-            );
-            return (
-              <HeroStylePicker
-                label="Hero & poster style"
-                hint="Closed-enum override for which poster look gets rendered on this story. Empty = let the resolver chain pick (per-category default → global default → smart auto-pick from this category's short-list). Changing this only affects the NEXT hero render — click 'Restyle hero from short character' on the panel above to regenerate."
-                selectedId={s.hero_style_id ?? ""}
-                thumbnails={heroStyleSettings.thumbnails}
-                includeAutoOption
-                autoOptionLabel="Use the resolver chain"
-                formAction={saveStoryHeroStyleAction}
-                formHiddenFields={{ storyId: s.id }}
-                captionOverride={`${captionPrefix}. ${sourceLine}.`}
-                saveLabel="Save hero style"
-              />
-            );
-          })()}
-
-          {/* Bible lives in `stories.pipeline_cache` (split off
-              video_config 2026-06-14 — see
-              `_plans/2026-06-14-pipeline-cache-column.md`). Fall back
-              to video_config so stories persisted before the migration
-              still render in the inspector. */}
-          <WorldBiblePanel
-            cacheJson={s.pipeline_cache ?? s.video_config ?? null}
-          />
-
-          {sceneGranular.length > 0 && (
-            <GranularRegenGrid
-              ownerKind="story"
-              ownerId={s.id}
-              title="Scenes (per-image)"
-              description="Redo a single scene without touching the rest."
-              items={sceneGranular}
-            />
-          )}
-
-          {propGranular.length > 0 && (
-            <GranularRegenGrid
-              ownerKind="story"
-              ownerId={s.id}
-              title="Props (per-image)"
-              description="Redo a single prop. Label + side stay; only the image changes."
-              items={propGranular}
-            />
-          )}
-
-          {voicePickerEnabled && voices.length > 0 && (
-            <VoicePicker
-              storyId={s.id}
-              voices={voices}
-              currentProvider={s.voice_provider}
-              currentVoiceId={s.voice_id}
-              regenInFlight={voiceRegenInFlight}
-              lastRegenError={lastVoiceRegenError}
-            />
-          )}
-
-          <div className="rounded-xl border border-line bg-surface p-4">
-            <div className={LABEL}>Media</div>
-            {s.hero_image ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={s.hero_image}
-                alt=""
-                className="mb-3 w-full rounded-lg border border-line"
-              />
-            ) : (
-              <p className="mb-2 text-[13px] text-muted">No hero image yet.</p>
-            )}
-            {gallery.length > 0 && (
-              <p className="mb-2 text-[13px] text-muted">
-                {gallery.length} illustration(s)
-              </p>
-            )}
-            {s.audio_url && (
-              <audio controls src={s.audio_url} className="mb-2 w-full" />
-            )}
-            {s.video_url ? (
-              <video controls src={s.video_url} className="w-full rounded-lg" />
-            ) : (
-              <p className="text-[13px] text-muted">No video rendered yet.</p>
-            )}
-            <Link
-              href={`/admin/videos/${s.id}`}
-              className="mt-3 inline-flex w-full items-center justify-center rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent"
-            >
-              Open video editor →
-            </Link>
-          </div>
-
-          <SegmentOverrideCard
-            kind="intro"
-            label="Intro"
-            rows={intros}
+      {showRail ? (
+        <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
+          <div className="min-w-0">{tabContent}</div>
+          {/* Per-tab rail. Cards land in either the primary section or
+              the Advanced drawer based on which tab is active. Status +
+              Search Visibility live in the StoryActionBar above
+              (single source of truth). */}
+          <StoryRail
+            activeTab={activeTab}
             storyId={s.id}
-            pinnedId={s.intro_segment_id}
-            skip={Boolean(s.skip_intro)}
-            globalActiveId={activeIntroId ?? null}
+            storyCategory={s.category ?? null}
+            heroStyleId={s.hero_style_id ?? null}
+            heroImage={s.hero_image ?? null}
+            audioUrl={s.audio_url ?? null}
+            videoUrl={s.video_url ?? null}
+            pipelineCache={s.pipeline_cache ?? null}
+            videoConfig={s.video_config ?? null}
+            introSegmentId={s.intro_segment_id ?? null}
+            outroSegmentId={s.outro_segment_id ?? null}
+            skipIntro={Boolean(s.skip_intro)}
+            skipOutro={Boolean(s.skip_outro)}
+            tokens={s.tokens ?? null}
+            costCents={s.cost_cents ?? null}
+            createdAt={s.created_at ?? null}
+            publishedAt={s.published_at ?? null}
+            gallery={gallery}
+            poll={poll}
+            pollPreset={pollPreset}
+            heroStyleSettings={heroStyleSettings}
+            storyAssets={storyAssets}
+            sceneGranular={sceneGranular}
+            propGranular={propGranular}
+            intros={intros}
+            outros={outros}
+            activeIntroId={activeIntroId ?? null}
+            activeOutroId={activeOutroId ?? null}
+            commentsArticleId={commentsArticleId}
+            commentsClosed={commentsClosed}
+            siteCommentsEnabled={siteCommentsEnabled}
           />
-
-          <SegmentOverrideCard
-            kind="outro"
-            label="Outro"
-            rows={outros}
-            storyId={s.id}
-            pinnedId={s.outro_segment_id}
-            skip={Boolean(s.skip_outro)}
-            globalActiveId={activeOutroId ?? null}
-          />
-
-          <div className="rounded-xl border border-line bg-surface p-4 font-mono text-[11px] text-muted">
-            <div className={LABEL}>Meta</div>
-            <p>id: {s.id}</p>
-            <p>tokens: {s.tokens ?? 0}</p>
-            <p>cost: ${((s.cost_cents ?? 0) / 100).toFixed(2)}</p>
-            {s.created_at && <p>created: {s.created_at.slice(0, 16)}</p>}
-            {s.published_at && <p>published: {s.published_at.slice(0, 16)}</p>}
-          </div>
-        </aside>
-      </div>
+        </div>
+      ) : (
+        // Editing tabs: full-width canvas, no rail. The inline
+        // ShortPreviewPlayer inside StoryShortTabsClient handles the
+        // 9:16 preview (toggleable via the Action Bar's "Hide preview"
+        // chip).
+        <div className="min-w-0">{tabContent}</div>
+      )}
     </div>
   );
 }
 
-function SegmentOverrideCard({
-  kind,
-  label,
-  rows,
+// Server-side loader for the 7 short-client tabs. Mirrors the parallel
+// loaders in the standalone /admin/shorts/[id]/page.tsx so the unified
+// page reaches the same starting state (config blob, latest render,
+// voice catalog, linked articles, per-platform publish rows, SEO
+// metadata, foreign-session resolution). Best-effort: each side-load
+// catches its own error so a transient failure on one of them does not
+// blank the entire editor.
+async function loadShortClientTabState(
+  storyId: string,
+  currentUserId: string,
+): Promise<
+  | {
+      ok: true;
+      config: import("@/lib/short-config").ShortConfig;
+      latestRender: import("@/lib/short-render-queue").ShortRenderRow | null;
+      voices: Awaited<ReturnType<typeof listVoices>>;
+      linkedArticles: LinkedArticleSummary[];
+      foreignOwnerEmail: string | null;
+      initialFacebookPost: Awaited<
+        ReturnType<typeof getLatestFacebookPostForStoryAction>
+      >;
+      initialInstagramPost: Awaited<
+        ReturnType<typeof getLatestInstagramPostForStoryAction>
+      >;
+      initialYouTubePost: Awaited<
+        ReturnType<typeof getLatestYouTubePostForStoryAction>
+      >;
+      initialTikTokPost: Awaited<
+        ReturnType<typeof getLatestTikTokPostForStoryAction>
+      >;
+      initialSeoMetadata: SeoMetadataState;
+    }
+  | { ok: false; error: string }
+> {
+  const [
+    state,
+    voices,
+    articlesResult,
+    initialFacebookPost,
+    initialInstagramPost,
+    initialYouTubePost,
+    initialTikTokPost,
+    initialSeoMetadata,
+  ] = await Promise.all([
+    loadShortEditorState(storyId),
+    listVoices().catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] listVoices failed", {
+        err: String(err),
+      });
+      return [] as Awaited<ReturnType<typeof listVoices>>;
+    }),
+    listArticlesLinkedToStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] linked articles failed", {
+        err: String(err),
+      });
+      return { ok: false, articles: [] } as const;
+    }),
+    getLatestFacebookPostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest facebook post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getLatestInstagramPostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest instagram post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getLatestYouTubePostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest youtube post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getLatestTikTokPostForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] latest tiktok post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    getSeoMetadataForStoryAction(storyId).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[unified editor page] seo metadata lookup failed", {
+        err: String(err),
+      });
+      return { metadata: null, generatedAt: null } as SeoMetadataState;
+    }),
+  ]);
+
+  if (!state.ok || !state.config) {
+    return { ok: false, error: state.error ?? "no-short-yet" };
+  }
+
+  const foreignOwnerEmail = await resolveForeignOwnerEmail(
+    state.config,
+    currentUserId,
+  );
+
+  return {
+    ok: true,
+    config: state.config,
+    latestRender: state.latestRender ?? null,
+    voices,
+    linkedArticles: articlesResult.ok ? (articlesResult.articles ?? []) : [],
+    foreignOwnerEmail,
+    initialFacebookPost,
+    initialInstagramPost,
+    initialYouTubePost,
+    initialTikTokPost,
+    initialSeoMetadata,
+  };
+}
+
+// Mirrors the standalone short editor's foreign-session resolver. Returns
+// null when the current user owns the session, the session is stale, or
+// no session was ever claimed — all of which mean "no banner."
+async function resolveForeignOwnerEmail(
+  config: import("@/lib/short-config").ShortConfig,
+  currentUserId: string,
+): Promise<string | null> {
+  const read = readForeignSession(config, currentUserId);
+  if (!read.isForeign || !read.foreignUserId) return null;
+  const otherUser = await getUserById(read.foreignUserId);
+  return otherUser?.email ?? read.foreignUserId;
+}
+
+function NoShortYetCard({
+  error,
   storyId,
-  pinnedId,
-  skip,
-  globalActiveId,
 }: {
-  kind: SegmentKind;
-  label: string;
-  rows: SegmentRow[];
+  error: string;
   storyId: string;
-  pinnedId: string | null;
-  skip: boolean;
-  globalActiveId: string | null;
 }) {
-  const enabledRows = rows.filter((r) => r.enabled !== 0);
-  // The select's current value reflects the resolution chain so the UI shows
-  // exactly what the render will use: a skip flag wins over a pinned id, and
-  // a pinned id wins over the global active.
-  const currentValue = skip ? "skip" : pinnedId || "inherit";
-  const globalRow = rows.find((r) => r.id === globalActiveId);
-  return (
-    <div className="rounded-xl border border-line bg-surface p-4">
-      <div className={LABEL}>{label}</div>
-      <form action={setStoryOverrideAction} className="space-y-2">
-        <input type="hidden" name="story_id" value={storyId} />
-        <input type="hidden" name="kind" value={kind} />
-        <select
-          name="pick"
-          defaultValue={currentValue}
-          className="w-full rounded-lg border border-line bg-bg px-3 py-2 text-[14px] text-ink outline-none focus:border-accent"
+  // Same UX as the standalone short editor's NoShortYet: the most common
+  // reason the editor lands cold is "you haven't generated a short for
+  // this story yet." The Generate Short button lives on the long-form
+  // editor; cut 3 will move it into the unified page so the escape
+  // hatch is no longer the only path.
+  if (error === "no-short-yet" || error === "short_renders-props-empty") {
+    return (
+      <div className="rounded-lg border border-line bg-surface p-4">
+        <p className="text-[13px] text-ink">
+          No short exists for this story yet.
+        </p>
+        <p className="mt-1 text-[12px] text-muted">
+          Generate one from the long-form editor, then come back here to
+          fine-tune individual scenes.
+        </p>
+        <Link
+          href={`/admin/videos/${storyId}`}
+          className="mt-3 inline-block rounded-md border border-accent px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-accent hover:bg-accent/10"
         >
-          <option value="inherit">
-            Use global active
-            {globalRow ? ` (${globalRow.label ?? globalRow.id.slice(0, 8)})` : " (none set)"}
-          </option>
-          <option value="skip">Skip — no {kind} for this story</option>
-          {enabledRows.length > 0 && (
-            <optgroup label="Pin a specific one">
-              {enabledRows.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.label ?? r.id.slice(0, 8)}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </select>
-        <button className="w-full rounded-md border border-line px-3 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
-          Save {label.toLowerCase()} choice
-        </button>
-      </form>
+          Open 16:9 long-form editor
+        </Link>
+      </div>
+    );
+  }
+  return (
+    <div
+      role="alert"
+      className="rounded-lg border border-warn bg-warn/10 p-4 text-[12px] text-warn"
+    >
+      Could not load the short editor: {error}
     </div>
   );
 }
+

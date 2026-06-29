@@ -5,8 +5,17 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import { headers } from "next/headers";
+import {
+  clearLoginAttempts,
+  isLoginBlocked,
+  loginAttemptKey,
+  recordLoginFailure,
+} from "@/lib/rate-limit";
+import { verifyMfaForLogin } from "@/lib/users";
 import { randomUUID } from "node:crypto";
-import { requireAdmin, ensureSeedAdmin, currentUser } from "@/lib/dal";
+import { CATEGORIES } from "@/app/admin/ui";
+import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
 import {
   getUserByEmail,
@@ -14,6 +23,10 @@ import {
   setStatus,
   setSetting,
   getSetting,
+  upsertVoiceover,
+  deleteVoiceover,
+  setDefaultVoiceoverId,
+  setCategoryVoiceoverId,
   getStoryConfigJson,
   setStoryConfigJson,
   getSegment,
@@ -32,6 +45,8 @@ import {
   setStoryVoice,
   getStory as getStoryRow,
   deleteArticle,
+  deleteStory,
+  setStoryCategory,
   appendRevision,
   checkSlugAvailable,
   updateArticleSlug,
@@ -46,7 +61,7 @@ import {
 } from "@/lib/repo";
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
-import { run } from "@/lib/db";
+import { one, run } from "@/lib/db";
 import {
   canEnqueueImageRegen,
   cancelAllImageRendersForOwner,
@@ -89,7 +104,21 @@ import {
   ReviewPayloadSchema,
 } from "@/lib/article-payload";
 import { isValidSlugShape } from "@/lib/article-seo";
-import type { ArticleType } from "@/lib/repo";
+import type { ArticleType, SocialPlatform } from "@/lib/repo";
+import { publishShortToFacebook } from "@/lib/publish-to-facebook";
+import {
+  publishShortToFacebookStory,
+  SETTING_AUTO_PUBLISH as FB_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-facebook-story";
+import { publishShortToInstagram } from "@/lib/publish-to-instagram";
+import {
+  publishShortToInstagramStory,
+  SETTING_AUTO_PUBLISH as IG_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-instagram-story";
+import { publishShortToYouTube } from "@/lib/publish-to-youtube";
+import { publishShortToTikTok } from "@/lib/publish-to-tiktok";
+import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
+import { ensureSeoMetadataForStory } from "@/lib/seo-metadata";
 import {
   isConfigured as isSheetsConfigured,
   parseSheetRef,
@@ -99,6 +128,9 @@ import {
 
 export interface LoginState {
   error?: string;
+  /** Set after a correct password when the account has 2FA on — the form then
+   *  reveals a code field and resubmits. */
+  needsMfa?: boolean;
 }
 
 export async function login(
@@ -110,12 +142,51 @@ export async function login(
   if (!email || !password) {
     return { error: "Enter your email and password." };
   }
+
+  // Brute-force throttle, keyed by source IP (hashed; no raw IP stored).
+  const reqHeaders = await headers();
+  const ip =
+    (reqHeaders.get("x-forwarded-for") ?? "").split(",")[0].trim() ||
+    reqHeaders.get("x-real-ip") ||
+    "unknown";
+  const rlKey = loginAttemptKey(ip);
+  const blocked = await isLoginBlocked(rlKey);
+  if (blocked.blocked) {
+    const mins = Math.max(1, Math.ceil(blocked.retryAfterSec / 60));
+    return {
+      error: `Too many attempts. Try again in ${mins} minute${mins === 1 ? "" : "s"}.`,
+    };
+  }
+
   // Bootstrap the first admin from env if the users table is still empty.
   await ensureSeedAdmin();
   const user = await getUserByEmail(email);
   if (!user || !(await verifyPassword(password, user.password_hash))) {
+    await recordLoginFailure(rlKey);
     return { error: "Wrong email or password." };
   }
+  if (user.status === "suspended") {
+    // A suspended staff account must never receive a fresh session cookie —
+    // reject at the door rather than relying only on the per-request gate.
+    console.warn("[admin login] suspended account blocked");
+    return { error: "This account is suspended. Contact an administrator." };
+  }
+
+  // Opt-in 2FA: only accounts that enrolled require a second factor, so every
+  // other login is unchanged. The password is already verified at this point.
+  if (user.mfa_enabled) {
+    const code = String(formData.get("code") ?? "").trim();
+    if (!code) {
+      // First step passed — ask for the code (not an error state).
+      return { needsMfa: true };
+    }
+    if (!(await verifyMfaForLogin(user.id, code))) {
+      await recordLoginFailure(rlKey); // throttle code guessing too
+      return { needsMfa: true, error: "That code didn't match. Try again." };
+    }
+  }
+
+  await clearLoginAttempts(rlKey);
   await createSession({ userId: user.id, email: user.email, role: user.role });
   redirect("/admin");
 }
@@ -126,7 +197,7 @@ export async function logout(): Promise<void> {
 }
 
 export async function saveStory(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) return;
   await updateStory(id, {
@@ -138,16 +209,92 @@ export async function saveStory(formData: FormData): Promise<void> {
     body: String(formData.get("body") ?? ""),
     teleprompter: String(formData.get("teleprompter") ?? ""),
   });
+  // 2026-06-18 polls plan extension: every story should have a poll.
+  // Try to autodraft now that the admin has just saved (body may
+  // have meaningful content). Service is idempotent — skips when an
+  // enabled poll already exists. Best-effort: any failure logs and
+  // the save still succeeds.
+  try {
+    const body = String(formData.get("body") ?? "").trim();
+    if (body.length >= 50) {
+      const story = await getStoryRow(id);
+      const { autoDraftPollForSubject } = await import("@/lib/poll-autodraft");
+      await autoDraftPollForSubject({
+        kind: "story",
+        storyId: id,
+        title: story?.title ?? null,
+        body,
+        category: story?.category ?? null,
+      });
+    }
+  } catch (err) {
+    console.warn("[stories action] autodraft on save failed", {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   revalidatePath(`/admin/stories/${id}`);
   revalidatePath("/admin/stories");
 }
 
 export async function changeStatus(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "") as StoryStatus;
   if (!id || !status) return;
+  // 2026-06-25 (#101 follow-up): per-story editor's status dropdown
+  // form was the LAST publish path without an asset gate, so an
+  // operator could flip a story to 'published' here with no short /
+  // no thumbnails / no poll and the public site would serve a
+  // missing-video story. Same gate the bulk Publish + manual
+  // review-publish + Complete & publish + full-pipeline cron use.
+  // Caught when 1nkq58q shipped with audio but no video.
+  if (status === "published") {
+    const current = await getStoryRow(id);
+    if (current && current.status !== "published") {
+      const { evaluateAssetCompleteness } = await import(
+        "@/lib/asset-completeness"
+      );
+      const completeness = await evaluateAssetCompleteness(id);
+      if (!completeness.ready) {
+        const reason = encodeURIComponent(completeness.missing.join(" | "));
+        console.warn("[stories action] publish-blocked", {
+          id,
+          missing: completeness.missing,
+        });
+        revalidatePath(`/admin/stories/${id}`);
+        redirect(`/admin/stories/${id}?publish_blocked=${reason}`);
+      }
+    }
+  }
   await setStatus(id, status);
+  // 2026-06-18 polls plan extension: fire the autodraft service when
+  // a story transitions to published — the public widget needs a poll
+  // by then. Idempotent (skips enabled polls). Body should be
+  // populated by the pipeline at this point.
+  if (status === "published") {
+    try {
+      const story = await getStoryRow(id);
+      const body = (story?.body ?? "").trim();
+      if (story && body.length >= 50) {
+        const { autoDraftPollForSubject } = await import(
+          "@/lib/poll-autodraft"
+        );
+        await autoDraftPollForSubject({
+          kind: "story",
+          storyId: id,
+          title: story.title,
+          body,
+          category: story.category,
+        });
+      }
+    } catch (err) {
+      console.warn("[stories action] autodraft on publish failed", {
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   revalidatePath(`/admin/stories/${id}`);
   revalidatePath("/admin/stories");
   revalidatePath("/admin");
@@ -156,7 +303,7 @@ export async function changeStatus(formData: FormData): Promise<void> {
 export async function setStoryNoindexAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const noindex = String(formData.get("noindex") ?? "") === "1";
   if (!id) return;
@@ -164,6 +311,41 @@ export async function setStoryNoindexAction(
   console.info("[stories action] noindex", { id, noindex });
   revalidatePath(`/admin/stories/${id}`);
   revalidatePath(`/admin/videos/${id}`);
+}
+
+// Plan: _plans/2026-06-25-title-length-gate.md (Layer 3).
+// One-click admin recovery for when the pipeline's title gate lets a
+// too-long title through. Calls into the lib/title-regenerator module
+// which runs the same LLM prompt as the Python pipeline, validates the
+// new title against the length policy, and writes it to stories.title.
+export type RegenerateStoryTitleActionResult =
+  | { ok: true; title: string; previousTitle: string | null }
+  | { ok: false; error: string };
+
+export async function regenerateStoryTitleAction(
+  storyId: string,
+): Promise<RegenerateStoryTitleActionResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story id" };
+  const { regenerateTitleForStory } = await import("@/lib/title-regenerator");
+  const result = await regenerateTitleForStory(storyId);
+  console.info("[admin title regen]", {
+    storyId,
+    actorId: session.userId,
+    ok: result.ok,
+    stage: result.ok ? "ok" : result.stage,
+  });
+  if (!result.ok) {
+    return { ok: false, error: result.error };
+  }
+  revalidatePath(`/admin/shorts/${storyId}`);
+  revalidatePath(`/admin/videos/${storyId}`);
+  revalidatePath("/admin");
+  return {
+    ok: true,
+    title: result.title,
+    previousTitle: result.previousTitle,
+  };
 }
 
 // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: per-story aspect
@@ -181,7 +363,7 @@ export async function setStoryAspectAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const rawAspect = String(formData.get("aspect") ?? "");
   if (!id) return { ok: false, error: "missing id" };
@@ -213,6 +395,205 @@ export async function setStoryAspectAction(formData: FormData): Promise<{
   return { ok: true };
 }
 
+// Phase 1 of _plans/2026-06-17-engagement-polls.md. Story-level poll
+// save: validates the editor inputs through validatePollInputs (single
+// trust boundary, also reused by the LLM auto-draft endpoint) and
+// upserts the row. The story's current category is snapshotted onto
+// polls.category so the rail queries don't have to join through
+// stories on the hot path. Returns a shape the client can branch on so
+// inline validation errors render without a refresh.
+export async function savePollAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+  created?: boolean;
+}> {
+  await requireCapability("content.manage");
+  const storyId = String(formData.get("story_id") ?? "");
+  if (!storyId) return { ok: false, error: "missing story id" };
+  const story = await getStoryRow(storyId);
+  if (!story) {
+    console.warn("[polls action] save: story not found", { story_id: storyId });
+    return { ok: false, error: "story not found" };
+  }
+  const { upsertPoll } = await import("@/lib/polls");
+  const result = await upsertPoll({
+    storyId,
+    question: String(formData.get("question") ?? ""),
+    optionA: String(formData.get("option_a") ?? ""),
+    optionB: String(formData.get("option_b") ?? ""),
+    enabled: String(formData.get("enabled") ?? "") === "1",
+    category: story.category,
+  });
+  if (!result.ok) {
+    console.warn("[polls action] save rejected", {
+      story_id: storyId,
+      error: result.error,
+    });
+    return { ok: false, error: result.error };
+  }
+  console.info("[polls action] save", {
+    story_id: storyId,
+    poll_id: result.pollId,
+    created: result.created,
+  });
+  revalidatePath(`/admin/stories/${storyId}`);
+  revalidatePath("/admin/polls");
+  return { ok: true, created: result.created };
+}
+
+// 2026-06-18 polls plan extension: backfill action for the "every
+// article must have a poll, whether existing or new" requirement.
+// Walks every published story + article without an enabled poll and
+// fires the autodraft service. Best-effort per row: a per-row failure
+// logs and skips, never aborts the batch. Idempotent — re-running is
+// safe; rows with admin-saved (enabled=1) polls are left alone.
+//
+// Surfaces on /admin/polls as a button. Per-call cost: ~$0.001 per
+// row × (count of subjects without an enabled poll). With 50
+// existing articles + 100 stories that's ~$0.15.
+export interface BackfillPollsResult {
+  ok: boolean;
+  storiesScanned: number;
+  articlesScanned: number;
+  pollsCreatedFromLLM: number;
+  pollsCreatedAsDraft: number;
+  errors: number;
+}
+
+export async function backfillPollsAction(): Promise<BackfillPollsResult> {
+  await requireCapability("content.manage");
+  const startedAt = Date.now();
+  const result: BackfillPollsResult = {
+    ok: true,
+    storiesScanned: 0,
+    articlesScanned: 0,
+    pollsCreatedFromLLM: 0,
+    pollsCreatedAsDraft: 0,
+    errors: 0,
+  };
+  const { autoDraftPollForSubject, tiptapToPlainText } = await import(
+    "@/lib/poll-autodraft"
+  );
+  const { listStories, listArticlesSlim, getArticle } = await import(
+    "@/lib/repo"
+  );
+
+  // Stories: published rows the public reader can see. We don't try
+  // to autodraft drafts because admin hasn't decided on the body yet.
+  const stories = await listStories({ status: "published" });
+  for (const s of stories) {
+    result.storiesScanned += 1;
+    const body = (s.body ?? "").trim();
+    if (body.length < 50) {
+      continue; // not enough text for the LLM to make sense of
+    }
+    try {
+      const r = await autoDraftPollForSubject({
+        kind: "story",
+        storyId: s.id,
+        title: s.title,
+        body,
+        category: s.category,
+      });
+      if (r.ok && r.ai) result.pollsCreatedFromLLM += 1;
+      else if (r.ok && !r.ai) result.pollsCreatedAsDraft += 1;
+      else result.errors += 1;
+    } catch (err) {
+      result.errors += 1;
+      console.warn("[polls backfill story failed]", {
+        story_id: s.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Articles: every published article. Read each via getArticle so we
+  // have the document column for tiptapToPlainText.
+  const articles = await listArticlesSlim({ status: "published" });
+  for (const a of articles) {
+    result.articlesScanned += 1;
+    const full = await getArticle(a.id);
+    if (!full) continue;
+    const bodyText = tiptapToPlainText(full.document);
+    if (bodyText.length < 50) continue;
+    try {
+      const r = await autoDraftPollForSubject({
+        kind: "article",
+        articleId: a.id,
+        title: a.title,
+        bodyText,
+        type: a.type,
+      });
+      if (r.ok && r.ai) result.pollsCreatedFromLLM += 1;
+      else if (r.ok && !r.ai) result.pollsCreatedAsDraft += 1;
+      else result.errors += 1;
+    } catch (err) {
+      result.errors += 1;
+      console.warn("[polls backfill article failed]", {
+        article_id: a.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  console.info("[polls backfill done]", {
+    duration_ms: Date.now() - startedAt,
+    ...result,
+  });
+  revalidatePath("/admin/polls");
+  return result;
+}
+
+// 2026-06-18 standalone-article polls (plan §15). Mirrors
+// savePollAction for the article CMS surface. Articles get their
+// OWN poll authored on the article edit page — independent of any
+// linked story's poll. The article reader resolves article-own >
+// linked-story priority (see /articles/[locale]/[slug]/page.tsx).
+//
+// Category snapshot uses the article TYPE (news / feature /
+// listicle / review) so per-type analytics roll up without a join
+// to articles — same shape story polls use for stories.category.
+export async function saveArticlePollAction(formData: FormData): Promise<{
+  ok: boolean;
+  error?: string;
+  created?: boolean;
+}> {
+  await requireCapability("content.manage");
+  const articleId = String(formData.get("article_id") ?? "");
+  if (!articleId) return { ok: false, error: "missing article id" };
+  const article = await getArticle(articleId);
+  if (!article) {
+    console.warn("[polls action] save: article not found", {
+      article_id: articleId,
+    });
+    return { ok: false, error: "article not found" };
+  }
+  const { upsertPoll } = await import("@/lib/polls");
+  const result = await upsertPoll({
+    articleId,
+    question: String(formData.get("question") ?? ""),
+    optionA: String(formData.get("option_a") ?? ""),
+    optionB: String(formData.get("option_b") ?? ""),
+    enabled: String(formData.get("enabled") ?? "") === "1",
+    category: article.type,
+  });
+  if (!result.ok) {
+    console.warn("[polls action] save article rejected", {
+      article_id: articleId,
+      error: result.error,
+    });
+    return { ok: false, error: result.error };
+  }
+  console.info("[polls action] save article", {
+    article_id: articleId,
+    poll_id: result.pollId,
+    created: result.created,
+  });
+  revalidatePath(`/admin/articles/${articleId}`);
+  revalidatePath("/admin/polls");
+  return { ok: true, created: result.created };
+}
+
 // ─── Asset re-render ─────────────────────────────────────────────────────────
 // Enqueue one image-regen request. Admin clicks Regenerate on a hero, scene,
 // prop, mouth-swap, OG, or gallery image; we run a budget pre-flight, queue
@@ -236,7 +617,7 @@ export async function enqueueImageRegenAction(opts: {
   ownerId: string;
   asset: string;
 }): Promise<EnqueueImageRegenResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { ownerKind, ownerId, asset } = opts;
   if (!ownerId || !asset) {
     return { ok: false, error: "missing owner/asset" };
@@ -292,6 +673,30 @@ export async function enqueueImageRegenAction(opts: {
     };
   }
 
+  // 2026-06-25: when the operator explicitly clicks "Generate hero +
+  // thumbnail from short" on a story that already has variants, the
+  // Python finisher's resume optimization (pipeline/media.py:1711)
+  // emits `variant_resumed ... already persisted — skipping i2i` and
+  // silently keeps the OLD URLs. That logic is correct for the
+  // crash-recovery case (cron reclaimed a mid-flight row, don't
+  // re-bill kie for what already landed) but wrong for the
+  // operator-clicked-regen case. NULL the 5 columns here so the
+  // finisher sees no persisted URLs and treats every variant as a
+  // fresh i2i call. Same workaround the /api/refresh_assets cron
+  // uses in advanceShortPending.
+  if (ownerKind === "story" && asset === "hero_thumbnail_from_short") {
+    await run(
+      "UPDATE stories SET hero_image = NULL, hero_image_landscape = NULL, " +
+        "thumbnail_image = NULL, thumbnail_image_landscape = NULL, " +
+        "thumbnail_image_square = NULL WHERE id = ?",
+      [ownerId],
+    );
+    console.info("[image regen action] cleared hero+thumbnail variants", {
+      owner_id: ownerId,
+      reason: "operator regen, bypass finisher resume-skip",
+    });
+  }
+
   const fresh = await enqueueImageRegen({
     ownerKind,
     ownerId,
@@ -327,7 +732,7 @@ export async function enqueueImageRegenAction(opts: {
 export async function listRenderEventsAction(
   renderId: string,
 ): Promise<RenderEventRow[]> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!renderId) return [];
   return listRenderEvents(renderId);
 }
@@ -350,7 +755,7 @@ export async function cancelImageRenderAction(opts: {
   renderId: string;
   reason?: string;
 }): Promise<CancelImageRenderResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { renderId } = opts;
   const reason = (opts.reason ?? "").trim() || "cancelled by admin";
   if (!renderId) return { ok: false, error: "missing render id" };
@@ -396,7 +801,7 @@ export async function cancelAllImageRendersAction(opts: {
   ownerId: string;
   reason?: string;
 }): Promise<CancelAllImageRendersResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { ownerKind, ownerId } = opts;
   const reason = (opts.reason ?? "").trim() || "stopped by admin (bulk)";
   if (!ownerId) return { ok: false, cancelled: 0, error: "missing owner" };
@@ -464,7 +869,7 @@ function revalidateOwnerPanels(
 }
 
 export async function setModelAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const stage = String(formData.get("stage") ?? "") as Stage;
   const model = String(formData.get("model") ?? "");
   if (!stage || !model) return;
@@ -550,7 +955,7 @@ const SETTING_VALUE_VALIDATORS: Record<
 export async function saveStoryHeroStyleAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const storyId = String(formData.get("storyId") ?? "");
   const rawValue = String(formData.get("value") ?? "");
   if (!storyId) {
@@ -625,7 +1030,7 @@ export interface HeroStyleSettingsSnapshot {
  *  thumbnail URL. Callers (the settings page; the per-story edit page
  *  in step 5) render off the snapshot without re-querying. */
 export async function loadHeroStyleSettings(): Promise<HeroStyleSettingsSnapshot> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { HERO_STYLES } = await import("@/lib/hero-styles");
   const styleIds = HERO_STYLES.map((s) => s.id);
 
@@ -657,7 +1062,7 @@ export async function loadHeroStyleSettings(): Promise<HeroStyleSettingsSnapshot
 }
 
 export async function saveSettingAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const key = String(formData.get("key") ?? "");
   if (!key) return;
   const rawValue = String(formData.get("value") ?? "");
@@ -677,6 +1082,150 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
   // is read from /admin/videos/[id]). Revalidate the whole admin layout so
   // the next render anywhere under /admin reflects the new value.
   revalidatePath("/admin", "layout");
+}
+
+// --- Voiceover presets (/admin/voiceovers) ----------------------------------
+// CRUD for named TTS presets + the global-default / per-category selection.
+// All admin-gated; the pipeline reads the resulting voiceovers table + the
+// voiceovers.default / voiceovers.category.<Cat> settings via
+// pipeline/voiceovers.resolve_voiceover.
+
+export async function saveVoiceoverAction(formData: FormData): Promise<void> {
+  await requireCapability("content.manage");
+  const name = String(formData.get("name") ?? "").trim();
+  const provider = String(formData.get("provider") ?? "").trim();
+  const voiceId = String(formData.get("voice_id") ?? "").trim();
+  if (!name || !provider || !voiceId) return;
+  const id = String(formData.get("id") ?? "").trim() || randomUUID();
+  const stylePrompt = String(formData.get("style_prompt") ?? "").trim();
+  const rateRaw = String(formData.get("speaking_rate") ?? "").trim();
+  const rate = rateRaw ? Number(rateRaw) : null;
+  await upsertVoiceover({
+    id,
+    name,
+    provider,
+    voice_id: voiceId,
+    style_prompt: stylePrompt || null,
+    speaking_rate: rate !== null && Number.isFinite(rate) ? rate : null,
+    hook_pause: String(formData.get("hook_pause") ?? "") === "1" ? 1 : 0,
+  });
+  console.info("[voiceover action] save", { id, name, provider, voiceId });
+  revalidatePath("/admin/voiceovers");
+}
+
+export async function deleteVoiceoverAction(formData: FormData): Promise<void> {
+  await requireCapability("content.manage");
+  const id = String(formData.get("id") ?? "").trim();
+  if (!id) return;
+  await deleteVoiceover(id);
+  console.info("[voiceover action] delete", { id });
+  revalidatePath("/admin/voiceovers");
+}
+
+export async function setDefaultVoiceoverAction(
+  formData: FormData,
+): Promise<void> {
+  await requireCapability("content.manage");
+  const id = String(formData.get("id") ?? "").trim();
+  await setDefaultVoiceoverId(id);
+  console.info("[voiceover action] set default", { id });
+  // The default feeds the shorts pipeline; revalidate the whole admin layout.
+  revalidatePath("/admin", "layout");
+}
+
+export async function setCategoryVoiceoverAction(
+  formData: FormData,
+): Promise<void> {
+  await requireCapability("content.manage");
+  const category = String(formData.get("category") ?? "").trim();
+  const id = String(formData.get("id") ?? "").trim();
+  if (!CATEGORIES.includes(category as (typeof CATEGORIES)[number])) return;
+  await setCategoryVoiceoverId(category, id);
+  console.info("[voiceover action] set category", { category, id });
+  revalidatePath("/admin/voiceovers");
+}
+
+// Synthesize a sample for an arbitrary (possibly unsaved) voiceover config so
+// the admin can hear a voice WHILE choosing it in the editor, before saving.
+// Calls the Python preview endpoint (which has the Google creds) with the shared
+// CRON_SECRET; returns the MP3 as a data URL the client plays. Preview only
+// works where the Vercel Python runtime + creds exist (deploy), not local
+// `next dev`; the error path surfaces that cleanly.
+export async function previewVoiceoverConfigAction(config: {
+  provider: string;
+  voice_id: string;
+  style_prompt?: string | null;
+  speaking_rate?: number | null;
+  hook_pause?: boolean;
+  // Optional sample override. The quick per-row preview passes a short ~2-3s
+  // line so auditioning a voice is fast; the editor preview omits it for the
+  // fuller default sample.
+  text?: string | null;
+}): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
+  await requireCapability("content.manage");
+  if (!config.provider || !config.voice_id) {
+    return { ok: false, error: "Pick a model and a voice first." };
+  }
+  return runVoiceoverPreview({
+    provider: config.provider,
+    voice_id: config.voice_id,
+    style_prompt: config.style_prompt ?? null,
+    speaking_rate: config.speaking_rate ?? null,
+    hook_pause: !!config.hook_pause,
+    text: config.text ?? null,
+  });
+}
+
+// Shared core: POST a config to the Python preview endpoint and return a data
+// URL. Kept separate so both the editor (config) and any saved-preset caller
+// can reuse it.
+async function runVoiceoverPreview(payload: {
+  provider: string;
+  voice_id: string;
+  style_prompt: string | null;
+  speaking_rate: number | null;
+  hook_pause: boolean;
+  text: string | null;
+}): Promise<{ ok: true; audio: string } | { ok: false; error: string }> {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    return { ok: false, error: "CRON_SECRET is not set, so preview is unavailable." };
+  }
+  const h = await headers();
+  const host = h.get("host");
+  if (!host) return { ok: false, error: "Could not resolve the app host for preview." };
+  const proto = h.get("x-forwarded-proto") ?? "https";
+  try {
+    const resp = await fetch(`${proto}://${host}/api/preview_voiceover`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({
+        provider: payload.provider,
+        voice_id: payload.voice_id,
+        style_prompt: payload.style_prompt,
+        speaking_rate: payload.speaking_rate,
+        hook_pause: payload.hook_pause,
+        ...(payload.text ? { text: payload.text } : {}),
+      }),
+    });
+    if (!resp.ok) {
+      const msg = (await resp.text()).slice(0, 200);
+      return { ok: false, error: `Preview failed (${resp.status}): ${msg}` };
+    }
+    const data = (await resp.json()) as {
+      audio_base64: string;
+      content_type: string;
+    };
+    return {
+      ok: true,
+      audio: `data:${data.content_type};base64,${data.audio_base64}`,
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 // Wave 3 Phase 1 + 2: save all 14 caption template fields for whatever scope
@@ -736,7 +1285,7 @@ export async function saveStoryCaptionStyleAction(
   field: string,
   value: string,
 ): Promise<SaveStoryCaptionStyleResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing-story" };
   if (!CAPTION_STYLE_FIELDS_SET.has(field)) {
     return { ok: false, error: `unknown caption field "${field}"` };
@@ -794,7 +1343,7 @@ const CAPTION_STYLE_FIELDS_SET = new Set<string>([
 // control-char rejected (rule 13 §Security).
 
 const MAX_PRESET_NAME_LEN = 60;
-// eslint-disable-next-line no-control-regex -- intentional: rejecting them
+ 
 const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 
 export interface ApplyCaptionPresetResult {
@@ -827,7 +1376,7 @@ export async function applyCaptionStylePresetAction(
   storyId: string,
   presetId: string,
 ): Promise<ApplyCaptionPresetResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing-story" };
   if (!presetId) return { ok: false, error: "missing-preset" };
 
@@ -868,7 +1417,7 @@ export interface ClearCaptionOverridesResult {
 export async function clearStoryCaptionOverridesAction(
   storyId: string,
 ): Promise<ClearCaptionOverridesResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing-story" };
   for (const field of CAPTION_STYLE_FIELDS_SET) {
     await setSetting(`caption.story.${storyId}.${field}`, "");
@@ -892,7 +1441,7 @@ export async function saveUserCaptionPresetAction(opts: {
   name: string;
   values: CaptionStyleValues;
 }): Promise<SaveUserCaptionPresetResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const name = opts.name.trim();
   if (name.length === 0) return { ok: false, error: "name-empty" };
   if (name.length > MAX_PRESET_NAME_LEN) {
@@ -935,14 +1484,14 @@ export async function saveUserCaptionPresetAction(opts: {
 
 // Server-only read helper exposed for the page's RSC pass.
 export async function getUserCaptionPresetsForPage(): Promise<CaptionPreset[]> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   return listUserCaptionPresets();
 }
 
 export async function saveCaptionTemplateAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const rawScope = String(formData.get("__scope") ?? "global");
   const cat = String(formData.get("__cat") ?? "") || undefined;
   const story = String(formData.get("__story") ?? "") || undefined;
@@ -1019,7 +1568,7 @@ function redirectToSegments(params?: Record<string, string>): never {
 // normalize moved off-Vercel into pipeline/segments_worker.py.
 
 export async function setActiveSegmentAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const kind = parseKind(formData.get("kind"));
   if (!kind) redirectToSegments({ error: "missing-kind" });
   const id = String(formData.get("id") ?? "");
@@ -1042,7 +1591,7 @@ export async function setActiveSegmentAction(formData: FormData): Promise<void> 
 export async function setSegmentEnabledAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const enabled = String(formData.get("enabled") ?? "") === "1";
   if (!id) redirectToSegments({ error: "missing-id" });
@@ -1053,7 +1602,7 @@ export async function setSegmentEnabledAction(
 }
 
 export async function renameSegmentAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToSegments({ error: "missing-id" });
   const label = sanitizeLabel(String(formData.get("label") ?? ""));
@@ -1064,7 +1613,7 @@ export async function renameSegmentAction(formData: FormData): Promise<void> {
 }
 
 export async function deleteSegmentAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToSegments({ error: "missing-id" });
   const seg = await getSegment(id);
@@ -1109,7 +1658,7 @@ export async function deleteSegmentAction(formData: FormData): Promise<void> {
 export async function setStoryOverrideAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const storyId = String(formData.get("story_id") ?? "");
   const kind = parseKind(formData.get("kind"));
   const pick = String(formData.get("pick") ?? "inherit");
@@ -1134,7 +1683,7 @@ export async function setStoryVoiceAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const storyId = String(formData.get("story_id") ?? "");
   const rawProvider = String(formData.get("voice_provider") ?? "");
   const rawVoiceId = String(formData.get("voice_id") ?? "");
@@ -1194,7 +1743,7 @@ export async function regenerateVoiceoverAction(formData: FormData): Promise<{
   error?: string;
   renderId?: string;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const storyId = String(formData.get("story_id") ?? "");
   if (!storyId) {
     return { ok: false, error: "missing story_id" };
@@ -1275,7 +1824,7 @@ function redirectToArticle(id: string, params?: Record<string, string>): never {
 }
 
 export async function createArticleAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const user = await currentUser();
   const type = formData.get("type");
   const language = formData.get("language");
@@ -1301,12 +1850,34 @@ export async function createArticleAction(formData: FormData): Promise<void> {
     slug,
     titleLen: title.length,
   });
+  // 2026-06-18 polls plan extension: every article must have a poll
+  // row by default. On create the body is empty so the autodraft
+  // service inserts the category preset as a disabled draft —
+  // saveArticleAction calls the same service again once the editor
+  // has real content, which promotes the draft to enabled=1 via the
+  // LLM. Best-effort: any failure logs and the article create still
+  // succeeds (we never block the redirect on poll generation).
+  try {
+    const { autoDraftPollForSubject } = await import("@/lib/poll-autodraft");
+    await autoDraftPollForSubject({
+      kind: "article",
+      articleId: id,
+      title,
+      bodyText: "",
+      type,
+    });
+  } catch (err) {
+    console.warn("[articles action] autodraft failed", {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   revalidatePath("/admin/articles");
   redirect(`/admin/articles/${id}`);
 }
 
 export async function saveArticleAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const user = await currentUser();
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1351,6 +1922,34 @@ export async function saveArticleAction(formData: FormData): Promise<void> {
     revisionId,
     coalesced,
   });
+  // 2026-06-18 polls plan extension: try to upgrade an article's
+  // disabled-draft poll to an LLM-drafted enabled poll now that the
+  // editor save has populated real content. The autodraft service
+  // skips admin-saved (enabled=1) polls and only acts on the draft
+  // case. Best-effort: any error logs and the save still succeeds.
+  try {
+    const docForExtract = document || article.document || null;
+    const { autoDraftPollForSubject, tiptapToPlainText } =
+      await import("@/lib/poll-autodraft");
+    const bodyText = tiptapToPlainText(docForExtract);
+    // Only worth attempting when there's a meaningful body to read.
+    // Sub-50-char bodies almost always produce LLM rejection; skip
+    // so we don't burn cycles on every keystroke autosave.
+    if (bodyText.length >= 50) {
+      await autoDraftPollForSubject({
+        kind: "article",
+        articleId: id,
+        title: title || article.title,
+        bodyText,
+        type: article.type,
+      });
+    }
+  } catch (err) {
+    console.warn("[articles action] autodraft upgrade failed", {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   revalidatePath(`/admin/articles/${id}`);
   revalidatePath("/admin/articles");
   redirectToArticle(id, { saved: "1" });
@@ -1359,7 +1958,7 @@ export async function saveArticleAction(formData: FormData): Promise<void> {
 export async function setArticleStatusAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const status = String(formData.get("status") ?? "") as ArticleStatus;
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1406,7 +2005,7 @@ export async function setArticleStatusAction(
 export async function setArticleNoindexAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const noindex = String(formData.get("noindex") ?? "") === "1";
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1423,7 +2022,7 @@ export async function setArticleNoindexAction(
 export async function updateArticleSlugAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const slug = String(formData.get("slug") ?? "").trim();
   if (!id) redirectToArticles({ error: "missing-id" });
@@ -1451,7 +2050,7 @@ export async function updateArticleSlugAction(
 export async function updateArticlePayloadAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
   const article = await getArticle(id);
@@ -1554,7 +2153,7 @@ export async function updateArticlePayloadAction(
 export async function updateArticleSeoAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
   const article = await getArticle(id);
@@ -1626,7 +2225,7 @@ function redirectToImport(params?: Record<string, string>): never {
 export async function previewSheetImportAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!isSheetsConfigured()) {
     redirectToImport({ error: "sheets-not-configured" });
   }
@@ -1658,7 +2257,7 @@ interface CommitMapping {
 export async function commitSheetImportAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!isSheetsConfigured()) {
     redirectToImport({ error: "sheets-not-configured" });
   }
@@ -1805,7 +2404,7 @@ export async function commitSheetImportAction(
 export async function nameRevisionAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleId = String(formData.get("article_id") ?? "");
   const revisionId = String(formData.get("revision_id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
@@ -1829,7 +2428,7 @@ export async function nameRevisionAction(
 export async function unnameRevisionAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleId = String(formData.get("article_id") ?? "");
   const revisionId = String(formData.get("revision_id") ?? "");
   if (!articleId || !revisionId) {
@@ -1847,7 +2446,7 @@ export async function unnameRevisionAction(
 export async function restoreRevisionAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const user = await currentUser();
   const articleId = String(formData.get("article_id") ?? "");
   const revisionId = String(formData.get("revision_id") ?? "");
@@ -1918,7 +2517,7 @@ export async function restoreRevisionAction(
 export async function pruneRevisionsAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleId = String(formData.get("article_id") ?? "");
   if (!articleId) redirectToArticles({ error: "missing-id" });
   const removed = await pruneRevisions(articleId, 50);
@@ -1928,7 +2527,7 @@ export async function pruneRevisionsAction(
 }
 
 export async function deleteArticleAction(formData: FormData): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) redirectToArticles({ error: "missing-id" });
   const article = await getArticle(id);
@@ -1965,7 +2564,7 @@ export async function setArticleStoryIdAction(formData: FormData): Promise<{
   error?: string;
   previousStoryId?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const rawStoryId = String(formData.get("story_id") ?? "");
   const storyId = rawStoryId.trim() === "" ? null : rawStoryId.trim();
@@ -1995,7 +2594,7 @@ export async function setArticleHeroFromFrameAction(
   frameUrl?: string;
   previousUrl?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const frameId = String(formData.get("frame_id") ?? "");
   if (!id) return { ok: false, error: "missing id" };
@@ -2024,7 +2623,7 @@ export async function setArticleOgFromFrameAction(
   frameUrl?: string;
   previousUrl?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const frameId = String(formData.get("frame_id") ?? "");
   if (!id) return { ok: false, error: "missing id" };
@@ -2053,7 +2652,7 @@ export async function addArticleGalleryImageFromFrameAction(
   frameUrl?: string;
   previousDocument?: string | null;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const frameId = String(formData.get("frame_id") ?? "");
   const rawAlt = String(formData.get("alt") ?? "").trim();
@@ -2101,7 +2700,7 @@ export async function revertArticleHeroAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const raw = formData.get("previous_url");
   if (!id) return { ok: false, error: "missing id" };
@@ -2122,7 +2721,7 @@ export async function revertArticleOgAction(formData: FormData): Promise<{
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const raw = formData.get("previous_url");
   if (!id) return { ok: false, error: "missing id" };
@@ -2145,7 +2744,7 @@ export async function revertArticleDocumentAction(
   ok: boolean;
   error?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   const previousDocument = formData.get("previous_document");
   if (!id) return { ok: false, error: "missing id" };
@@ -2202,7 +2801,7 @@ export async function syncRedditSourceCsvAction(
   _prev: RedditSyncResult | null,
   formData: FormData,
 ): Promise<RedditSyncResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
 
   const file = formData.get("csv");
   const dryRun = String(formData.get("dry_run") ?? "") === "1";
@@ -2273,7 +2872,7 @@ export async function syncRedditSourceCsvAction(
 export async function skipRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   const notes = String(formData.get("notes") ?? "").trim() || null;
   if (ids.length === 0) return;
@@ -2286,7 +2885,7 @@ export async function skipRedditSourcesAction(
 export async function reopenRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   if (ids.length === 0) return;
   const { bulkSetRedditSourceStatus } = await import("@/lib/reddit-source");
@@ -2303,7 +2902,7 @@ export async function reopenRedditSourcesAction(
 export async function setDailyBudgetCapAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const raw = String(formData.get("cap_usd") ?? "").trim();
   // Empty input → unset → unlimited.
   if (raw === "") {
@@ -2342,7 +2941,7 @@ export async function setDailyBudgetCapAction(
 export async function cancelActiveStoryJobsAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   if (ids.length === 0) {
     redirect("/admin/reddit-sources?error=no-selection");
@@ -2371,7 +2970,7 @@ export async function cancelActiveStoryJobsAction(
 export async function bulkReprocessRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   if (ids.length === 0) {
     redirect("/admin/reddit-sources?error=no-selection");
@@ -2415,13 +3014,11 @@ const REVIEW_ROUTE = (rid: string) => `/admin/reddit-sources/${rid}`;
 export async function publishReviewedStoryAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const redditId = String(formData.get("reddit_id") ?? "");
   if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
 
-  const { getRedditSource, evaluatePublishReadiness } = await import(
-    "@/lib/reddit-source"
-  );
+  const { getRedditSource } = await import("@/lib/reddit-source");
   const source = await getRedditSource(redditId);
   if (!source) {
     redirect(`/admin/reddit-sources?error=source-not-found&id=${redditId}`);
@@ -2429,18 +3026,31 @@ export async function publishReviewedStoryAction(
   const story = source!.story_id
     ? await getStoryRow(source!.story_id)
     : null;
-  const readiness = evaluatePublishReadiness(story, {
-    status: source!.status,
-    story_id: source!.story_id,
-  });
-  if (!readiness.ready) {
-    // Encode the missing-list as a single string so the review page can
-    // surface it without a separate state shape. URL-safe; the page splits
-    // by `|` to render line items.
-    const reason = encodeURIComponent(readiness.missing.join(" | "));
+  if (!source!.story_id || !story) {
+    const reason = encodeURIComponent(
+      !source!.story_id
+        ? "source row has no linked story_id"
+        : "story has not been generated yet",
+    );
+    redirect(`${REVIEW_ROUTE(redditId)}?publish_blocked=${reason}`);
+  }
+  // 2026-06-25 (PR follow-up): use the unified asset gate from the bulk
+  // complete-and-publish work so every publish path enforces the same
+  // requirements. Manual publish from review used to require only
+  // body+hero, letting half-built stories (no short, no thumbnails, no
+  // poll) reach the public site. The new gate blocks those at the
+  // single publish entry the operator uses for review-page publishing.
+  // Operators who want to PUBLISH AND complete missing assets in one
+  // click should use the Content list's "Complete & publish" action.
+  const { evaluateAssetCompleteness } = await import(
+    "@/lib/asset-completeness"
+  );
+  const completeness = await evaluateAssetCompleteness(story!.id);
+  if (!completeness.ready) {
+    const reason = encodeURIComponent(completeness.missing.join(" | "));
     console.warn("[reddit-review publish-blocked]", {
       reddit_id: redditId,
-      missing: readiness.missing,
+      missing: completeness.missing,
     });
     redirect(`${REVIEW_ROUTE(redditId)}?publish_blocked=${reason}`);
   }
@@ -2469,7 +3079,7 @@ export async function publishReviewedStoryAction(
 export async function rejectReviewedStoryAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const redditId = String(formData.get("reddit_id") ?? "");
   if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
 
@@ -2495,7 +3105,7 @@ export async function rejectReviewedStoryAction(
 export async function reprocessRedditSourceAction(
   formData: FormData,
 ): Promise<void> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const redditId = String(formData.get("reddit_id") ?? "");
   if (!redditId) redirect("/admin/reddit-sources?error=missing-reddit-id");
 
@@ -2533,20 +3143,9 @@ export async function reprocessRedditSourceAction(
 export async function processRedditSourcesAction(
   formData: FormData,
 ): Promise<void> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
   const withMedia = String(formData.get("with_media") ?? "1") === "1";
-  // Per-batch output override: 'short' / 'long' pin every row in this
-  // batch to that format; '' (the default option) leaves the row's
-  // output_format NULL so the worker resolves against the
-  // `reddit.default_output` setting at claim time. Any other value is
-  // silently dropped to NULL: the storage helper enforces the same
-  // closed enum, so a hand-crafted POST can't smuggle a typo through.
-  const outputFormatRaw = String(formData.get("output_format") ?? "");
-  const outputFormat: "short" | "long" | null =
-    outputFormatRaw === "short" || outputFormatRaw === "long"
-      ? outputFormatRaw
-      : null;
   if (ids.length === 0) {
     redirect("/admin/reddit-sources?error=no-selection");
   }
@@ -2571,7 +3170,6 @@ export async function processRedditSourcesAction(
   const result = await bulkEnqueueStoryJobs(ids, {
     with_media: withMedia,
     requested_by: session.email,
-    output_format: outputFormat,
   });
   console.info("[story-jobs enqueue]", {
     requested: ids.length,
@@ -2580,10 +3178,6 @@ export async function processRedditSourcesAction(
     skipped_status: result.skipped_status,
     not_found: result.not_found,
     with_media: withMedia,
-    // null = "use default" (worker reads reddit.default_output at claim
-    // time); the audit trail captures the admin's per-batch intent so
-    // a later setting change doesn't muddy what was requested.
-    output_format: outputFormat,
     requested_by: session.email,
   });
   revalidatePath("/admin/reddit-sources");
@@ -2594,3 +3188,1695 @@ export async function processRedditSourcesAction(
       (result.skipped_active ? `&skipped_active=${result.skipped_active}` : ""),
   );
 }
+
+// 2026-06-24 Full Pipeline toggle (plan:
+// _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). Per-row +
+// bulk setters for the auto-publish opt-in. The toggle only writes the
+// reddit_source column — propagation onto story_jobs happens at
+// enqueue time inside bulkEnqueueStoryJobs so a mid-flip on an active
+// job has no effect (the flag is snapshotted when Process N fires).
+export async function setRedditSourceFullPipelineAction(
+  formData: FormData,
+): Promise<void> {
+  await requireCapability("content.manage");
+  const redditId = String(formData.get("reddit_id") ?? "");
+  const enabled = String(formData.get("enabled") ?? "0") === "1";
+  if (!redditId) {
+    redirect("/admin/reddit-sources?error=missing-reddit-id");
+  }
+  const { setRedditSourceFullPipeline } = await import("@/lib/reddit-source");
+  await setRedditSourceFullPipeline(redditId, enabled);
+  console.info("[reddit-sources full-pipeline-toggle]", {
+    reddit_id: redditId,
+    enabled,
+  });
+  revalidatePath("/admin/reddit-sources");
+  revalidatePath(`/admin/reddit-sources/${redditId}`);
+}
+
+export async function bulkSetRedditSourceFullPipelineAction(
+  formData: FormData,
+): Promise<void> {
+  await requireCapability("content.manage");
+  const ids = formData.getAll("reddit_id").map(String).filter(Boolean);
+  const enabled = String(formData.get("enabled") ?? "0") === "1";
+  if (ids.length === 0) {
+    redirect("/admin/reddit-sources?error=no-selection");
+  }
+  const { bulkSetRedditSourceFullPipeline } = await import(
+    "@/lib/reddit-source"
+  );
+  const updated = await bulkSetRedditSourceFullPipeline(ids, enabled);
+  console.info("[reddit-sources full-pipeline-bulk]", {
+    requested: ids.length,
+    updated,
+    enabled,
+  });
+  revalidatePath("/admin/reddit-sources");
+  redirect(
+    `/admin/reddit-sources?full_pipeline_updated=${updated}&full_pipeline_value=${enabled ? "1" : "0"}`,
+  );
+}
+
+// 2026-06-16 per-row event timeline. The StoryJobEventTimeline client
+// component polls this every 2s while the source row is queued/processing
+// and once on mount otherwise. Read-only; admin-gated.
+// Plan: _plans/2026-06-16-story-job-event-timeline.md.
+export async function listStoryJobEventsForRedditAction(
+  redditId: string,
+): Promise<
+  Awaited<
+    ReturnType<typeof import("@/lib/story-jobs").listStoryJobEventsForReddit>
+  >
+> {
+  await requireCapability("content.manage");
+  if (!redditId) return [];
+  const { listStoryJobEventsForReddit } = await import("@/lib/story-jobs");
+  return listStoryJobEventsForReddit(redditId);
+}
+
+// 2026-06-28 live runs page. /admin/reddit-sources/live polls this every
+// 2s to render every in-flight job + recently finished job (within the
+// 15-min grace window) with its event log inline. Read-only; admin-gated.
+// Result-size caps (50 jobs, 50 events/job) live in story-jobs-live.ts.
+// Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
+export async function listActiveJobsWithEventsAction(): Promise<
+  Awaited<
+    ReturnType<typeof import("@/lib/story-jobs-live").listActiveJobsWithEvents>
+  >
+> {
+  await requireCapability("content.manage");
+  const { listActiveJobsWithEvents } = await import("@/lib/story-jobs-live");
+  const result = await listActiveJobsWithEvents();
+  const totalEvents = result.reduce((acc, j) => acc + j.events.length, 0);
+  console.info("[reddit-sources live action] query", {
+    job_count: result.length,
+    total_events: totalEvents,
+  });
+  return result;
+}
+
+// 2026-06-29 live runs Stop. The live page polls listActiveJobsWithEvents
+// and shows a card per in-flight run; these two actions back the per-run
+// "Stop" button and the "Stop all" button. Both settle WHATEVER stage is
+// in flight (story / short / hero / publish) via stopLiveRun — the
+// list-page Stop only knows the story stage, so it can't clear a run whose
+// article finished but whose short render zombied (the 128h cards).
+// content.manage-gated like every other write here.
+
+export interface StopLiveRunActionResult {
+  ok: boolean;
+  error?: string;
+  /** Stages that were actually in flight and got cancelled. */
+  stoppedStages: string[];
+}
+
+export async function stopLiveRunAction(
+  jobId: string,
+): Promise<StopLiveRunActionResult> {
+  const session = await requireCapability("content.manage");
+  if (!jobId) return { ok: false, error: "missing-job-id", stoppedStages: [] };
+  const { stopLiveRun } = await import("@/lib/story-jobs");
+  const r = await stopLiveRun(jobId);
+  console.info("[live runs stop]", {
+    job_id: jobId,
+    ok: r.ok,
+    stopped_stages: r.stopped_stages,
+    user_id: session.userId,
+  });
+  revalidatePath("/admin/reddit-sources/live");
+  revalidatePath("/admin/reddit-sources");
+  return { ok: r.ok, error: r.error, stoppedStages: r.stopped_stages };
+}
+
+export interface StopAllLiveRunsActionResult {
+  ok: boolean;
+  /** Active runs considered this pass. */
+  scanned: number;
+  /** Runs that had at least one stage settled. */
+  stopped: number;
+}
+
+export async function stopAllActiveLiveRunsAction(): Promise<StopAllLiveRunsActionResult> {
+  const session = await requireCapability("content.manage");
+  // Recompute the active set server-side off the same snapshot the live
+  // page reads, so "stop all" can't be widened by a stale client payload.
+  const { listActiveJobsWithEvents } = await import("@/lib/story-jobs-live");
+  const { isJobActive } = await import("@/lib/story-jobs-live-shared");
+  const { stopLiveRun } = await import("@/lib/story-jobs");
+  const active = (await listActiveJobsWithEvents()).filter((j) => isJobActive(j));
+  let stopped = 0;
+  // Sequential: this is a rare, deliberate action over at most
+  // MAX_ACTIVE_JOBS rows, and serial writes keep the per-stage logging
+  // and any future per-row failure easy to reason about.
+  for (const job of active) {
+    const r = await stopLiveRun(job.job_id);
+    if (r.ok && r.stopped_stages.length > 0) stopped += 1;
+  }
+  console.info("[live runs stop-all]", {
+    scanned: active.length,
+    stopped,
+    user_id: session.userId,
+  });
+  revalidatePath("/admin/reddit-sources/live");
+  revalidatePath("/admin/reddit-sources");
+  return { ok: true, scanned: active.length, stopped };
+}
+
+// 2026-06-28 sidebar live-runs badge. Polled at a lower cadence (~15s)
+// across every admin page so the count is visible without staying on
+// the live page. Returns a single integer; never a row payload.
+// Plan: _plans/2026-06-28-reddit-sources-live-runs-page.md.
+export async function countActiveStoryJobsAction(): Promise<number> {
+  await requireCapability("content.manage");
+  const { countPendingStoryJobs } = await import("@/lib/story-jobs");
+  const count = await countPendingStoryJobs();
+  console.info("[sidebar live badge action] count", { count });
+  return count;
+}
+
+// 2026-06-29 sidebar submissions badge. Same shape as the live-runs badge: a
+// single integer, polled across admin pages so the count of submissions awaiting
+// review is glanceable. Plan: _plans/2026-06-29-user-submitted-stories.md.
+export async function countSubmissionQueueAction(): Promise<number> {
+  await requireCapability("content.manage");
+  const { countSubmissionQueue } = await import("@/lib/submissions");
+  const count = await countSubmissionQueue();
+  console.info("[sidebar submissions badge action] count", { count });
+  return count;
+}
+
+// --- Bulk content actions (2026-06-19) --------------------------------------
+// Plan: _plans/2026-06-19-content-bulk-actions.md.
+//
+// The /admin/content list is a client island that lets the operator tick
+// rows and run a bulk action (publish, unpublish, set-status, set-category,
+// delete). These actions are the server-side entry points. Both stories and
+// articles flow through one of two actions:
+//
+//   bulkUpdateContentAction(items, op)
+//     - status change (any STATUSES value), works on both kinds
+//     - category change (Story CATEGORIES), stories only — article items in
+//       the same batch are recorded as failures with reason "kind-mismatch"
+//
+//   bulkDeleteContentAction(items)
+//     - hard delete. Stories: deleteStory + deleteStoryMedia (the GCS
+//       cleanup is best-effort and never blocks the row delete). Articles:
+//       deleteArticle (cascades to revisions per the repo function).
+//
+// Both actions:
+//   - require admin via requireCapability("content.manage") at entry,
+//   - re-read each row from the database before mutating to defend against
+//     a client that lies about the `kind` of an id,
+//   - catch and record per-item errors so a batch keeps going past one
+//     bad row,
+//   - return a BulkActionResult the client uses to render success counts,
+//     failure lists, and the inline undo banner (status / category undo
+//     uses the `prev` map; delete is not undoable).
+//
+// Security note: input validation runs at the boundary (status / category
+// against the closed enums) BEFORE any DB call, so a forged client payload
+// can't land an arbitrary string in a column. Hard cap of MAX_BULK_ITEMS
+// protects against accidental "select all 200" runaway operations.
+
+const MAX_BULK_ITEMS = 200;
+
+const STORY_CATEGORIES = new Set([
+  "Drama",
+  "Entitled",
+  "Humor",
+  "Wholesome",
+  "Dating",
+  "Roommate",
+]);
+
+const STORY_STATUSES = new Set<StoryStatus>([
+  "draft",
+  "review",
+  "scripted",
+  "rendering",
+  "ready",
+  "published",
+  "archived",
+]);
+
+const ARTICLE_STATUSES_SET = new Set<ArticleStatus>([
+  "draft",
+  "review",
+  "published",
+  "archived",
+]);
+
+export type BulkContentKind = "story" | "article";
+
+export interface BulkContentItem {
+  kind: BulkContentKind;
+  id: string;
+}
+
+export type BulkUpdateOp =
+  | { type: "status"; status: string }
+  | { type: "category"; category: string };
+
+export interface BulkActionFailure {
+  kind: BulkContentKind;
+  id: string;
+  reason: string;
+}
+
+export interface BulkActionResult {
+  ok: BulkContentItem[];
+  failed: BulkActionFailure[];
+  // Previous values, keyed by `${kind}:${id}`. For status ops the value is
+  // the old status; for category ops the value is the old category (stories
+  // only). The client uses this to drive the inline undo banner — it calls
+  // bulkUpdateContentAction again with the previous values to reverse.
+  prev: Record<string, string | null>;
+}
+
+function isBulkContentKind(v: unknown): v is BulkContentKind {
+  return v === "story" || v === "article";
+}
+
+function validateItems(items: unknown): BulkContentItem[] {
+  if (!Array.isArray(items)) {
+    throw new Error("bulk-action: items is not an array");
+  }
+  if (items.length === 0) {
+    throw new Error("bulk-action: items is empty");
+  }
+  if (items.length > MAX_BULK_ITEMS) {
+    throw new Error(`bulk-action: exceeds ${MAX_BULK_ITEMS} items`);
+  }
+  const out: BulkContentItem[] = [];
+  for (const raw of items) {
+    if (!raw || typeof raw !== "object") {
+      throw new Error("bulk-action: item is not an object");
+    }
+    const kind = (raw as { kind?: unknown }).kind;
+    const id = (raw as { id?: unknown }).id;
+    if (!isBulkContentKind(kind)) {
+      throw new Error("bulk-action: invalid kind");
+    }
+    if (typeof id !== "string" || !id) {
+      throw new Error("bulk-action: invalid id");
+    }
+    out.push({ kind, id });
+  }
+  return out;
+}
+
+export async function bulkUpdateContentAction(
+  itemsInput: BulkContentItem[],
+  op: BulkUpdateOp,
+): Promise<BulkActionResult> {
+  await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+  if (!op || typeof op !== "object" || typeof op.type !== "string") {
+    throw new Error("bulk-action: invalid op");
+  }
+  if (op.type === "status") {
+    // Closed-enum check: status string must be in at least one of the two
+    // kind-specific sets. Per-item validation below narrows further so a
+    // story-only status like "scripted" can't be applied to an article row.
+    if (
+      !STORY_STATUSES.has(op.status as StoryStatus) &&
+      !ARTICLE_STATUSES_SET.has(op.status as ArticleStatus)
+    ) {
+      throw new Error("bulk-action: invalid status");
+    }
+  } else if (op.type === "category") {
+    if (!STORY_CATEGORIES.has(op.category)) {
+      throw new Error("bulk-action: invalid category");
+    }
+  } else {
+    throw new Error("bulk-action: unknown op type");
+  }
+
+  console.info("[content bulk action] start", {
+    type: op.type,
+    count: items.length,
+  });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+  const prev: Record<string, string | null> = {};
+
+  for (const item of items) {
+    try {
+      if (item.kind === "story") {
+        const story = await getStoryRow(item.id);
+        if (!story) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        if (op.type === "status") {
+          if (!STORY_STATUSES.has(op.status as StoryStatus)) {
+            failed.push({ ...item, reason: "invalid-status-for-story" });
+            continue;
+          }
+          // 2026-06-25 (PR follow-up): apply the unified asset gate
+          // before flipping a video story to published. Same gate the
+          // "Complete & publish" action and the manual review-publish
+          // use, so bulk Publish can no longer ship a story missing a
+          // short / thumbnails / poll. The Complete & publish action
+          // is the right tool for "publish AND complete" — bulk
+          // Publish is "publish what's ready now."
+          if (op.status === "published" && story.status !== "published") {
+            const { evaluateAssetCompleteness } = await import(
+              "@/lib/asset-completeness"
+            );
+            const completeness = await evaluateAssetCompleteness(item.id);
+            if (!completeness.ready) {
+              failed.push({
+                ...item,
+                reason: `asset-incomplete: ${completeness.missing.join(",")}`,
+              });
+              continue;
+            }
+          }
+          const prevStatus = story.status;
+          await setStatus(item.id, op.status as StoryStatus);
+          // Mirror the side-effect from changeStatus(): a story that
+          // transitions to published gets an auto-drafted poll if it has
+          // enough body text. Failures are swallowed so a poll-draft
+          // problem can't make the batch publish look broken.
+          if (op.status === "published" && prevStatus !== "published") {
+            const body = (story.body ?? "").trim();
+            if (body.length >= 50) {
+              try {
+                const { autoDraftPollForSubject } = await import(
+                  "@/lib/poll-autodraft"
+                );
+                await autoDraftPollForSubject({
+                  kind: "story",
+                  storyId: item.id,
+                  title: story.title,
+                  body,
+                  category: story.category,
+                });
+              } catch (err) {
+                console.warn("[content bulk action] poll-autodraft failed", {
+                  id: item.id,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+          }
+          prev[`${item.kind}:${item.id}`] = prevStatus;
+        } else {
+          // category — story only
+          const prevCategory = story.category;
+          await setStoryCategory(item.id, op.category);
+          prev[`${item.kind}:${item.id}`] = prevCategory;
+        }
+      } else {
+        // article
+        const article = await getArticle(item.id);
+        if (!article) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        if (op.type === "category") {
+          // Category bulk action is stories-only by design: articles don't
+          // carry a writable category column, their `type` is the badge and
+          // type is set-at-creation per repo.ts:651-656.
+          failed.push({ ...item, reason: "kind-mismatch-category" });
+          continue;
+        }
+        if (!ARTICLE_STATUSES_SET.has(op.status as ArticleStatus)) {
+          failed.push({ ...item, reason: "invalid-status-for-article" });
+          continue;
+        }
+        // Mirror the publish guard from setArticleStatusAction: every
+        // image must carry alt text before the article is allowed to go
+        // public. Failing rows are recorded with a precise reason so the
+        // modal can show "3 images missing alt text" rather than a vague
+        // "publish failed".
+        if (op.status === "published") {
+          let doc: unknown = null;
+          try {
+            doc = article.document ? JSON.parse(article.document) : null;
+          } catch {
+            doc = null;
+          }
+          const missing =
+            countImagesMissingAlt(doc) + countGalleryImagesMissingAlt(doc);
+          if (missing > 0) {
+            failed.push({ ...item, reason: `alt-missing-${missing}` });
+            continue;
+          }
+        }
+        const prevStatus = article.status;
+        await setArticleStatus(item.id, op.status as ArticleStatus);
+        prev[`${item.kind}:${item.id}`] = prevStatus;
+      }
+      ok.push(item);
+      console.info("[content bulk item]", {
+        id: item.id,
+        kind: item.kind,
+        ok: true,
+        op: op.type,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content bulk action] failed", {
+        id: item.id,
+        kind: item.kind,
+        error: reason,
+      });
+    }
+  }
+
+  // Revalidate the list page once, and any per-item editor page that might
+  // be open in another tab so it doesn't show stale state after the action.
+  revalidatePath("/admin/content");
+  for (const item of ok) {
+    if (item.kind === "story") {
+      revalidatePath(`/admin/stories/${item.id}`);
+    } else {
+      revalidatePath(`/admin/articles/${item.id}`);
+    }
+  }
+
+  console.info("[content bulk action] done", {
+    type: op.type,
+    ok: ok.length,
+    failed: failed.length,
+  });
+  return { ok, failed, prev };
+}
+
+export async function bulkDeleteContentAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkActionResult> {
+  await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  console.info("[content bulk action] start", {
+    type: "delete",
+    count: items.length,
+  });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+
+  for (const item of items) {
+    try {
+      if (item.kind === "story") {
+        const removed = await deleteStory(item.id);
+        if (!removed) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        // GCS cleanup is best-effort: a transient bucket error must not
+        // leave the DB row half-deleted. The row is already gone at this
+        // point; we log media failures but don't push to `failed` because
+        // the user-visible outcome (story gone from the inbox) succeeded.
+        try {
+          const { deleteStoryMedia } = await import("@/lib/gcs");
+          const media = await deleteStoryMedia(
+            removed.audio_url,
+            removed.video_url,
+          );
+          console.info("[content bulk item]", {
+            id: item.id,
+            kind: item.kind,
+            ok: true,
+            op: "delete",
+            mediaAttempted: media.attempted,
+            mediaSkipped: media.skipped,
+          });
+        } catch (mediaErr) {
+          console.warn("[content bulk action] media cleanup failed", {
+            id: item.id,
+            error:
+              mediaErr instanceof Error ? mediaErr.message : String(mediaErr),
+          });
+        }
+      } else {
+        const article = await getArticle(item.id);
+        if (!article) {
+          failed.push({ ...item, reason: "not-found" });
+          continue;
+        }
+        await deleteArticle(item.id);
+        console.info("[content bulk item]", {
+          id: item.id,
+          kind: item.kind,
+          ok: true,
+          op: "delete",
+        });
+      }
+      ok.push(item);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content bulk action] failed", {
+        id: item.id,
+        kind: item.kind,
+        op: "delete",
+        error: reason,
+      });
+    }
+  }
+
+  revalidatePath("/admin/content");
+  revalidatePath("/admin/stories");
+  revalidatePath("/admin/articles");
+
+  console.info("[content bulk action] done", {
+    type: "delete",
+    ok: ok.length,
+    failed: failed.length,
+  });
+  return { ok, failed, prev: {} };
+}
+
+// --- Bulk LLM reclassify (2026-06-21) ---------------------------------------
+// Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+//
+// Thin auth + revalidate wrapper around `reclassifyDramaAndNullStories`.
+// The actual SQL + classifier loop lives in `lib/reclassify-stories.ts`
+// so it stays unit-testable without the "use server" gate.
+
+export type {
+  ReclassifyChange,
+  ReclassifyFailure,
+  ReclassifyResult,
+} from "@/lib/reclassify-stories";
+
+export async function bulkReclassifyStoriesAction() {
+  await requireCapability("content.manage");
+  const { reclassifyDramaAndNullStories } = await import(
+    "@/lib/reclassify-stories"
+  );
+  const result = await reclassifyDramaAndNullStories({ limit: MAX_BULK_ITEMS });
+  // Refresh the admin list and the public homepage. The live catalog
+  // reads category from the DB on every render, so the public site picks
+  // up the new tags on the next request.
+  revalidatePath("/admin/content");
+  revalidatePath("/");
+  return result;
+}
+
+// --- Bulk regenerate (2026-06-24) -------------------------------------------
+// Inbox-level fan-out of the per-story regen buttons that already live on the
+// story editor. Lets the operator tick N rows and re-run hero / scenes /
+// voiceover / the entire pipeline in one gesture.
+//
+// Each target reuses the same primitive the single-story button calls, so the
+// daily budget gate, the queue rows, and the panel polling all "just work":
+//   hero     -> enqueueImageRegen("hero")               via canEnqueueImageRegen
+//   scenes   -> enqueueScenesBulk()                     per-scene rows
+//   voice    -> enqueueVoiceRender(body, provider, id)  ON-CONFLICT skip
+//   pipeline -> bulkEnqueueStoryJobs([reddit_id])       reddit_source gate
+//
+// Articles in the selection are not story-pipeline citizens; they're rejected
+// with reason "not-a-story" so the per-row failure list stays specific. The
+// loop is sequential so the per-story budget gate sees the running total —
+// parallel would race on the cap (same reasoning as RebuildAllButton).
+
+export type BulkRegenTarget =
+  | "hero"
+  | "scenes"
+  | "voice"
+  | "pipeline"
+  | "short";
+
+const BULK_REGEN_TARGETS: ReadonlySet<BulkRegenTarget> = new Set([
+  "hero",
+  "scenes",
+  "voice",
+  "pipeline",
+  "short",
+]);
+
+export interface BulkRegenResult {
+  target: BulkRegenTarget;
+  ok: BulkContentItem[];
+  failed: BulkActionFailure[];
+}
+
+export async function bulkRegenerateContentAction(
+  itemsInput: BulkContentItem[],
+  target: BulkRegenTarget,
+): Promise<BulkRegenResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+  if (!BULK_REGEN_TARGETS.has(target)) {
+    throw new Error("bulk-regen: invalid target");
+  }
+
+  console.info("[content bulk regen] start", {
+    target,
+    count: items.length,
+  });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+
+  // Lazy imports keep the action surface light when no regen is in flight.
+  const { enqueueImageRegen, enqueueScenesBulk, canEnqueueImageRegen } =
+    await import("@/lib/image-render-queue");
+  const { enqueueVoiceRender } = await import("@/lib/voice-render-queue");
+
+  for (const item of items) {
+    if (item.kind === "article") {
+      failed.push({ ...item, reason: "not-a-story" });
+      continue;
+    }
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        failed.push({ ...item, reason: "not-found" });
+        continue;
+      }
+
+      if (target === "hero") {
+        const pre = await canEnqueueImageRegen("hero");
+        if (!pre.ok) {
+          failed.push({ ...item, reason: "daily-budget-exceeded" });
+          continue;
+        }
+        await enqueueImageRegen({
+          ownerKind: "story",
+          ownerId: item.id,
+          asset: "hero",
+          promptHash: null,
+          requestedBy: session.userId,
+        });
+        revalidateOwnerPanels("story", item.id);
+      } else if (target === "scenes") {
+        const bulk = await enqueueScenesBulk({
+          ownerKind: "story",
+          ownerId: item.id,
+          requestedBy: session.userId,
+          storyBody: story.body,
+          storyDuration: story.duration,
+        });
+        if (!bulk.ok) {
+          failed.push({
+            ...item,
+            reason: bulk.error ?? "scenes-enqueue-failed",
+          });
+          continue;
+        }
+        revalidateOwnerPanels("story", item.id);
+      } else if (target === "voice") {
+        const body = (story.body ?? "").trim();
+        if (!body) {
+          failed.push({ ...item, reason: "empty-body" });
+          continue;
+        }
+        const r = await enqueueVoiceRender({
+          storyId: item.id,
+          body,
+          voiceProvider: story.voice_provider,
+          voiceId: story.voice_id,
+          requestedBy: session.userId,
+        });
+        if (!r.ok) {
+          // "race-loss" = already in-flight for the same voice/body. Counts as
+          // a no-op success from the operator's perspective (something IS in
+          // flight) — surface it as a soft skip rather than a hard failure so
+          // bulk re-ticks don't flood the failure list.
+          failed.push({ ...item, reason: r.error });
+          continue;
+        }
+        revalidatePath(`/admin/stories/${item.id}`);
+        revalidatePath(`/admin/videos/${item.id}`);
+      } else if (target === "pipeline") {
+        // pipeline — needs reddit_id to enqueue a story_jobs row. Stories
+        // imported pre-pipeline (manual seeds, legacy migrations) may not
+        // have one; we surface that explicitly instead of failing silently.
+        const redditId = story.reddit_id;
+        if (!redditId) {
+          failed.push({ ...item, reason: "no-reddit-source" });
+          continue;
+        }
+        const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+        const r = await bulkEnqueueStoryJobs([redditId], {
+          with_media: true,
+          requested_by: session.email,
+        });
+        if (r.enqueued === 0) {
+          // bulkEnqueueStoryJobs has its own gates: source row in the wrong
+          // status (already used/skipped), or an active job already running.
+          // Map the most likely cause to a single short reason — the per-row
+          // failure list shows the count so the operator can re-check.
+          const reason =
+            r.skipped_active > 0
+              ? "pipeline-already-running"
+              : r.skipped_status > 0
+                ? "reddit-source-locked"
+                : "not-enqueued";
+          failed.push({ ...item, reason });
+          continue;
+        }
+        revalidatePath("/admin/reddit-sources");
+      } else {
+        // short — re-render the existing short with the current narration
+        // prompt (clarity bar + POV + hook-charge rules, locked 2026-06-28).
+        // See _plans/2026-06-28-bulk-regen-shorts.md. Goes through the same
+        // primitive the per-story Restart button uses, with `force: true` so
+        // props are cleared and the LLM is called again — that's the only
+        // way the new prompt rules reach the script.
+        if (!(story.body ?? "").trim()) {
+          failed.push({ ...item, reason: "empty-body" });
+          continue;
+        }
+        const { enqueueShortRender } = await import(
+          "@/lib/short-render-queue"
+        );
+        try {
+          await enqueueShortRender(
+            item.id,
+            null,
+            null,
+            session.userId,
+            { force: true },
+          );
+        } catch (err) {
+          // enqueueShortRender only throws on DB / invariant failures; race
+          // with an in-flight render is handled inside and surfaces as an
+          // idempotent_hit event (the row stays as-is, no double-charge).
+          const reason = err instanceof Error ? err.message : String(err);
+          failed.push({ ...item, reason });
+          continue;
+        }
+        revalidatePath(`/admin/videos/${item.id}`);
+      }
+
+      ok.push(item);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content bulk regen] failed", {
+        id: item.id,
+        kind: item.kind,
+        target,
+        error: reason,
+      });
+    }
+  }
+
+  // Inbox refresh so updated_at-driven re-sort lands on the operator's next
+  // paint. The per-target revalidates above cover the editor surfaces; this
+  // one covers the list they just came from.
+  revalidatePath("/admin/content");
+
+  console.info("[content bulk regen] done", {
+    target,
+    ok: ok.length,
+    failed: failed.length,
+  });
+  return { target, ok, failed };
+}
+
+// ─── Bulk publish to socials ────────────────────────────────────────────────
+// Plan: _plans/2026-06-24-bulk-publish-from-content.md.
+//
+// Push one or more selected video stories to one or more social
+// platforms (Facebook, Instagram, YouTube, TikTok) in a single click.
+// Loop is sequential per (story, platform) so a single rate-limit
+// hit on one platform doesn't stop the others; each call goes through
+// the same publisher functions the per-short editor uses, with
+// trigger='manual' so the auto-publish toggle setting doesn't gate.
+//
+// Returns aggregated counts split by terminal state. The client
+// surfaces a result banner with platform-level counts + first few
+// failure reasons.
+
+export interface BulkPublishItem {
+  kind: BulkContentKind;
+  id: string;
+  platform: SocialPlatform;
+  /** Set when the publisher returned `posted` with a platform-side id. */
+  externalId?: string | null;
+  /** Set when the publisher returned `failed` or `skipped`. */
+  reason?: string;
+}
+
+export interface BulkPublishResult {
+  posted: BulkPublishItem[];
+  /** TikTok inbox mode + IG async path can end at `pending` (the row
+   *  is created, the platform's async pipeline is still processing).
+   *  The retry cron drains these within ~5 minutes. */
+  pending: BulkPublishItem[];
+  failed: BulkPublishItem[];
+  skipped: BulkPublishItem[];
+}
+
+const SOCIAL_PLATFORMS_LIST = [
+  "facebook",
+  "instagram",
+  "youtube",
+  "tiktok",
+] as const;
+
+function isSocialPlatform(v: unknown): v is SocialPlatform {
+  return (
+    v === "facebook" || v === "instagram" || v === "youtube" || v === "tiktok"
+  );
+}
+
+function validatePlatforms(input: unknown): SocialPlatform[] {
+  if (!Array.isArray(input) || input.length === 0) {
+    throw new Error("bulk-publish: platforms is empty");
+  }
+  const out: SocialPlatform[] = [];
+  const seen = new Set<string>();
+  for (const raw of input) {
+    if (!isSocialPlatform(raw)) {
+      throw new Error(`bulk-publish: invalid platform "${String(raw)}"`);
+    }
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
+  }
+  return out;
+}
+
+/** Resolve the article URL for the publisher's metadata context. Same
+ *  shape as the per-publisher *ForRender helpers — pulled inline so
+ *  this action doesn't depend on the render route's private helpers. */
+async function bulkResolveArticleUrl(storyId: string): Promise<string> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  return article
+    ? `${origin}/articles/${article.language}/${article.slug}`
+    : origin;
+}
+
+export async function bulkPublishToSocialsAction(
+  itemsInput: BulkContentItem[],
+  platformsInput: SocialPlatform[],
+): Promise<BulkPublishResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+  const platforms = validatePlatforms(platformsInput);
+
+  const t0 = Date.now();
+  console.info("[content bulk-publish] start", {
+    user_id: session.userId,
+    count: items.length,
+    platforms,
+  });
+
+  const posted: BulkPublishItem[] = [];
+  const pending: BulkPublishItem[] = [];
+  const failed: BulkPublishItem[] = [];
+  const skipped: BulkPublishItem[] = [];
+
+  for (const item of items) {
+    // Articles are not publishable to social — skip cleanly with one
+    // skipped entry per platform so the operator sees what happened.
+    if (item.kind !== "story") {
+      for (const platform of platforms) {
+        skipped.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: "articles cannot publish to social",
+        });
+      }
+      continue;
+    }
+    const story = await getStoryRow(item.id);
+    if (!story) {
+      for (const platform of platforms) {
+        skipped.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: "story not found",
+        });
+      }
+      continue;
+    }
+    const render = await latestDoneShortRenderForStory(item.id);
+    if (!render || render.status !== "done" || !render.output_url) {
+      for (const platform of platforms) {
+        skipped.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: "no completed short render",
+        });
+      }
+      continue;
+    }
+    const articleUrl = await bulkResolveArticleUrl(item.id);
+
+    // Ensure per-platform SEO metadata exists BEFORE the publishers
+    // fire so they pick it up via their resolution chains instead of
+    // falling through to the template default. Idempotent: skips when
+    // metadata is fresh and the story hasn't been updated since.
+    // Best-effort: a generation failure is logged but doesn't block —
+    // publishers gracefully fall back to templates on missing metadata.
+    // This closes the gap where stories rendered BEFORE the SEO feature
+    // shipped never got LLM-generated captions on first publish.
+    try {
+      const seoResult = await ensureSeoMetadataForStory({
+        storyId: item.id,
+        articleUrl,
+      });
+       
+      console.info("[content bulk-publish seo ensure]", {
+        story_id: item.id,
+        status: seoResult.status,
+      });
+    } catch (err) {
+       
+      console.warn("[content bulk-publish seo ensure threw]", {
+        story_id: item.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const context = {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+      category: story.category ?? null,
+    };
+
+    for (const platform of platforms) {
+      try {
+        let result;
+        if (platform === "facebook") {
+          result = await publishShortToFacebook({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context: {
+              hook: context.hook,
+              title: context.title,
+              article_url: context.article_url,
+            },
+          });
+        } else if (platform === "instagram") {
+          result = await publishShortToInstagram({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context: {
+              hook: context.hook,
+              title: context.title,
+              article_url: context.article_url,
+            },
+          });
+        } else if (platform === "youtube") {
+          result = await publishShortToYouTube({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context,
+          });
+        } else {
+          // tiktok
+          result = await publishShortToTikTok({
+            storyId: item.id,
+            renderId: render.id,
+            videoUrl: render.output_url,
+            trigger: "manual",
+            context,
+          });
+        }
+
+        if (result.status === "posted") {
+          const externalId =
+            "external_post_id" in result.row
+              ? result.row.external_post_id
+              : "external_video_id" in result.row
+                ? (result.row as { external_video_id: string | null }).external_video_id
+                : null;
+          posted.push({
+            kind: item.kind,
+            id: item.id,
+            platform,
+            externalId,
+          });
+          // After a successful FB/IG Reel publish, also cross-post as
+          // a Story if the per-platform Story toggle is on. Fire-and-
+          // forget — the Story call must never block the bulk-publish
+          // response or surface a failure here (logs only). Plan:
+          // _plans/2026-06-25-instagram-facebook-stories-cross-publish.md.
+          if (platform === "facebook" || platform === "instagram") {
+            void crossPostStoryIfEnabled(
+              platform,
+              item.id,
+              render.id,
+              render.output_url,
+            );
+          }
+        } else if (result.status === "pending") {
+          pending.push({ kind: item.kind, id: item.id, platform });
+          // IG Reel pending = container created but still IN_PROGRESS;
+          // the retry cron will publish it. Still trigger Story now —
+          // it has its own independent container/upload flow.
+          if (platform === "instagram") {
+            void crossPostStoryIfEnabled(
+              platform,
+              item.id,
+              render.id,
+              render.output_url,
+            );
+          }
+        } else if (result.status === "failed") {
+          failed.push({
+            kind: item.kind,
+            id: item.id,
+            platform,
+            reason: result.row.error_message ?? "unknown publisher error",
+          });
+        } else {
+          // skipped
+          skipped.push({
+            kind: item.kind,
+            id: item.id,
+            platform,
+            reason: result.reason,
+          });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error("[content bulk-publish] threw", {
+          story_id: item.id,
+          platform,
+          message,
+        });
+        failed.push({
+          kind: item.kind,
+          id: item.id,
+          platform,
+          reason: message,
+        });
+      }
+    }
+  }
+
+  console.info("[content bulk-publish] done", {
+    user_id: session.userId,
+    posted: posted.length,
+    pending: pending.length,
+    failed: failed.length,
+    skipped: skipped.length,
+    latency_ms: Date.now() - t0,
+  });
+
+  revalidatePath("/admin/content");
+
+  return { posted, pending, failed, skipped };
+}
+
+/** Story toggle-gated cross-post helper used by the bulk publish path.
+ *  Called after a successful FB/IG Reel publish for an item. Errors
+ *  are logged + swallowed; the caller does not await, so the bulk
+ *  response surfaces immediately and the Story call completes in the
+ *  background. Toggle: per-platform
+ *  `publisher.{facebook,instagram}.auto_publish_story`. */
+async function crossPostStoryIfEnabled(
+  platform: "facebook" | "instagram",
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+): Promise<void> {
+  try {
+    const settingKey =
+      platform === "facebook"
+        ? FB_STORY_SETTING_AUTO_PUBLISH
+        : IG_STORY_SETTING_AUTO_PUBLISH;
+    const on = (await getSetting(settingKey)) === "1";
+    if (!on) {
+      console.info("[content bulk-publish story]", {
+        story_id: storyId,
+        render_id: renderId,
+        platform,
+        skipped: "story toggle off",
+      });
+      return;
+    }
+    const r =
+      platform === "facebook"
+        ? await publishShortToFacebookStory({
+            storyId,
+            renderId,
+            videoUrl,
+            trigger: "manual",
+          })
+        : await publishShortToInstagramStory({
+            storyId,
+            renderId,
+            videoUrl,
+            trigger: "manual",
+          });
+    console.info("[content bulk-publish story]", {
+      story_id: storyId,
+      render_id: renderId,
+      platform,
+      status: r.status,
+      external_post_id:
+        r.status === "posted" ? r.row.external_post_id : null,
+    });
+  } catch (e) {
+    console.warn("[content bulk-publish story error]", {
+      story_id: storyId,
+      render_id: renderId,
+      platform,
+      error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
+}
+
+// ─── Bulk complete-and-publish ──────────────────────────────────────────────
+// Plan: _plans/2026-06-25-bulk-complete-and-publish.md.
+//
+// One-click action: for every selected video story, enqueue every
+// missing asset, flag the story for auto-publish, and let the
+// /api/auto_complete_publish cron push it to all four socials the
+// moment it passes evaluateAssetCompleteness(). The action returns
+// immediately — it does NOT wait for renders.
+//
+// Enqueue strategy by missing-set:
+//   - body / short_render / voiceover / scene_images missing →
+//     kick the full pipeline (bulkEnqueueStoryJobs), which
+//     regenerates the script + voice + scenes + short atomically.
+//   - only hero or any thumbnail variant missing → enqueue hero
+//     regen, which produces all five variants in one
+//     hero_thumbnail_from_short job.
+//   - only poll missing → no enqueue. The poll-autodraft cron
+//     handles unattached video stories on its own cadence; the
+//     auto-publish flag waits.
+//   - already ready → flag only. The cron publishes on its next
+//     tick (within 2 minutes).
+
+export interface BulkCompleteAndPublishOutcome {
+  kind: BulkContentKind;
+  id: string;
+  /** What we did for this row, structured so the toast can summarize
+   *  without parsing strings. `enqueued` lists every regen target we
+   *  fired (empty when the story was already ready). */
+  state:
+    | "already_ready_flagged"
+    | "missing_assets_enqueued"
+    | "only_poll_missing_flagged"
+    | "skipped"
+    | "errored";
+  missing: string[];
+  enqueued: Array<"pipeline" | "hero" | "scenes" | "voice">;
+  /** Set when state === "skipped" or "errored". */
+  reason?: string;
+}
+
+export interface BulkCompleteAndPublishResult {
+  /** Stories now flagged auto_publish_when_ready=1 (across every
+   *  non-error state). The cron will pick them up. */
+  flaggedCount: number;
+  /** Stories that were rejected before flagging (article, missing
+   *  story row, no reddit source for pipeline kick, daily budget
+   *  exceeded, etc.) — surfaced individually in `outcomes`. */
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkCompleteAndPublishOutcome[];
+}
+
+const MISSING_BLOCKS_PIPELINE: ReadonlySet<string> = new Set([
+  "body",
+  "short_render",
+  "voiceover",
+  "scene_images",
+]);
+const MISSING_BLOCKS_HERO: ReadonlySet<string> = new Set([
+  "hero_image",
+  "hero_image_landscape",
+  "thumbnail_image",
+  "thumbnail_image_landscape",
+  "thumbnail_image_square",
+]);
+
+export async function bulkCompleteAndPublishAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkCompleteAndPublishResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  const t0 = Date.now();
+   
+  console.info("[bulk-complete-publish click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  // Lazy imports keep the action surface light when nothing is in flight,
+  // matching bulkRegenerateContentAction's pattern.
+  const { evaluateAssetCompleteness } = await import(
+    "@/lib/asset-completeness"
+  );
+  const { enqueueVoiceRender: _enqueueVoice } = await import(
+    "@/lib/voice-render-queue"
+  );
+  // _enqueueVoice is referenced via the closure below; the import is
+  // kept top-level here so the lazy-load round-trip happens once per
+  // action call. The pipeline path is the dominant case; voice-only
+  // re-enqueues are not currently emitted by this action.
+  void _enqueueVoice;
+  const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+
+  const outcomes: BulkCompleteAndPublishOutcome[] = [];
+  let flaggedCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        missing: [],
+        enqueued: [],
+        reason: "articles cannot complete-and-publish",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const completeness = await evaluateAssetCompleteness(item.id);
+
+       
+      console.info("[bulk-complete-publish gate]", {
+        story_id: item.id,
+        ready: completeness.ready,
+        missing: completeness.missing,
+      });
+
+      // Already-published is a no-op skip — never re-flag.
+      if (completeness.missing.includes("already_published")) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          missing: completeness.missing,
+          enqueued: [],
+          reason: "story is already published",
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      const enqueued: Array<"pipeline" | "hero" | "scenes" | "voice"> = [];
+
+      if (completeness.ready) {
+        // Already complete. Flag for the cron's next tick.
+        await flagStoryForAutoPublish(item.id);
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "already_ready_flagged",
+          missing: [],
+          enqueued: [],
+        });
+        flaggedCount += 1;
+        continue;
+      }
+
+      const missingSet = new Set(completeness.missing);
+      const needsPipeline = [...missingSet].some((m) =>
+        MISSING_BLOCKS_PIPELINE.has(m),
+      );
+      const needsHero =
+        !needsPipeline &&
+        [...missingSet].some((m) => MISSING_BLOCKS_HERO.has(m));
+
+      if (needsPipeline) {
+        const story = await getStoryRow(item.id);
+        if (!story) {
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "errored",
+            missing: completeness.missing,
+            enqueued: [],
+            reason: "story disappeared between gate and enqueue",
+          });
+          erroredCount += 1;
+          continue;
+        }
+        if (!story.reddit_id) {
+          // Same gap bulkRegenerateContentAction surfaces: a manual seed
+          // can't drive the full pipeline. Flag the story so the cron
+          // still publishes once the operator manually completes the
+          // missing assets — but report the gap so they know.
+          await flagStoryForAutoPublish(item.id);
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "missing_assets_enqueued",
+            missing: completeness.missing,
+            enqueued: [],
+            reason:
+              "no reddit source — pipeline restart skipped; flagged for manual completion",
+          });
+          flaggedCount += 1;
+          continue;
+        }
+        const r = await bulkEnqueueStoryJobs([story.reddit_id], {
+          with_media: true,
+          requested_by: session.email,
+        });
+        if (r.enqueued === 0) {
+          const reason =
+            r.skipped_active > 0
+              ? "pipeline-already-running"
+              : r.skipped_status > 0
+                ? "reddit-source-locked"
+                : "not-enqueued";
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "errored",
+            missing: completeness.missing,
+            enqueued: [],
+            reason,
+          });
+          erroredCount += 1;
+          continue;
+        }
+        enqueued.push("pipeline");
+         
+        console.info("[bulk-complete-publish enqueue]", {
+          story_id: item.id,
+          asset: "pipeline",
+        });
+      } else if (needsHero) {
+        const pre = await canEnqueueImageRegen("hero");
+        if (!pre.ok) {
+          outcomes.push({
+            kind: item.kind,
+            id: item.id,
+            state: "errored",
+            missing: completeness.missing,
+            enqueued: [],
+            reason: "daily-budget-exceeded",
+          });
+          erroredCount += 1;
+          continue;
+        }
+        await enqueueImageRegen({
+          ownerKind: "story",
+          ownerId: item.id,
+          asset: "hero",
+          promptHash: null,
+          requestedBy: session.userId,
+        });
+        enqueued.push("hero");
+         
+        console.info("[bulk-complete-publish enqueue]", {
+          story_id: item.id,
+          asset: "hero",
+        });
+      }
+      // Else: only poll (or nothing currently enqueueable) is missing.
+      // Flag and let the poll-autodraft cron land the poll.
+
+      await flagStoryForAutoPublish(item.id);
+       
+      console.info("[bulk-complete-publish flag-set]", {
+        story_id: item.id,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: enqueued.length > 0
+          ? "missing_assets_enqueued"
+          : "only_poll_missing_flagged",
+        missing: completeness.missing,
+        enqueued,
+      });
+      flaggedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+       
+      console.error("[bulk-complete-publish errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        missing: [],
+        enqueued: [],
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  // Refresh the inbox so flag-driven visual state (a future "flagged"
+  // chip on the row) updates on next paint.
+  revalidatePath("/admin/content");
+
+   
+  console.info("[bulk-complete-publish result]", {
+    user_id: session.userId,
+    flaggedCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return { flaggedCount, skippedCount, erroredCount, outcomes };
+}
+
+/** Set stories.auto_publish_when_ready=1 + reset the retry counter so a
+ *  story that previously hit the attempt cap (and was cleared) gets a
+ *  fresh window when the operator re-flags it. */
+async function flagStoryForAutoPublish(storyId: string): Promise<void> {
+  await run(
+    "UPDATE stories SET auto_publish_when_ready = 1, " +
+      "auto_publish_attempts = 0 WHERE id = ?",
+    [storyId],
+  );
+}
+
+// ─── Bulk refresh assets ─────────────────────────────────────────────────────
+// 2026-06-25 follow-up to #99 / #102 / #104. The Complete & publish
+// gate only checks asset PRESENCE — a story with old-but-present
+// short / hero / thumbnails passes the gate. So a story published
+// before the voice defaults locked OR before the hero-from-short
+// pipeline existed sits live with stale assets, and there's no
+// one-click way to fix it: "Restart entire pipeline" refuses on
+// reddit_source = 'used', and the per-asset regen actions don't
+// chain.
+//
+// This action kicks off a state-machine refresh that preserves
+// story_id / slug / URL / SEO / comments and just regenerates the
+// media chain:
+//
+//   voice -> short (Lane B) -> hero+thumbnails (finisher cron)
+//
+// The action enqueues voice + sets refresh_assets_state='voice_pending'.
+// The /api/refresh_assets cron watches flagged stories every 1 min
+// and advances each through the state machine when the upstream
+// stage's finished_at beats refresh_assets_started_at.
+
+export interface BulkRefreshAssetsOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state:
+    | "refresh_started"
+    | "already_refreshing"
+    | "skipped"
+    | "errored";
+  reason?: string;
+}
+
+export interface BulkRefreshAssetsResult {
+  startedCount: number;
+  alreadyRefreshingCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkRefreshAssetsOutcome[];
+}
+
+export async function bulkRefreshAssetsAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkRefreshAssetsResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  const t0 = Date.now();
+   
+  console.info("[bulk-refresh-assets click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  // Lazy imports keep the action surface light when nothing's in flight.
+  const { enqueueVoiceRender } = await import("@/lib/voice-render-queue");
+  const { latestDoneShortRenderForStory } = await import(
+    "@/lib/short-render-queue"
+  );
+
+  const outcomes: BulkRefreshAssetsOutcome[] = [];
+  let startedCount = 0;
+  let alreadyRefreshingCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "articles have no media chain to refresh",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "not-found",
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      // Already mid-refresh — don't double-fire the chain. The cron
+      // will keep advancing the existing flag through the state machine.
+      if (story.refresh_assets_state) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "already_refreshing",
+          reason: `state=${story.refresh_assets_state}`,
+        });
+        alreadyRefreshingCount += 1;
+        continue;
+      }
+
+      // Lane B re-render needs a baseline short to diff against.
+      // Without one, the right answer is the regular Restart entire
+      // pipeline path, not refresh assets.
+      const baseline = await latestDoneShortRenderForStory(item.id);
+      if (!baseline) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason: "no baseline short — use Restart entire pipeline instead",
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      const body = (story.body ?? "").trim();
+      if (!body) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "empty body — voice render cannot start",
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      // Enqueue voice using the story's pinned voice if any, falling
+      // back to the global default at synthesis time (voice.py picks
+      // it up). This means a story whose pinned voice is null
+      // automatically gets the CURRENT global default — exactly the
+      // refresh semantic we want when voice defaults change.
+      const voiceResult = await enqueueVoiceRender({
+        storyId: item.id,
+        body,
+        voiceProvider: story.voice_provider,
+        voiceId: story.voice_id,
+        requestedBy: session.userId,
+      });
+      if (!voiceResult.ok) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: `voice enqueue failed: ${voiceResult.error}`,
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      const now = new Date().toISOString();
+      await run(
+        "UPDATE stories SET refresh_assets_state = 'voice_pending', " +
+          "refresh_assets_started_at = ?, refresh_assets_attempts = 0 " +
+          "WHERE id = ?",
+        [now, item.id],
+      );
+       
+      console.info("[bulk-refresh-assets started]", {
+        story_id: item.id,
+        baseline_render_id: baseline.id,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "refresh_started",
+      });
+      startedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+       
+      console.error("[bulk-refresh-assets errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+   
+  console.info("[bulk-refresh-assets result]", {
+    user_id: session.userId,
+    startedCount,
+    alreadyRefreshingCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return {
+    startedCount,
+    alreadyRefreshingCount,
+    skippedCount,
+    erroredCount,
+    outcomes,
+  };
+}
+

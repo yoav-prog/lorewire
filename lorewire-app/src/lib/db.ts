@@ -145,6 +145,13 @@ async function ensureSchema(d: Driver): Promise<Driver> {
     // readiness — the slot stays empty and the render falls to body-only
     // until the admin sets an active segment by hand.
   }
+  try {
+    await cleanupStaleThinCategoryCurations(d);
+  } catch {
+    // Best-effort cleanup. Failure leaves the curation rows in place; the
+    // homepage still renders correctly because resolveRailIds augments
+    // curated picks with the fallback (2026-06-24 semantic change).
+  }
   return d;
 }
 
@@ -189,6 +196,75 @@ async function seedActiveSegmentAspect(d: Driver): Promise<void> {
       [slotKey, legacyId],
     );
   }
+}
+
+// 2026-06-24 one-shot: clear stale tiny curations on category rails +
+// new_row. Production homepage was showing 2 Dramas because an old
+// 2-pick `drama_row` curation was authoritative — resolveRailIds treated
+// curation as the full rail. The fallback chain has since been fixed
+// (curation now AUGMENTS the fallback instead of replacing it), but the
+// old tiny curated entries are leftover state that pin two arbitrary
+// stories at the front of every affected rail. This cleanup removes
+// them so the rail is purely auto-derived until the admin re-curates.
+//
+// Safety:
+//   - Settings flag guards against re-running: the cleanup fires once
+//     across all serverless cold starts.
+//   - Only deletes when count < 4 — a fatter curation is admin-intent
+//     and must not be touched.
+//   - Skips hero (single-pick), top10 (capacity-bound editorial), and
+//     continue (personalized) — only the surfaces the user complained
+//     about.
+//   - Logs every cleared surface per rule 14 so a deploy-time grep
+//     confirms what changed.
+async function cleanupStaleThinCategoryCurations(d: Driver): Promise<void> {
+  const DONE_KEY = "curation.cleanup_2026_06_24_stale_thin_picks_done";
+  const settingRows = await d.all(
+    "SELECT value FROM settings WHERE key = ?",
+    [DONE_KEY],
+  );
+  if (
+    settingRows.length > 0 &&
+    String((settingRows[0]?.value as string) ?? "") === "true"
+  ) {
+    return;
+  }
+
+  const surfaces = [
+    "entitled_row",
+    "humor_row",
+    "wholesome_row",
+    "dating_row",
+    "roommate_row",
+    "drama_row",
+    "new_row",
+  ];
+  const THIN_THRESHOLD = 4;
+  const cleared: Record<string, number> = {};
+  const kept: Record<string, number> = {};
+
+  for (const surface of surfaces) {
+    const countRows = await d.all(
+      "SELECT COUNT(*) as n FROM homepage_curation WHERE surface = ?",
+      [surface],
+    );
+    const n = Number(countRows[0]?.n ?? 0);
+    if (n === 0) continue;
+    if (n < THIN_THRESHOLD) {
+      await d.run("DELETE FROM homepage_curation WHERE surface = ?", [surface]);
+      cleared[surface] = n;
+    } else {
+      kept[surface] = n;
+    }
+  }
+
+  await d.run(
+    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    [DONE_KEY, "true"],
+  );
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[lorewire curation cleanup 2026-06-24]", { cleared, kept });
 }
 
 export function db(): Promise<Driver> {

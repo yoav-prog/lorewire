@@ -23,6 +23,12 @@ export interface Story {
   syn: string;
   body?: string;
   source_url?: string;
+  // Public canonical reader path slug — the story is reachable at
+  // /v/[slug] when present. Set by liveRowToStory for stories that
+  // came through the live DB (LiveCatalogStory carries this); absent
+  // on the seed STORIES catalog whose entries aren't reader-routable
+  // by slug. Consumers must gate `/v/${slug}` navigation on truthiness.
+  slug?: string;
   // Pipeline-generated media (3.1 + 3.2). All optional — UI components fall
   // back to their CSS treatments when these are unset.
   heroImage?: string;
@@ -85,6 +91,18 @@ export const tryById = (id: string): Story | null => {
   return STORIES.find((x) => x.id === id) ?? null;
 };
 
+// "Has the pipeline actually produced something for this story?" — true
+// when any real artefact has been generated (hero artwork, short render,
+// narration audio, or article body). The bare STORIES catalog ships with
+// 16 sample placeholders that only carry title / category / synopsis;
+// the CMS overlay at the bottom of this file fills the artefact fields
+// for stories the pipeline has finished. Browse and Search use this gate
+// so the public listing surfaces shows only stories with real content,
+// not the empty sample placeholders the design was built against.
+export function isPublishedStory(s: Story): boolean {
+  return Boolean(s.videoUrl || s.heroImage || s.audioUrl || s.body);
+}
+
 // CONTINUE / TOP10 / ENTITLED_ROW / NEW_ROW used to live here as
 // hardcoded ordered lists of story ids. Phase 5 of
 // _plans/2026-06-16-homepage-curation.md moved the source of truth onto
@@ -130,7 +148,10 @@ for (const p of PUBLISHED) {
       id: p.id,
       title: p.title || p.id,
       cat,
-      dur: p.dur || "2:00",
+      // Empty string when the export omitted duration — display sites gate
+      // the badge on truthiness so it stays hidden rather than falling back
+      // to the legacy long-form "2:00".
+      dur: p.dur || "",
       match: 90,
       year: p.year || 2026,
       glyph: GLYPH[cat],

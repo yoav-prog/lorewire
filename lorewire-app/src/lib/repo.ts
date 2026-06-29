@@ -16,6 +16,7 @@ export type StoryStatus =
 export interface StoryRow {
   id: string;
   reddit_id: string | null;
+  submission_id: string | null;
   slug: string | null;
   category: string | null;
   title: string | null;
@@ -80,20 +81,38 @@ export interface StoryRow {
   // auto-pick from the category's whitelist. Settings changes never overwrite
   // an existing row's pin; only the per-story picker writes here.
   hero_style_id: string | null;
+  // 2026-06-25 bulk complete-and-publish flag the
+  // /api/auto_complete_publish cron watches. 1 = enqueue social
+  // publishes the moment evaluateAssetCompleteness passes; 0 / NULL =
+  // not flagged. Plan:
+  // _plans/2026-06-25-bulk-complete-and-publish.md.
+  auto_publish_when_ready: number | null;
+  // Per-story retry counter the cron increments on every NOT-READY
+  // visit. Cleared back to 0 when the flag clears (on publish or on
+  // hitting the per-story max-attempts cap).
+  auto_publish_attempts: number | null;
+  // 2026-06-25 refresh-assets state machine. NULL = not refreshing.
+  // 'voice_pending' / 'short_pending' / 'hero_pending'. See schema.ts.
+  refresh_assets_state: string | null;
+  refresh_assets_started_at: string | null;
+  refresh_assets_attempts: number | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
 // that the list does not render — the full editor reads getStory() instead.
+// `reddit_id` is included so the Content inbox can batch-load the latest
+// story_jobs.status per row without a second per-row trip.
 const STORY_LIST_COLS =
-  "id, slug, category, title, status, cost_cents, created_at, updated_at";
+  "id, reddit_id, slug, category, title, status, cost_cents, created_at, updated_at, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts";
 
 export type StoryListRow = Pick<
   StoryRow,
   | "id"
+  | "reddit_id"
   | "slug"
   | "category"
   | "title"
@@ -101,6 +120,11 @@ export type StoryListRow = Pick<
   | "cost_cents"
   | "created_at"
   | "updated_at"
+  | "auto_publish_when_ready"
+  | "auto_publish_attempts"
+  | "refresh_assets_state"
+  | "refresh_assets_started_at"
+  | "refresh_assets_attempts"
 >;
 
 // Columns the admin editor is allowed to write directly.
@@ -147,8 +171,24 @@ export async function listStories(
 // List-view variant: slim columns and a real LIMIT so the dashboard does not
 // pull every body/teleprompter on every render. The full editor still uses
 // listStories / getStory when it needs the heavy fields.
+//
+// 2026-06-24 last-updated filter (Content inbox). `updatedSince` and
+// `updatedUntil` accept ISO-8601 timestamps and compare against the same
+// `COALESCE(updated_at, created_at)` the ORDER BY uses, so the bucket
+// chips ("Last 7 days") and the range picker stay consistent with the
+// sort order operators see.
 export async function listStoriesSlim(
-  opts: { status?: string; category?: string; limit?: number } = {},
+  opts: {
+    status?: string;
+    category?: string;
+    updatedSince?: string;
+    updatedUntil?: string;
+    /** 2026-06-25: narrow to stories currently flagged for the
+     *  auto-publish cron (true) or explicitly not flagged (false).
+     *  Undefined = no filter. */
+    flagged?: boolean;
+    limit?: number;
+  } = {},
 ): Promise<StoryListRow[]> {
   const where: string[] = [];
   const params: unknown[] = [];
@@ -160,6 +200,19 @@ export async function listStoriesSlim(
     where.push("category = ?");
     params.push(opts.category);
   }
+  if (opts.flagged === true) {
+    where.push("COALESCE(auto_publish_when_ready, 0) = 1");
+  } else if (opts.flagged === false) {
+    where.push("COALESCE(auto_publish_when_ready, 0) = 0");
+  }
+  if (opts.updatedSince) {
+    where.push("COALESCE(updated_at, created_at) >= ?");
+    params.push(opts.updatedSince);
+  }
+  if (opts.updatedUntil) {
+    where.push("COALESCE(updated_at, created_at) < ?");
+    params.push(opts.updatedUntil);
+  }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
   return all<StoryListRow>(
@@ -170,6 +223,48 @@ export async function listStoriesSlim(
 
 export async function getStory(id: string): Promise<StoryRow | null> {
   return one<StoryRow>(`SELECT ${COLS} FROM stories WHERE id = ?`, [id]);
+}
+
+// Minimal-column candidate row used by the global admin search bar's
+// in-process scorer (plan:
+// _plans/2026-06-19-global-admin-search.md). Pairs with the
+// reddit-source equivalent; both feed the same scorer in `@/lib/admin-search`.
+export interface StorySearchCandidate {
+  id: string;
+  category: string | null;
+  title: string | null;
+  summary: string | null;
+  body: string | null;
+  updated_at: string | null;
+}
+
+/** Fetch up to `limit` stories where every token lands in at least one
+ * of (title, summary, category, body). Each token is parameter-bound.
+ * Mirrors `listRedditSourcesForSearch` — same shape, same contract, so
+ * the scorer treats them identically. */
+export async function listStoriesForSearch(
+  tokens: string[],
+  limit = 200,
+): Promise<StorySearchCandidate[]> {
+  if (tokens.length === 0) return [];
+  const cappedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
+  const parts: string[] = [];
+  const params: unknown[] = [];
+  for (const t of tokens) {
+    parts.push(
+      "(LOWER(COALESCE(title, '')) LIKE ? OR LOWER(COALESCE(summary, '')) LIKE ? " +
+      "OR LOWER(COALESCE(category, '')) LIKE ? OR LOWER(COALESCE(body, '')) LIKE ?)",
+    );
+    const like = `%${t}%`;
+    params.push(like, like, like, like);
+  }
+  const where = parts.join(" AND ");
+  return all<StorySearchCandidate>(
+    `SELECT id, category, title, summary, body, updated_at ` +
+    `FROM stories WHERE ${where} ` +
+    `ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?`,
+    [...params, cappedLimit],
+  );
 }
 
 // 2026-06-11 video editor: typed read/write helpers for stories.video_config.
@@ -324,8 +419,105 @@ export async function updateStory(
   await run(`UPDATE stories SET ${sets.join(", ")} WHERE id = ?`, params);
 }
 
+export interface CreateStoryInput {
+  id: string;
+  slug: string;
+  category: string | null;
+  title: string;
+  summary: string;
+  body: string;
+  status: StoryStatus;
+  /** Set for a story promoted from a user submission (non-Reddit origin). */
+  submissionId: string | null;
+}
+
+// Insert a new story row. The Python pipeline owns the Reddit ingestion path and
+// its own upsert; this is the TS-side create used by user-submission promotion
+// (lib/submission-promote). Only the core authored fields are set — the media and
+// config columns stay NULL until the render pipeline fills them.
+export async function createStory(input: CreateStoryInput): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    `INSERT INTO stories
+       (id, submission_id, slug, category, title, summary, body, status,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.id,
+      input.submissionId,
+      input.slug,
+      input.category,
+      input.title,
+      input.summary,
+      input.body,
+      input.status,
+      now,
+      now,
+    ],
+  );
+}
+
+// Promotion to public-facing statuses ("ready" / "published") refuses
+// stories whose Reddit identity is a dry-run fixture. The render path
+// already suppresses the embed when reddit_id / source_url disagree
+// (see lib/reddit-thread.ts), but a fixture row that reaches
+// status='published' still surfaces on rails as an article with no real
+// Reddit thread — which contradicts "every story is from Reddit".
+// Throwing here means the admin's publish click reports the failure
+// instead of silently shipping a dummy row.
+const FIXTURE_PLACEHOLDER_IDS = new Set([
+  "envelope",
+  "example",
+  "test",
+  "demo",
+  "sample",
+  "placeholder",
+]);
+const FIXTURE_DRY_RUN_BODY_MARKER = "[DRY RUN ARTICLE]";
+
+async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
+  const row = await one<{
+    reddit_id: string | null;
+    submission_id: string | null;
+    source_url: string | null;
+    body: string | null;
+  }>(
+    "SELECT reddit_id, submission_id, source_url, body FROM stories WHERE id = ?",
+    [id],
+  );
+  if (!row) {
+    throw new Error(
+      `[stories repo] cannot publish missing story id=${id}`,
+    );
+  }
+  // User-submission origin: vetted by moderation + human approval, not a Reddit
+  // dry-run fixture. The guard below targets fixture Reddit rows and does not
+  // apply here. Plan: 2026-06-29-user-submitted-stories.md (Phase 3).
+  if (row.submission_id) return;
+  const redditId = row.reddit_id?.toLowerCase() ?? "";
+  if (!redditId || FIXTURE_PLACEHOLDER_IDS.has(redditId)) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: reddit_id is a fixture placeholder (${row.reddit_id ?? "null"})`,
+    );
+  }
+  const source = (row.source_url ?? "").toLowerCase();
+  if (source.includes("/comments/example/") || source.includes("/comments/test/")) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: source_url is a fixture placeholder (${row.source_url})`,
+    );
+  }
+  if (row.body && row.body.startsWith(FIXTURE_DRY_RUN_BODY_MARKER)) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: body is a dry-run fixture`,
+    );
+  }
+}
+
 export async function setStatus(id: string, status: StoryStatus): Promise<void> {
   const now = new Date().toISOString();
+  if (status === "ready" || status === "published") {
+    await assertStoryReadyForPublicStatus(id);
+  }
   if (status === "published") {
     await run(
       "UPDATE stories SET status = ?, published_at = ?, updated_at = ? WHERE id = ?",
@@ -350,6 +542,87 @@ export async function setStoryNoindex(
     [noindex ? 1 : 0, now, id],
   );
   console.info("[stories repo] noindex", { id, noindex });
+}
+
+// Hard delete a story and every row in the schema that is meaningless without
+// it. No FK constraints exist (see schema.ts) so the cleanup is explicit. The
+// behavior was chosen per _plans/2026-06-19-content-bulk-actions.md:
+//
+//   Owned rows -> DELETE (renders, render-events via parent-id chain, polls).
+//   User state -> DELETE (saves, likes, recently viewed, continue) so the
+//     public reader never resolves a "ghost" item it can't render.
+//   Loose links -> NULL (articles.story_id, reddit_source.story_id,
+//     story_jobs.story_id) so the parent rows keep working without the link.
+//   Curation slot -> DELETE the slot (an empty homepage tile is worse than
+//     no tile; admin can re-curate).
+//
+// Returns the row that was deleted (or null if it did not exist) so the
+// caller can fan rendered-media (audio_url, video_url) into GCS deletion.
+// Throws if the row exists but the cascade fails partway — the caller
+// should treat that as a batch-item failure.
+export async function deleteStory(id: string): Promise<StoryRow | null> {
+  const existing = await getStory(id);
+  if (!existing) return null;
+
+  // Render-event children first — they reference their parent render by id.
+  await run(
+    "DELETE FROM image_render_events WHERE render_id IN " +
+      "(SELECT id FROM image_renders WHERE owner_kind = 'story' AND owner_id = ?)",
+    [id],
+  );
+  await run(
+    "DELETE FROM video_render_events WHERE render_id IN " +
+      "(SELECT id FROM video_renders WHERE story_id = ?)",
+    [id],
+  );
+  await run(
+    "DELETE FROM short_render_events WHERE render_id IN " +
+      "(SELECT id FROM short_renders WHERE story_id = ?)",
+    [id],
+  );
+
+  // Owned-by-story queues and projections.
+  await run("DELETE FROM image_renders WHERE owner_kind = 'story' AND owner_id = ?", [id]);
+  await run("DELETE FROM video_renders WHERE story_id = ?", [id]);
+  await run("DELETE FROM short_renders WHERE story_id = ?", [id]);
+  await run("DELETE FROM voice_renders WHERE story_id = ?", [id]);
+  await run("DELETE FROM poll_votes WHERE story_id = ?", [id]);
+  await run("DELETE FROM polls WHERE story_id = ?", [id]);
+  await run("DELETE FROM poll_aggregates WHERE story_id = ?", [id]);
+
+  // Public-user state pointing at the story.
+  await run("DELETE FROM user_saves WHERE story_id = ?", [id]);
+  await run("DELETE FROM user_likes WHERE story_id = ?", [id]);
+  await run("DELETE FROM user_recently_viewed WHERE story_id = ?", [id]);
+  await run("DELETE FROM user_continue WHERE story_id = ?", [id]);
+
+  // Homepage slot pointing at the story is dropped (an empty slot misleads
+  // the reader; the editor can re-fill the position from /admin/homepage).
+  await run("DELETE FROM homepage_curation WHERE story_id = ?", [id]);
+
+  // Loose references — preserve the parent row, just unlink. articles.story_id
+  // is the hero/og borrow link; reddit_source.story_id is the "this Reddit
+  // post produced story X" trail; story_jobs.story_id is the job-history row.
+  await run("UPDATE articles SET story_id = NULL WHERE story_id = ?", [id]);
+  await run("UPDATE reddit_source SET story_id = NULL WHERE story_id = ?", [id]);
+  await run("UPDATE story_jobs SET story_id = NULL WHERE story_id = ?", [id]);
+
+  // Finally, the story row itself.
+  await run("DELETE FROM stories WHERE id = ?", [id]);
+  // eslint-disable-next-line no-console -- rule 14: observability from day one
+  console.info("[stories repo] delete", { id });
+  return existing;
+}
+
+// Thin wrapper around updateStory for callers that want a typed setter
+// instead of a Record<string, unknown>. Used by bulk-content actions so the
+// category-change path reads as `setStoryCategory(id, "Drama")` at the call
+// site. `category` is already in EDITABLE so this is purely a clarity win.
+export async function setStoryCategory(
+  id: string,
+  category: string,
+): Promise<void> {
+  await updateStory(id, { category });
 }
 
 // Phase 3 of _plans/2026-06-14-voiceover-picker.md. Set or clear the
@@ -567,6 +840,108 @@ export async function deleteSegment(id: string): Promise<void> {
   await run("DELETE FROM video_segments WHERE id = ?", [id]);
 }
 
+// --- voiceovers (named TTS presets) -----------------------------------------
+// Mirrors the `voiceovers` table in pipeline/store.py. The shorts pipeline
+// resolves a preset per category (the `voiceovers.category.<Cat>` setting) then
+// the global default (`voiceovers.default`); see pipeline/voiceovers.py.
+
+export interface VoiceoverRow {
+  id: string;
+  name: string;
+  provider: string;
+  voice_id: string;
+  style_prompt: string | null;
+  speaking_rate: number | null;
+  hook_pause: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+const VOICEOVER_COLS =
+  "id, name, provider, voice_id, style_prompt, speaking_rate, hook_pause, " +
+  "created_at, updated_at";
+
+export async function listVoiceovers(): Promise<VoiceoverRow[]> {
+  return all<VoiceoverRow>(
+    `SELECT ${VOICEOVER_COLS} FROM voiceovers ORDER BY name`,
+    [],
+  );
+}
+
+export async function getVoiceover(id: string): Promise<VoiceoverRow | null> {
+  if (!id) return null;
+  return one<VoiceoverRow>(
+    `SELECT ${VOICEOVER_COLS} FROM voiceovers WHERE id = ?`,
+    [id],
+  );
+}
+
+export async function upsertVoiceover(v: {
+  id: string;
+  name: string;
+  provider: string;
+  voice_id: string;
+  style_prompt?: string | null;
+  speaking_rate?: number | null;
+  hook_pause?: number;
+}): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    `INSERT INTO voiceovers (id, name, provider, voice_id, style_prompt, speaking_rate, hook_pause, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       name = excluded.name,
+       provider = excluded.provider,
+       voice_id = excluded.voice_id,
+       style_prompt = excluded.style_prompt,
+       speaking_rate = excluded.speaking_rate,
+       hook_pause = excluded.hook_pause,
+       updated_at = excluded.updated_at`,
+    [
+      v.id,
+      v.name,
+      v.provider,
+      v.voice_id,
+      v.style_prompt ?? null,
+      v.speaking_rate ?? null,
+      v.hook_pause ?? 1,
+      now,
+      now,
+    ],
+  );
+}
+
+export async function deleteVoiceover(id: string): Promise<void> {
+  await run("DELETE FROM voiceovers WHERE id = ?", [id]);
+}
+
+// Voiceover SELECTION lives in settings, mirroring the shorts.auto.category.*
+// pattern: `voiceovers.default` is the global pick; `voiceovers.category.<Cat>`
+// overrides it for a category ("" / missing = inherit the default).
+export async function getDefaultVoiceoverId(): Promise<string> {
+  return (await getSetting("voiceovers.default")) ?? "";
+}
+
+export async function setDefaultVoiceoverId(id: string): Promise<void> {
+  await setSetting("voiceovers.default", id);
+}
+
+export async function getCategoryVoiceoverIds(): Promise<Record<string, string>> {
+  const raw = await getSettingsByPrefix("voiceovers.category.");
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    out[k.replace("voiceovers.category.", "")] = v;
+  }
+  return out;
+}
+
+export async function setCategoryVoiceoverId(
+  category: string,
+  id: string,
+): Promise<void> {
+  await setSetting(`voiceovers.category.${category}`, id);
+}
+
 // Per-story override write. Allowed values for `pick`:
 //   "inherit" -> clear both the pinned id and the skip flag
 //   "skip"    -> set skip_<kind> = 1, clear pinned id
@@ -694,6 +1069,8 @@ export async function listArticlesSlim(
     status?: string;
     type?: string;
     language?: string;
+    updatedSince?: string;
+    updatedUntil?: string;
     limit?: number;
   } = {},
 ): Promise<ArticleListRow[]> {
@@ -710,6 +1087,14 @@ export async function listArticlesSlim(
   if (opts.language) {
     where.push("language = ?");
     params.push(opts.language);
+  }
+  if (opts.updatedSince) {
+    where.push("COALESCE(updated_at, created_at) >= ?");
+    params.push(opts.updatedSince);
+  }
+  if (opts.updatedUntil) {
+    where.push("COALESCE(updated_at, created_at) < ?");
+    params.push(opts.updatedUntil);
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const limit = opts.limit ? `LIMIT ${Math.trunc(opts.limit)}` : "";
@@ -964,11 +1349,19 @@ export async function appendRevision(
     `SELECT ${REVISION_COLS} FROM article_revisions WHERE article_id = ? ORDER BY created_at DESC LIMIT 1`,
     [input.article_id],
   );
+  const latestMs =
+    latest?.created_at != null ? new Date(latest.created_at).getTime() : null;
+  const sinceLatestMs = latestMs !== null ? now.getTime() - latestMs : null;
+  // Coalesce only into a recent, still-unnamed revision — and never one stamped
+  // in the "future" relative to now (sinceLatestMs >= 0). A future stamp comes
+  // from the monotonic insert bump below (or clock skew); merging into it would
+  // be wrong. The guard also makes window=0 always insert, never coalesce.
   if (
     latest &&
     !latest.is_named &&
-    latest.created_at &&
-    now.getTime() - new Date(latest.created_at).getTime() < window * 1000
+    sinceLatestMs !== null &&
+    sinceLatestMs >= 0 &&
+    sinceLatestMs < window * 1000
   ) {
     await run(
       "UPDATE article_revisions SET document = ?, payload = ?, title = ?, status = ?, author_id = ?, created_at = ? WHERE id = ?",
@@ -989,6 +1382,13 @@ export async function appendRevision(
     });
     return { revisionId: latest.id, coalesced: true };
   }
+  // Stamp created_at strictly after the latest revision so forced inserts (a
+  // restore fires two appends in one action) never tie — ordering and pruning
+  // are by created_at, and a tie made "newest" nondeterministic. Portable:
+  // there's no auto-increment column across SQLite + Postgres to break ties on.
+  let insertMs = now.getTime();
+  if (latestMs !== null && insertMs <= latestMs) insertMs = latestMs + 1;
+  const insertIso = new Date(insertMs).toISOString();
   await run(
     "INSERT INTO article_revisions (id, article_id, document, payload, title, status, is_named, author_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
@@ -1000,7 +1400,7 @@ export async function appendRevision(
       input.status,
       0,
       input.author_id,
-      nowIso,
+      insertIso,
     ],
   );
   console.info("[articles revisions] append", {
@@ -1108,6 +1508,30 @@ export const CONTENT_SUBKINDS: ContentSubKind[] = [
   ...ARTICLE_TYPES,
 ];
 
+/** Per-platform "is this story already live on platform X?" flags. A
+ *  story is "published_on" a platform when at least one row in that
+ *  platform's *_posts table has status='posted'. Articles always have
+ *  all-false flags (they're not publishable to social). Plan:
+ *  _plans/2026-06-24-bulk-publish-from-content.md. */
+export interface PublishedOn {
+  facebook: boolean;
+  instagram: boolean;
+  youtube: boolean;
+  tiktok: boolean;
+}
+
+export const SOCIAL_PLATFORMS = ["facebook", "instagram", "youtube", "tiktok"] as const;
+export type SocialPlatform = (typeof SOCIAL_PLATFORMS)[number];
+
+/** Default all-false published_on for articles and for stories that
+ *  have never been published anywhere. */
+export const DEFAULT_PUBLISHED_ON: PublishedOn = {
+  facebook: false,
+  instagram: false,
+  youtube: false,
+  tiktok: false,
+};
+
 export interface ContentRow {
   kind: ContentKind;
   subKind: ContentSubKind;
@@ -1124,13 +1548,374 @@ export interface ContentRow {
   updated_at: string | null;
   created_at: string | null;
   published_at: string | null;
+  /** Per-platform live-status. Articles always all-false. */
+  published_on: PublishedOn;
+  /** Latest story_jobs.status for THIS story (newest by requested_at).
+   *  Stories with no pipeline run yet AND every article carry null —
+   *  the row UI surfaces null as no pill. */
+  job_status: JobStatus | null;
+  /** 2026-06-25 auto-publish cron flag state. `flagged` is the boolean
+   *  view of stories.auto_publish_when_ready (1 → true, anything else
+   *  → false). `flagged_attempts` is the per-story retry count.
+   *  Articles always read both as false / 0 (no flag column). */
+  flagged: boolean;
+  flagged_attempts: number;
+  /** 2026-06-25 most-prominent active render for this story (short,
+   *  images, voice, or pipeline). NULL when nothing is in flight.
+   *  Articles are always NULL. */
+  progress: ProgressSnapshot | null;
+  /** 2026-06-25 refresh-assets state-machine state. NULL = not
+   *  refreshing. 'voice_pending' / 'short_pending' / 'hero_pending'
+   *  per the cron at /api/refresh_assets. Articles always NULL. */
+  refresh_state: string | null;
 }
+
+/** 2026-06-24 Content inbox: latest story_jobs row status per story.
+ *  Articles have no pipeline so their job_status is always null. */
+export type JobStatus = "queued" | "processing" | "done" | "error";
+
+export const JOB_STATUSES: readonly JobStatus[] = [
+  "queued",
+  "processing",
+  "done",
+  "error",
+] as const;
 
 export interface ListContentOpts {
   subKind?: ContentSubKind;
   status?: string;
   language?: string; // narrows to articles
+  // Stories only — articles carry no category column. When set, the
+  // article half of the union is skipped entirely.
+  category?: string;
+  /** AND-filter: only rows that ARE published on every listed platform. */
+  publishedOn?: SocialPlatform[];
+  /** AND-filter: only rows that ARE NOT published on every listed platform. */
+  publishedNotOn?: SocialPlatform[];
+  /** Latest pipeline-job state. Articles are story-pipeline-less and fall
+   *  out of the result entirely when this is set. */
+  jobStatus?: JobStatus;
+  /** ISO-8601 lower bound on COALESCE(updated_at, created_at). */
+  updatedSince?: string;
+  /** ISO-8601 upper bound on COALESCE(updated_at, created_at) — exclusive,
+   *  so a "today" bucket lands as [start-of-today, start-of-tomorrow). */
+  updatedUntil?: string;
+  /** 2026-06-25: narrow to stories currently flagged for the
+   *  auto-publish cron. Articles never carry the flag so the article
+   *  half drops out the moment this is true. */
+  flagged?: boolean;
+  /** 2026-06-25 in-flight filter. "any" = any active render across
+   *  short / images / voice / pipeline; the specific kinds narrow
+   *  to one source table. Applied in-memory after the row +
+   *  progress join (same shape as publishedOn/jobStatus). */
+  activeKind?: ProgressKind | "any";
   limit?: number;
+}
+
+/** Aggregate "which platforms is each story live on?" across all four
+ *  publisher tables in a single batch. One small query per platform
+ *  (DISTINCT story_id WHERE status='posted'), then a Map<story_id,
+ *  PublishedOn>. Articles are not included — the caller fills them
+ *  in with DEFAULT_PUBLISHED_ON.
+ *
+ *  Empty input → empty map (no queries fired).
+ *
+ *  Plan: _plans/2026-06-24-bulk-publish-from-content.md. */
+export async function loadPublishedOnByStoryIds(
+  storyIds: readonly string[],
+): Promise<Map<string, PublishedOn>> {
+  const out = new Map<string, PublishedOn>();
+  if (storyIds.length === 0) return out;
+  for (const id of storyIds) {
+    out.set(id, { ...DEFAULT_PUBLISHED_ON });
+  }
+  // Build a single "?, ?, ?, …" placeholder string for the IN list.
+  // The same shape works in SQLite and Postgres.
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const params = [...storyIds];
+  const tables: { table: string; key: SocialPlatform }[] = [
+    { table: "facebook_posts", key: "facebook" },
+    { table: "instagram_posts", key: "instagram" },
+    { table: "youtube_posts", key: "youtube" },
+    { table: "tiktok_posts", key: "tiktok" },
+  ];
+  // Run all four in parallel. Each returns at most storyIds.length rows.
+  const results = await Promise.all(
+    tables.map(async ({ table }) =>
+      all<{ story_id: string }>(
+        `SELECT DISTINCT story_id FROM ${table}
+         WHERE story_id IN (${placeholders}) AND status = 'posted'`,
+        params,
+      ),
+    ),
+  );
+  for (let i = 0; i < tables.length; i++) {
+    const platform = tables[i].key;
+    for (const row of results[i]) {
+      const flags = out.get(row.story_id);
+      if (flags) flags[platform] = true;
+    }
+  }
+  return out;
+}
+
+/** 2026-06-25 Content inbox header card: aggregate count of stories
+ *  currently flagged for the /api/auto_complete_publish cron, plus
+ *  how many of them have already burned through half of the default
+ *  retry budget (a "struggling" subset the operator should triage
+ *  before the cap clears the flag). One small SELECT; fired
+ *  alongside the row list on /admin/content. Articles aren't
+ *  flag-bearing so the count is video-stories-only by construction. */
+export interface AutoPublishFlaggedSummary {
+  flagged: number;
+  struggling: number;
+}
+
+export async function getAutoPublishFlaggedSummary(): Promise<AutoPublishFlaggedSummary> {
+  const row = await one<{ flagged: number | string; struggling: number | string }>(
+    `SELECT
+       COUNT(*) AS flagged,
+       COALESCE(SUM(CASE WHEN COALESCE(auto_publish_attempts, 0) >= 6 THEN 1 ELSE 0 END), 0) AS struggling
+     FROM stories
+     WHERE COALESCE(auto_publish_when_ready, 0) = 1`,
+    [],
+  );
+  return {
+    flagged: Number(row?.flagged ?? 0),
+    struggling: Number(row?.struggling ?? 0),
+  };
+}
+
+// 2026-06-25 per-row "what's actively running for this story" snapshot.
+// Aggregates short_renders + image_renders + voice_renders + story_jobs
+// in 4 parallel SELECTs and picks the single most-prominent active
+// signal per story via the priority table below. The Content list
+// renders this as a per-row pill so the operator can see, at a
+// glance, which renders are in flight without drilling into each
+// story page. Same data the per-kind editor pages render piecemeal.
+
+export type ProgressKind = "short" | "images" | "voice" | "pipeline";
+export type ProgressStatus = "queued" | "rendering" | "processing";
+
+export interface ProgressSnapshot {
+  kind: ProgressKind;
+  status: ProgressStatus;
+  /** Free-text phase from short_renders.phase (e.g. "encoding",
+   *  "upload"). Other kinds don't carry a phase column today. */
+  phase: string | null;
+  /** 0..100 (whole percent). NULL when the underlying row hasn't
+   *  reported progress yet (rendering just started, or the worker
+   *  doesn't write progress for this kind). */
+  progressPct: number | null;
+  /** For kind='images' only: how many image_renders rows for this
+   *  story are currently queued + rendering combined. Lets the pill
+   *  read "3 images · rendering" instead of just "images · rendering". */
+  count: number | null;
+}
+
+/** Priority order for "which active signal wins when a story has
+ *  multiple in flight." Rendering beats queued; short beats images
+ *  beats voice beats pipeline so the most user-visible thing wins
+ *  the pill. Tie-broken by insertion order. */
+const PROGRESS_PRIORITY: ReadonlyArray<{
+  kind: ProgressKind;
+  status: ProgressStatus;
+  rank: number;
+}> = [
+  { kind: "short", status: "rendering", rank: 0 },
+  { kind: "short", status: "queued", rank: 1 },
+  { kind: "images", status: "rendering", rank: 2 },
+  { kind: "images", status: "queued", rank: 3 },
+  { kind: "voice", status: "rendering", rank: 4 },
+  { kind: "voice", status: "queued", rank: 5 },
+  { kind: "pipeline", status: "processing", rank: 6 },
+  { kind: "pipeline", status: "queued", rank: 7 },
+];
+
+function progressRank(kind: ProgressKind, status: ProgressStatus): number {
+  for (const p of PROGRESS_PRIORITY) {
+    if (p.kind === kind && p.status === status) return p.rank;
+  }
+  return 99;
+}
+
+export async function loadStoryProgressByIds(
+  storyIds: readonly string[],
+): Promise<Map<string, ProgressSnapshot>> {
+  const out = new Map<string, ProgressSnapshot>();
+  if (storyIds.length === 0) return out;
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const params = [...storyIds];
+
+  const [shorts, images, voices, jobs] = await Promise.all([
+    all<{
+      story_id: string;
+      status: string;
+      phase: string | null;
+      progress: number | null;
+    }>(
+      `SELECT story_id, status, phase, progress FROM short_renders
+       WHERE story_id IN (${placeholders})
+         AND status IN ('queued', 'rendering')`,
+      params,
+    ),
+    all<{ owner_id: string; status: string; progress: number | null }>(
+      `SELECT owner_id, status, progress FROM image_renders
+       WHERE owner_kind = 'story'
+         AND owner_id IN (${placeholders})
+         AND status IN ('queued', 'rendering')`,
+      params,
+    ),
+    all<{ story_id: string; status: string; progress: number | null }>(
+      `SELECT story_id, status, progress FROM voice_renders
+       WHERE story_id IN (${placeholders})
+         AND status IN ('queued', 'rendering')`,
+      params,
+    ),
+    all<{ story_id: string | null; status: string; progress: number | null }>(
+      `SELECT story_id, status, progress FROM story_jobs
+       WHERE story_id IN (${placeholders})
+         AND status IN ('queued', 'processing')`,
+      params,
+    ),
+  ]);
+
+  const apply = (storyId: string, snap: ProgressSnapshot): void => {
+    const r = progressRank(snap.kind, snap.status);
+    const existing = out.get(storyId);
+    if (!existing) {
+      out.set(storyId, snap);
+      return;
+    }
+    const existingRank = progressRank(existing.kind, existing.status);
+    if (r < existingRank) out.set(storyId, snap);
+  };
+
+  for (const row of shorts) {
+    const status: ProgressStatus =
+      row.status === "rendering" ? "rendering" : "queued";
+    // short_renders.progress is REAL (0..1) per the schema comment; the
+    // other three tables use INTEGER (0..100). Normalise here so the
+    // UI shows a consistent whole percent.
+    const pct =
+      row.progress != null && Number.isFinite(row.progress)
+        ? Math.round(row.progress * 100)
+        : null;
+    apply(row.story_id, {
+      kind: "short",
+      status,
+      phase: row.phase,
+      progressPct: pct,
+      count: null,
+    });
+  }
+
+  // Aggregate images per story so the pill reads "3 images" rather
+  // than the count of N separate jobs each with its own status.
+  const imagesByStory = new Map<
+    string,
+    { rendering: number; queued: number; topProgress: number }
+  >();
+  for (const row of images) {
+    const slot = imagesByStory.get(row.owner_id) ?? {
+      rendering: 0,
+      queued: 0,
+      topProgress: 0,
+    };
+    if (row.status === "rendering") slot.rendering += 1;
+    else slot.queued += 1;
+    if (
+      row.progress != null &&
+      Number.isFinite(row.progress) &&
+      row.progress > slot.topProgress
+    ) {
+      slot.topProgress = row.progress;
+    }
+    imagesByStory.set(row.owner_id, slot);
+  }
+  for (const [storyId, agg] of imagesByStory) {
+    const status: ProgressStatus = agg.rendering > 0 ? "rendering" : "queued";
+    apply(storyId, {
+      kind: "images",
+      status,
+      phase: null,
+      progressPct: status === "rendering" && agg.topProgress > 0
+        ? Math.round(agg.topProgress)
+        : null,
+      count: agg.rendering + agg.queued,
+    });
+  }
+
+  for (const row of voices) {
+    const status: ProgressStatus =
+      row.status === "rendering" ? "rendering" : "queued";
+    apply(row.story_id, {
+      kind: "voice",
+      status,
+      phase: null,
+      progressPct:
+        row.progress != null && Number.isFinite(row.progress)
+          ? Math.round(row.progress)
+          : null,
+      count: null,
+    });
+  }
+
+  for (const row of jobs) {
+    if (!row.story_id) continue;
+    const status: ProgressStatus =
+      row.status === "processing" ? "processing" : "queued";
+    apply(row.story_id, {
+      kind: "pipeline",
+      status,
+      phase: null,
+      progressPct:
+        row.progress != null && Number.isFinite(row.progress)
+          ? Math.round(row.progress)
+          : null,
+      count: null,
+    });
+  }
+
+  return out;
+}
+
+/** 2026-06-24 Content inbox: most-recent story_jobs.status per reddit_id.
+ *  Stories with no pipeline run land outside the map (caller treats as null).
+ *  One query, then a JS dedupe — most stories have 1-3 job rows, so fetching
+ *  all and keeping the newest is cheaper than a per-row correlated subquery
+ *  and works identically in SQLite + Postgres. */
+export async function loadLatestJobStatusByReddit(
+  redditIds: readonly string[],
+): Promise<Map<string, JobStatus>> {
+  const out = new Map<string, JobStatus>();
+  if (redditIds.length === 0) return out;
+  const placeholders = redditIds.map(() => "?").join(", ");
+  const rows = await all<{
+    reddit_id: string;
+    status: string;
+    requested_at: string;
+  }>(
+    `SELECT reddit_id, status, requested_at FROM story_jobs
+     WHERE reddit_id IN (${placeholders})
+     ORDER BY requested_at DESC`,
+    [...redditIds],
+  );
+  // Rows are newest-first, so the FIRST hit per reddit_id is the latest
+  // — set-once and skip the rest. The closed-enum check guards against
+  // a future status value sneaking in unmapped.
+  for (const row of rows) {
+    if (out.has(row.reddit_id)) continue;
+    if (
+      row.status === "queued" ||
+      row.status === "processing" ||
+      row.status === "done" ||
+      row.status === "error"
+    ) {
+      out.set(row.reddit_id, row.status);
+    }
+  }
+  return out;
 }
 
 export async function listContentSlim(
@@ -1141,6 +1926,7 @@ export async function listContentSlim(
   // - subKind="video" or language set -> articles or stories only
   // - subKind=any article type -> stories not needed
   // - status that exists only on stories (scripted/rendering/ready) -> articles not needed
+  // - category set -> articles skipped (no category column)
   const isArticleSubKind =
     opts.subKind && opts.subKind !== "video"
       ? ARTICLE_TYPES.includes(opts.subKind as ArticleType)
@@ -1154,23 +1940,57 @@ export async function listContentSlim(
     !isArticleSubKind &&
     (opts.subKind === undefined || opts.subKind === "video");
   const wantArticles =
-    !isStoryOnlyStatus && (opts.subKind === undefined || isArticleSubKind);
+    !isStoryOnlyStatus &&
+    !opts.category &&
+    (opts.subKind === undefined || isArticleSubKind);
 
   const articleType = isArticleSubKind ? (opts.subKind as ArticleType) : undefined;
+  // 2026-06-24 jobStatus filter: articles aren't pipeline citizens, so the
+  // moment the operator picks any job status the article half drops out.
+  // 2026-06-25 flagged filter: same shape — articles have no
+  // auto_publish_when_ready column so the article half drops out when
+  // the operator narrows to flagged-only.
+  const wantArticlesAfterJobFilter =
+    wantArticles && !opts.jobStatus && opts.flagged !== true;
 
   const [stories, articles] = await Promise.all([
     wantStories
-      ? listStoriesSlim({ status: opts.status, limit })
+      ? listStoriesSlim({
+          status: opts.status,
+          category: opts.category,
+          updatedSince: opts.updatedSince,
+          updatedUntil: opts.updatedUntil,
+          flagged: opts.flagged,
+          limit,
+        })
       : Promise.resolve([] as StoryListRow[]),
-    wantArticles
+    wantArticlesAfterJobFilter
       ? listArticlesSlim({
           status: opts.status,
           type: articleType,
           language: opts.language,
+          updatedSince: opts.updatedSince,
+          updatedUntil: opts.updatedUntil,
           limit,
         })
       : Promise.resolve([] as ArticleListRow[]),
   ]);
+
+  // Aggregate published_on flags for the stories in this slice. One
+  // batched call (4 queries) before the merge so each row carries its
+  // own per-platform live-status. Articles get DEFAULT_PUBLISHED_ON.
+  const storyIds = stories.map((s) => s.id);
+  const [publishedOnByStory, progressByStory] = await Promise.all([
+    loadPublishedOnByStoryIds(storyIds),
+    loadStoryProgressByIds(storyIds),
+  ]);
+  // Latest pipeline-job status per story. Keyed by reddit_id (the FK in
+  // story_jobs). Stories with no reddit_id (manual seeds) skip the lookup
+  // and surface job_status: null.
+  const redditIds = stories
+    .map((s) => s.reddit_id)
+    .filter((r): r is string => typeof r === "string" && r.length > 0);
+  const jobStatusByReddit = await loadLatestJobStatusByReddit(redditIds);
 
   const merged: ContentRow[] = [
     ...stories.map<ContentRow>((s) => ({
@@ -1186,6 +2006,15 @@ export async function listContentSlim(
       updated_at: s.updated_at,
       created_at: s.created_at,
       published_at: null, // slim story projection drops this
+      published_on:
+        publishedOnByStory.get(s.id) ?? { ...DEFAULT_PUBLISHED_ON },
+      job_status: s.reddit_id
+        ? (jobStatusByReddit.get(s.reddit_id) ?? null)
+        : null,
+      flagged: s.auto_publish_when_ready === 1,
+      flagged_attempts: s.auto_publish_attempts ?? 0,
+      progress: progressByStory.get(s.id) ?? null,
+      refresh_state: s.refresh_assets_state ?? null,
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -1200,6 +2029,12 @@ export async function listContentSlim(
       updated_at: a.updated_at,
       created_at: a.created_at,
       published_at: a.published_at,
+      published_on: { ...DEFAULT_PUBLISHED_ON },
+      job_status: null,
+      flagged: false,
+      flagged_attempts: 0,
+      progress: null,
+      refresh_state: null,
     })),
   ];
 
@@ -1211,7 +2046,51 @@ export async function listContentSlim(
     return bT.localeCompare(aT);
   });
 
-  const out = merged.slice(0, limit);
+  // 2026-06-24 jobStatus filter runs alongside the publish-on filter:
+  // both are in-memory because the underlying signal is an aggregate, not
+  // a per-row column. Stories with no job row land null and fall out the
+  // moment any jobStatus is set.
+  const jobFiltered = opts.jobStatus
+    ? merged.filter((row) => row.job_status === opts.jobStatus)
+    : merged;
+
+  // 2026-06-25 activeKind filter — narrows to stories with a matching
+  // in-flight render. "any" passes everything with a non-null progress;
+  // the specific kinds match on progress.kind.
+  const activeFiltered = opts.activeKind
+    ? jobFiltered.filter((row) => {
+        if (!row.progress) return false;
+        if (opts.activeKind === "any") return true;
+        return row.progress.kind === opts.activeKind;
+      })
+    : jobFiltered;
+
+  // Apply the published-on AND-filters AFTER aggregation so the SQL
+  // stays simple. The slim list caps at 200 stories anyway, so an
+  // in-memory filter is cheap.
+  const publishedOn = opts.publishedOn ?? [];
+  const publishedNotOn = opts.publishedNotOn ?? [];
+  const filteredByPublish =
+    publishedOn.length === 0 && publishedNotOn.length === 0
+      ? activeFiltered
+      : activeFiltered.filter((row) => {
+          // Articles are never published-on-social. If any
+          // publishedOn filter is set, articles fall out. If only
+          // publishedNotOn is set, articles pass (they're not on
+          // anything).
+          if (row.kind !== "story") {
+            return publishedOn.length === 0;
+          }
+          for (const p of publishedOn) {
+            if (!row.published_on[p]) return false;
+          }
+          for (const p of publishedNotOn) {
+            if (row.published_on[p]) return false;
+          }
+          return true;
+        });
+
+  const out = filteredByPublish.slice(0, limit);
   console.info("[content repo] list", {
     count: out.length,
     storyCount: stories.length,
@@ -1219,6 +2098,12 @@ export async function listContentSlim(
     subKind: opts.subKind ?? null,
     status: opts.status ?? null,
     language: opts.language ?? null,
+    category: opts.category ?? null,
+    publishedOn: publishedOn.length > 0 ? publishedOn : null,
+    publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : null,
+    jobStatus: opts.jobStatus ?? null,
+    updatedSince: opts.updatedSince ?? null,
+    updatedUntil: opts.updatedUntil ?? null,
   });
   return out;
 }
@@ -1229,18 +2114,25 @@ export interface UserRow {
   password_hash: string;
   role: string;
   created_at: string;
+  // 2026-06-22 Phase 3: NULL/'active' = normal, 'suspended' = locked out. Read
+  // by the admin gates (dal.ts) and the login action so a suspended staff
+  // member loses access on the next request.
+  status: string | null;
+  // 2026-06-22 Phase 8: 1 = this staff account has opted into TOTP 2FA, so the
+  // login flow requires a second factor. NULL/0 = off (the default).
+  mfa_enabled: number | null;
 }
 
 export async function getUserByEmail(email: string): Promise<UserRow | null> {
   return one<UserRow>(
-    "SELECT id, email, password_hash, role, created_at FROM users WHERE email = ?",
+    "SELECT id, email, password_hash, role, created_at, status, mfa_enabled FROM users WHERE email = ?",
     [email.toLowerCase()],
   );
 }
 
 export async function getUserById(id: string): Promise<UserRow | null> {
   return one<UserRow>(
-    "SELECT id, email, password_hash, role, created_at FROM users WHERE id = ?",
+    "SELECT id, email, password_hash, role, created_at, status, mfa_enabled FROM users WHERE id = ?",
     [id],
   );
 }

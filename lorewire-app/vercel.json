@@ -26,8 +26,56 @@
       "schedule": "*/1 * * * *"
     },
     {
+      "path": "/api/polls/refresh",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/prune_magic_links",
+      "schedule": "0 * * * *"
+    },
+    {
       "path": "/api/comments/drain_moderation",
       "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/retry_facebook_publishes",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/retry_instagram_publishes",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/retry_facebook_stories",
+      "schedule": "3-59/5 * * * *"
+    },
+    {
+      "path": "/api/retry_instagram_stories",
+      "schedule": "4-59/5 * * * *"
+    },
+    {
+      "path": "/api/retry_youtube_publishes",
+      "schedule": "1-59/5 * * * *"
+    },
+    {
+      "path": "/api/retry_tiktok_publishes",
+      "schedule": "2-59/5 * * * *"
+    },
+    {
+      "path": "/api/auto_publish_full_pipeline",
+      "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/auto_complete_publish",
+      "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/refresh_assets",
+      "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/run_hero_thumbnail_finisher",
+      "schedule": "*/2 * * * *"
     }
   ],
   "functions": {
@@ -35,18 +83,48 @@
       "maxDuration": 300
     },
     "api/drain_story_jobs.py": {
-      "maxDuration": 300
+      "maxDuration": 800
     },
     "api/drain_voice_renders.py": {
       "maxDuration": 300
     },
     "api/drain_short_renders.py": {
-      "maxDuration": 300
+      "maxDuration": 800
     },
     "src/app/api/render_video/route.ts": {
       "maxDuration": 800
     },
     "src/app/api/render_short/route.ts": {
+      "maxDuration": 800
+    },
+    "src/app/api/retry_facebook_publishes/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_instagram_publishes/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_facebook_stories/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_instagram_stories/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_youtube_publishes/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/retry_tiktok_publishes/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/auto_publish_full_pipeline/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/auto_complete_publish/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/refresh_assets/route.ts": {
+      "maxDuration": 300
+    },
+    "api/run_hero_thumbnail_finisher.py": {
       "maxDuration": 800
     }
   }

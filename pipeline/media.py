@@ -22,7 +22,16 @@ import re
 import time
 from pathlib import Path
 
-from pipeline import config, gcs, images, models, stages, store, voice
+from pipeline import (
+    config,
+    gcs,
+    images,
+    models,
+    narration,
+    stages,
+    store,
+    voice,
+)
 from pipeline.aspect import (
     resolve_aspect_for_fresh_run,
     resolve_aspect_for_story,
@@ -33,6 +42,38 @@ from pipeline.aspect import (
 # The pipeline runs from the repo root; this is the relative path it writes to.
 PUBLIC_DIR_RELATIVE = Path("lorewire-app") / "public" / "generated"
 PUBLIC_URL_PREFIX = "/generated"
+
+
+def _cache_bust(url: str) -> str:
+    """Append `?v={epoch_seconds}` to a deterministic-path asset URL so
+    browser cache, Vercel Image Optimizer, and the edge cache treat each
+    regen as a fresh asset.
+
+    Why: hero/thumbnail filenames are stable per story (see
+    `_HERO_THUMB_VARIANTS`), so a regen overwrites the SAME R2/GCS
+    object key. Without a query-param version the URL string stored in
+    `stories.hero_image` never changes, every cache layer keeps serving
+    the old bytes, and on the public homepage you see one regen
+    "revert" another because what reaches the browser is a random
+    sample of cached versions across layers. Bug observed 2026-06-27
+    on the public TOP 10 rail. Plan:
+    `_plans/2026-06-27-hero-thumb-url-cache-bust.md`.
+
+    R2/GCS ignore query strings for object lookup, so the file at the
+    deterministic key still serves. Everything in front of R2 keys on
+    the full URL, so a new `v=` is a new cache entry.
+
+    Idempotent: a URL already carrying `v=` is returned unchanged so
+    the resume path (`_build_hero_and_thumbnail_from_short` re-reading
+    `existing[column]` after a Vercel-function kill) doesn't double-stamp.
+    """
+    if not url:
+        return url
+    if "v=" in url:
+        return url
+    bust = int(time.time())
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={bust}"
 
 
 def _staging_dir(safe_id: str, repo_root: Path) -> Path:
@@ -88,6 +129,44 @@ SCENE_TARGET_SECONDS_PER_SCENE_MAX = 30.0
 # Legacy alias for old call sites that haven't been updated yet. Removed in a
 # follow-up once nothing imports it.
 DEFAULT_IMAGE_COUNT = 4
+
+
+def _format_duration_ms(duration_ms: object) -> str | None:
+    """Format a millisecond duration as "M:SS" for stories.duration. Returns
+    None on missing / non-numeric / non-positive input so the caller can skip
+    the write rather than land an empty or malformed value. Mirrors the TS
+    `formatDurationMs` helper at lorewire-app/src/lib/duration.ts."""
+    try:
+        ms = float(duration_ms)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0:
+        return None
+    seconds = ms / 1000.0
+    m = int(seconds // 60)
+    s = round(seconds - m * 60)
+    if s == 60:
+        return f"{m + 1}:00"
+    return f"{m}:{s:02d}"
+
+
+def _short_duration_from_props(props: object) -> str | None:
+    """Pull duration_ms out of a short_renders.props blob and format as
+    "M:SS". The column is TEXT in the DB; cursors return it as a string we
+    parse, but a fetch that's already decoded the JSON (some test paths)
+    passes a dict here. Either is fine; anything else returns None."""
+    if isinstance(props, str):
+        try:
+            parsed = json.loads(props)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(props, dict):
+        parsed = props
+    else:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return _format_duration_ms(parsed.get("duration_ms"))
 
 
 def _parse_duration_to_seconds(duration: str | None) -> float | None:
@@ -246,6 +325,74 @@ STT_COST_PER_SECOND = 0.024 / 60.0
 IMAGE_POLL_TIMEOUT = 240
 
 
+# Sidechannel for the last `_generate_with_retry` failure message + kind.
+# `_generate_with_retry` returns None on failure (legacy contract; many
+# callers expect that). To surface the upstream kie error into the admin
+# timeline (`kie_failed` events), we stash the text here and let the
+# caller read it immediately after a None return. The `kind` field
+# distinguishes a hard kie.ai quota cap ("quota", body code 433) from any
+# other failure ("generic") so the timeline message can read as actionable
+# instead of looking like a transient retry exhaustion. Reset at the START
+# of every call so a previous success doesn't leak stale state into a
+# later, unrelated failure. Single-threaded per drain tick, so a module
+# global is safe. Plan:
+# _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
+_LAST_KIE_ERROR: dict[str, str | None] = {"msg": None, "kind": None}
+
+# Substrings that appear in `images.generate`'s exception text when kie
+# returned the daily-points-cap error (`{'code': 433, 'msg': 'The current
+# number of points used by apiKey has exceeded the daily limit', ...}`).
+# Match both single- and double-quoted dict repr, since the raw repr can
+# come from either Python's default repr or a JSON-style re-serialisation.
+_KIE_QUOTA_MARKERS = (
+    "'code': 433",
+    '"code": 433',
+    "exceeded the daily limit",
+)
+
+
+def _is_kie_quota_error(msg: str) -> bool:
+    """True when `msg` is the kie.ai daily-quota cap error. The cap is a
+    hard wall — retrying inside the same tick can never succeed and just
+    burns another API round-trip, so callers branch on this to short-
+    circuit retries and surface an actionable timeline message."""
+    return any(m in msg for m in _KIE_QUOTA_MARKERS)
+
+
+def last_kie_error() -> str | None:
+    """Return the upstream exception text from the most recent
+    `_generate_with_retry` failure, or `None` when the last call
+    succeeded. Callers reading this MUST do so immediately after the
+    `_generate_with_retry` they care about — the value is overwritten on
+    every call."""
+    return _LAST_KIE_ERROR["msg"]
+
+
+def last_kie_error_kind() -> str | None:
+    """Return `"quota"` when the most recent `_generate_with_retry`
+    failure was kie's daily-points cap (body code 433), `"generic"` when
+    it failed for any other reason, or `None` when the last call
+    succeeded. Used by `_kie_failed_msg` to compose admin-facing text
+    that names the actual blocker instead of the misleading "returned
+    no URL after retries"."""
+    return _LAST_KIE_ERROR["kind"]
+
+
+def _kie_failed_msg(label: str) -> str:
+    """Compose the message for a `kie_failed` event based on the kind of
+    the most recent `_generate_with_retry` failure. Centralised here so
+    every `_build_*` callsite surfaces the same admin-facing wording,
+    AND so a 433 daily-cap error reads as "top up or wait" instead of
+    looking like a transient retry-exhaustion the admin should mash
+    "Regenerate" against."""
+    if _LAST_KIE_ERROR["kind"] == "quota":
+        return (
+            f"{label} — kie.ai daily points cap exceeded; "
+            "wait for the daily reset or top up the account"
+        )
+    return f"{label} returned no URL after retries"
+
+
 def _generate_with_retry(
     prompt: str,
     label: str,
@@ -272,7 +419,20 @@ def _generate_with_retry(
     model just for this call. The scenes path uses it to pin
     nano-banana-2 (ref-image support) while leaving hero / props on the
     admin's global selection.
+
+    On failure the upstream exception text is also stashed on
+    `_LAST_KIE_ERROR` so callers can surface it into the admin timeline
+    via `last_kie_error()`. The legacy `return None` contract is
+    preserved so existing call sites need no change.
+
+    Hard kie.ai quota caps (body code 433) short-circuit the retry loop:
+    the daily points budget doesn't replenish between attempts and a
+    second createTask burns another API call to confirm the same 433.
+    The failure kind is stashed via `_LAST_KIE_ERROR["kind"] = "quota"`
+    so `_kie_failed_msg` can surface a clear admin-facing message.
     """
+    _LAST_KIE_ERROR["msg"] = None
+    _LAST_KIE_ERROR["kind"] = None
     last: Exception | None = None
     ref_count = len([u for u in (image_input or []) if u])
     for attempt in range(1, attempts + 1):
@@ -287,6 +447,20 @@ def _generate_with_retry(
             )
         except Exception as e:
             last = e
+            if _is_kie_quota_error(str(e)):
+                # No retry on a hard quota cap. kie's daily points cap
+                # is wall-clock-bound; a retry inside the same tick can
+                # only fail the same way, and on a 5-variant finisher
+                # like hero+thumb the retry alone wastes 4-5 extra API
+                # round-trips before bottoming out.
+                print(
+                    f"[media image quota] {label} attempt {attempt} "
+                    f"refs={ref_count} model={model or 'global'} "
+                    "hit kie daily points cap; skipping retry"
+                )
+                _LAST_KIE_ERROR["msg"] = str(e)
+                _LAST_KIE_ERROR["kind"] = "quota"
+                return None
             if attempt < attempts:
                 print(
                     f"[media image retry] {label} attempt {attempt} "
@@ -297,6 +471,8 @@ def _generate_with_retry(
         f"[media image] {label} refs={ref_count} model={model or 'global'} "
         f"FAILED after {attempts} attempts: {last}"
     )
+    _LAST_KIE_ERROR["msg"] = str(last) if last is not None else None
+    _LAST_KIE_ERROR["kind"] = "generic" if last is not None else None
     return None
 
 
@@ -469,6 +645,10 @@ def generate_media(
     dry_run: bool,
     repo_root: Path,
     image_count: int | None = None,
+    *,
+    skip_hero: bool = False,
+    skip_long_form_scenes: bool = False,
+    skip_long_form_motion_beats: bool = False,
 ) -> dict:
     """Generate images + narration for one story and return DB columns.
 
@@ -482,6 +662,36 @@ def generate_media(
     `title` is the branded LoreWire title — it goes into the cinematic
     thumbnail prompt so the image model bakes the title typography directly
     into the hero compositions.
+
+    `skip_hero=True` defers hero generation to the downstream
+    `generate_hero_and_thumbnail_from_short` finisher (see plan
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    The story-jobs worker uses this so we don't burn two paid hero gens
+    per story (the t2i hero is immediately overwritten once the short is
+    done). Scene images + narration still run unchanged because the
+    finisher uses them as i2i inputs.
+
+    `skip_long_form_scenes=True` skips the per-scene kie image generations
+    (typically 27-31 per story at ~$0.05 each = ~$1.35-1.55). Used when the
+    caller plans to populate `stories.images` from the short's scene URLs
+    instead — every Reddit-source job goes through that path now because
+    the article doesn't ship a long-form MP4 anyway (the publish gate's
+    `video_url` requirement has been dropped). Narration + alignment still
+    run; only the image-generation loop is skipped, and `images` is left
+    out of the returned dict so the caller's downstream write isn't fooled
+    into overwriting with an empty list.
+
+    `skip_long_form_motion_beats=True` ALSO skips the `prop_slide` cutouts
+    and the `mouth_swap` character bust + mouth-removed edit. Both motion
+    beats exist for the long-form video composition (PropSlideIn overlay,
+    SVG mouth swap on a still bust) — they were dead weight on Reddit
+    jobs after the 2026-06-19 cut of long-form video, and on a slow kie
+    day they push the Vercel drain past its 800s timeout (production
+    incident 2026-06-24: one prop with a 240s kie task timeout + retry
+    used 306s by itself, then prop-3 hit OpenAI's content policy and
+    burned 2x retries on top — total media run blew past 800s before
+    even reaching the short handoff). The flag is purely opt-in here so
+    long-form callers keep the existing behaviour unchanged.
     """
     safe_id = _sanitize_id(story_id)
     out: dict = {}
@@ -513,25 +723,41 @@ def generate_media(
     portrait_hero_url: str | None = None
     landscape_hero_url: str | None = None
     category = idea.get("category", "Drama")
+    hero_variants: tuple[tuple[str, str, str], ...] = (
+        () if skip_hero
+        else (
+            ("3:4", "hero.png", "hero portrait"),
+            ("16:9", "hero-landscape.png", "hero landscape"),
+        )
+    )
+    if skip_hero:
+        print(
+            f"[media id={safe_id} hero] skipped — caller will derive hero "
+            "from the short's character + a chosen scene (see "
+            "generate_hero_and_thumbnail_from_short)"
+        )
     # Fresh-run hero gen runs BEFORE the stories row exists, so there's
     # no hero_style_id to honor — resolver falls through the settings
     # chain into the deterministic auto-pick. Same story_id every render
-    # → same picked style, so the catalog stays visually stable.
-    resolved_hero_style = stages.resolve_hero_style(
-        story_id=story_id,
-        category=category,
-        pinned_id=None,
-        get_setting=store.get_setting,
+    # → same picked style, so the catalog stays visually stable. Skipped
+    # when skip_hero is True since the loop won't iterate anyway and the
+    # caller will pick a style via its own path.
+    resolved_hero_style = (
+        None if skip_hero
+        else stages.resolve_hero_style(
+            story_id=story_id,
+            category=category,
+            pinned_id=None,
+            get_setting=store.get_setting,
+        )
     )
-    print(
-        f"[hero style resolve id={safe_id}] picked={resolved_hero_style.style.id} "
-        f"source={resolved_hero_style.source} "
-        f"whitelist={resolved_hero_style.whitelist or '<n/a>'}"
-    )
-    for aspect_ratio, filename, label in (
-        ("3:4", "hero.png", "hero portrait"),
-        ("16:9", "hero-landscape.png", "hero landscape"),
-    ):
+    if resolved_hero_style is not None:
+        print(
+            f"[hero style resolve id={safe_id}] picked={resolved_hero_style.style.id} "
+            f"source={resolved_hero_style.source} "
+            f"whitelist={resolved_hero_style.whitelist or '<n/a>'}"
+        )
+    for aspect_ratio, filename, label in hero_variants:
         public_url = f"{url_prefix}/{filename}"
         if dry_run:
             print(f"[media id={safe_id} {label}] (DRY RUN cinematic) -> {public_url}")
@@ -585,7 +811,16 @@ def generate_media(
         f"[media id={safe_id} aspect] video={fresh_video_aspect} "
         f"scene_kie_aspect={scene_kie_aspect}"
     )
-    scene_prompts = prompts[1:] if len(prompts) > 1 else prompts
+    scene_prompts = (
+        [] if skip_long_form_scenes
+        else (prompts[1:] if len(prompts) > 1 else prompts)
+    )
+    if skip_long_form_scenes:
+        print(
+            f"[media id={safe_id} scenes] skipped — caller will populate "
+            "stories.images from the short's scenes (saves ~$"
+            f"{(scene_count * 0.05):.2f} in kie gen per story)"
+        )
     scene_urls: list[str] = []
     for i, prompt in enumerate(scene_prompts):
         filename = f"scene-{i + 1}.png"
@@ -630,7 +865,15 @@ def generate_media(
     # Wave 3 Phase 3 PropSlideIn: generate a small library of prop cutouts when
     # the admin has the prop_slide motion beat enabled. Off by default so this
     # step (and its kie cost) is opt-in. Per-prop cost: ~$0.05 at gpt-image-2.
-    if not dry_run and _prop_slide_enabled():
+    # 2026-06-24: `skip_long_form_motion_beats=True` shortcuts this whole
+    # block — see the docstring above. The setting toggle still wins over
+    # the long-form path; this just means Reddit jobs ignore it.
+    if skip_long_form_motion_beats:
+        print(
+            f"[media id={safe_id} props] skipped — caller opted out of "
+            "long-form motion beats (Reddit-source pipeline)"
+        )
+    elif not dry_run and _prop_slide_enabled():
         prop_count = _prop_count()
         plan = stages.make_prop_plan(idea, body, prop_count, dry_run=False)
         print(f"[media id={safe_id} props] planning {len(plan)} prop(s)")
@@ -668,7 +911,14 @@ def generate_media(
     # and a mouth-removed copy. The composition overlays SVG mouth shapes on
     # the mouth-removed version at a fixed anchor (cx=0.50, cy=0.62). Two
     # kie calls per story (~$0.10) so this is opt-in via video.mouth_swap.
-    if not dry_run and _mouth_swap_enabled():
+    # 2026-06-24: short-circuited when the caller opted out of long-form
+    # motion beats — see the prop_slide branch above.
+    if skip_long_form_motion_beats:
+        print(
+            f"[media id={safe_id} mouth_swap] skipped — caller opted out of "
+            "long-form motion beats (Reddit-source pipeline)"
+        )
+    elif not dry_run and _mouth_swap_enabled():
         char_prompt = stages.make_character_prompt(idea, body, dry_run=False)
         char_url, char_removed_url = _mouth_swap_block(
             char_prompt, safe_id, out_dir, url_prefix
@@ -688,15 +938,19 @@ def generate_media(
         narration_path = out_dir / "narration.mp3"
         started = time.time()
         try:
-            result = voice.synthesize(body, narration_path)
+            # Single entry point so the normalize -> TTS -> script-graft
+            # contract can't be skipped on this code path. See
+            # `pipeline.narration.render_narration` and
+            # _plans/2026-06-18-caption-accuracy-and-naturalness.md.
+            result = narration.render_narration(body, narration_path)
             elapsed = time.time() - started
-            words = result.get("words", [])
+            words = result["words"]
             duration = words[-1]["end"] if words else 0.0
             stored_audio_url = gcs.publish(
                 narration_path, f"{safe_id}/narration.mp3", f"{url_prefix}/narration.mp3"
             )
             print(
-                f"[media id={safe_id} voice] {len(body)} chars "
+                f"[media id={safe_id} voice] {len(result['spoken_script'])} chars "
                 f"({models.get_selected('voice')}, provider={result['provider']}) "
                 f"-> {stored_audio_url} ({elapsed:.1f}s, {len(words)} words, ~{duration:.1f}s audio)"
             )
@@ -795,6 +1049,15 @@ def regen_one(
         # for the hero / poster gen. Net effect: the hero stops being a
         # different person from the Watch tab's narrator character.
         return _regen_hero_from_short(story, out_dir, safe_id)
+
+    if asset == "hero_thumbnail_from_short":
+        # 2026-06-19 hybrid finisher: hero + thumbnail (3:4, 16:9, 1:1)
+        # all i2i'd from the short's character_base_url PLUS a picker-chosen
+        # scene. Five paid kie calls per click — the legacy-row backfill
+        # surface for the same orchestration the story-jobs worker now runs
+        # automatically. Plan:
+        # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md.
+        return _regen_hero_and_thumbnail_from_short(story, out_dir, safe_id)
 
     if asset == "scenes":
         return _regen_scenes(story, out_dir, safe_id)
@@ -927,9 +1190,13 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     if portrait_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Portrait generation returned no URL after retries",
+            _kie_failed_msg("Portrait generation"),
             level="error",
-            payload={"variant": "portrait"},
+            payload={
+                "variant": "portrait",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         raise RuntimeError("kie portrait hero generation returned no URL after retries")
     store.log_render_event(
@@ -940,9 +1207,9 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     portrait_local = out_dir / "hero.png"
     images.download(portrait_kie, portrait_local)
     portrait_public = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
-    portrait_url = gcs.publish(
+    portrait_url = _cache_bust(gcs.publish(
         portrait_local, f"{safe_id}/hero.png", portrait_public,
-    )
+    ))
     store.log_render_event(
         "image_saved",
         f"Portrait uploaded — {portrait_url}",
@@ -969,9 +1236,17 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     if landscape_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Landscape failed; portrait still updated (partial success)",
+            (
+                "Landscape: kie.ai daily points cap exceeded; portrait still updated (partial success)"
+                if last_kie_error_kind() == "quota"
+                else "Landscape failed; portrait still updated (partial success)"
+            ),
             level="warn",
-            payload={"variant": "landscape"},
+            payload={
+                "variant": "landscape",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         print(
             f"[image regen hero] id={safe_id} landscape FAILED; "
@@ -984,11 +1259,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
             landscape_public = (
                 f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
             )
-            landscape_url = gcs.publish(
+            landscape_url = _cache_bust(gcs.publish(
                 landscape_local,
                 f"{safe_id}/hero-landscape.png",
                 landscape_public,
-            )
+            ))
             store.log_render_event(
                 "image_saved",
                 f"Landscape uploaded — {landscape_url}",
@@ -1120,9 +1395,14 @@ def _regen_hero_from_short(
     if portrait_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Portrait i2i generation returned no URL after retries",
+            _kie_failed_msg("Portrait i2i generation"),
             level="error",
-            payload={"variant": "portrait", "mode": "i2i"},
+            payload={
+                "variant": "portrait",
+                "mode": "i2i",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         raise RuntimeError("kie portrait hero (i2i) generation returned no URL after retries")
     store.log_render_event(
@@ -1133,9 +1413,9 @@ def _regen_hero_from_short(
     portrait_local = out_dir / "hero.png"
     images.download(portrait_kie, portrait_local)
     portrait_public = f"{PUBLIC_URL_PREFIX}/{safe_id}/hero.png"
-    portrait_url = gcs.publish(
+    portrait_url = _cache_bust(gcs.publish(
         portrait_local, f"{safe_id}/hero.png", portrait_public,
-    )
+    ))
     store.log_render_event(
         "image_saved",
         f"Portrait (i2i) uploaded — {portrait_url}",
@@ -1167,9 +1447,18 @@ def _regen_hero_from_short(
     if landscape_kie is None:
         store.log_render_event(
             "kie_failed",
-            "Landscape i2i failed; portrait still updated (partial success)",
+            (
+                "Landscape i2i: kie.ai daily points cap exceeded; portrait still updated (partial success)"
+                if last_kie_error_kind() == "quota"
+                else "Landscape i2i failed; portrait still updated (partial success)"
+            ),
             level="warn",
-            payload={"variant": "landscape", "mode": "i2i"},
+            payload={
+                "variant": "landscape",
+                "mode": "i2i",
+                "error": last_kie_error(),
+                "kind": last_kie_error_kind(),
+            },
         )
         print(
             f"[image regen hero from-short] id={safe_id} landscape FAILED; "
@@ -1182,11 +1471,11 @@ def _regen_hero_from_short(
             landscape_public = (
                 f"{PUBLIC_URL_PREFIX}/{safe_id}/hero-landscape.png"
             )
-            landscape_url = gcs.publish(
+            landscape_url = _cache_bust(gcs.publish(
                 landscape_local,
                 f"{safe_id}/hero-landscape.png",
                 landscape_public,
-            )
+            ))
             store.log_render_event(
                 "image_saved",
                 f"Landscape (i2i) uploaded — {landscape_url}",
@@ -1201,6 +1490,398 @@ def _regen_hero_from_short(
             )
 
     return portrait_url, total_cents
+
+
+# Each variant in the hero+thumbnail finisher: which scene seeds it, what
+# aspect to ask kie for, where it lives in GCS, and which DB column to
+# patch. The tuple order is preserved so the call sequence matches what the
+# observability events claim is happening.
+_HeroThumbVariant = tuple[str, str, str, str, str]  # (seed, aspect, filename, label, column)
+_HERO_THUMB_VARIANTS: tuple[_HeroThumbVariant, ...] = (
+    ("hero",      "3:4",  "hero.png",                "hero portrait",     "hero_image"),
+    ("hero",      "16:9", "hero-landscape.png",      "hero landscape",    "hero_image_landscape"),
+    ("thumbnail", "3:4",  "thumbnail.png",           "thumb portrait",    "thumbnail_image"),
+    ("thumbnail", "16:9", "thumbnail-landscape.png", "thumb landscape",   "thumbnail_image_landscape"),
+    ("thumbnail", "1:1",  "thumbnail-square.png",    "thumb square",      "thumbnail_image_square"),
+)
+
+# Map a column name to the corresponding store update helper. Keeping this
+# as data (not an if/elif chain inside the loop) keeps the loop body short
+# and makes the dispatcher obvious. Stays in sync with the columns named
+# in `_HERO_THUMB_VARIANTS`.
+_HERO_THUMB_COLUMN_WRITERS = {
+    "hero_image":                lambda sid, url: store.update_story_hero(sid, url),
+    "hero_image_landscape":      lambda sid, url: store.update_story_hero_landscape(sid, url),
+    "thumbnail_image":           lambda sid, url: store.update_story_thumbnail(sid, url),
+    "thumbnail_image_landscape": lambda sid, url: store.update_story_thumbnail_landscape(sid, url),
+    "thumbnail_image_square":    lambda sid, url: store.update_story_thumbnail_square(sid, url),
+}
+
+
+def _build_hero_and_thumbnail_from_short(
+    story: dict, out_dir: Path, safe_id: str,
+) -> dict:
+    """Shared core for the story-jobs worker and the admin regen path.
+
+    Resolves the short's character_base_url + scene list, asks the LLM
+    which two scenes make the best hero / thumbnail, then generates all
+    five i2i variants (2 hero + 3 thumbnail) with two image inputs per
+    call — the character (identity) and the chosen scene (composition).
+    Writes each column as soon as its image lands so a partial failure
+    still leaves the public reader with whatever DID succeed; mirrors
+    the portrait-first / landscape-best-effort discipline of
+    `_regen_hero_from_short`.
+
+    Returns a dict with the five URLs (None for variants that failed),
+    `cost_cents` (only counts what actually shipped), `hero_index`,
+    `thumbnail_index`, and `picker_reasoning`. Raises ValueError on
+    setup failures (no short, no scenes, no character_base_url) so the
+    caller can surface a clear message to the admin.
+    """
+    title = (story.get("title") or "").strip()
+    if not title:
+        raise ValueError(f"story {safe_id} has no title — cannot build a hero prompt")
+    body = (story.get("body") or "").strip()
+    category = (story.get("category") or "Drama").strip()
+
+    latest = store.latest_short_render_for_story(story["id"])
+    if latest is None or (latest.get("status") or "") != "done":
+        raise ValueError(
+            f"story {safe_id} has no completed short render — generate a short first"
+        )
+    props_raw = latest.get("props")
+    if not props_raw:
+        raise ValueError(
+            f"story {safe_id} short render has no props blob — re-render the short"
+        )
+    try:
+        props = json.loads(props_raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"story {safe_id} short render props blob is not valid JSON: {e}"
+        ) from e
+    if not isinstance(props, dict):
+        raise ValueError(f"story {safe_id} short render props is not a JSON object")
+
+    character_base_url = (props.get("character_base_url") or "").strip()
+    if not character_base_url:
+        raise ValueError(
+            f"story {safe_id} short render has no character_base_url — "
+            "re-render the short on the current shorts pipeline so the base is persisted"
+        )
+
+    # Scenes live under either `scenes` (raw assets list from shorts.py) or
+    # `doodle_frames` (post-render Remotion props shape). Either source has a
+    # per-scene `url` and the description text we feed to the picker.
+    scenes_raw = props.get("scenes")
+    if not isinstance(scenes_raw, list) or not scenes_raw:
+        scenes_raw = props.get("doodle_frames")
+    if not isinstance(scenes_raw, list) or not scenes_raw:
+        raise ValueError(
+            f"story {safe_id} short render props has no usable scene list "
+            "(neither `scenes` nor `doodle_frames`)"
+        )
+    scenes: list[dict] = [s for s in scenes_raw if isinstance(s, dict) and s.get("url")]
+    if not scenes:
+        raise ValueError(f"story {safe_id} short render scenes carry no URLs")
+
+    # 2026-06-19 (plan:
+    # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+    # Plumb the short's scene URLs into stories.images so the public
+    # article reader has inline illustrations. The Reddit-source worker
+    # path skips the 27-31 long-form scene gen entirely (~$1.43 saved
+    # per story) and relies on this handoff for article visuals. Idempotent:
+    # re-running the finisher just rewrites the same list.
+    scene_urls_for_article = [
+        s["url"] for s in scenes
+        if isinstance(s.get("url"), str) and s["url"]
+    ]
+    if scene_urls_for_article:
+        store.update_story_scenes(story["id"], scene_urls_for_article)
+        print(
+            f"[hero+thumb from-short] id={safe_id} wrote "
+            f"{len(scene_urls_for_article)} short scene URLs into stories.images"
+        )
+
+    # 2026-06-19: also auto-apply the short as the story's video. The
+    # admin's "Use this short as the story's video" button (at
+    # /admin/(panel)/shorts/[id]/UseShortAsVideoButton.tsx) used to be
+    # the only path that pointed stories.video_url at the short. The
+    # user shouldn't have to click it — when the short finishes, this
+    # IS the story's video. Mirrors the TS `applyShortToStory` helper
+    # exactly (a single column write). Idempotent: a re-render that
+    # produces the same URL is a no-op.
+    short_output_url = (latest.get("output_url") or "").strip()
+    if short_output_url:
+        store.update_story_video_url(story["id"], short_output_url)
+        print(
+            f"[hero+thumb from-short] id={safe_id} auto-applied short as "
+            f"stories.video_url={short_output_url}"
+        )
+        # Mirror duration alongside video_url so the public rail thumbnail
+        # badge reads the real ~30-60s short length instead of falling back
+        # to the legacy "2:00" long-form default. Same contract as the TS
+        # `applyShortToStory` write: overwrite unconditionally because
+        # stories.duration tracks "the currently-applied video's length",
+        # not "admin's free-form note".
+        short_duration = _short_duration_from_props(latest.get("props"))
+        if short_duration:
+            store.update_story_duration(story["id"], short_duration)
+            print(
+                f"[hero+thumb from-short] id={safe_id} auto-applied short "
+                f"duration as stories.duration={short_duration}"
+            )
+
+    # 2026-06-24 resumability: when a Vercel function kill caused this
+    # image_renders row to be reclaimed, the previous tick already
+    # logged its picker choice to `image_render_events`. Reuse it so
+    # every tick targets the same seed scenes and we don't end up with
+    # variants that were i2i'd against different scene composites. No-op
+    # outside the queue path (no render context, no prior event → run
+    # the LLM picker fresh). See
+    # `_plans/2026-06-24-hero-thumb-finisher-resumable.md`.
+    render_id = store.current_render_id()
+    prior_pick: dict | None = None
+    if render_id:
+        prior = store.first_render_event(render_id, "scenes_picked")
+        if prior and prior.get("payload"):
+            try:
+                payload = json.loads(prior["payload"])
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            if (
+                isinstance(payload, dict)
+                and "hero_index" in payload
+                and "thumbnail_index" in payload
+            ):
+                prior_pick = payload
+    if prior_pick is not None:
+        pick = {
+            "hero_index": prior_pick["hero_index"],
+            "thumbnail_index": prior_pick["thumbnail_index"],
+            "picker_reasoning": prior_pick.get("picker_reasoning") or "",
+        }
+        print(
+            f"[hero+thumb from-short] id={safe_id} resumed picker "
+            f"hero=#{pick['hero_index']} thumb=#{pick['thumbnail_index']}"
+        )
+        store.log_render_event(
+            "picker_resumed",
+            (
+                f"Reusing prior pick hero=#{pick['hero_index']} "
+                f"thumb=#{pick['thumbnail_index']} after function kill"
+            ),
+            payload={
+                "hero_index": pick["hero_index"],
+                "thumbnail_index": pick["thumbnail_index"],
+                "picker_reasoning": pick["picker_reasoning"],
+            },
+        )
+    else:
+        pick = stages.pick_hero_and_thumbnail_scenes(title, body, scenes, dry_run=False)
+    hero_idx = pick["hero_index"]
+    thumb_idx = pick["thumbnail_index"]
+    hero_scene_url = scenes[hero_idx].get("url") or ""
+    thumb_scene_url = scenes[thumb_idx].get("url") or ""
+    if not hero_scene_url or not thumb_scene_url:
+        raise ValueError(
+            f"story {safe_id} picked scenes are missing URLs "
+            f"(hero={hero_idx}, thumb={thumb_idx})"
+        )
+
+    # On a resumed run the original `scenes_picked` event is already in
+    # the timeline (it's what we just read back); the new `picker_resumed`
+    # event above marks this iteration. Skip the verbose print + the
+    # duplicate `scenes_picked` log so the timeline stays single-source
+    # for the audit trail.
+    if prior_pick is None:
+        print(
+            f"[hero+thumb from-short] id={safe_id} title={title[:60]!r} "
+            f"character={character_base_url[:80]}... "
+            f"hero_scene=#{hero_idx} thumb_scene=#{thumb_idx} "
+            f"reason={pick['picker_reasoning'][:120]!r}"
+        )
+        store.log_render_event(
+            "scenes_picked",
+            f"Picker chose hero=#{hero_idx} thumb=#{thumb_idx}",
+            payload={
+                "hero_index": hero_idx,
+                "thumbnail_index": thumb_idx,
+                "hero_scene_url": hero_scene_url,
+                "thumbnail_scene_url": thumb_scene_url,
+                "picker_reasoning": pick["picker_reasoning"],
+            },
+        )
+
+    per_image_cents = _per_image_cost_cents()
+    seed_to_scene = {"hero": hero_scene_url, "thumbnail": thumb_scene_url}
+    # Re-fetch the story so a partial-success from a prior reclaim is
+    # visible. Each successful i2i in the loop below already commits
+    # its URL to the relevant `stories` column (see
+    # `_HERO_THUMB_COLUMN_WRITERS`), so the column read here is the
+    # authoritative "what's already done" signal even when the previous
+    # tick died before reaching `finish_image_render`. Skipping variants
+    # we already have stops re-burning kie credits on each reclaim.
+    fresh = store.fetch_story(story["id"]) or story
+    existing = {
+        col: (fresh.get(col) or "").strip()
+        for _seed, _aspect, _filename, _label, col in _HERO_THUMB_VARIANTS
+    }
+    result: dict = {
+        "hero_image": existing["hero_image"] or None,
+        "hero_image_landscape": existing["hero_image_landscape"] or None,
+        "thumbnail_image": existing["thumbnail_image"] or None,
+        "thumbnail_image_landscape": existing["thumbnail_image_landscape"] or None,
+        "thumbnail_image_square": existing["thumbnail_image_square"] or None,
+        "cost_cents": 0,
+        "hero_index": hero_idx,
+        "thumbnail_index": thumb_idx,
+        "picker_reasoning": pick["picker_reasoning"],
+    }
+
+    for seed, aspect, filename, label, column in _HERO_THUMB_VARIANTS:
+        if existing[column]:
+            store.log_render_event(
+                "variant_resumed",
+                f"{label} already persisted — skipping i2i",
+                payload={
+                    "variant": label,
+                    "url": existing[column],
+                    "resumed": True,
+                },
+            )
+            print(
+                f"[hero+thumb from-short] id={safe_id} {label} "
+                f"already persisted, skipping"
+            )
+            continue
+        scene_url = seed_to_scene[seed]
+        prompt = stages.make_thumbnail_prompt(
+            title, category, body, aspect_ratio=aspect, dry_run=False,
+            character_base_url=character_base_url,
+            scene_image_url=scene_url,
+        )
+        store.log_render_event(
+            "kie_request_sent",
+            f"Submitted {label} to kie (hybrid i2i)",
+            payload={"variant": label, "aspect": aspect, "mode": "i2i+scene"},
+        )
+        kie_url = _generate_with_retry(
+            prompt,
+            f"id={safe_id} {label} (hybrid i2i)",
+            aspect_ratio=aspect,
+            # Order MUST be [character, scene] — `make_thumbnail_prompt`'s
+            # hybrid copy says "FIRST reference image" = identity source,
+            # "SECOND reference image" = composition source. Reverse the
+            # order and the model invents a fresh face in the scene's pose.
+            image_input=[character_base_url, scene_url],
+            model="kie/gpt-image-2-i2i",
+        )
+        if kie_url is None:
+            store.log_render_event(
+                "kie_failed",
+                _kie_failed_msg(f"{label} (hybrid i2i)"),
+                level="warn",
+                payload={
+                    "variant": label,
+                    "error": last_kie_error(),
+                    "kind": last_kie_error_kind(),
+                },
+            )
+            print(
+                f"[hero+thumb from-short] id={safe_id} {label} FAILED; "
+                "other variants will still be attempted"
+            )
+            continue
+        try:
+            local_path = out_dir / filename
+            images.download(kie_url, local_path)
+            public_url = f"{PUBLIC_URL_PREFIX}/{safe_id}/{filename}"
+            stored_url = _cache_bust(
+                gcs.publish(local_path, f"{safe_id}/{filename}", public_url)
+            )
+        except Exception as e:  # noqa: BLE001 — keep going on transient I/O
+            store.log_render_event(
+                "image_save_failed",
+                f"{label} download/upload failed: {e}",
+                level="warn",
+                payload={"variant": label, "error": str(e)[:200]},
+            )
+            print(
+                f"[hero+thumb from-short] id={safe_id} {label} "
+                f"download/upload FAILED: {e}; other variants will still be attempted"
+            )
+            continue
+        store.log_render_event(
+            "image_saved",
+            f"{label} uploaded — {stored_url}",
+            payload={"variant": label, "url": stored_url, "mode": "i2i+scene"},
+        )
+        _HERO_THUMB_COLUMN_WRITERS[column](story["id"], stored_url)
+        result[column] = stored_url
+        result["cost_cents"] += per_image_cents
+
+    return result
+
+
+def generate_hero_and_thumbnail_from_short(
+    story_id: str, repo_root: Path,
+) -> dict:
+    """Top-level finisher: produce the article's hero + thumbnail variants
+    using the latest short's character + a picker-chosen scene as i2i
+    inputs. Called by the story-jobs worker AFTER the short's render row
+    flips to status='done' (plan:
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+
+    Returns the result dict from `_build_hero_and_thumbnail_from_short`
+    (the five column URLs + cost_cents + picker metadata). Updates the
+    `stories` columns directly via the store helpers — the worker does
+    not need to merge anything into its row dict because the upsert has
+    already happened by the time this fires.
+
+    Raises ValueError on setup failures so the worker can mark the job
+    failed with a clear admin-facing message.
+    """
+    safe_id = _sanitize_id(story_id)
+    story = store.fetch_story(story_id)
+    if story is None:
+        raise ValueError(f"story {story_id!r} not found")
+    out_dir = _regen_out_dir(repo_root, safe_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return _build_hero_and_thumbnail_from_short(story, out_dir, safe_id)
+
+
+def _regen_hero_and_thumbnail_from_short(
+    story: dict, out_dir: Path, safe_id: str,
+) -> tuple[str, int]:
+    """Regen-worker wrapper around the finisher. Returns
+    (first_landed_url, total_cost_cents) to match the (url, cents)
+    contract that `regen_one`'s other handlers use.
+
+    Used by the admin's "Generate hero + thumbnail from short" button on
+    /admin/stories/[id] so a legacy story that already has a short but
+    no thumbnail can be backfilled by hand. Same five i2i calls, same
+    cost, same observability — just routed through the image_renders
+    queue instead of the story_jobs worker.
+    """
+    result = _build_hero_and_thumbnail_from_short(story, out_dir, safe_id)
+    # Prefer the portrait hero (the column the public reader checks first)
+    # as the queue's output_url sample. Fall back through the other variants
+    # if the portrait specifically failed.
+    first_url = (
+        result.get("hero_image")
+        or result.get("thumbnail_image")
+        or result.get("hero_image_landscape")
+        or result.get("thumbnail_image_landscape")
+        or result.get("thumbnail_image_square")
+        or ""
+    )
+    if not first_url:
+        raise RuntimeError(
+            f"story {safe_id} hero+thumb regen produced no images "
+            "(all five i2i calls failed) — check the timeline"
+        )
+    return first_url, int(result.get("cost_cents") or 0)
 
 
 def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
@@ -1328,9 +2009,17 @@ def _regen_scenes(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         if kie_url is None:
             store.log_render_event(
                 "kie_failed",
-                f"Scene {i + 1} failed; continuing",
+                (
+                    f"Scene {i + 1}: kie.ai daily points cap exceeded; continuing"
+                    if last_kie_error_kind() == "quota"
+                    else f"Scene {i + 1} failed; continuing"
+                ),
                 level="warn",
-                payload={"index": i + 1},
+                payload={
+                    "index": i + 1,
+                    "error": last_kie_error(),
+                    "kind": last_kie_error_kind(),
+                },
             )
             print(f"[image regen scenes] id={safe_id} {label} FAILED, skipping")
             continue

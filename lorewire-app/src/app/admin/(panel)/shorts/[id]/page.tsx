@@ -7,7 +7,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getStory, getUserById, listSegments } from "@/lib/repo";
 import { listVoices } from "@/lib/voice-library";
 import { readForeignSession } from "@/lib/short-edit-session";
@@ -18,18 +18,24 @@ import {
   type VideoAspect,
 } from "@/lib/aspect";
 import {
+  getLatestFacebookPostForStoryAction,
+  getLatestInstagramPostForStoryAction,
+  getLatestTikTokPostForStoryAction,
+  getLatestYouTubePostForStoryAction,
+  getSeoMetadataForStoryAction,
   listArticlesLinkedToStoryAction,
   loadShortEditorState,
 } from "./actions";
 import { ShortEditorClient } from "./ShortEditorClient";
 import { ShortSegmentsStatusCard } from "./ShortSegmentsStatusCard";
+import { StoryTitleHeader } from "./StoryTitleHeader";
 
 export default async function ShortEditorPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const { id } = await params;
   const story = await getStory(id);
   if (!story) notFound();
@@ -38,7 +44,15 @@ export default async function ShortEditorPage({
   // costs ~1 ms after the first page load of the admin shell.
   // Linked articles: feed the per-scene "Use in article" promote actions
   // in ScenesTab. Empty list when no article points at this story.
-  const [state, voices, articlesResult] = await Promise.all([
+  const [
+    state,
+    voices,
+    articlesResult,
+    latestFacebookPost,
+    latestInstagramPost,
+    latestYouTubePost,
+    latestTikTokPost,
+  ] = await Promise.all([
     loadShortEditorState(id),
     listVoices().catch((err) => {
       // eslint-disable-next-line no-console -- rule 14
@@ -52,7 +66,54 @@ export default async function ShortEditorPage({
       });
       return { ok: false, articles: [] } as const;
     }),
+    // Latest facebook_posts row for the manual Publish-to-Facebook button.
+    // Best-effort: a lookup failure should not block the editor from
+    // rendering — the button just shows "no post yet" instead of state.
+    getLatestFacebookPostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest facebook post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    // Same shape for the Instagram button.
+    getLatestInstagramPostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest instagram post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    // YouTube button.
+    getLatestYouTubePostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest youtube post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
+    // TikTok button.
+    getLatestTikTokPostForStoryAction(id).catch((err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] latest tiktok post lookup failed", {
+        err: String(err),
+      });
+      return null;
+    }),
   ]);
+
+  // SEO metadata for the SEO card on the editor. Best-effort: a
+  // lookup failure should not block the editor — the card just shows
+  // "Not generated yet" and exposes the Generate button.
+  const initialSeoMetadata = await getSeoMetadataForStoryAction(id).catch(
+    (err) => {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor page] seo metadata lookup failed", {
+        err: String(err),
+      });
+      return { metadata: null, generatedAt: null };
+    },
+  );
   const linkedArticles = articlesResult.ok
     ? (articlesResult.articles ?? [])
     : [];
@@ -113,9 +174,9 @@ export default async function ShortEditorPage({
             <span>·</span>
             <span>Short editor</span>
           </div>
-          <h1 className="mt-1 text-base font-semibold text-ink">
-            {story.title ?? "(untitled)"}
-          </h1>
+          <div className="mt-1">
+            <StoryTitleHeader storyId={id} initialTitle={story.title ?? null} />
+          </div>
         </div>
         <div className="font-mono text-[10px] uppercase tracking-wider text-muted">
           Scenes · Captions · Script · Voice
@@ -158,6 +219,11 @@ export default async function ShortEditorPage({
             session.userId,
           )}
           linkedArticles={linkedArticles}
+          initialFacebookPost={latestFacebookPost}
+          initialInstagramPost={latestInstagramPost}
+          initialYouTubePost={latestYouTubePost}
+          initialTikTokPost={latestTikTokPost}
+          initialSeoMetadata={initialSeoMetadata}
         />
       )}
     </div>

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting, listStories } from "@/lib/repo";
 import { saveCaptionTemplateAction } from "@/app/admin/actions";
 import { CaptionTemplatePreview } from "./preview";
@@ -32,7 +32,7 @@ import {
 const CATEGORIES = ["Drama", "Entitled", "Humor", "Wholesome", "Dating", "Roommate"] as const;
 
 const DEFAULTS: Record<string, string> = {
-  "position_y": "0.55",
+  "position_y": "0.68",
   "size_scale": "1",
   "padding_x": "64",
   "text_transform": "uppercase",
@@ -57,7 +57,7 @@ const POSITION_FIELDS: FieldDef[] = [
     max: 1,
     step: 0.01,
     endpoints: ["TOP", "BOTTOM"],
-    tickValue: 0.55,
+    tickValue: 0.68,
     hint: "Where the caption band sits inside the 1920px-tall frame.",
   },
   {
@@ -261,7 +261,7 @@ interface PageProps {
 }
 
 export default async function TemplatesPage({ searchParams }: PageProps) {
-  await requireAdmin();
+  await requireCapability("settings.manage");
   const params = await searchParams;
   const requestedScope = params.scope === "cat" || params.scope === "story" ? params.scope : "global";
   const cat = params.cat;

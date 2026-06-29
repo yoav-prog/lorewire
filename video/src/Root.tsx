@@ -1,9 +1,25 @@
-// Remotion root: registers the DoodleShort composition.
-// CLI render: `npx remotion render video/src/Root.tsx DoodleShort out.mp4 --props=./path/to.json`.
+// Remotion root: registers the DoodleShort composition + the PosterStill
+// composition (the latter rendered via renderStill from the Cloud Run
+// /render-poster endpoint per
+// _plans/2026-06-28-phase-2-social-poster-render.md).
+//
+// CLI renders:
+//   Video:  `npx remotion render video/src/Root.tsx DoodleShort out.mp4 --props=./path/to.json`
+//   Still:  `npx remotion still video/src/Root.tsx PosterStill out.png --props=./path/to.json`
 
 import React from "react";
 import { Composition, registerRoot, type CalculateMetadataFunction } from "remotion";
 import { DoodleShort } from "./DoodleShort";
+import {
+  LANDSCAPE_HEIGHT,
+  LANDSCAPE_WIDTH,
+  POSTER_HEIGHT,
+  POSTER_WIDTH,
+  PosterStill,
+  PosterStillLandscape,
+  type PosterStillLandscapeProps,
+  type PosterStillProps,
+} from "./PosterStill";
 import type { ShortVideoConfig } from "./types";
 import { aspectDims, LEGACY_DEFAULT_ASPECT } from "./aspect";
 import { deriveCompositionMetadata, FPS } from "./composition-metadata";
@@ -58,17 +74,64 @@ const DEFAULT_PROPS: ShortVideoConfig = {
 };
 
 const DoodleShortLoose = DoodleShort as unknown as React.ComponentType<LooseProps>;
+const PosterStillLoose = PosterStill as unknown as React.ComponentType<LooseProps>;
+const PosterStillLandscapeLoose =
+  PosterStillLandscape as unknown as React.ComponentType<LooseProps>;
+
+// PosterStill defaults — only used by Remotion Studio preview when no
+// --props is passed. The pipeline render always supplies real props.
+const POSTER_DEFAULT_PROPS: PosterStillProps = {
+  scene_1_url: "",
+  text: "Her refusal ended everything.",
+  brand_text: "LORE WIRE",
+};
+
+// Phase 3 landscape OG-card defaults. Same shape as the portrait, just
+// rendered into the 1200×630 PosterStillLandscape composition. Studio-
+// preview only; production always supplies real props.
+const POSTER_LANDSCAPE_DEFAULT_PROPS: PosterStillLandscapeProps = {
+  scene_1_url: "",
+  text: "Her refusal ended everything.",
+  brand_text: "LORE WIRE",
+};
 
 const Root: React.FC = () => (
-  <Composition
-    id="DoodleShort"
-    component={DoodleShortLoose}
-    fps={FPS}
-    width={STUDIO_FALLBACK_DIMS.width}
-    height={STUDIO_FALLBACK_DIMS.height}
-    defaultProps={DEFAULT_PROPS as unknown as LooseProps}
-    calculateMetadata={calculateMetadata}
-  />
+  <>
+    <Composition
+      id="DoodleShort"
+      component={DoodleShortLoose}
+      fps={FPS}
+      width={STUDIO_FALLBACK_DIMS.width}
+      height={STUDIO_FALLBACK_DIMS.height}
+      defaultProps={DEFAULT_PROPS as unknown as LooseProps}
+      calculateMetadata={calculateMetadata}
+    />
+    {/* Still composition for social cover renders. durationInFrames=1
+        because renderStill only ever rasterizes frame 0; fps is required
+        by Remotion's Composition contract but unused for stills. */}
+    <Composition
+      id="PosterStill"
+      component={PosterStillLoose}
+      fps={FPS}
+      width={POSTER_WIDTH}
+      height={POSTER_HEIGHT}
+      durationInFrames={1}
+      defaultProps={POSTER_DEFAULT_PROPS as unknown as LooseProps}
+    />
+    {/* Phase 3 landscape OG-card composition. Same renderStill seam,
+        different aspect. Selected by the Cloud Run /render-poster
+        endpoint when `aspect: "landscape"` is requested. Per
+        _plans/2026-06-29-phase-3-og-poster-cards.md. */}
+    <Composition
+      id="PosterStillLandscape"
+      component={PosterStillLandscapeLoose}
+      fps={FPS}
+      width={LANDSCAPE_WIDTH}
+      height={LANDSCAPE_HEIGHT}
+      durationInFrames={1}
+      defaultProps={POSTER_LANDSCAPE_DEFAULT_PROPS as unknown as LooseProps}
+    />
+  </>
 );
 
 registerRoot(Root);

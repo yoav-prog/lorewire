@@ -131,41 +131,6 @@ describe("bulkEnqueueStoryJobs", () => {
     expect(jobs.get("a")?.with_media).toBe(0);
   });
 
-  it("persists output_format='short' when explicitly set", async () => {
-    await seedSource("a", "imported");
-    await bulkEnqueueStoryJobs(["a"], { output_format: "short" });
-    const jobs = await listLatestStoryJobsForReddit(["a"]);
-    expect(jobs.get("a")?.output_format).toBe("short");
-  });
-
-  it("persists output_format='long' when explicitly set", async () => {
-    await seedSource("a", "imported");
-    await bulkEnqueueStoryJobs(["a"], { output_format: "long" });
-    const jobs = await listLatestStoryJobsForReddit(["a"]);
-    expect(jobs.get("a")?.output_format).toBe("long");
-  });
-
-  it("leaves output_format NULL when omitted (worker resolves at claim time)", async () => {
-    await seedSource("a", "imported");
-    await bulkEnqueueStoryJobs(["a"]);
-    const jobs = await listLatestStoryJobsForReddit(["a"]);
-    expect(jobs.get("a")?.output_format).toBeNull();
-  });
-
-  it("normalises a bad output_format value to NULL (closed-enum defence)", async () => {
-    await seedSource("a", "imported");
-    // The runtime TypeScript signature is closed-enum, but a stale browser
-    // tab or a hand-crafted POST can still smuggle a typo through the
-    // action layer. The storage call must drop it to NULL so the worker's
-    // resolver doesn't see a malformed format and bypass the admin's
-    // intended default.
-    await bulkEnqueueStoryJobs(["a"], {
-      output_format: "shrt" as unknown as "short",
-    });
-    const jobs = await listLatestStoryJobsForReddit(["a"]);
-    expect(jobs.get("a")?.output_format).toBeNull();
-  });
-
   it("returns zero-result on empty input without touching the DB", async () => {
     await seedSource("a", "imported");
     const result = await bulkEnqueueStoryJobs([]);
@@ -191,6 +156,59 @@ describe("bulkEnqueueStoryJobs", () => {
     const result = await bulkEnqueueStoryJobs(["a"]);
     expect(result.enqueued).toBe(0);
     expect(result.skipped_active).toBe(1);
+  });
+
+  // 2026-06-24 Full Pipeline propagation. The opt-in lives on reddit_source;
+  // bulkEnqueueStoryJobs snapshots it at enqueue and writes it onto the
+  // story_jobs row so the worker doesn't have to join back and a mid-flip
+  // doesn't affect an already-claimed job.
+  it("propagates full_pipeline=1 from source to job", async () => {
+    await seedSource("a", "imported");
+    await run("UPDATE reddit_source SET full_pipeline = 1 WHERE reddit_id = ?", [
+      "a",
+    ]);
+
+    await bulkEnqueueStoryJobs(["a"]);
+
+    const job = await one<{ full_pipeline: number | null; auto_publish_status: string | null }>(
+      "SELECT full_pipeline, auto_publish_status FROM story_jobs WHERE reddit_id = ?",
+      ["a"],
+    );
+    expect(job?.full_pipeline).toBe(1);
+    // auto_publish_status is the worker's lane signal; always NULL on enqueue.
+    expect(job?.auto_publish_status).toBeNull();
+  });
+
+  it("defaults full_pipeline=0 when source has the column at NULL/0", async () => {
+    await seedSource("a", "imported");
+    // No UPDATE: the seed left full_pipeline at the column default (0/NULL).
+
+    await bulkEnqueueStoryJobs(["a"]);
+
+    const job = await one<{ full_pipeline: number | null }>(
+      "SELECT full_pipeline FROM story_jobs WHERE reddit_id = ?",
+      ["a"],
+    );
+    expect(job?.full_pipeline).toBe(0);
+  });
+
+  it("propagates per-row in a mixed batch", async () => {
+    await seedSource("on", "imported");
+    await seedSource("off", "imported");
+    await run("UPDATE reddit_source SET full_pipeline = 1 WHERE reddit_id = ?", [
+      "on",
+    ]);
+
+    await bulkEnqueueStoryJobs(["on", "off"]);
+
+    const jobs = await all<{ reddit_id: string; full_pipeline: number | null }>(
+      "SELECT reddit_id, full_pipeline FROM story_jobs ORDER BY reddit_id",
+      [],
+    );
+    expect(jobs).toEqual([
+      { reddit_id: "off", full_pipeline: 0 },
+      { reddit_id: "on", full_pipeline: 1 },
+    ]);
   });
 });
 
@@ -564,5 +582,216 @@ describe("listLatestStoryJobsForReddit", () => {
     const map = await listLatestStoryJobsForReddit(["a"]);
     expect(map.size).toBe(1);
     expect(map.get("a")?.status).toBe("queued");
+  });
+});
+
+// stopLiveRun is the live-page Stop. Unlike bulkCancelActiveStoryJobs it
+// settles WHATEVER stage is in flight — the screenshot that prompted this
+// was a story that finished hours ago with a short render stuck mid-flight,
+// which the story-stage-only cancel can't touch.
+describe("stopLiveRun", () => {
+  beforeEach(async () => {
+    await clear();
+    await run("DELETE FROM short_renders", []);
+    await run("DELETE FROM story_job_events", []);
+    await run("DELETE FROM short_render_events", []);
+  });
+
+  async function seedJob(
+    id: string,
+    over: {
+      reddit_id?: string;
+      status?: string;
+      story_id?: string | null;
+      finisher_status?: string | null;
+      auto_publish_status?: string | null;
+    } = {},
+  ) {
+    await run(
+      "INSERT INTO story_jobs " +
+        "(id, reddit_id, status, progress, with_media, requested_at, story_id, finisher_status, auto_publish_status) " +
+        "VALUES (?, ?, ?, 0, 1, '2026-06-14T00:00:00+00:00', ?, ?, ?)",
+      [
+        id,
+        over.reddit_id ?? "r-" + id,
+        over.status ?? "done",
+        over.story_id ?? null,
+        over.finisher_status ?? null,
+        over.auto_publish_status ?? null,
+      ],
+    );
+  }
+
+  async function seedShort(id: string, storyId: string, status: string) {
+    await run(
+      "INSERT INTO short_renders " +
+        "(id, story_id, config_hash, status, progress, requested_at) " +
+        "VALUES (?, ?, ?, ?, 0, '2026-06-14T00:00:00+00:00')",
+      [id, storyId, "hash-" + id, status],
+    );
+  }
+
+  it("returns ok=false for a missing job", async () => {
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun("nope");
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("job-not-found");
+  });
+
+  it("returns ok=false for an empty job id without a DB hit", async () => {
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun("");
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("missing-job-id");
+  });
+
+  it("force-cancels a zombie short whose story already finished", async () => {
+    // The exact screenshot case: story done, short stuck in 'rendering'.
+    await seedJob("j1", { status: "done", story_id: "s1" });
+    await seedShort("sr1", "s1", "rendering");
+
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun("j1");
+
+    expect(r.ok).toBe(true);
+    expect(r.stopped_stages).toEqual(["short"]);
+
+    const short = await one<{ status: string; finished_at: string | null }>(
+      "SELECT status, finished_at FROM short_renders WHERE id = ?",
+      ["sr1"],
+    );
+    expect(short?.status).toBe("cancelled");
+    expect(short?.finished_at).not.toBeNull();
+
+    // The finished article is untouched — only the stuck stage was killed.
+    const job = await one<{ status: string }>(
+      "SELECT status FROM story_jobs WHERE id = ?",
+      ["j1"],
+    );
+    expect(job?.status).toBe("done");
+  });
+
+  it("cancels each in-flight short status (queued / generating / rendering)", async () => {
+    const { stopLiveRun } = await import("./story-jobs");
+    for (const s of ["queued", "generating", "rendering"]) {
+      await seedJob("job-" + s, { status: "done", story_id: "story-" + s });
+      await seedShort("short-" + s, "story-" + s, s);
+      const r = await stopLiveRun("job-" + s);
+      expect(r.stopped_stages).toContain("short");
+      const short = await one<{ status: string }>(
+        "SELECT status FROM short_renders WHERE id = ?",
+        ["short-" + s],
+      );
+      expect(short?.status).toBe("cancelled");
+    }
+  });
+
+  it("does not touch a short that already settled (done)", async () => {
+    await seedJob("j2", { status: "done", story_id: "s2" });
+    await seedShort("sr2", "s2", "done");
+
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun("j2");
+
+    expect(r.stopped_stages).toEqual([]);
+    const short = await one<{ status: string }>(
+      "SELECT status FROM short_renders WHERE id = ?",
+      ["sr2"],
+    );
+    expect(short?.status).toBe("done");
+  });
+
+  it("cancels a story-stage run and resets its source to 'imported'", async () => {
+    await seedSource("rsrc", "imported");
+    await bulkEnqueueStoryJobs(["rsrc"]); // source → queued, one queued job
+    const job = await one<{ id: string }>(
+      "SELECT id FROM story_jobs WHERE reddit_id = ?",
+      ["rsrc"],
+    );
+
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun(job!.id);
+
+    expect(r.stopped_stages).toEqual(["story"]);
+    const stopped = await one<{ status: string }>(
+      "SELECT status FROM story_jobs WHERE id = ?",
+      [job!.id],
+    );
+    expect(stopped?.status).toBe("cancelled");
+    const source = await one<{ status: string; story_id: string | null }>(
+      "SELECT status, story_id FROM reddit_source WHERE reddit_id = ?",
+      ["rsrc"],
+    );
+    expect(source?.status).toBe("imported");
+    expect(source?.story_id).toBeNull();
+  });
+
+  it("cancels a pending hero finisher", async () => {
+    await seedJob("j3", { status: "done", story_id: "s3", finisher_status: "pending" });
+    await seedShort("sr3", "s3", "done");
+
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun("j3");
+
+    expect(r.stopped_stages).toEqual(["hero"]);
+    const job = await one<{ finisher_status: string | null }>(
+      "SELECT finisher_status FROM story_jobs WHERE id = ?",
+      ["j3"],
+    );
+    expect(job?.finisher_status).toBe("cancelled");
+  });
+
+  it("cancels a pending auto-publish", async () => {
+    await seedJob("j4", {
+      status: "done",
+      story_id: "s4",
+      finisher_status: "done",
+      auto_publish_status: "pending",
+    });
+    await seedShort("sr4", "s4", "done");
+
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun("j4");
+
+    expect(r.stopped_stages).toEqual(["publish"]);
+    const job = await one<{ auto_publish_status: string | null }>(
+      "SELECT auto_publish_status FROM story_jobs WHERE id = ?",
+      ["j4"],
+    );
+    expect(job?.auto_publish_status).toBe("cancelled");
+  });
+
+  it("is an idempotent no-op on a fully settled run", async () => {
+    await seedJob("j5", {
+      status: "done",
+      story_id: "s5",
+      finisher_status: "done",
+      auto_publish_status: "done",
+    });
+    await seedShort("sr5", "s5", "done");
+
+    const { stopLiveRun } = await import("./story-jobs");
+    const r = await stopLiveRun("j5");
+
+    expect(r.ok).toBe(true);
+    expect(r.stopped_stages).toEqual([]);
+  });
+
+  it("writes a 'stopped' event to the story-job timeline", async () => {
+    await seedSource("rsrc2", "imported");
+    await bulkEnqueueStoryJobs(["rsrc2"]);
+    const job = await one<{ id: string }>(
+      "SELECT id FROM story_jobs WHERE reddit_id = ?",
+      ["rsrc2"],
+    );
+
+    const { stopLiveRun } = await import("./story-jobs");
+    await stopLiveRun(job!.id);
+
+    const ev = await one<{ event: string }>(
+      "SELECT event FROM story_job_events WHERE job_id = ? AND event = 'stopped'",
+      [job!.id],
+    );
+    expect(ev?.event).toBe("stopped");
   });
 });

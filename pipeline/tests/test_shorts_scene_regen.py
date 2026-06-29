@@ -213,6 +213,167 @@ class HappyPathTests(_ShortsSceneRegenTestCase):
         self.assertEqual(f1["url"], "https://gcs/other.png")
         self.assertNotIn("is_pinned", f1)
 
+    def test_passes_persisted_multi_ref_input_to_i2i(self):
+        # When a frame carries `image_input_urls` (base + world-bible refs),
+        # the regen must replay that same multi-ref list. Otherwise per-scene
+        # regen would lose the wife / kitchen / envelope consistency the
+        # initial render established.
+        self._seed_story(
+            "s-multi",
+            {
+                "doodle_frames": [
+                    {
+                        "id": "frame-00",
+                        "url": "https://gcs/old.png",
+                        "image_prompt": "wife in the kitchen",
+                        "image_input_urls": [
+                            "https://gcs/base.png",
+                            "https://gcs/wife-ref.png",
+                            "https://gcs/kitchen-ref.png",
+                        ],
+                    },
+                ],
+                "character_base_url": "https://gcs/base.png",
+            },
+        )
+        captured: dict = {}
+
+        def _capture_kie(prompt, label, **kwargs):
+            captured["image_input"] = kwargs.get("image_input")
+            return "https://kie.example/output.png"
+
+        with (
+            mock.patch.object(
+                shorts_scene_regen.media, "_generate_with_retry",
+                side_effect=_capture_kie,
+            ),
+            mock.patch.object(shorts_scene_regen.images, "download", return_value=None),
+            mock.patch.object(
+                shorts_scene_regen.gcs, "publish", return_value="https://gcs/new.png",
+            ),
+            mock.patch.object(
+                shorts_scene_regen.media, "_per_image_cost_cents", return_value=5,
+            ),
+            mock.patch.object(
+                shorts_scene_regen.media, "_regen_out_dir",
+                return_value=Path(self._tmpdir.name),
+            ),
+        ):
+            shorts_scene_regen.regen_short_scene(
+                "s-multi", "frame:frame-00", Path("."),
+            )
+
+        # The exact ordered list the initial render used must reach kie.
+        self.assertEqual(
+            captured["image_input"],
+            [
+                "https://gcs/base.png",
+                "https://gcs/wife-ref.png",
+                "https://gcs/kitchen-ref.png",
+            ],
+        )
+
+    def test_forces_base_first_when_persisted_list_is_out_of_order(self):
+        # Defensive: if a malformed config has the base elsewhere (or missing),
+        # the regen must still anchor identity by putting the base char URL
+        # first in input_urls.
+        self._seed_story(
+            "s-broken",
+            {
+                "doodle_frames": [
+                    {
+                        "id": "frame-00",
+                        "url": "https://gcs/old.png",
+                        "image_prompt": "wife in the kitchen",
+                        # base url is NOT in the list at all
+                        "image_input_urls": [
+                            "https://gcs/wife-ref.png",
+                            "https://gcs/kitchen-ref.png",
+                        ],
+                    },
+                ],
+                "character_base_url": "https://gcs/base.png",
+            },
+        )
+        captured: dict = {}
+
+        def _capture_kie(prompt, label, **kwargs):
+            captured["image_input"] = kwargs.get("image_input")
+            return "https://kie.example/output.png"
+
+        with (
+            mock.patch.object(
+                shorts_scene_regen.media, "_generate_with_retry",
+                side_effect=_capture_kie,
+            ),
+            mock.patch.object(shorts_scene_regen.images, "download", return_value=None),
+            mock.patch.object(
+                shorts_scene_regen.gcs, "publish", return_value="https://gcs/new.png",
+            ),
+            mock.patch.object(
+                shorts_scene_regen.media, "_per_image_cost_cents", return_value=5,
+            ),
+            mock.patch.object(
+                shorts_scene_regen.media, "_regen_out_dir",
+                return_value=Path(self._tmpdir.name),
+            ),
+        ):
+            shorts_scene_regen.regen_short_scene(
+                "s-broken", "frame:frame-00", Path("."),
+            )
+
+        # Base char URL pushed to the front.
+        self.assertEqual(captured["image_input"][0], "https://gcs/base.png")
+        # World-bible refs preserved behind it.
+        self.assertIn("https://gcs/wife-ref.png", captured["image_input"])
+        self.assertIn("https://gcs/kitchen-ref.png", captured["image_input"])
+
+    def test_legacy_frame_without_input_urls_falls_back_to_base_only(self):
+        # Frames generated before the world-bible feature have no
+        # `image_input_urls` field. The regen must still work — just with
+        # single-ref input — so old shorts can be re-edited.
+        self._seed_story(
+            "s-legacy",
+            {
+                "doodle_frames": [
+                    {
+                        "id": "frame-00",
+                        "url": "https://gcs/old.png",
+                        "image_prompt": "a forest",
+                    },
+                ],
+                "character_base_url": "https://gcs/base.png",
+            },
+        )
+        captured: dict = {}
+
+        def _capture_kie(prompt, label, **kwargs):
+            captured["image_input"] = kwargs.get("image_input")
+            return "https://kie.example/output.png"
+
+        with (
+            mock.patch.object(
+                shorts_scene_regen.media, "_generate_with_retry",
+                side_effect=_capture_kie,
+            ),
+            mock.patch.object(shorts_scene_regen.images, "download", return_value=None),
+            mock.patch.object(
+                shorts_scene_regen.gcs, "publish", return_value="https://gcs/new.png",
+            ),
+            mock.patch.object(
+                shorts_scene_regen.media, "_per_image_cost_cents", return_value=5,
+            ),
+            mock.patch.object(
+                shorts_scene_regen.media, "_regen_out_dir",
+                return_value=Path(self._tmpdir.name),
+            ),
+        ):
+            shorts_scene_regen.regen_short_scene(
+                "s-legacy", "frame:frame-00", Path("."),
+            )
+
+        self.assertEqual(captured["image_input"], ["https://gcs/base.png"])
+
 
 if __name__ == "__main__":
     unittest.main()

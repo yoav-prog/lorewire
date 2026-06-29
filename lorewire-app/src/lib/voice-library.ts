@@ -46,6 +46,9 @@ export interface VoiceEntry {
   language: string;
   /** Short accent / style descriptor for the card subtitle. */
   accent?: string;
+  /** "Female" | "Male" where known (Google voices are gendered; ElevenLabs
+   *  carries it in labels.gender). Undefined when the provider doesn't say. */
+  gender?: string;
   /** Short MP3 sample URL. Null when no preview is available yet (Google
    *  voices that haven't been baked into GCS — the picker should disable
    *  the play button or trigger an on-demand bake). */
@@ -197,28 +200,54 @@ async function listElevenLabs(): Promise<VoiceEntry[]> {
 
 // ─── Google Chirp 3 HD ──────────────────────────────────────────────────────
 
-// Curated set of Google Chirp 3 HD voices known to narrate well at
-// article-length text. The full Chirp 3 HD catalog is ~30 voices but
-// most are tuned for short-form (digital assistant) prompts — these 8
-// hold up across 2-3 minute narrations.
+// The full Google Chirp 3 HD en-US catalog: 30 voices (14 female, 16 male),
+// verified against Google's docs 2026-06-22. The Gemini-TTS tiers reuse the
+// same names. Autonoe is first because it is the codified house shorts narrator
+// (pipeline/shorts_narration.py SHORTS_VOICE_NAME); the rest follow females
+// then males, alphabetical. `gender` is from Google's voice table; `accent` is
+// a rough character hint only on the few we've characterised — preview to hear
+// the real delivery (Google doesn't publish per-voice descriptions).
 //
-// VERIFY-BEFORE-PHASE-3: each entry's voice_id MUST match a real Google
-// Chirp 3 HD voice name. Run a single TTS call against each id at deploy
-// time (or the bake script lands first) — Google rejects unknown names
-// with a 400, so the bake is the integration test for this list.
+// VERIFY: each voice_id is a real en-US-Chirp3-HD-<Name>; Google rejects an
+// unknown name with a 400, so a preview/bake is the integration test.
 const GOOGLE_CHIRP3_HD_VOICES: ReadonlyArray<{
   voice_id: string;
   name: string;
-  accent: string;
+  gender: "Female" | "Male";
+  accent?: string;
 }> = [
-  { voice_id: "en-US-Chirp3-HD-Aoede", name: "Aoede", accent: "Warm narrator" },
-  { voice_id: "en-US-Chirp3-HD-Charon", name: "Charon", accent: "Deep, authoritative" },
-  { voice_id: "en-US-Chirp3-HD-Fenrir", name: "Fenrir", accent: "Dramatic, low" },
-  { voice_id: "en-US-Chirp3-HD-Kore", name: "Kore", accent: "Clear, even" },
-  { voice_id: "en-US-Chirp3-HD-Leda", name: "Leda", accent: "Soft, gentle" },
-  { voice_id: "en-US-Chirp3-HD-Puck", name: "Puck", accent: "Playful, lighter" },
-  { voice_id: "en-US-Chirp3-HD-Achernar", name: "Achernar", accent: "Neutral, steady" },
-  { voice_id: "en-US-Chirp3-HD-Vindemiatrix", name: "Vindemiatrix", accent: "Warm, conversational" },
+  { voice_id: "en-US-Chirp3-HD-Autonoe", name: "Autonoe", gender: "Female", accent: "Warm, even-paced (house voice)" },
+  // Female
+  { voice_id: "en-US-Chirp3-HD-Achernar", name: "Achernar", gender: "Female", accent: "Neutral, steady" },
+  { voice_id: "en-US-Chirp3-HD-Aoede", name: "Aoede", gender: "Female", accent: "Warm narrator" },
+  { voice_id: "en-US-Chirp3-HD-Callirrhoe", name: "Callirrhoe", gender: "Female" },
+  { voice_id: "en-US-Chirp3-HD-Despina", name: "Despina", gender: "Female" },
+  { voice_id: "en-US-Chirp3-HD-Erinome", name: "Erinome", gender: "Female" },
+  { voice_id: "en-US-Chirp3-HD-Gacrux", name: "Gacrux", gender: "Female" },
+  { voice_id: "en-US-Chirp3-HD-Kore", name: "Kore", gender: "Female", accent: "Clear, even" },
+  { voice_id: "en-US-Chirp3-HD-Laomedeia", name: "Laomedeia", gender: "Female" },
+  { voice_id: "en-US-Chirp3-HD-Leda", name: "Leda", gender: "Female", accent: "Soft, gentle" },
+  { voice_id: "en-US-Chirp3-HD-Pulcherrima", name: "Pulcherrima", gender: "Female" },
+  { voice_id: "en-US-Chirp3-HD-Sulafat", name: "Sulafat", gender: "Female" },
+  { voice_id: "en-US-Chirp3-HD-Vindemiatrix", name: "Vindemiatrix", gender: "Female", accent: "Warm, conversational" },
+  { voice_id: "en-US-Chirp3-HD-Zephyr", name: "Zephyr", gender: "Female" },
+  // Male
+  { voice_id: "en-US-Chirp3-HD-Achird", name: "Achird", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Algenib", name: "Algenib", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Algieba", name: "Algieba", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Alnilam", name: "Alnilam", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Charon", name: "Charon", gender: "Male", accent: "Deep, authoritative" },
+  { voice_id: "en-US-Chirp3-HD-Enceladus", name: "Enceladus", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Fenrir", name: "Fenrir", gender: "Male", accent: "Dramatic, low" },
+  { voice_id: "en-US-Chirp3-HD-Iapetus", name: "Iapetus", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Orus", name: "Orus", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Puck", name: "Puck", gender: "Male", accent: "Playful, lighter" },
+  { voice_id: "en-US-Chirp3-HD-Rasalgethi", name: "Rasalgethi", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Sadachbia", name: "Sadachbia", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Sadaltager", name: "Sadaltager", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Schedar", name: "Schedar", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Umbriel", name: "Umbriel", gender: "Male" },
+  { voice_id: "en-US-Chirp3-HD-Zubenelgenubi", name: "Zubenelgenubi", gender: "Male" },
 ];
 
 function listGoogleChirp3HD(): VoiceEntry[] {
@@ -228,6 +257,7 @@ function listGoogleChirp3HD(): VoiceEntry[] {
     name: v.name,
     language: "en-US",
     accent: v.accent,
+    gender: v.gender,
     preview_url: previewUrlFor("google/chirp3-hd", v.voice_id),
   }));
 }
@@ -248,6 +278,7 @@ function listGoogleGemini(
     name: v.name,
     language: "en-US",
     accent: v.accent,
+    gender: v.gender,
     preview_url: previewUrlFor(provider, v.voice_id),
   }));
 }

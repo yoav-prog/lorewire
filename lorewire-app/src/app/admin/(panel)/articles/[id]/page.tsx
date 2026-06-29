@@ -6,7 +6,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getArticle, getStory, listStoriesSlim } from "@/lib/repo";
 import type { ArticleType } from "@/lib/repo";
 import { getLinkedShortFrames } from "@/lib/article-shorts";
@@ -38,6 +38,11 @@ import { ArticleEditor } from "./ArticleEditor";
 import { ArticlePayloadSidebar } from "./ArticlePayloadSidebar";
 import { ArticleSeoPanel } from "./ArticleSeoPanel";
 import { SeoSuggestPanel } from "./SeoSuggestPanel";
+import { ArticlePollEditor } from "./ArticlePollEditor";
+import {
+  getPollByArticleId,
+  getPresetForCategory,
+} from "@/lib/polls";
 
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
@@ -55,7 +60,7 @@ export default async function EditArticlePage({
     restored?: string;
   }>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const { id } = await params;
   const {
     saved,
@@ -66,6 +71,16 @@ export default async function EditArticlePage({
   } = await searchParams;
   const article = await getArticle(id);
   if (!article) notFound();
+
+  // 2026-06-18 standalone-article polls (plan §15). Author the
+  // article's own poll right next to the SEO panel. Seeds null
+  // rows with the preset for this article's type — getPresetForCategory
+  // falls back to the Drama preset when the type isn't in the closed
+  // story-category enum (news / feature / listicle / review aren't
+  // story categories), which is fine: presets are voice cues, not
+  // hard constraints, and the LLM auto-draft reads the article body.
+  const articlePoll = await getPollByArticleId(article.id);
+  const articlePollPreset = getPresetForCategory(article.type);
 
   // Parse the type-specific payload once; if the row's type is missing or
   // unknown we skip the sidebar entirely rather than render a broken form.
@@ -263,6 +278,15 @@ export default async function EditArticlePage({
             jsonLdPreview={jsonLdPreview}
           />
           <SeoSuggestPanel articleId={article.id} />
+
+          <ArticlePollEditor
+            articleId={article.id}
+            articleType={article.type}
+            poll={articlePoll}
+            presetQuestion={articlePollPreset.question}
+            presetOptionA={articlePollPreset.optionA}
+            presetOptionB={articlePollPreset.optionB}
+          />
 
           <MediaRegenPanel
             ownerKind="article"

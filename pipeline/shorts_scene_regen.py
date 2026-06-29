@@ -96,6 +96,26 @@ def regen_short_scene(
             f"i2i needs the base character image to keep identity stable"
         )
 
+    # Multi-ref input: prefer the SAME ordered ref list the original
+    # generation used (base + this scene's supporting chars / locations /
+    # items), so a regen preserves the world-bible consistency the initial
+    # render established. Fall back to base-only for legacy frames that
+    # pre-date the world-bible feature and have no `image_input_urls`
+    # field — they still get a regen, just without the multi-ref boost.
+    frame_refs = frame.get("image_input_urls")
+    if isinstance(frame_refs, list) and frame_refs:
+        ref_urls = [u for u in frame_refs if isinstance(u, str) and u.strip()]
+        if not ref_urls or ref_urls[0] != character_base_url:
+            # Force the base character to lead the input list so identity
+            # stays anchored — the documented strongest method is base-first
+            # then supporting refs. A malformed persisted list (missing or
+            # wrong-position base) would otherwise drift identity on regen.
+            ref_urls = [character_base_url] + [
+                u for u in ref_urls if u != character_base_url
+            ]
+    else:
+        ref_urls = [character_base_url]
+
     out_dir = media._regen_out_dir(repo_root, f"shorts-{safe_id}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -105,16 +125,16 @@ def regen_short_scene(
 
     print(
         f"[short scene regen start] id={safe_id} frame={frame_id} "
-        f"prompt_chars={len(prompt)}"
+        f"prompt_chars={len(prompt)} refs={len(ref_urls)}"
     )
 
-    # gpt-image-2-i2i: identity locked by the character base in input_urls.
-    # 9:16 aspect to match the rest of the short's frames.
+    # gpt-image-2-i2i: identity locked by the base + world-bible refs in
+    # input_urls. 9:16 aspect to match the rest of the short's frames.
     kie_url = media._generate_with_retry(
         prompt,
         f"id={safe_id} {label} per-scene regen",
         aspect_ratio="9:16",
-        image_input=[character_base_url],
+        image_input=ref_urls,
         model="kie/gpt-image-2-i2i",
     )
     if kie_url is None:

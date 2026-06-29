@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:drain": "node scripts/dev_drain.mjs",
     "prebuild": "node scripts/vendor_pipeline.mjs",
     "build": "next build",
     "start": "next start",
@@ -17,6 +18,8 @@
     "@tiptap/pm": "^3.26.1",
     "@tiptap/react": "^3.26.1",
     "@tiptap/starter-kit": "^3.26.1",
+    "arctic": "^3.7.0",
+    "aws4fetch": "^1.0.20",
     "google-auth-library": "^10.7.0",
     "google-spreadsheet": "^5.3.0",
     "jose": "^6.2.3",
@@ -26,6 +29,7 @@
     "react-dom": "19.2.4",
     "remotion": "^4.0.0",
     "server-only": "^0.0.1",
+    "sharp": "^0.35.2",
     "undici": "^7.0.0",
     "zod": "^4.4.3"
   },

@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
-import logging
 import time
 import traceback
 from pathlib import Path
@@ -37,18 +36,27 @@ from typing import Callable
 
 from pipeline import llm, media, stages, store, video
 
-logger = logging.getLogger(__name__)
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLL_SECONDS = 5
-
-
-def _now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 # Long enough that a normal media+video run (LLM + kie + ElevenLabs + Remotion
 # easily ~5-10 min on a healthy network) doesn't get reaped mid-flight, but
 # short enough to clean up a crashed worker within a useful window.
 STALE_AFTER_SECONDS = 30 * 60
+
+# 2026-06-19 hero+thumbnail-from-short finisher (plan:
+# _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+# How long the worker will inline-wait for a short to finish before bailing
+# on the finisher (the story still ships, just without scene-derived visuals).
+# Default 25 min covers a busy shorts queue without holding the worker slot
+# forever. Overridable via the `hero_thumbnail.wait_ceiling_seconds` setting.
+HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT = 25 * 60
+HERO_THUMB_WAIT_CEILING_SETTING_KEY = "hero_thumbnail.wait_ceiling_seconds"
+# Backoff between polls: tight at first (3s, 5s) so a fast short finisher
+# is picked up promptly, steady 10s thereafter so a stalled short doesn't
+# hammer the DB. Heartbeat event every 30s while waiting so the admin can
+# see "still waiting" in the timeline.
+HERO_THUMB_POLL_BACKOFF_SECONDS = (3, 5, 10)
+HERO_THUMB_HEARTBEAT_SECONDS = 30
 
 # Phase 7 daily-budget cap (see _plans/2026-06-14-story-jobs-followups.md).
 # Per-job spend estimate used by the worker's pre-claim budget gate.
@@ -81,40 +89,7 @@ DRAIN_UNSUPPORTED_MEDIA_REASON = (
     "re-enqueue with with_media=False or run the local worker"
 )
 
-# 2026-06-16 Reddit-import output format. Per-batch override on the
-# `story_jobs.output_format` column wins; otherwise the
-# `reddit.default_output` setting decides; otherwise REDDIT_DEFAULT_OUTPUT.
-# Plan: _plans/2026-06-16-reddit-default-to-shorts.md.
-REDDIT_DEFAULT_OUTPUT_SETTING_KEY = "reddit.default_output"
-REDDIT_DEFAULT_OUTPUT = "short"
-_VALID_OUTPUT_FORMATS = ("short", "long")
-
 ProcessFn = Callable[[dict, dict], dict]
-
-
-def resolve_output_format(
-    claimed_job: dict,
-    get_setting: Callable[[str], "str | None"] = store.get_setting,
-) -> tuple[str, str]:
-    """Decide the output format for a claimed story_jobs row.
-
-    Returns `(format, source)` where `format` is 'short' or 'long' and
-    `source` is one of 'row' (per-batch override on the row),
-    'setting' (the global `reddit.default_output` setting) or
-    'default' (the hardcoded REDDIT_DEFAULT_OUTPUT fallback).
-
-    Closed enum on both ends: a malformed row column or setting falls
-    through to the next layer rather than crashing the worker. The
-    storage layer (pipeline/store.py:enqueue_story_job) normalises bad
-    inputs to NULL on write; this resolver is the read-side defence.
-    """
-    row_raw = (claimed_job.get("output_format") or "").strip().lower()
-    if row_raw in _VALID_OUTPUT_FORMATS:
-        return row_raw, "row"
-    setting_raw = (get_setting(REDDIT_DEFAULT_OUTPUT_SETTING_KEY) or "").strip().lower()
-    if setting_raw in _VALID_OUTPUT_FORMATS:
-        return setting_raw, "setting"
-    return REDDIT_DEFAULT_OUTPUT, "default"
 
 
 def _daily_budget_cap_cents() -> int | None:
@@ -171,6 +146,68 @@ def _budget_block_reason() -> str | None:
     return None
 
 
+def _hero_thumb_wait_ceiling_seconds() -> int:
+    """Read the admin-configurable wait ceiling for the hero+thumb finisher.
+    None or non-positive override falls back to the default. Kept as a
+    function (not a module constant) so a settings change is picked up on
+    the next tick without restarting the worker."""
+    raw = (store.get_setting(HERO_THUMB_WAIT_CEILING_SETTING_KEY) or "").strip()
+    if not raw:
+        return HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT
+    try:
+        v = int(float(raw))
+    except ValueError:
+        return HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT
+    return v if v > 0 else HERO_THUMB_WAIT_CEILING_SECONDS_DEFAULT
+
+
+def _wait_for_short_done(
+    story_id: str,
+    job_id: str,
+    reddit_id: str,
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
+) -> str:
+    """Inline-poll `short_renders` for `story_id` until the latest render hits
+    a terminal state (`done`, `failed`, `error`, or `cancelled`) or the wait
+    ceiling fires. Returns the final status string; the caller branches on it.
+
+    The `sleeper` and `now` parameters are injected so unit tests drive the
+    loop without real time passing. Heartbeats emit a `waiting_for_short`
+    story_job_event every HERO_THUMB_HEARTBEAT_SECONDS so the admin's row
+    timeline narrates the wait.
+    """
+    ceiling = _hero_thumb_wait_ceiling_seconds()
+    start = now()
+    last_heartbeat = start
+    poll_idx = 0
+    while True:
+        latest = store.latest_short_render_for_story(story_id)
+        status = (latest.get("status") if latest else "") or ""
+        if status in {"done", "failed", "error", "cancelled"}:
+            return status
+        elapsed = now() - start
+        if elapsed >= ceiling:
+            return "timeout"
+        if (now() - last_heartbeat) >= HERO_THUMB_HEARTBEAT_SECONDS:
+            store.log_story_job_event(
+                job_id, reddit_id, "waiting_for_short",
+                message=f"Still waiting on short ({int(elapsed)}s elapsed)",
+                payload={
+                    "elapsed_seconds": int(elapsed),
+                    "ceiling_seconds": ceiling,
+                    "short_status": status or "missing",
+                },
+            )
+            last_heartbeat = now()
+        delay = HERO_THUMB_POLL_BACKOFF_SECONDS[
+            min(poll_idx, len(HERO_THUMB_POLL_BACKOFF_SECONDS) - 1)
+        ]
+        sleeper(delay)
+        poll_idx += 1
+
+
 # Subreddit -> category mapping is owned by stages.SUBREDDIT_CATEGORY. We
 # mirror its lookup here so reddit_source rows with subreddits the static
 # table doesn't know about still get a sensible default.
@@ -187,81 +224,17 @@ def reddit_source_to_post(row: dict) -> dict:
     real-scrape path and this queue-driven path go through identical
     downstream stages from make_idea onward — the only difference is the
     origin of the dict.
-
-    Dispatch for IdeasDB idea-only seeds (2026-06-23): when the row
-    arrives with `needs_expansion=1` (set by pipeline/ideas_import.py),
-    the seed has no real reddit body — we run stages.expand_seed_to_post
-    to synthesize a first-person narrative, persist it back into
-    reddit_source.full_text, flip needs_expansion to 0, then return the
-    post dict as usual. Idempotent: a re-run with needs_expansion=0
-    skips the LLM call and reads the cached body.
     """
-    full_text = row.get("full_text") or ""
-    if row.get("needs_expansion") == 1 and not full_text:
-        # Idea-only seed: synthesize the body once, persist, fall through
-        # into the normal path. We log at INFO so the cost shows up in
-        # the per-job timeline alongside research / write_article.
-        logger.info(
-            "[seeds-worker expand] reddit_id=%s headline=%r category=%r strength=%r",
-            row["reddit_id"], row.get("headline"), row.get("category"),
-            row.get("strength"),
-        )
-        full_text = stages.expand_seed_to_post(
-            headline=row.get("headline") or row.get("title") or "",
-            summary=row.get("summary") or "",
-            category=row.get("category"),
-            strength=row.get("strength") or "none",
-            dry_run=False,
-        )
-        # Persist the expanded body on the row in-DB so a downstream stage
-        # that re-reads the seed sees the synthesized text, and a future
-        # reaper-induced re-queue doesn't pay the LLM twice. The
-        # reddit-CSV importer is the only other writer of full_text, and
-        # idea-only seeds (subreddit='curated') are out of its scope, so
-        # this write is safe.
-        _persist_expanded_full_text(row["reddit_id"], full_text)
-        store.update_ideas_fields(row["reddit_id"], needs_expansion=0)
-        # Reflect the new state on the in-memory row so the post dict
-        # built below carries the expanded body and downstream stages
-        # don't see the empty placeholder.
-        row["full_text"] = full_text
-        row["needs_expansion"] = 0
     return {
         "id": row["reddit_id"],
         "category": _category_for(row["subreddit"]),
         "subreddit": row["subreddit"],
         "title": row["title"] or "",
-        "selftext": full_text,
+        "selftext": row["full_text"] or "",
         "score": 0,
         "num_comments": int(row.get("comments") or 0),
         "url": row.get("url") or "",
     }
-
-
-def _persist_expanded_full_text(reddit_id: str, full_text: str) -> None:
-    """Write the LLM-synthesized body back into reddit_source.full_text.
-    Lives next to reddit_source_to_post because it's the only caller and
-    the write is intentionally surgical: only `full_text` and
-    `last_synced` move. The IdeasDB-owned columns are written separately
-    via store.update_ideas_fields elsewhere in this stage."""
-    now = _now_iso()
-    if store._is_postgres():
-        with store._pg_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE reddit_source SET full_text = %s, "
-                    "last_synced = %s, length_chars = %s "
-                    "WHERE reddit_id = %s",
-                    (full_text, now, len(full_text), reddit_id),
-                )
-            conn.commit()
-        return
-    with store._sqlite_conn() as c:
-        c.execute(
-            "UPDATE reddit_source SET full_text = ?, last_synced = ?, "
-            "length_chars = ? WHERE reddit_id = ?",
-            (full_text, now, len(full_text), reddit_id),
-        )
 
 
 def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
@@ -279,6 +252,18 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     """
     post = reddit_source_to_post(reddit_row)
     with_media = bool(claimed_job.get("with_media", 1))
+    job_id = claimed_job["id"]
+    reddit_id = claimed_job["reddit_id"]
+
+    # 2026-06-16 per-row event timeline. Worker emits one event per
+    # meaningful phase so the admin detail page can render a live log.
+    # See _plans/2026-06-16-story-job-event-timeline.md. The print() lines
+    # below are kept so the worker terminal still narrates locally.
+    store.log_story_job_event(
+        job_id, reddit_id, "claimed",
+        message="Worker claimed the row",
+        payload={"with_media": with_media, "subreddit": post.get("subreddit")},
+    )
 
     before_tokens = llm.totals["total_tokens"]
     # Snapshot of running cost so we can compute the per-job delta at the
@@ -292,17 +277,65 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     idea = stages.make_idea(post, dry_run=False)
     print(f"[story-jobs idea] reddit_id={post['id']} category={idea['category']}")
     store.update_story_job_progress(claimed_job["id"], 15)
+    store.log_story_job_event(
+        job_id, reddit_id, "idea_done",
+        message=f"Generated idea: {idea.get('headline', '')[:80]}",
+        payload={"category": idea.get("category"), "headline": idea.get("headline")},
+    )
 
     research = stages.research(idea, post, dry_run=False)
     store.update_story_job_progress(claimed_job["id"], 30)
+    store.log_story_job_event(
+        job_id, reddit_id, "research_done",
+        message="Researched supporting context",
+        payload={"keys": list(research.keys()) if isinstance(research, dict) else None},
+    )
 
     body = stages.write_article(idea, research, dry_run=False)
     store.update_story_job_progress(claimed_job["id"], 50)
+    store.log_story_job_event(
+        job_id, reddit_id, "article_done",
+        message=f"Wrote article ({len(body)} chars)",
+        payload={"char_count": len(body)},
+    )
 
     branded_title, branded_syn = stages.make_title_and_synopsis(
         idea, body, dry_run=False
     )
     store.update_story_job_progress(claimed_job["id"], 60)
+    store.log_story_job_event(
+        job_id, reddit_id, "title_done",
+        message=f"Title: {(branded_title or idea.get('headline', ''))[:80]}",
+        payload={"title": branded_title, "synopsis_chars": len(branded_syn or "")},
+    )
+
+    # 2026-06-21 LLM category classifier
+    # (_plans/2026-06-21-category-classifier-and-pills.md). Subreddit map
+    # is the fallback; the classifier reads the rewritten article body so
+    # it tags accurately regardless of which subreddit a CSV row came
+    # from. A failed call returns the fallback unchanged — never NULL,
+    # never junk — so the downstream upsert stays safe.
+    prev_category = idea["category"]
+    classified = stages.classify_category(
+        branded_title or idea["headline"],
+        body,
+        fallback_category=prev_category,
+    )
+    if classified != prev_category:
+        print(
+            f"[story-jobs classify] reddit_id={post['id']} "
+            f"{prev_category} -> {classified}"
+        )
+        store.log_story_job_event(
+            job_id, reddit_id, "category_reclassified",
+            message=f"Category {prev_category} -> {classified}",
+            payload={"prev": prev_category, "next": classified},
+        )
+        idea["category"] = classified
+    else:
+        print(
+            f"[story-jobs classify] reddit_id={post['id']} kept {prev_category}"
+        )
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     row = {
@@ -310,7 +343,12 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         "reddit_id": idea["reddit_id"],
         "slug": idea["reddit_id"],
         "category": idea["category"],
-        "title": branded_title or idea["headline"],
+        # `branded_title` is guaranteed non-empty and length-gated by
+        # stages.make_title_and_synopsis (validator + retry + salvage).
+        # The pre-2026-06-25 `or idea["headline"]` fallback was the
+        # mechanism by which 99-char Reddit headlines reached the live
+        # hero. Plan: _plans/2026-06-25-title-length-gate.md.
+        "title": branded_title,
         "summary": branded_syn or post.get("selftext", "")[:160],
         "body": body,
         # Fresh from the worker lands in review, never published — the
@@ -324,6 +362,29 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     }
 
     if with_media:
+        store.log_story_job_event(
+            job_id, reddit_id, "media_started",
+            message="Generating scenes + voice + alignment (hero deferred to finisher)",
+        )
+        # 2026-06-19 (plans:
+        # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md
+        # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+        # The hero is generated AFTER the short completes — `skip_hero=True`
+        # tells `generate_media` to keep narration + alignment and skip
+        # only the two t2i hero calls that the finisher will overwrite anyway.
+        # `skip_long_form_scenes=True` skips the 27-31 long-form scene images
+        # (~$1.35-1.55/story); the finisher writes the short's own scenes into
+        # stories.images so the article reader still has inline illustrations.
+        # Net: -$1.43/story average vs. the pre-2026-06-19 worker path.
+        # 2026-06-24: skip_long_form_motion_beats=True silences the
+        # PropSlideIn (~5x kie calls @ 60s each) and MouthSwap (~2x kie
+        # calls) blocks. Both feed the long-form video composition, which
+        # Reddit jobs no longer render (per 2026-06-19 plan). Production
+        # was hitting Vercel's 800s ceiling because one prop's kie task
+        # timed out at 240s and the retry took 306s on its own, before
+        # even reaching the short handoff. Skipping shaves ~6-7 minutes
+        # off a typical media run and keeps the Vercel drain comfortably
+        # under the deadline.
         media_cols = media.generate_media(
             idea["reddit_id"],
             idea,
@@ -331,10 +392,21 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             branded_title or idea["headline"],
             False,
             repo_root=REPO_ROOT,
+            skip_hero=True,
+            skip_long_form_scenes=True,
+            skip_long_form_motion_beats=True,
         )
         row.update(media_cols)
         row["tokens"] = llm.totals["total_tokens"] - before_tokens
         store.update_story_job_progress(claimed_job["id"], 90)
+        store.log_story_job_event(
+            job_id, reddit_id, "media_done",
+            message="Voice + alignment ready (hero + scenes pending finisher)",
+            payload={
+                "audio_url": bool(media_cols.get("audio_url")),
+                "alignment": bool(media_cols.get("alignment")),
+            },
+        )
         # Video render is OUT of band — enqueue into video_renders so the
         # Cloud Run service (api/dispatch_video_render -> Cloud Run
         # /render) picks it up. Done after upsert_story below because
@@ -357,74 +429,207 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         media_delta_usd, llm_token_delta,
     )
     store.upsert_story(row)
-
-    # Resolve the per-row output format BEFORE handing off so the two
-    # branches stay symmetric (one enqueues a long-form render, the other
-    # force-enqueues a short; never both, never neither).
-    output_format, output_source = resolve_output_format(claimed_job)
-    print(
-        f"[reddit output] resolved reddit_id={post['id']} "
-        f"job_id={claimed_job['id']} format={output_format} "
-        f"source={output_source}"
+    store.log_story_job_event(
+        job_id, reddit_id, "story_persisted",
+        message=f"Saved story (cost ~${row['cost_cents'] / 100:.2f})",
+        payload={
+            "story_id": row["id"],
+            "cost_cents": row["cost_cents"],
+            "tokens": row["tokens"],
+        },
     )
 
-    if output_format == "short":
-        # Short-only branch (the new default for Reddit imports). Skip the
-        # long-form video_renders enqueue entirely: the short pipeline
-        # generates its own frames + voice from the story body, lands in
-        # the short editor (Scenes + Captions tabs), and is materially
-        # cheaper than a Cloud Run remotion render. The shorts.auto.*
-        # gate is bypassed because the admin's per-batch / per-setting
-        # pick is "make a short", but the rolling-24h cap still applies
-        # as a cost safety net.
-        print(
-            f"[reddit output] short-only skip-long-form story_id={row['id']}"
-        )
-        try:
-            from pipeline import shorts_auto
-            forced = shorts_auto.maybe_enqueue_short_for_story(
-                row["id"],
-                row.get("category"),
-                requested_by="reddit-import",
-                force=True,
-            )
-            if forced:
-                print(
-                    f"[reddit output] forced-short story_id={row['id']} "
-                    f"requested_by=reddit-import"
-                )
-            else:
-                # Cap hit (logged inside shorts_auto). Surface here too so
-                # the worker's per-row log tells the whole story without
-                # having to grep across two namespaces.
-                print(
-                    f"[reddit output] forced-short-skipped story_id={row['id']} "
-                    f"reason=cap-or-error"
-                )
-        except Exception as e:  # noqa: BLE001 - handoff must not break the job
-            print(f"[reddit output] forced-short error story_id={row['id']}: {e}")
-    else:
-        # Long-form branch: existing behaviour. Hand off to the video
-        # pipeline, then optionally an auto-short alongside if the global
-        # setting / per-category override says so. The Cloud Run cron picks
-        # the row up within ~1 min and writes back stories.video_url. The
-        # publish gate already requires video_url IS NOT NULL, so the story
-        # stays at status='review' until then.
-        if with_media:
-            _enqueue_video_render_for_story(row)
+    # 2026-06-19 (plan:
+    # _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md):
+    # The long-form video render is NO LONGER auto-enqueued for Reddit-source
+    # jobs. The MP4 render burned Cloud Run compute + worker time on top of
+    # an MP4 the public reader never asked for. The publish gate's video_url
+    # requirement has been dropped to match. The video editor's "Render"
+    # button on /admin/videos/[id] still works as an ad-hoc escape hatch
+    # when a specific story genuinely needs the long-form MP4.
 
-        # Auto-enqueue a short if the admin turned it on (global or per-category).
-        # Shorts generate their own frames + voice from the story text, so this is
-        # NOT gated on with_media. Off by default; a failure here never blocks story
-        # completion.
-        try:
-            from pipeline import shorts_auto
-            if shorts_auto.maybe_enqueue_short_for_story(row["id"], row.get("category")):
-                print(f"[story-jobs handoff] short auto-enqueued story_id={row['id']}")
-        except Exception as e:  # noqa: BLE001 - auto-short must not break the job
-            print(f"[story-jobs handoff] auto-short skipped: {e}")
+    # 2026-06-19 (plan:
+    # _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md):
+    # Reddit-source story jobs now run the short to completion inline so the
+    # hero + thumbnail can be derived from the short's character_base_url + a
+    # picker-chosen scene. For with_media=False jobs we keep the legacy
+    # fire-and-forget shape (no short, no finisher) because the admin
+    # explicitly opted out of the visual pipeline.
+    if with_media:
+        _enqueue_short_and_mark_finisher_pending(row, job_id, reddit_id)
 
     return row
+
+
+def _enqueue_short_and_mark_finisher_pending(
+    row: dict, job_id: str, reddit_id: str,
+) -> None:
+    """2026-06-24 stage-split: force-enqueue the short and flip the job's
+    `finisher_status` to 'pending' so the /api/run_hero_thumbnail_finisher
+    cron can run the hero+thumbnail finisher OUT of band when the short
+    eventually reaches status='done'.
+
+    This replaces the old inline wait + finisher (`_run_short_and_finisher`)
+    which exceeded Vercel's 800s function ceiling on fresh sources where
+    the short hadn't been pre-rendered. The new shape returns in seconds
+    after enqueueing the short, leaving the heavy work (short generation
+    + 5 i2i finisher calls) to dedicated cron functions that each have
+    their own 800s budget.
+
+    Best-effort: failure to enqueue the short is logged as a timeline
+    event but never raises — the article still ships even if the visual
+    pipeline doesn't (the public reader's fallback chain handles missing
+    hero/thumbnail).
+    """
+    from pipeline import shorts_auto
+
+    story_id = row["id"]
+    try:
+        enqueued = shorts_auto.maybe_enqueue_short_for_story(
+            story_id, row.get("category"),
+            requested_by="story_job", force=True,
+        )
+    except Exception as e:  # noqa: BLE001 — short must not break the job
+        print(f"[story-jobs handoff] short enqueue failed: {e}")
+        store.log_story_job_event(
+            job_id, reddit_id, "short_enqueue_error",
+            level="warn",
+            message=f"Short enqueue raised: {e}"[:200],
+        )
+        return
+
+    if not enqueued:
+        # Hit the global 24h cost cap. No short to wait for; skip the
+        # finisher. The admin sees this in the timeline so they know
+        # why the story shipped without scene-derived visuals.
+        print(f"[story-jobs handoff] short enqueue refused (cap hit) story_id={story_id}")
+        store.log_story_job_event(
+            job_id, reddit_id, "short_enqueue_capped",
+            level="warn",
+            message="Daily shorts cap hit; skipping hero+thumbnail finisher",
+            payload={"story_id": story_id},
+        )
+        return
+
+    print(f"[story-jobs handoff] short force-enqueued story_id={story_id}")
+    store.log_story_job_event(
+        job_id, reddit_id, "short_enqueued_for_story",
+        message=(
+            "Short enqueued (force) — finisher will run when the short is done"
+        ),
+        payload={"story_id": story_id},
+    )
+    # Stage-split signal: the finisher cron polls for this flag + a
+    # short_renders.status='done' join to decide when to claim.
+    store.mark_finisher_pending(job_id)
+
+
+def run_finisher_for_job(claimed: dict) -> None:
+    """2026-06-24 stage-split: the body of what used to be the worker's
+    inline finisher block, lifted into its own function so the Vercel
+    cron at /api/run_hero_thumbnail_finisher can call it after claiming
+    one row via `store.claim_finisher_job`.
+
+    Invariants the caller upholds:
+      - `claimed['story_id']` exists in stories.
+      - The story's short_renders row has status='done' (the claim SQL
+        verifies this).
+      - `claimed['finisher_status']` is 'running' (the claim flipped it
+        from 'pending' atomically).
+
+    On success: sets `finisher_status='done'` and, when the job is
+    Full-Pipeline-armed, calls `store.request_story_job_auto_publish`
+    so the auto-publish cron picks the row up next.
+
+    On failure: sets `finisher_status='failed'` and logs a structured
+    timeline event so the admin sees why. The job's `status='done'`
+    flag is left as-is — the article ships even without the visual
+    finisher because the public reader has a fallback chain.
+    """
+    job_id = claimed["id"]
+    reddit_id = claimed["reddit_id"]
+    story_id = claimed["story_id"]
+    if not story_id:
+        store.set_finisher_status(job_id, "failed")
+        store.log_story_job_event(
+            job_id, reddit_id, "hero_thumbnail_skipped",
+            level="warn",
+            message="Finisher claim had no story_id",
+        )
+        return
+
+    try:
+        result = media.generate_hero_and_thumbnail_from_short(story_id, REPO_ROOT)
+    except ValueError as e:
+        # Expected setup failures (missing character_base_url, malformed
+        # props, etc.) — surfaced verbatim by `_build_hero_and_thumbnail_from_short`.
+        store.set_finisher_status(job_id, "failed")
+        store.log_story_job_event(
+            job_id, reddit_id, "hero_thumbnail_skipped",
+            level="warn",
+            message=str(e)[:200],
+        )
+        print(f"[finisher refused] story_id={story_id}: {e}")
+        return
+    except Exception as e:  # noqa: BLE001 — finisher must not break the cron
+        traceback.print_exc()
+        store.set_finisher_status(job_id, "failed")
+        store.log_story_job_event(
+            job_id, reddit_id, "hero_thumbnail_error",
+            level="error",
+            message=f"Finisher raised: {e}"[:200],
+        )
+        print(f"[finisher error] story_id={story_id}: {e}")
+        return
+
+    # The image columns (hero_image, hero_image_landscape, thumbnail_*)
+    # AND stories.video_url were written by the finisher's per-variant
+    # store helpers directly. We only need to add the i2i spend to
+    # stories.cost_cents so the daily budget bar tracks reality.
+    extra_cents = int(result.get("cost_cents") or 0)
+    story = store.fetch_story(story_id)
+    base_cents = int((story or {}).get("cost_cents") or 0)
+    store.update_story_cost_cents(story_id, base_cents + extra_cents)
+    store.log_story_job_event(
+        job_id, reddit_id, "hero_thumbnail_built",
+        message=(
+            f"Hero+thumbnail built (+${extra_cents / 100:.2f}, "
+            f"hero=#{result.get('hero_index')}, thumb=#{result.get('thumbnail_index')})"
+        ),
+        payload={
+            "story_id": story_id,
+            "cost_cents_added": extra_cents,
+            "hero_index": result.get("hero_index"),
+            "thumbnail_index": result.get("thumbnail_index"),
+            "picker_reasoning": result.get("picker_reasoning"),
+            "hero_image": result.get("hero_image"),
+            "hero_image_landscape": result.get("hero_image_landscape"),
+            "thumbnail_image": result.get("thumbnail_image"),
+            "thumbnail_image_landscape": result.get("thumbnail_image_landscape"),
+            "thumbnail_image_square": result.get("thumbnail_image_square"),
+        },
+    )
+    print(
+        f"[finisher done] story_id={story_id} +${extra_cents / 100:.2f}"
+    )
+    store.set_finisher_status(job_id, "done")
+
+    # Full Pipeline auto-publish handoff. The worker used to do this
+    # inline after finish_story_job; with stage-split it must happen
+    # HERE so the auto-publish drain only sees rows that have a
+    # working hero+thumbnail. Reading from `claimed` is safe because
+    # full_pipeline is set at enqueue and never mutates.
+    if claimed.get("full_pipeline"):
+        store.request_story_job_auto_publish(job_id)
+        print(
+            f"[finisher auto-publish-requested] job={job_id} "
+            f"reddit_id={reddit_id} story_id={story_id}"
+        )
+        store.log_story_job_event(
+            job_id, reddit_id, "auto_publish_requested",
+            message="Full Pipeline opt-in: auto-publish queued for TS drain",
+            payload={"story_id": story_id},
+        )
 
 
 def _enqueue_video_render_for_story(story_row: dict) -> None:
@@ -563,11 +768,18 @@ def run_one_tick(
         result_row = pfn(claimed, reddit_row)
     except Exception as e:  # noqa: BLE001 — worker catches everything per-row
         traceback.print_exc()
-        store.fail_story_job(job_id, f"{type(e).__name__}: {e}")
+        err_msg = f"{type(e).__name__}: {e}"
+        store.fail_story_job(job_id, err_msg)
         # Leave the source row in 'queued' so a future Process re-pick is
         # possible without an admin "Reset" affordance.
         store.set_reddit_source_status(reddit_id, "queued")
-        print(f"[story-jobs error] job={job_id} {type(e).__name__}: {e}")
+        print(f"[story-jobs error] job={job_id} {err_msg}")
+        store.log_story_job_event(
+            job_id, reddit_id, "failed",
+            level="error",
+            message=err_msg[:200],
+            payload={"exc_type": type(e).__name__},
+        )
         return True
 
     story_id = result_row.get("id") if isinstance(result_row, dict) else None
@@ -575,6 +787,11 @@ def run_one_tick(
         store.fail_story_job(job_id, "process returned no story id")
         store.set_reddit_source_status(reddit_id, "queued")
         print(f"[story-jobs error] job={job_id} no story id returned")
+        store.log_story_job_event(
+            job_id, reddit_id, "failed",
+            level="error",
+            message="Process returned no story id",
+        )
         return True
 
     store.finish_story_job(job_id, story_id)
@@ -583,6 +800,30 @@ def run_one_tick(
         f"[story-jobs done] job={job_id} reddit_id={reddit_id} "
         f"story_id={story_id}"
     )
+    store.log_story_job_event(
+        job_id, reddit_id, "finished",
+        message=f"Done. Story: {story_id}",
+        payload={"story_id": story_id},
+    )
+    # 2026-06-24 Full Pipeline auto-publish handoff. The stage-split
+    # moved this for with_media=True jobs into `run_finisher_for_job`
+    # (the cron) because we want the auto-publish to fire ONLY after
+    # the hero+thumbnail are in place — otherwise the publish gate
+    # would reject for missing visuals. For with_media=False jobs
+    # there's no finisher, so the worker still arms auto-publish here
+    # directly.
+    with_media = bool(claimed.get("with_media", 1))
+    if claimed.get("full_pipeline") and not with_media:
+        store.request_story_job_auto_publish(job_id)
+        print(
+            f"[story-jobs auto-publish-requested] job={job_id} "
+            f"reddit_id={reddit_id} story_id={story_id}"
+        )
+        store.log_story_job_event(
+            job_id, reddit_id, "auto_publish_requested",
+            message="Full Pipeline opt-in: auto-publish queued (no media path)",
+            payload={"story_id": story_id},
+        )
     return True
 
 

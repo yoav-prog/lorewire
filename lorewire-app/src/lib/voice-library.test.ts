@@ -73,13 +73,14 @@ describe("listVoices", () => {
     const voices = await listVoices({ forceRefresh: true });
     const byProvider = countByProvider(voices);
     expect(byProvider.elevenlabs).toBe(2);
-    // Hardcoded Google list is 8 voices; same set reused for both
-    // Gemini variants. Locked here because adding/removing a voice
-    // ought to be a deliberate code change with a test update.
-    expect(byProvider["google/chirp3-hd"]).toBe(8);
-    expect(byProvider["google/gemini-25-flash-tts"]).toBe(8);
-    expect(byProvider["google/gemini-31-flash-tts"]).toBe(8);
-    expect(voices).toHaveLength(2 + 8 + 8 + 8);
+    // The full Google Chirp 3 HD en-US catalog is 30 voices (verified against
+    // Google's docs 2026-06-22); the same set is reused for both Gemini
+    // variants. Locked here because adding/removing a voice ought to be a
+    // deliberate code change with a test update.
+    expect(byProvider["google/chirp3-hd"]).toBe(30);
+    expect(byProvider["google/gemini-25-flash-tts"]).toBe(30);
+    expect(byProvider["google/gemini-31-flash-tts"]).toBe(30);
+    expect(voices).toHaveLength(2 + 30 + 30 + 30);
   });
 
   it("drops the ElevenLabs section when the API key is missing", async () => {
@@ -91,7 +92,7 @@ describe("listVoices", () => {
     const byProvider = countByProvider(voices);
     expect(byProvider.elevenlabs).toBeUndefined();
     // Other providers still surface — graceful degrade is per-section.
-    expect(byProvider["google/chirp3-hd"]).toBe(8);
+    expect(byProvider["google/chirp3-hd"]).toBe(30);
   });
 
   it("drops the ElevenLabs section when the live fetch returns non-200", async () => {
@@ -105,7 +106,7 @@ describe("listVoices", () => {
     const voices = await listVoices({ forceRefresh: true });
     expect(countByProvider(voices).elevenlabs).toBeUndefined();
     // Google sections unaffected — section failures are isolated.
-    expect(countByProvider(voices)["google/chirp3-hd"]).toBe(8);
+    expect(countByProvider(voices)["google/chirp3-hd"]).toBe(30);
   });
 
   it("drops the ElevenLabs section when fetch throws (network error)", async () => {
@@ -118,7 +119,7 @@ describe("listVoices", () => {
     );
     const voices = await listVoices({ forceRefresh: true });
     expect(countByProvider(voices).elevenlabs).toBeUndefined();
-    expect(countByProvider(voices)["google/chirp3-hd"]).toBe(8);
+    expect(countByProvider(voices)["google/chirp3-hd"]).toBe(30);
   });
 
   it("caches the result and serves the cached list on subsequent calls", async () => {

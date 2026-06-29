@@ -29,23 +29,74 @@ let baseUrl;
  *  received so the segments-parsing tests can assert what the HTTP
  *  layer handed downstream. Reset before each segments-parsing case. */
 let lastRenderCall = null;
+/** Captures the (storyId, hash, inputProps) tuple for /render-poster.
+ *  Reset before each poster-parsing case. */
+let lastPosterRenderCall = null;
+
+/** Captures the last (url) the probe stub received so the /probe-mp4
+ *  test set can assert what the HTTP layer forwarded into the helper. */
+let lastProbeCall = null;
 
 before(async () => {
   process.env.CRON_SECRET = SECRET;
+  // GCS_BUCKET feeds the /probe-mp4 URL allow-list — without it every
+  // probe request 400s, regardless of the URL.
+  process.env.GCS_BUCKET = "test-bucket";
   // Stubbed renderer: never touches Remotion or GCS. The HTTP layer
-  // only needs to know the contract — Promise<{ url, elapsed_ms }> —
-  // not the implementation.
+  // only needs to know the contract — Promise<{ url, elapsed_ms,
+  // duration_ms }> — not the implementation. duration_ms was added
+  // by _plans/2026-06-29-actual-mp4-duration.md; the stub returns a
+  // deterministic value so the response-shape test can assert it.
   const render = async (storyId, inputProps, segments) => {
     lastRenderCall = { storyId, inputProps, segments };
     if (storyId === "boom") {
       throw new Error("renderMedia failed: bad composition");
     }
+    if (storyId === "no-probe") {
+      // Renderer's ffprobe failed; the field surfaces as null and the
+      // dispatcher's writer falls back to the legacy sum.
+      return {
+        url: `https://storage.googleapis.com/test-bucket/${storyId}/video.mp4`,
+        elapsed_ms: 12345,
+        duration_ms: null,
+      };
+    }
     return {
       url: `https://storage.googleapis.com/test-bucket/${storyId}/video.mp4`,
       elapsed_ms: 12345,
+      duration_ms: 44321,
     };
   };
-  const app = createApp(render);
+  // Phase 2 stub for /render-poster, extended for Phase 3 aspect
+  // routing. The fourth arg (`aspect`) is optional in production
+  // (default "portrait"); the stub captures it so the aspect-routing
+  // tests can assert what the HTTP layer forwarded into the renderer.
+  const renderPoster = async (storyId, hash, inputProps, aspect) => {
+    lastPosterRenderCall = { storyId, hash, inputProps, aspect };
+    if (storyId === "poster-boom") {
+      throw new Error("renderStill failed: bad composition");
+    }
+    // Landscape returns a distinct key shape (the GCS write uses
+    // `poster-landscape-{hash}.png`); the response URL mirrors that
+    // so the tests can assert routing reached the right composition.
+    const keyPrefix = aspect === "landscape" ? "poster-landscape-" : "poster-";
+    return {
+      url: `https://storage.googleapis.com/test-bucket/${storyId}-short/${keyPrefix}${hash}.png`,
+      elapsed_ms: 678,
+      hash,
+    };
+  };
+  // Stubbed probe: never spawns ffprobe or hits the network. Mirrors
+  // the renderer's "deterministic value for the success path, named
+  // sentinel for the failure path" pattern.
+  const probeRemote = async (url) => {
+    lastProbeCall = { url };
+    if (url.includes("boom")) {
+      throw new Error("ffprobe failed: bad MP4");
+    }
+    return 44321;
+  };
+  const app = createApp(render, renderPoster, probeRemote);
   server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   const { port } = server.address();
@@ -136,7 +187,7 @@ describe("Cloud Run render service /render body validation", () => {
 });
 
 describe("Cloud Run render service /render success path", () => {
-  it("returns the URL + elapsed_ms from the renderer", async () => {
+  it("returns the URL + elapsed_ms + duration_ms from the renderer", async () => {
     const { status, body } = await post("/render", {
       auth: `Bearer ${SECRET}`,
       body: { storyId: "envelope", configHash: "abc", inputProps: {} },
@@ -147,6 +198,22 @@ describe("Cloud Run render service /render success path", () => {
       "https://storage.googleapis.com/test-bucket/envelope/video.mp4",
     );
     assert.equal(body.elapsed_ms, 12345);
+    // _plans/2026-06-29-actual-mp4-duration.md — the dispatcher reads
+    // this field and stamps it onto short_renders.props.assembled_duration_ms
+    // so every reader path can prefer it over body+intro+outro math.
+    assert.equal(body.duration_ms, 44321);
+  });
+
+  it("surfaces duration_ms=null when the renderer's ffprobe failed", async () => {
+    // ffprobe is best-effort: the render still ships and the dispatcher
+    // falls back to the legacy sum. Mirrors the renderAndUploadStory
+    // catch path in render.ts.
+    const { status, body } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: { storyId: "no-probe", configHash: "abc", inputProps: {} },
+    });
+    assert.equal(status, 200);
+    assert.equal(body.duration_ms, null);
   });
 });
 
@@ -222,5 +289,382 @@ describe("Cloud Run render service /render segments parsing", () => {
     });
     assert.equal(status, 200);
     assert.deepEqual(lastRenderCall.segments, { intro, outro: null });
+  });
+
+  it("passes hookEndSec through when the dispatcher sends a positive number", async () => {
+    // _plans/2026-06-28-hook-before-brand-intro.md. The dispatcher
+    // computes hook_end_ms from the alignment data and POSTs the
+    // seconds-form here so the server stays content-free.
+    lastRenderCall = null;
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        storyId: "envelope",
+        configHash: "abc",
+        inputProps: {},
+        segments: { intro, outro: null, hookEndSec: 2.5 },
+      },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, {
+      intro,
+      outro: null,
+      hookEndSec: 2.5,
+    });
+  });
+
+  it("drops hookEndSec when it's <= 0, non-finite, or wrong type", async () => {
+    // Defense in depth: a stale / malformed dispatcher can't push the
+    // splice into an unsafe shape. Falls through to the legacy ordering.
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    for (const bad of [0, -1, Infinity, NaN, "2.5", null]) {
+      lastRenderCall = null;
+      const { status } = await post("/render", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          storyId: "envelope",
+          configHash: "abc",
+          inputProps: {},
+          segments: { intro, outro: null, hookEndSec: bad },
+        },
+      });
+      assert.equal(status, 200);
+      assert.equal(
+        lastRenderCall.segments.hookEndSec,
+        undefined,
+        `hookEndSec=${JSON.stringify(bad)} must be dropped`,
+      );
+    }
+  });
+
+  it("passes outroLeadInSec through when the dispatcher sends one", async () => {
+    // Pre-existing latent bug: SpliceSegments declared outroLeadInSec
+    // and the renderer used it, but parseSegments dropped it before
+    // 2026-06-28. The hook-first refactor that added hookEndSec parsing
+    // also fixed this gap. Lock the fix in with a regression test.
+    lastRenderCall = null;
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    const outro = "https://storage.googleapis.com/test-bucket/segments/o1.mp4";
+    const { status } = await post("/render", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        storyId: "envelope",
+        configHash: "abc",
+        inputProps: {},
+        segments: { intro, outro, outroLeadInSec: 1.5 },
+      },
+    });
+    assert.equal(status, 200);
+    assert.deepEqual(lastRenderCall.segments, {
+      intro,
+      outro,
+      outroLeadInSec: 1.5,
+    });
+  });
+});
+
+// _plans/2026-06-28-phase-2-social-poster-render.md.
+// The /render-poster endpoint mirrors /render's HTTP layer (auth + body
+// validation + error mapping) but invokes the renderStill seam instead
+// of renderMedia. These tests stub the renderer so we're testing the
+// HTTP layer end-to-end without spinning up Remotion.
+
+const STORY = "envelope";
+const VALID_HASH = "a1b2c3d4e5f60718";
+const VALID_POSTER_BODY = {
+  storyId: STORY,
+  hash: VALID_HASH,
+  inputProps: {
+    scene_1_url: "https://media.lorewire.com/envelope-short/frame-00.png",
+    text: "Her wedding dress was destroyed the morning of the ceremony.",
+    brand_text: "LORE WIRE",
+  },
+};
+
+describe("Cloud Run render service /render-poster auth", () => {
+  it("returns 401 when Authorization header missing", async () => {
+    const { status, body } = await post("/render-poster", {
+      body: VALID_POSTER_BODY,
+    });
+    assert.equal(status, 401);
+    assert.equal(body.error, "unauthorized");
+  });
+
+  it("returns 401 when token is wrong", async () => {
+    const { status } = await post("/render-poster", {
+      auth: "Bearer wrong",
+      body: VALID_POSTER_BODY,
+    });
+    assert.equal(status, 401);
+  });
+});
+
+describe("Cloud Run render service /render-poster body validation", () => {
+  it("returns 400 when body is missing", async () => {
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+    });
+    assert.equal(status, 400);
+    assert.match(body.error, /storyId/);
+  });
+
+  it("returns 400 when storyId is missing", async () => {
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, storyId: undefined },
+    });
+    assert.equal(status, 400);
+  });
+
+  it("returns 400 when hash doesn't match the required hex format", async () => {
+    for (const badHash of ["", "../escape", "Z" + VALID_HASH.slice(1), "abc", "a".repeat(33)]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: { ...VALID_POSTER_BODY, hash: badHash },
+      });
+      assert.equal(status, 400, `hash=${JSON.stringify(badHash)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when inputProps is missing or non-object", async () => {
+    for (const bad of [null, "props", 42, []]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: { ...VALID_POSTER_BODY, inputProps: bad },
+      });
+      assert.equal(status, 400, `inputProps=${JSON.stringify(bad)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when scene_1_url is missing or too long", async () => {
+    for (const badUrl of ["", "x".repeat(2001), null, 42]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          ...VALID_POSTER_BODY,
+          inputProps: { ...VALID_POSTER_BODY.inputProps, scene_1_url: badUrl },
+        },
+      });
+      assert.equal(status, 400, `scene_1_url=${JSON.stringify(badUrl)?.slice(0, 30)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when text is missing or empty", async () => {
+    for (const badText of [undefined, "", null, 42]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          ...VALID_POSTER_BODY,
+          inputProps: { ...VALID_POSTER_BODY.inputProps, text: badText },
+        },
+      });
+      assert.equal(status, 400, `text=${JSON.stringify(badText)} should be rejected`);
+    }
+  });
+
+  it("returns 400 when text is too long", async () => {
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        ...VALID_POSTER_BODY,
+        inputProps: { ...VALID_POSTER_BODY.inputProps, text: "x".repeat(281) },
+      },
+    });
+    assert.equal(status, 400);
+  });
+});
+
+describe("Cloud Run render service /render-poster success path", () => {
+  it("returns the URL + elapsed_ms + hash from the renderer", async () => {
+    lastPosterRenderCall = null;
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: VALID_POSTER_BODY,
+    });
+    assert.equal(status, 200);
+    assert.equal(
+      body.url,
+      `https://storage.googleapis.com/test-bucket/${STORY}-short/poster-${VALID_HASH}.png`,
+    );
+    assert.equal(body.elapsed_ms, 678);
+    assert.equal(body.hash, VALID_HASH);
+    // The renderer saw the (storyId, hash, inputProps) tuple intact.
+    assert.equal(lastPosterRenderCall.storyId, STORY);
+    assert.equal(lastPosterRenderCall.hash, VALID_HASH);
+    assert.equal(
+      lastPosterRenderCall.inputProps.text,
+      "Her wedding dress was destroyed the morning of the ceremony.",
+    );
+  });
+
+  it("normalizes a missing optional brand_text to undefined", async () => {
+    lastPosterRenderCall = null;
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        ...VALID_POSTER_BODY,
+        inputProps: {
+          scene_1_url: VALID_POSTER_BODY.inputProps.scene_1_url,
+          text: VALID_POSTER_BODY.inputProps.text,
+        },
+      },
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.inputProps.brand_text, undefined);
+  });
+});
+
+describe("Cloud Run render service /render-poster error mapping", () => {
+  it("returns 500 with the error message when the renderer throws", async () => {
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, storyId: "poster-boom" },
+    });
+    assert.equal(status, 500);
+    assert.match(body.error, /renderStill failed/);
+  });
+});
+
+// Phase 3 aspect routing. Per
+// _plans/2026-06-29-phase-3-og-poster-cards.md. The validator accepts
+// `aspect: "portrait" | "landscape"` (default "portrait" for back-
+// compat with stale dispatchers), forwards it to the renderer, and
+// rejects anything else with 400.
+describe("Cloud Run render service /render-poster aspect param", () => {
+  it("defaults to portrait when aspect is missing (Phase 2 back-compat)", async () => {
+    lastPosterRenderCall = null;
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: VALID_POSTER_BODY, // no aspect field
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.aspect, "portrait");
+    // GCS key shape is the Phase 2 key (no -landscape- segment).
+    assert.match(body.url, /-short\/poster-[a-f0-9]+\.png$/);
+  });
+
+  it("routes aspect=portrait explicitly", async () => {
+    lastPosterRenderCall = null;
+    const { status } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, aspect: "portrait" },
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.aspect, "portrait");
+  });
+
+  it("routes aspect=landscape to the landscape composition", async () => {
+    lastPosterRenderCall = null;
+    const { status, body } = await post("/render-poster", {
+      auth: `Bearer ${SECRET}`,
+      body: { ...VALID_POSTER_BODY, aspect: "landscape" },
+    });
+    assert.equal(status, 200);
+    assert.equal(lastPosterRenderCall.aspect, "landscape");
+    // GCS key has the -landscape- segment so portrait and landscape
+    // can't collide on the same hash.
+    assert.match(body.url, /-short\/poster-landscape-[a-f0-9]+\.png$/);
+  });
+
+  it("returns 400 when aspect is an unrecognized string", async () => {
+    for (const bad of ["square", "PORTRAIT", "landscape ", 123, true, null]) {
+      const { status } = await post("/render-poster", {
+        auth: `Bearer ${SECRET}`,
+        body: { ...VALID_POSTER_BODY, aspect: bad },
+      });
+      assert.equal(status, 400, `aspect=${JSON.stringify(bad)} must reject`);
+    }
+  });
+});
+
+// _plans/2026-06-29-actual-mp4-duration.md. The /probe-mp4 endpoint is
+// the backfill path: an admin one-shot that hands existing MP4 URLs to
+// Cloud Run, gets back the actual ffprobed duration, and stamps it onto
+// short_renders.props.assembled_duration_ms. Auth is the same CRON_SECRET
+// bearer; the URL is gated through the same env-driven allow-list the
+// renderer's segment downloads use.
+describe("Cloud Run /probe-mp4 auth", () => {
+  it("returns 401 without an Authorization header", async () => {
+    const { status, body } = await post("/probe-mp4", {
+      body: {
+        url: "https://storage.googleapis.com/test-bucket/x/video.mp4",
+      },
+    });
+    assert.equal(status, 401);
+    assert.equal(body.error, "unauthorized");
+  });
+
+  it("returns 401 with the wrong token", async () => {
+    const { status } = await post("/probe-mp4", {
+      auth: "Bearer wrong",
+      body: {
+        url: "https://storage.googleapis.com/test-bucket/x/video.mp4",
+      },
+    });
+    assert.equal(status, 401);
+  });
+});
+
+describe("Cloud Run /probe-mp4 URL allow-list", () => {
+  it("returns 400 when the URL is missing or empty", async () => {
+    for (const body of [undefined, {}, { url: "" }, { url: 123 }]) {
+      const { status } = await post("/probe-mp4", {
+        auth: `Bearer ${SECRET}`,
+        body,
+      });
+      assert.equal(
+        status,
+        400,
+        `body=${JSON.stringify(body)} must be 400`,
+      );
+    }
+  });
+
+  it("returns 400 when the URL host is not on the allow-list", async () => {
+    // GCS_BUCKET is "test-bucket" in this suite, MEDIA_PUBLIC_BASE is
+    // unset. Any URL outside `storage.googleapis.com/test-bucket/...`
+    // must fail closed.
+    for (const url of [
+      "https://attacker.example/payload.mp4",
+      "https://storage.googleapis.com/other-bucket/x/video.mp4",
+      "http://storage.googleapis.com/test-bucket/x/video.mp4", // http (not https)
+      "file:///etc/passwd",
+      "not a url at all",
+    ]) {
+      const { status, body } = await post("/probe-mp4", {
+        auth: `Bearer ${SECRET}`,
+        body: { url },
+      });
+      assert.equal(status, 400, `url=${url} must be 400`);
+      assert.match(body.error, /allow-list/);
+    }
+  });
+});
+
+describe("Cloud Run /probe-mp4 success path", () => {
+  it("returns the probed duration_ms for an allow-listed URL", async () => {
+    lastProbeCall = null;
+    const url = "https://storage.googleapis.com/test-bucket/short.mp4";
+    const { status, body } = await post("/probe-mp4", {
+      auth: `Bearer ${SECRET}`,
+      body: { url },
+    });
+    assert.equal(status, 200);
+    assert.equal(body.duration_ms, 44321);
+    assert.deepEqual(lastProbeCall, { url });
+  });
+
+  it("returns 500 when the probe helper throws", async () => {
+    // The stub throws on URLs containing 'boom'. Mirrors the real
+    // probeRemoteMp4DurationMs failure path.
+    const { status, body } = await post("/probe-mp4", {
+      auth: `Bearer ${SECRET}`,
+      body: {
+        url: "https://storage.googleapis.com/test-bucket/boom.mp4",
+      },
+    });
+    assert.equal(status, 500);
+    assert.match(body.error, /ffprobe failed/);
   });
 });

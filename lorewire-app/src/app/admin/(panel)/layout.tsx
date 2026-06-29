@@ -1,20 +1,28 @@
-import { requireAdmin } from "@/lib/dal";
+import { currentUser, requireStaff } from "@/lib/dal";
+import { capabilitiesFor } from "@/lib/authz";
 import { logout } from "@/app/admin/actions";
 import AdminSidebar from "@/app/admin/AdminSidebar";
 import UserMenu from "@/app/admin/UserMenu";
-import CommandPalette from "@/app/admin/CommandPalette";
+import GlobalSearch from "@/app/admin/GlobalSearch";
+import ImpersonationBanner from "@/components/ImpersonationBanner";
 
 // Studio shell. Sidebar + content column. The sidebar holds the brand and all
-// navigation; the header is now a thin chrome line carrying just the user
-// menu (and, on mobile, sitting alongside the hamburger fixed-positioned by
-// the sidebar). See _plans/2026-06-11-admin-reorg.md for the full IA.
+// navigation; the header carries the global admin search bar + user menu.
+// Cmd-K / Ctrl-K and "/" both focus the search bar (the previous CommandPalette
+// stub is gone — see _plans/2026-06-19-global-admin-search.md).
+// See also _plans/2026-06-11-admin-reorg.md for the original IA.
 
 export default async function PanelLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const session = await requireAdmin();
+  const session = await requireStaff();
+  // Capabilities of the signed-in staff member, read from the DB role (reuses
+  // the per-request cached lookup requireAdmin already did). Drives which nav
+  // items the sidebar shows; the per-page gates still enforce access.
+  const me = await currentUser();
+  const caps = capabilitiesFor(me?.role);
   const isDev = process.env.NODE_ENV !== "production";
 
   console.info("[admin shell] render", {
@@ -37,17 +45,24 @@ export default async function PanelLayout({
   );
 
   return (
-    <div className="flex min-h-screen">
-      <AdminSidebar isDev={isDev} />
-      <div className="flex min-h-screen min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-10 flex items-center justify-end gap-3 border-b border-line bg-bg/85 px-5 py-3 backdrop-blur md:px-7">
-          <UserMenu email={session.email} signOutSlot={signOutSlot} />
-        </header>
-        <main className="mx-auto w-full max-w-[1100px] px-5 py-7 md:px-7">
-          {children}
-        </main>
+    <>
+      <ImpersonationBanner />
+      <div className="flex min-h-screen">
+        <AdminSidebar isDev={isDev} caps={caps} />
+        <div className="flex min-h-screen min-w-0 flex-1 flex-col">
+          <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-line bg-bg/85 px-5 py-3 backdrop-blur md:px-7">
+            <div className="flex-1">
+              {/* The search API queries content (stories/reddit), so it's gated
+                  on content.manage — only show the bar to staff who can use it. */}
+              {caps.includes("content.manage") && <GlobalSearch />}
+            </div>
+            <UserMenu email={session.email} signOutSlot={signOutSlot} />
+          </header>
+          <main className="mx-auto w-full max-w-[1100px] px-5 py-7 md:px-7">
+            {children}
+          </main>
+        </div>
       </div>
-      <CommandPalette />
-    </div>
+    </>
   );
 }

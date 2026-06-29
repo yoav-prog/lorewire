@@ -206,6 +206,91 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
     expect(failSpy).not.toHaveBeenCalled();
   });
 
+  it("rewrites legacy GCS URLs in inputProps onto MEDIA_PUBLIC_BASE before POSTing to Cloud Run", async () => {
+    // The load-bearing assertion for the 2026-06-23 outbound-URL fix:
+    // pre-migration GCS URLs persisted in video_config must arrive at
+    // Cloud Run already pointed at the R2 delivery host, otherwise
+    // Remotion's fetch 404s against GCS and the render fails.
+    vi.stubEnv("MEDIA_PUBLIC_BASE", "https://media.lorewire.com");
+    vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(
+        JSON.stringify({
+          title: "Envelope",
+          voiceover_url:
+            "https://storage.googleapis.com/aporia-unleash/envelope/voice.mp3",
+          hero_image:
+            "https://storage.googleapis.com/aporia-unleash/envelope/hero.png?v=abc",
+          scenes: [
+            {
+              url: "https://storage.googleapis.com/aporia-unleash/envelope/scene-00.png",
+            },
+          ],
+          caption: "Just prose, leave alone",
+        }),
+      ),
+    );
+    vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+    undiciFetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ url: "https://example/out.mp4" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await GET(makeReq({ auth: "Bearer test-secret" }));
+
+    expect(undiciFetchMock).toHaveBeenCalledTimes(1);
+    const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+    const sentBody = JSON.parse(callInit.body as string) as {
+      inputProps: {
+        voiceover_url: string;
+        hero_image: string;
+        scenes: { url: string }[];
+        caption: string;
+      };
+    };
+    expect(sentBody.inputProps.voiceover_url).toBe(
+      "https://media.lorewire.com/envelope/voice.mp3",
+    );
+    expect(sentBody.inputProps.hero_image).toBe(
+      "https://media.lorewire.com/envelope/hero.png?v=abc",
+    );
+    expect(sentBody.inputProps.scenes[0].url).toBe(
+      "https://media.lorewire.com/envelope/scene-00.png",
+    );
+    expect(sentBody.inputProps.caption).toBe("Just prose, leave alone");
+  });
+
+  it("leaves inputProps unchanged when MEDIA_PUBLIC_BASE is unset (dev / pre-cutover)", async () => {
+    vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+    vi.spyOn(repo, "getStory").mockResolvedValue(
+      makeStory(
+        JSON.stringify({
+          voiceover_url:
+            "https://storage.googleapis.com/aporia-unleash/envelope/voice.mp3",
+        }),
+      ),
+    );
+    vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+    undiciFetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ url: "https://example/out.mp4" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await GET(makeReq({ auth: "Bearer test-secret" }));
+
+    const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+    const sentBody = JSON.parse(callInit.body as string) as {
+      inputProps: { voiceover_url: string };
+    };
+    expect(sentBody.inputProps.voiceover_url).toBe(
+      "https://storage.googleapis.com/aporia-unleash/envelope/voice.mp3",
+    );
+  });
+
   it("fails the render when the story row is gone", async () => {
     vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
     vi.spyOn(repo, "getStory").mockResolvedValue(null);
@@ -394,6 +479,82 @@ describe("/api/render_video (Vercel cron orchestrator)", () => {
       expect(sent.segments.outro).toBe(
         "https://storage.googleapis.com/b/segments/o1.mp4",
       );
+    });
+
+    it("does NOT rewrite intro/outro URLs to MEDIA_PUBLIC_BASE even when the rewriter is active for inputProps", async () => {
+      // Regression for the 2026-06-23 "intro and outro missing from rendered
+      // short even after manual override" bug. The dispatcher used to call
+      // `rewriteStoredMediaUrlsDeep(segments)` for consistency, which when
+      // MEDIA_PUBLIC_BASE was set rewrote each segment URL to
+      // `media.lorewire.com/<key>` — a host that
+      // `video/server/render.ts:parseGcsSegmentUrl` rejects, so the splice
+      // was silently skipped and the rendered MP4 came back body-only.
+      // Cloud Run downloads segments via the authenticated GCS SDK, so
+      // public-read state does not matter and the rewriter is not needed
+      // here. Assert the segments pass through verbatim even when
+      // MEDIA_PUBLIC_BASE is set (which would activate the rewriter for
+      // inputProps).
+      const prev = process.env.MEDIA_PUBLIC_BASE;
+      process.env.MEDIA_PUBLIC_BASE = "https://media.lorewire.com";
+      try {
+        vi.spyOn(queue, "claimNextRender").mockResolvedValue(FAKE_ROW);
+        vi.spyOn(repo, "getStory").mockResolvedValue({
+          ...makeStory(JSON.stringify({ aspect: "9:16" })),
+          intro_segment_id: "intro-1",
+          outro_segment_id: "outro-1",
+        } as unknown as repo.StoryRow);
+        vi.spyOn(repo, "getSetting").mockImplementation(async (k: string) => {
+          if (k === "video.default_aspect") return "9:16";
+          return null;
+        });
+        vi.spyOn(repo, "getSegment").mockImplementation(async (id: string) => {
+          if (id === "intro-1") {
+            return {
+              id: "intro-1",
+              kind: "intro",
+              normalized_url: "https://storage.googleapis.com/b/segments/i1.mp4",
+              enabled: 1,
+              aspect: "9:16",
+            } as unknown as repo.SegmentRow;
+          }
+          if (id === "outro-1") {
+            return {
+              id: "outro-1",
+              kind: "outro",
+              normalized_url: "https://storage.googleapis.com/b/segments/o1.mp4",
+              enabled: 1,
+              aspect: "9:16",
+            } as unknown as repo.SegmentRow;
+          }
+          return null;
+        });
+        vi.spyOn(queue, "finishRender").mockResolvedValue(undefined);
+        undiciFetchMock.mockResolvedValue(
+          new Response(JSON.stringify({ url: "https://gcs/x.mp4" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+
+        await GET(makeReq({ auth: "Bearer test-secret" }));
+
+        const [, callInit] = undiciFetchMock.mock.calls[0] as [string, RequestInit];
+        const sent = JSON.parse(callInit.body as string) as {
+          segments: { intro: string | null; outro: string | null };
+        };
+        // Original storage.googleapis.com URLs must be preserved — anything
+        // else (notably the media.lorewire.com rewrite) makes Cloud Run skip
+        // the splice.
+        expect(sent.segments.intro).toBe(
+          "https://storage.googleapis.com/b/segments/i1.mp4",
+        );
+        expect(sent.segments.outro).toBe(
+          "https://storage.googleapis.com/b/segments/o1.mp4",
+        );
+      } finally {
+        if (prev === undefined) delete process.env.MEDIA_PUBLIC_BASE;
+        else process.env.MEDIA_PUBLIC_BASE = prev;
+      }
     });
 
     it("sends {intro: null, outro: null} when the story opts out of both", async () => {

@@ -394,3 +394,69 @@ describe("parseShortConfig — caption_style", () => {
     }
   });
 });
+
+// Phase 3 OG-poster state fields (per
+// _plans/2026-06-29-phase-3-og-poster-cards.md). Three optional fields
+// the helper writes during a publish — the parser must round-trip them
+// without coercion, and missing fields must parse as undefined / false.
+describe("parseShortConfig — Phase 3 OG poster fields", () => {
+  it("round-trips og_poster_landscape_url + og_poster_disabled + og_poster_attempted_at", () => {
+    const url =
+      "https://media.lorewire.com/story-1-short/poster-landscape-abc1234567890def.png?v=abc1234567890def";
+    const r = parseShortConfig({
+      doodle_frames: [],
+      captions: [],
+      og_poster_landscape_url: url,
+      og_poster_disabled: true,
+      og_poster_attempted_at: "2026-06-29T01:23:45Z",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.config.og_poster_landscape_url).toBe(url);
+    expect(r.config.og_poster_disabled).toBe(true);
+    expect(r.config.og_poster_attempted_at).toBe("2026-06-29T01:23:45Z");
+  });
+
+  it("missing fields parse as undefined (no false default for disabled)", () => {
+    const r = parseShortConfig({
+      doodle_frames: [],
+      captions: [],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Explicit undefined — important: an absent og_poster_disabled
+    // must read as "not disabled" via `!parsed.config.og_poster_disabled`,
+    // which works because undefined is falsy. But it must NOT survive
+    // round-trip as `false`, because that would clutter the column.
+    expect(r.config.og_poster_landscape_url).toBeUndefined();
+    expect(r.config.og_poster_disabled).toBeUndefined();
+    expect(r.config.og_poster_attempted_at).toBeUndefined();
+  });
+
+  it("drops fields with wrong types silently (defense against bad writers)", () => {
+    const r = parseShortConfig({
+      doodle_frames: [],
+      captions: [],
+      og_poster_landscape_url: 42,          // not a string
+      og_poster_disabled: "true",            // not a boolean
+      og_poster_attempted_at: { iso: "x" },  // not a string
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.config.og_poster_landscape_url).toBeUndefined();
+    expect(r.config.og_poster_disabled).toBeUndefined();
+    expect(r.config.og_poster_attempted_at).toBeUndefined();
+  });
+
+  it("og_poster_disabled = false is preserved (explicit re-enable)", () => {
+    // Admin flipped a kill switch ON then OFF — the OFF state must
+    // survive parse so the metadata reader sees it.
+    const r = parseShortConfig({
+      doodle_frames: [],
+      captions: [],
+      og_poster_disabled: false,
+    });
+    if (!r.ok) return;
+    expect(r.config.og_poster_disabled).toBe(false);
+  });
+});

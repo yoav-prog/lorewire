@@ -15,9 +15,10 @@
 // [short editor ...] per rule 14.
 
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   getArticle,
+  getSetting,
   getStory,
   getStoryShortConfigJson,
   setStoryShortConfigJson,
@@ -48,15 +49,53 @@ import {
 import { shortCaptionStyleToRenderTemplate } from "@/lib/short-caption-style-to-props";
 import {
   planShortRender,
+  type CurrentPoll,
   type CurrentResolvedSegments,
   type ShortRenderPlan,
 } from "@/lib/short-render-plan";
 import { resolveShortSegments } from "@/lib/short-segments";
+import {
+  getPollByStoryId,
+  QUESTION_CARD_DURATION_MS,
+} from "@/lib/polls";
 import { nudgeDrain } from "@/lib/drain-nudge";
 import {
   nextSessionFor,
   readForeignSession,
 } from "@/lib/short-edit-session";
+import {
+  deleteLatestPostedRowForStory,
+  publishShortToFacebook,
+  type FacebookPostRow,
+} from "@/lib/publish-to-facebook";
+import {
+  publishShortToFacebookStory,
+  SETTING_AUTO_PUBLISH as FB_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-facebook-story";
+import {
+  deleteLatestPostedRowForStory as deleteLatestPostedIgRowForStory,
+  publishShortToInstagram,
+  type InstagramPostRow,
+} from "@/lib/publish-to-instagram";
+import {
+  publishShortToInstagramStory,
+  SETTING_AUTO_PUBLISH as IG_STORY_SETTING_AUTO_PUBLISH,
+} from "@/lib/publish-to-instagram-story";
+import {
+  deleteLatestPostedRowForStory as deleteLatestPostedYtRowForStory,
+  publishShortToYouTube,
+  type YouTubePostRow,
+} from "@/lib/publish-to-youtube";
+import {
+  deleteLatestPostedRowForStory as deleteLatestPostedTtRowForStory,
+  publishShortToTikTok,
+  type TikTokPostRow,
+} from "@/lib/publish-to-tiktok";
+import {
+  ensureSeoMetadataForStory,
+  loadSeoMetadata,
+  type SeoMetadata,
+} from "@/lib/seo-metadata";
 
 // ─── shared helpers ──────────────────────────────────────────────────────────
 
@@ -128,7 +167,7 @@ export interface LoadShortEditorResult {
 export async function loadShortEditorState(
   storyId: string,
 ): Promise<LoadShortEditorResult> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -140,7 +179,7 @@ export async function saveShortConfigPatch(
   storyId: string,
   patch: Record<string, unknown>,
 ): Promise<{ ok: boolean; error?: string; config?: ShortConfig }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   if (!patch || typeof patch !== "object") {
     return { ok: false, error: "patch must be an object" };
@@ -181,7 +220,7 @@ export async function regenShortScene(
   frameId: string,
   newPrompt: string,
 ): Promise<RegenSceneResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   if (!frameId) return { ok: false, error: "missing frame_id" };
   const trimmed = (newPrompt ?? "").trim();
@@ -261,7 +300,7 @@ export async function setShortSegmentOverrideAction(
   kind: "intro" | "outro",
   pick: ShortSegmentPick,
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (kind !== "intro" && kind !== "outro") {
     return { ok: false, error: `invalid kind: ${kind}` };
   }
@@ -300,7 +339,7 @@ export async function setFrameIsPinned(
   frameId: string,
   pinned: boolean,
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const result = await saveShortConfigPatch(storyId, {
     [`doodle_frames.${frameId}.is_pinned`]: pinned,
   });
@@ -333,7 +372,7 @@ export interface ShortEditSessionResult {
 export async function claimShortEditSession(
   storyId: string,
 ): Promise<ShortEditSessionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -355,7 +394,7 @@ export async function claimShortEditSession(
 export async function heartbeatShortEditSession(
   storyId: string,
 ): Promise<ShortEditSessionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -399,13 +438,96 @@ async function currentSegmentsFor(
   };
 }
 
+// Phase 3 polish of _plans/2026-06-17-engagement-polls.md. Mirror of
+// currentSegmentsFor for the burnt-in question card: the render bakes
+// a snapshot of polls.question + option labels into the tail of every
+// short, and when the admin later edits the poll the previous MP4 is
+// stale. Returns null when the story has no live poll (poll missing
+// OR enabled=0) so the planner can also detect "poll was removed
+// since the last render."
+async function currentPollFor(storyId: string): Promise<CurrentPoll | null> {
+  const poll = await getPollByStoryId(storyId);
+  if (!poll || poll.enabled !== 1) return null;
+  return {
+    question: poll.question,
+    option_a: poll.option_a_text,
+    option_b: poll.option_b_text,
+  };
+}
+
+/** Shape of the question_card prop the renderer consumes. Matches the
+ *  Python emitter in pipeline/shorts_render.py:_build_question_card. */
+interface QuestionCardProps {
+  question: string;
+  option_a: string;
+  option_b: string;
+  slug: string;
+  card_ms: number;
+}
+
+/** Read `polls.endcard.enabled` — falsy values disable the card
+ *  surface entirely. Mirrors the Python `_endcard_disabled_by_setting`
+ *  exactly so the TS Lane A path and the Python generation drain
+ *  produce identical card / no-card decisions for the same setting.
+ *  Phase 5 follow-up of _plans/2026-06-17-engagement-polls.md. */
+async function endcardDisabledBySetting(): Promise<boolean> {
+  const raw = await getSetting("polls.endcard.enabled");
+  if (raw === null) return false;
+  return ["0", "false", "off", "no"].includes(raw.trim().toLowerCase());
+}
+
+/** Read `polls.endcard.duration_ms` with bounds (500–10000ms). Any
+ *  parse error or out-of-range value falls back to the
+ *  QUESTION_CARD_DURATION_MS default. Mirrors the Python
+ *  `_resolve_card_ms` so the two build paths stay synchronized. */
+async function resolveCardMs(): Promise<number> {
+  const raw = await getSetting("polls.endcard.duration_ms");
+  if (!raw) return QUESTION_CARD_DURATION_MS;
+  const v = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(v)) return QUESTION_CARD_DURATION_MS;
+  if (v < 500 || v > 10000) return QUESTION_CARD_DURATION_MS;
+  return v;
+}
+
+/** Resolve the question_card the renderer should bake into the next
+ *  Lane A re-render. Returns null when the story has no live poll,
+ *  the poll has any empty field, OR the admin has flipped the master
+ *  switch off via `polls.endcard.enabled`. Card duration honours the
+ *  `polls.endcard.duration_ms` override. Slug falls back to the story
+ *  id when stories.slug is null (mirrors the Python side). */
+async function currentQuestionCardPropsFor(
+  storyId: string,
+): Promise<QuestionCardProps | null> {
+  // Master switch first — skip the poll + story reads when the card
+  // is disabled so a Lane A trigger doesn't waste round trips.
+  if (await endcardDisabledBySetting()) return null;
+  const [poll, story, cardMs] = await Promise.all([
+    getPollByStoryId(storyId),
+    getStory(storyId),
+    resolveCardMs(),
+  ]);
+  if (!poll || poll.enabled !== 1 || !story) return null;
+  const question = (poll.question ?? "").trim();
+  const optionA = (poll.option_a_text ?? "").trim();
+  const optionB = (poll.option_b_text ?? "").trim();
+  if (!question || !optionA || !optionB) return null;
+  const slug = (story.slug ?? storyId).trim() || storyId;
+  return {
+    question,
+    option_a: optionA,
+    option_b: optionB,
+    slug,
+    card_ms: cardMs,
+  };
+}
+
 export async function previewRenderPlan(storyId: string): Promise<{
   ok: boolean;
   error?: string;
   plan?: ShortRenderPlan;
   baselineRenderId?: string;
 }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -418,8 +540,11 @@ export async function previewRenderPlan(storyId: string): Promise<{
       error: "no baseline render to diff against — generate a short first",
     };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   return { ok: true, plan, baselineRenderId: baseline.id };
 }
 
@@ -440,7 +565,7 @@ export async function renderShortLaneA(
   renderId?: string;
   plan?: ShortRenderPlan;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -450,8 +575,11 @@ export async function renderShortLaneA(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   // Lane A now accepts BOTH lane="A" and lane="noop". The noop path is
   // the user's "always re-render" escape hatch (added 2026-06-17 after
   // an intro/outro stamping race left the planner reading "no changes"
@@ -481,8 +609,8 @@ export async function renderShortLaneA(
   }
 
   // Lane A swap: the renderer needs the new captions; everything else (frames,
-  // voiceover_url, character, duration_ms) stays exactly as the baseline
-  // shipped, because Lane A is "edit captions and re-render the same MP4."
+  // voiceover_url, character) stays exactly as the baseline shipped, because
+  // Lane A is "edit captions and re-render the same MP4."
   // Caption style: if the editor has any caption_style override, merge it
   // into caption_template so the next render reflects the picked colors /
   // highlight / position. The baseline's caption_template (set by the
@@ -498,21 +626,69 @@ export async function renderShortLaneA(
   const baselineTemplate =
     (baselineProps as { caption_template?: Record<string, unknown> })
       .caption_template ?? {};
-  const newProps = {
+
+  // Question card (Phase 3 polish of engagement-polls plan). When the
+  // poll text changes the planner flips to Lane A; this swap must
+  // bake the CURRENT poll into newProps so the re-rendered card
+  // actually reflects the edit. Without this, the banner triggers a
+  // re-render that produces the same stale card — purely decorative.
+  // Mirrors the Python build path so both lanes (TS-Lane-A and Python
+  // generation drain) emit identical card-shape decisions.
+  const newCard = await currentQuestionCardPropsFor(storyId);
+  // Narration end (ms) from the current captions, mirroring the Python
+  // build path's `duration_ms = max(captions[-1].end_ms, 1)`. The body
+  // audio is unchanged for Lane A so the caption-derived end IS the
+  // narration end; we re-add the card tail when one exists.
+  const narrationEndMs = cfg.config.captions.length > 0
+    ? Math.max(
+        1,
+        cfg.config.captions[cfg.config.captions.length - 1]?.end_ms ?? 1,
+      )
+    : 1;
+  // Floor at the baseline's duration_ms so Lane A can never SHORTEN the
+  // body relative to the baseline. The baseline's duration was computed
+  // from the actual audio (`pipeline/voice.audio_duration_ms` in the
+  // generation drain), so shrinking below it would clip the narration.
+  // The editor can EXTEND captions safely (last-caption end_ms > baseline),
+  // and the question card can stretch the tail; we just never go below.
+  const baselineDurationMs = Number(
+    (baselineProps as { duration_ms?: unknown }).duration_ms ?? 0,
+  );
+  const captionsDurationMs = newCard
+    ? narrationEndMs + newCard.card_ms
+    : narrationEndMs;
+  const renderedDurationMs = Math.max(
+    baselineDurationMs,
+    captionsDurationMs,
+    1,
+  );
+
+  // Build newProps with the card swapped in or stripped. The
+  // `question_card` key is conditionally present so a removed-poll
+  // case (current null + baseline had card) produces props with NO
+  // question_card field — the renderer treats absence as "no card."
+  const newProps: Record<string, unknown> = {
     ...baselineProps,
     captions: cfg.config.captions,
     caption_template: {
       ...baselineTemplate,
       ...styleOverride,
     },
+    duration_ms: renderedDurationMs,
   };
+  if (newCard) {
+    newProps.question_card = newCard;
+  } else {
+    delete newProps.question_card;
+  }
 
   // Distinct config_hash so this row coexists with the baseline (the same
   // story may have multiple "edit and re-render" runs from the same vibe +
   // length pair). Including the lane + a digest of captions + the resolved
-  // segments keeps it stable across identical re-clicks (idempotent if the
-  // user clicks twice without editing in between) AND triggers a fresh row
-  // when only the intro/outro override changed.
+  // segments + a poll fingerprint keeps it stable across identical re-clicks
+  // (idempotent if the user clicks twice without editing in between) AND
+  // triggers a fresh row when only the intro/outro override OR the poll
+  // text changed.
   const captionsDigest = createHash("sha256")
     .update(JSON.stringify(cfg.config.captions))
     .digest("hex")
@@ -521,13 +697,18 @@ export async function renderShortLaneA(
     .update(JSON.stringify(segments))
     .digest("hex")
     .slice(0, 12);
+  const pollDigest = createHash("sha256")
+    .update(JSON.stringify(newCard ?? null))
+    .digest("hex")
+    .slice(0, 12);
   // noop = "force re-render anyway" path. Skip the idempotency dedupe
   // AND add a per-click timestamp suffix so the user can fire several
   // force-renders in a row without colliding on the unique
   // config_hash. Lane-A-with-real-diffs keeps the dedupe so a
   // double-click on the same edits coalesces (the original intent).
   const forceTag = plan.lane === "noop" ? `:force-${Date.now()}` : "";
-  const configHash = `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}${forceTag}`;
+  const configHash =
+    `${baseline.config_hash}:laneA:${captionsDigest}:${segmentsDigest}:${pollDigest}${forceTag}`;
 
   // Idempotency check ONLY for the planner-detected Lane A path.
   // The noop force path always inserts a fresh row.
@@ -613,7 +794,7 @@ export async function renderShortLaneB(
   renderId?: string;
   plan?: ShortRenderPlan;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -623,8 +804,11 @@ export async function renderShortLaneB(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -764,7 +948,7 @@ export async function renderShortLaneC(
   renderId?: string;
   plan?: ShortRenderPlan;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const cfg = await loadCurrentConfig(storyId);
   if (!cfg.ok) return { ok: false, error: cfg.error };
@@ -774,8 +958,11 @@ export async function renderShortLaneC(
   if (!baseline || baseline.status !== "done" || !baseline.props) {
     return { ok: false, error: "no baseline render — generate a short first" };
   }
-  const segments = await currentSegmentsFor(storyId, cfg.config);
-  const plan = planShortRender(cfg.config, baseline.props, segments);
+  const [segments, poll] = await Promise.all([
+    currentSegmentsFor(storyId, cfg.config),
+    currentPollFor(storyId),
+  ]);
+  const plan = planShortRender(cfg.config, baseline.props, segments, poll);
   if (plan.lane === "noop") {
     return { ok: false, error: "no edits since the last render", plan };
   }
@@ -948,11 +1135,50 @@ export async function renderShortLaneC(
   return { ok: true, renderId, plan };
 }
 
+// Single-call "smart re-render" used by the story page's Action Bar.
+// Picks the cheapest lane that covers the user's pending edits (same
+// logic as previewRenderPlan), then queues it. Lets the bar offer one
+// "Re-render" button that does the right thing on every tab without
+// the user having to think about lane A/B/C.
+//
+// Lane A handles both lane="A" and lane="noop" baselines, so this
+// dispatcher never falls into a dead branch — a noop render becomes a
+// forced Lane A assembly with the current state.
+//
+// Plan: _plans/2026-06-25-story-action-bar-and-rail-restructure.md.
+export async function smartRerenderShort(storyId: string): Promise<{
+  ok: boolean;
+  error?: string;
+  renderId?: string;
+  lane?: ShortRenderPlan["lane"];
+}> {
+  await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const planned = await previewRenderPlan(storyId);
+  if (!planned.ok || !planned.plan) {
+    return { ok: false, error: planned.error ?? "could not plan re-render" };
+  }
+  const lane = planned.plan.lane;
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[action bar smart re-render]", { story_id: storyId, lane });
+  if (lane === "C") {
+    const r = await renderShortLaneC(storyId);
+    return { ok: r.ok, error: r.error, renderId: r.renderId, lane };
+  }
+  if (lane === "B") {
+    const r = await renderShortLaneB(storyId);
+    return { ok: r.ok, error: r.error, renderId: r.renderId, lane };
+  }
+  // lane === "A" or "noop" — both route through Lane A.
+  const r = await renderShortLaneA(storyId);
+  return { ok: r.ok, error: r.error, renderId: r.renderId, lane };
+}
+
 export async function revertShortScene(
   storyId: string,
   frameId: string,
 ): Promise<{ ok: boolean; error?: string }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const current = await loadCurrentConfig(storyId);
   if (!current.ok) return { ok: false, error: current.error };
   const sessionGate = assertSessionMine(current.config, session.userId);
@@ -998,7 +1224,7 @@ export async function applyLatestShortToStoryAction(storyId: string): Promise<{
   url?: string;
   slug?: string | null;
 }> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story-not-found" };
@@ -1008,7 +1234,7 @@ export async function applyLatestShortToStoryAction(storyId: string): Promise<{
     return { ok: false, error: "latest short is not done" };
   }
   const previousUrl = story.video_url ?? null;
-  await applyShortToStory(storyId, latest.output_url);
+  await applyShortToStory(storyId, latest.output_url, latest.props);
   // Defense-in-depth: re-read the row and confirm video_url actually
   // landed. If a constraint or trigger silently dropped the write the
   // user would otherwise see "Applied ✓" forever on a no-op — surface
@@ -1061,7 +1287,7 @@ export interface LinkedArticleSummary {
 export async function listArticlesLinkedToStoryAction(
   storyId: string,
 ): Promise<{ ok: boolean; error?: string; articles?: LinkedArticleSummary[] }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   if (!storyId) return { ok: false, error: "missing story_id" };
   const rows = await all<LinkedArticleSummary>(
     "SELECT id, title, slug, language FROM articles WHERE story_id = ? " +
@@ -1116,7 +1342,7 @@ export async function promoteSceneToArticleHero(
   frameId: string,
   articleId: string,
 ): Promise<{ ok: boolean; error?: string; previousUrl?: string | null }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleRes = await resolveLinkedArticle(storyId, articleId);
   if (!articleRes.ok) return articleRes;
   const frameRes = await resolveFrameUrl(storyId, frameId);
@@ -1139,7 +1365,7 @@ export async function promoteSceneToArticleOg(
   frameId: string,
   articleId: string,
 ): Promise<{ ok: boolean; error?: string; previousUrl?: string | null }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleRes = await resolveLinkedArticle(storyId, articleId);
   if (!articleRes.ok) return articleRes;
   const frameRes = await resolveFrameUrl(storyId, frameId);
@@ -1163,7 +1389,7 @@ export async function addSceneToArticleGallery(
   articleId: string,
   alt: string = "",
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const articleRes = await resolveLinkedArticle(storyId, articleId);
   if (!articleRes.ok) return articleRes;
   const frameRes = await resolveFrameUrl(storyId, frameId);
@@ -1198,4 +1424,820 @@ export async function addSceneToArticleGallery(
   });
   revalidatePath(`/admin/articles/${articleId}`);
   return { ok: true };
+}
+
+// ─── Facebook auto-publish: manual publish / re-publish ───────────────────────
+// Plan: _plans/2026-06-23-facebook-auto-publish.md.
+//
+// The render-route auto-publish hook is gated by the
+// `publisher.facebook.auto_publish` setting + a story-level dedup so
+// re-renders don't double-post. This action is the admin's escape hatch:
+//   - Story never auto-published? Manually publish it now (default flow).
+//   - Story already on the Page but admin wants a fresh post (typo fix,
+//     content takedown, A/B test)? Tick "delete previous" in the confirm
+//     modal and this action removes the prior post from the Page before
+//     publishing the new one.
+//
+// All FB calls land inside publishShortToFacebook / deleteLatestPostedRowForStory
+// — see lib/publish-to-facebook for the network surface + retry semantics.
+// The action's job is glue: auth, latest-render lookup, article URL,
+// invocation order (delete-first-then-publish, abort if delete fails),
+// and revalidating the editor path so the next paint shows fresh state.
+
+export interface ManualFacebookPublishOpts {
+  /** When true, the latest 'posted' row for this story is removed from
+   *  Facebook (DELETE /{video-id}) BEFORE the new publish runs. If the
+   *  delete fails we abort without publishing — surfaces the failure to
+   *  the admin so they can investigate rather than silently producing
+   *  a duplicate post. */
+  deletePrevious?: boolean;
+  /** Admin can override the rendered caption for this one publish. The
+   *  global caption template setting is unchanged. Empty/whitespace
+   *  falls back to the template-rendered caption. */
+  captionOverride?: string;
+}
+
+export interface ManualFacebookPublishResult {
+  ok: boolean;
+  error?: string;
+  /** Facebook video id of the new post on success. */
+  externalPostId?: string;
+  /** Facebook video id of the prior post that was deleted (only set when
+   *  deletePrevious=true and the delete succeeded). */
+  deletedPostId?: string;
+}
+
+/** Look up the article URL for a story, falling back to the lorewire
+ *  homepage when no published article is linked. Mirrors the same
+ *  helper inside render_short/route.ts so the manual flow produces an
+ *  identically-shaped caption. */
+async function resolveArticleUrlForStory(storyId: string): Promise<string> {
+  const origin =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN || "https://www.lorewire.com";
+  const article = await one<{ language: string; slug: string }>(
+    "SELECT language, slug FROM articles WHERE story_id = ? AND published_at IS NOT NULL ORDER BY published_at DESC LIMIT 1",
+    [storyId],
+  ).catch(() => null);
+  if (!article) return origin;
+  return `${origin}/articles/${article.language}/${article.slug}`;
+}
+
+/** Best-effort: ensure SEO metadata exists for this story before any
+ *  per-platform manual publish runs. Mirrors the same hook the render
+ *  route + bulk publish action use, so EVERY publish path produces
+ *  LLM-generated, content-aware captions instead of falling through
+ *  to the template default.
+ *
+ *  Idempotent: skips when metadata is fresh + the story hasn't been
+ *  updated. A generation failure is logged but never blocks — the
+ *  publisher falls back to the template if metadata's missing. */
+async function ensureSeoBeforeManualPublish(
+  storyId: string,
+  articleUrl: string,
+): Promise<void> {
+  try {
+    const result = await ensureSeoMetadataForStory({ storyId, articleUrl });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor seo ensure pre-publish]", {
+      story_id: storyId,
+      status: result.status,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor seo ensure threw]", {
+      story_id: storyId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+export async function publishToFacebookAction(
+  storyId: string,
+  opts: ManualFacebookPublishOpts = {},
+): Promise<ManualFacebookPublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let deletedPostId: string | undefined;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor fb-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous Facebook post failed: ${del.error}`,
+      };
+    }
+    deletedPostId = del.externalPostId;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
+  const result = await publishShortToFacebook({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+    },
+    captionOverride:
+      opts.captionOverride && opts.captionOverride.trim().length > 0
+        ? opts.captionOverride
+        : null,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor fb-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    deleted_post_id: deletedPostId ?? null,
+    status: result.status,
+    external_post_id:
+      result.status === "posted" ? result.row.external_post_id : null,
+  });
+
+  // After a successful Reel publish, also cross-post as a Story if the
+  // Story toggle is on. Fire-and-forget: a Story failure must never
+  // mutate the Reel response surfaced to the admin UI. Plan:
+  // _plans/2026-06-25-instagram-facebook-stories-cross-publish.md.
+  if (result.status === "posted") {
+    void crossPostFacebookStoryIfEnabled(storyId, latest.id, latest.output_url);
+  }
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalPostId: result.row.external_post_id ?? undefined,
+      deletedPostId,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "Facebook publish failed",
+      deletedPostId,
+    };
+  }
+  // 'skipped' for the manual path means missing env config (toggle off
+  // is auto-only; manual bypasses it). Surface a clean message.
+  return {
+    ok: false,
+    error: "publish skipped — server env vars FB_PAGE_ACCESS_TOKEN / FB_PAGE_ID may be missing",
+    deletedPostId,
+  };
+}
+
+/** Story toggle-gated FB cross-post helper. Called after a successful
+ *  manual Reel publish. Errors are logged + swallowed; the caller does
+ *  not await the network call — the Reel response surfaces immediately
+ *  and the Story attempt completes in the background. The toggle is
+ *  the per-platform `publisher.facebook.auto_publish_story` setting —
+ *  same gate the auto-render path consults. */
+async function crossPostFacebookStoryIfEnabled(
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+): Promise<void> {
+  try {
+    const on = (await getSetting(FB_STORY_SETTING_AUTO_PUBLISH)) === "1";
+    if (!on) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[short editor fb-story manual]", {
+        story_id: storyId,
+        render_id: renderId,
+        skipped: "story toggle off",
+      });
+      return;
+    }
+    const r = await publishShortToFacebookStory({
+      storyId,
+      renderId,
+      videoUrl,
+      // 'manual' bypasses the publisher's own toggle gate (we just
+      // checked it above) and the story-level dedup so a manual click
+      // always produces a fresh Story, matching the Reel manual flow.
+      trigger: "manual",
+    });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor fb-story manual]", {
+      story_id: storyId,
+      render_id: renderId,
+      status: r.status,
+      external_post_id:
+        r.status === "posted" ? r.row.external_post_id : null,
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor fb-story manual error]", {
+      story_id: storyId,
+      render_id: renderId,
+      error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
+}
+
+/** Slim getter for the editor page: returns the most recent
+ *  facebook_posts row for a story (any status) so the button can
+ *  display "Posted on …" / "Last attempt failed …" beneath it. Returns
+ *  null when the story has no facebook_posts rows yet. */
+export async function getLatestFacebookPostForStoryAction(
+  storyId: string,
+): Promise<FacebookPostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<FacebookPostRow>(
+    `SELECT id, story_id, render_id, page_id, trigger, video_url, caption, status, external_post_id, fb_error_code, fb_error_subcode, error_message, attempts, created_at, posted_at, deleted_at
+     FROM facebook_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
+// ─── Instagram auto-publish: manual publish / re-publish ──────────────────────
+// Plan: _plans/2026-06-24-instagram-auto-publish.md.
+//
+// Mirror of the Facebook manual publish action above. Same shape, same
+// safety properties (delete-previous aborts on failure, never silently
+// publishes a duplicate). The IG-specific 2-step flow + container poll
+// happens inside publishShortToInstagram — this action is glue: auth,
+// latest-render lookup, article URL resolution, delete-previous orderly
+// dispatch.
+//
+// Note: publishShortToInstagram can return status='pending' (container
+// created but still IN_PROGRESS after the inline 30s budget). Surface
+// that to the admin as "queued — the retry cron will publish it in the
+// next few minutes" rather than a failure.
+
+export interface ManualInstagramPublishOpts {
+  deletePrevious?: boolean;
+  captionOverride?: string;
+}
+
+export interface ManualInstagramPublishResult {
+  ok: boolean;
+  /** True when the row landed in 'pending' (container created but still
+   *  processing on IG's side after our inline budget). The retry cron
+   *  will publish it. UI should treat this as success-ish, not failure. */
+  pending?: boolean;
+  error?: string;
+  externalPostId?: string;
+  deletedPostId?: string;
+}
+
+export async function publishToInstagramAction(
+  storyId: string,
+  opts: ManualInstagramPublishOpts = {},
+): Promise<ManualInstagramPublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let deletedPostId: string | undefined;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedIgRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor ig-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous Instagram post failed: ${del.error}`,
+      };
+    }
+    deletedPostId = del.externalPostId;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
+  const result = await publishShortToInstagram({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+    },
+    captionOverride:
+      opts.captionOverride && opts.captionOverride.trim().length > 0
+        ? opts.captionOverride
+        : null,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor ig-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    deleted_post_id: deletedPostId ?? null,
+    status: result.status,
+    external_post_id:
+      result.status === "posted" ? result.row.external_post_id : null,
+    container_id:
+      result.status === "pending" || result.status === "posted" || result.status === "failed"
+        ? result.row.container_id
+        : null,
+  });
+
+  // After a successful Reel publish (or pending — the retry cron will
+  // finish it), also cross-post as a Story if the Story toggle is on.
+  // Fire-and-forget; mirrors the FB side.
+  if (result.status === "posted" || result.status === "pending") {
+    void crossPostInstagramStoryIfEnabled(storyId, latest.id, latest.output_url);
+  }
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalPostId: result.row.external_post_id ?? undefined,
+      deletedPostId,
+    };
+  }
+  if (result.status === "pending") {
+    // Container created OK but still processing on IG side. Retry cron
+    // will publish it. Surface as success-with-caveat to the admin.
+    return {
+      ok: true,
+      pending: true,
+      deletedPostId,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "Instagram publish failed",
+      deletedPostId,
+    };
+  }
+  return {
+    ok: false,
+    error:
+      "publish skipped — server env vars IG_BUSINESS_ACCOUNT_ID / FB_PAGE_ACCESS_TOKEN may be missing",
+    deletedPostId,
+  };
+}
+
+/** Story toggle-gated IG cross-post helper. Twin of the FB one above. */
+async function crossPostInstagramStoryIfEnabled(
+  storyId: string,
+  renderId: string,
+  videoUrl: string,
+): Promise<void> {
+  try {
+    const on = (await getSetting(IG_STORY_SETTING_AUTO_PUBLISH)) === "1";
+    if (!on) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.info("[short editor ig-story manual]", {
+        story_id: storyId,
+        render_id: renderId,
+        skipped: "story toggle off",
+      });
+      return;
+    }
+    const r = await publishShortToInstagramStory({
+      storyId,
+      renderId,
+      videoUrl,
+      trigger: "manual",
+    });
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[short editor ig-story manual]", {
+      story_id: storyId,
+      render_id: renderId,
+      status: r.status,
+      external_post_id:
+        r.status === "posted" ? r.row.external_post_id : null,
+      container_id:
+        r.status === "pending" || r.status === "posted" || r.status === "failed"
+          ? r.row.container_id
+          : null,
+    });
+  } catch (e) {
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[short editor ig-story manual error]", {
+      story_id: storyId,
+      render_id: renderId,
+      error: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
+  }
+}
+
+/** Mirror of getLatestFacebookPostForStoryAction for the IG button. */
+export async function getLatestInstagramPostForStoryAction(
+  storyId: string,
+): Promise<InstagramPostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<InstagramPostRow>(
+    `SELECT id, story_id, render_id, ig_account_id, trigger, video_url, caption, container_id, status, external_post_id, ig_error_code, ig_error_subcode, error_message, attempts, created_at, posted_at, deleted_at
+     FROM instagram_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
+// ─── YouTube auto-publish: manual publish / re-publish ───────────────────────
+// Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
+//
+// Mirror of the Facebook + Instagram manual publish actions above. The
+// YouTube-specific OAuth refresh + channel-id verify + resumable upload
+// + captions sidecar all live inside publishShortToYouTube; this action
+// is the glue: auth, latest-render lookup, article URL resolution,
+// optional per-publish overrides (title / description / tags), and
+// optional delete-previous-then-republish.
+
+export interface ManualYouTubePublishOpts {
+  deletePrevious?: boolean;
+  titleOverride?: string;
+  descriptionOverride?: string;
+  /** Comma-separated tag override. When set (even to ""), wins over the
+   *  template-rendered tags. */
+  tagsOverride?: string;
+}
+
+export interface ManualYouTubePublishResult {
+  ok: boolean;
+  error?: string;
+  externalVideoId?: string;
+  deletedVideoId?: string;
+}
+
+export async function publishToYouTubeAction(
+  storyId: string,
+  opts: ManualYouTubePublishOpts = {},
+): Promise<ManualYouTubePublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let deletedVideoId: string | undefined;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedYtRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor yt-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous YouTube video failed: ${del.error}`,
+      };
+    }
+    deletedVideoId = del.externalVideoId;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
+  const tagsOverrideArray =
+    opts.tagsOverride != null
+      ? opts.tagsOverride
+          .split(",")
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0)
+      : null;
+  const result = await publishShortToYouTube({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+      category: story.category ?? null,
+    },
+    titleOverride:
+      opts.titleOverride && opts.titleOverride.trim().length > 0
+        ? opts.titleOverride
+        : null,
+    descriptionOverride:
+      opts.descriptionOverride && opts.descriptionOverride.trim().length > 0
+        ? opts.descriptionOverride
+        : null,
+    tagsOverride: tagsOverrideArray,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor yt-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    deleted_video_id: deletedVideoId ?? null,
+    status: result.status,
+    external_video_id:
+      result.status === "posted" ? result.row.external_video_id : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalVideoId: result.row.external_video_id ?? undefined,
+      deletedVideoId,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "YouTube publish failed",
+      deletedVideoId,
+    };
+  }
+  return {
+    ok: false,
+    error:
+      "publish skipped — server env vars YOUTUBE_REFRESH_TOKEN / YOUTUBE_CHANNEL_ID may be missing",
+    deletedVideoId,
+  };
+}
+
+/** Mirror of getLatestFacebookPostForStoryAction for the YouTube button. */
+export async function getLatestYouTubePostForStoryAction(
+  storyId: string,
+): Promise<YouTubePostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<YouTubePostRow>(
+    `SELECT id, story_id, render_id, channel_id, trigger, video_url, title, description, tags_json, category_id, made_for_kids, synthetic, privacy, status, external_video_id, yt_error_reason, error_message, attempts, created_at, posted_at, deleted_at
+     FROM youtube_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
+// ─── TikTok auto-publish: manual publish / re-publish ────────────────────────
+// Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
+//
+// Mirror of the YouTube manual action above. TikTok's two-mode shape
+// (inbox vs direct) is controlled by the settings toggle; admin can
+// override per-publish via opts.postModeOverride. Like Instagram, the
+// publisher can return 'pending' (publish_id created but TikTok still
+// processing after the inline 30s poll budget) — surface that to the
+// admin as "queued" so they don't refresh and re-publish.
+
+export interface ManualTikTokPublishOpts {
+  deletePrevious?: boolean;
+  captionOverride?: string;
+  postModeOverride?: "inbox" | "direct";
+}
+
+export interface ManualTikTokPublishResult {
+  ok: boolean;
+  pending?: boolean;
+  error?: string;
+  /** TikTok external post id (only present in direct mode after the
+   *  status poll terminates at PUBLISH_COMPLETE). Drafts mode never
+   *  exposes an external id until the user publishes from the app. */
+  externalPostId?: string | null;
+  /** TikTok has no delete endpoint; the manual flow only marks the
+   *  local row as deleted (so a fresh publish has a clean state to
+   *  insert into). The actual TikTok post must be removed in the app. */
+  localRowMarkedDeleted?: boolean;
+}
+
+export async function publishToTikTokAction(
+  storyId: string,
+  opts: ManualTikTokPublishOpts = {},
+): Promise<ManualTikTokPublishResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const latest = await latestDoneShortRenderForStory(storyId);
+  if (!latest || latest.status !== "done" || !latest.output_url) {
+    return {
+      ok: false,
+      error: "no completed short render — render one first, then publish",
+    };
+  }
+
+  let localRowMarkedDeleted = false;
+  if (opts.deletePrevious) {
+    const del = await deleteLatestPostedTtRowForStory(storyId);
+    if (!del.ok) {
+      // eslint-disable-next-line no-console -- rule 14
+      console.warn("[short editor tt-publish delete-previous failed]", {
+        story_id: storyId,
+        user_id: session.userId,
+        error: del.error,
+      });
+      return {
+        ok: false,
+        error: `delete previous TikTok row failed: ${del.error}`,
+      };
+    }
+    localRowMarkedDeleted = true;
+  }
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  await ensureSeoBeforeManualPublish(storyId, articleUrl);
+  const result = await publishShortToTikTok({
+    storyId,
+    renderId: latest.id,
+    videoUrl: latest.output_url,
+    trigger: "manual",
+    context: {
+      hook: null,
+      title: story.title ?? null,
+      article_url: articleUrl,
+      category: story.category ?? null,
+    },
+    captionOverride:
+      opts.captionOverride && opts.captionOverride.trim().length > 0
+        ? opts.captionOverride
+        : null,
+    postModeOverride: opts.postModeOverride ?? null,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor tt-publish manual]", {
+    story_id: storyId,
+    render_id: latest.id,
+    user_id: session.userId,
+    delete_previous: Boolean(opts.deletePrevious),
+    status: result.status,
+    external_post_id:
+      result.status === "posted" ? result.row.external_post_id : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "posted") {
+    return {
+      ok: true,
+      externalPostId: result.row.external_post_id,
+      localRowMarkedDeleted,
+    };
+  }
+  if (result.status === "pending") {
+    return {
+      ok: true,
+      pending: true,
+      localRowMarkedDeleted,
+    };
+  }
+  if (result.status === "failed") {
+    return {
+      ok: false,
+      error: result.row.error_message ?? "TikTok publish failed",
+      localRowMarkedDeleted,
+    };
+  }
+  return {
+    ok: false,
+    error:
+      "publish skipped — server env vars TIKTOK_REFRESH_TOKEN / TIKTOK_OPEN_ID may be missing",
+    localRowMarkedDeleted,
+  };
+}
+
+/** Mirror of getLatestFacebookPostForStoryAction for the TikTok button. */
+export async function getLatestTikTokPostForStoryAction(
+  storyId: string,
+): Promise<TikTokPostRow | null> {
+  await requireCapability("content.manage");
+  if (!storyId) return null;
+  return one<TikTokPostRow>(
+    `SELECT id, story_id, render_id, open_id, trigger, video_url, caption, privacy_level, post_mode, is_aigc, disable_duet, disable_stitch, disable_comment, publish_id, status, external_post_id, tt_error_code, error_message, attempts, created_at, posted_at, deleted_at
+     FROM tiktok_posts WHERE story_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [storyId],
+  );
+}
+
+// ─── SEO metadata: load + regenerate ─────────────────────────────────────────
+// Plan: _plans/2026-06-24-llm-seo-metadata.md.
+//
+// The render route auto-regenerates on every fresh render when the
+// auto-regenerate setting is on; this admin action lets the operator
+// force a regeneration on demand (e.g., after editing the teleprompter,
+// or to retry after an LLM failure). Returns the new metadata so the
+// UI can update without a page reload.
+
+export interface SeoMetadataState {
+  metadata: SeoMetadata | null;
+  generatedAt: string | null;
+}
+
+export async function getSeoMetadataForStoryAction(
+  storyId: string,
+): Promise<SeoMetadataState> {
+  await requireCapability("content.manage");
+  if (!storyId) return { metadata: null, generatedAt: null };
+  const row = await one<{ seo_metadata_generated_at: string | null }>(
+    "SELECT seo_metadata_generated_at FROM stories WHERE id = ?",
+    [storyId],
+  );
+  const metadata = await loadSeoMetadata(storyId);
+  return {
+    metadata,
+    generatedAt: row?.seo_metadata_generated_at ?? null,
+  };
+}
+
+export type RegenerateSeoMetadataResult =
+  | { ok: true; metadata: SeoMetadata; generatedAt: string; model: string }
+  | { ok: false; error: string };
+
+export async function regenerateSeoMetadataAction(
+  storyId: string,
+): Promise<RegenerateSeoMetadataResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story_id" };
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story-not-found" };
+
+  const articleUrl = await resolveArticleUrlForStory(storyId);
+  const result = await ensureSeoMetadataForStory({
+    storyId,
+    articleUrl,
+    force: true,
+  });
+
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[short editor seo-regen]", {
+    story_id: storyId,
+    user_id: session.userId,
+    status: result.status,
+    model: result.status === "generated" ? result.model : null,
+    error: result.status === "failed" ? result.error : null,
+  });
+
+  revalidatePath(`/admin/shorts/${storyId}`);
+
+  if (result.status === "generated") {
+    const row = await one<{ seo_metadata_generated_at: string | null }>(
+      "SELECT seo_metadata_generated_at FROM stories WHERE id = ?",
+      [storyId],
+    );
+    return {
+      ok: true,
+      metadata: result.metadata,
+      generatedAt: row?.seo_metadata_generated_at ?? new Date().toISOString(),
+      model: result.model,
+    };
+  }
+  if (result.status === "failed") {
+    return { ok: false, error: result.error };
+  }
+  return {
+    ok: false,
+    error: `regeneration skipped: ${result.reason}`,
+  };
 }

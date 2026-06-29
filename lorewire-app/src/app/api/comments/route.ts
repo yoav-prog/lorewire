@@ -15,6 +15,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { isAllowedOrigin } from "@/lib/request-origin";
+import { ipUaHash } from "@/lib/poll-rate-limit";
 import { getOrIssueCommentToken } from "@/lib/comment-cookie";
 import { readUserSession } from "@/lib/user-session";
 import { readCommentToken } from "@/lib/comment-cookie";
@@ -27,7 +28,7 @@ import {
 } from "@/lib/comments";
 import { loadCommentThread, type CommentSort } from "@/lib/comments-read";
 import { moderateComment } from "@/lib/comment-moderation";
-import { checkCommentVelocity, ipUaHash } from "@/lib/comment-rate-limit";
+import { checkCommentVelocity } from "@/lib/comment-rate-limit";
 
 // Read a page of the thread (used by the client island for sort changes and
 // "load more"). Read-only, so no origin gate; visibility of the viewer's own

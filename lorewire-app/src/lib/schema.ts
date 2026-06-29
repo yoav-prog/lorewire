@@ -24,6 +24,11 @@ export const STORIES: Table = {
   columns: [
     { name: "id", type: "TEXT", pk: true },
     { name: "reddit_id", type: "TEXT" },
+    // 2026-06-29 user submissions: when set, this story was promoted from a user
+    // submission (lib/submissions). Its presence marks a non-Reddit origin and
+    // exempts the story from the reddit-fixture publish gate (repo.ts
+    // assertStoryReadyForPublicStatus). Plan: 2026-06-29-user-submitted-stories.md.
+    { name: "submission_id", type: "TEXT" },
     { name: "slug", type: "TEXT" },
     { name: "category", type: "TEXT" },
     { name: "title", type: "TEXT" },
@@ -105,6 +110,74 @@ export const STORIES: Table = {
     // story's category whitelist. Admin override always wins; settings
     // changes never overwrite an existing row.
     { name: "hero_style_id", type: "TEXT" },
+    // 2026-06-24 LLM-generated SEO metadata
+    // (_plans/2026-06-24-llm-seo-metadata.md). Per-platform titles /
+    // descriptions / captions / hashtags / tags generated once per
+    // story from teleprompter + title + category via kie.ai's Gemini
+    // 3.5 Flash. Used by the FB/IG/YT/TT publishers in preference to
+    // the settings-level template. NULL = publisher falls through to
+    // the template (Phase 1 behavior). Shape validated by Zod in
+    // lib/seo-metadata.ts (SeoMetadataSchema).
+    { name: "seo_metadata_json", type: "TEXT" },
+    // ISO-8601 timestamp of the last metadata generation. Compared
+    // against stories.updated_at to decide whether to regenerate when
+    // a story's teleprompter has been edited since the last run.
+    { name: "seo_metadata_generated_at", type: "TEXT" },
+    // 2026-06-25 hero / poster / per-platform thumbnail variants.
+    // These four columns are written by the Python hero+thumbnail
+    // finisher (pipeline/media.py::_HERO_THUMB_VARIANTS) alongside
+    // the hero_image column above; together they're the five outputs
+    // of one atomic image-render job. Declared here so the TS
+    // additive ALTER picks them up on fresh DBs (the Python
+    // ALTER is idempotent so co-declaring is safe), and so the
+    // asset-completeness gate can SELECT them without a try/catch
+    // dance against environments where the Python pipeline hasn't
+    // run yet. The TS side never writes here.
+    { name: "hero_image_landscape", type: "TEXT" },
+    { name: "thumbnail_image", type: "TEXT" },
+    { name: "thumbnail_image_landscape", type: "TEXT" },
+    { name: "thumbnail_image_square", type: "TEXT" },
+    // 2026-06-25 bulk complete-and-publish
+    // (_plans/2026-06-25-bulk-complete-and-publish.md). Flag the
+    // /api/auto_complete_publish cron watches. 1 = enqueue social
+    // publishes the moment evaluateAssetCompleteness() passes. The
+    // bulk action sets this AFTER enqueueing every missing asset,
+    // so a flagged-but-not-yet-ready story always has the renders in
+    // flight. The cron clears it back to 0 on a successful publish
+    // OR when auto_publish_attempts exceeds the per-story retry cap
+    // (so a permanently-stuck asset can't pile up infinite work).
+    { name: "auto_publish_when_ready", type: "INTEGER" },
+    // Per-story retry counter the cron increments on every NOT-READY
+    // visit. Hard cap lives in settings.auto_publish.max_attempts.
+    { name: "auto_publish_attempts", type: "INTEGER" },
+    // 2026-06-25 refresh-assets state machine
+    // (_plans/2026-06-25-bulk-complete-and-publish.md follow-up).
+    // The /api/refresh_assets cron drives an already-published video
+    // story through voice -> short (Lane B) -> hero+thumbnails
+    // (finisher) while preserving story_id / URL / SEO / comments.
+    // Distinct from auto_publish_when_ready which is the "asset gate
+    // + publish" flag — this one is "regenerate stale assets in
+    // place." States:
+    //   NULL                = not refreshing
+    //   'voice_pending'     = waiting for the new voice_renders row
+    //   'short_pending'     = waiting for the new short_renders row
+    //   'hero_pending'      = waiting for the finisher to write
+    //                         hero + 5 thumbnail variants
+    //   The cron clears the column back to NULL on completion OR on
+    //   hitting refresh_assets_attempts cap (so a permanently-stuck
+    //   stage can't pile up infinite work).
+    { name: "refresh_assets_state", type: "TEXT" },
+    // ISO-8601 of when the refresh was kicked off. Used as the
+    // "before timestamp" for freshness comparisons — a downstream
+    // asset's finished_at must beat this for the cron to consider
+    // that stage done.
+    { name: "refresh_assets_started_at", type: "TEXT" },
+    // Per-story retry counter the refresh cron increments on every
+    // tick that doesn't advance. Cap lives in
+    // settings.refresh_assets.max_attempts (default 30 ticks
+    // ≈ 60 min, generous because Lane B + finisher each take
+    // multiple minutes).
+    { name: "refresh_assets_attempts", type: "INTEGER" },
   ],
 };
 
@@ -133,6 +206,25 @@ export const VOICE_RENDERS: Table = {
   ],
 };
 
+// Named voiceover presets the admin manages (model + voice + style prompt +
+// pace + hook pause). Mirrors `voiceovers` in pipeline/store.py. The shorts
+// pipeline resolves one per category -> global default -> code fallback (see
+// pipeline/voiceovers.py). speaking_rate is a no-op on the Gemini path.
+export const VOICEOVERS: Table = {
+  name: "voiceovers",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "name", type: "TEXT" },
+    { name: "provider", type: "TEXT" },
+    { name: "voice_id", type: "TEXT" },
+    { name: "style_prompt", type: "TEXT" },
+    { name: "speaking_rate", type: "REAL" },
+    { name: "hook_pause", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
 export const SETTINGS: Table = {
   name: "settings",
   columns: [
@@ -152,12 +244,6 @@ export const SETTINGS: Table = {
 // set on creation; later sign-ins on other devices don't overwrite it. NULL
 // for admin rows and for users who registered without prior anonymous use.
 // Plan: _plans/2026-06-19-anonymous-first-auth.md.
-//
-// Today these columns sit ahead of the public-side auth surface itself —
-// they were brought in early so the Comments feature (which joins users.name
-// for the moderation queue) can land without waiting for the full auth port.
-// Once that auth surface ships, the new columns get populated; until then
-// they stay NULL on admin rows and Comments treats every viewer as a guest.
 export const USERS: Table = {
   name: "users",
   columns: [
@@ -172,6 +258,118 @@ export const USERS: Table = {
     { name: "anonymous_id", type: "TEXT" },
     { name: "last_seen_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
+    // 2026-06-22 admin user-management Phase 3. Account status for moderation.
+    // NULL or 'active' = normal; 'suspended' = sign-in/participation blocked
+    // (reversible). The per-request DB re-read in requireAdmin/currentUser/
+    // readActiveUserSession is what makes a status change take effect on the
+    // next request despite the 7-day JWT. Plan:
+    // _plans/2026-06-22-admin-user-management.md (Phase 3).
+    { name: "status", type: "TEXT" },
+    { name: "suspended_at", type: "TEXT" },
+    { name: "suspended_reason", type: "TEXT" },
+    // 2026-06-22 Phase 8 staff 2FA (opt-in, default off). totp_secret is base32,
+    // set at enrollment and only enforced once mfa_enabled=1.
+    // totp_backup_codes is a JSON array of hashed single-use recovery codes.
+    { name: "totp_secret", type: "TEXT" },
+    { name: "mfa_enabled", type: "INTEGER" },
+    { name: "totp_backup_codes", type: "TEXT" },
+    // 2026-06-29 contributor profiles. Opt-out for the public profile at
+    // /u/[id]: NULL/0 = public (default), 1 = hidden (the page 404s and the
+    // story byline / comment author render as plain text, no link). Plan:
+    // _plans/2026-06-29-contributor-profiles-gamification.md.
+    { name: "profile_hidden", type: "INTEGER" },
+  ],
+};
+
+// Public-user state: My List. One row per (user_id, story_id), enforced by
+// the unique index in POST_TABLE_DDL. `id` is a generated UUID so the row has
+// a stable handle for deletes; the upsert path targets (user_id, story_id).
+// Plan: _plans/2026-06-19-anonymous-first-auth.md §Storage layout.
+export const USER_SAVES: Table = {
+  name: "user_saves",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Likes. Parallel to USER_SAVES; wires feed Like button.
+export const USER_LIKES: Table = {
+  name: "user_likes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Favorite categories. `category` is one of the six closed
+// enum strings from src/app/admin/ui.ts (Drama, Entitled, Humor, Wholesome,
+// Dating, Roommate). Stored as text (not FK) because the enum is a code-level
+// type, not a row in a categories table — see plan §Resolved.
+export const USER_FAV_CATEGORIES: Table = {
+  name: "user_fav_categories",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Recently viewed. Capped server-side via a periodic prune
+// (the most recent 50 per user) — the index on (user_id, viewed_at DESC)
+// makes the prune cheap. `id` is generated per visit so the same story can
+// appear multiple times if revisited (read path collapses by story_id).
+export const USER_RECENTLY_VIEWED: Table = {
+  name: "user_recently_viewed",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "viewed_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-19 Phase 3 magic-link auth. One row per outstanding token. The
+// raw token is sent in the email and NEVER stored — we store only its
+// SHA-256 hash. Verify-by-lookup hashes the incoming token and matches
+// against token_hash. `used_at` is null until first verify; the verify
+// path enforces single-use by checking used_at IS NULL before accepting
+// the token. `email` is stored normalized (lowercased + trimmed) so the
+// users-table upsert sees the same key. Expired rows are pruned by a
+// future periodic cron; the verify path also rejects on expires_at <
+// now, so an unpruned row is harmless. Plan:
+// _plans/2026-06-19-anonymous-first-auth.md.
+export const MAGIC_LINK_TOKENS: Table = {
+  name: "magic_link_tokens",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "email", type: "TEXT" },
+    { name: "token_hash", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+    { name: "used_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// Public-user state: Continue Watching / Reading. One row per (user_id,
+// story_id); a re-watch UPDATEs the existing row. `position_ms` for video,
+// `position_pct` (0-100) for article scroll progress — non-null exactly one
+// of the two depending on the surface. The unique index on (user_id,
+// story_id) is what the upsert path targets.
+export const USER_CONTINUE: Table = {
+  name: "user_continue",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    { name: "position_ms", type: "INTEGER" },
+    { name: "position_pct", type: "INTEGER" },
+    { name: "updated_at", type: "TEXT" },
   ],
 };
 
@@ -402,6 +600,13 @@ export const REDDIT_SOURCE: Table = {
     { name: "source_hint", type: "TEXT" },
     { name: "needs_expansion", type: "INTEGER" },
     { name: "fingerprint", type: "TEXT" },
+    // 2026-06-24 Full Pipeline toggle (plan:
+    // _plans/2026-06-24-reddit-source-full-pipeline-toggle.md). Per-source
+    // opt-in: when 1, the worker runs every stage end-to-end AND the TS
+    // drain flips stories.status to 'published' on success (web + Facebook).
+    // Default 0 = existing review-then-manual-publish. Mirror of the ALTER
+    // in pipeline/store.py.
+    { name: "full_pipeline", type: "INTEGER" },
   ],
 };
 
@@ -453,11 +658,21 @@ export const STORY_JOBS: Table = {
     { name: "requested_at", type: "TEXT" },
     { name: "started_at", type: "TEXT" },
     { name: "finished_at", type: "TEXT" },
-    // 2026-06-16 per-batch output override for Reddit imports. NULL =
-    // resolve at worker claim time against `reddit.default_output`
-    // (default 'short'); 'short' / 'long' pin the row's output format.
-    // See _plans/2026-06-16-reddit-default-to-shorts.md.
-    { name: "output_format", type: "TEXT" },
+    // 2026-06-24 Full Pipeline: propagated from reddit_source at enqueue.
+    // Worker reads when finishing a job; when 1 + every stage succeeded,
+    // worker sets auto_publish_status='pending' for the TS drain.
+    { name: "full_pipeline", type: "INTEGER" },
+    // 2026-06-24 Full Pipeline auto-publish lane.
+    // NULL = inactive, 'pending' = worker requested, 'done' = TS drain
+    // flipped story to published, 'failed' = publish gate rejected.
+    { name: "auto_publish_status", type: "TEXT" },
+    // 2026-06-24 stage-split: worker flips to 'pending' after enqueueing
+    // the short. The /api/run_hero_thumbnail_finisher cron polls for
+    // 'pending' rows whose short_renders is done, runs the i2i finisher,
+    // sets 'done', and chains into auto-publish if full_pipeline=1.
+    // Splitting this stage off keeps every Vercel function under the
+    // 800s ceiling.
+    { name: "finisher_status", type: "TEXT" },
   ],
 };
 
@@ -534,6 +749,148 @@ export const SHORT_RENDER_EVENTS: Table = {
   ],
 };
 
+// 2026-06-16 story_jobs per-row event timeline. Direct mirror of
+// SHORT_RENDER_EVENTS for the story_jobs queue: one row per phase the
+// worker enters (claimed, idea_done, research_done, article_done,
+// title_done, media_done, video_render_enqueued, forced_short,
+// auto_short_enqueued, finished, failed). The reddit-source detail page
+// reads via listStoryJobEvents and renders a live timeline so the admin
+// can see what's happening to a row without tailing the worker
+// terminal. Plan: _plans/2026-06-16-story-job-event-timeline.md.
+//
+// Carries `reddit_id` denormalised so the per-row detail page can look
+// events up by the URL parameter it has on hand (the page route is
+// /admin/reddit-sources/[reddit_id]) without joining through story_jobs.
+export const STORY_JOB_EVENTS: Table = {
+  name: "story_job_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "job_id", type: "TEXT" },
+    { name: "reddit_id", type: "TEXT" },
+    { name: "ts", type: "TEXT" },
+    { name: "level", type: "TEXT" },
+    { name: "event", type: "TEXT" },
+    { name: "message", type: "TEXT" },
+    { name: "payload", type: "TEXT" },
+  ],
+};
+
+// 2026-06-18 engagement polls. One row per story OR article that has
+// a poll. `enabled = 0` hides the poll everywhere (admin can park a
+// draft without deleting it). `category` is denormalised from
+// stories.category (or article-type for article polls) so the rail
+// queries ("Most Divisive", etc) filter without a join.
+//
+// Standalone-article polls (2026-06-18, plan §15): polls can attach
+// EITHER to a story (story_id non-null, article_id null) OR an
+// article (article_id non-null, story_id null) — never both, never
+// neither. The partial unique indexes in POST_TABLE_DDL enforce one
+// poll per subject. Story polls go through the existing aggregate
+// projection + rail surfaces; article polls compute counts live from
+// poll_votes (low expected volume, no projection table needed).
+//
+// Plan: _plans/2026-06-17-engagement-polls.md.
+export const POLLS: Table = {
+  name: "polls",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "article_id", type: "TEXT" },
+    { name: "question", type: "TEXT" },
+    { name: "option_a_text", type: "TEXT" },
+    { name: "option_b_text", type: "TEXT" },
+    { name: "enabled", type: "INTEGER" },
+    { name: "category", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-18 engagement polls vote log. Append-only, anonymous. One row
+// per (poll, cookie_token); the partial unique index in POST_TABLE_DDL
+// is what makes the same browser re-voting a no-op rather than a
+// duplicate. `cookie_token` is a 256-bit random nonce set
+// HttpOnly+Secure+SameSite=Lax — the anti-double-vote primitive. `side`
+// is closed enum 'A' | 'B'. `ip_ua_hash` is SHA-256 of (ip || '\n' ||
+// user_agent) used ONLY for the rate-limit bucket; the daily aggregate
+// refresh cron nulls it on rows older than 24h so it never becomes a
+// durable fingerprint. `story_id` and `category` are denormalised so the
+// rail queries don't join through polls -> stories.
+export const POLL_VOTES: Table = {
+  name: "poll_votes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "poll_id", type: "TEXT" },
+    { name: "story_id", type: "TEXT" },
+    // 2026-06-18 standalone-article polls. Denormalised for
+    // article-poll analytics the same way story_id is for rails.
+    // Mutually exclusive with story_id at write time — recordVote
+    // enforces exactly one is populated based on which subject the
+    // parent poll is attached to. The unique index on (poll_id,
+    // cookie_token) doesn't change; it's the anti-double-vote
+    // primitive regardless of subject.
+    { name: "article_id", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "side", type: "TEXT" },
+    { name: "cookie_token", type: "TEXT" },
+    { name: "ip_ua_hash", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    // 2026-06-19 anonymous-first auth. Nullable: anonymous votes leave
+    // this NULL and stay anchored to cookie_token; signed-in votes set
+    // user_id and the OAuth callback's reconciliation step UPDATEs
+    // prior anon votes from the same browser to fill it. Anti-double-
+    // vote becomes two PARTIAL unique indexes (see POST_TABLE_DDL):
+    // (poll_id, user_id) WHERE user_id IS NOT NULL and the existing
+    // (poll_id, cookie_token) which now only enforces over anon rows.
+    // Plan: _plans/2026-06-19-anonymous-first-auth.md §Polls + auth.
+    { name: "user_id", type: "TEXT" },
+  ],
+};
+
+// 2026-06-18 engagement polls projection. Refreshed every 5 minutes by
+// a Vercel cron. Reading this instead of COUNT(*)/GROUP BY on poll_votes
+// is what keeps the rail-query latency budget tight. `divisiveness` is
+// `1 - |0.5 - pctA| * 2` (1.0 = perfect 50/50, 0.0 = 100/0). `agreement`
+// is `1 - divisiveness`; both stored so the rail queries can ORDER BY
+// without recomputing.
+export const POLL_AGGREGATES: Table = {
+  name: "poll_aggregates",
+  columns: [
+    { name: "story_id", type: "TEXT", pk: true },
+    { name: "poll_id", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "votes_a", type: "INTEGER" },
+    { name: "votes_b", type: "INTEGER" },
+    { name: "total_votes", type: "INTEGER" },
+    { name: "divisiveness", type: "REAL" },
+    { name: "agreement", type: "REAL" },
+    { name: "last_vote_at", type: "TEXT" },
+    { name: "refreshed_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 data-deletion audit log. One row per honored deletion request,
+// keyed by the confirmation_code we hand back (to Meta's data-deletion
+// callback, or generated for a self-serve delete). `source` is 'facebook'
+// (a Meta signed_request fired this) or 'self_serve' (the user clicked Delete
+// my account). `subject_hash` is hashForLog() of the Facebook app-scoped id
+// or the internal user id — NEVER the raw value, so the log carries no
+// reversible PII (rule 13). `deleted` is 1 when a matching account row was
+// found and wiped, 0 when the request resolved to no account (already gone /
+// never existed). The public status page at /data-deletion/[code] reads this
+// to answer "is my deletion done?" deterministically. Plan:
+// _plans/2026-06-22-facebook-login-and-data-deletion.md.
+export const DATA_DELETION_REQUESTS: Table = {
+  name: "data_deletion_requests",
+  columns: [
+    { name: "confirmation_code", type: "TEXT", pk: true },
+    { name: "source", type: "TEXT" },
+    { name: "subject_hash", type: "TEXT" },
+    { name: "deleted", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-16 homepage curation. One row per slot on the public homepage —
 // `surface` names the rail ('hero', 'top10', 'continue', '<category>_row',
 // 'new_row'), `position` is 0-based ordering within the surface, `story_id`
@@ -553,6 +910,33 @@ export const HOMEPAGE_CURATION: Table = {
   ],
 };
 
+// 2026-06-22 admin audit log. Append-only record of every sensitive admin
+// action (role change, suspend, delete, invite, impersonate) for the
+// user-management feature — "who did what to whom, and when". PII-free by
+// construction: actor and target are an opaque id plus a one-way hashed label
+// (lib/users.hashForLog), and `metadata` is a PII-free JSON blob the caller
+// controls. A row references nothing by foreign key (there are none) and
+// survives a GDPR deletion of its target with no dangling PII, because the
+// only trace left is the hash. App-owned (not mirrored in pipeline/store.py),
+// so the app owns its indexes in POST_TABLE_DDL too. There is intentionally no
+// update/delete path — append-only is the tamper-resistance at this scale.
+// Plan: _plans/2026-06-22-admin-user-management.md (Phase 1).
+export const ADMIN_AUDIT_LOG: Table = {
+  name: "admin_audit_log",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "actor_id", type: "TEXT" },
+    { name: "actor_label", type: "TEXT" },
+    { name: "action", type: "TEXT" },
+    { name: "target_type", type: "TEXT" },
+    { name: "target_id", type: "TEXT" },
+    { name: "target_label", type: "TEXT" },
+    { name: "metadata", type: "TEXT" },
+    { name: "ip_hash", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-22 article comments + AI moderation
 // (_plans/2026-06-22-article-comments-ai-moderation.md). Reader comments on
 // articles, moderated by a two-tier pipeline (free OpenAI Moderation API then a
@@ -563,12 +947,13 @@ export const HOMEPAGE_CURATION: Table = {
 // delete by the author). `author_user_id` is NULL for guests, who carry a
 // `guest_name` only — we deliberately store no guest email (it bought nothing
 // but PII liability; abuse is handled by `ip_ua_hash` velocity + a CAPTCHA).
-// `cookie_token` is a 256-bit nonce that both blocks double-likes and lets a
-// guest see their own held/rejected comment. `ip_ua_hash` is one-way and
-// pruned on a retention sweep. The stance/sentiment/topic_tag fields are the
-// cheap editorial signal the judge emits while it is already reading the
-// comment (stored, not yet surfaced). like_count / reply_count are
-// denormalised so the public thread never runs COUNT(*) per render.
+// `cookie_token` is a 256-bit nonce (same primitive as poll_votes) that both
+// blocks double-likes and lets a guest see their own held/rejected comment.
+// `ip_ua_hash` is one-way and pruned on a retention sweep like poll_votes. The
+// stance/sentiment/topic_tag fields are the cheap editorial signal the judge
+// emits while it is already reading the comment (stored, not yet surfaced).
+// like_count / reply_count are denormalised so the public thread never runs
+// COUNT(*) per render.
 export const COMMENTS: Table = {
   name: "comments",
   columns: [
@@ -602,10 +987,32 @@ export const COMMENTS: Table = {
   ],
 };
 
+// 2026-06-22 admin user-management Phase 5. Email invites for new staff. The
+// raw one-time token lives ONLY in the emailed link; we store its SHA-256 hash
+// (same reasoning as magic_link_tokens / passwords — a DB leak can't be used to
+// accept an invite). `role` is bound here at invite time and is never taken
+// from the client at accept, so a leaked link can only ever grant the role the
+// inviter chose. Single-use via accepted_at; revocable via revoked_at; expires
+// ~72h. Plan: _plans/2026-06-22-admin-user-management.md (Phase 5).
+export const STAFF_INVITES: Table = {
+  name: "staff_invites",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "email", type: "TEXT" },
+    { name: "role", type: "TEXT" },
+    { name: "token_hash", type: "TEXT" },
+    { name: "invited_by", type: "TEXT" },
+    { name: "expires_at", type: "TEXT" },
+    { name: "accepted_at", type: "TEXT" },
+    { name: "revoked_at", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // One row per like. Anonymous likes are keyed by cookie_token, signed-in by
 // user_id; the two partial unique indexes in POST_TABLE_DDL are the
-// anti-double-like primitives. The like count is kept denormalised on
-// comments.like_count and reconciled from this log.
+// anti-double-like primitives (mirrors poll_votes). The like count is kept
+// denormalised on comments.like_count and reconciled from this log.
 export const COMMENT_LIKES: Table = {
   name: "comment_likes",
   columns: [
@@ -613,6 +1020,23 @@ export const COMMENT_LIKES: Table = {
     { name: "comment_id", type: "TEXT" },
     { name: "user_id", type: "TEXT" },
     { name: "cookie_token", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-22 admin user-management Phase 8. Per-source login throttle —
+// brute-force defense for the admin login. `key` is namespaced + hashed by the
+// caller (e.g. "admin-login:<ip hash>") so no raw IP is stored. attempts +
+// first_at form the rolling window; locked_until is set once the threshold is
+// hit. DB-backed because the app is serverless (in-memory wouldn't survive
+// across instances). Plan: _plans/2026-06-22-admin-user-management.md (Phase 8).
+export const LOGIN_ATTEMPTS: Table = {
+  name: "login_attempts",
+  columns: [
+    { name: "key", type: "TEXT", pk: true },
+    { name: "attempts", type: "INTEGER" },
+    { name: "first_at", type: "TEXT" },
+    { name: "locked_until", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
   ],
 };
@@ -650,10 +1074,386 @@ export const COMMENT_MODERATION_EVENTS: Table = {
   ],
 };
 
+// 2026-06-29 user-submitted stories (_plans/2026-06-29-user-submitted-stories.md).
+// A signed-in user submits their own story plus a two-option dilemma; on approval
+// the existing short pipeline renders it and it publishes with a poll. Untrusted
+// UGC lives here and is promoted into `stories` only on approval (the same trust
+// boundary the reddit_source -> story_jobs -> stories ingestion keeps), so the
+// curated content table never holds unreviewed user text. `status` is a closed
+// enum carried in code (lib/submissions.ts SubmissionStatus): 'draft' ->
+// 'pending_text_check' -> 'pending_review' -> 'rejected' | 'approved' ->
+// 'rendering' -> 'published', plus 'unpublished' / 'erased' for takedown. Phase 1
+// has no moderation or render yet: a submit lands in 'pending_review' directly.
+// `display_name` snapshots the chosen name shown on publish (so a later profile
+// rename never retro-changes a published credit). `reject_category` maps to the
+// user-safe reason taxonomy (scripts/submission-eval/reasons.mjs); `reject_reason`
+// is the raw judge/admin note kept for the audit trail, not shown verbatim.
+// `story_id` is set on approval (the promoted story). App-owned: the Python
+// pipeline only ever touches the promoted stories/short_renders rows, never this
+// table, so there is no pipeline/store.py mirror (same call as facebook_posts /
+// admin_audit_log).
+export const SUBMISSIONS: Table = {
+  name: "submissions",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "display_name", type: "TEXT" },
+    { name: "lang", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "body", type: "TEXT" },
+    { name: "dilemma_question", type: "TEXT" },
+    { name: "option_a_text", type: "TEXT" },
+    { name: "option_b_text", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "reject_category", type: "TEXT" },
+    { name: "reject_reason", type: "TEXT" },
+    // How the current status was reached: 'human' (direct submit/admin) |
+    // 'tier1' | 'tier2' | 'auto' | 'timeout'. Phase 1 writes 'human' / null.
+    { name: "moderation_source", type: "TEXT" },
+    { name: "moderation_confidence", type: "REAL" },
+    // The judge's full structured read (JSON), stored for the admin queue and the
+    // Phase 5 training corpus. Null until the moderator runs.
+    { name: "ai_signal", type: "TEXT" },
+    // Bumped each time the author edits a rejected submission and resends it.
+    { name: "resubmit_count", type: "INTEGER" },
+    // The promoted story once approved; NULL until then.
+    { name: "story_id", type: "TEXT" },
+    { name: "approved_by", type: "TEXT" },
+    { name: "approved_at", type: "TEXT" },
+    // 'video' (approve + render) | 'poll_only' (publish the text poll, no render)
+    // — the approver's cost release valve, set at approval time (Phase 3).
+    { name: "render_choice", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// Append-only audit of every submission state change (submit, AI/human verdict,
+// resubmit, takedown). Same role + shape as comment_moderation_events: the
+// statement-of-reasons record and the basis for the appeal/resubmit history; never
+// updated or deleted. `actor` is 'author' | 'system' | 'ai' | an admin user id.
+export const SUBMISSION_EVENTS: Table = {
+  name: "submission_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "submission_id", type: "TEXT" },
+    { name: "actor", type: "TEXT" },
+    { name: "from_status", type: "TEXT" },
+    { name: "to_status", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-29 user-submission victim reports
+// (_plans/2026-06-29-user-submitted-stories.md, Phase 4). A public "this is about
+// me / report" path for people who recognise themselves in a published submission
+// story — they have no account, so this is unauthenticated (origin-gated +
+// rate-limited by ip_ua_hash). An admin reviews open reports and either takes the
+// story down (archive + unpublish the submission) or dismisses. `status` is
+// 'open' | 'actioned' | 'dismissed'. `ip_ua_hash` is one-way (rate-limit + dedup
+// only). App-owned; no pipeline mirror.
+export const SUBMISSION_REPORTS: Table = {
+  name: "submission_reports",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "submission_id", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "ip_ua_hash", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-23 Facebook auto-publish for shorts
+// (_plans/2026-06-23-facebook-auto-publish.md). One row per attempt to
+// publish a rendered short to the LoreWire Facebook Page. Survives
+// re-renders (auto path dedups at story level in code) and stacks freely
+// for manual re-publishes (a 'manual' trigger row can sit next to
+// previously-posted 'auto' rows for the same story). status flows:
+//   pending -> posted (Facebook returned 200 with video id)
+//   pending -> failed (Facebook 4xx/5xx; retry cron picks it up)
+//   posted  -> deleted (manual flow with delete_previous=true succeeded)
+// The Page Access Token never lives here — env var only (rule 13). The
+// columns capture only what's safe to persist for audit + retry: page id
+// at post time, the GCS url we handed Facebook, the rendered caption
+// snapshot, and the Facebook video id on success. Only the TS app writes
+// this table today, so no Python mirror is needed yet.
+export const FACEBOOK_POSTS: Table = {
+  name: "facebook_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    // Nullable: manual re-publishes on an older short don't always
+    // reference a specific render_id (the admin clicked the button on
+    // the story, not on a specific render row).
+    { name: "render_id", type: "TEXT" },
+    { name: "page_id", type: "TEXT" },
+    // 'auto' (from the render route post-hook) or 'manual' (admin
+    // clicked Publish/Re-publish on the short editor). Distinguishes
+    // toggle-respecting attempts from explicit admin actions for both
+    // dedup and observability.
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "caption", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "fb_error_code", type: "INTEGER" },
+    { name: "fb_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    // ensureSchema's TS-side ADD COLUMN emits no DEFAULT, so a row
+    // created before this column existed reads back NULL — callers
+    // must COALESCE(attempts, 0). Mirrors the SHORT_RENDERS.attempts
+    // convention above.
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-24 Instagram auto-publish for shorts
+// (_plans/2026-06-24-instagram-auto-publish.md). Mirrors FACEBOOK_POSTS
+// with two IG-specific deltas:
+//   - `container_id` column: IG publishing is a two-step async flow
+//     (POST /media → poll status_code → POST /media_publish). If the
+//     inline publish times out between create and publish, we persist
+//     the container_id so the retry cron can resume from step 2/3 without
+//     re-creating (re-creating would waste the 100/24h post quota and
+//     create orphan containers).
+//   - `ig_account_id` instead of `page_id` — the post is scoped to the
+//     IG Business Account, not the Page directly (even though the same
+//     Page Access Token authorises both, since the IG account is linked
+//     to the Page).
+// The Page Access Token never lives here — env var only (rule 13). Only
+// the TS app writes this table today, so no Python mirror is needed.
+export const INSTAGRAM_POSTS: Table = {
+  name: "instagram_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "ig_account_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "caption", type: "TEXT" },
+    // IG-specific. Populated after step 1 succeeds; survives across
+    // retries so a row that landed in `pending` with a container_id can
+    // resume from step 2 (poll) or step 3 (publish), skipping the
+    // already-completed step 1.
+    { name: "container_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "ig_error_code", type: "INTEGER" },
+    { name: "ig_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-25 Instagram Story cross-post for shorts
+// (_plans/2026-06-25-instagram-facebook-stories-cross-publish.md).
+// Mirrors INSTAGRAM_POSTS with the caption column dropped: the IG
+// /media endpoint with media_type=STORIES does NOT accept a caption
+// parameter (Story text overlays are creation-tool-only stickers).
+// The same `container_id` resume mechanic carries over — Story
+// publishing is the same 3-step async flow (POST /media → poll
+// status_code → POST /media_publish) modulo media_type=STORIES.
+// Cross-post is gated by `publisher.instagram.auto_publish_story`
+// (default off), independent from the Reel toggle. Reuses
+// FB_PAGE_ACCESS_TOKEN — no new env vars, no new App Review.
+export const INSTAGRAM_STORIES: Table = {
+  name: "instagram_stories",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "ig_account_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "container_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "ig_error_code", type: "INTEGER" },
+    { name: "ig_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-25 Facebook Page Story cross-post for shorts
+// (_plans/2026-06-25-instagram-facebook-stories-cross-publish.md).
+// Mirrors FACEBOOK_POSTS with two deltas:
+//   - No caption column. FB Page /video_stories does NOT accept a
+//     description on creation.
+//   - `upload_session_id` (the FB `video_id` returned from
+//     upload_phase=start). Survives across retries so a row that
+//     landed in `pending` after the rupload bytes step can resume at
+//     upload_phase=finish without re-uploading — same role
+//     INSTAGRAM_STORIES.container_id plays for IG.
+// Cross-post is gated by `publisher.facebook.auto_publish_story`
+// (default off), independent from the FB Reel toggle.
+export const FACEBOOK_STORIES: Table = {
+  name: "facebook_stories",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "page_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "upload_session_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "fb_error_code", type: "INTEGER" },
+    { name: "fb_error_subcode", type: "INTEGER" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-24 YouTube auto-publish for shorts
+// (_plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md).
+// Mirrors FACEBOOK_POSTS / INSTAGRAM_POSTS with YT-specific deltas:
+//   - The metadata is wider than IG/FB: the YT video carries a title,
+//     description, tags, category, MFK + synthetic-media flags. We
+//     snapshot each at post time so an audit row reflects what was
+//     actually uploaded (an admin editing the global default later
+//     doesn't rewrite history).
+//   - `channel_id` instead of page_id / ig_account_id. The OAuth
+//     refresh token authorises the LoreWire channel; the channel id
+//     is snapshotted from env for audit + the defense-in-depth check
+//     in publish-to-youtube.ts that refuses to upload to a different
+//     channel than configured.
+//   - `yt_error_reason` is TEXT (not INTEGER): the Data API returns
+//     stringly reason codes ("quotaExceeded", "uploadLimitExceeded",
+//     "youtubeSignupRequired"), not numeric codes the way Meta does.
+// The OAuth refresh token + client secret live in env, never in this
+// table or in logs (rule 13).
+export const YOUTUBE_POSTS: Table = {
+  name: "youtube_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "channel_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "description", type: "TEXT" },
+    // JSON array of strings. Stored as TEXT for portability across
+    // SQLite + Postgres. publish-to-youtube serializes on write,
+    // parses on read.
+    { name: "tags_json", type: "TEXT" },
+    { name: "category_id", type: "TEXT" },
+    { name: "made_for_kids", type: "INTEGER" },
+    // 0/1 → maps to status.containsSyntheticMedia in the Data API
+    // (the "AI-generated / altered content" flag).
+    { name: "synthetic", type: "INTEGER" },
+    { name: "privacy", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_video_id", type: "TEXT" },
+    { name: "yt_error_reason", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-24 TikTok auto-publish for shorts
+// (_plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md).
+// Mirrors INSTAGRAM_POSTS' async-pipeline shape since TikTok's Content
+// Posting API is also two-step: POST init → poll status → terminal.
+//   - `publish_id`: the async id returned by /v2/post/publish/.../init/.
+//     Persisted so the retry cron can resume polling without re-uploading.
+//   - `open_id` instead of page_id / channel_id — TikTok's stable user
+//     id for the LoreWire account. Defense-in-depth check refuses to
+//     publish if the id refreshed from the refresh token doesn't match.
+//   - `post_mode`: 'inbox' (drafts; works without app audit) vs
+//     'direct' (live post; requires app audit). The audit-gate switch
+//     ships as a settings toggle, not as code branches.
+//   - `is_aigc`: 0/1 → maps to post_info.is_aigc, surfaces TikTok's
+//     "Creator labeled as AI-generated" tag.
+//   - The disable_duet / disable_stitch / disable_comment booleans
+//     are snapshotted at post time so the audit row reflects what
+//     was actually requested.
+// OAuth refresh token + client secret live in env, never in this
+// table or in logs (rule 13).
+export const TIKTOK_POSTS: Table = {
+  name: "tiktok_posts",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "open_id", type: "TEXT" },
+    { name: "trigger", type: "TEXT" },
+    { name: "video_url", type: "TEXT" },
+    // Caption with inline hashtags + mentions. TikTok doesn't have
+    // a separate hashtags field — hashtags live inside title at the
+    // API level.
+    { name: "caption", type: "TEXT" },
+    { name: "privacy_level", type: "TEXT" },
+    { name: "post_mode", type: "TEXT" },
+    { name: "is_aigc", type: "INTEGER" },
+    { name: "disable_duet", type: "INTEGER" },
+    { name: "disable_stitch", type: "INTEGER" },
+    { name: "disable_comment", type: "INTEGER" },
+    { name: "publish_id", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "tt_error_code", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "created_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+    { name: "deleted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-06-25 Phase 1 of _plans/2026-06-25-top10-ranking.md. Anonymous
+// engagement events keyed off the lw_anon cookie. The weight column is
+// baked at write time so future tuning of the weight table doesn't
+// retroactively rewrite history — today's Top 10 reflects today's
+// rules. Consent gate is enforced at the lib/story-events.ts layer
+// (rejected → no-op, not a database concern).
+export const STORY_EVENTS: Table = {
+  name: "story_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "event_type", type: "TEXT" },
+    // anon_id is the lw_anon cookie value; NULL when the writer didn't
+    // (or couldn't) read a cookie. Kept on the row for future per-user
+    // rate-limiting and de-duplication; not required to score the rail.
+    { name: "anon_id", type: "TEXT" },
+    { name: "occurred_at", type: "TEXT" },
+    { name: "weight", type: "REAL" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
   USERS,
+  USER_SAVES,
+  USER_LIKES,
+  USER_FAV_CATEGORIES,
+  USER_RECENTLY_VIEWED,
+  USER_CONTINUE,
+  MAGIC_LINK_TOKENS,
   VIDEO_SEGMENTS,
   VIDEO_RENDERS,
   VIDEO_RENDER_EVENTS,
@@ -666,12 +1466,31 @@ export const TABLES: Table[] = [
   REDDIT_SOURCE,
   IDEAS_IMPORT_LOG,
   STORY_JOBS,
+  STORY_JOB_EVENTS,
   VOICE_RENDERS,
+  VOICEOVERS,
   HOMEPAGE_CURATION,
+  STORY_EVENTS,
+  POLLS,
+  POLL_VOTES,
+  POLL_AGGREGATES,
+  DATA_DELETION_REQUESTS,
+  ADMIN_AUDIT_LOG,
+  STAFF_INVITES,
+  LOGIN_ATTEMPTS,
   COMMENTS,
   COMMENT_LIKES,
   COMMENT_REPORTS,
   COMMENT_MODERATION_EVENTS,
+  SUBMISSIONS,
+  SUBMISSION_EVENTS,
+  SUBMISSION_REPORTS,
+  FACEBOOK_POSTS,
+  INSTAGRAM_POSTS,
+  INSTAGRAM_STORIES,
+  FACEBOOK_STORIES,
+  YOUTUBE_POSTS,
+  TIKTOK_POSTS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -717,6 +1536,9 @@ export const POST_TABLE_DDL: string[] = [
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_renders_one_active " +
     "ON voice_renders(story_id, text_hash, voice_provider, voice_id) " +
     "WHERE status IN ('queued', 'processing')",
+  // 2026-06-22 voiceover presets: names are the admin-facing handle, so keep
+  // them unique (mirror of idx_voiceovers_name in pipeline/store.py).
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_voiceovers_name ON voiceovers(name)",
   // 2026-06-15 article shorts: pipeline/store.py enqueue_short_render does
   // INSERT ... ON CONFLICT (story_id, config_hash). createTableSql emits no
   // UNIQUE, so when the TS app creates short_renders first on a fresh prod DB
@@ -729,25 +1551,180 @@ export const POST_TABLE_DDL: string[] = [
   // ts, and we expect ~15-25 events per short so the lookup is hot-pathed.
   "CREATE INDEX IF NOT EXISTS idx_short_render_events_render_id " +
     "ON short_render_events(render_id, ts)",
+  // 2026-06-16 story_jobs observability. Same shape as the short_render_events
+  // index. The detail page at /admin/reddit-sources/[reddit_id] reads by
+  // reddit_id (cheapest path on a page that already has the URL param); the
+  // job_id index supports the by-job lookup used by tests and the API.
+  "CREATE INDEX IF NOT EXISTS idx_story_job_events_reddit_id " +
+    "ON story_job_events(reddit_id, ts)",
+  "CREATE INDEX IF NOT EXISTS idx_story_job_events_job_id " +
+    "ON story_job_events(job_id, ts)",
   // 2026-06-16 homepage curation. (surface, position) uniqueness is the
   // load-bearing invariant — two stories can't share a slot, and add/remove/
   // move operations depend on packed positions. Surface filter is also the
   // hot read path (one query per rail) so the leading column matches.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_homepage_curation_surface_position " +
     "ON homepage_curation(surface, position)",
+  // 2026-06-25 Phase 1 of _plans/2026-06-25-top10-ranking.md. The
+  // scoring query in Phase 2 is a per-story aggregation over a recent
+  // time window — `(story_id, occurred_at)` is the exact lookup shape.
+  // The standalone `occurred_at` index supports the cutoff filter
+  // (WHERE occurred_at >= now() - INTERVAL '7 days') before the join
+  // back to stories.
+  "CREATE INDEX IF NOT EXISTS idx_story_events_story_time " +
+    "ON story_events(story_id, occurred_at)",
+  "CREATE INDEX IF NOT EXISTS idx_story_events_time " +
+    "ON story_events(occurred_at)",
+  // 2026-06-18 engagement polls. Both per-subject uniqueness indexes
+  // are PARTIAL — they only enforce uniqueness over the non-null
+  // values. The schema invariant is "exactly one of (story_id,
+  // article_id) is non-null"; the partial indexes mean an article-
+  // only poll (story_id NULL) doesn't collide on the story uniqueness
+  // check, and vice versa. lib/polls.ts:upsertPoll targets the
+  // matching index via lookup-then-write, NOT ON CONFLICT, so this
+  // shape works identically on SQLite + Postgres.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_polls_story_id " +
+    "ON polls(story_id) WHERE story_id IS NOT NULL",
+  // 2026-06-18 standalone-article polls (plan §15). Parallel partial
+  // unique to idx_polls_story_id — one poll per article.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_polls_article_id " +
+    "ON polls(article_id) WHERE article_id IS NOT NULL",
+  // Rail read shape: filter by category + enabled, surface a list.
+  "CREATE INDEX IF NOT EXISTS idx_polls_category_enabled " +
+    "ON polls(category, enabled)",
+  // 2026-06-18 engagement poll votes. (poll_id, cookie_token) uniqueness
+  // is the anti-double-vote primitive. lib/polls.ts:recordVote does
+  // INSERT ... ON CONFLICT (poll_id, cookie_token) DO NOTHING; missing
+  // this index would let the same browser vote twice on Postgres until
+  // an explicit duplicate check ran, AND would 500 the action because
+  // the ON CONFLICT clause has nothing to match.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_poll_votes_poll_cookie " +
+    "ON poll_votes(poll_id, cookie_token)",
+  // Per-poll vote count + per-story rollup read paths. Both are touched
+  // by the aggregate refresh cron + the per-story sparkline query on
+  // /admin/polls/[id].
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_poll_id ON poll_votes(poll_id)",
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_story_id " +
+    "ON poll_votes(story_id)",
+  // 2026-06-18 standalone-article polls. Mirrors idx_poll_votes_story_id
+  // for the article-poll surface — supports the per-article analytics
+  // path (admin overview rollups, future article-only divisive rail).
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_article_id " +
+    "ON poll_votes(article_id)",
+  // Retention sweep (24h prune of ip_ua_hash) + sparkline range scan
+  // both filter by created_at. Cheap to keep, expensive to retrofit.
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_created_at " +
+    "ON poll_votes(created_at)",
+  // 2026-06-18 QA pass: the personalized article-rail mode (and any
+  // future "what did this cookie vote on" admin view) reads by
+  // cookie_token alone. The compound idx_poll_votes_poll_cookie
+  // leads with poll_id so it can't service this query — without a
+  // standalone index here, the SELECT becomes a table scan as the
+  // vote log grows.
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_cookie_token " +
+    "ON poll_votes(cookie_token)",
+  // 2026-06-18 engagement poll aggregates. The three rails ORDER BY
+  // divisiveness / agreement / category-divisiveness; without these
+  // indexes the rails would table-scan poll_aggregates on every public
+  // pageview.
+  "CREATE INDEX IF NOT EXISTS idx_poll_aggregates_divisiveness " +
+    "ON poll_aggregates(divisiveness DESC, total_votes DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_poll_aggregates_agreement " +
+    "ON poll_aggregates(agreement DESC, total_votes DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_poll_aggregates_category " +
+    "ON poll_aggregates(category, divisiveness DESC)",
+  // 2026-06-19 anonymous-first auth. Load-bearing uniqueness for the
+  // OAuth callback's user lookup: (provider, provider_sub) is the
+  // identity key Google's `sub` claim maps to. The fallback by-email
+  // path uses the email index. Partial uniqueness on provider_sub so
+  // admin rows (provider IS NULL) don't collide.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_provider_sub " +
+    "ON users(provider, provider_sub) " +
+    "WHERE provider IS NOT NULL AND provider_sub IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)",
+  // 2026-06-19 anonymous-first auth: per-user state tables. The unique
+  // indexes are the upsert anchors (lib/user-state.ts will INSERT ...
+  // ON CONFLICT(user_id, story_id) DO NOTHING for saves/likes; same
+  // shape for the others). The non-unique reads sort latest-first.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_saves_user_story " +
+    "ON user_saves(user_id, story_id)",
+  "CREATE INDEX IF NOT EXISTS idx_user_saves_user_created " +
+    "ON user_saves(user_id, created_at DESC)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_likes_user_story " +
+    "ON user_likes(user_id, story_id)",
+  "CREATE INDEX IF NOT EXISTS idx_user_likes_user_created " +
+    "ON user_likes(user_id, created_at DESC)",
+  // 2026-06-22 Wires likes. The public feed counts likes per story
+  // (COUNT(*) WHERE story_id = ?); the (user_id, story_id) index can't
+  // serve a story_id-leading lookup, so without this the count subquery
+  // table-scans user_likes on every feed page.
+  "CREATE INDEX IF NOT EXISTS idx_user_likes_story " +
+    "ON user_likes(story_id)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_fav_categories_user_cat " +
+    "ON user_fav_categories(user_id, category)",
+  // Recently-viewed: NOT unique on (user_id, story_id) — re-visits are
+  // separate rows, the read collapses by story_id. The (user_id,
+  // viewed_at) index supports both the latest-N read and the periodic
+  // prune that caps the per-user history at 50.
+  "CREATE INDEX IF NOT EXISTS idx_user_recently_viewed_user_viewed " +
+    "ON user_recently_viewed(user_id, viewed_at DESC)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_continue_user_story " +
+    "ON user_continue(user_id, story_id)",
+  "CREATE INDEX IF NOT EXISTS idx_user_continue_user_updated " +
+    "ON user_continue(user_id, updated_at DESC)",
+  // 2026-06-19 polls + auth. Signed-in users get a second anti-double-
+  // vote primitive keyed on user_id (anonymous votes keep using the
+  // existing idx_poll_votes_poll_cookie). PARTIAL: only enforces over
+  // rows that actually carry a user_id, so the anon row pattern is
+  // unchanged. The reconciliation UPDATE in the OAuth callback sets
+  // user_id on prior anon rows from the same browser; after that, the
+  // signed-in user can re-vote from a second device and recordVote
+  // sees the existing (poll_id, user_id) row and returns
+  // inserted=false without creating a duplicate. Plan:
+  // _plans/2026-06-19-anonymous-first-auth.md §Polls + auth integration.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_poll_votes_poll_user " +
+    "ON poll_votes(poll_id, user_id) WHERE user_id IS NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_poll_votes_user_id " +
+    "ON poll_votes(user_id) WHERE user_id IS NOT NULL",
+  // 2026-06-19 Phase 3 magic link. The verify path looks up by
+  // token_hash (cheapest index for the hot path); the periodic prune
+  // and the verify-time expiry check scan by expires_at.
+  "CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_hash " +
+    "ON magic_link_tokens(token_hash)",
+  "CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_expires " +
+    "ON magic_link_tokens(expires_at)",
+  // 2026-06-22 admin audit log (app-owned, not in pipeline/store.py). The
+  // default view reads newest-first, so created_at DESC is the hot path; the
+  // per-user detail panel reads by (target_type, target_id); the by-actor and
+  // by-action filters each lead with their column then created_at.
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_created " +
+    "ON admin_audit_log(created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_target " +
+    "ON admin_audit_log(target_type, target_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_actor " +
+    "ON admin_audit_log(actor_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_admin_audit_log_action " +
+    "ON admin_audit_log(action, created_at DESC)",
+  // 2026-06-22 staff invites. The accept path looks up by token_hash (hot);
+  // the pending-invites list reads newest-first.
+  "CREATE INDEX IF NOT EXISTS idx_staff_invites_token " +
+    "ON staff_invites(token_hash)",
+  "CREATE INDEX IF NOT EXISTS idx_staff_invites_created " +
+    "ON staff_invites(created_at DESC)",
   // 2026-06-22 article comments. The public thread read filters by
-  // (article_id, status='published') and orders by created_at, so the
-  // composite index is the hot path. Parent lookup for reply threading is
-  // separate.
+  // (article_id, status='published') and paginates by created_at — keyset,
+  // never OFFSET — so the leading columns match the hot path.
   "CREATE INDEX IF NOT EXISTS idx_comments_article_thread " +
     "ON comments(article_id, status, created_at)",
+  // Reply fan-out under a top-level comment.
   "CREATE INDEX IF NOT EXISTS idx_comments_parent " +
     "ON comments(parent_id) WHERE parent_id IS NOT NULL",
+  // Admin review queue reads held/quarantined ordered oldest-first.
   "CREATE INDEX IF NOT EXISTS idx_comments_status_created " +
     "ON comments(status, created_at)",
   // DB-backed guest velocity limit: count this bucket's recent comments in a
-  // single window. lib/comment-rate-limit.ts:checkCommentVelocity targets
-  // this index.
+  // window. In-memory per-instance limiting (poll-rate-limit.ts) is too weak
+  // for guest abuse on serverless, so the write path counts rows here instead.
   "CREATE INDEX IF NOT EXISTS idx_comments_ipua_created " +
     "ON comments(ip_ua_hash, created_at)",
   // "My own comments" (lets a guest see their held/rejected comment) + the
@@ -757,20 +1734,46 @@ export const POST_TABLE_DDL: string[] = [
   // Signed-in user's own comments + per-user velocity bucket.
   "CREATE INDEX IF NOT EXISTS idx_comments_author " +
     "ON comments(author_user_id) WHERE author_user_id IS NOT NULL",
-  // Anti-double-like: one like per (comment, cookie_token) for anonymous, and
-  // one per (comment, user_id) for signed-in. Partial index on user_id covers
+  // Anti-double-like primitives, mirroring poll_votes: cookie uniqueness is
+  // the always-on primitive; the user_id partial adds a second key for
   // signed-in likes across devices. lib/comments.ts:toggleLike targets these
-  // indexes.
+  // via lookup-then-write, so the shape works identically on SQLite + Postgres.
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_cookie " +
     "ON comment_likes(comment_id, cookie_token)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_comment_likes_comment_user " +
     "ON comment_likes(comment_id, user_id) WHERE user_id IS NOT NULL",
-  // Admin queue read: open reports first, then by report age.
+  // Open-reports queue (admin) + per-comment report lookup.
   "CREATE INDEX IF NOT EXISTS idx_comment_reports_status " +
     "ON comment_reports(status, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_comment_reports_comment " +
     "ON comment_reports(comment_id)",
-  // Audit trail per comment, newest first for the appeal / admin history view.
+  // Per-comment audit timeline (the statement-of-reasons / appeal record).
   "CREATE INDEX IF NOT EXISTS idx_comment_moderation_events_comment " +
     "ON comment_moderation_events(comment_id, created_at)",
+  // 2026-06-29 user submissions. The dashboard reads a user's own submissions
+  // newest-first (user_id, created_at); the per-user cap counts active + recent
+  // rows by (user_id, status); the admin review queue (Phase 2) reads pending
+  // oldest-first by (status, created_at); story_id links a published submission
+  // back to its promoted story.
+  "CREATE INDEX IF NOT EXISTS idx_submissions_user_created " +
+    "ON submissions(user_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_submissions_user_status " +
+    "ON submissions(user_id, status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_submissions_status " +
+    "ON submissions(status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_submissions_story " +
+    "ON submissions(story_id) WHERE story_id IS NOT NULL",
+  // Per-submission audit timeline (the statement-of-reasons / resubmit record).
+  "CREATE INDEX IF NOT EXISTS idx_submission_events_submission " +
+    "ON submission_events(submission_id, created_at)",
+  // Find the promoted story for a submission (Phase 3). Partial: only the small
+  // set of submission-origin stories.
+  "CREATE INDEX IF NOT EXISTS idx_stories_submission_id " +
+    "ON stories(submission_id) WHERE submission_id IS NOT NULL",
+  // 2026-06-29 victim reports: the admin queue reads open reports oldest-first;
+  // the report endpoint rate-limits by counting recent rows per reporter bucket.
+  "CREATE INDEX IF NOT EXISTS idx_submission_reports_status " +
+    "ON submission_reports(status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_submission_reports_ipua " +
+    "ON submission_reports(ip_ua_hash, created_at)",
 ];

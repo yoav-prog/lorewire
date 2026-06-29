@@ -7,7 +7,7 @@
 // Plan: _plans/2026-06-22-article-comments-ai-moderation.md (Step 5).
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import Breadcrumb from "@/app/admin/Breadcrumb";
 import { getSetting } from "@/lib/repo";
 import { listModerationQueue, type ModerationQueueRow } from "@/lib/comments";
@@ -31,7 +31,7 @@ function ago(iso: string | null): string {
 }
 
 export default async function CommentsModerationPage() {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const rows = await listModerationQueue(200);
   const held = rows.filter((r) => r.status === "held");
   const quarantined = rows.filter((r) => r.status === "quarantined");

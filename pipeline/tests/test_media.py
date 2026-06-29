@@ -10,7 +10,7 @@ import os
 import unittest
 from unittest import mock
 
-from pipeline import media
+from pipeline import images, media
 
 
 class SanitizeIdTests(unittest.TestCase):
@@ -49,6 +49,126 @@ class ImageFilenameTests(unittest.TestCase):
     def test_higher_indexes_are_scenes(self):
         self.assertEqual(media._image_filename(1), "scene-1.png")
         self.assertEqual(media._image_filename(3), "scene-3.png")
+
+
+class GenerateWithRetryErrorSidechannelTests(unittest.TestCase):
+    """`_generate_with_retry` returns None on failure; the upstream exception
+    text is stashed on `_LAST_KIE_ERROR` so callers can include it in the
+    admin timeline's `kie_failed` event (read via `last_kie_error()`).
+
+    Plan: _plans/2026-06-23-pipeline-outbound-url-rewriter.md."""
+
+    def test_failure_stashes_exception_text(self):
+        with mock.patch.object(
+            images, "generate", side_effect=RuntimeError("kie task t-1 failed: bad URL")
+        ):
+            url = media._generate_with_retry("prompt", "id=x")
+        self.assertIsNone(url)
+        self.assertEqual(
+            media.last_kie_error(), "kie task t-1 failed: bad URL"
+        )
+
+    def test_success_clears_previous_error(self):
+        # First call fails — sidechannel carries the error.
+        with mock.patch.object(images, "generate", side_effect=RuntimeError("first")):
+            self.assertIsNone(media._generate_with_retry("p", "id=x"))
+        self.assertEqual(media.last_kie_error(), "first")
+
+        # Second call succeeds — sidechannel resets to None so a future
+        # caller can't read a stale error from a previous unrelated call.
+        with mock.patch.object(images, "generate", return_value="https://kie/out.png"):
+            self.assertEqual(
+                media._generate_with_retry("p", "id=x"),
+                "https://kie/out.png",
+            )
+        self.assertIsNone(media.last_kie_error())
+
+    def test_retry_reports_last_exception(self):
+        # Both attempts fail with different messages — the FINAL one is what
+        # the sidechannel carries (matches the human-readable log line).
+        with mock.patch.object(
+            images,
+            "generate",
+            side_effect=[RuntimeError("first"), RuntimeError("second")],
+        ):
+            self.assertIsNone(media._generate_with_retry("p", "id=x", attempts=2))
+        self.assertEqual(media.last_kie_error(), "second")
+
+    def test_quota_error_short_circuits_retry(self):
+        """A kie.ai 433 daily-cap error is unrecoverable inside the same
+        tick — kie's points budget is wall-clock-bound and a second
+        createTask just burns another round-trip to confirm the same
+        rejection. `_generate_with_retry` must bail after the FIRST
+        attempt when the upstream error carries the 433 marker, not the
+        normal 2-attempt loop. Without this short-circuit a 5-variant
+        finisher (hero+thumbnail) wastes 5 extra API calls confirming
+        the same wall.
+        """
+        # Use a generator side_effect so we can assert exactly how many
+        # times images.generate was invoked — the second call should not
+        # happen on a quota error.
+        quota_err = RuntimeError(
+            "kie createTask failed: {'code': 433, 'msg': 'The current "
+            "number of points used by apiKey has exceeded the daily limit', "
+            "'data': None}"
+        )
+        with mock.patch.object(images, "generate") as gen:
+            gen.side_effect = quota_err
+            self.assertIsNone(media._generate_with_retry("p", "id=x", attempts=2))
+            # Only ONE call despite attempts=2 — the quota error short-
+            # circuited the retry.
+            self.assertEqual(gen.call_count, 1)
+        # Both the raw error AND the kind sidechannel are set so callers
+        # can either show the verbatim kie text or branch on `last_kie_error_kind`.
+        self.assertIn("code': 433", media.last_kie_error())
+        self.assertEqual(media.last_kie_error_kind(), "quota")
+
+    def test_quota_kind_drives_user_friendly_msg(self):
+        """`_kie_failed_msg` rewrites the event's user-facing text when
+        the upstream failure was a 433 cap, so the admin sees a quota
+        notice instead of the generic "returned no URL after retries"
+        that previously made the failure look transient.
+        """
+        quota_err = RuntimeError(
+            "kie createTask failed: {'code': 433, 'msg': 'exceeded the daily limit'}"
+        )
+        with mock.patch.object(images, "generate", side_effect=quota_err):
+            media._generate_with_retry("p", "id=x")
+        self.assertEqual(media.last_kie_error_kind(), "quota")
+        msg = media._kie_failed_msg("Portrait i2i generation")
+        self.assertIn("kie.ai daily points cap", msg)
+        self.assertIn("Portrait i2i generation", msg)
+
+    def test_generic_kind_keeps_legacy_msg(self):
+        """Non-quota failures keep the existing wording so existing log
+        searches / admin-eye patterns are not disturbed."""
+        with mock.patch.object(
+            images, "generate", side_effect=RuntimeError("connection reset")
+        ):
+            media._generate_with_retry("p", "id=x")
+        self.assertEqual(media.last_kie_error_kind(), "generic")
+        self.assertEqual(
+            media._kie_failed_msg("Portrait i2i generation"),
+            "Portrait i2i generation returned no URL after retries",
+        )
+
+    def test_quota_kind_resets_on_success(self):
+        """A successful call must clear `kind` along with `msg`, so a
+        later unrelated failure doesn't read as quota by mistake."""
+        with mock.patch.object(
+            images,
+            "generate",
+            side_effect=RuntimeError(
+                "kie createTask failed: {'code': 433, 'msg': 'exceeded the daily limit'}"
+            ),
+        ):
+            media._generate_with_retry("p", "id=x")
+        self.assertEqual(media.last_kie_error_kind(), "quota")
+
+        with mock.patch.object(images, "generate", return_value="https://kie/x.png"):
+            media._generate_with_retry("p", "id=x")
+        self.assertIsNone(media.last_kie_error())
+        self.assertIsNone(media.last_kie_error_kind())
 
 
 class StoryCostCentsTests(unittest.TestCase):
@@ -95,6 +215,53 @@ class MouthSwapEnabledTests(unittest.TestCase):
             get.return_value = "1"
             media._mouth_swap_enabled()
             get.assert_called_with("video.mouth_swap")
+
+
+class FormatDurationMsTests(unittest.TestCase):
+    def test_sub_minute_pads_seconds_to_two_digits(self):
+        self.assertEqual(media._format_duration_ms(28_400), "0:28")
+        self.assertEqual(media._format_duration_ms(5_000), "0:05")
+
+    def test_multi_minute(self):
+        self.assertEqual(media._format_duration_ms(75_000), "1:15")
+        self.assertEqual(media._format_duration_ms(134_000), "2:14")
+
+    def test_rounds_up_at_minute_boundary(self):
+        # 59.6s rounds the seconds to 60; the helper must roll that into
+        # the minute count instead of emitting a malformed "0:60".
+        self.assertEqual(media._format_duration_ms(59_600), "1:00")
+        self.assertEqual(media._format_duration_ms(119_600), "2:00")
+
+    def test_returns_none_for_zero_negative_or_non_numeric(self):
+        self.assertIsNone(media._format_duration_ms(0))
+        self.assertIsNone(media._format_duration_ms(-1))
+        self.assertIsNone(media._format_duration_ms(None))
+        self.assertIsNone(media._format_duration_ms("nope"))
+
+
+class ShortDurationFromPropsTests(unittest.TestCase):
+    def test_pulls_duration_from_json_string(self):
+        props = '{"duration_ms": 47000}'
+        self.assertEqual(media._short_duration_from_props(props), "0:47")
+
+    def test_pulls_duration_from_already_decoded_dict(self):
+        # Some Postgres adapters auto-decode JSON columns; we accept the
+        # dict form so the caller doesn't need to know which driver is
+        # active.
+        self.assertEqual(
+            media._short_duration_from_props({"duration_ms": 30_000}),
+            "0:30",
+        )
+
+    def test_missing_duration_ms_returns_none(self):
+        self.assertIsNone(media._short_duration_from_props('{"other": 1}'))
+        self.assertIsNone(media._short_duration_from_props("{}"))
+
+    def test_unparseable_or_wrong_shape_returns_none(self):
+        self.assertIsNone(media._short_duration_from_props(None))
+        self.assertIsNone(media._short_duration_from_props("{not json}"))
+        self.assertIsNone(media._short_duration_from_props(42))
+        self.assertIsNone(media._short_duration_from_props("[1, 2, 3]"))
 
 
 class ParseDurationTests(unittest.TestCase):
@@ -290,6 +457,132 @@ class StagingDirTests(unittest.TestCase):
             path,
             Path("/repo") / "lorewire-app" / "public" / "generated" / "abc",
         )
+
+
+class GenerateMediaSkipFlagsTests(unittest.TestCase):
+    """Verify the two skip flags on `generate_media` actually short-circuit
+    the right cost centers (plans:
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md
+    _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md).
+
+    The Reddit-source worker passes BOTH skip_hero=True and
+    skip_long_form_scenes=True, so the total kie image calls must be
+    ZERO — the hero is built later by the finisher, and the scenes
+    come from the short. Heavy mocking is intentional: the goal is
+    to exercise the GATING, not the rest of the pipeline."""
+
+    def setUp(self) -> None:
+        # Patches that prevent any real network / disk / config read.
+        # Each stub returns the minimum the function needs to keep going.
+        from pathlib import Path
+        self._tmpdir = Path(__file__).parent / "_tmp_skip_flags"
+        self._tmpdir.mkdir(exist_ok=True)
+        # Patch order: the narration step happens AFTER the hero+scene
+        # loops. We stub it to a quick no-op so the function can return
+        # without touching real TTS infra.
+        self._stack = [
+            # 3 prompts: first is the fallback hero (dropped by media.py), the
+            # other 2 are scene prompts. So default path = 2 hero variants + 2
+            # scene generations = 4 kie calls.
+            mock.patch.object(media.stages, "make_image_prompts", return_value=["p0", "p1", "p2"]),
+            mock.patch.object(media, "_resolve_scene_count", return_value=2),
+            mock.patch.object(media, "_generate_with_retry", return_value="https://kie/img.png"),
+            mock.patch.object(media.images, "download"),
+            mock.patch.object(media.gcs, "publish", side_effect=lambda local, key, url: url),
+            mock.patch.object(media.models, "get_selected", return_value="kie/gpt-image-2"),
+            mock.patch.object(media.narration, "render_narration",
+                              return_value={"words": [], "spoken_script": "", "provider": "stub"}),
+            mock.patch.object(media, "_budget_log"),
+            mock.patch.object(media, "_staging_dir", return_value=self._tmpdir),
+            mock.patch.object(media, "_prop_slide_enabled", return_value=False),
+            mock.patch.object(media, "_mouth_swap_enabled", return_value=False),
+        ]
+        self._mocks = [p.start() for p in self._stack]
+        self.gen_mock = self._mocks[2]  # _generate_with_retry
+
+    def tearDown(self) -> None:
+        for p in self._stack:
+            p.stop()
+
+    def _call(self, **kwargs):
+        from pathlib import Path
+        return media.generate_media(
+            "id1",
+            {"reddit_id": "id1", "category": "Drama", "headline": "T"},
+            "Some body.",
+            "Title",
+            False,
+            repo_root=Path("/repo"),
+            **kwargs,
+        )
+
+    def test_default_path_calls_kie_for_hero_and_scenes(self):
+        # Without the skip flags the gates are open: hero (2 variants) +
+        # 2 scene prompts = 4 kie calls.
+        self._call()
+        self.assertEqual(self.gen_mock.call_count, 4)
+
+    def test_skip_hero_drops_hero_kie_calls(self):
+        # Hero gone, 2 scene calls remain.
+        self._call(skip_hero=True)
+        self.assertEqual(self.gen_mock.call_count, 2)
+
+    def test_skip_long_form_scenes_drops_scene_kie_calls(self):
+        # Scene loop gone, 2 hero calls remain.
+        self._call(skip_long_form_scenes=True)
+        self.assertEqual(self.gen_mock.call_count, 2)
+
+    def test_both_skip_flags_zero_kie_calls(self):
+        # The Reddit-source worker path: zero paid kie image gen here.
+        out = self._call(skip_hero=True, skip_long_form_scenes=True)
+        self.assertEqual(self.gen_mock.call_count, 0)
+        # And the returned dict has no "images" key so the caller's
+        # store.upsert_story doesn't overwrite the column with an empty
+        # JSON list.
+        self.assertNotIn("images", out)
+
+    def test_skip_long_form_motion_beats_short_circuits_props_even_when_enabled(self):
+        # 2026-06-24: even with the global prop_slide setting ON, the new
+        # flag must short-circuit the prop block. Production was hitting
+        # Vercel's 800s timeout because one prop's kie task took 306s by
+        # itself; the Reddit-source worker now passes this flag because
+        # the long-form video those motion beats compose into isn't
+        # rendered for these jobs anyway.
+        with mock.patch.object(media, "_prop_slide_enabled", return_value=True), \
+             mock.patch.object(media.stages, "make_prop_plan") as plan_mock:
+            self._call(
+                skip_hero=True,
+                skip_long_form_scenes=True,
+                skip_long_form_motion_beats=True,
+            )
+            # The fast guard fires BEFORE make_prop_plan, so it must not
+            # have been called even once. Without the guard, the prop
+            # loop would burn ~60s per prop on kie.
+            plan_mock.assert_not_called()
+
+    def test_skip_long_form_motion_beats_short_circuits_mouth_swap_even_when_enabled(self):
+        # Same shape for the mouth_swap block.
+        with mock.patch.object(media, "_mouth_swap_enabled", return_value=True), \
+             mock.patch.object(media.stages, "make_character_prompt") as char_mock, \
+             mock.patch.object(media, "_mouth_swap_block") as swap_mock:
+            self._call(
+                skip_hero=True,
+                skip_long_form_scenes=True,
+                skip_long_form_motion_beats=True,
+            )
+            char_mock.assert_not_called()
+            swap_mock.assert_not_called()
+
+    def test_motion_beats_default_off_still_runs_when_settings_are_off(self):
+        # The flag is opt-in. When it's NOT passed (long-form callers),
+        # the existing setting toggle still decides whether prop_slide /
+        # mouth_swap fire. With both disabled (the test default), the
+        # blocks stay skipped — but via the original gate, not the new
+        # one. This pins the regression-shape so a future refactor can't
+        # silently make the new flag the only off-switch.
+        with mock.patch.object(media.stages, "make_prop_plan") as plan_mock:
+            self._call(skip_hero=True, skip_long_form_scenes=True)
+            plan_mock.assert_not_called()  # because _prop_slide_enabled=False (default mock)
 
 
 if __name__ == "__main__":

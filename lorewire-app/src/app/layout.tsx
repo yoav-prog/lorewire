@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Archivo, Hanken_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
+import { Archivo, Fraunces, Hanken_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
 import RegisterSW from "@/components/RegisterSW";
 import { getSiteSeo } from "@/lib/site-seo";
 import {
@@ -9,6 +9,13 @@ import {
 import "./globals.css";
 
 const archivo = Archivo({ subsets: ["latin"], variable: "--font-archivo" });
+// 2026-06-26 visual-distance pass: Fraunces on --font-display.
+// Variable serif with optical sizing — letterforms physically reshape
+// between large display sizes and small chrome sizes. Modern
+// editorial vibe (Substack / Linear / Vercel-blog adjacent), not the
+// wedding-invitation feel of older serifs like Playfair. Variable
+// font so no `weight` array — all weights via one file.
+const fraunces = Fraunces({ subsets: ["latin"], variable: "--font-fraunces" });
 const hanken = Hanken_Grotesk({ subsets: ["latin"], variable: "--font-hanken" });
 const spline = Spline_Sans_Mono({ subsets: ["latin"], variable: "--font-spline" });
 const caveat = Caveat({ subsets: ["latin"], variable: "--font-caveat" });
@@ -61,7 +68,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${archivo.variable} ${hanken.variable} ${spline.variable} ${caveat.variable}`}
+      className={`${archivo.variable} ${fraunces.variable} ${hanken.variable} ${spline.variable} ${caveat.variable}`}
     >
       <head>
         {/* Runs BEFORE React hydration so the document paints with the

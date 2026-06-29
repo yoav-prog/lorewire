@@ -52,7 +52,7 @@ const DEFAULTS = {
   outline_color: "#0f172a",
   word_highlight: "karaoke",
   entry_effect: "fade",
-  position_y: "0.55",
+  position_y: "0.68",
 } as const;
 
 function effective(

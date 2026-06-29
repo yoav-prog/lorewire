@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from pipeline import gcs, store, video, voice
+from pipeline import gcs, narration, store, video, voice, voiceovers
 
 # Shared with shorts_render.SHORT_ID_SUFFIX so the staged files end up in the
 # same GCS prefix that the original short uses. Keeps Cloud Run's render
@@ -118,9 +118,15 @@ def build_short_props_lane_b(
         except Exception:
             pass
 
+    # Resolve the category voiceover so an editor re-render inherits the same
+    # delivery (pace, hook pause, style prompt) as the original short. The
+    # editor's explicit voice pick (lane_inputs.voice), if any, still wins for
+    # the provider + voice itself; otherwise it falls back to the preset's voice.
+    story = store.fetch_story(story_id)
+    voiceover = voiceovers.resolve_voiceover(story.get("category") if story else None)
     voice_override = inputs.get("voice") or {}
-    provider = voice_override.get("provider") or None
-    voice_id = voice_override.get("voice_id") or None
+    provider = voice_override.get("provider") or voiceover["provider"]
+    voice_id = voice_override.get("voice_id") or voiceover["voice_id"]
 
     if remote:
         work_dir = Path(tempfile.mkdtemp(prefix=f"{safe_id}-laneB-"))
@@ -129,19 +135,40 @@ def build_short_props_lane_b(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = work_dir / "voice.mp3"
-    vres = voice.synthesize(
+    # `narration.render_narration` applies the normalize -> TTS -> script-graft
+    # pipeline so Lane B's voice swap inherits the same caption-accuracy fix as
+    # the baseline render. No structured hook here, so the pause anchors on the
+    # first sentence (render_narration fallback).
+    vres = narration.render_narration(
         script,
         audio_path,
         override_provider=provider,
         override_voice_id=voice_id,
+        speaking_rate=voiceover["speaking_rate"],
+        hook_pause=voiceover["hook_pause"],
+        style_prompt=voiceover["style_prompt"],
     )
-    captions = video._chunk_alignment(vres.get("words") or [])
-    if not captions:
+    caption_chunks = video._chunk_alignment(vres.get("words") or [])
+    if not caption_chunks:
         raise RuntimeError(
             "Lane B voice synthesis produced no caption chunks "
             "(empty alignment)"
         )
-    duration_ms = max(int(captions[-1]["end_ms"]), 1)
+    # Floor the body length at the real MP3 duration so the re-rendered short's
+    # concatenated outro can't clip the new narration's closing words — the
+    # last caption end_ms undershoots the real audio on some providers. Mirror
+    # of the full-render path in shorts_render.build_short_props. Also extend
+    # the last caption's end_ms to cover the trailing audio so the on-screen
+    # text stays present until the audio actually ends.
+    caption_end_ms = int(caption_chunks[-1]["end_ms"])
+    audio_ms = voice.audio_duration_ms(audio_path)
+    duration_ms = max(caption_end_ms, audio_ms, 1)
+    if audio_ms > caption_end_ms:
+        print(
+            f"[short laneB duration] audio={audio_ms}ms > "
+            f"caption_end={caption_end_ms}ms — extending body + last caption"
+        )
+        caption_chunks[-1] = {**caption_chunks[-1], "end_ms": audio_ms}
 
     if on_progress is not None:
         try:
@@ -164,8 +191,8 @@ def build_short_props_lane_b(
     # has any short_config.caption_style override, merge it onto the
     # baseline's caption_template so the render reflects the picked
     # colors / highlight / animation / position. Editor-side wires the same
-    # merge into Lane A; Lane C does it from a single helper too.
-    story = store.fetch_story(story_id)
+    # merge into Lane A; Lane C does it from a single helper too. (story was
+    # already fetched above for the voiceover resolution.)
     style_override = store.read_short_caption_style(story) if story else {}
     baseline_template = baseline_props.get("caption_template") or {}
     if not isinstance(baseline_template, dict):
@@ -173,7 +200,7 @@ def build_short_props_lane_b(
     new_props = {
         **baseline_props,
         "voiceover_url": audio_ref,
-        "captions": captions,
+        "captions": caption_chunks,
         "duration_ms": duration_ms,
     }
     if style_override:
@@ -218,6 +245,50 @@ def _parse_lane_inputs(claimed: dict) -> dict[str, Any]:
                 "{provider:string, voice_id:string} or null"
             )
     return parsed
+
+
+def sync_short_config_captions(story_id: str, props: dict[str, Any]) -> bool:
+    """Mirror a Lane B render's regenerated voice fields back into the editor's
+    short_config so the editor's live preview + Captions tab match the new
+    voiceover. The rendered MP4 already reads the render row's props and is
+    correct; this only closes the editor-display gap (the editor reads
+    short_config, which a voice re-render otherwise never updates).
+
+    Only the three fields the new voiceover drives are synced — captions,
+    voiceover_url, duration_ms — so it can't clobber pinned frames, caption
+    style, or pending manual caption edits (those flow through Lane A, which
+    writes short_config first). Captions are normalised to the
+    ShortCaptionChunk shape ({start_ms,end_ms,text}) the TS schema validates;
+    the per-word boundaries the render carries are dropped (short_config
+    doesn't store them).
+
+    Best-effort: returns False (and never raises on a missing/malformed config)
+    so a sync miss can't fail an otherwise-good render.
+    """
+    story = store.fetch_story(story_id)
+    if not story or not story.get("short_config"):
+        return False
+    try:
+        config = json.loads(story["short_config"])
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    config["captions"] = [
+        {
+            "start_ms": int(c["start_ms"]),
+            "end_ms": int(c["end_ms"]),
+            "text": str(c.get("text", "")),
+        }
+        for c in (props.get("captions") or [])
+        if isinstance(c, dict) and "start_ms" in c and "end_ms" in c
+    ]
+    if props.get("voiceover_url"):
+        config["voiceover_url"] = props["voiceover_url"]
+    if props.get("duration_ms"):
+        config["duration_ms"] = int(props["duration_ms"])
+    store.update_story_short_config(story_id, config)
+    return True
 
 
 def clear_lane(render_id: str) -> None:

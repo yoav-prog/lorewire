@@ -7,13 +7,9 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
+import { logShortRenderEvent } from "@/lib/short-render-queue";
 
 export type StoryJobStatus = "queued" | "processing" | "done" | "error";
-
-// Closed enum mirrored in pipeline/store.py:enqueue_story_job. NULL = the
-// worker resolves at claim time against the `reddit.default_output`
-// setting. Any other value is a bug; the storage layer normalizes to NULL.
-export type StoryJobOutputFormat = "short" | "long";
 
 export interface StoryJobRow {
   id: string;
@@ -27,11 +23,19 @@ export interface StoryJobRow {
   requested_at: string;
   started_at: string | null;
   finished_at: string | null;
-  output_format: StoryJobOutputFormat | null;
+  // 2026-06-24 Full Pipeline toggle. Propagated from reddit_source at
+  // enqueue so the worker reads it without joining back. When 1, the
+  // worker sets auto_publish_status='pending' on success and the
+  // /api/auto_publish_full_pipeline cron flips the story to published.
+  full_pipeline: number | null;
+  // 2026-06-24 auto-publish lane. NULL on a fresh row; the worker writes
+  // 'pending' when full_pipeline=1 and every stage succeeded; the TS
+  // drain writes 'done' on success or 'failed' on a publish gate reject.
+  auto_publish_status: string | null;
 }
 
 const COLS =
-  "id, reddit_id, status, progress, error, story_id, with_media, requested_by, requested_at, started_at, finished_at, output_format";
+  "id, reddit_id, status, progress, error, story_id, with_media, requested_by, requested_at, started_at, finished_at, full_pipeline, auto_publish_status";
 
 export interface BulkEnqueueResult {
   enqueued: number;
@@ -53,16 +57,7 @@ const ALLOWED_SOURCE_STATUSES: ReadonlySet<string> = new Set([
 
 export async function bulkEnqueueStoryJobs(
   redditIds: string[],
-  opts: {
-    with_media?: boolean;
-    requested_by?: string | null;
-    /** Per-batch override for the row's output format. Pass NULL or omit
-     *  to defer to `reddit.default_output` at worker claim time. The
-     *  storage layer (pipeline/store.py and the storage helper below)
-     *  normalises any other value to NULL so a stale caller can't smuggle
-     *  a typo past the worker. */
-    output_format?: StoryJobOutputFormat | null;
-  } = {},
+  opts: { with_media?: boolean; requested_by?: string | null } = {},
 ): Promise<BulkEnqueueResult> {
   const result: BulkEnqueueResult = {
     enqueued: 0,
@@ -75,10 +70,6 @@ export async function bulkEnqueueStoryJobs(
 
   const withMedia = opts.with_media === false ? 0 : 1;
   const requestedBy = opts.requested_by ?? null;
-  const outputFormat: StoryJobOutputFormat | null =
-    opts.output_format === "short" || opts.output_format === "long"
-      ? opts.output_format
-      : null;
   const now = new Date().toISOString();
 
   // One snapshot read for the candidate rows + one for in-flight jobs, both
@@ -93,12 +84,12 @@ export async function bulkEnqueueStoryJobs(
   const toFlipQueued: string[] = [];
 
   for (const rid of redditIds) {
-    const status = sourceRows.get(rid);
-    if (status === undefined) {
+    const src = sourceRows.get(rid);
+    if (src === undefined) {
       result.not_found++;
       continue;
     }
-    if (!ALLOWED_SOURCE_STATUSES.has(status)) {
+    if (!ALLOWED_SOURCE_STATUSES.has(src.status)) {
       result.skipped_status++;
       continue;
     }
@@ -118,12 +109,17 @@ export async function bulkEnqueueStoryJobs(
       requested_at: now,
       started_at: null,
       finished_at: null,
-      output_format: outputFormat,
+      // 2026-06-24 propagate Full Pipeline opt-in from the source row.
+      // The worker reads this flag when finishing the job; the cron
+      // drain reads it again as a safety check before flipping the
+      // story to published.
+      full_pipeline: src.full_pipeline,
+      auto_publish_status: null,
     });
     // Only flip reddit_source.status when the row was 'imported'; a row
     // already 'queued' (from a previous attempt the worker reset) stays as
     // it is — no spurious UPDATE.
-    if (status === "imported") toFlipQueued.push(rid);
+    if (src.status === "imported") toFlipQueued.push(rid);
   }
 
   if (toInsert.length > 0) {
@@ -154,6 +150,24 @@ export async function bulkEnqueueStoryJobs(
     if (survivors.length > 0) {
       await bulkFlipSourceStatus(survivors, "queued");
     }
+    // Per-row timeline kickoff: write a 'queued' event for every row that
+    // actually landed. The detail page renders these immediately, so the
+    // admin sees motion the moment Process N fires (even before the worker
+    // has claimed). Failure here is swallowed by logStoryJobEvent itself
+    // so a transient DB hiccup never blocks the enqueue.
+    await Promise.all(
+      toInsert
+        .filter((r) => insertedRedditIds.has(r.reddit_id))
+        .map((r) =>
+          logStoryJobEvent(r.id, r.reddit_id, "queued", {
+            message: "Enqueued for processing",
+            payload: {
+              with_media: r.with_media,
+              requested_by: r.requested_by,
+            },
+          }),
+        ),
+    );
   }
 
   return result;
@@ -177,18 +191,33 @@ async function readBackInsertedJobIds(jobIds: string[]): Promise<Set<string>> {
   return out;
 }
 
+// Snapshot the per-row state the enqueue path needs in a single round
+// trip: status (lifecycle gate) and full_pipeline (auto-publish opt-in
+// to propagate onto the job row). Returning the full object instead of
+// just status keeps callers free of a second fetch and lets future
+// per-source flags slot in without changing the call signature.
 async function snapshotSourceStatuses(
   redditIds: string[],
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, { status: string; full_pipeline: number }>> {
+  const out = new Map<string, { status: string; full_pipeline: number }>();
   for (let i = 0; i < redditIds.length; i += 500) {
     const batch = redditIds.slice(i, i + 500);
     const placeholders = batch.map(() => "?").join(", ");
-    const rows = await all<{ reddit_id: string; status: string }>(
-      `SELECT reddit_id, status FROM reddit_source WHERE reddit_id IN (${placeholders})`,
+    const rows = await all<{
+      reddit_id: string;
+      status: string;
+      full_pipeline: number | null;
+    }>(
+      `SELECT reddit_id, status, full_pipeline FROM reddit_source ` +
+        `WHERE reddit_id IN (${placeholders})`,
       batch,
     );
-    for (const r of rows) out.set(r.reddit_id, r.status);
+    for (const r of rows) {
+      out.set(r.reddit_id, {
+        status: r.status,
+        full_pipeline: r.full_pipeline ? 1 : 0,
+      });
+    }
   }
   return out;
 }
@@ -223,7 +252,11 @@ const INSERT_COLS = [
   "requested_at",
   "started_at",
   "finished_at",
-  "output_format",
+  // 2026-06-24 Full Pipeline propagation. auto_publish_status is always
+  // NULL on insert; the worker writes 'pending' after every stage
+  // succeeds for a full_pipeline=1 job.
+  "full_pipeline",
+  "auto_publish_status",
 ] as const;
 
 async function bulkInsertJobs(rows: StoryJobRow[]): Promise<void> {
@@ -357,6 +390,153 @@ export async function bulkCancelActiveStoryJobs(
   return result;
 }
 
+// ---------- stop a single live run (every in-flight stage) ----------
+
+/** Pipeline stages stopLiveRun can settle, in execution order. */
+export type LiveRunStage = "story" | "short" | "hero" | "publish";
+
+export interface StopLiveRunResult {
+  ok: boolean;
+  error?: string;
+  job_id: string;
+  /** Stages that were actually in flight and got cancelled by this call.
+   *  Empty when the run had already settled (idempotent no-op). */
+  stopped_stages: LiveRunStage[];
+}
+
+/**
+ * Stop one run shown on the live page. Unlike bulkCancelActiveStoryJobs
+ * (which only knows the STORY stage), this settles WHATEVER stage is
+ * actually in flight so the run leaves the active list:
+ *
+ *   - story queued/processing → cancelled, and the reddit_source resets
+ *     to 'imported' (story_id cleared) so it returns to the candidate
+ *     pool — same semantics as the list-page Stop.
+ *   - short queued/generating/rendering → cancelled. This force-cancels a
+ *     'rendering' row, which cancelShortRender deliberately refuses (Cloud
+ *     Run normally owns that window). A row stuck in 'rendering' for hours
+ *     is the exact zombie this feature exists to clear — the renderer died
+ *     without ever calling back, so there's no clean abort to wait for.
+ *   - hero finisher pending/running → cancelled.
+ *   - auto-publish pending → cancelled.
+ *
+ * A run whose article already finished keeps it — only the stuck
+ * downstream stage is cancelled. Spend already incurred is not refundable
+ * (the confirm dialog says so). Idempotent: a settled run returns ok with
+ * an empty stopped_stages.
+ *
+ * The cron claim queries all gate on the live status ('pending' finisher,
+ * 'pending' auto_publish, queued/generating/rendering short), so writing
+ * 'cancelled' both removes the row from the live view AND guarantees no
+ * cron re-claims it.
+ */
+export async function stopLiveRun(jobId: string): Promise<StopLiveRunResult> {
+  if (!jobId) {
+    return { ok: false, error: "missing-job-id", job_id: jobId, stopped_stages: [] };
+  }
+  // Targeted select: finisher_status isn't part of StoryJobRow/COLS, and
+  // we only need the lifecycle columns to decide which stages to settle.
+  const job = await one<{
+    id: string;
+    reddit_id: string;
+    status: string;
+    story_id: string | null;
+    finisher_status: string | null;
+    auto_publish_status: string | null;
+  }>(
+    `SELECT id, reddit_id, status, story_id, finisher_status, auto_publish_status ` +
+      `FROM story_jobs WHERE id = ?`,
+    [jobId],
+  );
+  if (!job) {
+    return { ok: false, error: "job-not-found", job_id: jobId, stopped_stages: [] };
+  }
+
+  const now = new Date().toISOString();
+  const stopped: LiveRunStage[] = [];
+
+  // 1. Story stage. Mirror the list-page Stop: cancel the job and reset
+  //    the source so it can be re-queued.
+  if (job.status === "queued" || job.status === "processing") {
+    await run(
+      `UPDATE story_jobs SET status = 'cancelled', finished_at = ? ` +
+        `WHERE id = ? AND status IN ('queued', 'processing')`,
+      [now, jobId],
+    );
+    await run(
+      `UPDATE reddit_source SET status = 'imported', story_id = NULL ` +
+        `WHERE reddit_id = ? AND status IN ('queued', 'processing')`,
+      [job.reddit_id],
+    );
+    stopped.push("story");
+    await logStoryJobEvent(jobId, job.reddit_id, "stopped", {
+      message: "Stopped by admin from live runs (story stage)",
+      payload: { stage: "story", previous_status: job.status },
+    });
+  }
+
+  // 2. Short stage — the latest render for this story. Force-cancel,
+  //    including a 'rendering' zombie.
+  if (job.story_id) {
+    const short = await one<{ id: string; status: string; phase: string | null }>(
+      `SELECT id, status, phase FROM short_renders ` +
+        `WHERE story_id = ? ORDER BY requested_at DESC LIMIT 1`,
+      [job.story_id],
+    );
+    if (
+      short &&
+      (short.status === "queued" ||
+        short.status === "generating" ||
+        short.status === "rendering")
+    ) {
+      await run(
+        `UPDATE short_renders SET status = 'cancelled', finished_at = ? ` +
+          `WHERE id = ? AND status IN ('queued', 'generating', 'rendering')`,
+        [now, short.id],
+      );
+      stopped.push("short");
+      await logShortRenderEvent(short.id, "cancelled", {
+        message: "Stopped by admin from live runs",
+        payload: {
+          previous_status: short.status,
+          previous_phase: short.phase,
+          forced: short.status === "rendering",
+        },
+      });
+    }
+  }
+
+  // 3. Hero finisher stage.
+  if (job.finisher_status === "pending" || job.finisher_status === "running") {
+    await run(
+      `UPDATE story_jobs SET finisher_status = 'cancelled' ` +
+        `WHERE id = ? AND finisher_status IN ('pending', 'running')`,
+      [jobId],
+    );
+    stopped.push("hero");
+    await logStoryJobEvent(jobId, job.reddit_id, "stopped", {
+      message: "Stopped by admin from live runs (hero finisher stage)",
+      payload: { stage: "hero", previous_status: job.finisher_status },
+    });
+  }
+
+  // 4. Auto-publish stage.
+  if (job.auto_publish_status === "pending") {
+    await run(
+      `UPDATE story_jobs SET auto_publish_status = 'cancelled' ` +
+        `WHERE id = ? AND auto_publish_status = 'pending'`,
+      [jobId],
+    );
+    stopped.push("publish");
+    await logStoryJobEvent(jobId, job.reddit_id, "stopped", {
+      message: "Stopped by admin from live runs (publish stage)",
+      payload: { stage: "publish", previous_status: job.auto_publish_status },
+    });
+  }
+
+  return { ok: true, job_id: jobId, stopped_stages: stopped };
+}
+
 // ---------- reads for the admin UI ----------
 
 export async function getLatestStoryJobForReddit(
@@ -399,4 +579,104 @@ export async function countPendingStoryJobs(): Promise<number> {
     [],
   );
   return Number(row?.n ?? 0);
+}
+
+// ---------- per-row event timeline (2026-06-16) ----------
+// Mirrors lib/short-render-queue.ts:logShortRenderEvent + listShortRenderEvents.
+// The Python worker is the primary writer (one event per phase in
+// _default_process); TS server actions write the click-side "queued" event
+// at enqueue time so the timeline starts the moment Process N fires.
+// Plan: _plans/2026-06-16-story-job-event-timeline.md.
+
+export type StoryJobEventLevel = "info" | "warn" | "error";
+
+export interface StoryJobEventRow {
+  id: string;
+  job_id: string;
+  reddit_id: string;
+  ts: string;
+  level: StoryJobEventLevel;
+  event: string;
+  message: string | null;
+  /** JSON-encoded structured payload; UI parses + displays inline. */
+  payload: string | null;
+}
+
+const EVENT_COLS =
+  "id, job_id, reddit_id, ts, level, event, message, payload";
+
+/**
+ * Append one event to the timeline for a story_jobs row. Cheap. Swallows
+ * write errors because event logging must never break the enqueue path.
+ * Mirrors logShortRenderEvent.
+ */
+export async function logStoryJobEvent(
+  jobId: string,
+  redditId: string,
+  event: string,
+  opts: {
+    message?: string;
+    level?: StoryJobEventLevel;
+    payload?: Record<string, unknown>;
+  } = {},
+): Promise<void> {
+  const id = randomUUID();
+  const ts = new Date().toISOString();
+  const level = opts.level ?? "info";
+  const message = opts.message ?? null;
+  const payload =
+    opts.payload === undefined ? null : JSON.stringify(opts.payload);
+  try {
+    await run(
+      `INSERT INTO story_job_events
+         (id, job_id, reddit_id, ts, level, event, message, payload)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, jobId, redditId, ts, level, event, message, payload],
+    );
+  } catch (e) {
+    // Don't let logging take down the enqueue path. The terminal print()
+    // calls on the Python side are independent so the data isn't lost,
+    // only the user-facing timeline misses a row.
+    // eslint-disable-next-line no-console -- rule 14
+    console.warn("[story-jobs] event log failed", {
+      job_id: jobId,
+      reddit_id: redditId,
+      event,
+      err: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+/**
+ * Read the event timeline for one story_jobs row in chronological order
+ * (oldest first). 200 is much more than enough for a job's lifecycle
+ * (typical ~10-15 events; failure path adds 1-3).
+ */
+export async function listStoryJobEvents(
+  jobId: string,
+  limit = 200,
+): Promise<StoryJobEventRow[]> {
+  if (!jobId) return [];
+  return all<StoryJobEventRow>(
+    `SELECT ${EVENT_COLS} FROM story_job_events
+       WHERE job_id = ? ORDER BY ts ASC, id ASC LIMIT ?`,
+    [jobId, limit],
+  );
+}
+
+/**
+ * Read every event for the latest job on a reddit_id. The detail page
+ * route is /admin/reddit-sources/[reddit_id], so this is the
+ * page-friendly reader.
+ */
+export async function listStoryJobEventsForReddit(
+  redditId: string,
+  limit = 200,
+): Promise<StoryJobEventRow[]> {
+  if (!redditId) return [];
+  return all<StoryJobEventRow>(
+    `SELECT ${EVENT_COLS} FROM story_job_events
+       WHERE reddit_id = ? ORDER BY ts ASC, id ASC LIMIT ?`,
+    [redditId, limit],
+  );
 }

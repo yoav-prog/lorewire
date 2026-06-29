@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from pipeline import config, models
+from pipeline import config, media_url, models
 
 KIE_BASE = "https://api.kie.ai/api/v1/jobs"
 
@@ -124,7 +124,16 @@ def generate(
     if image_input:
         # Drop empty / falsy URLs defensively — a bible row with a
         # missing reference_image_url shouldn't poison the call.
-        refs = [u for u in image_input if isinstance(u, str) and u][:4]
+        raw_refs = [u for u in image_input if isinstance(u, str) and u][:4]
+        # Resolve legacy GCS hosts to the R2 delivery base (no-op when
+        # MEDIA_PUBLIC_BASE is unset). Required after the 2026-06-22
+        # migration — kie fetches the URLs we send by HTTP, and legacy
+        # GCS public reads now 404. Plan:
+        # _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
+        refs, rewrote = media_url.resolve_outbound_urls(raw_refs)
+        print(
+            f"[kie i2i refs] count={len(refs)} rewrote={rewrote}"
+        )
     inputs: dict = {
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
@@ -184,13 +193,22 @@ def edit_image(image_url: str, prompt: str, aspect_ratio: str = "3:4", poll_time
     composition and replaced the mouth with neutral skin in the same style.
     Cost: ~5-6 kie credits per edit (~$0.03).
     """
+    # Resolve legacy GCS hosts to the R2 delivery base. Same rationale as
+    # `generate` above: kie fetches the URL we send by HTTP, and legacy
+    # GCS public reads now 404 post-2026-06-22 migration.
+    resolved_image_url = media_url.resolve_media_url(image_url) or image_url
+    if resolved_image_url != image_url:
+        print(
+            f"[kie edit ref resolved] from={image_url[:80]!r} "
+            f"to={resolved_image_url[:80]!r}"
+        )
     created = _post(
         "createTask",
         {
             "model": "qwen2/image-edit",
             "input": {
                 "prompt": prompt,
-                "image_url": image_url,
+                "image_url": resolved_image_url,
                 "image_size": aspect_ratio,
                 "output_format": "png",
             },

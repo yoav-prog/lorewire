@@ -8,7 +8,7 @@
 // Plan: _plans/2026-06-16-homepage-curation.md (phase 3).
 
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   addToSurface,
   HOMEPAGE_SURFACES,
@@ -33,7 +33,7 @@ export async function addCurationAction(
   surface: string,
   storyId: string,
 ): Promise<CurationActionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const r = await addToSurface(surface, storyId);
   // eslint-disable-next-line no-console -- rule 14
   console.info("[admin curation add]", {
@@ -52,7 +52,7 @@ export async function removeCurationAction(
   surface: string,
   storyId: string,
 ): Promise<CurationActionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const r = await removeFromSurface(surface, storyId);
   // eslint-disable-next-line no-console -- rule 14
   console.info("[admin curation remove]", {
@@ -72,7 +72,7 @@ export async function moveCurationAction(
   storyId: string,
   direction: "up" | "down",
 ): Promise<CurationActionResult> {
-  const session = await requireAdmin();
+  const session = await requireCapability("content.manage");
   const r = await moveInSurface(surface, storyId, direction);
   // eslint-disable-next-line no-console -- rule 14
   console.info("[admin curation move]", {
@@ -105,7 +105,7 @@ export interface CurationPickerStory {
 export async function listCurationPickerStoriesAction(): Promise<
   CurationPickerStory[]
 > {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const rows = await all<CurationPickerStory>(
     "SELECT id, title, category, hero_image, video_url, duration, published_at " +
       "FROM stories " +
@@ -139,7 +139,7 @@ export interface CurationServerRender {
 }
 
 export async function loadCurationServerRenderAction(): Promise<CurationServerRender> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const grouped = await listAllCuration();
   // Bulk-fetch every curated story id (across all surfaces) so the page
   // can render titles + thumbs + publish state without N round-trips.

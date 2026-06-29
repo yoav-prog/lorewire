@@ -3,6 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import type { Capability } from "@/lib/authz";
+import SidebarLiveBadge from "./SidebarLiveBadge";
+import SidebarSubmissionsBadge from "./SidebarSubmissionsBadge";
 
 // Studio sidebar. Three primary destinations: Overview, Content, Settings.
 // Plus an optional Dev zone surfaced only when NODE_ENV !== 'production'
@@ -25,8 +28,27 @@ export type SidebarItem = {
   label: string;
   /** Path prefixes that should highlight this item. Defaults to [href without query]. */
   activePrefixes?: string[];
+  /** Path prefixes that should NOT highlight this item, even if an
+   *  activePrefix would otherwise match. Used to carve out a nested
+   *  sub-item's URL from its parent's broader active range — e.g.
+   *  Reddit Sources matches /admin/reddit-sources/* but explicitly
+   *  excludes /admin/reddit-sources/live so the nested Live runs entry
+   *  owns that path uniquely. */
+  notPrefixes?: string[];
   /** When true, the item is active only when pathname exactly equals href (no query). */
   exact?: boolean;
+  /** When set, the item is shown only to staff whose role grants this
+   *  capability. Unset = visible to every staff role. Server-side gates still
+   *  enforce access; this only hides what the user can't use. */
+  capability?: Capability;
+  /** Renders a small left-indent so the item visually nests under its
+   *  preceding sibling (used for the Live runs entry under Reddit
+   *  Sources). The sidebar has no real parent/child concept; this is
+   *  purely the visual affordance. */
+  nested?: boolean;
+  /** Trailing slot rendered inside the link, after the label. Used for
+   *  status badges (e.g. the active-runs count). Optional. */
+  slot?: React.ReactNode;
 };
 
 export type SidebarGroup = {
@@ -54,13 +76,31 @@ const STATIC_GROUPS: SidebarGroup[] = [
           "/admin/videos",
           "/admin/stories",
         ],
+        capability: "content.manage",
       },
       {
         // Reddit candidate pool — the import / review / publish upstream
-        // for stories. See _plans/2026-06-14-reddit-db-sync.md.
+        // for stories. See _plans/2026-06-14-reddit-db-sync.md. The
+        // notPrefixes carve-out keeps /admin/reddit-sources/live from
+        // double-lighting both this entry AND the nested Live runs
+        // entry below.
         href: "/admin/reddit-sources",
         label: "Reddit Sources",
         activePrefixes: ["/admin/reddit-sources"],
+        notPrefixes: ["/admin/reddit-sources/live"],
+        capability: "content.manage",
+      },
+      {
+        // 2026-06-28 aggregator: every queued/processing job + recently
+        // finished, with event logs streaming live. Sits visually under
+        // Reddit Sources. Plan:
+        // _plans/2026-06-28-reddit-sources-live-runs-page.md.
+        href: "/admin/reddit-sources/live",
+        label: "Live runs",
+        activePrefixes: ["/admin/reddit-sources/live"],
+        capability: "content.manage",
+        nested: true,
+        slot: <SidebarLiveBadge />,
       },
       {
         // Homepage curation: which stories appear on each rail. Live
@@ -69,13 +109,46 @@ const STATIC_GROUPS: SidebarGroup[] = [
         href: "/admin/curation",
         label: "Homepage",
         activePrefixes: ["/admin/curation"],
+        capability: "content.manage",
+      },
+      {
+        // Engagement polls overview. Author lives on the story edit
+        // page; this is the cross-cutting "every poll + how it's
+        // voting" view. Plan: _plans/2026-06-17-engagement-polls.md.
+        href: "/admin/polls",
+        label: "Polls",
+        activePrefixes: ["/admin/polls"],
+        capability: "content.manage",
+      },
+      {
+        // User management: members (public sign-ups), staff/roles, audit log.
+        // Capability-gated so non-admin staff only see it if their role grants
+        // users.view. Plan: _plans/2026-06-22-admin-user-management.md.
+        href: "/admin/users",
+        label: "Users",
+        activePrefixes: ["/admin/users"],
+        capability: "users.view",
       },
       {
         // Comment moderation queue — the human side of the hybrid
-        // moderator. Plan: _plans/2026-06-22-article-comments-ai-moderation.md.
+        // moderator. Gated under content.manage (comments are content); the
+        // page + its server actions enforce the same capability. Plan:
+        // _plans/2026-06-22-article-comments-ai-moderation.md.
         href: "/admin/comments",
         label: "Comments",
         activePrefixes: ["/admin/comments"],
+        capability: "content.manage",
+      },
+      {
+        // User-submitted dilemmas awaiting a human decision — the human side of
+        // the submission moderator. content.manage like comments; the page + its
+        // server actions enforce the same capability. Plan:
+        // _plans/2026-06-29-user-submitted-stories.md.
+        href: "/admin/submissions",
+        label: "Submissions",
+        activePrefixes: ["/admin/submissions"],
+        capability: "content.manage",
+        slot: <SidebarSubmissionsBadge />,
       },
       {
         href: "/admin/settings",
@@ -87,9 +160,29 @@ const STATIC_GROUPS: SidebarGroup[] = [
         activePrefixes: [
           "/admin/settings",
           "/admin/models",
+          "/admin/voiceovers",
           "/admin/templates",
           "/admin/segments",
         ],
+        capability: "settings.manage",
+      },
+      {
+        // One-time media migration tool: copy all media from the legacy GCS
+        // bucket to R2. Plan:
+        // _plans/2026-06-22-r2-media-migration-and-avatar-upload.md.
+        href: "/admin/migrate",
+        label: "Migrate",
+        activePrefixes: ["/admin/migrate"],
+        capability: "settings.manage",
+      },
+      {
+        // One-time media compression tool: re-encode the existing images the
+        // DB references to WebP (what fixes slow media after the R2 cutover).
+        // Sibling of Migrate. Plan: _plans/2026-06-22-media-compression.md.
+        href: "/admin/compress",
+        label: "Compress",
+        activePrefixes: ["/admin/compress"],
+        capability: "settings.manage",
       },
     ],
   },
@@ -111,18 +204,41 @@ const DEV_GROUP: SidebarGroup = {
 export function isItemActive(pathname: string, item: SidebarItem): boolean {
   const hrefPath = item.href.split("?")[0];
   if (item.exact) return pathname === hrefPath;
+  if (item.notPrefixes?.some((p) => pathname.startsWith(p))) return false;
   const prefixes = item.activePrefixes ?? [hrefPath];
   return prefixes.some((p) => pathname.startsWith(p));
 }
 
-export function buildGroups(isDev: boolean): SidebarGroup[] {
-  return isDev ? [...STATIC_GROUPS, DEV_GROUP] : STATIC_GROUPS;
+// Build the visible nav. `caps` filters out items whose `capability` the
+// current staff role doesn't grant; passing `undefined` (the default) shows
+// every item, which keeps the pure-function tests and any capability-agnostic
+// caller working unchanged. A group that loses all its items is dropped.
+export function buildGroups(
+  isDev: boolean,
+  caps?: readonly Capability[],
+): SidebarGroup[] {
+  const base = isDev ? [...STATIC_GROUPS, DEV_GROUP] : STATIC_GROUPS;
+  if (!caps) return base;
+  return base
+    .map((g) => ({
+      ...g,
+      items: g.items.filter(
+        (it) => !it.capability || caps.includes(it.capability),
+      ),
+    }))
+    .filter((g) => g.items.length > 0);
 }
 
-export default function AdminSidebar({ isDev }: { isDev: boolean }) {
+export default function AdminSidebar({
+  isDev,
+  caps,
+}: {
+  isDev: boolean;
+  caps?: readonly Capability[];
+}) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const groups = buildGroups(isDev);
+  const groups = buildGroups(isDev, caps);
 
   useEffect(() => {
     console.info("[admin sidebar] route", {
@@ -171,7 +287,9 @@ export default function AdminSidebar({ isDev }: { isDev: boolean }) {
               className="block"
               onClick={() => setOpen(false)}
             >
-              <span className="font-display text-[16px] font-extrabold tracking-tightest text-ink">
+              {/* 2026-06-26 slice H follow-up: admin sidebar
+                  wordmark locked to Archivo. */}
+              <span className="text-[16px] font-extrabold tracking-tightest text-ink" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
                 LORE<span className="text-accent">WIRE</span>
               </span>
               <span className="mt-0.5 block font-mono text-[10px] uppercase tracking-[0.2em] text-muted">
@@ -196,13 +314,17 @@ export default function AdminSidebar({ isDev }: { isDev: boolean }) {
                         <Link
                           href={it.href}
                           onClick={() => setOpen(false)}
-                          className={`block rounded-md px-2.5 py-1.5 font-mono text-[12px] uppercase tracking-wider transition-colors ${
+                          aria-current={active ? "page" : undefined}
+                          className={`flex items-center gap-2 rounded-md py-1.5 font-mono text-[12px] uppercase tracking-wider transition-colors ${
+                            it.nested ? "pl-6 pr-2.5" : "px-2.5"
+                          } ${
                             active
                               ? "bg-surface2 text-ink"
                               : "text-muted hover:bg-surface2 hover:text-ink"
                           }`}
                         >
-                          {it.label}
+                          <span className="truncate">{it.label}</span>
+                          {it.slot}
                         </Link>
                       </li>
                     );

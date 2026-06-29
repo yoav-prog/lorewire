@@ -49,6 +49,7 @@ import {
   type VideoAspect,
 } from "@/lib/aspect";
 import { resolveSegmentsForStory } from "@/lib/segment-resolver";
+import { rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
 
 // Override undici's 300s default headers/body timeouts. Cloud Run
 // renders a 2:11 envelope-style composition in ~3-7 minutes (cold
@@ -307,6 +308,25 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     has_intro: segments.intro !== null,
     has_outro: segments.outro !== null,
     outro_lead_in_sec: segments.outroLeadInSec ?? 0,
+  });
+
+  // Walk inputProps + segments and rewrite any persisted legacy GCS URLs
+  // onto MEDIA_PUBLIC_BASE before they cross out to Cloud Run. Same rationale
+  // as render_short: Cloud Run's Remotion render fetches every URL via HTTP,
+  // and legacy GCS public reads 404 post-2026-06-22 migration. Inert when the
+  // base is unset. Plan:
+  // _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
+  const propsRewrote = rewriteStoredMediaUrlsDeep(inputProps);
+  // Segments are deliberately NOT rewritten — see the mirror comment on
+  // render_short/route.ts. Cloud Run downloads them via the authenticated
+  // GCS SDK so public-read state is irrelevant; rewriting them to
+  // `media.lorewire.com/<key>` makes `parseGcsSegmentUrl` return null and
+  // `spliceWithSegments` silently skip the splice, dropping the intro and
+  // outro from the final cut.
+  namespacedLog("rewrite", {
+    render_id: claimed.id,
+    props_rewrote: propsRewrote,
+    segments_rewrote: 0,
   });
 
   await logVideoRenderEvent(claimed.id, "dispatch_start", {

@@ -18,6 +18,7 @@ import { ArticleEmbed } from "@/lib/tiptap-embed";
 import { PullQuote } from "@/lib/tiptap-pullquote";
 import { ArticleComparison } from "@/lib/tiptap-comparison";
 import { SheetsRef, stripSheetsRefs } from "@/lib/tiptap-sheets-ref";
+import { mediaPublicBase, rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
 
 // Extensions array. Pin the same set the editor registers so the renderer
 // understands every block the writer can author. Adding a new editor block
@@ -63,6 +64,9 @@ export function renderArticleHtml(raw: string | null | undefined): string {
     const cleaned = stripSheetsRefs(
       json as Parameters<typeof generateHTML>[0],
     );
+    // Flip embedded media URLs onto the delivery base (passthrough until the
+    // cutover sets MEDIA_PUBLIC_BASE).
+    rewriteStoredMediaUrlsDeep(cleaned, mediaPublicBase());
     // generateHTML's signature is permissive on the JSON shape; if a stored
     // document carries an unknown node type the renderer either drops it or
     // throws, depending on the extension. Catch ensures the public page

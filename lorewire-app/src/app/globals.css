@@ -20,7 +20,15 @@
   --color-cat-dating: #a8466a;
   --color-cat-roommate: #5b3b8a;
 
-  --font-display: var(--font-archivo), "Arial Black", Arial, sans-serif;
+  /* 2026-06-26 Netflix-distance pass: --font-display swapped from
+     Archivo (sans condensed bold, same DNA as Netflix Sans) to
+     Fraunces (variable serif with optical sizing — modern editorial,
+     Substack / Linear / Vercel-blog adjacent). Every Tailwind
+     `font-display` usage (hero title, rail headers, buttons) picks
+     this up automatically. Archivo stays imported as
+     `var(--font-archivo)` for any element that needs the old voice
+     during transition. */
+  --font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
   --font-body: var(--font-hanken), system-ui, sans-serif;
   --font-mono: var(--font-spline), ui-monospace, monospace;
   --font-hand: var(--font-caveat), cursive;
@@ -120,6 +128,17 @@ button:not(:disabled),
 .fade-in {
   animation: fadeIn 0.5s ease both;
 }
+/* Mobile hero carousel progress dot: fills the active dot left-to-right
+   over one rotation interval, restarting via React key on each slide
+   change. Paused/reduced-motion paths skip the animation entirely. */
+@keyframes heroProgress {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}
 @keyframes floaty {
   0% {
     transform: translateY(0) rotate(-1deg);
@@ -130,6 +149,64 @@ button:not(:disabled),
 }
 .floaty {
   animation: floaty 4.5s ease-in-out infinite alternate;
+}
+/* Double-tap-to-like burst over a wire's frame. */
+@keyframes wireHeartBurst {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  18% {
+    transform: scale(1.15);
+    opacity: 0.95;
+  }
+  35% {
+    transform: scale(1);
+    opacity: 0.95;
+  }
+  100% {
+    transform: scale(1.25);
+    opacity: 0;
+  }
+}
+.wire-heart-burst {
+  display: inline-flex;
+  animation: wireHeartBurst 0.7s ease-out forwards;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.45));
+}
+/* One-shot pulse ring around a wire poll's answer buttons. Fires when
+   the floating WirePollPill is tapped while the panel is already on
+   screen, drawing the eye to the buttons without scrolling. The ring
+   color is set inline (each button's accent hue); only the size +
+   opacity animate here. */
+@keyframes wire-poll-pulse {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 0.55;
+  }
+  100% {
+    box-shadow: 0 0 0 12px currentColor;
+    opacity: 0;
+  }
+}
+/* Floating wire-poll pill — pre-vote pulses to draw attention, post-vote
+   sits as ambient social proof. The pulse is a two-stage glow on the
+   dot inside the pill so the pill itself stays compact. Same reduced-
+   motion-friendly tween Tailwind already applies to opacity. */
+@keyframes wire-poll-pill-pulse {
+  0%,
+  60%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  30% {
+    transform: scale(1.6);
+    opacity: 0.55;
+  }
+}
+.wire-poll-pill-pulse {
+  animation: wire-poll-pill-pulse 1.6s ease-in-out infinite;
 }
 .poster-vig {
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.82) 0%, rgba(0, 0, 0, 0.28) 38%, rgba(0, 0, 0, 0) 62%);
@@ -142,4 +219,82 @@ button:not(:disabled),
 }
 .ink-shadow {
   text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6);
+}
+/* Floating "jump to poll" CTA: fade + slide up on first appearance so the
+   button doesn't pop into the viewport. Component is in
+   src/components/JumpToPoll.tsx; this class only handles the entrance
+   animation — sizing/colors live inline so the button is portable. */
+@keyframes jumpToPollFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.jump-to-poll-cta {
+  animation: jumpToPollFadeIn 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.jump-to-poll-cta:hover {
+  box-shadow: 0 12px 32px rgba(232, 70, 43, 0.45), 0 4px 10px rgba(0, 0, 0, 0.5);
+}
+.jump-to-poll-cta:focus-visible {
+  outline: 2px solid #f5f3ef;
+  outline-offset: 3px;
+}
+/* Soft, slow pulse on the "Today's debate" dot in TopArticleCTA. Communicates
+   liveness without becoming distracting — a single subtle breath at ~1.6s
+   intervals reads as a heartbeat, faster would feel anxious. */
+@keyframes lorewireDotPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 4px rgba(232, 70, 43, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(232, 70, 43, 0.06);
+  }
+}
+.lorewire-pulse-dot {
+  animation: lorewireDotPulse 1.6s ease-in-out infinite;
+}
+/* Back-to-top arrow gets a tiny lift on hover so the affordance is felt
+   rather than just seen. Pairs with the button's full hover state in
+   src/components/JumpToPoll.tsx. */
+@keyframes lorewireArrowLift {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+.lorewire-back-to-top:hover .lorewire-back-to-top__arrow {
+  animation: lorewireArrowLift 0.9s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lorewire-pulse-dot,
+  .lorewire-back-to-top:hover .lorewire-back-to-top__arrow {
+    animation: none;
+  }
+}
+/* Deep-linked comment highlight: a soft accent glow that fades out
+   so the reader's eye finds the targeted comment but the surrounding
+   thread isn't visually pinned to it. Triggered by inline style on
+   CommentItem (lorewire-app/src/components/CommentsSection.tsx). */
+@keyframes comment-focus-glow {
+  0% {
+    background: rgba(232, 70, 43, 0);
+    box-shadow: 0 0 0 0 rgba(232, 70, 43, 0);
+  }
+  10% {
+    background: rgba(232, 70, 43, 0.16);
+    box-shadow: 0 0 0 1px rgba(232, 70, 43, 0.5);
+  }
+  100% {
+    background: rgba(232, 70, 43, 0);
+    box-shadow: 0 0 0 0 rgba(232, 70, 43, 0);
+  }
 }

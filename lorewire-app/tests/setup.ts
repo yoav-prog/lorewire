@@ -28,6 +28,11 @@ process.env.PIPELINE_DB = dbFile;
 // SESSION_SECRET is unset. Tests never call into auth here, but the safe
 // default keeps the import graph happy.
 process.env.SESSION_SECRET ??= "test-session-secret";
+// 2026-06-21 Phase 5: loadHomepageSSRData now reads the lw_user session
+// via lib/user-session.ts, which throws when USER_SESSION_SECRET is
+// unset. Default a test value so SSR tests don't spuriously fail with
+// an unrelated env-config error. Non-secret; prod sets its own.
+process.env.USER_SESSION_SECRET ??= "test-user-session-secret";
 // `DATABASE_URL` MUST be unset so db.ts takes the SQLite branch.
 delete process.env.DATABASE_URL;
 

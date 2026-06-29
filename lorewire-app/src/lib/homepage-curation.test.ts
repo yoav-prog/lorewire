@@ -64,12 +64,16 @@ describe("addToSurface", () => {
   });
 
   it("refuses to overflow a fixed-capacity surface", async () => {
-    const heroA = await addToSurface("hero", "story-hero-a");
-    expect(heroA.ok).toBe(true);
-    const heroB = await addToSurface("hero", "story-hero-b");
-    expect(heroB.ok).toBe(false);
-    if (!heroB.ok) {
-      expect(heroB.error).toMatch(/full/);
+    // Hero capacity is 8 (rotation pool for the carousel). Filling all 8
+    // is allowed; the 9th add must fail.
+    for (let i = 0; i < 8; i++) {
+      const r = await addToSurface("hero", `story-hero-${i}`);
+      expect(r.ok).toBe(true);
+    }
+    const overflow = await addToSurface("hero", "story-hero-9");
+    expect(overflow.ok).toBe(false);
+    if (!overflow.ok) {
+      expect(overflow.error).toMatch(/full/);
     }
   });
 
@@ -241,8 +245,8 @@ describe("listAllCuration", () => {
 });
 
 describe("SURFACE_CAPACITY contract", () => {
-  it("hero is capped at 1", () => {
-    expect(SURFACE_CAPACITY.hero).toBe(1);
+  it("hero is capped at 8 (rotation pool for the carousel)", () => {
+    expect(SURFACE_CAPACITY.hero).toBe(8);
   });
   it("top10 is capped at 10", () => {
     expect(SURFACE_CAPACITY.top10).toBe(10);

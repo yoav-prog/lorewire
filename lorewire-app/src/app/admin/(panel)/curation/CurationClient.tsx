@@ -50,7 +50,7 @@ interface RailSpec {
 const RAILS: RailSpec[] = [
   { surface: "hero", title: "Hero", hint: "The single front-and-centre pick at the top of the home page." },
   { surface: "top10", title: "TOP 10 Today", hint: "Numbered rail. Exactly 10 picks, ordered." },
-  { surface: "continue", title: "Continue Watching", hint: "Editor-curated rail (no per-user state yet)." },
+  { surface: "continue", title: "You Didn't Vote Yet", hint: "Reframed Continue Watching: surfaces watched-but-not-voted stories per viewer. Admin curation overrides this surface entirely (legacy editor-pick path)." },
   { surface: "new_row", title: "New on LoreWire", hint: "Fresh-this-week strip; cross-category." },
   { surface: "entitled_row", title: "Audacity: Entitled People", hint: "Category rail · Entitled." },
   { surface: "humor_row", title: "Humor & Awkward Moments", hint: "Category rail · Humor." },

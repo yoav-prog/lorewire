@@ -7,7 +7,13 @@ import Link from "next/link";
 // belong inside the video editor (see _plans/2026-06-12-admin-reorg-phase2.md
 // §"Captions are intentionally not a Settings sub-nav category").
 
-export type SettingsCategory = "general" | "models" | "seo" | "intros";
+export type SettingsCategory =
+  | "general"
+  | "models"
+  | "voiceovers"
+  | "seo"
+  | "socials"
+  | "intros";
 
 type CategoryDef = {
   key: SettingsCategory;
@@ -30,10 +36,23 @@ const CATEGORIES: CategoryDef[] = [
     description: "Pick the AI model used at each pipeline stage.",
   },
   {
+    key: "voiceovers",
+    label: "Voiceovers",
+    href: "/admin/voiceovers",
+    description: "House narrator presets + a voice per category.",
+  },
+  {
     key: "seo",
     label: "SEO",
     href: "/admin/seo",
     description: "Site identity, social cards, and search engine defaults.",
+  },
+  {
+    key: "socials",
+    label: "Socials",
+    href: "/admin/settings/socials",
+    description:
+      "Per-platform auto-publish defaults: Facebook, Instagram, YouTube, TikTok.",
   },
   {
     key: "intros",

@@ -18,7 +18,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from pipeline import gcs, media, segments
+from pipeline import gcs, media, segments, voice
 from pipeline.aspect import resolve_aspect_for_story
 
 VIDEO_PROJECT_RELATIVE = Path("video")
@@ -36,6 +36,14 @@ STATIC_DIR_RELATIVE = Path("public")
 # reading; pauses over 400ms read as a sentence break; punctuation forces a cut
 # even mid-phrase so the karaoke matches the cadence of the narration.
 MAX_WORDS_PER_CHUNK = 4
+# Phase 3 of _plans/2026-06-18-caption-accuracy-and-naturalness.md: a 30-char
+# cap keeps every chunk on a single line at the 1080×1920 mobile-first canvas
+# and lands at ~15 CPS for typical 150-180 WPM narration, right under the
+# Netflix adult 17 CPS / 20 CPS ceiling and inside the broadcast 42-char
+# line standard. A four-word chunk of long words ("antidisestablishment
+# championship absolutely magnificent") would otherwise wrap to two lines
+# and crash the karaoke flow; this cap forces an earlier split.
+MAX_CHARS_PER_CHUNK = 30
 PAUSE_BREAK_MS = 400
 PUNCTUATION_BREAK_RE = re.compile(r"[.!?,;:]$")
 
@@ -44,7 +52,13 @@ PUNCTUATION_BREAK_RE = re.compile(r"[.!?,;:]$")
 # value falls back to the default and emits a warning so a render that surprises
 # the admin can be traced back to which field misbehaved.
 _CAPTION_DEFAULTS: dict = {
-    "position_y": 0.55,
+    # 0.68 lands the caption block in the 9:16 lower-middle third: ~1305px
+    # from the top on a 1920-tall canvas, with the text bottom edge at
+    # ~1405px — comfortably above TikTok's 320px bottom button column and
+    # Instagram Reels's 420px reaction strip. The pre-Phase-3 default of
+    # 0.55 sat at the geometric middle of the frame, which read as
+    # "kicker" rather than lower-third on mobile.
+    "position_y": 0.68,
     "size_scale": 1.0,
     "padding_x": 64,
     "text_transform": "uppercase",
@@ -237,11 +251,27 @@ def generate_video(
         print(f"[video id={safe_id}] alignment produced no caption chunks; skipping")
         return {}
 
-    duration_ms = max(int(captions[-1]["end_ms"]), 1)
     video_project = repo_root / VIDEO_PROJECT_RELATIVE
     static_paths = _stage_assets(repo_root, video_project, safe_id, audio_url, image_urls)
     static_audio = static_paths["audio"]
     static_images = static_paths["images"]
+    # Mirror the shorts audio-floor: long-form body must cover the WHOLE
+    # narration MP3, or the concatenated outro clips closing words. The
+    # last caption's end_ms is a proxy that undershoots on providers whose
+    # word timings aren't calibrated to the audio. Floor the duration at
+    # the real audio length so the body always plays through. Failing
+    # probe returns 0 → the max stays at caption_end (old behaviour).
+    caption_end_ms = int(captions[-1]["end_ms"])
+    audio_disk_path = video_project / STATIC_DIR_RELATIVE / static_audio
+    audio_ms = voice.audio_duration_ms(audio_disk_path)
+    duration_ms = max(caption_end_ms, audio_ms, 1)
+    if audio_ms > caption_end_ms:
+        print(
+            f"[video id={safe_id} duration] audio={audio_ms}ms > "
+            f"caption_end={caption_end_ms}ms — flooring body at audio length "
+            f"so the outro doesn't clip the narration"
+        )
+        captions[-1] = {**captions[-1], "end_ms": audio_ms}
     doodle_frames = _distribute_frames(static_images, captions, duration_ms)
 
     # Wave 3 Phase 3 PropSlideIn: stage each prop PNG alongside the other
@@ -345,12 +375,22 @@ def generate_video(
         f"aspect={resolved_aspect})"
     )
 
+    # 2026-06-18 polls plan extension: long-form video also carries the
+    # burnt-in question card at the tail, mirroring shorts_render. Same
+    # build_question_card helper, same duration extension. Skipped when
+    # story_row is None (CLI render with no DB row, e.g. dry-run).
+    from pipeline.question_card import build_question_card
+    question_card = build_question_card(story_row) if story_row else None
+    rendered_duration_ms = duration_ms + (
+        question_card["card_ms"] if question_card else 0
+    )
+
     config = {
         "voiceover_url": static_audio,
         "title": _truncate_title(title),
         "channel_name": "lorewire",
         "aspect": resolved_aspect,
-        "duration_ms": duration_ms,
+        "duration_ms": rendered_duration_ms,
         "doodle_frames": doodle_frames,
         "captions": captions,
         "ken_burns": ken_burns,
@@ -359,6 +399,13 @@ def generate_video(
         "props_list": static_props,
         "character_image_mouth_removed": static_character,
     }
+    if question_card:
+        config["question_card"] = question_card
+        print(
+            f"[video id={safe_id} props] question_card baked "
+            f"(narration {duration_ms / 1000:.1f}s + card "
+            f"{(rendered_duration_ms - duration_ms) / 1000:.1f}s)"
+        )
 
     props_dir = video_project / ".props"
     props_dir.mkdir(parents=True, exist_ok=True)
@@ -491,14 +538,16 @@ def generate_video(
 def _chunk_alignment(words: list[dict]) -> list[dict]:
     """Group word timings into 2-4 word caption chunks.
 
-    Breaks on: 4-word cap, pause >= PAUSE_BREAK_MS, trailing punctuation. Each
-    chunk carries the word list with start/end times in ms (the karaoke
-    highlight uses the per-word boundaries).
+    Breaks on: 4-word cap, MAX_CHARS_PER_CHUNK char budget, pause >=
+    PAUSE_BREAK_MS, trailing punctuation. Each chunk carries the word
+    list with start/end times in ms (the karaoke highlight uses the
+    per-word boundaries).
     """
     if not words:
         return []
     chunks: list[dict] = []
     current: list[dict] = []
+    current_chars = 0  # running char width of the chunk including separator spaces
     prev_end_ms: float | None = None
     for w in words:
         token = (w.get("word") or "").strip()
@@ -507,14 +556,25 @@ def _chunk_alignment(words: list[dict]) -> list[dict]:
         start_ms = float(w.get("start", 0.0)) * 1000.0
         end_ms = float(w.get("end", start_ms)) * 1000.0
         pause = start_ms - prev_end_ms if prev_end_ms is not None else 0.0
-        if current and (len(current) >= MAX_WORDS_PER_CHUNK or pause >= PAUSE_BREAK_MS):
+        projected_chars = (
+            current_chars + (1 if current else 0) + len(token)
+        )
+        over_char_budget = current and projected_chars > MAX_CHARS_PER_CHUNK
+        if current and (
+            len(current) >= MAX_WORDS_PER_CHUNK
+            or pause >= PAUSE_BREAK_MS
+            or over_char_budget
+        ):
             chunks.append(_finalize_chunk(current))
             current = []
+            current_chars = 0
         current.append({"word": token, "start_ms": start_ms, "end_ms": end_ms})
+        current_chars += (1 if len(current) > 1 else 0) + len(token)
         prev_end_ms = end_ms
         if PUNCTUATION_BREAK_RE.search(token) and current:
             chunks.append(_finalize_chunk(current))
             current = []
+            current_chars = 0
             prev_end_ms = end_ms
     if current:
         chunks.append(_finalize_chunk(current))

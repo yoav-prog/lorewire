@@ -64,7 +64,10 @@ class HeroRegenTests(unittest.TestCase):
             })
             mocks = _apply(patches, self)
             url, cents = media.regen_one("abc123", "hero", Path(tmp))
-            self.assertTrue(url.endswith("/hero.png"))
+            # URL ends with `/hero.png?v=<int>` — `_cache_bust` (added
+            # 2026-06-27) stamps a version query param on every regen
+            # write so cache layers treat each upload as a fresh asset.
+            self.assertRegex(url, r"/hero\.png\?v=\d+$")
             # _regen_hero generates BOTH portrait (3:4) and landscape
             # (16:9) so the article reader, OG card, and 16:9 video
             # poster stay in sync. 2 images at $0.05 each.
@@ -79,7 +82,12 @@ class HeroRegenTests(unittest.TestCase):
         serve /generated/<id>/hero.png because the file lives nowhere
         persistent). The portrait path must go through gcs.publish
         with the right key so the URL stored is whatever GCS returns,
-        same shape as the fresh-run pipeline."""
+        same shape as the fresh-run pipeline.
+
+        2026-06-27: the stored URL now carries a `?v={ts}` cache-bust
+        suffix (see `_cache_bust` + plan
+        `_plans/2026-06-27-hero-thumb-url-cache-bust.md`); the prefix is
+        still gcs.publish's return value."""
         with tempfile.TemporaryDirectory() as tmp:
             patches = _patches({
                 "update_hero": mock.patch.object(media.store, "update_story_hero"),
@@ -94,11 +102,13 @@ class HeroRegenTests(unittest.TestCase):
             })
             mocks = _apply(patches, self)
             url, _ = media.regen_one("abc123", "hero", Path(tmp))
-            # Stored URL is whatever gcs.publish returned, not the
-            # /generated/... fallback.
-            self.assertEqual(
-                url,
-                "https://storage.googleapis.com/b/abc123/hero.png",
+            # Stored URL is whatever gcs.publish returned, with a
+            # `?v=<ts>` cache-bust suffix appended.
+            self.assertTrue(
+                url.startswith(
+                    "https://storage.googleapis.com/b/abc123/hero.png?v="
+                ),
+                f"unexpected stored URL: {url!r}",
             )
             # publish was called with the canonical key + fallback URL
             # at least once (portrait). Landscape attempts a second
@@ -112,6 +122,63 @@ class HeroRegenTests(unittest.TestCase):
                 portrait_call.args[2], "/generated/abc123/hero.png",
             )
             mocks["update_hero"].assert_called_with("abc123", url)
+
+    def test_hero_url_has_cache_bust_query_param(self):
+        """2026-06-27: hero/thumbnail filenames are stable per story so
+        each regen overwrites the same R2 object key. Without a query-
+        string version on the URL stored in the DB, browser /
+        Vercel Image Optimizer / edge caches keep serving the old bytes
+        and the user sees "regen reverted." `_cache_bust` stamps
+        `?v={int(time.time())}` so every regen lands a fresh cache key.
+        Plan: `_plans/2026-06-27-hero-thumb-url-cache-bust.md`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches({
+                "update_hero": mock.patch.object(media.store, "update_story_hero"),
+                "update_hero_landscape": mock.patch.object(
+                    media.store, "update_story_hero_landscape",
+                ),
+                "make_thumb": mock.patch.object(
+                    media.stages, "make_thumbnail_prompt",
+                    return_value="cinematic prompt",
+                ),
+                "publish": mock.patch.object(
+                    media.gcs, "publish",
+                    return_value="https://r2.lorewire/abc123/hero.png",
+                ),
+                "now": mock.patch.object(
+                    media.time, "time", return_value=1_719_440_000.0,
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, _ = media.regen_one("abc123", "hero", Path(tmp))
+            self.assertEqual(
+                url, "https://r2.lorewire/abc123/hero.png?v=1719440000",
+            )
+            # Every column writer receives a URL with the bust suffix.
+            for call in mocks["update_hero"].call_args_list:
+                self.assertIn("?v=1719440000", call.args[1])
+            for call in mocks["update_hero_landscape"].call_args_list:
+                self.assertIn("?v=1719440000", call.args[1])
+
+    def test_cache_bust_is_idempotent(self):
+        """Re-running `_cache_bust` on an already-stamped URL must not
+        double-stamp — the resume path in
+        `_build_hero_and_thumbnail_from_short` re-reads
+        `existing[column]` after a Vercel-function kill and would pass
+        an already-busted URL back through here on the next claim."""
+        already = "https://r2.lorewire/abc123/hero.png?v=1719000000"
+        self.assertEqual(media._cache_bust(already), already)
+        # Empty / falsy input passes through (defensive — the writers
+        # never call with None, but the helper shouldn't crash).
+        self.assertEqual(media._cache_bust(""), "")
+        # URL with an unrelated query string gets `&v=` appended.
+        with mock.patch.object(media.time, "time", return_value=1_719_500_000.0):
+            url = media._cache_bust(
+                "https://r2.lorewire/abc123/hero.png?w=320",
+            )
+        self.assertEqual(
+            url, "https://r2.lorewire/abc123/hero.png?w=320&v=1719500000",
+        )
 
     def test_hero_raises_when_kie_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:

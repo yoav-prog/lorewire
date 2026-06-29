@@ -14,7 +14,7 @@
 // in a transitional state, <SegmentsAutoRefresh> polls every 5s so the chip
 // transitions live in front of the admin.
 
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   getSetting,
   listSegments,
@@ -36,6 +36,7 @@ import {
   saveSettingAction,
 } from "@/app/admin/actions";
 import SettingsShell from "@/app/admin/SettingsShell";
+import SettingsSection from "@/app/admin/SettingsSection";
 import { SegmentUploadForm } from "./SegmentUploadForm";
 import { SegmentsAutoRefresh } from "./SegmentsAutoRefresh";
 
@@ -90,7 +91,7 @@ export default async function SegmentsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  await requireAdmin();
+  await requireCapability("settings.manage");
   const sp = await searchParams;
   const errorKey = typeof sp.error === "string" ? sp.error : "";
 
@@ -179,37 +180,36 @@ export default async function SegmentsPage({
           </div>
         )}
 
-        <form
-          action={saveSettingAction}
-          className="rounded-xl border border-line bg-surface p-4"
+        <SettingsSection
+          title="Master switch"
+          description={
+            masterExplicitlyOff
+              ? "Currently off. No intro or outro is spliced onto any render."
+              : "Currently on. The active intro and outro for each shape are spliced onto every render. Per-story overrides still apply."
+          }
+          status={{
+            ok: !masterExplicitlyOff,
+            label: masterExplicitlyOff ? "Off" : "On",
+          }}
         >
-          <input type="hidden" name="key" value="video.intro_outro_enabled" />
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="text-[13px] font-semibold text-ink">
-                Master switch
-              </div>
-              <p className="mt-0.5 text-[12px] text-muted">
-                {masterExplicitlyOff
-                  ? "Currently off. No intro or outro is spliced onto any render."
-                  : "Currently on. The active intro and outro for each shape are spliced onto every render. Per-story overrides still apply."}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <select
-                name="value"
-                defaultValue={masterExplicitlyOff ? "0" : "1"}
-                className="rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
-              >
-                <option value="1">On</option>
-                <option value="0">Off</option>
-              </select>
-              <button className="rounded-md border border-line px-3 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
-                Save
-              </button>
-            </div>
-          </div>
-        </form>
+          <form
+            action={saveSettingAction}
+            className="flex flex-wrap items-center gap-2"
+          >
+            <input type="hidden" name="key" value="video.intro_outro_enabled" />
+            <select
+              name="value"
+              defaultValue={masterExplicitlyOff ? "0" : "1"}
+              className="rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
+            >
+              <option value="1">On</option>
+              <option value="0">Off</option>
+            </select>
+            <button className="rounded-md border border-line px-3 py-1.5 text-[12px] text-ink transition-colors hover:border-accent hover:text-accent">
+              Save
+            </button>
+          </form>
+        </SettingsSection>
 
         <SegmentKindSection
           kind="intro"
@@ -245,17 +245,17 @@ function SegmentKindSection({
   uploadMode: "gcs" | "local";
 }) {
   const singular = title.endsWith("s") ? title.slice(0, -1) : title;
+  // Zero rows is a real problem (the kind is empty and every render of that
+  // shape ships without the clip), so flip the pill to the warn tone so it's
+  // visible from the collapsed state.
   return (
-    <section className="space-y-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="font-display text-[18px] font-bold tracking-tight">
-          {title}
-        </h2>
-        <span className="font-mono text-[11px] uppercase tracking-wider text-muted">
-          {rows.length} in library
-        </span>
-      </div>
-
+    <SettingsSection
+      title={title}
+      status={{
+        ok: rows.length > 0,
+        label: `${rows.length} in library`,
+      }}
+    >
       <SegmentUploadForm
         kind={kind}
         singular={singular}
@@ -272,7 +272,7 @@ function SegmentKindSection({
           activeId={activeByAspect[aspect]}
         />
       ))}
-    </section>
+    </SettingsSection>
   );
 }
 

@@ -124,6 +124,28 @@ export interface EditSession {
   heartbeat_at: string;
 }
 
+// Phase 3 of _plans/2026-06-17-engagement-polls.md. Burnt-in end card
+// drawn at the tail of every short whose story has an enabled poll.
+// Populated by pipeline/shorts_render.py:build_short_props from the
+// polls table; the renderer keeps `duration_ms` extended by
+// `card_ms` so the QuestionCard sequence sits at
+// [duration_ms - card_ms, duration_ms].
+//
+// `slug` is the story slug used in the footer CTA
+// (lorewire.com/v/<slug>). Falls back to the safe story id when the
+// story has no slug yet — better to ship "lorewire.com/v/abc123"
+// than no link at all.
+//
+// Missing field = no card. The composition renders byte-identical to
+// today's shorts when a story has no poll.
+export interface QuestionCard {
+  question: string;
+  option_a: string;
+  option_b: string;
+  slug: string;
+  card_ms: number;
+}
+
 export interface ShortVideoConfig {
   // Schema version. Must equal CURRENT_CONFIG_VERSION when emitted by the
   // pipeline; the validator applies migrations for older values.
@@ -142,6 +164,12 @@ export interface ShortVideoConfig {
   // to today's render. Composition honors them in `Sequence` windows.
   clip_start_ms?: number;
   clip_end_ms?: number;
+  // Post-roll hold (ms) on the final scene. The shorts pipeline sets this so
+  // the last frame lingers past the narration and the closing word finishes
+  // before the outro splices on. Missing / 0 = no hold (long-form renders are
+  // unchanged). deriveCompositionMetadata grows durationInFrames by it and
+  // DoodleShort stretches the last frame's window to match.
+  end_hold_ms?: number;
   doodle_frames: DoodleFrame[];
   captions: ShortCaptionChunk[];
   // Wave 2 admin toggle: when true, each held image gets a slow Ken-Burns
@@ -165,6 +193,13 @@ export interface ShortVideoConfig {
   music?: MusicTrack;
   // V1.5 editor — reserved; renderer no-ops on an empty array.
   overlays?: Overlay[];
+  // Phase 3 of _plans/2026-06-17-engagement-polls.md. Burnt-in
+  // question card at the tail. When present, the composition's
+  // `duration_ms` was already extended by the build step to include
+  // the card's hold time; the renderer places the card sequence at
+  // [duration_ms - question_card.card_ms, duration_ms]. Missing
+  // field = no card, renders byte-identical to a pre-poll short.
+  question_card?: QuestionCard;
   // Editor-only metadata. The renderer ignores both.
   _locks?: LockMap;
   _edit_session?: EditSession;

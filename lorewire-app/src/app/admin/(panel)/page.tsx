@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireStaff } from "@/lib/dal";
 import { dashboardSummary, listStoriesSlim } from "@/lib/repo";
 import { allSelected, STAGES, STAGE_LABEL } from "@/lib/models";
 import { statusClass } from "@/app/admin/ui";
@@ -18,7 +18,7 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 }
 
 export default async function Dashboard() {
-  await requireAdmin();
+  await requireStaff();
   const [summary, recent, models] = await Promise.all([
     dashboardSummary(),
     listStoriesSlim({ limit: 8 }),
@@ -75,7 +75,7 @@ export default async function Dashboard() {
             recent.map((s) => (
               <Link
                 key={s.id}
-                href={`/admin/videos/${s.id}`}
+                href={`/admin/stories/${s.id}`}
                 className="flex items-center justify-between gap-3 border-b border-line bg-surface px-4 py-3 last:border-0 hover:bg-surface2"
               >
                 <span className="truncate text-[14px] text-ink">

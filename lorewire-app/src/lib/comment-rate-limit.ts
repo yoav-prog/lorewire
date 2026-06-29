@@ -10,18 +10,7 @@
 // backs this up.
 
 import "server-only";
-import { createHash } from "node:crypto";
 import { recentCommentTimes } from "@/lib/comments";
-
-// One-way SHA-256 of (ip, user_agent). Lives here (not in a shared
-// poll-rate-limit module like the source branch had) because the polls
-// feature it originally lived in is not on `main` yet. When polls ship
-// the two callers can dedupe by re-exporting this from a shared helper.
-export function ipUaHash(ip: string | null, userAgent: string | null): string {
-  const safeIp = (ip ?? "").trim() || "0.0.0.0";
-  const safeUa = (userAgent ?? "").trim() || "unknown";
-  return createHash("sha256").update(`${safeIp}\n${safeUa}`).digest("hex");
-}
 
 interface Limits {
   perMinute: number;

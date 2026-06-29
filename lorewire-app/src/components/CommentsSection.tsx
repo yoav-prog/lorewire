@@ -14,6 +14,7 @@
 
 import {
   useCallback,
+  useEffect,
   useRef,
   useState,
   type Dispatch,
@@ -46,12 +47,25 @@ export function CommentsSection({
   initialCount,
   signedIn,
   enabled,
+  permalinkStoryId,
+  focusedCommentId,
 }: {
   articleId: string;
   initial: CommentThreadPage;
   initialCount: number;
   signedIn: boolean;
   enabled: boolean;
+  /** When set, each comment's "Copy link" affordance produces a URL
+   *  that opens the homepage modal at this story + the Comments tab.
+   *  When unset (article reader mount), the affordance falls back to
+   *  a same-page anchor so /articles/[locale]/[slug]#commentId still
+   *  works for users coming from search engines. */
+  permalinkStoryId?: string;
+  /** When set, scroll to and briefly highlight this comment after the
+   *  thread renders. Powers the deep-link experience: a permalink URL
+   *  opens the modal here, and the targeted comment glows for ~2s so
+   *  the reader's eye lands on it before they start scrolling. */
+  focusedCommentId?: string;
 }) {
   const [nodes, setNodes] = useState<PublicCommentNode[]>(initial.nodes);
   const [cursor, setCursor] = useState<string | null>(initial.nextCursor);
@@ -129,6 +143,21 @@ export function CommentsSection({
     );
   }, []);
 
+  // Deep-link landing: after the thread mounts with focusedCommentId in
+  // scope, scroll the targeted comment into view. We defer one tick via
+  // requestAnimationFrame so the CommentItem has actually painted before
+  // we try to find its DOM node. Missing target → no-op (the comment
+  // might be on a later page; user can "load more" to find it).
+  useEffect(() => {
+    if (!focusedCommentId) return;
+    const id = focusedCommentId;
+    const raf = requestAnimationFrame(() => {
+      const el = document.getElementById(`comment-${id}`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [focusedCommentId]);
+
   return (
     <section className="mt-10 border-t border-line pt-7">
       <div className="mb-5 flex items-baseline justify-between gap-3">
@@ -172,6 +201,8 @@ export function CommentsSection({
               articleId={articleId}
               signedIn={signedIn}
               enabled={enabled}
+              permalinkStoryId={permalinkStoryId}
+              focused={focusedCommentId === node.id}
               onReply={(c) => addReply(node.id, c)}
               onChanged={replaceComment}
               onDeleted={removeComment}
@@ -185,6 +216,8 @@ export function CommentsSection({
                       articleId={articleId}
                       signedIn={signedIn}
                       enabled={enabled}
+                      permalinkStoryId={permalinkStoryId}
+                      focused={focusedCommentId === r.id}
                       onChanged={onChangedReply(setNodes, node.id)}
                       onDeleted={removeComment}
                     />
@@ -236,6 +269,8 @@ function CommentItem({
   articleId,
   signedIn,
   enabled,
+  permalinkStoryId,
+  focused,
   onReply,
   onChanged,
   onDeleted,
@@ -244,6 +279,8 @@ function CommentItem({
   articleId: string;
   signedIn: boolean;
   enabled: boolean;
+  permalinkStoryId?: string;
+  focused?: boolean;
   onReply?: (c: PublicComment) => void;
   onChanged: (c: PublicComment) => void;
   onDeleted: (id: string) => void;
@@ -251,6 +288,30 @@ function CommentItem({
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState(false);
   const [reported, setReported] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  async function copyPermalink(): Promise<void> {
+    // Homepage modal deep link when the caller is the modal-mounted
+    // CommentsTab; same-page anchor when mounted on /articles/[locale]/
+    // [slug] (the article reader page handles #comment-X natively via
+    // the id we render on the wrapper below). Either way the recipient
+    // lands directly on this comment.
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+    const url = permalinkStoryId
+      ? `${origin}/?story=${encodeURIComponent(permalinkStoryId)}&tab=Comments&c=${encodeURIComponent(comment.id)}`
+      : `${origin}${typeof window !== "undefined" ? window.location.pathname : ""}#comment-${comment.id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setLinkCopied(true);
+      window.setTimeout(() => setLinkCopied(false), 1800);
+    } catch {
+      // clipboard.writeText can fail under non-secure contexts. Surface
+      // nothing; the user can long-press / right-click the URL bar after
+      // we navigate to it as a fallback. Silent failure is fine — the
+      // share button isn't load-bearing.
+    }
+  }
   // Seeded from the server (the thread query joins the viewer's likes), then
   // updated optimistically and reconciled against the like endpoint's response.
   const [like, setLike] = useState({ liked: comment.liked, count: comment.likeCount });
@@ -304,7 +365,23 @@ function CommentItem({
   }
 
   return (
-    <div>
+    <div
+      id={`comment-${comment.id}`}
+      style={
+        focused
+          ? {
+              // Brief honey-on-arrival glow for deep-linked comments.
+              // 2.4s total (1.2s ease-in glow + 1.2s ease-out fade) so
+              // the reader's eye finds the comment but the highlight
+              // doesn't linger and visually pin the thread.
+              animation: "comment-focus-glow 2400ms ease-out 1",
+              padding: "8px",
+              margin: "-8px",
+              borderRadius: 8,
+            }
+          : undefined
+      }
+    >
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[14px] font-semibold text-ink">
           {comment.authorName || "Reader"}
@@ -369,6 +446,14 @@ function CommentItem({
                 Report
               </button>
             ))}
+          <button
+            type="button"
+            onClick={copyPermalink}
+            className={`uppercase tracking-wider transition-colors ${linkCopied ? "text-accent" : "hover:text-ink"}`}
+            aria-label="Copy link to this comment"
+          >
+            {linkCopied ? "Link copied" : "Link"}
+          </button>
         </div>
       ) : (
         <div className="mt-1.5 space-y-1.5">

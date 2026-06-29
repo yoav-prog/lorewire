@@ -9,7 +9,7 @@
 // — lands in Phase 3 alongside the worker entry.
 
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import {
   countRedditSources,
   listRedditSources,
@@ -26,6 +26,7 @@ import {
 } from "@/lib/story-jobs-budget";
 import { setDailyBudgetCapAction } from "@/app/admin/actions";
 import RedditSourceTable from "./RedditSourceTable";
+import FilterRail from "./FilterRail";
 
 export const dynamic = "force-dynamic";
 
@@ -50,10 +51,10 @@ const SORT_LABEL: Record<RedditSourceOrderBy, string> = {
   "subreddit ASC": "Subreddit A–Z",
 };
 
-// 2026-06-23 IdeasDB priority (see
-// _plans/2026-06-23-ideasdb-priority-import.md). Same enum as the
-// reddit_source.strength column. UI labels and badge styling live in
-// RedditSourceTable.
+// 2026-06-23 IdeasDB priority import. Mirror of the `strength` enum on
+// reddit_source. 'none' rows render without a badge in the table, so
+// listing it here is purely for the filter rail's "show only None"
+// option (rare, but useful to confirm what's NOT been curated).
 const STRENGTH_LABEL: Record<RedditSourceStrength, string> = {
   strong: "Strong",
   medium: "Medium",
@@ -62,11 +63,22 @@ const STRENGTH_LABEL: Record<RedditSourceStrength, string> = {
 
 const VALID_STRENGTHS: RedditSourceStrength[] = ["strong", "medium", "none"];
 
+// 2026-06-24 Full Pipeline filter. 'on' = auto-publish, 'off' = review.
+// Labels mirror the badge text in RedditSourceTable.FullPipelineToggle so
+// the filter rail and the row chips speak the same vocabulary.
+type FullPipelineFilter = "on" | "off";
+const VALID_FULL_PIPELINE: FullPipelineFilter[] = ["on", "off"];
+const FULL_PIPELINE_LABEL: Record<FullPipelineFilter, string> = {
+  on: "Full",
+  off: "Review",
+};
+
 interface SearchParams {
   q?: string;
   status?: string | string[];
   subreddits?: string | string[];
   strength?: string | string[];
+  full_pipeline?: string | string[];
   length_min?: string;
   length_max?: string;
   comments_min?: string;
@@ -90,6 +102,15 @@ function parseStrengths(
   const raw = toArray(v);
   return raw.filter((s): s is RedditSourceStrength =>
     (VALID_STRENGTHS as string[]).includes(s),
+  );
+}
+
+function parseFullPipeline(
+  v: string | string[] | undefined,
+): FullPipelineFilter[] {
+  const raw = toArray(v);
+  return raw.filter((s): s is FullPipelineFilter =>
+    (VALID_FULL_PIPELINE as string[]).includes(s),
   );
 }
 
@@ -129,12 +150,13 @@ export default async function RedditSourcesPage({
 }: {
   searchParams: Promise<SearchParams>;
 }) {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const sp = await searchParams;
 
   const statuses = parseStatuses(sp.status);
   const subreddits = toArray(sp.subreddits);
   const strengths = parseStrengths(sp.strength);
+  const fullPipeline = parseFullPipeline(sp.full_pipeline);
   const sort = parseSort(sp.sort);
   const page = Math.max(intOrUndefined(sp.page) ?? 1, 1);
 
@@ -147,6 +169,7 @@ export default async function RedditSourcesPage({
     status: effectiveStatuses,
     subreddits: subreddits.length > 0 ? subreddits : undefined,
     strength: strengths.length > 0 ? strengths : undefined,
+    full_pipeline: fullPipeline.length > 0 ? fullPipeline : undefined,
     length_min: intOrUndefined(sp.length_min),
     length_max: intOrUndefined(sp.length_max),
     comments_min: intOrUndefined(sp.comments_min),
@@ -199,8 +222,16 @@ export default async function RedditSourcesPage({
           activeStatuses={effectiveStatuses}
           activeSubreddits={subreddits}
           activeStrengths={strengths}
+          activeFullPipeline={fullPipeline}
           allSubreddits={allSubs}
           sort={sort}
+          validStatuses={VALID_STATUSES}
+          statusLabel={STATUS_LABEL}
+          validStrengths={VALID_STRENGTHS}
+          strengthLabel={STRENGTH_LABEL}
+          validFullPipeline={VALID_FULL_PIPELINE}
+          fullPipelineLabel={FULL_PIPELINE_LABEL}
+          sortLabel={SORT_LABEL}
         />
         <div className="space-y-3">
           <RedditSourceTable
@@ -352,18 +383,45 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
     );
   }
   if (enqueued > 0 || (sp.enqueued !== undefined && skippedActive > 0)) {
+    // 2026-06-16: banner copy spells out who drains the queue. In
+    // production the Vercel cron at /api/drain_story_jobs ticks every
+    // 2 minutes; in local dev the cron doesn't fire and the admin has
+    // to run the worker themselves. 2026-06-28 update: the primary CTA
+    // is now the aggregated Live runs page — one screen, every in-flight
+    // job, full event logs — so the admin doesn't have to drill into
+    // every row to follow progress.
     return (
-      <div className="rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-[12px] text-accent">
-        Enqueued <strong>{enqueued}</strong> row
-        {enqueued === 1 ? "" : "s"} for processing.
-        {skippedActive > 0 && (
-          <>
-            {" "}
-            Skipped {skippedActive} that already had an active job.
-          </>
-        )}{" "}
-        The hosted cron runs the article + media stages and hands the
-        video render off to Cloud Run; nothing to start locally.
+      <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-[12px] text-accent">
+        <p>
+          Enqueued <strong>{enqueued}</strong> row
+          {enqueued === 1 ? "" : "s"} for processing.
+          {skippedActive > 0 && (
+            <>
+              {" "}
+              Skipped {skippedActive} that already had an active job.
+            </>
+          )}
+        </p>
+        <p>
+          <Link
+            href="/admin/reddit-sources/live"
+            className="font-mono text-[12px] font-semibold uppercase tracking-wider text-accent underline-offset-2 hover:underline"
+          >
+            Watch live →
+          </Link>
+        </p>
+        <p className="text-[11px] opacity-80">
+          On Vercel the cron at <code>/api/drain_story_jobs</code> drains
+          every 2 minutes; in local dev run{" "}
+          <code className="font-mono">
+            python -m pipeline.story_jobs_worker
+          </code>{" "}
+          from the repo root, or{" "}
+          <code className="font-mono">
+            npm --prefix lorewire-app run dev:drain
+          </code>{" "}
+          to mirror the cron.
+        </p>
       </div>
     );
   }
@@ -383,213 +441,6 @@ function FlashBanner({ sp }: { sp: SearchParams }) {
     );
   }
   return null;
-}
-
-function FilterRail({
-  searchParams,
-  activeStatuses,
-  activeSubreddits,
-  activeStrengths,
-  allSubreddits,
-  sort,
-}: {
-  searchParams: SearchParams;
-  activeStatuses: RedditSourceStatus[];
-  activeSubreddits: string[];
-  activeStrengths: RedditSourceStrength[];
-  allSubreddits: string[];
-  sort: RedditSourceOrderBy;
-}) {
-  // The rail submits as a plain GET form so every filter combination is in
-  // the URL — bookmarkable, shareable, browser-back-friendly, and trivial
-  // to debug. No client-side state and no JS required for the filter logic.
-  return (
-    <form
-      method="get"
-      className="space-y-4 rounded-xl border border-line bg-surface p-4"
-    >
-      <div>
-        <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
-          Search
-        </label>
-        <input
-          type="search"
-          name="q"
-          defaultValue={searchParams.q ?? ""}
-          placeholder="title or summary…"
-          className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
-        />
-      </div>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Status
-        </legend>
-        <div className="grid grid-cols-2 gap-1">
-          {VALID_STATUSES.map((s) => {
-            const checked = activeStatuses.includes(s);
-            return (
-              <label
-                key={s}
-                className="flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors has-[input:checked]:border-accent has-[input:checked]:bg-surface2"
-              >
-                <input
-                  type="checkbox"
-                  name="status"
-                  value={s}
-                  defaultChecked={checked}
-                  className="accent-accent"
-                />
-                {STATUS_LABEL[s]}
-              </label>
-            );
-          })}
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Priority
-        </legend>
-        <div className="grid grid-cols-3 gap-1">
-          {VALID_STRENGTHS.map((s) => {
-            const checked = activeStrengths.includes(s);
-            return (
-              <label
-                key={s}
-                className="flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink transition-colors has-[input:checked]:border-accent has-[input:checked]:bg-surface2"
-              >
-                <input
-                  type="checkbox"
-                  name="strength"
-                  value={s}
-                  defaultChecked={checked}
-                  className="accent-accent"
-                />
-                {STRENGTH_LABEL[s]}
-              </label>
-            );
-          })}
-        </div>
-        <p className="mt-1 font-mono text-[9px] text-muted">
-          Set by the IdeasDB importer. Strong &gt; Medium &gt; None in the
-          worker queue.
-        </p>
-      </fieldset>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Subreddit
-        </legend>
-        <select
-          name="subreddits"
-          multiple
-          defaultValue={activeSubreddits}
-          size={8}
-          className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-ink outline-none focus:border-accent"
-        >
-          {allSubreddits.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <p className="mt-1 font-mono text-[9px] text-muted">
-          Ctrl/⌘-click to multi-select
-        </p>
-      </fieldset>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Length (chars)
-        </legend>
-        <div className="flex gap-2">
-          <input
-            type="number"
-            name="length_min"
-            min={0}
-            defaultValue={searchParams.length_min ?? ""}
-            placeholder="min"
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-          <input
-            type="number"
-            name="length_max"
-            min={0}
-            defaultValue={searchParams.length_max ?? ""}
-            placeholder="max"
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-        </div>
-      </fieldset>
-
-      <div>
-        <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
-          Min comments
-        </label>
-        <input
-          type="number"
-          name="comments_min"
-          min={0}
-          defaultValue={searchParams.comments_min ?? ""}
-          placeholder="e.g. 100"
-          className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-        />
-      </div>
-
-      <fieldset>
-        <legend className="mb-1 font-mono text-[10px] uppercase tracking-wider text-muted">
-          Date range
-        </legend>
-        <div className="space-y-1">
-          <input
-            type="date"
-            name="date_from"
-            defaultValue={searchParams.date_from ?? ""}
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-          <input
-            type="date"
-            name="date_to"
-            defaultValue={searchParams.date_to ?? ""}
-            className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-          />
-        </div>
-      </fieldset>
-
-      <div>
-        <label className="mb-1 block font-mono text-[10px] uppercase tracking-wider text-muted">
-          Sort
-        </label>
-        <select
-          name="sort"
-          defaultValue={sort}
-          className="w-full rounded-md border border-line bg-bg px-2 py-1 text-[13px] text-ink outline-none focus:border-accent"
-        >
-          {Object.entries(SORT_LABEL).map(([v, l]) => (
-            <option key={v} value={v}>
-              {l}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="flex items-center justify-between gap-2">
-        <Link
-          href="/admin/reddit-sources"
-          className="font-mono text-[10px] uppercase tracking-wider text-muted hover:text-ink"
-        >
-          Reset
-        </Link>
-        <button
-          type="submit"
-          className="rounded-md bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg transition-opacity hover:opacity-90"
-        >
-          Apply
-        </button>
-      </div>
-    </form>
-  );
 }
 
 function Pagination({
@@ -639,6 +490,7 @@ function buildPageHref(searchParams: SearchParams, page: number): string {
   appendMany("status", searchParams.status);
   appendMany("subreddits", searchParams.subreddits);
   appendMany("strength", searchParams.strength);
+  appendMany("full_pipeline", searchParams.full_pipeline);
   append("length_min", searchParams.length_min);
   append("length_max", searchParams.length_max);
   append("comments_min", searchParams.comments_min);

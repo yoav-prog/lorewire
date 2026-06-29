@@ -93,12 +93,13 @@ NORMALIZE_AUDIO_FILTER = (
     f"aformat=sample_rates={TARGET_AUDIO_RATE}:channel_layouts=stereo"
 )
 
-# Re-encode settings. CRF 20 is "visually lossless" for short-form video at
-# this resolution. preset=fast keeps normalize under ~5s for a 4-second clip
-# on a modern laptop; concat is a similar order of magnitude per second of
-# combined output.
+# Re-encode settings. CRF 23 is the high-quality web standard — ~30-40% smaller
+# than the old 20 with quality still excellent for the flat doodle art.
+# preset=fast keeps normalize under ~5s for a 4-second clip on a modern laptop;
+# concat is a similar order of magnitude per second of combined output.
+# See _plans/2026-06-22-media-compression.md.
 H264_PRESET = "fast"
-H264_CRF = "20"
+H264_CRF = "23"
 AAC_BITRATE = "192k"
 
 # Cache for downloaded normalized segments so re-renders of different stories
@@ -172,6 +173,23 @@ def _ffmpeg_normalize_cmd(
     ]
 
 
+# Paced hook-first seams (_plans/2026-06-29-hook-first-clean-pacing.md). When the
+# hook-first reorder is active the cold-open hook fades to black and holds a
+# silent beat before the brand intro, the intro holds a silent beat before the
+# story resumes, and the story fades back in — so the intro lands between two
+# pauses instead of a hard cut. Mirrored in video/server/ffmpeg.ts. Set any to 0
+# to drop that seam (all 0 == legacy hard-cut hook-first).
+HOOK_FIRST_FADE_SEC = 0.45  # video fade-out / fade-in at each seam
+HOOK_FIRST_HOOK_GAP_SEC = 1.1  # black + silence held after the hook
+HOOK_FIRST_INTRO_GAP_SEC = 0.9  # black + silence held after the intro
+# The hook caption can end a few frames before the spoken word does, and the
+# NEXT line's caption starts right on that boundary. So the hook clip freezes its
+# last clean frame at hook_end_sec and the AUDIO runs this much longer, letting
+# the last word finish over the held frame before the fade — without the next
+# line's caption ever appearing. See _plans/2026-06-29-hook-first-clean-pacing.md.
+HOOK_FIRST_TAIL_HOLD_SEC = 0.3
+
+
 def _ffmpeg_splice_cmd(
     inputs: list[Path],
     output: Path,
@@ -179,6 +197,11 @@ def _ffmpeg_splice_cmd(
     *,
     body_index: int | None = None,
     body_tail_pad_sec: float = 0.0,
+    hook_end_sec: float = 0.0,
+    fade_sec: float = 0.0,
+    hook_gap_sec: float = 0.0,
+    intro_gap_sec: float = 0.0,
+    tail_hold_sec: float = 0.0,
 ) -> list[str]:
     """Build the ffmpeg argv that concatenates 2+ inputs with the concat
     filter. All inputs are assumed normalized (same res/fps/codec). Pure.
@@ -196,9 +219,26 @@ def _ffmpeg_splice_cmd(
     index 1 when an intro precedes it; index 0 when not), and only the
     body's streams get the pad — the intro / outro inputs are passed
     through unchanged.
+
+    When `hook_end_sec > 0` AND there is at least one input preceding
+    the body (i.e. an intro is in the chain), the concat reorders to
+    hook-first: [body_hook][intro][body_rest][outro] instead of the
+    legacy [intro][body][outro]. `body_hook` is the body clipped to
+    [0, hook_end_sec] and `body_rest` is the body from `hook_end_sec`
+    to the end — both implemented by listing the body input twice
+    with different `-ss`/`-t` flags so the encoder runs once. Per
+    _plans/2026-06-28-hook-before-brand-intro.md. Mirror of the
+    TypeScript `buildConcatArgv` hook-first path in
+    `video/server/ffmpeg.ts` so a Cloud Run render matches a
+    locally-spliced one.
     """
     if len(inputs) < 2:
         raise ValueError("splice needs at least 2 inputs")
+    hook_first_active = (
+        body_index is not None
+        and hook_end_sec > 0.0
+        and 0 < body_index < len(inputs)
+    )
     pad_active = (
         body_index is not None
         and body_tail_pad_sec > 0.0
@@ -206,6 +246,24 @@ def _ffmpeg_splice_cmd(
         # No point padding the body when nothing follows it (no outro).
         and body_index < len(inputs) - 1
     )
+
+    if hook_first_active:
+        # `body_index` is gated > 0 above; mypy / type-checker hint.
+        assert body_index is not None
+        return _ffmpeg_splice_cmd_hook_first(
+            inputs,
+            output,
+            body_index,
+            hook_end_sec,
+            has_audio,
+            body_tail_pad_sec,
+            pad_active,
+            fade_sec=fade_sec,
+            hook_gap_sec=hook_gap_sec,
+            intro_gap_sec=intro_gap_sec,
+            tail_hold_sec=tail_hold_sec,
+        )
+
     argv: list[str] = ["ffmpeg", "-y"]
     for p in inputs:
         argv += ["-i", str(p)]
@@ -238,6 +296,199 @@ def _ffmpeg_splice_cmd(
     streams += f"concat=n={len(inputs)}:v=1:a={a}[v]"
     if has_audio:
         streams += "[a]"
+    argv += ["-filter_complex", streams]
+    argv += ["-map", "[v]"]
+    if has_audio:
+        argv += ["-map", "[a]"]
+    argv += [
+        "-r", str(TARGET_FPS),
+        "-c:v", "libx264",
+        "-preset", H264_PRESET,
+        "-crf", H264_CRF,
+        "-pix_fmt", "yuv420p",
+    ]
+    if has_audio:
+        argv += [
+            "-c:a", "aac",
+            "-b:a", AAC_BITRATE,
+            "-ar", str(TARGET_AUDIO_RATE),
+            "-ac", str(TARGET_AUDIO_CHANNELS),
+        ]
+    argv += ["-movflags", "+faststart", str(output)]
+    return argv
+
+
+def _hook_first_paced_filter(
+    concat_n: int,
+    body_index: int,
+    rest_physical_index: int,
+    has_audio: bool,
+    hook_end_sec: float,
+    fade_sec: float,
+    hook_gap_sec: float,
+    intro_gap_sec: float,
+    body_tail_pad_sec: float,
+    tail_hold_sec: float,
+) -> str:
+    """filter_complex for the PACED hook-first splice: body_hook holds its last
+    clean frame while the narrator finishes the line, then fades to black and
+    holds a silent beat (`hook_gap_sec`); the intro (the last pre-body input,
+    physical index `body_index`) holds a silent beat (`intro_gap_sec`); and
+    body_rest fades back in (`fade_sec`) — so the brand intro lands between two
+    pauses, after the sentence completes, instead of a hard cut.
+
+    The hook clip's VIDEO is trimmed at `hook_end_sec` (the caption edge, before
+    the next line appears) and frozen, while its AUDIO runs `tail_hold_sec`
+    longer so the last word finishes over the held frame — the physical body_hook
+    input therefore spans `hook_end_sec + tail_hold_sec`. `tpad=stop_mode=add`
+    pads with solid black so the held beat is pure black. `body_tail_pad_sec` is
+    the already-gated outro lead-in pad on body_rest (0 disables it). Each
+    filtered stream gets a `[pvN]`/`[paN]` label; unfiltered streams (e.g. the
+    outro) feed the concat directly. Pure. Mirrors video/server/ffmpeg.ts. Per
+    _plans/2026-06-29-hook-first-clean-pacing.md."""
+    def g(x: float) -> str:
+        return format(x, "g")
+
+    parts: list[str] = []
+    refs = ""
+    for i in range(concat_n):
+        vch: list[str] = []
+        ach: list[str] = []
+        if i == 0:  # body_hook: hold the clean frame, finish the line, then fade
+            a_end = hook_end_sec + tail_hold_sec
+            vch.append(f"trim=0:{g(hook_end_sec)}")
+            vch.append("setpts=PTS-STARTPTS")
+            # Freeze the last clean frame across the audio tail AND the fade.
+            vch.append(
+                f"tpad=stop_mode=clone:stop_duration={g(tail_hold_sec + fade_sec)}"
+            )
+            if fade_sec > 0.0:
+                vch.append(f"fade=t=out:st={g(a_end)}:d={g(fade_sec)}")
+            if hook_gap_sec > 0.0:
+                vch.append(f"tpad=stop_mode=add:stop_duration={g(hook_gap_sec)}")
+            # Audio runs the full hook (to a_end), then silence for the fade + gap.
+            apad_dur = fade_sec + hook_gap_sec
+            if apad_dur > 0.0:
+                ach.append(f"apad=pad_dur={g(apad_dur)}")
+        elif i == body_index:  # the intro: hold a silent beat before the story
+            if intro_gap_sec > 0.0:
+                vch.append(f"tpad=stop_mode=add:stop_duration={g(intro_gap_sec)}")
+                ach.append(f"apad=pad_dur={g(intro_gap_sec)}")
+        elif i == rest_physical_index:  # body_rest: fade in, then outro lead-in pad
+            if fade_sec > 0.0:
+                vch.append(f"fade=t=in:st=0:d={g(fade_sec)}")
+                ach.append(f"afade=t=in:d={g(fade_sec)}")
+            if body_tail_pad_sec > 0.0:
+                vch.append(
+                    f"tpad=stop_mode=clone:stop_duration={g(body_tail_pad_sec)}"
+                )
+                ach.append(f"apad=pad_dur={g(body_tail_pad_sec)}")
+        if vch:
+            parts.append(f"[{i}:v:0]" + ",".join(vch) + f"[pv{i}]")
+            refs += f"[pv{i}]"
+        else:
+            refs += f"[{i}:v:0]"
+        if has_audio:
+            if ach:
+                parts.append(f"[{i}:a:0]" + ",".join(ach) + f"[pa{i}]")
+                refs += f"[pa{i}]"
+            else:
+                refs += f"[{i}:a:0]"
+    a = 1 if has_audio else 0
+    streams = "".join(p + ";" for p in parts) + refs
+    streams += f"concat=n={concat_n}:v=1:a={a}[v]"
+    if has_audio:
+        streams += "[a]"
+    return streams
+
+
+def _ffmpeg_splice_cmd_hook_first(
+    inputs: list[Path],
+    output: Path,
+    body_index: int,
+    hook_end_sec: float,
+    has_audio: bool,
+    body_tail_pad_sec: float,
+    pad_active: bool,
+    fade_sec: float = 0.0,
+    hook_gap_sec: float = 0.0,
+    intro_gap_sec: float = 0.0,
+    tail_hold_sec: float = 0.0,
+) -> list[str]:
+    """Hook-first variant of the splice argv: lists the body input twice
+    (with different `-ss`/`-t`) so the encoder produces
+    [body_hook][pre-body inputs][body_rest][post-body inputs] in one pass.
+
+    For the canonical caller shape ``inputs=[intro, body, outro]`` with
+    ``body_index=1`` the physical argv inputs become
+    ``[body, intro, body, outro]`` (positions 0, 1, 2, 3) and the concat
+    filter references them in playback order. When `pad_active`, the
+    tail-pad applies to the SECOND body input (body_rest at physical
+    position ``body_index + 1``) so the outro still sees the silence-
+    before-outro contract.
+
+    Pure. Mirrors `video/server/ffmpeg.ts::buildHookFirstArgv`.
+    """
+    paced = fade_sec > 0.0 or hook_gap_sec > 0.0 or intro_gap_sec > 0.0
+    # When paced, the hook clip's video freezes at hook_end_sec but its audio runs
+    # `tail_hold_sec` longer so the last word finishes; the physical body clips
+    # therefore split at `split_sec`, and body_rest resumes there (the skipped
+    # span played as the frozen frame). Legacy/unpaced keeps the hook_end split.
+    split_sec = hook_end_sec + (tail_hold_sec if paced else 0.0)
+
+    argv: list[str] = ["ffmpeg", "-y"]
+    split_s = format(split_sec, "g")
+    body_path = str(inputs[body_index])
+    # Position 0: body_hook (runs to split_sec so the audio tail is available).
+    argv += ["-ss", "0", "-t", split_s, "-i", body_path]
+    # Positions 1..body_index: pre-body inputs (typically just the intro).
+    for i in range(body_index):
+        argv += ["-i", str(inputs[i])]
+    # Position body_index + 1: body_rest (resumes after the held audio tail).
+    argv += ["-ss", split_s, "-i", body_path]
+    # Positions body_index + 2..: post-body inputs (typically the outro).
+    for i in range(body_index + 1, len(inputs)):
+        argv += ["-i", str(inputs[i])]
+
+    rest_physical_index = body_index + 1
+    concat_n = len(inputs) + 1
+
+    if paced:
+        streams = _hook_first_paced_filter(
+            concat_n,
+            body_index,
+            rest_physical_index,
+            has_audio,
+            hook_end_sec,
+            fade_sec,
+            hook_gap_sec,
+            intro_gap_sec,
+            body_tail_pad_sec if pad_active else 0.0,
+            tail_hold_sec,
+        )
+    else:
+        streams = ""
+        if pad_active:
+            pad_s = format(body_tail_pad_sec, "g")
+            streams += (
+                f"[{rest_physical_index}:v:0]"
+                f"tpad=stop_mode=clone:stop_duration={pad_s}[bv];"
+            )
+            if has_audio:
+                streams += f"[{rest_physical_index}:a:0]apad=pad_dur={pad_s}[ba];"
+        for i in range(concat_n):
+            if pad_active and i == rest_physical_index:
+                streams += "[bv]"
+                if has_audio:
+                    streams += "[ba]"
+            else:
+                streams += f"[{i}:v:0]"
+                if has_audio:
+                    streams += f"[{i}:a:0]"
+        a = 1 if has_audio else 0
+        streams += f"concat=n={concat_n}:v=1:a={a}[v]"
+        if has_audio:
+            streams += "[a]"
     argv += ["-filter_complex", streams]
     argv += ["-map", "[v]"]
     if has_audio:
@@ -518,6 +769,7 @@ def splice(
     context_id: str = "",
     *,
     outro_lead_in_sec: float = 0.0,
+    hook_end_sec: float = 0.0,
 ) -> dict:
     """Glue intro + body + outro into `output_path` with one re-encode pass.
 
@@ -531,6 +783,14 @@ def splice(
     narrator's last word doesn't get stepped on by the outro cue.
     Defaults to 0 for back-compat; callers that want the user-facing
     default (1.5s) read `resolve_outro_lead_in_sec(store.get_setting)`.
+
+    `hook_end_sec` (2026-06-28) opts the splice into hook-first ordering:
+    when > 0 AND an intro is present, the concat reorders to
+    [body_hook][intro][body_rest][outro] so the cold-open spoken hook
+    lands BEFORE the brand stinger. Defaults to 0 for back-compat — every
+    caller that hasn't opted in gets the legacy [intro][body][outro]
+    ordering byte-for-byte. Per
+    _plans/2026-06-28-hook-before-brand-intro.md.
     """
     tag = f"[video splice id={context_id or '?'}]"
     if not body_path.exists():
@@ -564,16 +824,45 @@ def splice(
     # tail-padding before just an intro-then-body chain would extend the
     # output for no reason.
     pad_sec = outro_lead_in_sec if outro_path is not None else 0.0
+    # Hook-first only fires when an intro will sit in front of the body;
+    # gate here so the argv builder's check is redundant defense.
+    hook_sec = hook_end_sec if (intro_path is not None and hook_end_sec > 0) else 0.0
+    # The paced seams (fade-to-black + silent beat each side of the intro) are
+    # intrinsic to the hook-first reorder; off (0) for every legacy path.
+    paced = hook_sec > 0
     argv = _ffmpeg_splice_cmd(
-        inputs, output_path, body_index=body_index, body_tail_pad_sec=pad_sec,
+        inputs,
+        output_path,
+        body_index=body_index,
+        body_tail_pad_sec=pad_sec,
+        hook_end_sec=hook_sec,
+        fade_sec=HOOK_FIRST_FADE_SEC if paced else 0.0,
+        hook_gap_sec=HOOK_FIRST_HOOK_GAP_SEC if paced else 0.0,
+        intro_gap_sec=HOOK_FIRST_INTRO_GAP_SEC if paced else 0.0,
+        tail_hold_sec=HOOK_FIRST_TAIL_HOLD_SEC if paced else 0.0,
     )
-    parts_desc = "+".join(
-        ["intro" if intro_path else ""] +
-        ["body"] +
-        (["outro"] if outro_path else [])
-    ).strip("+")
-    if pad_sec > 0:
-        parts_desc = parts_desc.replace("body", f"body+{pad_sec:g}s-pad")
+    # Compose the log description from the spliced parts so the operator can
+    # see at a glance which path each render took. The hook-first reorder
+    # surfaces as `body-hook@2.5s+intro+body-rest+...` so a misconfigured
+    # render is debuggable from the log alone.
+    if hook_sec > 0:
+        rest_label = (
+            f"body-rest+{pad_sec:g}s-pad" if pad_sec > 0 else "body-rest"
+        )
+        parts = (
+            [f"body-hook@{hook_sec:g}s"]
+            + (["intro"] if intro_path else [])
+            + [rest_label]
+            + (["outro"] if outro_path else [])
+        )
+    else:
+        body_label = f"body+{pad_sec:g}s-pad" if pad_sec > 0 else "body"
+        parts = (
+            (["intro"] if intro_path else [])
+            + [body_label]
+            + (["outro"] if outro_path else [])
+        )
+    parts_desc = "+".join(parts)
     print(f"{tag} start parts={parts_desc} inputs={len(inputs)} -> {output_path.name}")
     started = time.time()
     result = _run_ffmpeg(argv, context=f"video splice id={context_id}")

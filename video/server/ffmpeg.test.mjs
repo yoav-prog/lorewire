@@ -170,6 +170,223 @@ describe("buildConcatArgv", () => {
     );
   });
 
+  it("hook-first: reorders to [body_hook][intro][body_rest][outro] when hookEndSec > 0 and intro precedes body", () => {
+    // _plans/2026-06-28-hook-before-brand-intro.md. The body file appears
+    // twice in the physical argv — once with `-ss 0 -t 2.5` (the hook
+    // clip), once with `-ss 2.5` (the rest) — so the concat filter sees
+    // four streams in playback order: body_hook → intro → body_rest → outro.
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5 },
+    );
+    // Physical input order in argv: body, intro, body, outro.
+    // Each -i is preceded by either -ss/-t (body_hook), nothing (intro),
+    // -ss (body_rest), or nothing (outro). Three -i for the bare inputs
+    // plus one more (the body listed twice) = 4 -i tokens.
+    const inputFlagCount = argv.filter((t) => t === "-i").length;
+    assert.equal(inputFlagCount, 4);
+    // Walk the argv and confirm the seek shape: -ss 0 -t 2.5 -i body,
+    // -i intro, -ss 2.5 -i body, -i outro.
+    const ffmpegPrefixLen = 2; // ["ffmpeg", "-y"]
+    assert.deepEqual(
+      argv.slice(ffmpegPrefixLen, ffmpegPrefixLen + 6),
+      ["-ss", "0", "-t", "2.5", "-i", "/tmp/body.mp4"],
+    );
+    assert.deepEqual(
+      argv.slice(ffmpegPrefixLen + 6, ffmpegPrefixLen + 8),
+      ["-i", "/tmp/intro.mp4"],
+    );
+    assert.deepEqual(
+      argv.slice(ffmpegPrefixLen + 8, ffmpegPrefixLen + 12),
+      ["-ss", "2.5", "-i", "/tmp/body.mp4"],
+    );
+    assert.deepEqual(
+      argv.slice(ffmpegPrefixLen + 12, ffmpegPrefixLen + 14),
+      ["-i", "/tmp/outro.mp4"],
+    );
+    // Filter graph references the 4 physical inputs in playback order.
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0][0:a:0][1:v:0][1:a:0][2:v:0][2:a:0][3:v:0][3:a:0]concat=n=4:v=1:a=1[v][a]",
+    );
+  });
+
+  it("hook-first with tail-pad: pad lands on body_rest, not body_hook", () => {
+    // The outro still needs the silence-before-outro contract, so the
+    // tpad/apad clause attaches to body_rest (the second body input,
+    // physical index = bodyIndex + 1 = 2). body_hook lands directly
+    // into the intro with no pad.
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, bodyTailPadSec: 1.5 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];" +
+        "[2:a:0]apad=pad_dur=1.5[ba];" +
+        "[0:v:0][0:a:0][1:v:0][1:a:0][bv][ba][3:v:0][3:a:0]concat=n=4:v=1:a=1[v][a]",
+    );
+  });
+
+  it("hook-first without outro: [body_hook][intro][body_rest], no pad", () => {
+    // intro + body only — the outro slot is empty, so the chain is
+    // 3 physical inputs and no pad applies (body_rest is now last).
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, bodyTailPadSec: 1.5 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0][0:a:0][1:v:0][1:a:0][2:v:0][2:a:0]concat=n=3:v=1:a=1[v][a]",
+    );
+    // body_rest has nothing after it, so the pad clause is dropped.
+    assert.equal(filter.includes("tpad"), false);
+    assert.equal(filter.includes("apad"), false);
+  });
+
+  it("hook-first inactive when hookEndSec is 0: byte-identical to legacy argv", () => {
+    // Opt-in semantics: a zero (or unset) hookEndSec must produce the
+    // SAME argv as the pre-hook-first path. No surprises for callers
+    // that haven't migrated.
+    const baseline = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, bodyTailPadSec: 1.5 },
+    );
+    const zero = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, bodyTailPadSec: 1.5, hookEndSec: 0 },
+    );
+    assert.deepEqual(zero, baseline);
+  });
+
+  it("hook-first inactive when no intro precedes body: legacy argv", () => {
+    // Nothing to push behind the hook — falls through to the legacy
+    // ordering. bodyIndex=0 means the body is already first.
+    const argv = buildConcatArgv(
+      ["/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 0, hookEndSec: 2.5 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[v][a]",
+    );
+    // No body duplication — only 2 inputs.
+    const inputFlagCount = argv.filter((t) => t === "-i").length;
+    assert.equal(inputFlagCount, 2);
+  });
+
+  it("hook-first with hasAudio=false: pad clause drops apad, concat drops audio map", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, bodyTailPadSec: 1.5, hasAudio: false },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];" +
+        "[0:v:0][1:v:0][bv][3:v:0]concat=n=4:v=1:a=0[v]",
+    );
+    assert.equal(argv.includes("aac"), false);
+  });
+
+  // Paced hook-first seams (fade-to-black + silent beat each side of the intro).
+  // _plans/2026-06-29-hook-first-clean-pacing.md. Expected strings are IDENTICAL
+  // to pipeline/tests/test_segments.py so the two splice paths stay byte-equal.
+
+  it("hook-first paced: body_hook freezes + holds the line, then fades; body_rest resumes at the split", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, fadeSec: 0.45, hookGapSec: 1.1, introGapSec: 0.9, tailHoldSec: 0.3 },
+    );
+    // Physical clips run to hookEnd + tailHold = 2.8; body_rest resumes there.
+    assert.deepEqual(argv.slice(2, 8), ["-ss", "0", "-t", "2.8", "-i", "/tmp/body.mp4"]);
+    assert.deepEqual(argv.slice(10, 14), ["-ss", "2.8", "-i", "/tmp/body.mp4"]);
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS," +
+        "tpad=stop_mode=clone:stop_duration=0.75," +
+        "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];" +
+        "[0:a:0]apad=pad_dur=1.55[pa0];" +
+        "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];" +
+        "[1:a:0]apad=pad_dur=0.9[pa1];" +
+        "[2:v:0]fade=t=in:st=0:d=0.45[pv2];" +
+        "[2:a:0]afade=t=in:d=0.45[pa2];" +
+        "[pv0][pa0][pv1][pa1][pv2][pa2][3:v:0][3:a:0]" +
+        "concat=n=4:v=1:a=1[v][a]",
+    );
+  });
+
+  it("hook-first paced: body_rest keeps the outro lead-in pad after the fade-in", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      {
+        bodyIndex: 1,
+        hookEndSec: 2.5,
+        bodyTailPadSec: 1.5,
+        fadeSec: 0.45,
+        hookGapSec: 1.1,
+        introGapSec: 0.9,
+        tailHoldSec: 0.3,
+      },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.ok(
+      filter.includes(
+        "[2:v:0]fade=t=in:st=0:d=0.45,tpad=stop_mode=clone:stop_duration=1.5[pv2];" +
+          "[2:a:0]afade=t=in:d=0.45,apad=pad_dur=1.5[pa2];",
+      ),
+    );
+  });
+
+  it("hook-first paced: all seam durations 0 is byte-identical to the legacy argv", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, bodyTailPadSec: 1.5, fadeSec: 0, hookGapSec: 0, introGapSec: 0 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];" +
+        "[2:a:0]apad=pad_dur=1.5[ba];" +
+        "[0:v:0][0:a:0][1:v:0][1:a:0][bv][ba][3:v:0][3:a:0]" +
+        "concat=n=4:v=1:a=1[v][a]",
+    );
+  });
+
+  it("hook-first paced with hasAudio=false: drops apad/afade and the audio map", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, fadeSec: 0.45, hookGapSec: 1.1, introGapSec: 0.9, tailHoldSec: 0.3, hasAudio: false },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS," +
+        "tpad=stop_mode=clone:stop_duration=0.75," +
+        "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];" +
+        "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];" +
+        "[2:v:0]fade=t=in:st=0:d=0.45[pv2];" +
+        "[pv0][pv1][pv2][3:v:0]concat=n=4:v=1:a=0[v]",
+    );
+    assert.equal(filter.includes("apad"), false);
+  });
+
   it("treats input paths as standalone argv tokens (no shell interpolation)", () => {
     // Paths with spaces, semicolons, and quotes pass through untouched —
     // any shell hazard at the call site is the spawner's problem, not

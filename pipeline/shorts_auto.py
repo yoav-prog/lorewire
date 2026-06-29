@@ -93,36 +93,31 @@ def maybe_enqueue_short_for_story(
     category: str | None,
     *,
     requested_by: str = "auto",
-    get_setting: GetSetting = store.get_setting,
     force: bool = False,
+    get_setting: GetSetting = store.get_setting,
 ) -> bool:
     """Enqueue a short for the story if auto-generate is on for its category.
     Returns True if a row was enqueued (or already existed idempotently), False
     when auto-generate is off. Safe to call on every story completion.
 
-    `force=True` is the Reddit-import "output: short" path
-    (see _plans/2026-06-16-reddit-default-to-shorts.md): the admin
-    explicitly picked short-as-the-video for this row, so the
-    shorts.auto.enabled / per-category gate is bypassed. The rolling-24h
-    cap is still enforced: the cap is a cost safety net, not an opt-in
-    toggle, and the admin can raise it via shorts.auto.daily_cap when
-    they want a bigger import wave. Narration vibe + length still come
-    from the shorts.auto.narration / shorts.auto.length settings so the
-    forced short matches the admin's preferred style.
+    `force=True` bypasses the per-category gate so a caller that has
+    already committed to producing a short (e.g. the Reddit-source story
+    job, which now ships article + short + hero + thumbnail as one
+    unit per _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md)
+    can ignore the admin's "should this category auto-generate?" knob.
+    The global 24h cost cap (DEFAULT_AUTO_DAILY_CAP) is the real backstop
+    against a runaway "Process 200 selected" backfill and STILL applies —
+    force only skips the cheap enable check, never the cap check.
     """
     cfg = resolve_short_auto_config(category, get_setting)
     if not cfg["enabled"] and not force:
         return False
 
-    # Global cost guard: cap shorts over a rolling 24h window, BUCKETED by
-    # requested_by. The auto pipeline (requested_by='auto') and the
-    # Reddit-import short-only path (requested_by='reddit-import') each get
-    # their own ceiling (default 50/day from shorts.auto.daily_cap) so a
-    # busy import wave can't silently eat into the auto budget and vice
-    # versa. Manual admin clicks (requested_by=<email>) similarly stand
-    # apart. Once the bucket cap is hit we skip entirely; a story whose
-    # short was already enqueued in-window is unaffected because its row
-    # already exists and will render regardless.
+    # Global cost guard: cap auto-requested shorts over a rolling 24h window.
+    # Counts only requested_by='auto' rows so manual admin clicks never eat into
+    # (or block) the auto budget. Once the cap is hit we skip entirely; a story
+    # whose auto short was already enqueued in-window is unaffected because its
+    # row already exists and will render regardless.
     cap = _resolve_auto_daily_cap(get_setting)
     since = (
         datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
@@ -130,9 +125,8 @@ def maybe_enqueue_short_for_story(
     recent = store.count_short_renders_since(since, requested_by=requested_by)
     if recent >= cap:
         print(
-            f"[shorts_auto cap] story={story_id} forced={force} "
-            f"requested_by={requested_by} skipped: {recent} shorts in last "
-            f"24h >= cap {cap} (raise shorts.auto.daily_cap to lift)"
+            f"[shorts_auto cap] story={story_id} skipped: {recent} auto shorts in "
+            f"last 24h >= cap {cap} (raise shorts.auto.daily_cap to lift)"
         )
         return False
 

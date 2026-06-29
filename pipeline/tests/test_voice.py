@@ -391,5 +391,90 @@ class VoiceOverrideResolutionTests(unittest.TestCase):
         self.assertIsNone(kwargs.get("voice_id_override"))
 
 
+class BuildChirpPayloadTests(unittest.TestCase):
+    """The shorts voice codification rides on this pure payload builder, so
+    pin its two new controls (speakingRate + markup) and the legacy default."""
+
+    def test_legacy_default_is_unchanged(self):
+        # No rate, no markup -> exactly the pre-codification payload, so other
+        # callers (and a rate of None) are byte-for-byte the same.
+        payload = voice._build_chirp_payload(
+            "Hello there.", "en-US-Chirp3-HD-Autonoe", "en-US",
+        )
+        self.assertEqual(payload["input"], {"text": "Hello there."})
+        self.assertEqual(payload["audioConfig"], {"audioEncoding": "MP3"})
+        self.assertNotIn("speakingRate", payload["audioConfig"])
+        self.assertEqual(payload["voice"]["name"], "en-US-Chirp3-HD-Autonoe")
+
+    def test_speaking_rate_added_when_set(self):
+        payload = voice._build_chirp_payload(
+            "Hi.", "en-US-Chirp3-HD-Autonoe", "en-US", speaking_rate=1.2,
+        )
+        self.assertEqual(payload["audioConfig"]["speakingRate"], 1.2)
+
+    def test_speaking_rate_of_one_is_omitted(self):
+        # 1.0 is a no-op pace; don't add the field (keeps the legacy payload).
+        payload = voice._build_chirp_payload(
+            "Hi.", "en-US-Chirp3-HD-Autonoe", "en-US", speaking_rate=1.0,
+        )
+        self.assertNotIn("speakingRate", payload["audioConfig"])
+
+    def test_markup_routes_text_to_markup_field(self):
+        # Pause tags only fire in input.markup; the text must NOT land in
+        # input.text or the engine reads "[pause long]" aloud.
+        payload = voice._build_chirp_payload(
+            "Hi. [pause long] There.", "en-US-Chirp3-HD-Autonoe", "en-US",
+            use_markup=True,
+        )
+        self.assertEqual(payload["input"], {"markup": "Hi. [pause long] There."})
+        self.assertNotIn("text", payload["input"])
+
+
+class BuildGeminiPayloadTests(unittest.TestCase):
+    """The Gemini path carries the young-creator vibe via input.prompt and reads
+    inline markup from input.text — pin both."""
+
+    def test_style_prompt_param_goes_in_input_prompt(self):
+        p = voice._build_gemini_payload(
+            "Hello there.", "en-US-Chirp3-HD-Leda", "en-US",
+            "gemini-25-flash-tts", style_prompt="lively young creator",
+        )
+        self.assertEqual(p["input"]["prompt"], "lively young creator")
+        self.assertEqual(p["input"]["text"], "Hello there.")
+        # Gemini wants the BARE voice name + the resolved model name.
+        self.assertEqual(p["voice"]["name"], "Leda")
+        self.assertEqual(p["voice"]["modelName"], "gemini-2.5-flash-tts")
+
+    def test_inline_markup_preserved_in_text(self):
+        # Gemini reads [long pause] from input.text; the builder must NOT strip it.
+        p = voice._build_gemini_payload(
+            "Hi. [long pause] There.", "en-US-Chirp3-HD-Leda", "en-US",
+            "gemini-25-flash-tts", style_prompt="x",
+        )
+        self.assertIn("[long pause]", p["input"]["text"])
+
+
+class StripPauseMarkupTests(unittest.TestCase):
+    """Engines without a markup field must never read a pause tag aloud."""
+
+    def test_strips_chirp_tag_variants(self):
+        for tag in ("[pause]", "[pause short]", "[pause long]", "[PAUSE LONG]"):
+            out = voice._strip_pause_markup(f"Hi {tag} there")
+            self.assertNotIn("pause", out.lower())
+            self.assertEqual(out, "Hi there")
+
+    def test_strips_gemini_tag_variants(self):
+        for tag in ("[long pause]", "[short pause]", "[extremely fast]"):
+            out = voice._strip_pause_markup(f"Hi {tag} there")
+            self.assertNotIn("[", out)
+            self.assertEqual(out, "Hi there")
+
+    def test_leaves_clean_text_untouched(self):
+        self.assertEqual(
+            voice._strip_pause_markup("Nothing to strip here."),
+            "Nothing to strip here.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

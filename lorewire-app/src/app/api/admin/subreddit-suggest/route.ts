@@ -12,7 +12,7 @@
 // the client UI actually uses.
 
 import { NextRequest } from "next/server";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 
 interface SubredditSuggestion {
   name: string;
@@ -29,7 +29,7 @@ interface RedditAutocompleteEntry {
 }
 
 export async function GET(req: NextRequest): Promise<Response> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const q = req.nextUrl.searchParams.get("q")?.trim() ?? "";
   if (q.length < 2) {
     return Response.json({ subreddits: [] satisfies SubredditSuggestion[] });

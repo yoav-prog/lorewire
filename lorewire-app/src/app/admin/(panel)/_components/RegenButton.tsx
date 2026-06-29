@@ -14,6 +14,12 @@ import {
 //
 // On success, kicks router.refresh() so the parent server component re-reads
 // the queue and the new row shows up in the panel without a full page reload.
+//
+// No success-state chip lives on the button. The latest-render line right
+// below the hint (Queued · 2s ago → Generating · 15s ago → Last regenerated …)
+// is the source of truth; a sticky "Queued." chip on the button never cleared
+// after the row settled, which read as "queued forever" even when the regen
+// had completed cleanly minutes earlier.
 
 interface RegenButtonProps {
   ownerKind: "story" | "article";
@@ -72,9 +78,6 @@ export function RegenButton({
         <p className="text-[11px] text-danger">
           {explainError(result)}
         </p>
-      )}
-      {result && result.ok && (
-        <p className="font-mono text-[10px] text-muted">Queued.</p>
       )}
     </div>
   );

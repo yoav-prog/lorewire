@@ -19,6 +19,8 @@ __pycache__/
 .venv/
 *.pyc
 *.db
+*.db-shm
+*.db-wal
 
 # Build output
 .next/
@@ -31,9 +33,14 @@ build/
 /video/.props/
 /video/out/
 
+# Local scratch + reference media (kept local, never committed)
+/_spike/
+/ref/
+
 # Misc
 .DS_Store
 *.log
 npm-debug.log*
 .vscode/
 .idea/
+.claude/

@@ -78,13 +78,17 @@ describe("evaluatePublishReadiness", () => {
     expect(r.missing).toContain("hero image is missing");
   });
 
-  it("blocks when video_url is missing", () => {
+  it("does NOT block when video_url is missing (2026-06-19 plan)", () => {
+    // The publish gate stopped requiring a long-form MP4 when Reddit-source
+    // jobs stopped auto-rendering one. The short carries the visual payload
+    // now; the article reads from hero + scenes. See
+    // _plans/2026-06-19-no-long-form-video-for-reddit-jobs.md.
     const r = evaluatePublishReadiness(
       { ...okStory, video_url: null },
       okSource,
     );
-    expect(r.ready).toBe(false);
-    expect(r.missing).toContain("video has not been rendered yet");
+    expect(r.ready).toBe(true);
+    expect(r.missing).not.toContain("video has not been rendered yet");
   });
 
   it("blocks publishing a story that's already published (avoids double-publish)", () => {
@@ -111,15 +115,15 @@ describe("evaluatePublishReadiness", () => {
       okSource,
     );
     expect(r.ready).toBe(false);
-    // body + hero + video — three reasons, all surfaced together so the
-    // admin doesn't fix one and re-discover another on a second click.
-    expect(r.missing.length).toBeGreaterThanOrEqual(3);
+    // body + hero — two reasons after the 2026-06-19 plan dropped
+    // video_url from the gate. Both surface together so the admin
+    // doesn't fix one and re-discover another on a second click.
     expect(r.missing).toEqual(
       expect.arrayContaining([
         "story body is empty",
         "hero image is missing",
-        "video has not been rendered yet",
       ]),
     );
+    expect(r.missing).not.toContain("video has not been rendered yet");
   });
 });

@@ -33,7 +33,7 @@
 // which renders came from this backfill versus an editor click.
 
 import { NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { listStories } from "@/lib/repo";
 import {
   forceEnqueueRender,
@@ -150,7 +150,7 @@ async function runBackfill(dryRun: boolean): Promise<BackfillResult> {
 }
 
 export async function GET(req: Request): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const url = new URL(req.url);
   const dry = url.searchParams.get("dry") === "1";
   if (!dry) {
@@ -170,7 +170,7 @@ export async function GET(req: Request): Promise<NextResponse> {
 }
 
 export async function POST(): Promise<NextResponse> {
-  await requireAdmin();
+  await requireCapability("content.manage");
   const result = await runBackfill(false);
   return NextResponse.json({ dry_run: false, ...result });
 }

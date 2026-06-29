@@ -46,7 +46,23 @@ DECODO_SCRAPE_URL = "https://scraper-api.decodo.com/v2/scrape"
 DECODO_GEO = "United States"
 REDDIT_BASE = "https://www.reddit.com/r"
 
+# Canonical category set, mirrored in src/lib/stories.ts `Cat` and
+# src/app/admin/ui.ts `CATEGORIES`. The classifier validates LLM output
+# against this set so a model returning "comedy" or worse "DROP TABLE"
+# can never become a stories.category value.
+STORY_CATEGORIES = (
+    "Drama",
+    "Entitled",
+    "Humor",
+    "Wholesome",
+    "Dating",
+    "Roommate",
+)
+
 # Rough subreddit -> LoreWire category. Editorial, so the admin can re-tag.
+# Used as the fast-path / fallback when the LLM classifier fails. The
+# classifier (`classify_category`) runs after the article body is written
+# and overrides this when it returns a confident match.
 SUBREDDIT_CATEGORY = {
     "amitheasshole": "Entitled",
     "entitledparents": "Entitled",
@@ -60,6 +76,60 @@ SUBREDDIT_CATEGORY = {
     "mademesmile": "Wholesome",
     "humansbeingbros": "Wholesome",
 }
+
+
+def classify_category(
+    title: str,
+    body: str,
+    fallback_category: str,
+    dry_run: bool = False,
+) -> str:
+    """LLM-classify a story into one of STORY_CATEGORIES.
+
+    Returns the fallback when the LLM call fails or returns something
+    outside the closed set, so the pipeline never writes a junk category
+    to the DB. The fallback is normally the subreddit-map value picked
+    by `_category_for` upstream — that way the worst case for a network
+    blip is "unchanged from the heuristic" instead of "everything is
+    Drama".
+
+    Dry-run path returns the fallback unchanged so the offline test
+    pipeline stays deterministic.
+
+    Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+    """
+    if dry_run:
+        return fallback_category
+    from pipeline import llm
+
+    options = ", ".join(STORY_CATEGORIES)
+    # Body is capped to keep the prompt small (every story is at most
+    # ~450 words from write_article; 2000 chars is comfortable headroom).
+    snippet = (body or "").strip()[:2000]
+    prompt = (
+        "You tag short retold-from-Reddit stories with one of these LoreWire "
+        f"categories: {options}.\n"
+        "Pick the ONE that best fits the story below. Reply with just the "
+        "category word, exactly as spelled, no punctuation, no explanation.\n\n"
+        f"Title: {title or '(no title)'}\n"
+        f"Story:\n{snippet}"
+    )
+    try:
+        raw = llm.chat(prompt, 20, model="openai/gpt-5-nano").strip()
+    except Exception as e:  # noqa: BLE001 — classifier is a quality lift, not load-bearing.
+        print(f"[classify_category] llm failed, using fallback: {e}")
+        return fallback_category
+    # Strip surrounding punctuation/quotes the model sometimes adds.
+    cleaned = raw.strip().strip(".,;:!?\"'`").split()[0] if raw.strip() else ""
+    # Closed-enum check (case-insensitive match, canonical-cased output).
+    for cat in STORY_CATEGORIES:
+        if cleaned.lower() == cat.lower():
+            return cat
+    print(
+        f"[classify_category] non-matching LLM response {raw!r}, using fallback "
+        f"{fallback_category!r}"
+    )
+    return fallback_category
 
 
 def _decodo_scrape(reddit_url: str) -> dict:
@@ -142,101 +212,6 @@ def make_idea(post: dict, dry_run: bool) -> dict:
     }
 
 
-# 2026-06-23 IdeasDB priority import (see
-# _plans/2026-06-23-ideasdb-priority-import.md).
-# Idea-only seeds (Yoav's IdeasDB rows with no matching reddit post)
-# arrive with `full_text=""` and `needs_expansion=1`. Before the existing
-# stages can run, we need a synthesized reddit-style narrative for the
-# `selftext` field. This stage takes (headline, summary, category,
-# strength) and asks the LLM to produce that narrative — a first-person
-# retelling that reads like a real reddit story so make_idea / research /
-# write_article downstream behave identically to a real-scrape path.
-#
-# Cost note (rule 8): one extra LLM call per idea-only seed. With the
-# active admin-selected model and ~600 output tokens per call, ballpark
-# per-call cost on a current cheap OpenAI-compatible model is on the
-# order of $0.001-$0.005 — but verify against the running admin
-# selection (`python -m pipeline.models get llm`) before draining a
-# 2000-seed backlog. The verify-with-20-samples discipline from the
-# council still applies: run a handful end-to-end, eyeball the output,
-# then commit to draining the rest.
-
-# Category hints that nudge the synthesized narrative toward the right
-# tone. Keys are lowercase, matched against the IdeasDB Category field.
-# Anything not in the map falls back to a neutral "personal story"
-# framing — better silent default than a wrong-tone forced match.
-_CATEGORY_TONE_HINTS: dict[str, str] = {
-    "medical shocking": "medical drama with stakes and a turning-point reveal",
-    "school/college drama": "social drama at school or college",
-    "entitled people": "an entitled-stranger confrontation that escalates",
-    "revenge stories": "a slow-burn revenge with a satisfying payoff",
-    "wedding money fights": "a wedding-budget conflict that exposes family lines",
-    "dating red flags": "a dating-disaster reveal partway through",
-    "wedding vendor nightmares": "a wedding-vendor disaster",
-    "wedding called off": "a wedding falling apart in real time",
-    "cheating & betrayal": "a betrayal discovery and the immediate fallout",
-    "toxic partner drama": "a toxic-relationship pattern that snaps",
-    "breakup revenge": "a breakup with a public-facing twist",
-    "family cut-off drama": "a family estrangement at a breaking point",
-    "adult child revenge": "an adult-child confronts a long-held parental wound",
-    "parents regret everything": "parental regret made explicit and irreversible",
-    "the family chose wrong": "a family rejection that backfires",
-    "ufo/uap": "an UFO / unexplained-sky-phenomenon account",
-}
-
-
-def expand_seed_to_post(
-    headline: str,
-    summary: str,
-    category: str | None,
-    strength: str,
-    dry_run: bool = False,
-) -> str:
-    """Synthesize a reddit-style `selftext` body for an idea-only seed.
-
-    Inputs are the IdeasDB columns. Output is plain-text first-person
-    narrative, ~250-500 words, suitable to flow into the existing
-    `reddit_source_to_post` → `make_idea` → `research` → `write_article`
-    pipeline. The caller persists this string into
-    `reddit_source.full_text` and flips `needs_expansion` to 0.
-
-    Returns a stub string under `dry_run` so end-to-end test paths can
-    exercise the worker without an LLM call.
-    """
-    if dry_run:
-        return (
-            f"[DRY RUN EXPANSION]\n\nHeadline: {headline}\n\n"
-            f"Summary: {summary}\n\nCategory: {category or 'n/a'}\n"
-            f"Strength: {strength}\n\n"
-            "(In a real run, the LLM expands this into a first-person "
-            "reddit-style narrative for the downstream stages.)"
-        )
-    from pipeline import llm
-
-    cat_key = (category or "").strip().lower()
-    tone_hint = _CATEGORY_TONE_HINTS.get(
-        cat_key, "a true-feeling personal story"
-    )
-    prompt = (
-        "You are simulating a Reddit user writing a true-story post in "
-        "first person. Take the headline and summary below and expand "
-        "them into a complete reddit-style selftext — the body of the "
-        f"post, not a reply. Aim for {tone_hint}. Target 300-500 words. "
-        "Open with the setup, walk the events in order, end with the "
-        "immediate aftermath. Do NOT include a title, do NOT moralize "
-        "or analyze, do NOT close with 'AITA?' or any meta-commentary. "
-        "Stay grounded in what the summary implies — invent only the "
-        "small connective tissue a real first-person teller would add "
-        "(specific dialogue, a small physical detail, an exact time of "
-        "day). Plain text only.\n\n"
-        f"HEADLINE: {headline}\n"
-        f"SUMMARY: {summary}\n"
-        f"CATEGORY: {category or 'general'}\n"
-    )
-    body = llm.chat(prompt, max_tokens=900)
-    return _clean_typography(body)
-
-
 def research(idea: dict, post: dict, dry_run: bool) -> dict:
     if dry_run:
         return {"rules": RESEARCH_RULES, "brief": post.get("selftext", "")[:400], "source": post.get("url", "")}
@@ -253,6 +228,43 @@ def research(idea: dict, post: dict, dry_run: bool) -> dict:
     return {"rules": RESEARCH_RULES, "brief": llm.chat(prompt, 1500), "source": post.get("url", "")}
 
 
+def _build_article_prompt(idea: dict, research: dict) -> str:
+    """Compose the article prompt. Extracted so the prompt content is
+    unit-testable without monkeypatching llm.chat. Kept in sync with the
+    short's _clarity_block in shorts_narration — change both together.
+    See _plans/2026-06-28-content-clarity-bar.md."""
+    return (
+        "You write for LoreWire, where true internet stories are retold as short, "
+        "vivid narratives. Retell the story below in about 350 to 450 words: open "
+        "with a hook, move scene by scene, keep it punchy and entertaining, and let "
+        "the facts carry it. Do NOT analyze, moralize, or render a verdict ('it's "
+        "not hard to see why...', 'the lesson here'), and do not invent anything "
+        "beyond the research. Return only the article text.\n\n"
+        "Clarity bar: open on the highest-stakes moment a STRANGER with zero "
+        "context can feel — a loss, a discovery, a confrontation, a transgression "
+        "caught in the act, a rupture. NOT a routine action. NAME THE THING "
+        "DIRECTLY, NOT THE ARTIFACT OF IT — the specific loss, the specific "
+        "transgression, the specific betrayal. An empty envelope is the symptom; "
+        "missing money is what a stranger feels. Go for the felt thing. The opening "
+        "line IS the catch of the story — if a stranger read only it, they must "
+        "think 'WAIT, WHAT?' — not 'huh, why?' or 'OK, and?'. By the end, an "
+        "everyday reader with no background on the story should be able to retell "
+        "what happened. Always anchor to concrete events that HAPPENED — never "
+        "abstract reflection or 'people are talking about'. Always plant a real "
+        "curiosity question early and pay it off in the body. If the source is "
+        "dry, lift it with sharp specifics: a vivid sensory detail, a real quote, "
+        "a small human moment from the source. Never invent drama beyond the "
+        "research.\n\n"
+        "POV: narrator is a third-person storyteller, NEVER the character. Source "
+        "posts are mostly first person ('I invoiced my coworkers'); translate every "
+        "'I/me/my' into third person — 'she', 'he', 'they', or a role-noun ('the "
+        "poster', 'the coworker', 'the wife'). When gender is not established, "
+        "default to 'they' or a role-noun. NEVER guess a gender.\n\n"
+        f"Headline: {idea['headline']}\n\n"
+        f"Research:\n{research['brief']}"
+    )
+
+
 def write_article(idea: dict, research: dict, dry_run: bool) -> str:
     if dry_run:
         return (
@@ -263,17 +275,7 @@ def write_article(idea: dict, research: dict, dry_run: bool) -> str:
         )
     from pipeline import llm
 
-    prompt = (
-        "You write for LoreWire, where true internet stories are retold as short, "
-        "vivid narratives. Retell the story below in about 350 to 450 words: open "
-        "with a hook, move scene by scene, keep it punchy and entertaining, and let "
-        "the facts carry it. Do NOT analyze, moralize, or render a verdict ('it's "
-        "not hard to see why...', 'the lesson here'), and do not invent anything "
-        "beyond the research. Return only the article text.\n\n"
-        f"Headline: {idea['headline']}\n\n"
-        f"Research:\n{research['brief']}"
-    )
-    return _clean_typography(llm.chat(prompt, 1200))
+    return _clean_typography(llm.chat(_build_article_prompt(idea, research), 1200))
 
 
 # --- image prompts ------------------------------------------------------------
@@ -562,6 +564,7 @@ def make_thumbnail_prompt(
     dry_run: bool,
     *,
     character_base_url: str | None = None,
+    scene_image_url: str | None = None,
     style: HeroStyle | None = None,
 ) -> str:
     """Build a cinematic title-baked thumbnail prompt for hero / poster art.
@@ -569,9 +572,10 @@ def make_thumbnail_prompt(
     Each prompt names the scene briefly (from the article's opening lines),
     appends the category's visual identity, and instructs the image model to
     render the title prominently inside the composition (gpt-image-2 handles
-    short bold text well; longer titles wrap or get abbreviated). Two aspect
-    ratios are supported: '3:4' for portrait posters / mobile billboards, and
-    '16:9' for desktop hero strips.
+    short bold text well; longer titles wrap or get abbreviated). Three
+    aspect ratios are supported: '3:4' for portrait posters / mobile
+    billboards, '16:9' for desktop hero strips, and '1:1' for the
+    Instagram-square thumbnail variant.
 
     When `character_base_url` is supplied the prompt switches to a
     character-faithful redraw: the caller MUST also pass
@@ -579,6 +583,16 @@ def make_thumbnail_prompt(
     sees the short's base character as an i2i reference. Without that
     handshake, the prompt change does nothing and the model still
     invents a fresh face every call.
+
+    When `scene_image_url` is ALSO supplied (the hybrid mode used by
+    `generate_hero_and_thumbnail_from_short` — see
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md),
+    the prompt names a second reference image and tells the model to
+    inherit its framing / mood / lighting while still preserving the
+    character's identity from the first reference. The caller MUST pass
+    `image_input=[character_base_url, scene_image_url]` in that order so
+    the prompt's "first reference" / "second reference" wording lines up
+    with what the model sees.
 
     `style` (Phase 2 of _plans/2026-06-17-hero-style-registry.md) selects
     which named look the prompt asks for. When supplied, the style's
@@ -589,6 +603,9 @@ def make_thumbnail_prompt(
     before it threads the resolver) keep producing byte-compatible
     prompts. Caller-side resolution chain lives in
     `pipeline.stages.resolve_hero_style`.
+
+    The style band stays shared across all aspects so the variants read
+    as one poster series — only the composition / scene cue varies.
     """
     # Resolved style wins; per-category default is the fall-through for
     # callers that don't pass one. Both bands are the same SHAPE — a
@@ -597,24 +614,58 @@ def make_thumbnail_prompt(
         style.system_prompt_band if style is not None
         else CATEGORY_THUMBNAIL_STYLES.get(category, CATEGORY_THUMBNAIL_STYLES["Drama"])
     )
-    orientation = (
-        "Vertical streaming-thumbnail composition, character focal point "
-        "centered, title baked into the upper or lower band"
-        if aspect_ratio == "3:4"
-        else "Wide cinematic banner composition, character focal point off-center "
-        "to leave room for the title, title baked into the lower-third band"
-    )
-    if dry_run:
-        suffix = " (i2i)" if character_base_url else ""
-        style_marker = f" [{style.id}]" if style is not None else ""
-        return (
-            f"[DRY] {title} cinematic {category} thumbnail at "
-            f"{aspect_ratio}{suffix}{style_marker}"
+    if aspect_ratio == "3:4":
+        orientation = (
+            "Vertical streaming-thumbnail composition, character focal point "
+            "centered, title baked into the upper or lower band"
         )
+    elif aspect_ratio == "1:1":
+        orientation = (
+            "Square Instagram-thumbnail composition, character focal point "
+            "centered with breathing room on both sides, title baked into "
+            "the lower band"
+        )
+    else:
+        orientation = (
+            "Wide cinematic banner composition, character focal point off-center "
+            "to leave room for the title, title baked into the lower-third band"
+        )
+    if dry_run:
+        flags = []
+        if character_base_url:
+            flags.append("i2i")
+        if scene_image_url:
+            flags.append("scene-ref")
+        suffix = f" ({'+'.join(flags)})" if flags else ""
+        style_marker = f" [{style.id}]" if style is not None else ""
+        return f"[DRY] {title} cinematic {category} thumbnail at {aspect_ratio}{suffix}{style_marker}"
 
     # Take just the first couple of sentences of the article as the scene cue
     # so the model gets context without re-rendering the whole body each call.
     opening = " ".join(body.split()[:60])
+
+    if character_base_url and scene_image_url:
+        # Hybrid mode: two reference images. First = the character (identity
+        # source), second = the chosen scene from the short (framing / mood
+        # source). Tell the model EXPLICITLY which is which because gpt-image-2
+        # i2i otherwise blends them; we need the face from #1 and the
+        # composition from #2, not a 50/50 mash.
+        return (
+            f"Redraw the EXACT same character from the FIRST reference image — "
+            f"same face, gender, build, hair, clothing, age — but place them in "
+            f"a composition INSPIRED BY the SECOND reference image's framing, "
+            f"mood, lighting, and dramatic moment. Reimagined as a cinematic "
+            f"editorial poster for a short documentary titled \"{title}\". "
+            f"{style_band} "
+            f"Scene context from the story: {opening} "
+            f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
+            f"bold typography (white or near-white characters with a strong dark "
+            f"shadow or outline against the background so the words stay clearly "
+            f"legible even at small thumbnail sizes), integrated into the "
+            f"composition (not floating on a separate layer). {orientation}. "
+            f"High-resolution magazine-cover finish. No watermarks, no signatures, "
+            f"no extra text beyond the title."
+        )
 
     if character_base_url:
         # i2i variant: the reference image carries the protagonist's identity
@@ -628,21 +679,155 @@ def make_thumbnail_prompt(
             f"cinematic editorial poster for a short documentary titled "
             f"\"{title}\". {style_band} "
             f"Composition focused on this scene from the story: {opening} "
-            f"Render the title \"{title}\" prominently in bold confident "
-            f"typography, integrated into the composition (not floating on a "
-            f"separate layer). {orientation}. High-resolution magazine-cover "
-            f"finish. No watermarks, no signatures, no extra text beyond the title."
+            f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
+            f"bold typography (white or near-white characters with a strong dark "
+            f"shadow or outline against the background so the words stay clearly "
+            f"legible even at small thumbnail sizes), integrated into the "
+            f"composition (not floating on a separate layer). {orientation}. "
+            f"High-resolution magazine-cover finish. No watermarks, no signatures, "
+            f"no extra text beyond the title."
         )
 
     return (
         f"Cinematic editorial poster for a short documentary titled \"{title}\". "
         f"{style_band} "
         f"Composition focused on this scene from the story: {opening} "
-        f"Render the title \"{title}\" prominently in bold confident "
-        f"typography, integrated into the composition (not floating on a "
-        f"separate layer). {orientation}. High-resolution magazine-cover "
-        f"finish. No watermarks, no signatures, no extra text beyond the title."
+        f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
+        f"bold typography (white or near-white characters with a strong dark "
+        f"shadow or outline against the background so the words stay clearly "
+        f"legible even at small thumbnail sizes), integrated into the "
+        f"composition (not floating on a separate layer). {orientation}. "
+        f"High-resolution magazine-cover finish. No watermarks, no signatures, "
+        f"no extra text beyond the title."
     )
+
+
+def pick_hero_and_thumbnail_scenes(
+    title: str,
+    body: str,
+    scenes: list[dict],
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Pick a hero scene index and a (distinct) thumbnail scene index from a
+    short's generated scene list.
+
+    Used by `media.generate_hero_and_thumbnail_from_short` (see
+    _plans/2026-06-19-reddit-source-auto-deliver-article-short-hero-thumbnail.md).
+    The hero and thumbnail are i2i'd from the short's character_base_url PLUS
+    a chosen scene image — picking which scene is what this function does.
+
+    `scenes` is the list persisted in short_renders.props (one dict per scene
+    with a `scene` description and a `url`). Returns
+    `{"hero_index", "thumbnail_index", "picker_reasoning"}`. Both indexes are
+    guaranteed to be within `range(len(scenes))`. Distinct whenever the list
+    has >= 2 scenes; equal only when there's a single scene available.
+
+    Deterministic fallback (used when scenes is empty, dry_run, or the LLM call
+    fails / returns junk): hero = 0 (story opener establishes the character),
+    thumbnail = len(scenes) // 2 (typically the climactic mid-beat). Cheap and
+    predictable so tests don't need an LLM key.
+
+    The LLM call is intentionally tiny — title + body's first 60 words + numbered
+    scene descriptions — and uses the cheap `gpt-5-nano` model the title stage
+    already uses. Cost target: ~$0.001 per story. Skipped entirely under
+    `hero_thumbnail.scene_picker.enabled = off`.
+    """
+    from pipeline import llm, store
+
+    if not scenes:
+        return {"hero_index": 0, "thumbnail_index": 0, "picker_reasoning": "no scenes"}
+
+    n = len(scenes)
+    fallback_hero = 0
+    fallback_thumb = n // 2 if n > 1 else 0
+    fallback = {
+        "hero_index": fallback_hero,
+        "thumbnail_index": fallback_thumb,
+        "picker_reasoning": "deterministic fallback (hero=0, thumb=mid)",
+    }
+
+    if dry_run:
+        return {**fallback, "picker_reasoning": "[DRY] deterministic"}
+
+    if (store.get_setting("hero_thumbnail.scene_picker.enabled") or "on").strip().lower() in {
+        "off", "0", "false", "no",
+    }:
+        return {**fallback, "picker_reasoning": "picker disabled in settings"}
+
+    # Just the description text per scene; we don't show the image URL or
+    # prompt to the model — those add tokens without changing the choice.
+    scene_lines = "\n".join(
+        f"  {i}. {(s.get('scene') or '').strip()[:200]}"
+        for i, s in enumerate(scenes)
+    )
+    opening = " ".join((body or "").split()[:60])
+    instruction = (
+        "You pick the two most visually striking scenes from a short documentary "
+        "for use as poster art.\n"
+        f'Article title: "{title}"\n'
+        f"Article opening: {opening}\n\n"
+        "Scenes (numbered, with the description that was given to the image model):\n"
+        f"{scene_lines}\n\n"
+        "Pick TWO scenes:\n"
+        "  - hero_index: best as the article's header — establishes the protagonist clearly, "
+        "calm enough that a baked-in title reads.\n"
+        "  - thumbnail_index: best as the click-stopping social card — most dramatic, highest "
+        "emotional charge, must be DIFFERENT from hero_index when more than one scene exists.\n\n"
+        "Return ONLY a JSON object with three keys: "
+        '{"hero_index": <int>, "thumbnail_index": <int>, "reasoning": "<one short sentence>"}. '
+        "No prose, no fences."
+    )
+    try:
+        raw = llm.chat(instruction, 600, model="openai/gpt-5-nano").strip()
+    except Exception as e:  # noqa: BLE001 — picker must not break the pipeline
+        return {**fallback, "picker_reasoning": f"llm error: {e}"[:200]}
+
+    parsed = _parse_scene_picker(raw)
+    if parsed is None:
+        return {**fallback, "picker_reasoning": "llm returned unparseable JSON"}
+
+    hero_idx = parsed.get("hero_index")
+    thumb_idx = parsed.get("thumbnail_index")
+    reasoning = str(parsed.get("reasoning") or "")[:200]
+    if not isinstance(hero_idx, int) or not (0 <= hero_idx < n):
+        hero_idx = fallback_hero
+    if not isinstance(thumb_idx, int) or not (0 <= thumb_idx < n):
+        thumb_idx = fallback_thumb
+    # Distinctness: with 2+ scenes the two assets should look different. If the
+    # model picked the same index, nudge thumbnail one slot toward the middle
+    # so we don't ship two identical i2i seeds.
+    if n > 1 and hero_idx == thumb_idx:
+        thumb_idx = (hero_idx + 1) % n
+        reasoning = (reasoning + " | nudged for distinctness").strip(" |")
+
+    return {
+        "hero_index": hero_idx,
+        "thumbnail_index": thumb_idx,
+        "picker_reasoning": reasoning or "llm pick",
+    }
+
+
+def _parse_scene_picker(raw: str) -> dict | None:
+    """Mirror of `_parse_title_synopsis`: strip fences, find the outer JSON
+    object, return the parsed dict. None on any failure so the caller can
+    fall back deterministically."""
+    snippet = raw
+    if "```" in snippet:
+        for part in snippet.split("```"):
+            stripped = part.strip()
+            if stripped.startswith(("json", "JSON")):
+                stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+            if stripped.startswith("{"):
+                snippet = stripped
+                break
+    start, end = snippet.find("{"), snippet.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        return json.loads(snippet[start : end + 1])
+    except json.JSONDecodeError:
+        return None
 
 
 # --- prop plan (Wave 3 Phase 3 PropSlideIn) ----------------------------------
@@ -858,6 +1043,63 @@ TITLE_STYLE_EXAMPLES = [
     "MY ROOMMATE'S 3AM RULES",
 ]
 
+# Length gate (plan: _plans/2026-06-25-title-length-gate.md).
+# The hero typography wraps cleanly under ~50 chars / 8 words. Past that
+# point the title visually dominates the hero — see the 2026-06-25
+# "cinnamon roll" incident, a 99-char Reddit headline that reached the
+# live hero because the LLM returned an empty branded title and the
+# worker silently fell back to the raw post title.
+TITLE_MAX_CHARS = 50
+TITLE_MAX_WORDS = 8
+
+
+def _title_within_bounds(title: str) -> bool:
+    """Length gate for branded titles. A title past either bound is rejected
+    by `make_title_and_synopsis` and triggers the retry/salvage path."""
+    cleaned = title.strip()
+    if not cleaned:
+        return False
+    if len(cleaned) > TITLE_MAX_CHARS:
+        return False
+    if len(cleaned.split()) > TITLE_MAX_WORDS:
+        return False
+    return True
+
+
+def _salvage_title_from_body(body: str, headline: str) -> str:
+    """Last-resort title producer for when the LLM returns garbage twice.
+
+    Walks the article body's first sentence for a short noun-phrase, then
+    falls back to the Reddit headline truncated at a word boundary. Always
+    returns a non-empty string within `TITLE_MAX_CHARS` / `TITLE_MAX_WORDS`
+    so the worker never has to ship a raw Reddit headline to the live site.
+    """
+    # Try the article body's first sentence first — it's the editorial voice,
+    # so a chopped version reads better than a chopped Reddit question.
+    for candidate in (body or "").split("."):
+        words = candidate.strip().split()
+        if not words:
+            continue
+        head = " ".join(words[:TITLE_MAX_WORDS])
+        if len(head) <= TITLE_MAX_CHARS and len(head) >= 6:
+            return head.upper()
+        break  # only consider the first sentence; deeper isn't more relevant
+    # Headline fallback: truncate at the last word boundary that fits.
+    words = (headline or "").split()
+    bag: list[str] = []
+    for w in words[:TITLE_MAX_WORDS]:
+        nxt = " ".join(bag + [w])
+        if len(nxt) > TITLE_MAX_CHARS:
+            break
+        bag.append(w)
+    salvaged = " ".join(bag).strip()
+    if not salvaged:
+        # Empty body AND empty headline: emit a placeholder rather than "" so
+        # downstream NOT NULL constraints / "ready for publish" gates still
+        # pass. The admin sees the placeholder and uses the regenerate button.
+        salvaged = "Untitled Story"
+    return salvaged.upper()
+
 
 def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, str]:
     """Generate a branded LoreWire title + 1-sentence synopsis from the article.
@@ -867,6 +1109,12 @@ def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, 
     title + synopsis the CMS publishes. Both are also Typography-cleaned so
     smart quotes / em dashes never sneak in. Dry-run returns deterministic
     stubs so the rest of the pipeline can run end to end without an LLM key.
+
+    Length gate (plan: _plans/2026-06-25-title-length-gate.md): the parsed
+    title is validated against `_title_within_bounds`. A failure triggers
+    one retry with a stricter prompt that quotes the rejected attempt; a
+    second failure salvages a short title from the article body so the
+    return value is always non-empty and always within bounds.
     """
     from pipeline import llm
 
@@ -880,7 +1128,8 @@ def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, 
         "You write headlines for LoreWire, where true internet stories are "
         "retold as short, vivid pieces. Read the article below and return "
         "exactly one JSON object with two keys:\n"
-        '  "title": a short branded title, ALL CAPS, 2 to 6 words, evocative, '
+        f'  "title": a short branded title, ALL CAPS, 2 to 6 words, at most '
+        f"{TITLE_MAX_CHARS} characters total, evocative, "
         "no question marks, no Reddit-isms (\"AITA\", \"WIBTA\"), no leading "
         '"THE STORY OF". The same voice as these:\n'
         f"{examples}\n"
@@ -896,6 +1145,43 @@ def make_title_and_synopsis(idea: dict, body: str, dry_run: bool) -> tuple[str, 
     # the JSON object after reasoning.
     raw = llm.chat(instruction, 2000, model="openai/gpt-5-nano").strip()
     title, synopsis = _parse_title_synopsis(raw)
+    print(
+        f"[stages title gate] attempt=1 chars={len(title)} "
+        f"words={len(title.split())} accepted={_title_within_bounds(title)}"
+    )
+    if not _title_within_bounds(title):
+        # One retry, quoting the rejected attempt so the model can self-correct
+        # against its own output rather than the abstract rule.
+        retry_instruction = (
+            f'Your previous title attempt was rejected: "{title}" '
+            f"({len(title)} characters, {len(title.split())} words). "
+            f"It exceeds the LoreWire length cap of {TITLE_MAX_CHARS} characters "
+            f"and {TITLE_MAX_WORDS} words.\n\n"
+            f"{instruction}"
+        )
+        raw_retry = llm.chat(
+            retry_instruction, 2000, model="openai/gpt-5-nano"
+        ).strip()
+        retry_title, retry_synopsis = _parse_title_synopsis(raw_retry)
+        print(
+            f"[stages title gate] attempt=2 chars={len(retry_title)} "
+            f"words={len(retry_title.split())} "
+            f"accepted={_title_within_bounds(retry_title)}"
+        )
+        if _title_within_bounds(retry_title):
+            title, synopsis = retry_title, retry_synopsis or synopsis
+        else:
+            # Both LLM attempts failed. Salvage a short title from the body so
+            # the worker never has to fall back to the raw Reddit headline.
+            salvaged = _salvage_title_from_body(body, idea.get("headline", ""))
+            print(
+                f"[stages title salvaged] chars={len(salvaged)} "
+                f'words={len(salvaged.split())} value="{salvaged}"'
+            )
+            title = salvaged
+            # Preserve the LLM's synopsis if we got one on either attempt,
+            # otherwise compose a minimal stub so the row isn't half-populated.
+            synopsis = synopsis or retry_synopsis or (body or "").split(".")[0][:160]
     return _clean_typography(title), _clean_typography(synopsis)
 
 

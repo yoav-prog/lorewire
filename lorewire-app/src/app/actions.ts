@@ -14,26 +14,35 @@
 // long-form 16:9 stills.
 
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
-import { all, one } from "@/lib/db";
-import { getSetting } from "@/lib/repo";
+import { all, one, run } from "@/lib/db";
+import { type HomepageSurface } from "@/lib/homepage-curation";
 import {
-  HOMEPAGE_SURFACES,
-  listAllCuration,
-  type HomepageSurface,
-} from "@/lib/homepage-curation";
-
-// The short renderer writes its MP4 to GCS at `<storyId>-short/video.mp4`
-// (suffix from pipeline/shorts_render.SHORT_ID_SUFFIX). Anything else is
-// the long-form path. We detect the apply by matching this suffix on the
-// URL itself so we don't need to round-trip a separate flag column.
-const SHORT_VIDEO_PATH_RE = /-short\/video\.mp4(?:[?#].*)?$/;
-
-function isShortVideoUrl(url: string | null | undefined): boolean {
-  return typeof url === "string" && SHORT_VIDEO_PATH_RE.test(url);
-}
+  loadHomepageCuration,
+  loadHomepagePolls,
+  loadLiveCatalog,
+} from "@/lib/homepage-data";
+import {
+  getWirePollsForStories,
+  resolvePublicFloor,
+  type HomepagePollRails,
+  type PollRailKind,
+  type WirePollData,
+} from "@/lib/polls";
+import { readVoteToken } from "@/lib/poll-cookie";
+import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
+import { resolveMediaUrl } from "@/lib/media-url";
+import { randomUUID } from "node:crypto";
+import { currentUser } from "@/lib/dal";
+import { getOrIssueAnonToken, readAnonToken } from "@/lib/anon";
+import { readConsent } from "@/lib/consent";
 
 export interface LiveStoryMediaResult {
   ok: boolean;
+  /** The story's public slug, for building the canonical /v/[slug] share URL.
+   *  Null when found=false (no published row) — callers fall back to the site
+   *  origin rather than minting a link that 404s. The published gate here is
+   *  identical to getPublishedStoryBySlug, so found=true ⟺ /v/[slug] resolves. */
+  slug: string | null;
   video_url: string | null;
   /** Scene images to render in the article body + gallery. When the story's
    *  video is the applied short, these come from short_renders.props
@@ -41,6 +50,13 @@ export interface LiveStoryMediaResult {
    *  long-form video (or no video), this falls back to stories.images
    *  and the caller should render at 16:9. */
   images: string[];
+  /** The story's article body, sourced from stories.body. The
+   *  LiveCatalogStory projection deliberately drops body to keep the
+   *  homepage rails payload small, so without surfacing it here the
+   *  Read tab's `story.body` check stays false for every live-only
+   *  story and the article falls into the hardcoded envelope sample.
+   *  Null means no row / empty body → caller falls back to story.body. */
+  body: string | null;
   /** LONG-FORM narration audio for the Read-along surface, sourced from
    *  stories.audio_url — the voice_renders_worker writes this whenever
    *  the admin clicks "Regenerate voiceover" in the VoicePicker (with
@@ -53,19 +69,6 @@ export interface LiveStoryMediaResult {
    *  stories.alignment. Empty array means no live alignment yet → caller
    *  falls back to the baked story.alignment. */
   alignment: Array<{ word: string; start: number; end: number }>;
-  /** The story's source thread URL (typically a Reddit post), sourced
-   *  from stories.source_url. Admin edits to the source URL on the
-   *  /admin/stories/[id] page need to reach the public site without
-   *  a re-export of published.ts. Null means no row / unset → caller
-   *  falls back to the baked story.source_url. */
-  source_url: string | null;
-  /** The story's article body, sourced from stories.body. The
-   *  LiveCatalogStory projection deliberately drops body to keep the
-   *  homepage rails payload small, so without surfacing it here the
-   *  Read tab's `story.body` check stays false for every live-only
-   *  story and the article falls into the hardcoded envelope sample.
-   *  Null means no row / empty body → caller falls back to story.body. */
-  body: string | null;
   /** True when video_url points at the applied short (GCS suffix match).
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
@@ -170,12 +173,12 @@ export async function getLiveStoryMedia(
 ): Promise<LiveStoryMediaResult> {
   const empty: LiveStoryMediaResult = {
     ok: true,
+    slug: null,
     video_url: null,
     images: [],
+    body: null,
     audio_url: null,
     alignment: [],
-    source_url: null,
-    body: null,
     is_short: false,
     found: false,
   };
@@ -184,14 +187,14 @@ export async function getLiveStoryMedia(
   // Try by id first — handles new pipeline UUIDs and legacy ids ("envelope").
   let row = await one<{
     id: string;
+    slug: string | null;
     video_url: string | null;
     images: string | null;
+    body: string | null;
     audio_url: string | null;
     alignment: string | null;
-    source_url: string | null;
-    body: string | null;
   }>(
-    "SELECT id, video_url, images, audio_url, alignment, source_url, body FROM stories " +
+    "SELECT id, slug, video_url, images, body, audio_url, alignment FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -202,12 +205,12 @@ export async function getLiveStoryMedia(
     if (bySlug) {
       row = {
         id: bySlug.id,
+        slug: bySlug.slug,
         video_url: bySlug.video_url,
         images: bySlug.images,
+        body: bySlug.body,
         audio_url: bySlug.audio_url,
         alignment: bySlug.alignment,
-        source_url: bySlug.source_url,
-        body: bySlug.body,
       };
     }
   }
@@ -231,14 +234,18 @@ export async function getLiveStoryMedia(
   // "Regenerate voiceover" in the VoicePicker. Pointedly NOT pulled from
   // the short's voiceover_url: Read-along must follow the article text,
   // and the short is a different (condensed) script.
+  // Resolve media references onto the delivery base at read time
+  // (lib/media-url). With MEDIA_PUBLIC_BASE unset this is a passthrough no-op.
+  // `is_short` was computed above from the STORED value; resolution preserves
+  // the object-path suffix, so it stays correct.
   return {
     ok: true,
-    video_url: row.video_url,
-    images,
-    audio_url: row.audio_url,
-    alignment: parseStoryAlignment(row.alignment),
-    source_url: row.source_url,
+    slug: row.slug,
+    video_url: resolveMediaUrl(row.video_url),
+    images: images.map((u) => resolveMediaUrl(u) ?? u),
     body: row.body,
+    audio_url: resolveMediaUrl(row.audio_url),
+    alignment: parseStoryAlignment(row.alignment),
     is_short: isShort,
     found: true,
   };
@@ -325,87 +332,463 @@ export interface LiveCatalogStory {
   created_at: string | null;
 }
 
+// The Wires-feed row: a LiveCatalogStory plus its server-counted like state.
+// `viewer_liked` is this viewer's own like (signed-in user or anon cookie);
+// `like_count` is the public total. The client hides the number until it
+// crosses the display threshold (see WireCard).
+//
+// `poll` is the server-resolved engagement-poll bundle for this story —
+// question + options + this cookie's already-voted-side + the floor-aware
+// initial result. Null when the story has no enabled poll. Plan:
+// _plans/2026-06-25-wires-poll-wrapper.md.
+export interface WireStory extends LiveCatalogStory {
+  like_count: number;
+  viewer_liked: boolean;
+  poll: WirePollData | null;
+}
+
 export interface LiveCatalogResult {
   ok: boolean;
   stories: LiveCatalogStory[];
 }
 
-// Returns published, non-noindex stories most-recent first. Used by the
-// homepage shells to render newly published stories that haven't been
-// re-exported into src/data/published.ts yet — `python -m pipeline.export_app`
-// is a deploy-required step; this fetch sidesteps it for live UX.
+// Public client entry: client components import this through "use server"
+// as an RPC. The body lives in @/lib/homepage-data so src/app/page.tsx can
+// run the same fetch at request time and seed the client shells' initial
+// render. Plan: _plans/2026-06-18-homepage-no-flash-ssr.md.
 export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
-  const safeLimit = Math.max(1, Math.min(limit, 500));
+  return loadLiveCatalog(limit);
+}
+
+// ─── Wires feed: published shorts, cursor-paginated ──────────────────────────
+// The Wires surface streams ONLY 9:16 short renders (the doodle shorts), most
+// recent first, one page at a time. A "short" is identified by its video_url
+// suffix (lib/short-video-url) — the long-form pipeline writes a different
+// path, so the same `stories` table serves both and this query filters in SQL
+// so pagination counts shorts, not all published stories. Public + unauthen-
+// ticated like its siblings: the published / non-noindex / has-slug filter is
+// load-bearing and mirrors listPublishedStories exactly.
+
+export interface ListShortsOpts {
+  /** Page size, clamped to 1..50. */
+  limit?: number;
+  /** Cursor: return shorts published strictly BEFORE this timestamp. Pass the
+   *  previous page's `nextCursor`; omit for the first page. */
+  beforePublishedAt?: string | null;
+}
+
+export interface ListShortsResult {
+  ok: boolean;
+  /** One page of shorts, newest first. The base projection mirrors the
+   *  homepage rails (LiveCatalogStory) so the catalog adapter shares a shape;
+   *  each row is enriched with server-counted like state for the Wires card. */
+  shorts: WireStory[];
+  /** Cursor for the next page (the published_at of the last row), or null when
+   *  this was the final page. */
+  nextCursor: string | null;
+}
+
+export async function listPublishedShorts(
+  opts: ListShortsOpts = {},
+): Promise<ListShortsResult> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 12, 50));
+  // Match the loosened public-visibility gate from getLiveCatalog: any story
+  // that's rendered (status ready or published) and has a slug surfaces.
+  // The previous strict gate dropped shorts whose published_at was NULL
+  // because the publish action hadn't backfilled the timestamp yet.
+  const where: string[] = [
+    "status IN ('ready', 'published')",
+    "slug IS NOT NULL",
+    "(noindex IS NULL OR noindex = 0)",
+    // Shorts only — match the `<id>-short/video.mp4` object path in SQL.
+    "video_url LIKE ?",
+  ];
+  const params: unknown[] = [SHORT_VIDEO_URL_LIKE];
+  if (opts.beforePublishedAt) {
+    where.push("COALESCE(published_at, updated_at, created_at) < ?");
+    params.push(opts.beforePublishedAt);
+  }
+  const clause = `WHERE ${where.join(" AND ")}`;
+  // Over-fetch by one so we know whether a further page exists without a second
+  // COUNT round-trip. id is the deterministic tiebreak so the sort is stable
+  // across equal published_at values.
   const rows = await all<LiveCatalogStory>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "hero_image_landscape, hero_has_baked_title, video_url, " +
       "published_at, created_at FROM stories " +
-      "WHERE status = 'published' AND published_at IS NOT NULL " +
-      "AND (noindex IS NULL OR noindex = 0) " +
-      "ORDER BY published_at DESC " +
-      `LIMIT ${safeLimit}`,
+      `${clause} ` +
+      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC " +
+      `LIMIT ${limit + 1}`,
+    params,
   );
-  return { ok: true, stories: rows };
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  // Belt and braces: the SQL LIKE already filters, but re-assert the exact
+  // suffix in JS so a URL that merely contains the substring mid-path can't
+  // slip a non-short into the feed (the regex anchors it to the end). Filter on
+  // the STORED value to stay aligned with the SQL LIKE, then resolve the
+  // survivors' media onto the delivery base for the client (passthrough when
+  // MEDIA_PUBLIC_BASE is unset; suffix is preserved either way).
+  const shorts = page
+    .filter((s) => isShortVideoUrl(s.video_url))
+    .map((s) => ({
+      ...s,
+      hero_image: resolveMediaUrl(s.hero_image),
+      video_url: resolveMediaUrl(s.video_url),
+    }));
+  // Cursor matches the SQL COALESCE order so a row with NULL published_at
+  // still produces a usable next-page key (uses created_at instead).
+  const last = page[page.length - 1];
+  const nextCursor = hasMore
+    ? last?.published_at ?? last?.created_at ?? null
+    : null;
+  // Attach server-counted like state (count + this viewer's own like) so the
+  // feed paints real hearts on first byte instead of after a second fetch.
+  const withLikes = await attachLikeState(shorts);
+  // Attach the server-resolved poll bundle (question + options + this cookie's
+  // voted side + floor-aware initial result) so the Wires panel + floating
+  // pill paint correctly on first byte. Stories with no enabled poll get
+  // `poll: null` — the card hides both surfaces in that case. Plan:
+  // _plans/2026-06-25-wires-poll-wrapper.md.
+  const withPolls = await attachWirePollState(withLikes);
+  return { ok: true, shorts: withPolls, nextCursor };
 }
 
-export async function getHomepageCuration(): Promise<HomepageCurationResult> {
-  const grouped = await listAllCuration();
-  // Collect every curated story id across all surfaces, dedupe, ask the
-  // DB which of them are publishable. One round-trip beats N per-id reads.
-  const curatedIds = new Set<string>();
-  let rawCount = 0;
-  for (const surface of HOMEPAGE_SURFACES) {
-    for (const r of grouped[surface]) {
-      curatedIds.add(r.story_id);
-      rawCount++;
-    }
-  }
-  let publishedSet = new Set<string>();
-  if (curatedIds.size > 0) {
-    const ids = Array.from(curatedIds);
-    const placeholders = ids.map(() => "?").join(", ");
-    const rows = await all<{ id: string }>(
-      `SELECT id FROM stories WHERE id IN (${placeholders}) ` +
-        "AND status = 'published' AND published_at IS NOT NULL " +
-        "AND (noindex IS NULL OR noindex = 0)",
-      ids,
+/** Batch-resolve the per-wire poll bundle and slot it onto each row.
+ *  Best-effort: any failure logs and falls through to `poll: null` so a
+ *  busted poll read can never crash the Wires feed (which is a public,
+ *  unauthenticated read path). */
+async function attachWirePollState(
+  shorts: WireStory[],
+): Promise<WireStory[]> {
+  if (shorts.length === 0) return shorts;
+  try {
+    const [cookieToken, floor] = await Promise.all([
+      readVoteToken(),
+      resolvePublicFloor(),
+    ]);
+    const polls = await getWirePollsForStories(
+      shorts.map((s) => s.id),
+      cookieToken,
+      floor,
     );
-    publishedSet = new Set(rows.map((r) => r.id));
+    return shorts.map((s) => ({ ...s, poll: polls.get(s.id) ?? null }));
+  } catch (err) {
+    console.warn("[wires poll panel resolve err]", {
+      story_count: shorts.length,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return shorts.map((s) => ({ ...s, poll: null }));
   }
-  const curation: HomepageCuration = {
-    hero: [],
-    top10: [],
-    continue: [],
-    new_row: [],
-    entitled_row: [],
-    humor_row: [],
-    wholesome_row: [],
-    dating_row: [],
-    roommate_row: [],
-    drama_row: [],
-  };
-  for (const surface of HOMEPAGE_SURFACES) {
-    for (const r of grouped[surface]) {
-      if (publishedSet.has(r.story_id)) {
-        curation[surface].push(r.story_id);
-      }
-    }
+}
+
+// ─── Wires likes: server-counted, one per viewer ─────────────────────────────
+// Replaces the local-only heart. The viewer is the signed-in user when there
+// is a session, else the anonymous identity cookie (lw_anon). Counts are read
+// in batch for the feed and recomputed on every toggle. Identity + persistence
+// follow the same consent gate the local stores use: anonymous likes only
+// persist once the cookie banner is accepted.
+
+/** The id a like is attributed to: the signed-in user, else the EXISTING anon
+ *  cookie. Read-only — never issues a cookie (used on feed reads). Null when
+ *  the browser has no identity yet. */
+async function viewerLikeId(): Promise<string | null> {
+  const user = await currentUser();
+  if (user) return user.id;
+  return readAnonToken();
+}
+
+/** Current public like count for one story. */
+async function storyLikeCount(storyId: string): Promise<number> {
+  const row = await one<{ c: number | string }>(
+    "SELECT COUNT(*) AS c FROM user_likes WHERE story_id = ?",
+    [storyId],
+  );
+  return Number(row?.c ?? 0);
+}
+
+/** Attach `like_count` + `viewer_liked` to a page of shorts with two small
+ *  batch queries (counts grouped by story, then the viewer's own likes) — one
+ *  pair per page, never per row. */
+async function attachLikeState(rows: LiveCatalogStory[]): Promise<WireStory[]> {
+  if (rows.length === 0) return [];
+  const ids = rows.map((r) => r.id);
+  const placeholders = ids.map(() => "?").join(", ");
+
+  const counts = await all<{ story_id: string; c: number | string }>(
+    "SELECT story_id, COUNT(*) AS c FROM user_likes " +
+      `WHERE story_id IN (${placeholders}) GROUP BY story_id`,
+    ids,
+  );
+  const countById = new Map(counts.map((r) => [r.story_id, Number(r.c)]));
+
+  let likedByViewer = new Set<string>();
+  const viewerId = await viewerLikeId();
+  if (viewerId) {
+    const mine = await all<{ story_id: string }>(
+      "SELECT story_id FROM user_likes " +
+        `WHERE user_id = ? AND story_id IN (${placeholders})`,
+      [viewerId, ...ids],
+    );
+    likedByViewer = new Set(mine.map((r) => r.story_id));
   }
-  // Pull both behaviour settings in parallel — single round trip cost is
-  // ~2 ms on SQLite and the same on Postgres pooled.
-  const [emptyRailRaw, heroRequiredRaw] = await Promise.all([
-    getSetting("curation.empty_rail_behavior"),
-    getSetting("curation.hero_required"),
-  ]);
-  const behavior: HomepageCurationBehavior = {
-    emptyRailBehavior:
-      emptyRailRaw === "hide" ? "hide" : "fallback",
-    heroRequired: heroRequiredRaw === "true",
-  };
+
+  // `poll` starts null and is filled in by `attachWirePollState` after this
+  // helper returns — keeping the field initialised here satisfies the
+  // `WireStory` shape so the chained transform doesn't have to widen.
+  return rows.map((r) => ({
+    ...r,
+    like_count: countById.get(r.id) ?? 0,
+    viewer_liked: likedByViewer.has(r.id),
+    poll: null,
+  }));
+}
+
+export interface ToggleLikeResult {
+  ok: boolean;
+  /** This viewer's like state for the story after the toggle. */
+  liked: boolean;
+  /** The story's public like count after the toggle. */
+  count: number;
+  /** False when the like could not be persisted (no consent / no identity) —
+   *  the client keeps an optimistic local heart but the number does not move. */
+  persisted: boolean;
+}
+
+/** Set this viewer's like state for a story to `liked` (idempotent). Signed-in
+ *  users always persist; anonymous users persist only once consent is accepted,
+ *  at which point the lw_anon identity cookie is issued here. */
+export async function toggleLikeStory(
+  storyId: string,
+  liked: boolean,
+): Promise<ToggleLikeResult> {
+  if (typeof storyId !== "string" || storyId.length === 0) {
+    return { ok: false, liked: false, count: 0, persisted: false };
+  }
+  // Only public stories can be liked — no arbitrary or unpublished rows. The
+  // gate mirrors listPublishedShorts so a likeable id is always a visible one.
+  const story = await one<{ id: string }>(
+    "SELECT id FROM stories WHERE id = ? AND status IN ('ready', 'published') " +
+      "AND slug IS NOT NULL AND (noindex IS NULL OR noindex = 0)",
+    [storyId],
+  );
+  if (!story) {
+    return { ok: false, liked: false, count: 0, persisted: false };
+  }
+
+  // Resolve identity, honoring consent. Signed-in users have implicitly
+  // consented; anonymous users must have accepted the banner before we
+  // persist anything or mint the identity cookie.
+  const user = await currentUser();
+  let viewerId: string | null = null;
+  if (user) {
+    viewerId = user.id;
+  } else if ((await readConsent()) === "accepted") {
+    viewerId = await getOrIssueAnonToken();
+  }
+
+  if (!viewerId) {
+    // No identity we may persist — report the current count so the client can
+    // keep a local optimistic heart without moving the public number.
+    return {
+      ok: true,
+      liked,
+      count: await storyLikeCount(storyId),
+      persisted: false,
+    };
+  }
+
+  if (liked) {
+    // Unique (user_id, story_id) makes this idempotent — a double-tap can't
+    // inflate the count.
+    await run(
+      "INSERT INTO user_likes (id, user_id, story_id, created_at) " +
+        "VALUES (?, ?, ?, ?) ON CONFLICT (user_id, story_id) DO NOTHING",
+      [randomUUID(), viewerId, storyId, new Date().toISOString()],
+    );
+  } else {
+    await run("DELETE FROM user_likes WHERE user_id = ? AND story_id = ?", [
+      viewerId,
+      storyId,
+    ]);
+  }
+
   return {
     ok: true,
-    curation,
-    raw_curation_count: rawCount,
-    behavior,
+    liked,
+    count: await storyLikeCount(storyId),
+    persisted: true,
   };
+}
+
+// Public client entry: see getLiveCatalog comment. Body lives in
+// @/lib/homepage-data.
+export async function getHomepageCuration(): Promise<HomepageCurationResult> {
+  return loadHomepageCuration();
+}
+
+// Phase 4.5 of _plans/2026-06-17-engagement-polls.md. Three derived
+// homepage rails computed from poll_aggregates: divisive, agreed,
+// unpopular. Each respects its own settings flag — when explicitly
+// disabled the rail returns an empty array regardless of available
+// data; when enabled (the default) it returns up to
+// HOMEPAGE_RAIL_LIMIT cards.
+//
+// `unpopular` is cookie-personalized: a returning voter sees the
+// stories they themselves picked the minority on. A fresh visitor
+// without history hits the "smaller side under 15%" fallback (see
+// topUnpopular).
+//
+// Empty rails are returned as empty arrays — the consumer skips the
+// section rather than rendering a placeholder. Errors fall back to
+// empty arrays too: a busted rail query must NEVER take the
+// homepage down with it.
+
+export interface HomepagePollRailsResult {
+  ok: boolean;
+  rails: HomepagePollRails;
+  /** Per-rail enabled flag so the consumer can distinguish "off by
+   *  setting" from "on but no data yet". Not used by the renderer
+   *  today (we just check array length); kept on the response so
+   *  future admin UI can surface "you have it ENABLED but no data
+   *  meets the floor" without a second round trip. */
+  enabled: Record<PollRailKind, boolean>;
+}
+
+// Public client entry: see getLiveCatalog comment. Body lives in
+// @/lib/homepage-data.
+export async function getHomepagePolls(): Promise<HomepagePollRailsResult> {
+  return loadHomepagePolls();
+}
+
+// (Empty-state sentinel for the client hook lives in
+// lib/homepage-rails.ts. Next.js 16 forbids non-async exports from
+// "use server" files — even a plain object would be wrapped into a
+// server-function reference that can't be read during initial
+// render. Sentinel + hook stay co-located on the client side.)
+
+// 2026-06-18 polls plan extension: per-story poll fetch for client-
+// rendered surfaces that didn't go through the server-rendered reader.
+// The homepage DetailModal (DesktopShell + AppShell) renders inside a
+// client component, so it can't await the poll repo helpers directly.
+// This action returns the same shape a server reader resolves so the
+// PollWidget renders identically on every surface.
+//
+// Best-effort — any failure returns { ok: false } so the modal
+// degrades gracefully (no poll shown) instead of crashing.
+export interface StoryPollView {
+  pollId: string;
+  question: string;
+  optionA: string;
+  optionB: string;
+  result: import("@/lib/polls-shared").PollResultView;
+  votedSide: "A" | "B" | null;
+}
+
+/** Optional seed passed by the client so the server can lazy-autodraft
+ *  a poll on first DetailModal open for a story that doesn't have one
+ *  yet. Honors the "every story has a poll by default" invariant
+ *  without requiring a backfill run or admin re-save first. The autodraft
+ *  is idempotent + race-safe (SELECT-then-INSERT with re-read), so
+ *  concurrent first-views collapse to a single insert. */
+export interface StoryPollSeed {
+  title: string;
+  body: string;
+  category: string;
+}
+
+export interface StoryPollViewResult {
+  ok: boolean;
+  /** Null when there's no enabled poll OR resolution failed. The
+   *  consumer treats this as "render nothing" without distinguishing
+   *  the two cases — both produce identical UX. */
+  view: StoryPollView | null;
+}
+
+export async function getPollForStoryView(
+  storyId: string,
+  seed?: StoryPollSeed,
+): Promise<StoryPollViewResult> {
+  if (!storyId) return { ok: true, view: null };
+  try {
+    const polls = await import("@/lib/polls");
+    const cookie = await import("@/lib/poll-cookie");
+    let poll = await polls.getPollByStoryId(storyId);
+
+    // Lazy autodraft on read: if no poll exists yet AND the client
+    // sent seed context, draft one inline so the modal shows a poll
+    // on first open. One-time per story (subsequent loads hit the
+    // cached row). Logs the outcome for [getPollForStoryView] traces.
+    if (!poll && seed) {
+      const { autoDraftPollForSubject } = await import(
+        "@/lib/poll-autodraft"
+      );
+      const r = await autoDraftPollForSubject({
+        kind: "story",
+        storyId,
+        title: seed.title || null,
+        body: seed.body || null,
+        category: seed.category || null,
+      });
+      console.info("[getPollForStoryView lazy autodraft]", {
+        story_id: storyId,
+        ok: r.ok,
+        ai: r.ai,
+        fallback: r.fallbackReason ?? null,
+      });
+      poll = await polls.getPollByStoryId(storyId);
+    }
+
+    // "Every story must have a poll, always visible" (2026-06-18 plan
+    // extension). We render enabled=0 fallback drafts too — the category
+    // preset is a real engagement question, and hiding it leaves the
+    // section empty for any story whose LLM autodraft fell back. The
+    // admin still controls the wording via PollEditor; the only way to
+    // hide a poll now is to delete the row.
+    if (!poll) {
+      return { ok: true, view: null };
+    }
+    const [voteToken, aggregate, floor] = await Promise.all([
+      cookie.readVoteToken(),
+      polls.getAggregateByStoryId(storyId),
+      polls.resolvePublicFloor(),
+    ]);
+    const votedSide = await polls.getVoteSideForCookie(poll.id, voteToken);
+    return {
+      ok: true,
+      view: {
+        pollId: poll.id,
+        question: poll.question,
+        optionA: poll.option_a_text,
+        optionB: poll.option_b_text,
+        result: polls.toResultView(aggregate, floor),
+        votedSide,
+      },
+    };
+  } catch (err) {
+    console.warn("[getPollForStoryView failed]", {
+      story_id: storyId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, view: null };
+  }
+}
+
+// 2026-06-25 Phase 1 of _plans/2026-06-25-top10-ranking.md. Public
+// server action wrapper around the story-events recorder. Client UIs
+// fire this fire-and-forget — they don't need the result, and the
+// recorder swallows every failure so the UI path never breaks.
+export async function recordStoryEventAction(
+  storyId: string,
+  type:
+    | "play_started"
+    | "play_completed"
+    | "save_added"
+    | "rating_submitted"
+    | "poll_vote"
+    | "share_initiated",
+): Promise<{ ok: boolean }> {
+  const { recordStoryEvent } = await import("@/lib/story-events");
+  const r = await recordStoryEvent({ storyId, type });
+  return { ok: r.ok };
 }

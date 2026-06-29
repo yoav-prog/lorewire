@@ -26,11 +26,137 @@ import {
 } from "@/lib/articles";
 import type { ArticleLanguage, ArticleRow, ArticleType } from "@/lib/repo";
 import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { PollWidget } from "@/components/PollWidget";
+import {
+  computeArticlePollAggregate,
+  getAggregateByStoryId,
+  getPollByArticleId,
+  getPollByStoryId,
+  getVoteSideForCookie,
+  resolvePublicFloor,
+  topDivisive,
+  toResultView,
+  type PollResultView,
+  type PollRow,
+  type PollSide,
+} from "@/lib/polls";
+import { readVoteToken } from "@/lib/poll-cookie";
 import { readCommentToken } from "@/lib/comment-cookie";
 import { readUserSession } from "@/lib/user-session";
 import { countPublishedComments, loadCommentThread } from "@/lib/comments-read";
 import { commentsEnabledForArticle } from "@/lib/comments";
 import { CommentsSection } from "@/components/CommentsSection";
+
+// Phase 2 + §15 (standalone-article polls) of
+// _plans/2026-06-17-engagement-polls.md.
+//
+// Resolution priority on the article reader:
+//   1. The article's OWN poll (polls.article_id = article.id) wins.
+//      Authored directly on /admin/articles/[id]. Aggregates compute
+//      live via computeArticlePollAggregate (no projection row).
+//   2. The linked story's poll (polls.story_id = article.story_id)
+//      is the fallback inheritance from Phase 2. Aggregates come
+//      from poll_aggregates (cron-refreshed projection).
+//   3. No widget renders when neither resolves.
+//
+// The follow-up "see another close call" link only fires for the
+// story-attached path because the divisive rail is story-only by
+// design. An article-only poll renders without a follow-up.
+interface PollRender {
+  pollId: string;
+  question: string;
+  optionA: string;
+  optionB: string;
+  result: PollResultView;
+  votedSide: PollSide | null;
+  followUp: { href: string; title: string } | null;
+}
+
+async function loadPollForArticle(
+  article: ArticleRow,
+): Promise<PollRender | null> {
+  // Priority 1: article-own poll. When the article CMS author wrote
+  // a poll directly on this article, it wins regardless of any linked
+  // story's poll. The author's intent for THIS article reads.
+  const ownPoll = await getPollByArticleId(article.id);
+  if (ownPoll && ownPoll.enabled === 1) {
+    return await buildArticleOwnPollRender(ownPoll);
+  }
+  // Priority 2: linked-story inheritance. Same behavior as Phase 2.
+  if (!article.story_id) return null;
+  const storyPoll = await getPollByStoryId(article.story_id);
+  if (!storyPoll || storyPoll.enabled !== 1) return null;
+  return await buildLinkedStoryPollRender(article.story_id, storyPoll);
+}
+
+async function buildArticleOwnPollRender(
+  poll: PollRow,
+): Promise<PollRender> {
+  const voteToken = await readVoteToken();
+  const [aggregate, votedSide, floor] = await Promise.all([
+    computeArticlePollAggregate(poll),
+    getVoteSideForCookie(poll.id, voteToken),
+    resolvePublicFloor(),
+  ]);
+  return {
+    pollId: poll.id,
+    question: poll.question,
+    optionA: poll.option_a_text,
+    optionB: poll.option_b_text,
+    result: toResultView(aggregate, floor),
+    votedSide,
+    // Article-own polls don't ride the story-only divisive rail, so
+    // no follow-up. Could change later if we add an article-only
+    // rail surface; flagged for the V3 personalization work.
+    followUp: null,
+  };
+}
+
+async function buildLinkedStoryPollRender(
+  storyId: string,
+  poll: PollRow,
+): Promise<PollRender> {
+  const [voteToken, aggregate, floor] = await Promise.all([
+    readVoteToken(),
+    getAggregateByStoryId(storyId),
+    resolvePublicFloor(),
+  ]);
+  const votedSide = await getVoteSideForCookie(poll.id, voteToken);
+  // Phase 4: same follow-up resolver shape as /v/[slug]. Falls back
+  // silently when the rail has no other entries in this category.
+  const followUp = await resolveFollowUp(storyId, poll.category);
+  return {
+    pollId: poll.id,
+    question: poll.question,
+    optionA: poll.option_a_text,
+    optionB: poll.option_b_text,
+    result: toResultView(aggregate, floor),
+    votedSide,
+    followUp,
+  };
+}
+
+async function resolveFollowUp(
+  currentStoryId: string,
+  category: string | null,
+): Promise<{ href: string; title: string } | null> {
+  try {
+    const rows = await topDivisive({
+      category,
+      excludeStoryId: currentStoryId,
+      limit: 1,
+    });
+    const top = rows[0];
+    if (!top || !top.slug || !top.title) return null;
+    return { href: `/v/${top.slug}`, title: top.title };
+  } catch (err) {
+    console.warn("[articles reader] follow-up resolve failed", {
+      story_id: currentStoryId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
 
 function isLanguage(v: string): v is ArticleLanguage {
   return v === "he" || v === "en";
@@ -137,11 +263,13 @@ export default async function ArticleReader({
     siteName: seo.siteName,
   });
 
+  // Inherits the linked story's poll if one exists + is enabled.
+  // Renders after the body so the reader finishes the piece before
+  // being asked to take a side.
+  const pollRender = await loadPollForArticle(article);
+
   // Comment thread: first page server-rendered for SEO + no-flash, with the
   // viewer resolved so they see their own held/rejected comments inline.
-  // readUserSession is a shim (always null) until the public-side auth surface
-  // ships — see src/lib/user-session.ts. Until then every viewer is treated
-  // as a guest keyed by the `lw_comment` cookie token.
   const commentSession = await readUserSession();
   const commentToken = await readCommentToken();
   const [commentThread, commentCount, commentsEnabled] = await Promise.all([
@@ -161,8 +289,8 @@ export default async function ArticleReader({
     language,
     slug: article.slug,
     docLen: article.document?.length ?? 0,
-    comment_count: commentCount,
-    comments_enabled: commentsEnabled,
+    has_poll: pollRender !== null,
+    poll_already_voted: pollRender ? pollRender.votedSide !== null : false,
   });
 
   return (
@@ -262,6 +390,18 @@ export default async function ArticleReader({
       {/* Listicle items come AFTER the intro body — the writer's body is
           usually a short setup, then the numbered items carry the meat. */}
       {payload.type === "listicle" && <ListicleBlock payload={payload.payload} />}
+
+      {pollRender && (
+        <PollWidget
+          pollId={pollRender.pollId}
+          question={pollRender.question}
+          optionA={pollRender.optionA}
+          optionB={pollRender.optionB}
+          initialResult={pollRender.result}
+          initialVotedSide={pollRender.votedSide}
+          followUp={pollRender.followUp}
+        />
+      )}
 
       <CommentsSection
         articleId={article.id}

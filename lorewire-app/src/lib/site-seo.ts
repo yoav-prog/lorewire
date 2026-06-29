@@ -39,7 +39,7 @@ const DEFAULTS: SiteSeoSettings = {
   siteUrl: "",
   titleTemplate: "%s · LoreWire",
   defaultMetaDescription:
-    "Netflix for true internet stories. Watch the short, read the article, or read along.",
+    "Every internet story ends with your verdict. Watch a 60-second short, decide who's right, see what the crowd said.",
   themeColor: "#0A0A0C",
   defaultOgImage: "",
   twitterCardType: "summary_large_image",

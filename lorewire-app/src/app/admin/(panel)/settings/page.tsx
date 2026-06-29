@@ -1,8 +1,9 @@
 import Link from "next/link";
-import { requireAdmin } from "@/lib/dal";
+import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
 import { listGoogleVoices, listElevenLabsVoices } from "@/lib/voice-providers";
 import SettingsShell from "@/app/admin/SettingsShell";
+import SettingsSection from "@/app/admin/SettingsSection";
 import { loadHeroStyleSettings } from "@/app/admin/actions";
 import { HeroStylePicker } from "@/app/admin/(panel)/_components/HeroStylePicker";
 import {
@@ -12,6 +13,7 @@ import {
   SettingNumber,
   SettingPresetText,
   SettingSelect,
+  SettingText,
   type SelectOption,
 } from "./_components/SettingControls";
 import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
@@ -22,6 +24,24 @@ import {
   LEGACY_DEFAULT_ASPECT,
   type VideoAspect,
 } from "@/lib/aspect";
+import {
+  DEFAULT_PUBLIC_FLOOR,
+  MINORITY_VOTE_DEFAULT_THRESHOLD,
+  minorityVoteThresholdSettingKey,
+  POLL_RAIL_KINDS,
+  railEnabledSettingKey,
+} from "@/lib/polls";
+import {
+  COLD_START_FLOOR_DEFAULT,
+  coldStartFloorSettingKey,
+  rotatingCategoryEnabledSettingKey,
+  rotatingCategoryOverrideSettingKey,
+} from "@/lib/homepage-curation-shared";
+// Per-platform social-publishing settings (Facebook, Instagram, YouTube,
+// TikTok) and the publisher-poll-hook caption suffixes live under
+// /admin/settings/socials — see socials/page.tsx. Imports from those
+// modules used to land here; they were removed in the 2026-06-24 Socials
+// reorganization.
 
 // Settings / General. Every field now uses the right control: toggles for
 // the booleans (previously stringy "0"/"1"), number inputs with min/max for
@@ -86,7 +106,7 @@ function readToggle(raw: string | null, defaultOn = false): boolean {
 }
 
 export default async function SettingsPage() {
-  await requireAdmin();
+  await requireCapability("settings.manage");
 
   // Pull every setting + voice catalog in parallel. The voice catalog fetchers
   // are cached server-side (1h TTL) so this isn't a fresh upstream call on
@@ -155,13 +175,6 @@ export default async function SettingsPage() {
     listElevenLabsVoices(),
   ]);
 
-  // Reddit-imports default output (short vs long-form video). Lives upstream
-  // of the shorts.auto.* block: it picks WHICH video to make for an
-  // imported story, not whether to also make a companion short alongside
-  // the long-form. NULL = the implicit default 'short' (cheaper render
-  // + matches the new short-editor flow we ship).
-  const redditDefaultOutput = await getSetting("reddit.default_output");
-
   // Hero style registry — Phase 2 of
   // _plans/2026-06-17-hero-style-registry.md. One round trip pulls the
   // global default, every per-category default, and every pre-generated
@@ -176,6 +189,68 @@ export default async function SettingsPage() {
       getSetting("shorts.auto.narration"),
       getSetting("shorts.auto.length"),
     ]);
+
+  // Engagement-poll settings (Phase 4.5 + Phase 5 + Phase 5 follow-up
+  // of _plans/2026-06-17-engagement-polls.md):
+  //   - Three rail toggles read by getHomepagePolls in
+  //     app/actions.ts when composing the homepage feed.
+  //   - polls.public_floor read by resolvePublicFloor — controls when
+  //     percentages reveal on the on-site widget.
+  //   - publisher.caption.<platform>.poll_hook_template — per-platform
+  //     caption-suffix override. Moved to /admin/settings/socials in the
+  //     2026-06-24 Socials reorganization; this page no longer reads
+  //     those keys.
+  const [
+    railDivisive,
+    railAgreed,
+    railUnpopular,
+    publicFloorRaw,
+    minorityVoteThresholdRaw,
+    rotatingCategoryEnabled,
+    rotatingCategoryOverrideRaw,
+    coldStartFloorRaw,
+    endcardEnabled,
+    endcardDurationRaw,
+    autoPublishEnabledRaw,
+    autoPublishMaxAttemptsRaw,
+  ] = await Promise.all([
+    getSetting(railEnabledSettingKey("divisive")),
+    getSetting(railEnabledSettingKey("agreed")),
+    getSetting(railEnabledSettingKey("unpopular")),
+    getSetting("polls.public_floor"),
+    // 2026-06-26 homepage redesign v1 slice B
+    // (_plans/2026-06-26-homepage-redesign-v1.md): per-viewer
+    // threshold gating the "You Voted With the Minority" rail.
+    getSetting(minorityVoteThresholdSettingKey()),
+    // 2026-06-26 homepage redesign v1 slice E: rotating-category
+    // kill switch + per-day editorial pin.
+    getSetting(rotatingCategoryEnabledSettingKey()),
+    getSetting(rotatingCategoryOverrideSettingKey()),
+    // 2026-06-26 homepage redesign v1 slice F: cold-start floor —
+    // minimum cards a floor-eligible rail must have before rendering.
+    getSetting(coldStartFloorSettingKey()),
+    getSetting("polls.endcard.enabled"),
+    getSetting("polls.endcard.duration_ms"),
+    // 2026-06-25 bulk complete-and-publish
+    // (_plans/2026-06-25-bulk-complete-and-publish.md).
+    // The kill switch + per-story retry cap consumed by
+    // /api/auto_complete_publish.
+    getSetting("auto_publish.enabled"),
+    getSetting("auto_publish.max_attempts"),
+  ]);
+  // Rotating-category dropdown options. "" is the "auto rotation"
+  // sentinel — the resolver treats blank / unknown the same way and
+  // falls through to the UTC-day modulo, so the dropdown stays
+  // honest about which path will run.
+  const rotatingCategoryOptions: SelectOption[] = [
+    { id: "", label: "Auto (rotate by UTC day)" },
+    { id: "entitled_row", label: "Audacity: Entitled People" },
+    { id: "humor_row", label: "Humor & Awkward Moments" },
+    { id: "wholesome_row", label: "Wholesome Wins" },
+    { id: "dating_row", label: "Dating Disasters" },
+    { id: "roommate_row", label: "Roommate Files" },
+    { id: "drama_row", label: "Pure Drama" },
+  ];
   const SHORT_CATEGORIES = [
     "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
   ];
@@ -197,14 +272,6 @@ export default async function SettingsPage() {
     { id: "", label: "Inherit global" },
     { id: "on", label: "Always make a short" },
     { id: "off", label: "Never" },
-  ];
-  // Closed enum mirrored in lib/story-jobs.ts:StoryJobOutputFormat and
-  // pipeline/story_jobs_worker.py:resolve_output_format. Default 'short'
-  // because Phase 1 + 2 of the short editor make shorts the lighter,
-  // cheaper, more-finished path for Reddit-origin stories.
-  const redditOutputOptions: SelectOption[] = [
-    { id: "short", label: "Short (vertical 40-60s doodle)" },
-    { id: "long", label: "Long-form video" },
   ];
 
   // Map voice catalogs to the SettingSelect option shape. Group Google by
@@ -229,20 +296,7 @@ export default async function SettingsPage() {
       description="Pipeline defaults, voice, video look, and the intro/outro splice switch. Read by the pipeline at run time."
     >
       <div className="space-y-8">
-        <Section
-          title="Reddit imports"
-          description="What video to produce when an imported Reddit row is processed. Short is the new default: it runs the 40-60s doodle pipeline you can finish in the short editor (Scenes + Captions tabs). Long-form runs the original Cloud Run remotion render. Either way, the per-batch picker on the Process N button can override this for one batch without changing the default."
-        >
-          <SettingSelect
-            settingKey="reddit.default_output"
-            label="Default output for Reddit imports"
-            hint="Short is cheaper per row (no Cloud Run render) and lands directly in the short editor for review. Long-form keeps the original 16:9 / 9:16 pipeline and is still worth picking for stories you plan to publish as full-length."
-            initial={redditDefaultOutput ?? "short"}
-            options={redditOutputOptions}
-          />
-        </Section>
-
-        <Section
+        <SettingsSection
           title="Article shorts"
           description="Auto-generate a 40-60s vertical doodle short when a story finishes. Off by default. The per-category overrides win over the global default; narration vibe + length apply to every auto-generated short (each short can still be (re)generated manually with its own picks in the video editor)."
         >
@@ -276,9 +330,9 @@ export default async function SettingsPage() {
               options={catOverrideOptions}
             />
           ))}
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Hero & poster style"
           description="Which named look the hero / poster art uses on every render. Lives ABOVE the existing 'Video & image style' field below — that field still steers scene illustrations + narration; this one steers ONLY the hero / poster. Empty layers fall through: per-story pin → category default → global default → an automatic per-category short-list. Changing a default here only affects FUTURE renders; existing rows keep their current art until you click 'Restyle hero from short character' on the story."
         >
@@ -314,9 +368,9 @@ export default async function SettingsPage() {
             once after a fresh install or after editing a style&apos;s prompt
             band. Idempotent — re-running with no edits is a no-op.
           </p>
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Style presets"
           description="Creative direction for everything the pipeline generates — narrator delivery, scene images, and prop cutouts. Pick a preset to fill the field, then tweak."
         >
@@ -336,9 +390,9 @@ export default async function SettingsPage() {
             presets={GEMINI_PROMPT_PRESETS}
             placeholder="Read this in a calm, conversational tone, like a podcaster telling a story"
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Image prompts"
           description="How the pipeline builds the prompt sent to kie.ai for each scene image. Grounding ties each scene's prompt to the narration line spoken at that moment; turning it off reverts to the older article-body-only prompts."
         >
@@ -354,9 +408,9 @@ export default async function SettingsPage() {
             hint="Diagnostic toggle. When on, the bible (the 2-4 recurring characters with their visual cues) is computed once per story and reused across scene regens — same characters scene to scene. Off forces a fresh bible on every regen, useful when the cached bible turns out wrong. Default on."
             initialOn={readToggle(characterBibleCache, true)}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="World bible (Option C)"
           description="2026-06-14: a structured per-story bible of characters, sub-characters, locations, and items, each with a stable id. Characters (and optionally locations) get a canonical reference image so kie.ai's nano-banana-2 endpoint can keep faces consistent scene to scene. Disable the master switch to revert to the previous text-only grounded path."
         >
@@ -393,9 +447,9 @@ export default async function SettingsPage() {
               { id: "kie/gpt-image-2", label: "gpt-image-2 ($0.05, no refs)" },
             ]}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Pipeline"
           description="What the Python pipeline pulls and how much it spends."
         >
@@ -437,9 +491,9 @@ export default async function SettingsPage() {
             min={1}
             max={60}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Voice"
           description="Narrator voice settings used by the active TTS model."
         >
@@ -464,9 +518,9 @@ export default async function SettingsPage() {
           <p className="rounded-lg border border-line bg-surface2/40 px-3 py-2 text-[12px] text-muted">
             Narrator tone preset for Gemini-TTS lives in <strong className="text-ink">Style presets</strong> above.
           </p>
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Video look"
           description="Scene count and motion effects applied during render. Visual style preset lives in Style presets above."
         >
@@ -532,9 +586,9 @@ export default async function SettingsPage() {
             hint="Small bottom-left bust of the protagonist with lip-flap mouth shapes timed to the narration. The next --media run generates a character portrait + mouth-removed copy via kie (~$0.10 / story)."
             initialOn={readToggle(mouthSwap)}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Intro / outro splice"
           description="Master switch for the branded clips spliced onto every render. Manage the library and the active picks under Intros & outros."
         >
@@ -544,9 +598,9 @@ export default async function SettingsPage() {
             hint="When on, the active intro and outro are spliced onto every rendered video. Per-story overrides still apply. Defaults to on."
             initialOn={readToggle(introOutroEnabled, true)}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Video editor"
           description="Per-frame image regen controls for /admin/videos/[id]. The cap is the safety net against a runaway click in the storyboard."
         >
@@ -568,9 +622,9 @@ export default async function SettingsPage() {
               { id: "contain", label: "Contain (letterbox)" },
             ]}
           />
-        </Section>
+        </SettingsSection>
 
-        <Section
+        <SettingsSection
           title="Caption defaults"
           description="Global caption appearance — color, motion, typography. Per-video overrides land in the video editor."
         >
@@ -590,33 +644,138 @@ export default async function SettingsPage() {
               <span className="font-mono text-[14px] text-muted">→</span>
             </div>
           </Link>
-        </Section>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Homepage"
+          description="Composition controls for the v1 voting-first homepage: single rotating category rail and the cold-start floor that hides half-built rails. Plan: _plans/2026-06-26-homepage-redesign-v1.md (slices E and F)."
+        >
+          <SettingToggle
+            settingKey={rotatingCategoryEnabledSettingKey()}
+            label="Rotating category rail on the homepage"
+            hint="When ON (default), the homepage shows ONE category rail per day, picked deterministically by UTC date so every visitor sees the same one. When OFF, the homepage falls back to rendering all six category rails (pre-redesign behaviour)."
+            initialOn={readToggle(rotatingCategoryEnabled, true)}
+          />
+          <SettingSelect
+            settingKey={rotatingCategoryOverrideSettingKey()}
+            label="Today's category (manual override)"
+            hint="Pin a specific category for today regardless of the auto-rotation. Pick 'Auto' to let the UTC-day modulo decide. Has no effect when the rotation toggle above is off."
+            initial={rotatingCategoryOverrideRaw ?? ""}
+            options={rotatingCategoryOptions}
+          />
+          <SettingNumber
+            settingKey={coldStartFloorSettingKey()}
+            label="Minimum cards per rail (cold-start floor)"
+            hint={`Floor-eligible rails (New on LoreWire, category rails, "The Internet Can't Agree", "Community agreed") hide entirely until they reach this many published cards, so a 1-3 poster rail doesn't read as broken. Personalized rails ("You Didn't Vote Yet", "You Voted With the Minority") and special-render rails (Hero, Top 10) skip the floor. Set to 0 to disable the floor and restore the legacy "> 0" gate. Default ${COLD_START_FLOOR_DEFAULT}.`}
+            initial={coldStartFloorRaw ?? String(COLD_START_FLOOR_DEFAULT)}
+            min={0}
+            max={50}
+            step={1}
+          />
+        </SettingsSection>
+
+        <SettingsSection
+          title="Engagement — Polls"
+          description="Story- and article-attached polls (the burnt-in question card on shorts + the on-site widget). Plan: _plans/2026-06-17-engagement-polls.md."
+        >
+          <SettingToggle
+            settingKey={railEnabledSettingKey("divisive")}
+            label={`"The Internet Can't Agree" rail on the homepage`}
+            hint="Surface polls whose votes split closest to 50/50. Auto-hides when there's nothing above the floor; turn off to suppress the section entirely."
+            initialOn={readToggle(railDivisive, true)}
+          />
+          <SettingToggle
+            settingKey={railEnabledSettingKey("agreed")}
+            label="Community Agreed rail on the homepage"
+            hint="Surface the most lopsided polls. Same auto-hide behaviour as Divisive."
+            initialOn={readToggle(railAgreed, true)}
+          />
+          <SettingToggle
+            settingKey={railEnabledSettingKey("unpopular")}
+            label='"You Voted With the Minority" rail on the homepage'
+            hint="Surfaces stories where this viewer voted on the side the crowd disagreed with. Personalized only — requires the threshold below; hides entirely for visitors without enough vote history. The dedicated /c/unpopular page keeps the broader landslide fallback for anonymous visitors."
+            initialOn={readToggle(railUnpopular, true)}
+          />
+          <SettingNumber
+            settingKey={minorityVoteThresholdSettingKey()}
+            label="Minority votes needed to surface the rail"
+            hint={`How many polls a viewer must have voted on the minority side of before the rail appears for them. Below the threshold the rail hides — one or two minority votes isn't enough signal to label someone "the kind of person who disagrees with the crowd." Default ${MINORITY_VOTE_DEFAULT_THRESHOLD}.`}
+            initial={
+              minorityVoteThresholdRaw ?? String(MINORITY_VOTE_DEFAULT_THRESHOLD)
+            }
+            min={1}
+            max={50}
+            step={1}
+          />
+          <SettingNumber
+            settingKey="polls.public_floor"
+            label="Public reveal floor (vote count)"
+            hint={`Below this total, the widget hides percentages and shows the pre-floor copy. Prevents misleading 100/0 readouts on fresh polls. Default ${DEFAULT_PUBLIC_FLOOR}.`}
+            initial={publicFloorRaw ?? String(DEFAULT_PUBLIC_FLOOR)}
+            min={0}
+            max={1000}
+            step={1}
+          />
+          <SettingToggle
+            settingKey="polls.endcard.enabled"
+            label="Burnt-in question card on shorts"
+            hint="Bake the 2.5s end card into every short whose story has an enabled poll. Off = ship shorts without the card. Useful when A/B testing the social-platform funnel."
+            initialOn={readToggle(endcardEnabled, true)}
+          />
+          <SettingNumber
+            settingKey="polls.endcard.duration_ms"
+            label="Card hold (ms)"
+            hint="How long the burnt-in card stays on screen at the tail of the short. 500–10000ms. Default 2500ms. Out-of-range values fall back to the default at render time."
+            initial={endcardDurationRaw ?? "2500"}
+            min={500}
+            max={10000}
+            step={100}
+          />
+        </SettingsSection>
+
+        {/* Per-platform social publishing config (Facebook, Instagram,
+            YouTube, TikTok) and the publisher poll-hook caption suffixes
+            live under Settings / Socials. Cross-link so admin lands
+            there from a familiar starting point. */}
+        <SettingsSection
+          title="Social publishing"
+          description="Per-platform auto-publish defaults — toggles, caption / title templates, privacy, and category overrides — moved to their own home so they stay together."
+        >
+          <p className="text-[13px] text-muted">
+            Open{" "}
+            <a
+              href="/admin/settings/socials"
+              className="text-accent underline"
+            >
+              Settings / Socials
+            </a>{" "}
+            to configure Facebook, Instagram, YouTube, TikTok, and the
+            cross-platform poll-hook caption suffixes.
+          </p>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Auto-publish"
+          description="One-click bulk Complete & publish (admin Content) flags selected stories for the /api/auto_complete_publish cron — a 2-minute watcher that publishes each flagged story to all four socials the moment every asset (article body, hero, thumbnails, short, voiceover, scene images, poll) is ready."
+        >
+          <SettingToggle
+            settingKey="auto_publish.enabled"
+            label="Enable the auto-publish cron"
+            hint="Kill switch. Off = the cron returns immediately without scanning. Flagged stories sit until the switch is flipped back on — they are not unflagged. Use during incidents to halt publishing without dropping the queue."
+            initialOn={readToggle(autoPublishEnabledRaw, true)}
+          />
+          <SettingNumber
+            settingKey="auto_publish.max_attempts"
+            label="Max attempts per story"
+            hint="How many cron ticks (each ~2 min) the watcher waits on missing assets before giving up on a story and clearing its flag. Default 12 (≈ 24 minutes). 0 or negative = no cap (operator override for known-slow asset queues)."
+            initial={autoPublishMaxAttemptsRaw ?? "12"}
+            min={0}
+            max={1000}
+            step={1}
+          />
+        </SettingsSection>
       </div>
     </SettingsShell>
-  );
-}
-
-function Section({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section>
-      <div className="mb-3">
-        <h2 className="font-display text-[15px] font-bold uppercase tracking-tight text-ink">
-          {title}
-        </h2>
-        {description && (
-          <p className="mt-0.5 text-[13px] text-muted">{description}</p>
-        )}
-      </div>
-      <div className="space-y-3">{children}</div>
-    </section>
   );
 }
 

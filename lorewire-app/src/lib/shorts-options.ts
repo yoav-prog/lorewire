@@ -3,6 +3,14 @@
 // NARRATION_STYLES and pipeline/shorts.py LENGTH_PRESETS) so the UI can render
 // the choices without a round trip. Keep the ids in sync with the Python side;
 // the worker resolves an unknown id to the default, so a drift is safe-failing.
+//
+// 2026-06-21: the five-vibe registry was replaced by a single hook-first
+// structure per _plans/2026-06-21-shorts-hook-first-restructure.md. Tone
+// variance lives inside the one structure (the script LLM picks a tone_knob
+// per story) rather than as a picker preset. The picker keeps a single entry
+// so legacy renders that stored a narration_style of "suspense", "punchy",
+// etc. resolve cleanly to the new default — the Python `get_style` falls back
+// to hook-first for any unknown id.
 
 export interface ShortOption {
   id: string;
@@ -12,29 +20,10 @@ export interface ShortOption {
 
 export const NARRATION_VIBES: ShortOption[] = [
   {
-    id: "storyteller",
-    label: "Storyteller",
-    description: "Warm, cinematic narrative. Sets a scene and builds to the turn.",
-  },
-  {
-    id: "suspense",
-    label: "Suspense / Mystery",
-    description: "True-crime tension. Opens on the unsettling fact, builds to a twist.",
-  },
-  {
-    id: "punchy",
-    label: "Punchy Explainer",
-    description: "Fast, high-retention. Bold hook, one takeaway, teaser-payoff.",
-  },
-  {
-    id: "conversational",
-    label: "Conversational",
-    description: "Casual and human, like a friend telling you what just happened.",
-  },
-  {
-    id: "documentary",
-    label: "Documentary",
-    description: "Measured, authoritative, factual. Lets the facts carry the weight.",
+    id: "hook-first",
+    label: "Hook-first (cold-open climax)",
+    description:
+      "Opens on the climax beat, rewinds to the start, builds back, then hands the viewer the poll.",
   },
 ];
 
@@ -51,5 +40,5 @@ export const LENGTH_PRESETS: ShortOption[] = [
   },
 ];
 
-export const DEFAULT_NARRATION_VIBE = "suspense";
+export const DEFAULT_NARRATION_VIBE = "hook-first";
 export const DEFAULT_LENGTH_PRESET = "standard";

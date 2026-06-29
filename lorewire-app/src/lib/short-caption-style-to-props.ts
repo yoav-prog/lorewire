@@ -40,7 +40,7 @@ export interface ShortCaptionStyleProps {
 // Mirror of caption-style.ts CAPTION_DEFAULTS. Kept locally so this module
 // stays importable from client components (caption-style.ts is server-only).
 const DEFAULTS: ShortCaptionStyleProps = {
-  position_y: 0.55,
+  position_y: 0.68,
   size_scale: 1,
   padding_x: 64,
   text_transform: "uppercase",
@@ -108,6 +108,116 @@ export function shortCaptionStyleToProps(
       s.word_highlight && WORD_HIGHLIGHTS.has(s.word_highlight)
         ? (s.word_highlight as ShortCaptionStyleProps["word_highlight"])
         : DEFAULTS.word_highlight,
+  };
+}
+
+// Coerce a baseline render's caption_template (the bag of typed values the
+// Python pipeline writes onto short_renders.props.caption_template) into a
+// CaptionStyleProps that matches what the renderer would use. Missing or
+// malformed fields fall through to DEFAULTS. Same field set + names as the
+// Python `_CAPTION_DEFAULTS` in pipeline/video.py — verified against the
+// snake_case keys the resolver writes.
+//
+// This is the bridge between "what the renderer baked into the last MP4"
+// and "what the preview should show" — the editor preview should match the
+// renderer's actual style baseline, not its own hardcoded TS defaults
+// (which is why a `caption.color = #ff0000` settings override produced a
+// red render but a yellow preview pre-fix).
+export function baselineCaptionTemplateToProps(
+  template: Record<string, unknown> | null | undefined,
+): ShortCaptionStyleProps {
+  if (!template) return { ...DEFAULTS };
+  const t = template;
+  const pickNum = (key: keyof ShortCaptionStyleProps, fallback: number): number => {
+    const v = t[key];
+    return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  };
+  const pickStr = (key: keyof ShortCaptionStyleProps, fallback: string): string => {
+    const v = t[key];
+    return typeof v === "string" && v.length > 0 ? v : fallback;
+  };
+  return {
+    position_y: pickNum("position_y", DEFAULTS.position_y),
+    size_scale: pickNum("size_scale", DEFAULTS.size_scale),
+    padding_x: pickNum("padding_x", DEFAULTS.padding_x),
+    text_transform:
+      typeof t.text_transform === "string" && TEXT_TRANSFORMS.has(t.text_transform)
+        ? (t.text_transform as ShortCaptionStyleProps["text_transform"])
+        : DEFAULTS.text_transform,
+    font_weight: pickNum("font_weight", DEFAULTS.font_weight),
+    letter_spacing: pickNum("letter_spacing", DEFAULTS.letter_spacing),
+    line_height: pickNum("line_height", DEFAULTS.line_height),
+    color: pickStr("color", DEFAULTS.color),
+    active_word_color: pickStr("active_word_color", DEFAULTS.active_word_color),
+    spoken_word_color: pickStr("spoken_word_color", DEFAULTS.spoken_word_color),
+    outline_color: pickStr("outline_color", DEFAULTS.outline_color),
+    outline_width: pickNum("outline_width", DEFAULTS.outline_width),
+    entry_effect:
+      typeof t.entry_effect === "string" && ENTRY_EFFECTS.has(t.entry_effect)
+        ? (t.entry_effect as ShortCaptionStyleProps["entry_effect"])
+        : DEFAULTS.entry_effect,
+    word_highlight:
+      typeof t.word_highlight === "string" && WORD_HIGHLIGHTS.has(t.word_highlight)
+        ? (t.word_highlight as ShortCaptionStyleProps["word_highlight"])
+        : DEFAULTS.word_highlight,
+  };
+}
+
+// Layered resolver for the editor preview. Builds the COMPLETE caption
+// style the preview should render:
+//   1. DEFAULTS (yellow, the TS hardcoded floor)
+//   2. baseline render's caption_template (what the renderer last used —
+//      this is where DB-level overrides like `caption.color = #ff0000`
+//      enter the preview's vocabulary)
+//   3. short_config.caption_style overrides (the editor's unsaved edits)
+//
+// Returns a complete CaptionStyleProps so the preview composition can use
+// it directly without falling through to its own hardcoded defaults.
+// Pre-fix the preview was step 1 + step 3 only, so step 2's settings-
+// driven choices (red captions baked into the baseline) never reached the
+// preview and the editor lied about what the next render would look like.
+export function resolveShortCaptionStyle(
+  config: ShortConfig,
+  baselineCaptionTemplate?: Record<string, unknown> | null,
+): ShortCaptionStyleProps {
+  const baseline = baselineCaptionTemplateToProps(baselineCaptionTemplate);
+  const overrides = config.caption_style;
+  if (!overrides) return baseline;
+  const numField = (key: keyof ShortCaptionStyleProps): number => {
+    const raw = (overrides as Record<string, string | undefined>)[key];
+    if (typeof raw !== "string" || raw.length === 0) return baseline[key] as number;
+    const v = Number(raw);
+    return Number.isFinite(v) ? v : (baseline[key] as number);
+  };
+  const strField = (key: keyof ShortCaptionStyleProps): string => {
+    const raw = (overrides as Record<string, string | undefined>)[key];
+    if (typeof raw !== "string" || raw.length === 0) return baseline[key] as string;
+    return raw;
+  };
+  return {
+    position_y: numField("position_y"),
+    size_scale: numField("size_scale"),
+    padding_x: numField("padding_x"),
+    text_transform:
+      overrides.text_transform && TEXT_TRANSFORMS.has(overrides.text_transform)
+        ? (overrides.text_transform as ShortCaptionStyleProps["text_transform"])
+        : baseline.text_transform,
+    font_weight: numField("font_weight"),
+    letter_spacing: numField("letter_spacing"),
+    line_height: numField("line_height"),
+    color: strField("color"),
+    active_word_color: strField("active_word_color"),
+    spoken_word_color: strField("spoken_word_color"),
+    outline_color: strField("outline_color"),
+    outline_width: numField("outline_width"),
+    entry_effect:
+      overrides.entry_effect && ENTRY_EFFECTS.has(overrides.entry_effect)
+        ? (overrides.entry_effect as ShortCaptionStyleProps["entry_effect"])
+        : baseline.entry_effect,
+    word_highlight:
+      overrides.word_highlight && WORD_HIGHLIGHTS.has(overrides.word_highlight)
+        ? (overrides.word_highlight as ShortCaptionStyleProps["word_highlight"])
+        : baseline.word_highlight,
   };
 }
 

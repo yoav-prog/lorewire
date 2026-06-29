@@ -10,7 +10,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { all, one, run } from "@/lib/db";
-import { getArticle, getSetting } from "@/lib/repo";
+import { getArticle, getSetting, getStory } from "@/lib/repo";
 
 export type CommentStatus =
   | "published"
@@ -108,8 +108,34 @@ export async function createComment(
     }
   }
 
+  // Accept either an article id OR a story id, matching the homepage modal
+  // flow. /api/comments/count resolves storyId → article.id when a published
+  // article links to the story; otherwise it returns the storyId verbatim so
+  // the story gets its own thread, independent of any future article link.
+  // The write path has to honor that contract or the UI shows a working
+  // composer that always 404s. Both lookups match the public reader's single
+  // source of truth (status='published'); stories have no `language`
+  // column, so the moderator falls back to body-sniffed lang via detectLang.
   const article = await getArticle(input.articleId);
-  if (!article || article.status !== "published" || !article.published_at) {
+  const target =
+    article && article.status === "published"
+      ? {
+          id: article.id,
+          title: article.title ?? "",
+          summary: article.summary ?? "",
+          language: article.language ?? "en",
+        }
+      : await (async () => {
+          const story = await getStory(input.articleId);
+          if (!story || story.status !== "published") return null;
+          return {
+            id: story.id,
+            title: story.title ?? "",
+            summary: story.summary ?? "",
+            language: "en",
+          };
+        })();
+  if (!target) {
     return { ok: false, error: "This article isn't open for comments.", httpStatus: 404 };
   }
 
@@ -118,7 +144,7 @@ export async function createComment(
   let parentId: string | null = null;
   if (input.parentId) {
     const parent = await getCommentById(input.parentId);
-    if (!parent || parent.article_id !== article.id || parent.status !== "published") {
+    if (!parent || parent.article_id !== target.id || parent.status !== "published") {
       return { ok: false, error: "That comment is no longer available.", httpStatus: 404 };
     }
     if (parent.parent_id) {
@@ -129,7 +155,7 @@ export async function createComment(
 
   const id = randomUUID();
   const now = new Date().toISOString();
-  const lang = detectLang(body, article.language ?? "en");
+  const lang = detectLang(body, target.language);
 
   // Insert as 'held'/'pending'. The write path moderates immediately and calls
   // setCommentStatus to resolve the status; the parent reply_count is bumped
@@ -142,7 +168,7 @@ export async function createComment(
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id,
-      article.id,
+      target.id,
       parentId,
       input.authorUserId ?? null,
       guestName,
@@ -163,8 +189,8 @@ export async function createComment(
   return {
     ok: true,
     comment: created,
-    articleTitle: article.title ?? "",
-    articleSummary: article.summary ?? "",
+    articleTitle: target.title,
+    articleSummary: target.summary,
   };
 }
 

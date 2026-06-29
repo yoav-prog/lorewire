@@ -19,6 +19,8 @@ import {
   processRedditSourcesAction,
   bulkReprocessRedditSourcesAction,
   cancelActiveStoryJobsAction,
+  setRedditSourceFullPipelineAction,
+  bulkSetRedditSourceFullPipelineAction,
 } from "@/app/admin/actions";
 import type {
   RedditSourceRow,
@@ -121,6 +123,13 @@ export default function RedditSourceTable({
               <Th className="text-right">Comments</Th>
               <Th>Date</Th>
               <Th>Priority</Th>
+              {/* 2026-06-24 Full Pipeline toggle. When ON for a source, the
+                  worker runs every stage end-to-end AND the auto-publish
+                  drain flips the resulting story to published on success
+                  (web + Facebook). OFF = today's review-then-manual-publish. */}
+              <Th title="When ON, the source auto-publishes on full success (web + Facebook). OFF = review-then-manual-publish.">
+                Full Pipeline
+              </Th>
               <Th>Status</Th>
               <Th className="text-right">Source</Th>
             </tr>
@@ -188,6 +197,12 @@ export default function RedditSourceTable({
                     />
                   </Td>
                   <Td>
+                    <FullPipelineToggle
+                      redditId={r.reddit_id}
+                      enabled={!!r.full_pipeline}
+                    />
+                  </Td>
+                  <Td>
                     <StatusChip status={r.status} />
                   </Td>
                   <Td className="whitespace-nowrap text-right">
@@ -244,6 +259,43 @@ function StatusChip({ status }: { status: string }) {
   );
 }
 
+// 2026-06-24 Per-row Full Pipeline toggle. A submit-on-click form so the
+// state lives in the DB column, not local component state — that way the
+// flag survives a refresh + is what the enqueue path reads. ON renders
+// a filled accent chip; OFF renders a muted "Review" placeholder so the
+// column never looks empty (lazy-user readability: the inverse state is
+// visible at a glance, not a missing badge). The form posts the opposite
+// of the current value so each click flips.
+function FullPipelineToggle({
+  redditId,
+  enabled,
+}: {
+  redditId: string;
+  enabled: boolean;
+}) {
+  return (
+    <form action={setRedditSourceFullPipelineAction}>
+      <input type="hidden" name="reddit_id" value={redditId} />
+      <input type="hidden" name="enabled" value={enabled ? "0" : "1"} />
+      <button
+        type="submit"
+        title={
+          enabled
+            ? "Full Pipeline ON — processing this source will auto-publish on full success. Click to switch back to Review."
+            : "Review mode — processing this source lands in review for manual publish. Click to switch to Full Pipeline."
+        }
+        className={
+          enabled
+            ? "inline-block rounded-full border border-accent/50 bg-accent/15 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-accent hover:opacity-80"
+            : "inline-block rounded-full border border-line px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted hover:text-ink"
+        }
+      >
+        {enabled ? "Full" : "Review"}
+      </button>
+    </form>
+  );
+}
+
 function StrengthChip({
   strength,
   category,
@@ -275,13 +327,6 @@ function StrengthChip({
   );
 }
 
-// Per-batch output choice for the Process N action. '' = "use the
-// reddit.default_output setting" (the worker resolves at claim time);
-// 'short' / 'long' pin every row in this batch to that format and
-// survive a later setting change. Kept narrow so the confirm dialog
-// copy below stays exhaustive.
-type OutputChoice = "" | "short" | "long";
-
 function BulkFooter({
   ids,
   activeIds,
@@ -296,10 +341,6 @@ function BulkFooter({
   onClear: () => void;
   budgetExhausted: boolean;
 }) {
-  // Default '' so a click that doesn't touch the picker honours the
-  // admin's global default. Stored locally so the confirm dialog can
-  // spell out which format will run before the credit-spend.
-  const [outputChoice, setOutputChoice] = useState<OutputChoice>("");
   return (
     <div className="sticky bottom-3 z-10 mx-auto flex max-w-[760px] flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-bg/95 px-4 py-2.5 shadow-lg backdrop-blur">
       <span className="font-mono text-[12px] text-ink">
@@ -377,6 +418,50 @@ function BulkFooter({
             Skip {ids.length}
           </button>
         </form>
+        {/* 2026-06-24 Bulk Full Pipeline opt-in / opt-out. Sized for the
+            "I just imported 200 sources, all should be full pipeline"
+            flow without forcing per-row clicks. The confirm on Mark Full
+            quotes the per-source cost so a bulk arming doesn't catch
+            the admin off-guard at Process time. */}
+        <form
+          action={bulkSetRedditSourceFullPipelineAction}
+          onSubmit={(e) => {
+            if (
+              !window.confirm(
+                `Mark ${ids.length} source${ids.length === 1 ? "" : "s"} as Full Pipeline?\n\n` +
+                  "When you process them, each one runs every stage end-to-end and auto-publishes (web + Facebook) on full success. Approximate cost ~$1.00–1.50 per source.\n\n" +
+                  "You can still toggle individual rows back to Review afterwards.",
+              )
+            ) {
+              e.preventDefault();
+            }
+          }}
+        >
+          {ids.map((id) => (
+            <input key={id} type="hidden" name="reddit_id" value={id} />
+          ))}
+          <input type="hidden" name="enabled" value="1" />
+          <button
+            type="submit"
+            title="Arm these sources to auto-publish on full success when processed."
+            className="rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-accent hover:opacity-80"
+          >
+            Mark Full {ids.length}
+          </button>
+        </form>
+        <form action={bulkSetRedditSourceFullPipelineAction}>
+          {ids.map((id) => (
+            <input key={id} type="hidden" name="reddit_id" value={id} />
+          ))}
+          <input type="hidden" name="enabled" value="0" />
+          <button
+            type="submit"
+            title="Disarm Full Pipeline — these sources land in review for manual publish."
+            className="rounded-md border border-line px-3 py-1.5 font-mono text-[11px] uppercase tracking-wider text-muted hover:text-ink"
+          >
+            Mark Review {ids.length}
+          </button>
+        </form>
         <form
           action={bulkReprocessRedditSourcesAction}
           onSubmit={(e) => {
@@ -412,33 +497,9 @@ function BulkFooter({
             // Lazy guard against accidental bulk-spend. The real cost is the
             // sum of LLM + kie images + voice + render across N rows; a
             // dozen rows can easily run $5+. Confirm before submit.
-            const formatLine =
-              outputChoice === "short"
-                ? "Output: SHORT only (no long-form video render this batch)."
-                : outputChoice === "long"
-                  ? "Output: LONG-FORM video (skips the short pipeline)."
-                  : "Output: use the global default (Settings → Reddit imports → Default output).";
-            // Cap-warning: the shorts pipeline has a per-bucket rolling 24h
-            // cap (default 50, set by shorts.auto.daily_cap). When the
-            // batch is large AND any of these rows will end up making a
-            // short (the per-batch picker says 'short' OR 'Default' which
-            // most often resolves to short), warn the admin so they don't
-            // silently lose the tail of the batch to the cap.
-            const SHORTS_CAP_DEFAULT = 50;
-            const willMakeShorts =
-              outputChoice === "short" || outputChoice === "";
-            const capWarn =
-              willMakeShorts && ids.length > SHORTS_CAP_DEFAULT
-                ? `\n\nHeads up: the shorts pipeline caps Reddit-import shorts at ~${SHORTS_CAP_DEFAULT}/24h. ` +
-                  `Roughly the first ${SHORTS_CAP_DEFAULT} of these ${ids.length} rows will get a short; ` +
-                  `the rest of the stories will be created but no short rendered until the cap rolls off. ` +
-                  `Raise Settings → Article shorts → daily cap if you need a bigger wave.`
-                : "";
             if (
               !window.confirm(
                 `Enqueue ${ids.length} row${ids.length === 1 ? "" : "s"} for full pipeline processing (article + images + video)?\n\n` +
-                  `${formatLine}` +
-                  `${capWarn}\n\n` +
                   "Each row spends real LLM + image + voice credits. The local pipeline worker must be running:\n\n" +
                   "    python -m pipeline.story_jobs_worker",
               )
@@ -451,25 +512,6 @@ function BulkFooter({
             <input key={id} type="hidden" name="reddit_id" value={id} />
           ))}
           <input type="hidden" name="with_media" value="1" />
-          {/* Closed enum: '' = "use the reddit.default_output setting".
-              The server action validates the same enum, so a stale
-              browser tab can't smuggle a typo through. */}
-          <label className="mr-2 inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-muted">
-            Output
-            <select
-              name="output_format"
-              value={outputChoice}
-              onChange={(e) =>
-                setOutputChoice(e.currentTarget.value as OutputChoice)
-              }
-              className="rounded-md border border-line bg-bg px-2 py-1 font-mono text-[11px] normal-case tracking-normal text-ink outline-none focus:border-accent"
-              aria-label="Output format for this batch"
-            >
-              <option value="">Default</option>
-              <option value="short">Short only</option>
-              <option value="long">Long-form</option>
-            </select>
-          </label>
           <button
             type="submit"
             disabled={budgetExhausted}
@@ -491,13 +533,16 @@ function BulkFooter({
 function Th({
   children,
   className = "",
+  title,
 }: {
   children: React.ReactNode;
   className?: string;
+  title?: string;
 }) {
   return (
     <th
       className={`px-3 py-2 text-left font-mono text-[10px] uppercase tracking-wider text-muted ${className}`}
+      title={title}
     >
       {children}
     </th>
