@@ -12,7 +12,12 @@ import { one, run } from "@/lib/db";
 import { setSetting } from "@/lib/repo";
 import { RENDER_BUDGET_CAP_SETTING_KEY } from "@/lib/submission-render-budget";
 import { approveAndPromote } from "@/lib/submission-promote";
-import { createSubmission, parseSubmissionInput } from "@/lib/submissions";
+import {
+  createSubmission,
+  eraseSubmission,
+  getSubmissionById,
+  parseSubmissionInput,
+} from "@/lib/submissions";
 
 const USER = "u_promote_test_owner";
 const ADMIN = "admin_promote_test";
@@ -134,5 +139,33 @@ describe("approveAndPromote — budget + state guards", () => {
     await expect(approveAndPromote(id, "video", ADMIN)).rejects.toMatchObject({
       kind: "invalid",
     });
+  });
+});
+
+describe("eraseSubmission — self-takedown", () => {
+  it("archives the story, disables its poll, and marks the submission erased", async () => {
+    const id = await pendingSubmission();
+    const res = await approveAndPromote(id, "poll_only", ADMIN);
+    const storyId = res!.story_id!;
+
+    expect(await eraseSubmission(id, USER)).toBe(true);
+    expect((await getSubmissionById(id))?.status).toBe("erased");
+
+    const story = await one<{ status: string }>(
+      `SELECT status FROM stories WHERE id = ?`,
+      [storyId],
+    );
+    expect(story?.status).toBe("archived");
+
+    const poll = await one<{ enabled: number }>(
+      `SELECT enabled FROM polls WHERE story_id = ?`,
+      [storyId],
+    );
+    expect(Number(poll?.enabled)).toBe(0);
+  });
+
+  it("refuses a submission the caller does not own", async () => {
+    const id = await pendingSubmission();
+    expect(await eraseSubmission(id, "u_not_the_owner")).toBe(false);
   });
 });

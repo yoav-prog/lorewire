@@ -18,6 +18,7 @@ import {
 } from "@/lib/submissions";
 import { resolveReason } from "@/lib/submission-reasons";
 import { readUserSession } from "@/lib/user-session";
+import { SubmissionDeleteButton } from "./SubmissionDeleteButton";
 
 interface PublishedView {
   slug: string;
@@ -132,6 +133,9 @@ function SubmissionCard({
           >
             {s.status === "rejected" ? "Fix & resubmit" : "Edit"}
           </Link>
+        )}
+        {s.status !== "erased" && (
+          <SubmissionDeleteButton submissionId={s.id} />
         )}
       </div>
     </li>
