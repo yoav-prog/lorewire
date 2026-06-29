@@ -401,6 +401,12 @@ export interface RecordVoteInput {
   category: string | null;
   side: PollSide;
   cookieToken: string;
+  /** Signed-in voter's user id, or null/undefined for an anonymous vote. When
+   *  set, the vote is attributed to the account AT VOTE TIME (the reconciliation
+   *  step only backfills votes cast BEFORE sign-in). Idempotency then spans both
+   *  the (poll_id, cookie_token) and the (poll_id, user_id) partial unique
+   *  indexes, so one signed-in user gets one vote per poll across every browser. */
+  userId?: string | null;
   /** Hex SHA-256 of (ip || '\n' || ua), kept only for the rate-limit
    *  bucket lookup and pruned by retention. Null disables the bucket. */
   ipUaHash: string | null;
@@ -432,6 +438,7 @@ export async function recordVote(
   // undefined as a parameter value).
   const storyId = input.storyId ?? null;
   const articleId = input.articleId ?? null;
+  const userId = input.userId ?? null;
   if (!storyId && !articleId) {
     return {
       ok: false,
@@ -449,14 +456,22 @@ export async function recordVote(
   if (!isPollSide(input.side)) {
     return { ok: false, inserted: false, error: "side must be 'A' or 'B'" };
   }
-  // Pre-check: if a row already exists for this (poll, cookie), the
-  // unique index would reject the insert; rather than catch the driver
-  // exception we read first. Cheap (single-row index probe) and gives
-  // the caller a precise `inserted` boolean for the response shape +
-  // observability log.
+  // Pre-check: if a row already exists for this (poll, cookie) — or, for a
+  // signed-in voter, this (poll, user) — the matching partial unique index
+  // would reject the insert; rather than catch the driver exception we read
+  // first. Cheap (single-row index probe) and gives the caller a precise
+  // `inserted` boolean for the response shape + observability log. The dup
+  // identity spans BOTH keys for a signed-in voter so a second browser (new
+  // cookie, same account) is an idempotent no-op, not a second vote.
+  const dupWhere = userId
+    ? "poll_id = ? AND (cookie_token = ? OR user_id = ?)"
+    : "poll_id = ? AND cookie_token = ?";
+  const dupParams = userId
+    ? [input.pollId, input.cookieToken, userId]
+    : [input.pollId, input.cookieToken];
   const existing = await one<{ id: string }>(
-    "SELECT id FROM poll_votes WHERE poll_id = ? AND cookie_token = ?",
-    [input.pollId, input.cookieToken],
+    `SELECT id FROM poll_votes WHERE ${dupWhere} LIMIT 1`,
+    dupParams,
   );
   if (existing) {
     console.info("[polls vote duplicate]", {
@@ -472,8 +487,8 @@ export async function recordVote(
   const now = new Date().toISOString();
   try {
     await run(
-      `INSERT INTO poll_votes (id, poll_id, story_id, article_id, category, side, cookie_token, ip_ua_hash, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO poll_votes (id, poll_id, story_id, article_id, category, side, cookie_token, ip_ua_hash, created_at, user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         input.pollId,
@@ -484,6 +499,7 @@ export async function recordVote(
         input.cookieToken,
         input.ipUaHash,
         now,
+        userId,
       ],
     );
   } catch (err) {
@@ -494,10 +510,12 @@ export async function recordVote(
     // success — the first INSERT already landed, this one is a no-op.
     // Driver-agnostic check: re-read the row. If it now exists, the
     // race lost cleanly. If it doesn't, the INSERT failed for some
-    // other reason and we surface the original error.
+    // other reason and we surface the original error. Same dual identity
+    // as the pre-check so a (poll, user) collision from a concurrent vote
+    // on another browser also coalesces to idempotent success.
     const after = await one<{ id: string }>(
-      "SELECT id FROM poll_votes WHERE poll_id = ? AND cookie_token = ?",
-      [input.pollId, input.cookieToken],
+      `SELECT id FROM poll_votes WHERE ${dupWhere} LIMIT 1`,
+      dupParams,
     );
     if (after) {
       console.info("[polls vote race-coalesced]", {
