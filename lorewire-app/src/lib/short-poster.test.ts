@@ -323,6 +323,57 @@ describe("ensureShortPoster — happy paths", () => {
     expect(sent.inputProps.poster_text).toBeUndefined();
     expect(sent.inputProps.brand_text).toBe("LORE WIRE");
   });
+
+  it("rewrites a legacy GCS scene_1_url onto the R2 media base before rendering", async () => {
+    const prev = process.env.MEDIA_PUBLIC_BASE;
+    process.env.MEDIA_PUBLIC_BASE = "https://media.lorewire.com";
+    try {
+      await seedStory(STORY, {
+        props: {
+          doodle_frames: [
+            {
+              id: "frame-00",
+              url: "https://storage.googleapis.com/aporia-unleash/story-poster-test-1-short/frame-00.webp?v=abc123",
+            },
+          ],
+          hook: "A hook.",
+        },
+        posterTextOnConfig:
+          "She refused. He emptied their joint account by morning.",
+      });
+      const stub = makeFetchStub([
+        { ok: false, status: 404 }, // HEAD miss
+        {
+          ok: true,
+          status: 200,
+          body: {
+            url: "https://media.lorewire.com/story-poster-test-1-short/poster-r2.png",
+            elapsed_ms: 700,
+            hash: "r2scene",
+          },
+        },
+      ]);
+      const result = await ensureShortPoster(STORY, {
+        fetch: stub.fetch,
+        settings: makeSettings("1"),
+        chat: makeChatStub({ ok: true, content: "x", provider: "t", model: "t" })
+          .chat,
+        pickModel: pickModelStub,
+      });
+      expect(result).not.toBeNull();
+      const postCall = stub.calls.find((c) => c.method === "POST");
+      expect(postCall).toBeDefined();
+      const sent = JSON.parse(postCall?.body ?? "{}");
+      // The stored GCS URL is rewritten onto media.lorewire.com (query preserved)
+      // so Cloud Run loads the migrated R2 object instead of the dead GCS one.
+      expect(sent.inputProps.scene_1_url).toBe(
+        "https://media.lorewire.com/story-poster-test-1-short/frame-00.webp?v=abc123",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.MEDIA_PUBLIC_BASE;
+      else process.env.MEDIA_PUBLIC_BASE = prev;
+    }
+  });
 });
 
 describe("ensureShortPoster — lazy LLM generation", () => {

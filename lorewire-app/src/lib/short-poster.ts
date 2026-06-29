@@ -42,6 +42,7 @@ import {
   type ShortConfig,
 } from "@/lib/short-config";
 import { getStory, setStoryShortConfigJson } from "@/lib/repo";
+import { rewriteStoredMediaUrl } from "@/lib/media-url";
 
 /** Bump this whenever the visual contract in
  *  `video/src/PosterStill.tsx` changes (band height, fonts, colors,
@@ -198,12 +199,18 @@ async function loadStoryInputsFromRender(
       ? (frames[0] as { url?: unknown }).url
       : null;
   if (typeof scene_1_url !== "string" || !scene_1_url) return null;
+  // Resolve the stored URL onto the live delivery base. Old stories persist a
+  // legacy `storage.googleapis.com/<bucket>/<key>` URL whose object was migrated
+  // to R2 — the GCS URL now 404s, so the Cloud Run render fails to load the
+  // scene. rewriteStoredMediaUrl flips a legacy GCS URL onto MEDIA_PUBLIC_BASE
+  // (query preserved) and is inert for already-on-base / external URLs.
+  const resolvedScene = rewriteStoredMediaUrl(scene_1_url);
   const hookRaw = obj.hook;
   const hook =
     typeof hookRaw === "string" && hookRaw.trim().length > 0
       ? hookRaw.trim()
       : null;
-  return { scene_1_url, hook };
+  return { scene_1_url: resolvedScene, hook };
 }
 
 /** Read the cached poster_text off short_config. Returns null when
