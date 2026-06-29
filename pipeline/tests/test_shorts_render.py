@@ -43,6 +43,100 @@ class MapFramesTests(unittest.TestCase):
         self.assertEqual(len(idxs), len(set(idxs)))
 
 
+class ExtendFirstSceneOverHookTests(unittest.TestCase):
+    """The opening scene must span the WHOLE spoken hook so the hook-first splice
+    separates hook from rest without scene 2's caption bleeding across the intro.
+    See _plans/2026-06-29-hook-first-clean-pacing.md."""
+
+    # Caption chunks for "She brought / a secret / child / HOURS EARLIER / ...":
+    # the hook ends at ~1880ms, inside chunk 2 ("child"); chunk 3 is the first
+    # post-hook chunk.
+    CAPS = [
+        {"start_ms": 0, "end_ms": 650},
+        {"start_ms": 700, "end_ms": 1550},
+        {"start_ms": 1600, "end_ms": 1880},
+        {"start_ms": 2300, "end_ms": 2900},
+        {"start_ms": 3000, "end_ms": 3800},
+        {"start_ms": 4000, "end_ms": 4800},
+    ]
+
+    def _frames(self, *idxs: int) -> list[dict]:
+        return [
+            {"id": f"frame-{i:02d}", "url": f"u{i}", "caption_chunk_start_index": idx}
+            for i, idx in enumerate(idxs)
+        ]
+
+    def _idxs(self, frames: list[dict]) -> list[int]:
+        return [f["caption_chunk_start_index"] for f in frames]
+
+    def test_scene_two_inside_hook_shifts_to_first_post_hook_chunk(self):
+        # Scene 2 planned on the "child" chunk (2, inside the hook) moves to the
+        # first chunk that starts after hook_end_ms (3 = "HOURS EARLIER"), and the
+        # split snaps to that chunk's start_ms (2300) so the cut is on the edge.
+        frames = self._frames(0, 2)
+        frames, split = shorts_render._extend_first_scene_over_hook(frames, self.CAPS, 1880)
+        self.assertEqual(self._idxs(frames), [0, 3])
+        self.assertEqual(split, 2300)
+
+    def test_multiple_scenes_in_hook_dedup_without_collision(self):
+        frames = self._frames(0, 1, 2)
+        frames, split = shorts_render._extend_first_scene_over_hook(frames, self.CAPS, 1880)
+        idxs = self._idxs(frames)
+        self.assertEqual(idxs, [0, 3, 4])
+        self.assertEqual(len(idxs), len(set(idxs)))  # strictly increasing
+        self.assertEqual(split, 2300)
+
+    def test_scenes_already_past_hook_unchanged_but_split_snaps(self):
+        frames = self._frames(0, 3, 4)
+        frames, split = shorts_render._extend_first_scene_over_hook(frames, self.CAPS, 1880)
+        self.assertEqual(self._idxs(frames), [0, 3, 4])
+        self.assertEqual(split, 2300)
+
+    def test_noop_when_hook_absent(self):
+        frames = self._frames(0, 2)
+        frames, split = shorts_render._extend_first_scene_over_hook(frames, self.CAPS, 0)
+        self.assertEqual(self._idxs(frames), [0, 2])
+        self.assertEqual(split, 0)
+
+    def test_noop_with_single_scene(self):
+        frames = self._frames(0)
+        frames, split = shorts_render._extend_first_scene_over_hook(frames, self.CAPS, 1880)
+        self.assertEqual(self._idxs(frames), [0])
+        self.assertEqual(split, 1880)
+
+    def test_noop_when_hook_spans_whole_clip(self):
+        # hook_end_ms past the last chunk start -> no post-hook chunk -> leave it.
+        frames = self._frames(0, 2)
+        frames, split = shorts_render._extend_first_scene_over_hook(frames, self.CAPS, 99999)
+        self.assertEqual(self._idxs(frames), [0, 2])
+        self.assertEqual(split, 99999)
+
+    def test_never_exceeds_last_caption_index(self):
+        frames = self._frames(0, 1, 2)
+        frames, _ = shorts_render._extend_first_scene_over_hook(frames, self.CAPS, 1880)
+        for f in frames:
+            self.assertLessEqual(f["caption_chunk_start_index"], len(self.CAPS) - 1)
+
+    def test_padded_hook_end_overshooting_caption_boundary_snaps_back(self):
+        # Real-data shape (story idea_15da45a5bbbd): the hook "She brought a
+        # secret child" ends at caption [1] (..1800ms), but hook_end_ms=1880
+        # (HOOK_END_PAD_MS=80 past the boundary) lands INSIDE caption [2]
+        # ("Hours earlier", 1800-3200). Snapping by "first chunk start >=
+        # hook_end_ms" would jump to caption [3] (3200) and leave "Hours
+        # earlier" before the intro; snapping by nearest caption END lands the
+        # split on 1800 with scene 2 at chunk 2.
+        caps = [
+            {"start_ms": 100, "end_ms": 1200},   # "She brought a secret"
+            {"start_ms": 1200, "end_ms": 1800},  # "child."
+            {"start_ms": 1800, "end_ms": 3200},  # "Hours earlier."
+            {"start_ms": 3200, "end_ms": 5100},  # "He expected a normal"
+        ]
+        frames = self._frames(0, 1)
+        frames, split = shorts_render._extend_first_scene_over_hook(frames, caps, 1880)
+        self.assertEqual(self._idxs(frames), [0, 2])
+        self.assertEqual(split, 1800)
+
+
 class BuildShortPropsBaseFrameTests(unittest.TestCase):
     """The base reference image is the model's i2i identity anchor — a neutral
     standing pose on a plain background. It must not appear in the rendered

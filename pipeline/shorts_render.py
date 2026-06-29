@@ -247,6 +247,70 @@ def _map_frames(staged: list[dict], caption_count: int, planning_count: int) -> 
     return frames
 
 
+def _extend_first_scene_over_hook(
+    doodle_frames: list[dict],
+    caption_chunks: list[dict],
+    hook_end_ms: int,
+) -> tuple[list[dict], int]:
+    """Force the FIRST doodle scene to span the entire spoken hook, and return the
+    caption-aligned boundary where scene 2 begins so the hook-first splice cuts on
+    a scene edge instead of mid-scene.
+
+    The hook-first splice (_plans/2026-06-28-hook-before-brand-intro.md) cuts the
+    body at the returned boundary and inserts the brand intro there. When a later
+    scene's `caption_chunk_start_index` falls inside the hook — e.g. the hook
+    sentence's last word lands on scene 2 — that scene's burnt-in caption shows
+    before the intro AND again after it, and there is no frame where the full hook
+    has played and scene 2 is not already on screen. Shift every frame after the
+    first so it starts at or after the first caption chunk that begins on/after
+    `hook_end_ms`, preserving the strictly-increasing index invariant `_map_frames`
+    established (so no two scenes share a start and render as a 1-frame flash).
+
+    Returns `(frames, split_ms)`. `split_ms` is the start_ms of the first caption
+    chunk that begins on/after `hook_end_ms` (where scene 2 now starts) so the
+    splice lands exactly on the scene edge; it falls back to the original
+    `hook_end_ms` when there is nothing to do. Mutates frames in place. No-op when
+    there is no hook (`hook_end_ms <= 0`), fewer than two scenes, or no caption
+    chunk begins after the hook (the hook spans the whole clip). The frame indices
+    point into the same `caption_chunks` list the props carry as `captions`. Per
+    _plans/2026-06-29-hook-first-clean-pacing.md.
+    """
+    if hook_end_ms <= 0 or len(doodle_frames) < 2 or not caption_chunks:
+        return doodle_frames, hook_end_ms
+    last_idx = len(caption_chunks) - 1
+    # The hook ends on a caption boundary (its last word's end). HOOK_END_PAD_MS
+    # pushes hook_end_ms a few frames PAST that boundary, which can land it inside
+    # the NEXT line's caption — so "first chunk starting at/after hook_end_ms"
+    # would skip the real boundary and leave the next line's caption before the
+    # intro. Instead, find the hook's last caption by the chunk whose END is
+    # nearest hook_end_ms; scene 2 and the splice start at the chunk AFTER it.
+    last_hook_chunk = min(
+        range(len(caption_chunks)),
+        key=lambda i: abs(int(caption_chunks[i].get("end_ms", 0) or 0) - hook_end_ms),
+    )
+    first_post_hook = last_hook_chunk + 1
+    # No chunk after the hook -> the hook covers the whole clip; leave the frames
+    # untouched rather than collapse every scene onto the last caption.
+    if not (0 < first_post_hook <= last_idx):
+        return doodle_frames, hook_end_ms
+    used = int(doodle_frames[0]["caption_chunk_start_index"])
+    for n, frame in enumerate(doodle_frames[1:]):
+        # The first scene after the opener must clear the hook; the rest only
+        # need to stay strictly increasing (they already sit past the hook).
+        lower = first_post_hook if n == 0 else used + 1
+        new_idx = min(
+            max(int(frame["caption_chunk_start_index"]), used + 1, lower),
+            last_idx,
+        )
+        frame["caption_chunk_start_index"] = new_idx
+        used = new_idx
+    # The split is the scene/caption edge where the post-hook line begins. It can
+    # sit a few frames BEFORE the padded hook_end_ms (the pad overshoots the
+    # boundary), which is correct — we want the cut on the caption edge.
+    split_ms = int(caption_chunks[first_post_hook].get("start_ms", hook_end_ms) or hook_end_ms)
+    return doodle_frames, split_ms
+
+
 def build_short_props(
     story_id: str,
     repo_root: Path,
@@ -522,6 +586,25 @@ def build_short_props(
                 f"pinning to 0 so the hook line has a visual"
             )
             doodle_frames[0]["caption_chunk_start_index"] = 0
+
+        # Make the opening scene span the WHOLE hook so the hook-first splice can
+        # separate hook from rest without scene 2's burnt-in caption bleeding
+        # across the intro (e.g. the hook's last word "child" landing on scene 2).
+        # Per _plans/2026-06-29-hook-first-clean-pacing.md.
+        before_idx = [f["caption_chunk_start_index"] for f in doodle_frames]
+        doodle_frames, hook_split_ms = _extend_first_scene_over_hook(
+            doodle_frames, caption_chunks, hook_end_ms
+        )
+        after_idx = [f["caption_chunk_start_index"] for f in doodle_frames]
+        if before_idx != after_idx or hook_split_ms != hook_end_ms:
+            print(
+                f"[short id={safe_id} hook_scene] first scene spans hook; "
+                f"frames {before_idx}->{after_idx}, "
+                f"split {hook_end_ms}->{hook_split_ms}ms"
+            )
+        # The splice cuts at hook_end_ms; snap it to the scene edge so the intro
+        # lands exactly between scene 1 (the hook) and scene 2 (the rest).
+        hook_end_ms = hook_split_ms
 
         caption_template = {
             **video.resolve_caption_template(store.get_setting),

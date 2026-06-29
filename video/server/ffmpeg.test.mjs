@@ -300,6 +300,93 @@ describe("buildConcatArgv", () => {
     assert.equal(argv.includes("aac"), false);
   });
 
+  // Paced hook-first seams (fade-to-black + silent beat each side of the intro).
+  // _plans/2026-06-29-hook-first-clean-pacing.md. Expected strings are IDENTICAL
+  // to pipeline/tests/test_segments.py so the two splice paths stay byte-equal.
+
+  it("hook-first paced: body_hook freezes + holds the line, then fades; body_rest resumes at the split", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, fadeSec: 0.45, hookGapSec: 1.1, introGapSec: 0.9, tailHoldSec: 0.3 },
+    );
+    // Physical clips run to hookEnd + tailHold = 2.8; body_rest resumes there.
+    assert.deepEqual(argv.slice(2, 8), ["-ss", "0", "-t", "2.8", "-i", "/tmp/body.mp4"]);
+    assert.deepEqual(argv.slice(10, 14), ["-ss", "2.8", "-i", "/tmp/body.mp4"]);
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS," +
+        "tpad=stop_mode=clone:stop_duration=0.75," +
+        "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];" +
+        "[0:a:0]apad=pad_dur=1.55[pa0];" +
+        "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];" +
+        "[1:a:0]apad=pad_dur=0.9[pa1];" +
+        "[2:v:0]fade=t=in:st=0:d=0.45[pv2];" +
+        "[2:a:0]afade=t=in:d=0.45[pa2];" +
+        "[pv0][pa0][pv1][pa1][pv2][pa2][3:v:0][3:a:0]" +
+        "concat=n=4:v=1:a=1[v][a]",
+    );
+  });
+
+  it("hook-first paced: body_rest keeps the outro lead-in pad after the fade-in", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      {
+        bodyIndex: 1,
+        hookEndSec: 2.5,
+        bodyTailPadSec: 1.5,
+        fadeSec: 0.45,
+        hookGapSec: 1.1,
+        introGapSec: 0.9,
+        tailHoldSec: 0.3,
+      },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.ok(
+      filter.includes(
+        "[2:v:0]fade=t=in:st=0:d=0.45,tpad=stop_mode=clone:stop_duration=1.5[pv2];" +
+          "[2:a:0]afade=t=in:d=0.45,apad=pad_dur=1.5[pa2];",
+      ),
+    );
+  });
+
+  it("hook-first paced: all seam durations 0 is byte-identical to the legacy argv", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, bodyTailPadSec: 1.5, fadeSec: 0, hookGapSec: 0, introGapSec: 0 },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[2:v:0]tpad=stop_mode=clone:stop_duration=1.5[bv];" +
+        "[2:a:0]apad=pad_dur=1.5[ba];" +
+        "[0:v:0][0:a:0][1:v:0][1:a:0][bv][ba][3:v:0][3:a:0]" +
+        "concat=n=4:v=1:a=1[v][a]",
+    );
+  });
+
+  it("hook-first paced with hasAudio=false: drops apad/afade and the audio map", () => {
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      { bodyIndex: 1, hookEndSec: 2.5, fadeSec: 0.45, hookGapSec: 1.1, introGapSec: 0.9, tailHoldSec: 0.3, hasAudio: false },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    assert.equal(
+      filter,
+      "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS," +
+        "tpad=stop_mode=clone:stop_duration=0.75," +
+        "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];" +
+        "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];" +
+        "[2:v:0]fade=t=in:st=0:d=0.45[pv2];" +
+        "[pv0][pv1][pv2][3:v:0]concat=n=4:v=1:a=0[v]",
+    );
+    assert.equal(filter.includes("apad"), false);
+  });
+
   it("treats input paths as standalone argv tokens (no shell interpolation)", () => {
     // Paths with spaces, semicolons, and quotes pass through untouched —
     // any shell hazard at the call site is the spawner's problem, not
