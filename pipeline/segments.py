@@ -770,6 +770,7 @@ def splice(
     *,
     outro_lead_in_sec: float = 0.0,
     hook_end_sec: float = 0.0,
+    hook_tail_hold_sec: float | None = None,
 ) -> dict:
     """Glue intro + body + outro into `output_path` with one re-encode pass.
 
@@ -791,6 +792,15 @@ def splice(
     caller that hasn't opted in gets the legacy [intro][body][outro]
     ordering byte-for-byte. Per
     _plans/2026-06-28-hook-before-brand-intro.md.
+
+    `hook_tail_hold_sec` (2026-06-29) sizes how long the hook clip's audio
+    holds past `hook_end_sec` (over a frozen frame) so the last hook word
+    finishes before the fade. Callers pass the per-video value the pipeline
+    computed from the gap before the next spoken word — 0 when the hook butts
+    straight into the next line, so the hold never bleeds that line's first
+    word into the pre-intro clip. None keeps the constant
+    `HOOK_FIRST_TAIL_HOLD_SEC` (legacy callers).
+    Per _plans/2026-06-29-hook-first-clean-pacing.md.
     """
     tag = f"[video splice id={context_id or '?'}]"
     if not body_path.exists():
@@ -830,6 +840,13 @@ def splice(
     # The paced seams (fade-to-black + silent beat each side of the intro) are
     # intrinsic to the hook-first reorder; off (0) for every legacy path.
     paced = hook_sec > 0
+    # Per-video audio tail-hold: the caller passes the gap-sized value (0 when
+    # the hook runs straight into the next line). None -> the constant fallback.
+    tail_hold = (
+        hook_tail_hold_sec
+        if hook_tail_hold_sec is not None
+        else HOOK_FIRST_TAIL_HOLD_SEC
+    )
     argv = _ffmpeg_splice_cmd(
         inputs,
         output_path,
@@ -839,7 +856,7 @@ def splice(
         fade_sec=HOOK_FIRST_FADE_SEC if paced else 0.0,
         hook_gap_sec=HOOK_FIRST_HOOK_GAP_SEC if paced else 0.0,
         intro_gap_sec=HOOK_FIRST_INTRO_GAP_SEC if paced else 0.0,
-        tail_hold_sec=HOOK_FIRST_TAIL_HOLD_SEC if paced else 0.0,
+        tail_hold_sec=max(0.0, tail_hold) if paced else 0.0,
     )
     # Compose the log description from the spliced parts so the operator can
     # see at a glance which path each render took. The hook-first reorder

@@ -65,6 +65,15 @@ HOOK_END_PAD_MS = 80
 # 8 words and ~2.33 w/s = ~3.4s, so 2500ms is the midpoint of the 1.5-3s
 # target range. Logged loudly when used so the operator can tune the prompt.
 HOOK_FALLBACK_MS = 2500
+# Hook-first audio tail-hold (per _plans/2026-06-29-hook-first-clean-pacing.md).
+# After the body splits at the hook's caption edge, the hook clip's AUDIO holds
+# a little longer (over a frozen frame) so the last word finishes before the
+# fade. The hold is sized PER VIDEO to the real gap before the next spoken word
+# and capped here — some hooks have a pause after them, others butt straight up
+# against the next sentence (gap 0 -> no hold, so the hold never bleeds into the
+# next line). Mirrors HOOK_FIRST_TAIL_HOLD_SEC in pipeline/segments.py /
+# video/server/ffmpeg.ts (the splice's fallback when a render carries no value).
+HOOK_TAIL_HOLD_MAX_MS = 300
 
 ProgressFn = Callable[[str, int, int], None]
 
@@ -158,6 +167,73 @@ def compute_hook_end_ms(
     if hook_idx >= len(hook_tokens) and last_end_ms is not None:
         return max(0, last_end_ms + pad_ms), "aligned"
     return fallback_ms, "fallback"
+
+
+def next_word_start_after_hook_ms(
+    hook: str | None,
+    words: list[dict] | None,
+) -> int | None:
+    """Alignment START (ms) of the first spoken word AFTER the hook line.
+
+    Returns None when the hook can't be matched against the alignment, or when
+    the hook is the last thing spoken (no following word). Used to size the
+    hook-first audio tail-hold to the real gap before the next sentence: a hook
+    that runs straight into the next line has a ~0 gap (so no hold, the splice
+    never bleeds the next sentence's first word into the pre-intro clip), while
+    a hook followed by a pause can hold up to the cap. Walks the alignment the
+    same way compute_hook_end_ms does so the two agree on where the hook ends.
+    """
+    hook_tokens = _tokenize_for_hook_match(hook or "")
+    if not hook_tokens or not words:
+        return None
+    hook_idx = 0
+    for w in words:
+        if hook_idx >= len(hook_tokens):
+            # Hook fully matched on a previous entry; `w` is the first word
+            # after it. Its start is the front edge of the next sentence.
+            if isinstance(w, dict):
+                start_sec = w.get("start")
+                if isinstance(start_sec, (int, float)):
+                    return int(round(start_sec * 1000))
+            return None
+        if not isinstance(w, dict):
+            continue
+        if not isinstance(w.get("end"), (int, float)):
+            continue
+        for piece in _tokenize_for_hook_match(w.get("word") or ""):
+            if hook_idx >= len(hook_tokens):
+                break
+            if piece == hook_tokens[hook_idx]:
+                hook_idx += 1
+    return None
+
+
+def compute_hook_tail_hold_ms(
+    hook: str | None,
+    words: list[dict] | None,
+    hook_end_ms: int,
+    *,
+    max_ms: int = HOOK_TAIL_HOLD_MAX_MS,
+) -> int:
+    """Per-video hook-first audio tail-hold (ms).
+
+    How long the hook clip's audio holds past the splice cut (`hook_end_ms`, the
+    snapped caption edge) so the last hook word finishes before the fade —
+    WITHOUT the hold reaching into the next sentence. Sized to the real gap
+    between the cut and the next spoken word, capped at `max_ms`:
+
+      * Hook runs straight into the next line (gap <= 0) -> 0 (no hold; the
+        splice cuts cleanly at the word boundary, never clipping the next line).
+      * Hook followed by a pause -> the pause, up to `max_ms`.
+      * Next word can't be located (no alignment match) -> `max_ms` (the legacy
+        constant hold; rare fallback).
+
+    Per _plans/2026-06-29-hook-first-clean-pacing.md.
+    """
+    next_word_ms = next_word_start_after_hook_ms(hook, words)
+    if next_word_ms is None:
+        return max_ms
+    return max(0, min(max_ms, next_word_ms - hook_end_ms))
 
 
 def _cache_bust(url: str, token: str) -> str:
@@ -606,6 +682,19 @@ def build_short_props(
         # lands exactly between scene 1 (the hook) and scene 2 (the rest).
         hook_end_ms = hook_split_ms
 
+        # Size the hook-first audio tail-hold to the REAL gap before the next
+        # spoken word so the hold finishes the hook word without bleeding into
+        # the next sentence (the dispatcher forwards it as
+        # `segments.hookTailHoldSec`). hook_end_ms here is already snapped to the
+        # caption edge. Per _plans/2026-06-29-hook-first-clean-pacing.md.
+        hook_tail_hold_ms = compute_hook_tail_hold_ms(
+            assets.script.get("hook"), vres.get("words") or [], hook_end_ms
+        )
+        print(
+            f"[short id={safe_id} hook_tail] cut @{hook_end_ms}ms -> "
+            f"tail_hold={hook_tail_hold_ms}ms (cap {HOOK_TAIL_HOLD_MAX_MS}ms)"
+        )
+
         caption_template = {
             **video.resolve_caption_template(store.get_setting),
             "position_y": SHORT_CAPTION_POSITION_Y,
@@ -644,6 +733,16 @@ def build_short_props(
             # reorder, splice falls through to legacy [intro][body][outro]".
             # See _plans/2026-06-28-hook-before-brand-intro.md.
             "hook_end_ms": hook_end_ms,
+            # Hook-first audio tail-hold (ms): how long the hook clip's audio
+            # holds past the splice cut (over a frozen frame) so the last hook
+            # word finishes before the fade — sized per video to the gap before
+            # the next spoken word (0 when the hook butts straight into the next
+            # line, so the hold never clips into it). The dispatcher reads this
+            # off `props`, converts to seconds, and POSTs it as
+            # `segments.hookTailHoldSec`; Cloud Run strips it from inputProps
+            # before Remotion. Absent/zero -> splice uses its own fallback hold.
+            # See _plans/2026-06-29-hook-first-clean-pacing.md.
+            "hook_tail_hold_ms": hook_tail_hold_ms,
             # The spoken cold-open hook line (beat 1 of the script, capped
             # at 8 words at generation time). Preserved here as a fallback
             # source for the social-poster renderer when the deliberate

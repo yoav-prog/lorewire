@@ -338,6 +338,56 @@ describe("Cloud Run render service /render segments parsing", () => {
     }
   });
 
+  it("passes hookTailHoldSec through, including 0 (no-pause hook)", async () => {
+    // _plans/2026-06-29-hook-first-clean-pacing.md. The dispatcher sizes the
+    // hold per video; 0 is valid (the hook runs straight into the next line)
+    // and MUST survive parsing — dropping it would revert the splice to the
+    // constant hold and re-clip the next sentence's first word.
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    for (const good of [0, 0.3, 1]) {
+      lastRenderCall = null;
+      const { status } = await post("/render", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          storyId: "envelope",
+          configHash: "abc",
+          inputProps: {},
+          segments: { intro, outro: null, hookEndSec: 2.5, hookTailHoldSec: good },
+        },
+      });
+      assert.equal(status, 200);
+      assert.equal(
+        lastRenderCall.segments.hookTailHoldSec,
+        good,
+        `hookTailHoldSec=${JSON.stringify(good)} must pass through`,
+      );
+    }
+  });
+
+  it("drops hookTailHoldSec when it's negative, non-finite, or wrong type", async () => {
+    // 0 is the lower bound (kept above); only sub-zero / garbage falls back to
+    // the constant hold.
+    const intro = "https://storage.googleapis.com/test-bucket/segments/i1.mp4";
+    for (const bad of [-1, Infinity, NaN, "0.3", null]) {
+      lastRenderCall = null;
+      const { status } = await post("/render", {
+        auth: `Bearer ${SECRET}`,
+        body: {
+          storyId: "envelope",
+          configHash: "abc",
+          inputProps: {},
+          segments: { intro, outro: null, hookEndSec: 2.5, hookTailHoldSec: bad },
+        },
+      });
+      assert.equal(status, 200);
+      assert.equal(
+        lastRenderCall.segments.hookTailHoldSec,
+        undefined,
+        `hookTailHoldSec=${JSON.stringify(bad)} must be dropped`,
+      );
+    }
+  });
+
   it("passes outroLeadInSec through when the dispatcher sends one", async () => {
     // Pre-existing latent bug: SpliceSegments declared outroLeadInSec
     // and the renderer used it, but parseSegments dropped it before

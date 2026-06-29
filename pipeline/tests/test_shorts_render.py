@@ -429,6 +429,128 @@ class ComputeHookEndMsTests(unittest.TestCase):
         self.assertEqual(ms, shorts_render.HOOK_FALLBACK_MS)
 
 
+class HookTailHoldTests(unittest.TestCase):
+    """Pure-helper tests for the per-video hook-first audio tail-hold
+    (next_word_start_after_hook_ms + compute_hook_tail_hold_ms). The hold lets
+    the hook clip's last word finish over a frozen frame; sizing it to the REAL
+    gap before the next spoken word is what stops it bleeding into the next
+    sentence when the hook has no pause after it (the 1l39ygh "you hear the next
+    line start, then the intro cuts it" bug).
+    Per _plans/2026-06-29-hook-first-clean-pacing.md."""
+
+    def test_next_word_start_is_the_first_word_after_the_hook(self):
+        # Hook is 2 tokens ("Gone forever."); the next spoken word is "This".
+        start = shorts_render.next_word_start_after_hook_ms(
+            "Gone forever.",
+            [
+                {"word": "Gone", "start": 0.0, "end": 0.5},
+                {"word": "forever.", "start": 0.5, "end": 1.2},
+                {"word": "This", "start": 1.5, "end": 1.7},
+                {"word": "started", "start": 1.7, "end": 2.1},
+            ],
+        )
+        self.assertEqual(start, 1500)
+
+    def test_next_word_start_none_when_hook_is_the_last_thing_spoken(self):
+        start = shorts_render.next_word_start_after_hook_ms(
+            "Gone forever.",
+            [
+                {"word": "Gone", "start": 0.0, "end": 0.5},
+                {"word": "forever.", "start": 0.5, "end": 1.2},
+            ],
+        )
+        self.assertIsNone(start)
+
+    def test_next_word_start_none_when_hook_doesnt_match(self):
+        # Drift: the alignment never completes the hook token sequence.
+        start = shorts_render.next_word_start_after_hook_ms(
+            "Eight hundred gone.",
+            [
+                {"word": "ate", "start": 0.0, "end": 0.3},
+                {"word": "hundred", "start": 0.3, "end": 0.8},
+            ],
+        )
+        self.assertIsNone(start)
+
+    def test_next_word_start_none_on_empty_inputs(self):
+        self.assertIsNone(shorts_render.next_word_start_after_hook_ms("", []))
+        self.assertIsNone(
+            shorts_render.next_word_start_after_hook_ms(
+                None, [{"word": "x", "start": 0.0, "end": 0.1}]
+            )
+        )
+        self.assertIsNone(shorts_render.next_word_start_after_hook_ms("hook", []))
+
+    def test_tail_hold_zero_when_next_sentence_butts_against_the_hook(self):
+        # 1l39ygh: the hook ends and the next sentence starts on the same edge.
+        # No pause -> 0 hold, so the splice never clips the next line's first
+        # word ("Twenty") into the pre-intro clip.
+        words = [
+            {"word": "Cold", "start": 0.1, "end": 0.3},
+            {"word": "water", "start": 0.3, "end": 0.7},
+            {"word": "hit", "start": 0.7, "end": 0.9},
+            {"word": "her", "start": 0.9, "end": 1.1},
+            {"word": "face", "start": 1.1, "end": 1.5},
+            {"word": "again.", "start": 1.5, "end": 1.72},
+            {"word": "Twenty", "start": 1.8, "end": 2.1},
+            {"word": "years", "start": 2.1, "end": 2.4},
+        ]
+        hold = shorts_render.compute_hook_tail_hold_ms(
+            "Cold water hit her face again.", words, 1800
+        )
+        self.assertEqual(hold, 0)
+
+    def test_tail_hold_is_the_pause_capped_at_max(self):
+        # A 500ms pause before the next sentence -> hold caps at the max so the
+        # pre-intro beat never drags.
+        words = [
+            {"word": "She", "start": 0.1, "end": 0.3},
+            {"word": "brought", "start": 0.3, "end": 0.7},
+            {"word": "a", "start": 0.7, "end": 0.8},
+            {"word": "secret", "start": 0.8, "end": 1.3},
+            {"word": "child.", "start": 1.3, "end": 1.8},
+            {"word": "Hours", "start": 2.3, "end": 2.6},
+            {"word": "earlier.", "start": 2.6, "end": 3.2},
+        ]
+        hold = shorts_render.compute_hook_tail_hold_ms(
+            "She brought a secret child.", words, 1800
+        )
+        self.assertEqual(hold, shorts_render.HOOK_TAIL_HOLD_MAX_MS)
+
+    def test_tail_hold_is_a_short_gap_verbatim(self):
+        # A sub-cap gap (150ms < 300ms cap) is held in full.
+        words = [
+            {"word": "One", "start": 0.0, "end": 0.4},
+            {"word": "two.", "start": 0.4, "end": 1.0},
+            {"word": "Next", "start": 1.15, "end": 1.5},
+        ]
+        hold = shorts_render.compute_hook_tail_hold_ms("One two.", words, 1000)
+        self.assertEqual(hold, 150)
+
+    def test_tail_hold_falls_back_to_max_when_next_word_unknown(self):
+        # No following word -> can't measure a gap -> the legacy constant hold.
+        hold = shorts_render.compute_hook_tail_hold_ms(
+            "One two.",
+            [
+                {"word": "One", "start": 0.0, "end": 0.4},
+                {"word": "two.", "start": 0.4, "end": 1.0},
+            ],
+            1000,
+        )
+        self.assertEqual(hold, shorts_render.HOOK_TAIL_HOLD_MAX_MS)
+
+    def test_tail_hold_clamps_negative_gap_to_zero(self):
+        # Defensive: the snapped cut sits PAST the next word (shouldn't happen,
+        # but max(0, ...) guards it) -> 0, never a negative hold.
+        words = [
+            {"word": "One", "start": 0.0, "end": 0.4},
+            {"word": "two.", "start": 0.4, "end": 1.0},
+            {"word": "Next", "start": 1.1, "end": 1.5},
+        ]
+        hold = shorts_render.compute_hook_tail_hold_ms("One two.", words, 1500)
+        self.assertEqual(hold, 0)
+
+
 class CacheBustHelperTests(unittest.TestCase):
     """Pure-helper tests for shorts_render._cache_bust. Covered separately so a
     URL-shape edge case can't regress without a targeted failure."""

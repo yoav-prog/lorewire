@@ -159,6 +159,14 @@ export interface SpliceSegments {
    *  service stays content-free. Undefined or 0 leaves the splice on
    *  the legacy [intro][body][outro] ordering. */
   hookEndSec?: number;
+  /** Seconds the hook clip's audio holds past `hookEndSec` (over a frozen
+   *  frame) so the last hook word finishes before the fade. The dispatcher
+   *  sizes this PER VIDEO to the gap before the next spoken word — 0 when the
+   *  hook butts straight into the next line, so the hold never bleeds that
+   *  line's first word into the pre-intro clip. Undefined falls back to the
+   *  constant `HOOK_FIRST_TAIL_HOLD_SEC` (rows rendered before this field).
+   *  Per _plans/2026-06-29-hook-first-clean-pacing.md. */
+  hookTailHoldSec?: number;
 }
 
 /** Test-side seam so the HTTP layer can stub the heavy lifting
@@ -698,6 +706,17 @@ async function spliceWithSegments(opts: {
       ? Math.max(0, segments.hookEndSec)
       : 0;
   const hookFirstActive = hookEndSec > 0 && hasIntro;
+  // Per-video audio tail-hold: how long the hook clip's audio holds past the
+  // cut (over a frozen frame) so the last word finishes. The dispatcher sizes
+  // it to the real gap before the next spoken word — 0 when the hook runs
+  // straight into the next line, so the hold never bleeds that line's first
+  // word into the pre-intro clip. Absent (legacy rows / rows rendered before
+  // the field) -> the constant fallback, preserving prior behavior.
+  // Per _plans/2026-06-29-hook-first-clean-pacing.md.
+  const tailHoldSec =
+    typeof segments.hookTailHoldSec === "number"
+      ? Math.max(0, segments.hookTailHoldSec)
+      : HOOK_FIRST_TAIL_HOLD_SEC;
 
   spliceLog("start", {
     story_id: storyId,
@@ -705,6 +724,7 @@ async function spliceWithSegments(opts: {
     has_outro: hasOutro,
     hook_first: hookFirstActive,
     hook_end_sec: hookEndSec,
+    tail_hold_sec: hookFirstActive ? tailHoldSec : 0,
   });
   const splicedStarted = Date.now();
 
@@ -758,7 +778,7 @@ async function spliceWithSegments(opts: {
     fadeSec: hookFirstActive ? HOOK_FIRST_FADE_SEC : 0,
     hookGapSec: hookFirstActive ? HOOK_FIRST_HOOK_GAP_SEC : 0,
     introGapSec: hookFirstActive ? HOOK_FIRST_INTRO_GAP_SEC : 0,
-    tailHoldSec: hookFirstActive ? HOOK_FIRST_TAIL_HOLD_SEC : 0,
+    tailHoldSec: hookFirstActive ? tailHoldSec : 0,
   });
   spliceLog("ffmpeg", {
     story_id: storyId,
