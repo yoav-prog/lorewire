@@ -191,6 +191,24 @@ export async function listSubmissionQueue(
   );
 }
 
+/** Lazy publish sync for the pilot (which uses manual one-click publish, so there
+ *  is no render-completion cron): flip a user's 'rendering' submissions to
+ *  'published' once an admin has published the promoted story. Idempotent and
+ *  cheap, so it's safe to run on every dashboard load. Bulk UPDATE rather than the
+ *  setSubmissionStatus chokepoint — this is a derived sync, and the story's
+ *  published_at is the source of truth for when it went live. */
+export async function reconcilePublishedSubmissions(
+  userId: string,
+): Promise<void> {
+  if (!userId) return;
+  await run(
+    `UPDATE submissions SET status = 'published', updated_at = ?
+      WHERE user_id = ? AND status = 'rendering'
+        AND story_id IN (SELECT id FROM stories WHERE status = 'published')`,
+    [new Date().toISOString(), userId],
+  );
+}
+
 // --- per-user cap --------------------------------------------------------
 
 async function settingInt(key: string, fallback: number): Promise<number> {

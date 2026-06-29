@@ -9,9 +9,22 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
-import { listUserSubmissions, type SubmissionRow } from "@/lib/submissions";
+import { getAggregateByStoryId } from "@/lib/polls";
+import { getStory } from "@/lib/repo";
+import {
+  listUserSubmissions,
+  reconcilePublishedSubmissions,
+  type SubmissionRow,
+} from "@/lib/submissions";
 import { resolveReason } from "@/lib/submission-reasons";
 import { readUserSession } from "@/lib/user-session";
+
+interface PublishedView {
+  slug: string;
+  votesA: number;
+  votesB: number;
+  total: number;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +60,13 @@ function formatDate(iso: string): string {
   });
 }
 
-function SubmissionCard({ s }: { s: SubmissionRow }) {
+function SubmissionCard({
+  s,
+  published,
+}: {
+  s: SubmissionRow;
+  published: PublishedView | null;
+}) {
   const state = stateOf(s.status);
   const dir = s.lang === "he" ? "rtl" : "ltr";
   const editable = s.status === "draft" || s.status === "rejected";
@@ -82,6 +101,28 @@ function SubmissionCard({ s }: { s: SubmissionRow }) {
         </div>
       )}
 
+      {published && (
+        <div className="mt-2 text-[13px]">
+          <Link
+            href={`/v/${published.slug}`}
+            className="font-mono uppercase tracking-[.15em] text-accent hover:underline"
+          >
+            View your published story →
+          </Link>
+          {published.total > 0 ? (
+            <p dir={dir} className="mt-1 text-muted">
+              {s.option_a_text}{" "}
+              {Math.round((published.votesA / published.total) * 100)}% ·{" "}
+              {s.option_b_text}{" "}
+              {Math.round((published.votesB / published.total) * 100)}% ·{" "}
+              {published.total} votes
+            </p>
+          ) : (
+            <p className="mt-1 text-muted">No votes yet</p>
+          )}
+        </div>
+      )}
+
       <div className="mt-2 flex items-center gap-3 text-[12px] text-muted">
         <span>{formatDate(s.created_at)}</span>
         {editable && (
@@ -101,7 +142,30 @@ export default async function SubmissionsPage() {
   const session = await readUserSession();
   if (!session) redirect(`/auth/signin?next=${NEXT}`);
 
+  // Lazy publish sync (the pilot has no completion cron), then enrich published
+  // submissions with their public slug + current vote split.
+  await reconcilePublishedSubmissions(session.userId);
   const submissions = await listUserSubmissions(session.userId);
+  const cards = await Promise.all(
+    submissions.map(async (s) => {
+      if (s.status !== "published" || !s.story_id) {
+        return { s, published: null as PublishedView | null };
+      }
+      const [story, agg] = await Promise.all([
+        getStory(s.story_id),
+        getAggregateByStoryId(s.story_id),
+      ]);
+      const published: PublishedView | null = story?.slug
+        ? {
+            slug: story.slug,
+            votesA: Number(agg?.votes_a ?? 0),
+            votesB: Number(agg?.votes_b ?? 0),
+            total: Number(agg?.total_votes ?? 0),
+          }
+        : null;
+      return { s, published };
+    }),
+  );
 
   return (
     <div className="mx-auto max-w-xl px-6 py-10">
@@ -123,15 +187,15 @@ export default async function SubmissionsPage() {
         </Link>
       </div>
 
-      {submissions.length === 0 ? (
+      {cards.length === 0 ? (
         <p className="mt-8 text-sm text-muted">
           You haven&apos;t submitted anything yet. Share a dilemma and the
           community votes on it.
         </p>
       ) : (
         <ul className="mt-6 space-y-3">
-          {submissions.map((s) => (
-            <SubmissionCard key={s.id} s={s} />
+          {cards.map(({ s, published }) => (
+            <SubmissionCard key={s.id} s={s} published={published} />
           ))}
         </ul>
       )}
