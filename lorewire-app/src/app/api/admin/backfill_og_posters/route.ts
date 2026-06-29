@@ -23,10 +23,13 @@
 //        → dry-run: lists what WOULD be processed (or skipped).
 //        No LLM calls, no Cloud Run renders, no DB writes.
 //
-//   POST /api/admin/backfill_og_posters?limit=N
+//   POST /api/admin/backfill_og_posters?limit=N[&force=1]
 //        → actually calls `ensureOgPoster` for each candidate. Returns
 //        per-row outcomes. Default limit: 30 (keeps batches small so a
 //        Cloud Run hiccup doesn't blow the whole route's budget).
+//        `force=1` bypasses the per-story 7-day re-attempt cooldown (but
+//        NOT a per-story disable) — use after fixing a systemic cause
+//        that stamped otherwise-good stories.
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireCapability } from "@/lib/dal";
@@ -113,6 +116,7 @@ async function loadCandidates(): Promise<CandidateRow[]> {
 function shouldProcess(
   row: CandidateRow,
   now: number,
+  force: boolean,
 ): "disabled_per_story" | "reattempt_window" | null {
   if (!row.shortConfigJson) return null;
   let parsed;
@@ -124,8 +128,13 @@ function shouldProcess(
     return null;
   }
   if (!parsed.ok) return null;
+  // The per-story kill switch is honoured even under ?force — force only
+  // bypasses the time-based cooldown, never an admin's explicit disable.
   if (parsed.config.og_poster_disabled) return "disabled_per_story";
-  if (!shouldReattemptOgPoster(parsed.config.og_poster_attempted_at, now)) {
+  if (
+    !force &&
+    !shouldReattemptOgPoster(parsed.config.og_poster_attempted_at, now)
+  ) {
     return "reattempt_window";
   }
   return null;
@@ -142,8 +151,9 @@ function parseLimit(url: URL): number {
 async function runBackfill(opts: {
   dryRun: boolean;
   limit: number;
+  force: boolean;
 }): Promise<BackfillOgPosterResult> {
-  const { dryRun, limit } = opts;
+  const { dryRun, limit, force } = opts;
   const t0 = Date.now();
   const candidates = await loadCandidates();
   const now = Date.now();
@@ -151,7 +161,7 @@ async function runBackfill(opts: {
   const outcomes: RowOutcome[] = [];
 
   for (const row of candidates) {
-    const skipReason = shouldProcess(row, now);
+    const skipReason = shouldProcess(row, now, force);
     if (skipReason) {
       outcomes.push({
         story_id: row.storyId,
@@ -209,6 +219,7 @@ async function runBackfill(opts: {
   namespacedLog(dryRun ? "dry_run" : "run", {
     candidates: candidates.length,
     eligible: eligible.length,
+    force,
     rendered,
     cached,
     skipped,
@@ -230,15 +241,17 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   await requireCapability("content.manage");
   const url = new URL(req.url);
   const dry = url.searchParams.get("dry") === "1";
+  const force = url.searchParams.get("force") === "1";
   const limit = parseLimit(url);
-  const result = await runBackfill({ dryRun: dry, limit });
+  const result = await runBackfill({ dryRun: dry, limit, force });
   return NextResponse.json(result);
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   await requireCapability("content.manage");
   const url = new URL(req.url);
+  const force = url.searchParams.get("force") === "1";
   const limit = parseLimit(url);
-  const result = await runBackfill({ dryRun: false, limit });
+  const result = await runBackfill({ dryRun: false, limit, force });
   return NextResponse.json(result);
 }

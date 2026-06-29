@@ -232,4 +232,55 @@ describe("/api/admin/backfill_og_posters", () => {
     expect(outcome.outcome).toBe("failed");
     expect(outcome.error).toMatch(/simulated/);
   });
+
+  it("?force=1 bypasses the re-attempt window and processes a stamped story", async () => {
+    // 6 days ago — inside the window; without force this would skip.
+    const sixDaysAgoIso = new Date(
+      Date.now() - 6 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    await seed("s-forced", {
+      shortConfig: { og_poster_attempted_at: sixDaysAgoIso },
+    });
+    const ensureSpy = vi
+      .spyOn(posterModule, "ensureOgPoster")
+      .mockResolvedValue({
+        url: "https://media.lorewire.com/x.png?v=h",
+        alt: "alt",
+        hash: "h".padEnd(16, "0"),
+        width: 1200,
+        height: 630,
+        source: "rendered",
+      } as Awaited<ReturnType<typeof posterModule.ensureOgPoster>>);
+
+    const resp = await POST(
+      makeReq("http://localhost/api/admin/backfill_og_posters?force=1"),
+    );
+    const body = await resp.json();
+    expect(body.rendered).toBe(1);
+    expect(ensureSpy).toHaveBeenCalledWith("s-forced");
+  });
+
+  it("?force=1 still honours a per-story disable (force bypasses the cooldown, not the kill switch)", async () => {
+    const sixDaysAgoIso = new Date(
+      Date.now() - 6 * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    await seed("s-disabled-forced", {
+      shortConfig: {
+        og_poster_disabled: true,
+        og_poster_attempted_at: sixDaysAgoIso,
+      },
+    });
+    const ensureSpy = vi
+      .spyOn(posterModule, "ensureOgPoster")
+      .mockResolvedValue(null);
+
+    const resp = await POST(
+      makeReq("http://localhost/api/admin/backfill_og_posters?force=1"),
+    );
+    const body = await resp.json();
+    const outcome = body.outcomes[0];
+    expect(outcome.outcome).toBe("skipped");
+    expect(outcome.reason).toBe("disabled_per_story");
+    expect(ensureSpy).not.toHaveBeenCalled();
+  });
 });
