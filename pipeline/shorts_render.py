@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from pipeline import gcs, images, media, narration, shorts, store, video, voice, voiceovers
+from pipeline import gcs, image_safety, images, media, narration, shorts, store, video, voice, voiceovers
 from pipeline.question_card import (
     QUESTION_CARD_MS,
     build_question_card,
@@ -287,6 +287,17 @@ def build_short_props(
     if not assets.scenes:
         print(f"[short id={safe_story}] generator returned no scenes; skipping")
         return None
+
+    # Image-output safety (Phase 4): the AI generates the character + scene images
+    # from user-submitted text, which text moderation never sees. For a
+    # submission-origin story, moderate the visible frames here; a flagged image
+    # raises ImageSafetyError, which the short-render worker catches and fails the
+    # render — so a problem image never publishes under the brand. Admin Reddit
+    # renders are unaffected (no submission_id). Plan:
+    # _plans/2026-06-29-user-submitted-stories.md (Phase 4).
+    if store.story_submission_id(safe_story):
+        frame_urls = [assets.base_url, *(s.get("url") for s in assets.scenes)]
+        image_safety.check_images_safe([u for u in frame_urls if u])
 
     # Plant the bundled poll draft from the narration pass (hook-first
     # restructure, _plans/2026-06-21-shorts-hook-first-restructure.md §5.3).
