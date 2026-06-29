@@ -77,12 +77,6 @@ const PROFANITY = new Set([
   "bastard", "damn", "goddamn", "hell",
 ]);
 
-/** Substantive all-caps runs (3+ chars) — re-renders as SHOUTING since
- *  PosterStill uppercases the text anyway. Same pattern as
- *  `pipeline/shorts_safety.py::_ALL_CAPS_RUN`. Acronyms 1-2 chars (OK,
- *  FBI, etc.) pass through. */
-const ALL_CAPS_RUN = /\b[A-Z]{3,}\b/;
-
 /** Allowed character set: Basic Latin + Latin-1 Supplement +
  *  Latin Extended-A. Covers English plus accented Latin (é, ñ, ü,
  *  etc.). Hebrew, Arabic, CJK, etc. all reject — PosterStill loads
@@ -362,7 +356,10 @@ export async function generatePosterText(
 function guardText(text: string): string | null {
   if (text.length > HOOK_MAX_CHARS) return "text_too_long";
   if (!SUPPORTED_GLYPH_RE.test(text)) return "glyph_unsupported";
-  if (ALL_CAPS_RUN.test(text)) return "all_caps_shock";
+  // No all-caps guard: PosterStill / PosterStillLandscape uppercase the text
+  // for display (`text.trim().toUpperCase()`), so all-caps and mixed-case
+  // inputs render identically. Rejecting all-caps only blocked LoreWire's
+  // house-style (all-caps) hooks for zero visual change.
   const lower = text.toLowerCase();
   for (const word of PROFANITY) {
     if (new RegExp(`\\b${word}\\b`).test(lower)) return "profanity";
