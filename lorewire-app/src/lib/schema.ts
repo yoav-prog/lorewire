@@ -1064,6 +1064,75 @@ export const COMMENT_MODERATION_EVENTS: Table = {
   ],
 };
 
+// 2026-06-29 user-submitted stories (_plans/2026-06-29-user-submitted-stories.md).
+// A signed-in user submits their own story plus a two-option dilemma; on approval
+// the existing short pipeline renders it and it publishes with a poll. Untrusted
+// UGC lives here and is promoted into `stories` only on approval (the same trust
+// boundary the reddit_source -> story_jobs -> stories ingestion keeps), so the
+// curated content table never holds unreviewed user text. `status` is a closed
+// enum carried in code (lib/submissions.ts SubmissionStatus): 'draft' ->
+// 'pending_text_check' -> 'pending_review' -> 'rejected' | 'approved' ->
+// 'rendering' -> 'published', plus 'unpublished' / 'erased' for takedown. Phase 1
+// has no moderation or render yet: a submit lands in 'pending_review' directly.
+// `display_name` snapshots the chosen name shown on publish (so a later profile
+// rename never retro-changes a published credit). `reject_category` maps to the
+// user-safe reason taxonomy (scripts/submission-eval/reasons.mjs); `reject_reason`
+// is the raw judge/admin note kept for the audit trail, not shown verbatim.
+// `story_id` is set on approval (the promoted story). App-owned: the Python
+// pipeline only ever touches the promoted stories/short_renders rows, never this
+// table, so there is no pipeline/store.py mirror (same call as facebook_posts /
+// admin_audit_log).
+export const SUBMISSIONS: Table = {
+  name: "submissions",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "user_id", type: "TEXT" },
+    { name: "display_name", type: "TEXT" },
+    { name: "lang", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "body", type: "TEXT" },
+    { name: "dilemma_question", type: "TEXT" },
+    { name: "option_a_text", type: "TEXT" },
+    { name: "option_b_text", type: "TEXT" },
+    { name: "status", type: "TEXT" },
+    { name: "reject_category", type: "TEXT" },
+    { name: "reject_reason", type: "TEXT" },
+    // How the current status was reached: 'human' (direct submit/admin) |
+    // 'tier1' | 'tier2' | 'auto' | 'timeout'. Phase 1 writes 'human' / null.
+    { name: "moderation_source", type: "TEXT" },
+    { name: "moderation_confidence", type: "REAL" },
+    // Bumped each time the author edits a rejected submission and resends it.
+    { name: "resubmit_count", type: "INTEGER" },
+    // The promoted story once approved; NULL until then.
+    { name: "story_id", type: "TEXT" },
+    { name: "approved_by", type: "TEXT" },
+    { name: "approved_at", type: "TEXT" },
+    // 'video' (approve + render) | 'poll_only' (publish the text poll, no render)
+    // — the approver's cost release valve, set at approval time (Phase 3).
+    { name: "render_choice", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// Append-only audit of every submission state change (submit, AI/human verdict,
+// resubmit, takedown). Same role + shape as comment_moderation_events: the
+// statement-of-reasons record and the basis for the appeal/resubmit history; never
+// updated or deleted. `actor` is 'author' | 'system' | 'ai' | an admin user id.
+export const SUBMISSION_EVENTS: Table = {
+  name: "submission_events",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "submission_id", type: "TEXT" },
+    { name: "actor", type: "TEXT" },
+    { name: "from_status", type: "TEXT" },
+    { name: "to_status", type: "TEXT" },
+    { name: "category", type: "TEXT" },
+    { name: "reason", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 // 2026-06-23 Facebook auto-publish for shorts
 // (_plans/2026-06-23-facebook-auto-publish.md). One row per attempt to
 // publish a rendered short to the LoreWire Facebook Page. Survives
@@ -1379,6 +1448,8 @@ export const TABLES: Table[] = [
   COMMENT_LIKES,
   COMMENT_REPORTS,
   COMMENT_MODERATION_EVENTS,
+  SUBMISSIONS,
+  SUBMISSION_EVENTS,
   FACEBOOK_POSTS,
   INSTAGRAM_POSTS,
   INSTAGRAM_STORIES,
@@ -1644,4 +1715,20 @@ export const POST_TABLE_DDL: string[] = [
   // Per-comment audit timeline (the statement-of-reasons / appeal record).
   "CREATE INDEX IF NOT EXISTS idx_comment_moderation_events_comment " +
     "ON comment_moderation_events(comment_id, created_at)",
+  // 2026-06-29 user submissions. The dashboard reads a user's own submissions
+  // newest-first (user_id, created_at); the per-user cap counts active + recent
+  // rows by (user_id, status); the admin review queue (Phase 2) reads pending
+  // oldest-first by (status, created_at); story_id links a published submission
+  // back to its promoted story.
+  "CREATE INDEX IF NOT EXISTS idx_submissions_user_created " +
+    "ON submissions(user_id, created_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_submissions_user_status " +
+    "ON submissions(user_id, status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_submissions_status " +
+    "ON submissions(status, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_submissions_story " +
+    "ON submissions(story_id) WHERE story_id IS NOT NULL",
+  // Per-submission audit timeline (the statement-of-reasons / resubmit record).
+  "CREATE INDEX IF NOT EXISTS idx_submission_events_submission " +
+    "ON submission_events(submission_id, created_at)",
 ];
