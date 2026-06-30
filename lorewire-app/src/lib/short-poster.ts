@@ -82,20 +82,32 @@ const HEAD_TIMEOUT_MS = 2000;
 const RENDER_TIMEOUT_MS = 25_000;
 const LLM_TIMEOUT_MS = 30_000;
 
-/** Post-render readiness verify budget. After Cloud Run uploads the
- *  PNG and returns, the freshly-PUT object can take a beat to be
- *  reliably readable through the Cloudflare-fronted MEDIA_PUBLIC_BASE
- *  (eventual visibility through the custom-domain binding, edge-cache
- *  miss timing). The publishers (FB multipart, YT thumbnails.set, IG
- *  cover_url) all silently fall back when the URL 404s, which produces
- *  the "first post has no thumbnail, second post does" symptom because
- *  the second publish hits HEAD cache and never re-races. We verify
- *  before handing the URL to the publisher: HEAD with a few short
- *  retries against the versioned URL (?v=<hash>), succeed on the first
- *  200, log + return null on timeout so the publisher's scene-1
- *  fallback kicks in instead of a broken cover. */
+/** Post-render readiness verify budget. ADVISORY ONLY since the
+ *  2026-06-30 19:40 cutover: Cloud Run's upload-success is treated as
+ *  authoritative and the URL is returned regardless of what this HEAD
+ *  reports. The verify is kept as an observability signal — it tells
+ *  the operator whether our own Vercel-egress can read the new object,
+ *  but the publisher (IG/FB/YT) fetches from a different network
+ *  position (the platform's own backend), so a verify failure here
+ *  doesn't necessarily mean the publisher will fail.
+ *
+ *  Why advisory: production logs at 2026-06-30 19:40 showed every
+ *  fresh-render publish failing the verify (404 then 403 four times in
+ *  a row) on URLs that were publicly readable to arbitrary curl
+ *  callers. Two compounding factors: (1) freshly-PUT objects take a
+ *  few seconds to be visible at every Cloudflare edge, and (2)
+ *  Vercel's serverless undici egress appears to trigger a Cloudflare
+ *  bot/firewall rule on the R2 custom domain that arbitrary callers
+ *  don't. Treating the verify as a hard fail dropped the editorial
+ *  poster on every publish (returned null -> publisher used the
+ *  scene-1 fallback) even when the URL was fine. By the time IG's
+ *  backend actually fetches cover_url (~20-30s after our publish call
+ *  per `container_create latency_ms`), R2 has long since propagated.
+ *
+ *  Reduced to a single 1.5s HEAD attempt (was four retries totaling
+ *  ~6s) since the result no longer gates anything. */
 const VERIFY_TIMEOUT_MS = 1500;
-const VERIFY_BACKOFFS_MS = [0, 400, 1200, 2500];
+const VERIFY_BACKOFFS_MS = [0];
 
 /** Setting key for the kill switch (default ON). When OFF, this
  *  function returns null for every call without doing any I/O —
@@ -670,27 +682,29 @@ export async function ensureShortPoster(
   // contained in the elapsed_ms above, but split fields help triage.)
   void LLM_TIMEOUT_MS; // placeholder reference — used in future LLM streaming.
 
-  // 3) Readiness verify. Cloud Run has confirmed the PUT to R2/GCS, but
-  //    the publishers will fetch the URL through MEDIA_PUBLIC_BASE
-  //    (Cloudflare custom domain), and a brand-new object isn't always
-  //    immediately visible there. Without this gate, FB's silent thumb
-  //    fallback / IG's silent thumb_offset=0 fallback / YT's
-  //    thumbnails.set 404 strip the cover on the first publish and the
-  //    next publish (HEAD cache hit, no race) restores it. We poll the
-  //    versioned URL until it's readable, then hand it off.
+  // 3) Readiness verify - ADVISORY ONLY. Cloud Run's upload-success
+  //    response is treated as authoritative; we return the URL
+  //    regardless of what this HEAD reports. See the VERIFY_BACKOFFS_MS
+  //    docblock for the full reasoning (Cloudflare bot/firewall on the
+  //    R2 custom domain blocks Vercel's undici egress while arbitrary
+  //    callers + the platforms' own backends fetch fine). The verify
+  //    stays as an observability signal: `verify_ok` means our egress
+  //    can read the URL; `verify_inconclusive` (logged below) means it
+  //    couldn't, which is a yellow flag to investigate but not a
+  //    publisher-blocker.
   const verified = await verifyPosterReadable(url, fetchImpl, {
     storyId,
     hash,
     backoffsMs: deps.verifyBackoffsMs ?? VERIFY_BACKOFFS_MS,
   });
   if (!verified) {
-    log("propagation_timeout", {
+    log("verify_inconclusive", {
       story_id: storyId,
       hash,
       elapsed_ms: Date.now() - t0,
       render_elapsed_ms: Date.now() - tRender,
+      note: "HEAD from our egress failed but Cloud Run upload succeeded; returning URL anyway since the publisher fetches from a different network position",
     });
-    return null;
   }
 
   return {
