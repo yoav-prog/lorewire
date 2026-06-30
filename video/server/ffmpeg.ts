@@ -48,6 +48,20 @@ export const HOOK_FIRST_INTRO_GAP_SEC = 0.9;
  *  last word finish over the held frame before the fade — without the next line's
  *  caption appearing. Mirrors pipeline/segments.py. */
 export const HOOK_FIRST_TAIL_HOLD_SEC = 0.3;
+/** Audio fade-out applied to the body_hook tail (seconds), right before the
+ *  body→intro cut in the hook-first splice. When the TTS runs the cold-open
+ *  hook directly into the next sentence (gap=0 case — PR #166's
+ *  `compute_hook_tail_hold_ms` correctly returns 0 to prevent bleeding next-
+ *  sentence audio into the held frame), the body_hook audio gets cut hard at
+ *  the caption boundary and the last word's natural consonant decay is
+ *  clipped (audible as a truncated final phoneme — e.g. the "d" of
+ *  "destroyed" in `idea_a744e0a033b0` on 2026-06-30). This fade smooths the
+ *  cut to silence over the trailing 80 ms so the decay sounds natural without
+ *  bleeding the next sentence. Sized for typical hard-consonant release time;
+ *  long enough to mask a hard cut, short enough that the word still feels
+ *  spoken, not faded. No-op when the body audio is already silence at the
+ *  cut (gap > 0 case). Per _plans/2026-06-30-hook-splice-audio-fade.md. */
+export const HOOK_FIRST_AUDIO_TAIL_FADE_SEC = 0.08;
 
 /**
  * Build the ffmpeg argv that concatenates 2+ normalized MP4 inputs into one
@@ -281,6 +295,23 @@ function hookFirstPacedFilter(
       }
       if (hookGapSec > 0) {
         vch.push(`tpad=stop_mode=add:stop_duration=${fmtG(hookGapSec)}`);
+      }
+      // Audio fade-out on the body_hook tail. When the TTS ran the hook line
+      // straight into the next sentence (gap=0 case — `tailHoldSec` is 0,
+      // body_hook audio plays from 0 to exactly hookEndSec and gets cut hard),
+      // the last word's natural consonant decay is clipped. This fade smooths
+      // the cut to silence over the trailing HOOK_FIRST_AUDIO_TAIL_FADE_SEC
+      // milliseconds so the decay sounds natural without bleeding the next
+      // sentence's first syllable into the held frame. Clamp the fade duration
+      // to aEnd so a pathologically short hook (< 80 ms) doesn't produce a
+      // negative `afade` start time. No-op when the body audio is already
+      // silence at the cut (gap > 0 case — tailHoldSec span is silence). Per
+      // _plans/2026-06-30-hook-splice-audio-fade.md.
+      const audioFadeDur = Math.min(HOOK_FIRST_AUDIO_TAIL_FADE_SEC, aEnd);
+      if (audioFadeDur > 0) {
+        ach.push(
+          `afade=t=out:st=${fmtG(aEnd - audioFadeDur)}:d=${fmtG(audioFadeDur)}`,
+        );
       }
       const apadDur = fadeSec + hookGapSec;
       if (apadDur > 0) {

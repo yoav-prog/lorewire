@@ -319,13 +319,70 @@ describe("buildConcatArgv", () => {
       "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS," +
         "tpad=stop_mode=clone:stop_duration=0.75," +
         "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];" +
-        "[0:a:0]apad=pad_dur=1.55[pa0];" +
+        // Audio fade-out applied to the body_hook tail at aEnd - 0.08 so the
+        // last word's consonant decays smoothly into silence before the cut,
+        // even when the gap-sized tailHoldSec is 0 (TTS ran the hook line into
+        // the next sentence). aEnd = hookEndSec + tailHoldSec = 2.5 + 0.3 = 2.8,
+        // so st = 2.72. Per _plans/2026-06-30-hook-splice-audio-fade.md.
+        "[0:a:0]afade=t=out:st=2.72:d=0.08,apad=pad_dur=1.55[pa0];" +
         "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];" +
         "[1:a:0]apad=pad_dur=0.9[pa1];" +
         "[2:v:0]fade=t=in:st=0:d=0.45[pv2];" +
         "[2:a:0]afade=t=in:d=0.45[pa2];" +
         "[pv0][pa0][pv1][pa1][pv2][pa2][3:v:0][3:a:0]" +
         "concat=n=4:v=1:a=1[v][a]",
+    );
+  });
+
+  it("hook-first paced: gap=0 case (tailHoldSec=0) still applies afade-out so the last hook word doesn't hard-clip", () => {
+    // Regression for the 2026-06-30 "destroyed" clip on idea_a744e0a033b0.
+    // PR #166's `compute_hook_tail_hold_ms` correctly returns 0 when the TTS
+    // runs the hook into the next sentence (no silence gap), to prevent
+    // bleeding next-sentence audio into the held frame. With tailHoldSec=0
+    // the body_hook audio plays from 0 to exactly hookEndSec and gets cut
+    // hard — the trailing consonant decay was audibly clipped. The new
+    // afade smooths the cut to silence over the trailing 80 ms.
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      {
+        bodyIndex: 1,
+        hookEndSec: 2.0,
+        fadeSec: 0.45,
+        hookGapSec: 1.1,
+        introGapSec: 0.9,
+        tailHoldSec: 0, // the user's actual case
+      },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    // aEnd = hookEndSec + tailHoldSec = 2.0 + 0 = 2.0; afade st = 1.92.
+    assert.ok(
+      filter.includes("[0:a:0]afade=t=out:st=1.92:d=0.08,apad=pad_dur=1.55[pa0]"),
+      `expected gap=0 afade with st=1.92:d=0.08; got: ${filter}`,
+    );
+  });
+
+  it("hook-first paced: short hook (aEnd < audioFadeSec) clamps the fade duration to aEnd so st never goes negative", () => {
+    // Pathologically short hook (50 ms total body_hook audio). The fade
+    // duration is clamped to aEnd so afade starts at st=0 and runs for
+    // the full body_hook audio — no negative start time reaches ffmpeg.
+    const argv = buildConcatArgv(
+      ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
+      "/tmp/out.mp4",
+      {
+        bodyIndex: 1,
+        hookEndSec: 0.05,
+        fadeSec: 0.45,
+        hookGapSec: 1.1,
+        introGapSec: 0.9,
+        tailHoldSec: 0,
+      },
+    );
+    const filter = argv[argv.indexOf("-filter_complex") + 1];
+    // aEnd = 0.05; audioFadeDur = min(0.08, 0.05) = 0.05; st = 0.
+    assert.ok(
+      filter.includes("[0:a:0]afade=t=out:st=0:d=0.05,apad=pad_dur=1.55[pa0]"),
+      `expected clamped afade with st=0:d=0.05; got: ${filter}`,
     );
   });
 
