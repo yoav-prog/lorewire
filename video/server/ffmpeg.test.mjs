@@ -304,27 +304,33 @@ describe("buildConcatArgv", () => {
   // _plans/2026-06-29-hook-first-clean-pacing.md. Expected strings are IDENTICAL
   // to pipeline/tests/test_segments.py so the two splice paths stay byte-equal.
 
-  it("hook-first paced: body_hook freezes + holds the line, then fades; body_rest resumes at the split", () => {
+  it("hook-first paced: body_hook freezes + holds the line, afade spans the held region; body_rest resumes at hookEndSec (NOT split)", () => {
     const argv = buildConcatArgv(
       ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
       "/tmp/out.mp4",
       { bodyIndex: 1, hookEndSec: 2.5, fadeSec: 0.45, hookGapSec: 1.1, introGapSec: 0.9, tailHoldSec: 0.3 },
     );
-    // Physical clips run to hookEnd + tailHold = 2.8; body_rest resumes there.
+    // body_hook input runs to hookEndSec + tailHoldSec = 2.8 so the held tail
+    // audio region is present for the afade to attenuate. body_rest input
+    // resumes at hookEndSec (2.5) — NOT at 2.8 — so the next sentence's first
+    // syllable is preserved at full volume after the intro. The [2.5, 2.8]
+    // body audio range plays in BOTH body_hook (fading) AND body_rest (full
+    // volume), with the brand intro between them so the brain processes them
+    // as separate events. Per the 2026-06-30 splice fix.
     assert.deepEqual(argv.slice(2, 8), ["-ss", "0", "-t", "2.8", "-i", "/tmp/body.mp4"]);
-    assert.deepEqual(argv.slice(10, 14), ["-ss", "2.8", "-i", "/tmp/body.mp4"]);
+    assert.deepEqual(argv.slice(10, 14), ["-ss", "2.5", "-i", "/tmp/body.mp4"]);
     const filter = argv[argv.indexOf("-filter_complex") + 1];
     assert.equal(
       filter,
       "[0:v:0]trim=0:2.5,setpts=PTS-STARTPTS," +
         "tpad=stop_mode=clone:stop_duration=0.75," +
         "fade=t=out:st=2.8:d=0.45,tpad=stop_mode=add:stop_duration=1.1[pv0];" +
-        // Audio fade-out applied to the body_hook tail at aEnd - 0.08 so the
-        // last word's consonant decays smoothly into silence before the cut,
-        // even when the gap-sized tailHoldSec is 0 (TTS ran the hook line into
-        // the next sentence). aEnd = hookEndSec + tailHoldSec = 2.5 + 0.3 = 2.8,
-        // so st = 2.72. Per _plans/2026-06-30-hook-splice-audio-fade.md.
-        "[0:a:0]afade=t=out:st=2.72:d=0.08,apad=pad_dur=1.55[pa0];" +
+        // Audio fade-out spans the entire held region [hookEndSec, aEnd] =
+        // [2.5, 2.8]. The body audio in that range is the natural consonant
+        // decay of the last hook word PLUS (in gap=0 cases) the start of the
+        // next sentence — both at decreasing volume. Per the 2026-06-30
+        // splice fix.
+        "[0:a:0]afade=t=out:st=2.5:d=0.3,apad=pad_dur=1.55[pa0];" +
         "[1:v:0]tpad=stop_mode=add:stop_duration=0.9[pv1];" +
         "[1:a:0]apad=pad_dur=0.9[pa1];" +
         "[2:v:0]fade=t=in:st=0:d=0.45[pv2];" +
@@ -334,14 +340,12 @@ describe("buildConcatArgv", () => {
     );
   });
 
-  it("hook-first paced: gap=0 case (tailHoldSec=0) still applies afade-out so the last hook word doesn't hard-clip", () => {
-    // Regression for the 2026-06-30 "destroyed" clip on idea_a744e0a033b0.
-    // PR #166's `compute_hook_tail_hold_ms` correctly returns 0 when the TTS
-    // runs the hook into the next sentence (no silence gap), to prevent
-    // bleeding next-sentence audio into the held frame. With tailHoldSec=0
-    // the body_hook audio plays from 0 to exactly hookEndSec and gets cut
-    // hard — the trailing consonant decay was audibly clipped. The new
-    // afade smooths the cut to silence over the trailing 80 ms.
+  it("hook-first paced: tailHoldSec=0 means no held region; the afade-out clause is dropped from body_hook audio", () => {
+    // tailHoldSec=0 happens when the caller hasn't opted into the floor (the
+    // dispatcher in render.ts floors it at MIN_HOOK_AUDIO_TAIL_HOLD_SEC for
+    // hook-first renders). For a pure builder test with tailHoldSec=0, there's
+    // no held region for the afade to span, so the audio chain collapses to
+    // just the apad silence. body_rest -ss still equals hookEndSec.
     const argv = buildConcatArgv(
       ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
       "/tmp/out.mp4",
@@ -351,38 +355,52 @@ describe("buildConcatArgv", () => {
         fadeSec: 0.45,
         hookGapSec: 1.1,
         introGapSec: 0.9,
-        tailHoldSec: 0, // the user's actual case
+        tailHoldSec: 0,
       },
     );
+    // Both body inputs cut at the same point (2.0) — no held region.
+    assert.deepEqual(argv.slice(2, 8), ["-ss", "0", "-t", "2", "-i", "/tmp/body.mp4"]);
+    assert.deepEqual(argv.slice(10, 14), ["-ss", "2", "-i", "/tmp/body.mp4"]);
     const filter = argv[argv.indexOf("-filter_complex") + 1];
-    // aEnd = hookEndSec + tailHoldSec = 2.0 + 0 = 2.0; afade st = 1.92.
+    // afade is skipped (tailHoldSec=0 means no held region to fade); body_hook
+    // audio chain is just the apad silence pad.
     assert.ok(
-      filter.includes("[0:a:0]afade=t=out:st=1.92:d=0.08,apad=pad_dur=1.55[pa0]"),
-      `expected gap=0 afade with st=1.92:d=0.08; got: ${filter}`,
+      filter.includes("[0:a:0]apad=pad_dur=1.55[pa0]"),
+      `expected no afade in body_hook audio chain; got: ${filter}`,
+    );
+    assert.equal(
+      filter.includes("afade=t=out"),
+      false,
+      `expected NO afade=t=out clause; got: ${filter}`,
     );
   });
 
-  it("hook-first paced: short hook (aEnd < audioFadeSec) clamps the fade duration to aEnd so st never goes negative", () => {
-    // Pathologically short hook (50 ms total body_hook audio). The fade
-    // duration is clamped to aEnd so afade starts at st=0 and runs for
-    // the full body_hook audio — no negative start time reaches ffmpeg.
+  it("hook-first paced: 150ms floor case — body_rest -ss decouples from body_hook -t (the 2026-06-30 fix shape)", () => {
+    // Regression for the 2026-06-30 incident on idea_a744e0a033b0. With the
+    // render.ts floor in place, tailHoldSec arrives here as 0.15 even when
+    // the pipeline's gap-sized value was 0. The body_hook input gets 150ms
+    // of post-hookEndSec audio to fade out; body_rest resumes at hookEndSec
+    // so "That was..." plays cleanly after the intro from its first syllable.
     const argv = buildConcatArgv(
       ["/tmp/intro.mp4", "/tmp/body.mp4", "/tmp/outro.mp4"],
       "/tmp/out.mp4",
       {
         bodyIndex: 1,
-        hookEndSec: 0.05,
+        hookEndSec: 1.9, // the user's actual hook_end_sec from the rewrite log
         fadeSec: 0.45,
         hookGapSec: 1.1,
         introGapSec: 0.9,
-        tailHoldSec: 0,
+        tailHoldSec: 0.15, // the floored value from render.ts
       },
     );
+    // body_hook -t = 1.9 + 0.15 = 2.05; body_rest -ss = 1.9 (decoupled).
+    assert.deepEqual(argv.slice(2, 8), ["-ss", "0", "-t", "2.05", "-i", "/tmp/body.mp4"]);
+    assert.deepEqual(argv.slice(10, 14), ["-ss", "1.9", "-i", "/tmp/body.mp4"]);
     const filter = argv[argv.indexOf("-filter_complex") + 1];
-    // aEnd = 0.05; audioFadeDur = min(0.08, 0.05) = 0.05; st = 0.
+    // afade spans [1.9, 2.05] = the full held region.
     assert.ok(
-      filter.includes("[0:a:0]afade=t=out:st=0:d=0.05,apad=pad_dur=1.55[pa0]"),
-      `expected clamped afade with st=0:d=0.05; got: ${filter}`,
+      filter.includes("[0:a:0]afade=t=out:st=1.9:d=0.15,apad="),
+      `expected afade spanning the held region [1.9, 2.05]; got: ${filter}`,
     );
   });
 
@@ -442,6 +460,11 @@ describe("buildConcatArgv", () => {
         "[pv0][pv1][pv2][3:v:0]concat=n=4:v=1:a=0[v]",
     );
     assert.equal(filter.includes("apad"), false);
+    assert.equal(
+      filter.includes("afade"),
+      false,
+      "hasAudio=false must not leak the new body_hook afade-out into the video-only filter",
+    );
   });
 
   it("treats input paths as standalone argv tokens (no shell interpolation)", () => {

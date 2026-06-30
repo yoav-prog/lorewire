@@ -48,20 +48,6 @@ export const HOOK_FIRST_INTRO_GAP_SEC = 0.9;
  *  last word finish over the held frame before the fade — without the next line's
  *  caption appearing. Mirrors pipeline/segments.py. */
 export const HOOK_FIRST_TAIL_HOLD_SEC = 0.3;
-/** Audio fade-out applied to the body_hook tail (seconds), right before the
- *  body→intro cut in the hook-first splice. When the TTS runs the cold-open
- *  hook directly into the next sentence (gap=0 case — PR #166's
- *  `compute_hook_tail_hold_ms` correctly returns 0 to prevent bleeding next-
- *  sentence audio into the held frame), the body_hook audio gets cut hard at
- *  the caption boundary and the last word's natural consonant decay is
- *  clipped (audible as a truncated final phoneme — e.g. the "d" of
- *  "destroyed" in `idea_a744e0a033b0` on 2026-06-30). This fade smooths the
- *  cut to silence over the trailing 80 ms so the decay sounds natural without
- *  bleeding the next sentence. Sized for typical hard-consonant release time;
- *  long enough to mask a hard cut, short enough that the word still feels
- *  spoken, not faded. No-op when the body audio is already silence at the
- *  cut (gap > 0 case). Per _plans/2026-06-30-hook-splice-audio-fade.md. */
-export const HOOK_FIRST_AUDIO_TAIL_FADE_SEC = 0.08;
 
 /**
  * Build the ffmpeg argv that concatenates 2+ normalized MP4 inputs into one
@@ -296,21 +282,20 @@ function hookFirstPacedFilter(
       if (hookGapSec > 0) {
         vch.push(`tpad=stop_mode=add:stop_duration=${fmtG(hookGapSec)}`);
       }
-      // Audio fade-out on the body_hook tail. When the TTS ran the hook line
-      // straight into the next sentence (gap=0 case — `tailHoldSec` is 0,
-      // body_hook audio plays from 0 to exactly hookEndSec and gets cut hard),
-      // the last word's natural consonant decay is clipped. This fade smooths
-      // the cut to silence over the trailing HOOK_FIRST_AUDIO_TAIL_FADE_SEC
-      // milliseconds so the decay sounds natural without bleeding the next
-      // sentence's first syllable into the held frame. Clamp the fade duration
-      // to aEnd so a pathologically short hook (< 80 ms) doesn't produce a
-      // negative `afade` start time. No-op when the body audio is already
-      // silence at the cut (gap > 0 case — tailHoldSec span is silence). Per
-      // _plans/2026-06-30-hook-splice-audio-fade.md.
-      const audioFadeDur = Math.min(HOOK_FIRST_AUDIO_TAIL_FADE_SEC, aEnd);
-      if (audioFadeDur > 0) {
+      // Audio fade-out spans the entire held region [hookEndSec, aEnd]. The
+      // body_hook input runs to aEnd, so the audio in that range is the
+      // natural consonant decay of the last hook word PLUS (in the gap=0
+      // case) the first ~tailHoldSec milliseconds of the next sentence. We
+      // fade BOTH so the decay plays at falling volume (natural sound) and
+      // any next-sentence bleed is heavily attenuated (mostly inaudible).
+      // The full-volume hook word still plays cleanly through hookEndSec.
+      // Skipped when tailHoldSec is 0 (no held region to fade); the
+      // dispatcher floors tailHoldSec in render.ts so hook-first renders
+      // always get a held region. Per the 2026-06-30 incident note in
+      // render.ts:MIN_HOOK_AUDIO_TAIL_HOLD_SEC.
+      if (tailHoldSec > 0) {
         ach.push(
-          `afade=t=out:st=${fmtG(aEnd - audioFadeDur)}:d=${fmtG(audioFadeDur)}`,
+          `afade=t=out:st=${fmtG(hookEndSec)}:d=${fmtG(tailHoldSec)}`,
         );
       }
       const apadDur = fadeSec + hookGapSec;
@@ -377,19 +362,30 @@ function buildHookFirstArgv(
   //   physical=[body, intro, body, outro]
   //   hookPhysicalIndex=0, restPhysicalIndex=2
   const paced = fadeSec > 0 || hookGapSec > 0 || introGapSec > 0;
-  // When paced, the hook clip's video freezes at hookEndSec but its audio runs
-  // tailHoldSec longer so the last word finishes; the physical clips split there,
-  // and body_rest resumes from it (the skipped span played as the frozen frame).
-  const split = fmtG(hookEndSec + (paced ? tailHoldSec : 0));
+  // body_hook runs to `bodyHookEndSec` (hookEndSec + tailHoldSec when paced)
+  // so the audio tail-hold region is present in the input. body_rest resumes
+  // at `bodyRestStartSec` which is INDEPENDENT — it always starts at
+  // hookEndSec so the next sentence's first syllable is preserved at full
+  // volume in body_rest after the intro. The body_hook tail and body_rest
+  // start overlap by tailHoldSec of original-body audio: the overlap plays
+  // at fading volume in body_hook (the afade-out, in the paced filter) and
+  // at full volume in body_rest (after the intro). With the brand intro
+  // between the two, the overlap is perceptually two separate events, not a
+  // duplicate. Pre-paced renders (legacy, no fade seams) use a single split
+  // because the hard-cut design has no held region. Per the 2026-06-30
+  // splice fix.
+  const bodyHookEndSec = fmtG(hookEndSec + (paced ? tailHoldSec : 0));
+  const bodyRestStartSec = fmtG(hookEndSec);
   const argv: string[] = ["ffmpeg", "-y"];
-  // Position 0: body_hook (runs to the split point so the audio tail is there).
-  argv.push("-ss", "0", "-t", split, "-i", inputs[bodyIndex]);
+  // Position 0: body_hook (runs through the held tail region).
+  argv.push("-ss", "0", "-t", bodyHookEndSec, "-i", inputs[bodyIndex]);
   // Positions 1..bodyIndex: the pre-body segments (typically just the intro).
   for (let i = 0; i < bodyIndex; i++) {
     argv.push("-i", inputs[i]);
   }
-  // Position bodyIndex + 1: body_rest (resumes after the held audio tail).
-  argv.push("-ss", split, "-i", inputs[bodyIndex]);
+  // Position bodyIndex + 1: body_rest (resumes at hookEndSec — the visual
+  // scene-edge cut — so no next-sentence audio is lost when paced).
+  argv.push("-ss", bodyRestStartSec, "-i", inputs[bodyIndex]);
   // Positions bodyIndex + 2..: the post-body segments (typically the outro).
   for (let i = bodyIndex + 1; i < inputs.length; i++) {
     argv.push("-i", inputs[i]);

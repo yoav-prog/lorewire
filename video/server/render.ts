@@ -53,6 +53,21 @@ const POSTER_LANDSCAPE_COMPOSITION_ID = "PosterStillLandscape";
  *  don't want a single bad row OOM'ing the container. */
 const MAX_SEGMENT_BYTES = 50 * 1024 * 1024;
 
+/** Minimum hook-first audio tail-hold (seconds) the splice ENFORCES on every
+ *  hook-first render regardless of what the dispatcher / pipeline computed.
+ *  Floors the gap-sized value so even when the TTS runs the hook line into
+ *  the next sentence (`hook_tail_hold_ms = 0` on the dispatcher rewrite log),
+ *  the body_hook audio still extends 150 ms past the visual cut so the last
+ *  consonant decays naturally over a fade-out before the intro lands. Sized
+ *  to comfortably cover the natural release of a hard consonant (~80-120 ms
+ *  for 'd', 't', 'k', 'p') plus a few frames of cushion. The body_hook audio
+ *  is faded across this region (in buildConcatArgv) so any bleed of the next
+ *  sentence's first syllable is at decreasing volume — natural-sounding
+ *  decay, mostly-inaudible bleed. Per the 2026-06-30 incident on
+ *  idea_a744e0a033b0 where the splice cut "Her wedding dress was destroyed"
+ *  mid-word despite PR #166's gap-sized hold being correct in isolation. */
+const MIN_HOOK_AUDIO_TAIL_HOLD_SEC = 0.15;
+
 // Bundle the Remotion project once. The first call kicks the actual
 // Webpack build (30-60s); subsequent calls return the cached promise.
 // Module-level cache means parallel requests during cold start all
@@ -797,14 +812,28 @@ async function spliceWithSegments(opts: {
   // Per-video audio tail-hold: how long the hook clip's audio holds past the
   // cut (over a frozen frame) so the last word finishes. The dispatcher sizes
   // it to the real gap before the next spoken word — 0 when the hook runs
-  // straight into the next line, so the hold never bleeds that line's first
-  // word into the pre-intro clip. Absent (legacy rows / rows rendered before
-  // the field) -> the constant fallback, preserving prior behavior.
-  // Per _plans/2026-06-29-hook-first-clean-pacing.md.
-  const tailHoldSec =
+  // straight into the next line. Absent (legacy rows / rows rendered before
+  // the field) -> the constant fallback. Per _plans/2026-06-29-hook-first-
+  // clean-pacing.md.
+  const rawTailHoldSec =
     typeof segments.hookTailHoldSec === "number"
       ? Math.max(0, segments.hookTailHoldSec)
       : HOOK_FIRST_TAIL_HOLD_SEC;
+
+  // Floor the hook-first tail-hold to MIN_HOOK_AUDIO_TAIL_HOLD_SEC so the
+  // last hook word's natural consonant decay can play to silence even when
+  // the dispatcher computed a 0 gap (TTS runs the hook line directly into the
+  // next sentence — the 2026-06-30 incident on idea_a744e0a033b0 where
+  // "ruined"/"destroyed" was clipped mid-word). The body_hook audio is faded
+  // out across the held region (in buildConcatArgv) so the trailing word
+  // decay AND any bleed from the next sentence both play at decreasing volume
+  // — natural-sounding decay, mostly-inaudible bleed. body_rest's -ss is
+  // decoupled from this hold (it still starts at hookEndSec) so the next
+  // sentence's first syllable isn't lost from body_rest after the intro.
+  // Per _plans/2026-06-30-hook-splice-audio-fade.md.
+  const tailHoldSec = hookFirstActive
+    ? Math.max(MIN_HOOK_AUDIO_TAIL_HOLD_SEC, rawTailHoldSec)
+    : rawTailHoldSec;
 
   spliceLog("start", {
     story_id: storyId,
@@ -813,6 +842,7 @@ async function spliceWithSegments(opts: {
     hook_first: hookFirstActive,
     hook_end_sec: hookEndSec,
     tail_hold_sec: hookFirstActive ? tailHoldSec : 0,
+    raw_tail_hold_sec: hookFirstActive ? rawTailHoldSec : 0,
   });
   const splicedStarted = Date.now();
 
