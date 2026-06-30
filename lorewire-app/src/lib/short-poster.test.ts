@@ -776,73 +776,71 @@ describe("ensureShortPoster — readiness verify (propagation race fix)", () => 
     expect(stub.calls[2].url).toBe(result.url);
   });
 
-  it("retries the verify HEAD when the object is briefly invisible at the edge", async () => {
+  it("returns the rendered URL when the verify HEAD reports 4xx (verify is advisory)", async () => {
+    // Per the 2026-06-30 19:40 production findings, the verify HEAD
+    // can fail from our Vercel-egress (Cloudflare bot/firewall on the
+    // R2 custom domain) while the URL is genuinely readable to the
+    // platform's backend. Cloud Run's upload-success is the
+    // authoritative signal; the URL must still be returned.
     const stub = makeFetchStub([
       { ok: false, status: 404 }, // cache HEAD miss
       {
         ok: true,
         status: 200,
         body: {
-          url: "https://media.lorewire.com/story-poster-test-1-short/poster-late.png",
-          hash: "late",
+          url: "https://media.lorewire.com/story-poster-test-1-short/poster-blocked.png",
+          hash: "blocked",
         },
       },
-      { ok: false, status: 404 }, // verify HEAD #1: not yet propagated
-      { ok: false, status: 404 }, // verify HEAD #2: still propagating
-      { ok: true, status: 200 }, // verify HEAD #3: now readable
+      { ok: false, status: 403 }, // verify HEAD: Cloudflare 403 from Vercel egress
     ]);
     const result = await ensureShortPoster(STORY, {
       fetch: stub.fetch,
       settings: makeSettings("1"),
       chat: noopChat.chat,
       pickModel: pickModelStub,
-      // Zero backoffs keep the test fast while still exercising the
-      // retry loop — production sleeps between attempts.
-      verifyBackoffsMs: [0, 0, 0, 0],
+      verifyBackoffsMs: [0],
     });
     expect(result).not.toBeNull();
     if (!result) return;
     expect(result.source).toBe("rendered");
-    expect(result.url).toContain("?v=");
-    expect(stub.calls).toHaveLength(5);
-    // The verify probes the SAME URL the publisher will fetch — so a
-    // 200 here guarantees the publisher's subsequent GET also hits a
-    // warm cache entry on the same key.
+    expect(result.url.endsWith(`?v=${result.hash}`)).toBe(true);
+    expect(stub.calls).toHaveLength(3);
+    expect(stub.calls[2].method).toBe("HEAD");
     expect(stub.calls[2].url).toBe(result.url);
-    expect(stub.calls[3].url).toBe(result.url);
-    expect(stub.calls[4].url).toBe(result.url);
   });
 
-  it("returns null when the verify never sees the object (propagation timeout)", async () => {
+  it("returns the rendered URL when the verify HEAD 404s (race or firewall)", async () => {
+    // 404 here means either R2 propagation hasn't caught up yet (the
+    // platform's later fetch will likely succeed since IG/FB/YT poll
+    // for ~20-30s after we return) or the same Cloudflare quirk as
+    // 403. Either way, we trust Cloud Run.
     const stub = makeFetchStub([
       { ok: false, status: 404 }, // cache HEAD miss
       {
         ok: true,
         status: 200,
         body: {
-          url: "https://media.lorewire.com/story-poster-test-1-short/poster-stuck.png",
-          hash: "stuck",
+          url: "https://media.lorewire.com/story-poster-test-1-short/poster-pending.png",
+          hash: "pending",
         },
       },
-      { ok: false, status: 404 }, // verify HEAD #1
-      { ok: false, status: 404 }, // verify HEAD #2
-      { ok: false, status: 404 }, // verify HEAD #3
-      { ok: false, status: 404 }, // verify HEAD #4 (final budget)
+      { ok: false, status: 404 }, // verify HEAD: not yet visible at the edge
     ]);
     const result = await ensureShortPoster(STORY, {
       fetch: stub.fetch,
       settings: makeSettings("1"),
       chat: noopChat.chat,
       pickModel: pickModelStub,
-      verifyBackoffsMs: [0, 0, 0, 0],
+      verifyBackoffsMs: [0],
     });
-    // Null → publisher falls back to scene-1 instead of a 404-thumbnail
-    // URL the platform would silently drop.
-    expect(result).toBeNull();
-    expect(stub.calls).toHaveLength(6);
+    expect(result).not.toBeNull();
+    if (!result) return;
+    expect(result.source).toBe("rendered");
+    expect(stub.calls).toHaveLength(3);
   });
 
-  it("treats verify network errors as a miss and keeps retrying", async () => {
+  it("returns the rendered URL when the verify HEAD errors out", async () => {
     const stub = makeFetchStub([
       { ok: false, status: 404 }, // cache HEAD miss
       {
@@ -853,18 +851,19 @@ describe("ensureShortPoster — readiness verify (propagation race fix)", () => 
           hash: "net",
         },
       },
-      { throws: new Error("ETIMEDOUT") }, // verify HEAD #1: network blip
-      { ok: true, status: 200 }, // verify HEAD #2: ok
+      { throws: new Error("ETIMEDOUT") }, // verify HEAD: network blip
     ]);
     const result = await ensureShortPoster(STORY, {
       fetch: stub.fetch,
       settings: makeSettings("1"),
       chat: noopChat.chat,
       pickModel: pickModelStub,
-      verifyBackoffsMs: [0, 0, 0, 0],
+      verifyBackoffsMs: [0],
     });
     expect(result).not.toBeNull();
-    expect(stub.calls).toHaveLength(4);
+    if (!result) return;
+    expect(result.source).toBe("rendered");
+    expect(stub.calls).toHaveLength(3);
   });
 
   it("skips the verify entirely when the cache HEAD hits (no race possible)", async () => {
