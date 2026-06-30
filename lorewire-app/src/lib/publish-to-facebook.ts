@@ -322,13 +322,29 @@ async function fetchThumbnailBlob(
   thumbnailUrl: string,
   fetchImpl: FbFetchLike,
 ): Promise<{ blob: Blob; mime: string } | null> {
+  // Every silent-fallback path that returns null logs the reason so an
+  // operator inspecting a `thumb_attached: false` line can tell
+  // network-vs-404-vs-empty-vs-decode apart without re-running the
+  // publish. Per rule 14 — the publisher's silent fall-through to the
+  // url-encoded body was previously the only signal, and it left
+  // "first post missing thumbnail" undiagnosable.
   let resp: FbFetchResponse;
   try {
     resp = await fetchImpl(thumbnailUrl, { method: "GET" });
-  } catch {
+  } catch (e) {
+    log("thumb_fetch_failed", {
+      thumb_url_host: hostOf(thumbnailUrl),
+      reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+    });
     return null;
   }
-  if (!resp.ok) return null;
+  if (!resp.ok) {
+    log("thumb_fetch_failed", {
+      thumb_url_host: hostOf(thumbnailUrl),
+      reason: `HTTP ${resp.status}`,
+    });
+    return null;
+  }
   let bytes: Uint8Array;
   try {
     // The FbFetchResponse contract surfaces .text() / .json() but the
@@ -337,10 +353,20 @@ async function fetchThumbnailBlob(
     const r = resp as unknown as Response;
     const buf = await r.arrayBuffer();
     bytes = new Uint8Array(buf);
-  } catch {
+  } catch (e) {
+    log("thumb_fetch_failed", {
+      thumb_url_host: hostOf(thumbnailUrl),
+      reason: `arrayBuffer: ${e instanceof Error ? e.message : String(e)}`,
+    });
     return null;
   }
-  if (bytes.byteLength === 0) return null;
+  if (bytes.byteLength === 0) {
+    log("thumb_fetch_failed", {
+      thumb_url_host: hostOf(thumbnailUrl),
+      reason: "zero bytes",
+    });
+    return null;
+  }
   // Pull the upstream mime if it's a real image/* value. Scene-1 GCS
   // objects are usually image/png; image/webp is also accepted by FB.
   const r = resp as unknown as Response;
@@ -613,6 +639,13 @@ export async function publishShortToFacebook(
     ]);
     thumbnailUrl =
       poster?.url ?? (await resolveShortThumbnailUrl(args.storyId));
+    log("thumbnail_resolve", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      source: poster ? poster.source : thumbnailUrl ? "scene_1" : "none",
+      hash: poster?.hash ?? null,
+      has_url: thumbnailUrl !== null,
+    });
   }
 
   const started = now.valueOf();
@@ -709,6 +742,13 @@ export async function attemptFacebookPublishForRow(
     ]);
     thumbnailUrl =
       poster?.url ?? (await resolveShortThumbnailUrl(row.story_id));
+    log("thumbnail_resolve", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      source: poster ? poster.source : thumbnailUrl ? "scene_1" : "none",
+      hash: poster?.hash ?? null,
+      has_url: thumbnailUrl !== null,
+    });
   }
   const started = Date.now();
   const result = await postVideo(

@@ -62,6 +62,21 @@ const HEAD_TIMEOUT_MS = 2000;
 const RENDER_TIMEOUT_MS = 8000;
 const LLM_TIMEOUT_MS = 30_000;
 
+/** Post-render readiness verify budget. After Cloud Run uploads the
+ *  PNG and returns, the freshly-PUT object can take a beat to be
+ *  reliably readable through the Cloudflare-fronted MEDIA_PUBLIC_BASE
+ *  (eventual visibility through the custom-domain binding, edge-cache
+ *  miss timing). The publishers (FB multipart, YT thumbnails.set, IG
+ *  cover_url) all silently fall back when the URL 404s, which produces
+ *  the "first post has no thumbnail, second post does" symptom because
+ *  the second publish hits HEAD cache and never re-races. We verify
+ *  before handing the URL to the publisher: HEAD with a few short
+ *  retries against the versioned URL (?v=<hash>), succeed on the first
+ *  200, log + return null on timeout so the publisher's scene-1
+ *  fallback kicks in instead of a broken cover. */
+const VERIFY_TIMEOUT_MS = 1500;
+const VERIFY_BACKOFFS_MS = [0, 400, 1200, 2500];
+
 /** Setting key for the kill switch (default ON). When OFF, this
  *  function returns null for every call without doing any I/O —
  *  publishers fall back to the PR #137 scene-1-as-cover path. */
@@ -127,6 +142,11 @@ export interface EnsureShortPosterDeps {
   chat?: ChatCompletionFn;
   /** Test override for the model picker. */
   pickModel?: SelectedModelFn;
+  /** Test override for the post-render readiness verify backoffs (ms
+   *  before each HEAD attempt). Production uses
+   *  `VERIFY_BACKOFFS_MS`; tests pass an all-zeros array so the suite
+   *  doesn't actually sleep on retry coverage. */
+  verifyBackoffsMs?: readonly number[];
 }
 
 /** Surface used by the dispatcher's existing log channel so failures
@@ -488,13 +508,24 @@ export async function ensureShortPoster(
   }
 
   const hash = computePosterHash(inputs.scene_1_url, text);
-  const url = posterUrlForKey(storyId, hash);
-  if (!url) {
+  const baseUrl = posterUrlForKey(storyId, hash);
+  if (!baseUrl) {
     log("skipped", { story_id: storyId, reason: "no_media_base" });
     return null;
   }
+  // The URL we hand to publishers carries `?v=<hash>` for two reasons:
+  // (a) on re-publish the Twitter/IG/FB share-card crawlers re-fetch
+  //     a fresh URL instead of a stale cached one (mirrors the OG path
+  //     at ogPosterUrlForKey + versionedUrl);
+  // (b) each unique URL is a fresh CDN cache key, so a brief negative-
+  //     cache 404 from a pre-render HEAD can't poison the post-render
+  //     verify or the publisher's subsequent GET.
+  const url = versionedUrl(baseUrl, hash);
 
-  // 1) Cache HEAD with a short budget.
+  // 1) Cache HEAD with a short budget. Probe the versioned URL so
+  //    both the cache check and the publisher fetch hit the same
+  //    cache key — important once the object exists, since we want
+  //    every retry on the same story to land on a warm cache entry.
   try {
     const head = await fetchImpl(url, {
       method: "HEAD",
@@ -604,12 +635,81 @@ export async function ensureShortPoster(
   // whether a slow publish was the LLM or the render. (Both are
   // contained in the elapsed_ms above, but split fields help triage.)
   void LLM_TIMEOUT_MS; // placeholder reference — used in future LLM streaming.
+
+  // 3) Readiness verify. Cloud Run has confirmed the PUT to R2/GCS, but
+  //    the publishers will fetch the URL through MEDIA_PUBLIC_BASE
+  //    (Cloudflare custom domain), and a brand-new object isn't always
+  //    immediately visible there. Without this gate, FB's silent thumb
+  //    fallback / IG's silent thumb_offset=0 fallback / YT's
+  //    thumbnails.set 404 strip the cover on the first publish and the
+  //    next publish (HEAD cache hit, no race) restores it. We poll the
+  //    versioned URL until it's readable, then hand it off.
+  const verified = await verifyPosterReadable(url, fetchImpl, {
+    storyId,
+    hash,
+    backoffsMs: deps.verifyBackoffsMs ?? VERIFY_BACKOFFS_MS,
+  });
+  if (!verified) {
+    log("propagation_timeout", {
+      story_id: storyId,
+      hash,
+      elapsed_ms: Date.now() - t0,
+      render_elapsed_ms: Date.now() - tRender,
+    });
+    return null;
+  }
+
   return {
-    url: data.url,
+    url,
     alt: buildAlt(text),
     hash,
     source: "rendered",
   };
+}
+
+/** HEAD the freshly-rendered URL until it returns 200 or the retry
+ *  budget is exhausted. Each attempt is a fresh HEAD with its own
+ *  timeout so a stuck connection on one edge doesn't burn the whole
+ *  budget. Returns true on first success, false after all backoffs. */
+async function verifyPosterReadable(
+  url: string,
+  fetchImpl: PosterFetchLike,
+  ctx: { storyId: string; hash: string; backoffsMs: readonly number[] },
+): Promise<boolean> {
+  for (let attempt = 0; attempt < ctx.backoffsMs.length; attempt++) {
+    const delay = ctx.backoffsMs[attempt];
+    if (delay > 0) {
+      await new Promise((r) => setTimeout(r, delay));
+    }
+    try {
+      const resp = await fetchImpl(url, {
+        method: "HEAD",
+        signal: timeoutSignal(VERIFY_TIMEOUT_MS),
+      });
+      if (resp.ok) {
+        log("verify_ok", {
+          story_id: ctx.storyId,
+          hash: ctx.hash,
+          attempt: attempt + 1,
+        });
+        return true;
+      }
+      log("verify_miss", {
+        story_id: ctx.storyId,
+        hash: ctx.hash,
+        attempt: attempt + 1,
+        http_status: resp.status,
+      });
+    } catch (e) {
+      log("verify_error", {
+        story_id: ctx.storyId,
+        hash: ctx.hash,
+        attempt: attempt + 1,
+        reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+      });
+    }
+  }
+  return false;
 }
 
 // ─── Phase 3: OG / Twitter landscape poster ───────────────────────────────────
