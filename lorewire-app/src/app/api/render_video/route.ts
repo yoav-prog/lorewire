@@ -318,11 +318,14 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
   const propsRewrote = rewriteStoredMediaUrlsDeep(inputProps);
   // Segments are deliberately NOT rewritten — see the mirror comment on
-  // render_short/route.ts. Cloud Run downloads them via the authenticated
-  // GCS SDK so public-read state is irrelevant; rewriting them to
-  // `media.lorewire.com/<key>` makes `parseGcsSegmentUrl` return null and
-  // `spliceWithSegments` silently skip the splice, dropping the intro and
-  // outro from the final cut.
+  // render_short/route.ts. Cloud Run's splice path (parseSegmentUrl +
+  // downloadSegment in video/server/render.ts) accepts both the legacy
+  // GCS URL shape and the post-cutover `MEDIA_PUBLIC_BASE/<key>.mp4`
+  // shape natively, branching to the GCS SDK or SigV4-signed R2 fetch
+  // per row. Rewriting here would only add complexity. History: pre-fix
+  // (until 2026-06-30) the parser only matched legacy GCS, and a
+  // consistency-rewrite to `media.lorewire.com/<key>` caused every
+  // parse to fail and the splice to skip silently.
   namespacedLog("rewrite", {
     render_id: claimed.id,
     props_rewrote: propsRewrote,

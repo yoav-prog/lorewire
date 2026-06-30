@@ -32,8 +32,11 @@ import {
   HOOK_FIRST_TAIL_HOLD_SEC,
 } from "./ffmpeg.js";
 import {
+  getR2ObjectToFile,
   isR2MediaActive,
   mediaBucket,
+  mediaPublicBase,
+  parseR2SegmentUrl,
   publicMediaUrl,
   putR2Object,
 } from "./r2.js";
@@ -565,14 +568,22 @@ export async function renderPosterAndUploadStory(
 
 // ─── Phase 3: intro/outro splice ─────────────────────────────────────────────
 //
-// _plans/2026-06-15-cloud-run-intro-outro-splice.md.
+// _plans/2026-06-15-cloud-run-intro-outro-splice.md (original GCS-only design),
+// extended for R2 by the GCS→R2 media migration: segment rows now carry either
+// the legacy `https://storage.googleapis.com/<bucket>/<key>.mp4` URL (segments
+// uploaded pre-cutover) OR the post-cutover `<MEDIA_PUBLIC_BASE>/<key>.mp4`
+// shape (anything uploaded once `pipeline/gcs.upload` started routing through
+// `_r2_upload`). The unified parser below recognises both, and the download
+// function branches by backend (GCS SDK vs. authenticated R2 fetch) so the
+// splice keeps working through and after the cutover without rewriting any
+// stored URLs.
 //
 // The dispatcher (Vercel cron) resolves which intro/outro to use and passes
-// the public GCS URLs in the /render request body. Here we download each
-// to /tmp, run one ffmpeg concat-filter pass, and replace the body MP4 at
-// `bodyPath` with the spliced output. The caller then uploads `bodyPath`
-// unchanged, so every existing path (URL shape, GCS key, cleanup) carries
-// over without modification.
+// each segment's stored URL in the /render request body. Here we download
+// each to /tmp, run one ffmpeg concat-filter pass, and replace the body MP4
+// at `bodyPath` with the spliced output. The caller then uploads `bodyPath`
+// unchanged, so every existing path (URL shape, key, cleanup) carries over
+// without modification.
 
 function spliceLog(event: string, fields: Record<string, unknown>): void {
   console.info(`[cloud-run splice ${event}]`, JSON.stringify(fields));
@@ -594,32 +605,96 @@ export function parseGcsSegmentUrl(
   return m[2];
 }
 
+/** Tagged reference to a resolved segment object. The kind selects which
+ *  backend `downloadSegment` will use; the bucket and key are what that
+ *  backend's API expects. */
+export interface ResolvedSegmentRef {
+  kind: "gcs" | "r2";
+  bucket: string;
+  key: string;
+}
+
+/** Inputs needed to walk both legacy GCS URLs and post-cutover R2 URLs in
+ *  one pass. Wired by the splice caller (which already knows GCS_BUCKET);
+ *  the R2 fields are null when R2 isn't the active media target — in that
+ *  state the splice should never see an R2 URL in the first place. */
+export interface ParseSegmentOpts {
+  gcsBucket: string;
+  r2PublicBase: string | null;
+  r2Bucket: string | null;
+}
+
+/** Try the GCS shape first (cheaper regex, the historical default), then
+ *  fall back to the R2 public-delivery shape if R2 inputs are configured.
+ *  Returns null when neither matches — the caller logs `invalid-*-url` and
+ *  skips the splice so a misconfigured row fails closed rather than
+ *  silently routing through an unauthenticated fetch. */
+export function parseSegmentUrl(
+  url: string,
+  opts: ParseSegmentOpts,
+): ResolvedSegmentRef | null {
+  const gcsKey = parseGcsSegmentUrl(url, opts.gcsBucket);
+  if (gcsKey) return { kind: "gcs", bucket: opts.gcsBucket, key: gcsKey };
+  if (opts.r2PublicBase && opts.r2Bucket) {
+    const r2Key = parseR2SegmentUrl(url, opts.r2PublicBase);
+    if (r2Key) return { kind: "r2", bucket: opts.r2Bucket, key: r2Key };
+  }
+  return null;
+}
+
 async function downloadSegment(
-  storage: Storage,
-  bucket: string,
-  key: string,
+  ref: ResolvedSegmentRef,
   destination: string,
   storyId: string,
   kind: "intro" | "outro",
+  storage: Storage,
 ): Promise<void> {
-  const file = storage.bucket(bucket).file(key);
-  const [meta] = await file.getMetadata();
-  const sizeRaw = meta.size;
-  const sizeBytes =
-    typeof sizeRaw === "string" ? parseInt(sizeRaw, 10) : sizeRaw ?? 0;
-  if (sizeBytes > MAX_SEGMENT_BYTES) {
-    throw new Error(
-      `segment ${key} is ${sizeBytes} bytes, exceeds ${MAX_SEGMENT_BYTES} cap`,
-    );
+  if (ref.kind === "gcs") {
+    const file = storage.bucket(ref.bucket).file(ref.key);
+    const [meta] = await file.getMetadata();
+    const sizeRaw = meta.size;
+    const sizeBytes =
+      typeof sizeRaw === "string" ? parseInt(sizeRaw, 10) : sizeRaw ?? 0;
+    if (sizeBytes > MAX_SEGMENT_BYTES) {
+      throw new Error(
+        `segment ${ref.key} is ${sizeBytes} bytes, exceeds ${MAX_SEGMENT_BYTES} cap`,
+      );
+    }
+    spliceLog("download", {
+      story_id: storyId,
+      kind,
+      backend: "gcs",
+      bucket: ref.bucket,
+      key: ref.key,
+      bytes: sizeBytes,
+    });
+    await file.download({ destination });
+    return;
   }
+  // R2: authenticated SigV4 GET via aws4fetch. Size cap is enforced both
+  // via HEAD's content-length (pre-stream) and a mid-stream byte counter
+  // inside getR2ObjectToFile. We log the intent + cap up front (no size
+  // yet) and the actual bytes after — symmetric to the GCS branch where
+  // metadata gives us the size before the body download.
   spliceLog("download", {
     story_id: storyId,
     kind,
-    bucket,
-    key,
-    bytes: sizeBytes,
+    backend: "r2",
+    bucket: ref.bucket,
+    key: ref.key,
+    bytes_cap: MAX_SEGMENT_BYTES,
   });
-  await file.download({ destination });
+  const { bytes } = await getR2ObjectToFile(ref.bucket, ref.key, destination, {
+    maxBytes: MAX_SEGMENT_BYTES,
+  });
+  spliceLog("download_done", {
+    story_id: storyId,
+    kind,
+    backend: "r2",
+    bucket: ref.bucket,
+    key: ref.key,
+    bytes,
+  });
 }
 
 function runFfmpeg(argv: string[], storyId: string): Promise<void> {
@@ -670,27 +745,40 @@ async function spliceWithSegments(opts: {
     return;
   }
 
-  // Validate URLs early — fail closed with a clear log so an admin can
-  // see WHICH URL the row pointed at, without trying to download it.
-  const introKey = hasIntro
-    ? parseGcsSegmentUrl(segments.intro as string, gcsBucket)
+  // Validate URLs early — fail closed with a clear log so an admin can see
+  // WHICH URL the row pointed at, without trying to download it. Walks both
+  // the legacy GCS shape and the post-cutover R2 shape so segments uploaded
+  // before AND after the GCS→R2 migration both resolve. R2 fields are wired
+  // through only when R2 is the active media target; otherwise the parser
+  // refuses R2 URLs and the splice fails closed, matching pre-cutover
+  // behavior.
+  const r2Active = isR2MediaActive();
+  const parseOpts: ParseSegmentOpts = {
+    gcsBucket,
+    r2PublicBase: r2Active ? mediaPublicBase() : null,
+    r2Bucket: r2Active ? mediaBucket() : null,
+  };
+  const introRef = hasIntro
+    ? parseSegmentUrl(segments.intro as string, parseOpts)
     : null;
-  const outroKey = hasOutro
-    ? parseGcsSegmentUrl(segments.outro as string, gcsBucket)
+  const outroRef = hasOutro
+    ? parseSegmentUrl(segments.outro as string, parseOpts)
     : null;
-  if (hasIntro && !introKey) {
+  if (hasIntro && !introRef) {
     spliceLog("skipped", {
       story_id: storyId,
       reason: "invalid-intro-url",
       url: segments.intro,
+      r2_active: r2Active,
     });
     return;
   }
-  if (hasOutro && !outroKey) {
+  if (hasOutro && !outroRef) {
     spliceLog("skipped", {
       story_id: storyId,
       reason: "invalid-outro-url",
       url: segments.outro,
+      r2_active: r2Active,
     });
     return;
   }
@@ -732,22 +820,23 @@ async function spliceWithSegments(opts: {
   // retry on the same container can't clobber an in-flight splice.
   const stamp = Date.now();
   const sanitized = sanitizeForFs(storyId);
-  const introPath = introKey
+  const introPath = introRef
     ? path.join("/tmp", `${sanitized}-intro-${stamp}.mp4`)
     : null;
-  const outroPath = outroKey
+  const outroPath = outroRef
     ? path.join("/tmp", `${sanitized}-outro-${stamp}.mp4`)
     : null;
   const splicedPath = path.join("/tmp", `${sanitized}-spliced-${stamp}.mp4`);
 
-  // Parallel downloads — both segments are small (~5 MB) and the GCS
-  // client multiplexes well.
+  // Parallel downloads — both segments are small (~5 MB) and both backend
+  // clients (GCS SDK, aws4fetch) multiplex fine. `downloadSegment` branches
+  // on `ref.kind` so the splice path stays backend-agnostic.
   await Promise.all([
-    introKey && introPath
-      ? downloadSegment(storage, gcsBucket, introKey, introPath, storyId, "intro")
+    introRef && introPath
+      ? downloadSegment(introRef, introPath, storyId, "intro", storage)
       : Promise.resolve(),
-    outroKey && outroPath
-      ? downloadSegment(storage, gcsBucket, outroKey, outroPath, storyId, "outro")
+    outroRef && outroPath
+      ? downloadSegment(outroRef, outroPath, storyId, "outro", storage)
       : Promise.resolve(),
   ]);
 

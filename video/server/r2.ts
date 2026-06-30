@@ -12,6 +12,7 @@
 // rewrite resolves to a real object.
 
 import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 import { AwsClient } from "aws4fetch";
 
 function endpoint(): string {
@@ -135,6 +136,122 @@ export async function putR2Object(
 /** Build the public delivery URL for an R2 object key: <MEDIA_PUBLIC_BASE>/<key>. */
 export function publicMediaUrl(key: string): string {
   return `${mediaPublicBase()}/${key}`;
+}
+
+/** Parse a public R2 delivery URL of the shape `<publicBase>/<key>.mp4` and
+ *  return the object key. Returns null for any URL that isn't `https://`,
+ *  doesn't start with the configured public base, carries a query/fragment,
+ *  contains a path-traversal segment, or doesn't end in `.mp4`.
+ *
+ *  Defense-in-depth gate: the GCS parser checks the bucket because GCS public
+ *  URLs embed the bucket. R2 public-delivery URLs are CDN-fronted on a single
+ *  host (MEDIA_PUBLIC_BASE), so the equivalent gate is "URL prefix must match
+ *  the configured public base." A misconfigured row pointing at a foreign host
+ *  or a different R2 bucket fails the prefix check the same way a foreign GCS
+ *  bucket fails the bucket check.
+ *
+ *  `publicBase` is the configured MEDIA_PUBLIC_BASE (passed in so this stays
+ *  pure for tests; production callers pass `mediaPublicBase()`). Trailing
+ *  slashes on the base are tolerated. */
+export function parseR2SegmentUrl(
+  url: string,
+  publicBase: string,
+): string | null {
+  const base = publicBase.replace(/\/+$/, "");
+  if (!base) return null;
+  if (!/^https:\/\//i.test(url)) return null;
+  if (!url.startsWith(`${base}/`)) return null;
+  const rest = url.slice(base.length + 1);
+  if (rest.length === 0) return null;
+  if (rest.includes("?") || rest.includes("#")) return null;
+  if (!/\.mp4$/i.test(rest)) return null;
+  for (const part of rest.split("/")) {
+    if (part === "" || part === "." || part === "..") return null;
+  }
+  return rest;
+}
+
+export interface GetR2ObjectToFileOpts {
+  /** Hard ceiling on bytes downloaded. Enforced via HEAD's content-length
+   *  before any body is streamed, AND via a mid-stream byte counter so a
+   *  server that omits / lies about content-length still fails closed. */
+  maxBytes: number;
+  /** Wall-clock timeout for the HEAD + GET pair. Defaults to 120 s — same
+   *  budget as `putR2Object`. */
+  timeoutMs?: number;
+}
+
+/** GET an R2 object via authenticated SigV4 fetch and stream it to disk.
+ *  Mirrors `putR2Object`'s trust model: credentials from env, talks straight
+ *  to the R2 origin (no CDN dependency), so the splice path keeps working
+ *  even if MEDIA_PUBLIC_BASE is fronted by a CDN that's down or hasn't
+ *  propagated a freshly-uploaded segment yet. Returns the number of bytes
+ *  actually written. Throws on any non-2xx response, an over-cap object,
+ *  a missing body, or an mid-stream cap trip. */
+export async function getR2ObjectToFile(
+  bucket: string,
+  key: string,
+  destination: string,
+  opts: GetR2ObjectToFileOpts,
+): Promise<{ bytes: number }> {
+  const url = objectUrl(bucket, key);
+  const timeoutMs = opts.timeoutMs ?? 120_000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // HEAD first: if Content-Length is reported and exceeds the cap, fail
+    // closed without streaming a single byte. R2 returns Content-Length on
+    // HEAD for every object — but treat a missing/non-numeric value as
+    // "unknown size, rely on the streaming counter" rather than failing.
+    const head = await client().fetch(url, {
+      method: "HEAD",
+      signal: controller.signal,
+    });
+    if (!head.ok) {
+      throw new Error(
+        `R2 HEAD ${bucket}/${key} returned HTTP ${head.status}`,
+      );
+    }
+    const declaredRaw = head.headers.get("content-length");
+    const declared = declaredRaw === null ? NaN : Number(declaredRaw);
+    if (Number.isFinite(declared) && declared > opts.maxBytes) {
+      throw new Error(
+        `R2 object ${bucket}/${key} is ${declared} bytes, exceeds ${opts.maxBytes} cap`,
+      );
+    }
+
+    const resp = await client().fetch(url, { signal: controller.signal });
+    if (!resp.ok) {
+      throw new Error(
+        `R2 GET ${bucket}/${key} returned HTTP ${resp.status}`,
+      );
+    }
+    if (!resp.body) {
+      throw new Error(`R2 GET ${bucket}/${key} returned no body`);
+    }
+
+    let written = 0;
+    const handle = await fs.open(destination, "w");
+    try {
+      const reader = (resp.body as ReadableStream<Uint8Array>).getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        written += value.byteLength;
+        if (written > opts.maxBytes) {
+          throw new Error(
+            `R2 download of ${bucket}/${key} exceeded ${opts.maxBytes} byte cap mid-stream`,
+          );
+        }
+        await handle.write(value);
+      }
+    } finally {
+      await handle.close();
+    }
+    return { bytes: written };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Test-only reset of the cached client. Production callers never need this.

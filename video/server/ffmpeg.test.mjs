@@ -20,7 +20,7 @@ import {
   TARGET_FPS,
   buildConcatArgv,
 } from "../dist/server/ffmpeg.js";
-import { parseGcsSegmentUrl } from "../dist/server/render.js";
+import { parseGcsSegmentUrl, parseSegmentUrl } from "../dist/server/render.js";
 
 describe("buildConcatArgv", () => {
   it("throws on fewer than 2 inputs (single-clip splice is meaningless)", () => {
@@ -445,5 +445,67 @@ describe("parseGcsSegmentUrl", () => {
   it("returns null for empty or junk input", () => {
     assert.equal(parseGcsSegmentUrl("", BUCKET), null);
     assert.equal(parseGcsSegmentUrl("not a url", BUCKET), null);
+  });
+});
+
+describe("parseSegmentUrl (GCS + R2 unified)", () => {
+  const GCS_BUCKET = "lorewire-media";
+  const R2_BUCKET = "lorewire-media-r2";
+  const R2_BASE = "https://media.lorewire.com";
+  const FULL_OPTS = {
+    gcsBucket: GCS_BUCKET,
+    r2PublicBase: R2_BASE,
+    r2Bucket: R2_BUCKET,
+  };
+
+  it("tags a legacy GCS URL as kind:gcs with the GCS bucket", () => {
+    const ref = parseSegmentUrl(
+      `https://storage.googleapis.com/${GCS_BUCKET}/segments/abc.mp4`,
+      FULL_OPTS,
+    );
+    assert.deepEqual(ref, {
+      kind: "gcs",
+      bucket: GCS_BUCKET,
+      key: "segments/abc.mp4",
+    });
+  });
+
+  it("tags a post-cutover R2 URL as kind:r2 with the R2 bucket", () => {
+    const ref = parseSegmentUrl(
+      `${R2_BASE}/segments/intro-reel-2.norm.mp4`,
+      FULL_OPTS,
+    );
+    assert.deepEqual(ref, {
+      kind: "r2",
+      bucket: R2_BUCKET,
+      key: "segments/intro-reel-2.norm.mp4",
+    });
+  });
+
+  it("returns null when neither shape matches (foreign host fails closed)", () => {
+    assert.equal(
+      parseSegmentUrl(
+        "https://attacker.example/segments/intro.mp4",
+        FULL_OPTS,
+      ),
+      null,
+    );
+  });
+
+  it("refuses an R2 URL when r2PublicBase is null (pre-cutover safety)", () => {
+    const ref = parseSegmentUrl(`${R2_BASE}/segments/intro.mp4`, {
+      gcsBucket: GCS_BUCKET,
+      r2PublicBase: null,
+      r2Bucket: null,
+    });
+    assert.equal(ref, null);
+  });
+
+  it("refuses a GCS URL pointing at a foreign bucket even when R2 is configured", () => {
+    const ref = parseSegmentUrl(
+      "https://storage.googleapis.com/other-bucket/segments/x.mp4",
+      FULL_OPTS,
+    );
+    assert.equal(ref, null);
   });
 });
