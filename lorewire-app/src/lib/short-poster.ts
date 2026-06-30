@@ -49,8 +49,15 @@ import { rewriteStoredMediaUrl } from "@/lib/media-url";
  *  layout). The hash incorporates this constant so a design-token
  *  change automatically invalidates every cached poster on the next
  *  publish — no backfill script needed. Per the council's POSTER_VERSION
- *  fix in the revised _plans/2026-06-28-phase-2-social-poster-render.md. */
-const POSTER_VERSION = "v1";
+ *  fix in the revised _plans/2026-06-28-phase-2-social-poster-render.md.
+ *
+ *  v2 (2026-06-30): editorial portrait redesign — warm-dark header at
+ *  top 28% with gold frame + Playfair Display serif + Caveat Brush
+ *  red emphasis word, scene image at bottom 72%. Per
+ *  _plans/2026-06-30-editorial-poster-redesign.md. Landscape
+ *  composition is unchanged but the same key includes this version
+ *  so all cached rows re-render on the next publish. */
+const POSTER_VERSION = "v2";
 
 /** Caps so a malformed input (or a runaway LLM line) can't blow the
  *  cache-key or the Cloud Run request body. Mirrored on the server
@@ -321,22 +328,34 @@ export async function generatePosterText(
 
   const system =
     "You write social-media cover tile lines for Lorewire shorts. " +
-    "Each line goes on a STATIC poster image a stranger sees in the IG / " +
-    "FB / YouTube grid BEFORE the video plays. Goal: stop the scroll by " +
-    "naming the dramatic moment CLEARLY so the stranger instantly " +
-    "understands the stakes and clicks.\n\n" +
-    "RULES (every line must obey):\n" +
-    "  - Length: 8-14 words. One or two short sentences. Renders in " +
-    "ALL CAPS — avoid idioms that lose meaning in caps.\n" +
-    "  - Name the dramatic event SPECIFICALLY (who, what happened). " +
-    "Do NOT spoil the resolution (keep curiosity intact).\n" +
-    "  - BAD (abstract metaphor): \"Everything changed.\" \"Nothing was " +
-    "the same.\"\n" +
-    "  - GOOD (concrete event): \"Her wedding dress was destroyed the " +
-    "morning of the ceremony.\" \"She refused. He emptied their joint " +
-    "account by morning.\"\n" +
-    "  - No all-caps shock words inside the line, no profanity, no PII.\n" +
-    "  - Defendable against the source story — never invent facts.\n\n" +
+    "Each line goes on a STATIC editorial poster a stranger sees in the IG / " +
+    "FB / YouTube / TikTok grid BEFORE the video plays. The poster has TWO " +
+    "typographic registers: a heavy serif (Playfair Display 900) for the " +
+    "setup, and a single LAST WORD rendered in big red brush script for the " +
+    "emotional payoff. Goal: stop the scroll, make the stranger feel " +
+    "something in under a second, and click to find out what happened.\n\n" +
+    "RULES (every line must obey, no exceptions):\n" +
+    "  - Length: 4-8 words. One short declarative sentence. Title Case " +
+    "or sentence case — do NOT shout in ALL CAPS.\n" +
+    "  - The FINAL word is the emotional payoff and renders as a big red " +
+    "brushstroke. It MUST be a concrete, punchy noun, verb, or short " +
+    "adjective that delivers the gut-punch by itself. Strong: destroyed, " +
+    "vanished, gone, stolen, drained, broken, missing, ruined, snapped, " +
+    "betrayed, lost, finished, dead, exposed. Weak: \"forever\", " +
+    "\"overnight\", \"again\", \"too\" — adverbs and time-words don't punch.\n" +
+    "  - The words BEFORE the final word are the concrete setup: who and " +
+    "what (the wedding dress, the joint account, the office gift fund, " +
+    "her mother's letter). Name a real specific thing from the story.\n" +
+    "  - Stay readable, understandable, eye-catching, emotion-triggering. " +
+    "Every word earns its place — no filler, no throat-clearing.\n" +
+    "  - BAD (abstract / weak ending): \"Everything changed forever.\" " +
+    "\"Nothing was the same again.\" \"And then it was over.\"\n" +
+    "  - GOOD (concrete setup + punch payload): \"Her wedding dress was " +
+    "destroyed.\" \"He drained their joint account.\" \"The gift fund " +
+    "had vanished.\" \"Her mother's letter was a lie.\"\n" +
+    "  - Do NOT spoil the resolution (keep curiosity intact).\n" +
+    "  - No profanity, no PII, defendable against the source story — " +
+    "never invent facts.\n\n" +
     "Output ONLY the line itself. No prose before or after, no quotes, " +
     "no markdown, no JSON.";
 
@@ -383,10 +402,12 @@ export async function generatePosterText(
 function guardText(text: string): string | null {
   if (text.length > HOOK_MAX_CHARS) return "text_too_long";
   if (!SUPPORTED_GLYPH_RE.test(text)) return "glyph_unsupported";
-  // No all-caps guard: PosterStill / PosterStillLandscape uppercase the text
-  // for display (`text.trim().toUpperCase()`), so all-caps and mixed-case
-  // inputs render identically. Rejecting all-caps only blocked LoreWire's
-  // house-style (all-caps) hooks for zero visual change.
+  // No all-caps guard: the portrait PosterStill renders in mixed case
+  // (Playfair Display 900 + Caveat Brush), the landscape PosterStillLandscape
+  // still uppercases for display. Rejecting all-caps would block legacy
+  // cached LLM lines without visual benefit on either composition (the
+  // landscape uppercases anyway; the portrait reads all-caps as a
+  // deliberate house-style choice).
   const lower = text.toLowerCase();
   for (const word of PROFANITY) {
     if (new RegExp(`\\b${word}\\b`).test(lower)) return "profanity";
