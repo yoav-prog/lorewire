@@ -16,6 +16,7 @@ import {
   isR2Configured,
   isR2MediaActive,
   mediaBucket,
+  parseR2SegmentUrl,
   publicMediaUrl,
 } from "../dist/server/r2.js";
 
@@ -150,6 +151,110 @@ describe("mediaBucket / publicMediaUrl", () => {
     assert.throws(
       () => publicMediaUrl("envelope-short/video.mp4"),
       /MEDIA_PUBLIC_BASE is not set/,
+    );
+  });
+});
+
+describe("parseR2SegmentUrl", () => {
+  const BASE = "https://media.lorewire.com";
+
+  it("returns the key for a well-formed URL under the configured base", () => {
+    const key = parseR2SegmentUrl(
+      `${BASE}/segments/intro-reel-2.norm.mp4`,
+      BASE,
+    );
+    assert.equal(key, "segments/intro-reel-2.norm.mp4");
+  });
+
+  it("tolerates a trailing slash on the configured base", () => {
+    const key = parseR2SegmentUrl(
+      `${BASE}/segments/intro-reel-2.norm.mp4`,
+      `${BASE}/`,
+    );
+    assert.equal(key, "segments/intro-reel-2.norm.mp4");
+  });
+
+  it("returns null when the URL doesn't start with the configured base (foreign host fails closed)", () => {
+    assert.equal(
+      parseR2SegmentUrl(
+        "https://attacker.example/segments/intro-reel-2.norm.mp4",
+        BASE,
+      ),
+      null,
+    );
+  });
+
+  it("returns null when the URL host matches base but the path is a different prefix", () => {
+    // `${BASE}-evil/...` shares the host root but isn't actually under BASE.
+    assert.equal(
+      parseR2SegmentUrl(
+        "https://media.lorewire.com.evil/segments/x.mp4",
+        BASE,
+      ),
+      null,
+    );
+  });
+
+  it("returns null for http:// (insists on https)", () => {
+    assert.equal(
+      parseR2SegmentUrl(
+        "http://media.lorewire.com/segments/intro.mp4",
+        "http://media.lorewire.com",
+      ),
+      null,
+    );
+  });
+
+  it("returns null when the path doesn't end in .mp4", () => {
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments/intro.txt`, BASE),
+      null,
+    );
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments/intro.mp4.bak`, BASE),
+      null,
+    );
+  });
+
+  it("returns null when the URL carries a query string or fragment", () => {
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments/intro.mp4?token=abc`, BASE),
+      null,
+    );
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments/intro.mp4#frag`, BASE),
+      null,
+    );
+  });
+
+  it("returns null on a path-traversal segment", () => {
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments/../etc/passwd.mp4`, BASE),
+      null,
+    );
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments/./intro.mp4`, BASE),
+      null,
+    );
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments//intro.mp4`, BASE),
+      null,
+    );
+  });
+
+  it("returns null when the base equals the URL with nothing after the slash", () => {
+    assert.equal(parseR2SegmentUrl(`${BASE}/`, BASE), null);
+  });
+
+  it("returns null for empty or junk input", () => {
+    assert.equal(parseR2SegmentUrl("", BASE), null);
+    assert.equal(parseR2SegmentUrl("not a url", BASE), null);
+  });
+
+  it("returns null when the configured base is empty (fail closed on misconfig)", () => {
+    assert.equal(
+      parseR2SegmentUrl(`${BASE}/segments/intro.mp4`, ""),
+      null,
     );
   });
 });

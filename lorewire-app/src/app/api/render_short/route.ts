@@ -411,20 +411,19 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // captions, prose, and external assets pass through unchanged. Plan:
   // _plans/2026-06-23-pipeline-outbound-url-rewriter.md.
   const propsRewrote = rewriteStoredMediaUrlsDeep(inputProps);
-  // Segments are deliberately NOT rewritten. Cloud Run downloads them via
-  // the authenticated GCS SDK (`video/server/render.ts:downloadSegment`,
-  // through `storage.bucket(bucket).file(key)`), so public-read state
-  // does not matter. Worse: `parseGcsSegmentUrl` on the Cloud Run side
-  // only accepts the legacy `storage.googleapis.com/<bucket>/<key>.mp4`
-  // shape and returns null for any other host. Rewriting to
-  // `media.lorewire.com/<key>` made every parse return null, which made
-  // `spliceWithSegments` log `reason: invalid-intro-url` and skip the
-  // splice entirely — that is the 2026-06-23 "intro and outro missing
-  // even after manual override" bug, traced to the consistency-rewrite
-  // added in 3855d5f. When the segments uploader eventually moves to R2,
-  // the durable fix is to extend `parseGcsSegmentUrl` to also recognise
-  // `MEDIA_PUBLIC_BASE/<key>` — until then, keep the legacy GCS shape
-  // intact end-to-end here.
+  // Segments are deliberately NOT rewritten. Cloud Run's splice path
+  // (`video/server/render.ts:parseSegmentUrl` + `downloadSegment`) walks
+  // both URL shapes natively: legacy `storage.googleapis.com/<bucket>/
+  // <key>.mp4` rows download via the authenticated GCS SDK, post-cutover
+  // `MEDIA_PUBLIC_BASE/<key>.mp4` rows download via SigV4-signed R2 fetch.
+  // Both paths fail closed if the URL doesn't match either contract, so
+  // rewriting here would only add complexity without changing behaviour.
+  // History: pre-fix the parser only accepted the legacy GCS shape, and a
+  // consistency-rewrite to `media.lorewire.com/<key>` caused every parse
+  // to return null — the 2026-06-23 "intro and outro missing even after
+  // manual override" bug. The 2026-06-30 fix extended the parser to
+  // accept R2 URLs natively; this comment stays as a tombstone so a
+  // future refactor doesn't reintroduce the rewrite.
   namespacedLog("rewrite", {
     render_id: claimed.id,
     props_rewrote: propsRewrote,
