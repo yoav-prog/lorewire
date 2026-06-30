@@ -10,8 +10,10 @@
 //
 // Two-step async flow:
 //   1. POST .../v2/oauth/token/  → access_token + (rotated) refresh_token
+//      + open_id. defaultGetAccessToken validates open_id against env.
 //   2. POST .../v2/post/publish/creator_info/query/  → allowed privacy
-//      levels + the account's open_id (defense-in-depth check)
+//      levels (the response intentionally does NOT include open_id; the
+//      open_id defense-in-depth lives on the /oauth/token/ response).
 //   3. POST .../v2/post/publish/{inbox|video}/init/  → publish_id
 //   4. POLL .../v2/post/publish/status/fetch/?publish_id=...  until
 //      PUBLISH_COMPLETE / FAILED / EXPIRED
@@ -414,7 +416,6 @@ interface TtErrorEnvelope {
 }
 
 interface TtCreatorInfoData {
-  open_id?: string;
   privacy_level_options?: string[];
 }
 
@@ -554,7 +555,7 @@ async function queryCreatorInfo(
   accessToken: string,
   fetchImpl: TtFetchLike,
 ): Promise<
-  | { ok: true; openId: string; allowedPrivacyLevels: string[] }
+  | { ok: true; allowedPrivacyLevels: string[] }
   | { ok: false; error: NormalizedTtError }
 > {
   let resp: TtFetchResponse;
@@ -577,22 +578,18 @@ async function queryCreatorInfo(
   const parsed = await parseTtJson(resp);
   if (!parsed.ok) return parsed;
   const data = (parsed.data?.data ?? {}) as TtCreatorInfoData;
-  const openId = (data.open_id ?? "").toString();
+  // TikTok's /creator_info/query/ response returns creator metadata
+  // (nickname, avatar, privacy options, post-duration cap, toggles) but
+  // NOT open_id. The open_id defense-in-depth happens upstream against
+  // the /oauth/token/ response (see defaultGetAccessToken). Don't
+  // re-check it here — a missing field would never appear, so the only
+  // outcome of checking would be a false-positive failure on every run.
   const allowed = Array.isArray(data.privacy_level_options)
     ? data.privacy_level_options.filter(
         (v): v is string => typeof v === "string",
       )
     : [];
-  if (!openId) {
-    return {
-      ok: false,
-      error: {
-        code: "no_open_id",
-        message: "tiktok: creator_info response missing open_id",
-      },
-    };
-  }
-  return { ok: true, openId, allowedPrivacyLevels: allowed };
+  return { ok: true, allowedPrivacyLevels: allowed };
 }
 
 /** Pick a privacy_level the account is allowed to use. Falls through
@@ -1030,26 +1027,9 @@ async function runFullPipeline(
   log("creator_info_query", {
     story_id: row.story_id,
     render_id: row.render_id,
-    open_id: maskOpenId(creator.openId),
     allowed_privacy: creator.allowedPrivacyLevels,
     latency_ms: Date.now() - t0,
   });
-  if (creator.openId !== expectedOpenId) {
-    const err: NormalizedTtError = {
-      code: "open_id_mismatch",
-      message: `creator_info returned ${maskOpenId(creator.openId)} but TIKTOK_OPEN_ID is ${maskOpenId(expectedOpenId)}`,
-    };
-    await markFailed(row.id, err);
-    log("error", {
-      story_id: row.story_id,
-      render_id: row.render_id,
-      tt_code: err.code,
-      tt_message: err.message,
-      stage: "creator_info_mismatch",
-    });
-    const fresh = await getRow(row.id);
-    return { status: "failed", row: fresh ?? row };
-  }
   const { picked: privacyLevel, fellBackFrom } = pickAllowedPrivacy(
     row.privacy_level,
     creator.allowedPrivacyLevels,

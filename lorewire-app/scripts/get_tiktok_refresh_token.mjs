@@ -35,13 +35,20 @@
 import http from "node:http";
 import { URL, URLSearchParams } from "node:url";
 import { exec } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY ?? "";
 const CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET ?? "";
 const REDIRECT_URI = "http://localhost:3720/callback";
 const SCOPES = ["video.upload", "video.publish", "user.info.basic"];
 const STATE = randomBytes(16).toString("hex");
+// PKCE (RFC 7636). TikTok's v2 authorize endpoint rejects requests
+// without a code_challenge (errCode 10007). The verifier stays in this
+// process's memory and ships to /oauth/token/ on the exchange.
+const CODE_VERIFIER = randomBytes(32).toString("base64url");
+const CODE_CHALLENGE = createHash("sha256")
+  .update(CODE_VERIFIER)
+  .digest("base64url");
 
 if (!CLIENT_KEY || !CLIENT_SECRET) {
   console.error(
@@ -56,6 +63,8 @@ authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
 authUrl.searchParams.set("response_type", "code");
 authUrl.searchParams.set("scope", SCOPES.join(","));
 authUrl.searchParams.set("state", STATE);
+authUrl.searchParams.set("code_challenge", CODE_CHALLENGE);
+authUrl.searchParams.set("code_challenge_method", "S256");
 
 console.log("Opening TikTok consent URL in your default browser…");
 console.log(authUrl.toString());
@@ -120,6 +129,7 @@ const server = http.createServer(async (req, res) => {
         code,
         grant_type: "authorization_code",
         redirect_uri: REDIRECT_URI,
+        code_verifier: CODE_VERIFIER,
       }).toString(),
     });
     const tokenJson = await tokenResp.json();
