@@ -1195,6 +1195,13 @@ export async function publishShortToYouTube(
       ensureOgPoster(args.storyId),
     ]);
     thumbnailUrl = poster?.url ?? (await resolveShortThumbnailUrl(args.storyId));
+    log("thumbnail_resolve", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      source: poster ? poster.source : thumbnailUrl ? "scene_1" : "none",
+      hash: poster?.hash ?? null,
+      has_url: thumbnailUrl !== null,
+    });
   }
 
   return runUploadPipeline(row, {
@@ -1546,6 +1553,13 @@ export async function attemptYouTubePublishForRow(
     ]);
     thumbnailUrl =
       poster?.url ?? (await resolveShortThumbnailUrl(row.story_id));
+    log("thumbnail_resolve", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      source: poster ? poster.source : thumbnailUrl ? "scene_1" : "none",
+      hash: poster?.hash ?? null,
+      has_url: thumbnailUrl !== null,
+    });
   }
   return runUploadPipeline(row, {
     fetchImpl,

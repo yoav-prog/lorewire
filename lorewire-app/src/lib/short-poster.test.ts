@@ -272,7 +272,12 @@ describe("ensureShortPoster — happy paths", () => {
     expect(result.source).toBe("cached");
     expect(result.url).toContain("media.lorewire.com");
     expect(result.url).toContain("-short/poster-");
-    expect(result.url).toMatch(/poster-[a-f0-9]{16}\.png$/);
+    // The returned URL carries `?v=<hash>` so each unique URL is a
+    // fresh CDN cache key — important for the publisher fetch on a
+    // first-publish HEAD-miss path, and matches the OG poster URL
+    // shape for cross-platform crawler cache-busting.
+    expect(result.url).toMatch(/poster-[a-f0-9]{16}\.png\?v=[a-f0-9]{16}$/);
+    expect(result.url.endsWith(`?v=${result.hash}`)).toBe(true);
     expect(result.hash).toMatch(/^[a-f0-9]{16}$/);
     expect(result.alt).toContain("Lorewire short:");
     expect(result.alt).toContain("Her wedding dress");
@@ -291,12 +296,13 @@ describe("ensureShortPoster — happy paths", () => {
       posterTextOnConfig: "She refused. He emptied their joint account by morning.",
     });
     const stub = makeFetchStub([
-      { ok: false, status: 404 }, // HEAD miss
+      { ok: false, status: 404 }, // HEAD miss (cache check)
       { ok: true, status: 200, body: {
         url: "https://media.lorewire.com/story-poster-test-1-short/poster-abc123.png",
         elapsed_ms: 700,
         hash: "abc123",
       } },
+      { ok: true, status: 200 }, // verify HEAD: object is readable
     ]);
     const chat = makeChatStub({ ok: true, content: "SHOULD NOT BE CALLED", provider: "test", model: "test" });
     const result = await ensureShortPoster(STORY, {
@@ -308,13 +314,18 @@ describe("ensureShortPoster — happy paths", () => {
     expect(result).not.toBeNull();
     if (!result) return;
     expect(result.source).toBe("rendered");
-    expect(result.url).toBe(
-      "https://media.lorewire.com/story-poster-test-1-short/poster-abc123.png",
+    // Returned URL is the deterministic poster URL + `?v=<hash>` cache
+    // buster, not the raw `data.url` Cloud Run echoed back.
+    expect(result.url).toMatch(
+      /^https:\/\/media\.lorewire\.com\/story-poster-test-1-short\/poster-[a-f0-9]{16}\.png\?v=[a-f0-9]{16}$/,
     );
-    expect(stub.calls).toHaveLength(2);
+    expect(result.url.endsWith(`?v=${result.hash}`)).toBe(true);
+    expect(stub.calls).toHaveLength(3);
     expect(stub.calls[1].url).toContain("/render-poster");
     expect(stub.calls[1].method).toBe("POST");
     expect(stub.calls[1].hasAuth).toBe(true);
+    expect(stub.calls[2].method).toBe("HEAD"); // post-render verify
+    expect(stub.calls[2].url).toBe(result.url);
     const sent = JSON.parse(stub.calls[1].body ?? "{}");
     expect(sent.storyId).toBe(STORY);
     // Single resolved `text` field — no dual hook/poster_text leak.
@@ -352,6 +363,7 @@ describe("ensureShortPoster — happy paths", () => {
             hash: "r2scene",
           },
         },
+        { ok: true, status: 200 }, // verify HEAD: object readable
       ]);
       const result = await ensureShortPoster(STORY, {
         fetch: stub.fetch,
@@ -398,6 +410,7 @@ describe("ensureShortPoster — lazy LLM generation", () => {
         elapsed_ms: 700,
         hash: "gen",
       } },
+      { ok: true, status: 200 }, // verify HEAD
     ]);
     const chat = makeChatStub({ ok: true, content: generated, provider: "openai", model: "gpt-5-test" });
 
@@ -436,6 +449,7 @@ describe("ensureShortPoster — lazy LLM generation", () => {
     const stub = makeFetchStub([
       { ok: false, status: 404 },
       { ok: true, status: 200, body: { url: "https://media.lorewire.com/x.png", hash: "h" } },
+      { ok: true, status: 200 }, // verify HEAD
     ]);
     const chat = makeChatStub({
       ok: true,
@@ -467,6 +481,7 @@ describe("ensureShortPoster — lazy LLM generation", () => {
         url: "https://media.lorewire.com/x.png",
         hash: "h",
       } },
+      { ok: true, status: 200 }, // verify HEAD
     ]);
     const chat = makeChatStub({ ok: false, error: "openai 503 backend timeout" });
     const result = await ensureShortPoster(STORY, {
@@ -544,6 +559,7 @@ describe("ensureShortPoster — guard rejections", () => {
         elapsed_ms: 700,
         hash: "caps1",
       } },
+      { ok: true, status: 200 }, // verify HEAD
     ]);
     const result = await ensureShortPoster(STORY, {
       fetch: stub.fetch,
@@ -551,9 +567,9 @@ describe("ensureShortPoster — guard rejections", () => {
       chat: noopChat.chat,
       pickModel: pickModelStub,
     });
-    // All-caps now passes the guard -> proceeds to render (HEAD miss then POST).
+    // All-caps now passes the guard -> renders, verifies, returns URL.
     expect(result).not.toBeNull();
-    expect(stub.calls).toHaveLength(2);
+    expect(stub.calls).toHaveLength(3);
     const sent = JSON.parse(stub.calls[1].body ?? "{}");
     expect(sent.inputProps.text).toBe("YOU WILL NEVER BELIEVE WHAT HAPPENED NEXT.");
   });
@@ -643,6 +659,7 @@ describe("ensureShortPoster — failure paths", () => {
         elapsed_ms: 700,
         hash: "xyz",
       } },
+      { ok: true, status: 200 }, // verify HEAD
     ]);
     const result = await ensureShortPoster(STORY, {
       fetch: stub.fetch,
@@ -653,7 +670,7 @@ describe("ensureShortPoster — failure paths", () => {
     expect(result).not.toBeNull();
     if (!result) return;
     expect(result.source).toBe("rendered");
-    expect(stub.calls).toHaveLength(2);
+    expect(stub.calls).toHaveLength(3);
   });
 
   it("returns null when Cloud Run returns 500", async () => {
@@ -698,6 +715,174 @@ describe("ensureShortPoster — failure paths", () => {
     });
     expect(result).toBeNull();
     // HEAD ran, then we noticed CLOUD_RUN env missing and aborted.
+    expect(stub.calls).toHaveLength(1);
+  });
+});
+
+// The readiness verify is the fix for the
+// "first publish has no thumbnail, second publish does" bug. The race:
+// Cloud Run confirms the PUT to R2, but the publishers fetch the URL
+// through MEDIA_PUBLIC_BASE (Cloudflare custom domain), where a
+// brand-new object isn't always immediately visible. Without the
+// verify, FB / IG / YT all silently fall back to no-cover on the
+// first publish; by the time the second publish runs, the object has
+// propagated and HEAD-cache hits short-circuit the race entirely —
+// hence the symptom.
+describe("ensureShortPoster — readiness verify (propagation race fix)", () => {
+  beforeEach(async () => {
+    await seedStory(STORY, {
+      props: {
+        doodle_frames: [
+          { id: "frame-00", url: "https://media.lorewire.com/x/frame-00.png" },
+        ],
+      },
+      posterTextOnConfig:
+        "Her wedding dress was destroyed the morning of the ceremony.",
+    });
+  });
+  const noopChat = makeChatStub({
+    ok: true,
+    content: "unused",
+    provider: "t",
+    model: "t",
+  });
+
+  it("returns the rendered URL when the verify HEAD succeeds on the first attempt", async () => {
+    const stub = makeFetchStub([
+      { ok: false, status: 404 }, // cache HEAD miss
+      {
+        ok: true,
+        status: 200,
+        body: {
+          url: "https://media.lorewire.com/story-poster-test-1-short/poster-fresh.png",
+          hash: "fresh",
+        },
+      },
+      { ok: true, status: 200 }, // verify HEAD: ready on first probe
+    ]);
+    const result = await ensureShortPoster(STORY, {
+      fetch: stub.fetch,
+      settings: makeSettings("1"),
+      chat: noopChat.chat,
+      pickModel: pickModelStub,
+      verifyBackoffsMs: [0, 0, 0, 0],
+    });
+    expect(result).not.toBeNull();
+    if (!result) return;
+    expect(result.source).toBe("rendered");
+    expect(result.url.endsWith(`?v=${result.hash}`)).toBe(true);
+    expect(stub.calls).toHaveLength(3);
+    expect(stub.calls[2].method).toBe("HEAD");
+    expect(stub.calls[2].url).toBe(result.url);
+  });
+
+  it("retries the verify HEAD when the object is briefly invisible at the edge", async () => {
+    const stub = makeFetchStub([
+      { ok: false, status: 404 }, // cache HEAD miss
+      {
+        ok: true,
+        status: 200,
+        body: {
+          url: "https://media.lorewire.com/story-poster-test-1-short/poster-late.png",
+          hash: "late",
+        },
+      },
+      { ok: false, status: 404 }, // verify HEAD #1: not yet propagated
+      { ok: false, status: 404 }, // verify HEAD #2: still propagating
+      { ok: true, status: 200 }, // verify HEAD #3: now readable
+    ]);
+    const result = await ensureShortPoster(STORY, {
+      fetch: stub.fetch,
+      settings: makeSettings("1"),
+      chat: noopChat.chat,
+      pickModel: pickModelStub,
+      // Zero backoffs keep the test fast while still exercising the
+      // retry loop — production sleeps between attempts.
+      verifyBackoffsMs: [0, 0, 0, 0],
+    });
+    expect(result).not.toBeNull();
+    if (!result) return;
+    expect(result.source).toBe("rendered");
+    expect(result.url).toContain("?v=");
+    expect(stub.calls).toHaveLength(5);
+    // The verify probes the SAME URL the publisher will fetch — so a
+    // 200 here guarantees the publisher's subsequent GET also hits a
+    // warm cache entry on the same key.
+    expect(stub.calls[2].url).toBe(result.url);
+    expect(stub.calls[3].url).toBe(result.url);
+    expect(stub.calls[4].url).toBe(result.url);
+  });
+
+  it("returns null when the verify never sees the object (propagation timeout)", async () => {
+    const stub = makeFetchStub([
+      { ok: false, status: 404 }, // cache HEAD miss
+      {
+        ok: true,
+        status: 200,
+        body: {
+          url: "https://media.lorewire.com/story-poster-test-1-short/poster-stuck.png",
+          hash: "stuck",
+        },
+      },
+      { ok: false, status: 404 }, // verify HEAD #1
+      { ok: false, status: 404 }, // verify HEAD #2
+      { ok: false, status: 404 }, // verify HEAD #3
+      { ok: false, status: 404 }, // verify HEAD #4 (final budget)
+    ]);
+    const result = await ensureShortPoster(STORY, {
+      fetch: stub.fetch,
+      settings: makeSettings("1"),
+      chat: noopChat.chat,
+      pickModel: pickModelStub,
+      verifyBackoffsMs: [0, 0, 0, 0],
+    });
+    // Null → publisher falls back to scene-1 instead of a 404-thumbnail
+    // URL the platform would silently drop.
+    expect(result).toBeNull();
+    expect(stub.calls).toHaveLength(6);
+  });
+
+  it("treats verify network errors as a miss and keeps retrying", async () => {
+    const stub = makeFetchStub([
+      { ok: false, status: 404 }, // cache HEAD miss
+      {
+        ok: true,
+        status: 200,
+        body: {
+          url: "https://media.lorewire.com/story-poster-test-1-short/poster-net.png",
+          hash: "net",
+        },
+      },
+      { throws: new Error("ETIMEDOUT") }, // verify HEAD #1: network blip
+      { ok: true, status: 200 }, // verify HEAD #2: ok
+    ]);
+    const result = await ensureShortPoster(STORY, {
+      fetch: stub.fetch,
+      settings: makeSettings("1"),
+      chat: noopChat.chat,
+      pickModel: pickModelStub,
+      verifyBackoffsMs: [0, 0, 0, 0],
+    });
+    expect(result).not.toBeNull();
+    expect(stub.calls).toHaveLength(4);
+  });
+
+  it("skips the verify entirely when the cache HEAD hits (no race possible)", async () => {
+    const stub = makeFetchStub([
+      { ok: true, status: 200 }, // cache HEAD hit
+    ]);
+    const result = await ensureShortPoster(STORY, {
+      fetch: stub.fetch,
+      settings: makeSettings("1"),
+      chat: noopChat.chat,
+      pickModel: pickModelStub,
+      verifyBackoffsMs: [0, 0, 0, 0],
+    });
+    expect(result).not.toBeNull();
+    if (!result) return;
+    expect(result.source).toBe("cached");
+    expect(result.url).toMatch(/\?v=[a-f0-9]{16}$/);
+    // Just the one HEAD — no render, no verify.
     expect(stub.calls).toHaveLength(1);
   });
 });
