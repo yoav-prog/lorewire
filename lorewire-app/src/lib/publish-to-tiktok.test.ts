@@ -9,7 +9,6 @@
 //   - missing env (open id or refresh token) -> skipped, no row
 //   - auto toggle off -> auto path skipped, manual path proceeds
 //   - story already posted -> auto skipped (dedup)
-//   - open_id mismatch (env vs creator_info response) -> 'failed' row
 //   - oauth refresh failure -> 'failed' row, no upload attempted
 //   - inbox happy path -> 'posted' row with no external_post_id
 //   - direct happy path -> 'posted' row with external_post_id
@@ -114,21 +113,26 @@ const STUB_TOKEN_BUNDLE = {
   refresh_token_rotated: false,
 };
 
-function creatorInfoOk(opts?: {
-  openId?: string;
-  allowed?: string[];
-}): StubResponse {
+// Mirrors the real /creator_info/query/ response shape: creator
+// metadata + privacy_level_options, but NO open_id (TikTok doesn't
+// return it on this endpoint).
+function creatorInfoOk(opts?: { allowed?: string[] }): StubResponse {
   return {
     ok: true,
     status: 200,
     body: {
       data: {
-        open_id: opts?.openId ?? "open-id-lorewire",
+        creator_nickname: "LoreWire",
+        creator_username: "lore_wire",
         privacy_level_options: opts?.allowed ?? [
           "PUBLIC_TO_EVERYONE",
           "MUTUAL_FOLLOW_FRIENDS",
           "SELF_ONLY",
         ],
+        max_video_post_duration_sec: 600,
+        comment_disabled: false,
+        duet_disabled: false,
+        stitch_disabled: false,
       },
       error: { code: "ok" },
     },
@@ -357,37 +361,6 @@ describe("publishShortToTikTok — direct mode happy path", () => {
     // Direct mode shipped with video_cover_timestamp_ms=0 from the
     // start; lock the assertion in here so a refactor can't drop it.
     expect(stub.calls[1].body).toContain('"video_cover_timestamp_ms":0');
-  });
-});
-
-// --- Defense in depth ------------------------------------------------------
-
-describe("publishShortToTikTok — open_id mismatch", () => {
-  beforeEach(async () => {
-    await setSetting("publisher.tiktok.auto_publish", "1");
-  });
-
-  it("fails when creator_info returns a different open_id than env", async () => {
-    const stub = makeFetchStub([
-      creatorInfoOk({ openId: "open-id-someone-else" }),
-    ]);
-    const result = await publishShortToTikTok(
-      {
-        storyId: STORY,
-        renderId: RENDER,
-        videoUrl: VIDEO_URL,
-        trigger: "auto",
-        context: CTX,
-      },
-      {
-        fetch: stub.fetch,
-        getAccessToken: async () => STUB_TOKEN_BUNDLE,
-        sleepMs: async () => {},
-      },
-    );
-    expect(result.status).toBe("failed");
-    if (result.status !== "failed") return;
-    expect(result.row.tt_error_code).toBe("open_id_mismatch");
   });
 });
 
