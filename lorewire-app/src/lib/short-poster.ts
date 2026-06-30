@@ -66,7 +66,20 @@ const HOOK_MAX_CHARS = 280;
 const URL_MAX_CHARS = 2000;
 
 const HEAD_TIMEOUT_MS = 2000;
-const RENDER_TIMEOUT_MS = 8000;
+/** Client-side budget for the Cloud Run /render-poster POST. Tuned at
+ *  25s to cover the cold-start path: when a Cloud Run revision is
+ *  brand new (just deployed) or has scaled to zero, the first request
+ *  pays for boot + Webpack bundle load + Google Fonts fetch
+ *  (Playfair Display 900 + Caveat Brush + Bebas Neue) BEFORE the
+ *  Remotion render even starts. The Phase 2 8s budget was tuned for
+ *  Bebas Neue alone and was exceeded by the editorial redesign on
+ *  the first publish after the v2 cutover (2026-06-30 19:13:45 UTC
+ *  envelope publish: render_failed at elapsed_ms=8004 — timed out
+ *  exactly on the budget). Warm renders complete in ~1-2s so the
+ *  larger budget is invisible after the first hit. Cloud Run's own
+ *  service-side timeout is 3600s, so this remains the binding cap.
+ *  Per _plans/2026-06-30-editorial-poster-redesign.md follow-up. */
+const RENDER_TIMEOUT_MS = 25_000;
 const LLM_TIMEOUT_MS = 30_000;
 
 /** Post-render readiness verify budget. After Cloud Run uploads the
