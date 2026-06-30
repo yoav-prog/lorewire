@@ -142,6 +142,28 @@ export async function getR2ObjectBytes(
   return resp.arrayBuffer();
 }
 
+/** GET an object's bytes AND its Content-Type. Same signed S3 GET as
+ *  getR2ObjectBytes but also returns the mime, which the publishers
+ *  (FB multipart thumb, YT thumbnails.set) need to set on the upload.
+ *  Falls back to image/png when the upstream Content-Type is missing
+ *  or non-image/* — every poster object we write is a PNG. */
+export async function getR2ObjectBytesWithMime(
+  bucket: string,
+  key: string,
+): Promise<{ bytes: ArrayBuffer; mime: string }> {
+  const resp = await client().fetch(objectUrl(bucket, key), {
+    method: "GET",
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!resp.ok) {
+    throw new Error(`R2 get HTTP ${resp.status}`);
+  }
+  const bytes = await resp.arrayBuffer();
+  const ct = resp.headers.get("content-type") ?? "";
+  const mime = ct.startsWith("image/") ? ct : "image/png";
+  return { bytes, mime };
+}
+
 /** HEAD an object: returns its size in bytes, or null if it does not exist.
  *  Used by the migration tool to skip objects already copied (size match) and
  *  to verify an upload landed at the right size. */

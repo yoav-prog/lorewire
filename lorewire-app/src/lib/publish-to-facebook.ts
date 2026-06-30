@@ -20,6 +20,7 @@ import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
 import { ensureOgPoster, ensureShortPoster } from "@/lib/short-poster";
 import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
+import { fetchPosterBytes } from "@/lib/poster-bytes";
 
 // --- Types -----------------------------------------------------------------
 
@@ -313,69 +314,39 @@ function normalizeFbError(
   };
 }
 
-/** Fetch the cover image bytes from a public URL (typically a story's
- *  scene-1 GCS object) and return a Blob suitable for multipart upload.
- *  Returns null on any failure — the caller falls back to the url-
- *  encoded path and FB picks the cover automatically. Per
- *  _plans/2026-06-28-explicit-thumbnail-uploads.md. */
+/** Fetch the cover image bytes and wrap them as a Blob for the FB
+ *  multipart `thumb` upload. Returns null on any failure — caller
+ *  falls back to the url-encoded path and FB picks the cover
+ *  automatically.
+ *
+ *  Bytes come from `fetchPosterBytes`, which prefers R2 direct (S3,
+ *  signed) in production to bypass the Cloudflare WAF that returns
+ *  403 on Vercel's serverless egress for R2 custom-domain URLs.
+ *  Tests / dev / GCS-only deploys fall through to the public-URL GET
+ *  via the caller's fetchImpl. Per fix/publisher-bytes-via-r2-direct
+ *  and the 2026-06-30 19:40 production incident. */
 async function fetchThumbnailBlob(
   thumbnailUrl: string,
   fetchImpl: FbFetchLike,
 ): Promise<{ blob: Blob; mime: string } | null> {
-  // Every silent-fallback path that returns null logs the reason so an
-  // operator inspecting a `thumb_attached: false` line can tell
-  // network-vs-404-vs-empty-vs-decode apart without re-running the
-  // publish. Per rule 14 — the publisher's silent fall-through to the
-  // url-encoded body was previously the only signal, and it left
-  // "first post missing thumbnail" undiagnosable.
-  let resp: FbFetchResponse;
-  try {
-    resp = await fetchImpl(thumbnailUrl, { method: "GET" });
-  } catch (e) {
+  const fetched = await fetchPosterBytes(thumbnailUrl, (url, init) =>
+    fetchImpl(url, init),
+  );
+  if (!fetched) {
+    // fetchPosterBytes already logged the reason in the `[poster bytes
+    // ...]` namespace; emit a `[publish facebook thumb_fetch_failed]`
+    // line too so the FB-specific publish log still tells the whole
+    // story when grepped on its own.
     log("thumb_fetch_failed", {
       thumb_url_host: hostOf(thumbnailUrl),
-      reason: e instanceof Error ? `${e.name}: ${e.message}` : String(e),
+      reason: "fetchPosterBytes returned null (see [poster bytes ...] logs)",
     });
     return null;
   }
-  if (!resp.ok) {
-    log("thumb_fetch_failed", {
-      thumb_url_host: hostOf(thumbnailUrl),
-      reason: `HTTP ${resp.status}`,
-    });
-    return null;
-  }
-  let bytes: Uint8Array;
-  try {
-    // The FbFetchResponse contract surfaces .text() / .json() but the
-    // real undici Response also exposes .arrayBuffer(). Cast pragmatically
-    // — the defaultFetch wrapper forwards the undici Response in full.
-    const r = resp as unknown as Response;
-    const buf = await r.arrayBuffer();
-    bytes = new Uint8Array(buf);
-  } catch (e) {
-    log("thumb_fetch_failed", {
-      thumb_url_host: hostOf(thumbnailUrl),
-      reason: `arrayBuffer: ${e instanceof Error ? e.message : String(e)}`,
-    });
-    return null;
-  }
-  if (bytes.byteLength === 0) {
-    log("thumb_fetch_failed", {
-      thumb_url_host: hostOf(thumbnailUrl),
-      reason: "zero bytes",
-    });
-    return null;
-  }
-  // Pull the upstream mime if it's a real image/* value. Scene-1 GCS
-  // objects are usually image/png; image/webp is also accepted by FB.
-  const r = resp as unknown as Response;
-  const upstreamCt =
-    (typeof r.headers?.get === "function" && r.headers.get("content-type")) ||
-    "";
-  const mime = upstreamCt.startsWith("image/") ? upstreamCt : "image/png";
-  // Blob extension picks the right serialization for FormData boundaries.
-  return { blob: new Blob([bytes as BlobPart], { type: mime }), mime };
+  return {
+    blob: new Blob([fetched.bytes as BlobPart], { type: fetched.mime }),
+    mime: fetched.mime,
+  };
 }
 
 async function postVideo(

@@ -36,6 +36,7 @@ import { getSetting } from "@/lib/repo";
 import { loadSeoMetadata } from "@/lib/seo-metadata";
 import { ensureOgPoster, ensureShortPoster } from "@/lib/short-poster";
 import { resolveShortThumbnailUrl } from "@/lib/short-thumbnail";
+import { fetchPosterBytes } from "@/lib/poster-bytes";
 
 // --- Types -----------------------------------------------------------------
 
@@ -808,46 +809,33 @@ async function uploadCustomThumbnail(args: {
   | { ok: true }
   | { ok: false; reason: string; status?: number }
 > {
-  let fetchResp: YtFetchResponse;
-  try {
-    fetchResp = await args.fetchImpl(args.thumbnailUrl, { method: "GET" });
-  } catch (e) {
+  // Bytes come from `fetchPosterBytes`, which prefers R2 direct (S3,
+  // signed) in production to bypass the Cloudflare WAF that returns
+  // 403 on Vercel's serverless egress for R2 custom-domain URLs.
+  // Tests / dev / GCS-only deploys fall through to the public-URL GET
+  // via the caller's fetchImpl. Per fix/publisher-bytes-via-r2-direct
+  // and the 2026-06-30 19:40 production incident.
+  //
+  // Note YT-specific caveat: even when this upload SUCCEEDS, the
+  // channel must be YouTube-verified for thumbnails.set to land — an
+  // unverified channel returns 403 on the POST below regardless of
+  // what we send. This helper handles the byte fetch; the channel
+  // verification is account-side.
+  const fetched = await fetchPosterBytes(args.thumbnailUrl, (url, init) =>
+    args.fetchImpl(url, init),
+  );
+  if (!fetched) {
     return {
       ok: false,
-      reason: `thumbnail fetch failed: ${e instanceof Error ? e.message : String(e)}`,
-    };
-  }
-  if (!fetchResp.ok) {
-    return {
-      ok: false,
-      reason: `thumbnail fetch HTTP ${fetchResp.status}`,
-      status: fetchResp.status,
-    };
-  }
-  let buf: ArrayBuffer;
-  try {
-    buf = await fetchResp.arrayBuffer();
-  } catch (e) {
-    return {
-      ok: false,
-      reason: `thumbnail read failed: ${e instanceof Error ? e.message : String(e)}`,
+      reason:
+        "thumbnail bytes unavailable (see [poster bytes ...] logs for the exact failure mode)",
     };
   }
   // YouTube docs accept JPEG and PNG up to 2 MB (Shorts thumbs in
   // practice are well under). Anything bigger gets a 400 invalidImage.
-  // We trust the source (our own GCS) but cap defensively.
-  const bytes = new Uint8Array(buf);
-  if (bytes.byteLength === 0) {
-    return { ok: false, reason: "thumbnail fetch returned zero bytes" };
-  }
-  // YouTube infers the mime from the body but accepts an explicit
-  // Content-Type. Pull from the upstream response when it's a real
-  // image/* value; otherwise default to image/png (scene-1 GCS objects
-  // are PNG or WebP — both accepted).
-  const upstreamCt = fetchResp.headers?.get?.("content-type") ?? "";
-  const contentType = upstreamCt.startsWith("image/")
-    ? upstreamCt
-    : "image/png";
+  // We trust the source (our own R2) but cap defensively.
+  const bytes = fetched.bytes;
+  const contentType = fetched.mime;
   const setUrl =
     `${YT_UPLOAD_BASE}/thumbnails/set?videoId=` +
     `${encodeURIComponent(args.videoId)}&uploadType=media`;
