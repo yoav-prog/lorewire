@@ -17,12 +17,10 @@ export const metadata: Metadata = {
   alternates: { canonical: "/terms" },
 };
 
-const EFFECTIVE_DATE = "2026-06-22";
-// TODO Yoav: confirm or replace these before filing review applications.
-const LEGAL_ENTITY = "Flexelent (operator of LoreWire)";
-const CONTACT_EMAIL = "info@lorewire.com";
-const GOVERNING_LAW =
-  "the State of Israel" /* TODO Yoav: confirm — Israel courts, or somewhere else */;
+const EFFECTIVE_DATE = "2026-06-30";
+const LEGAL_ENTITY = "LoreWire";
+const CONTACT_EMAIL = "contact@lorewire.com";
+const GOVERNING_LAW = "the State of Israel";
 
 export default function TermsPage() {
   return (

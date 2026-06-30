@@ -21,10 +21,9 @@ export const metadata: Metadata = {
   alternates: { canonical: "/privacy" },
 };
 
-const EFFECTIVE_DATE = "2026-06-22";
-// TODO Yoav: confirm or replace these before filing review applications.
-const LEGAL_ENTITY = "Flexelent (operator of LoreWire)";
-const CONTACT_EMAIL = "info@lorewire.com";
+const EFFECTIVE_DATE = "2026-06-30";
+const LEGAL_ENTITY = "LoreWire";
+const CONTACT_EMAIL = "contact@lorewire.com";
 
 export default function PrivacyPolicyPage() {
   return (
@@ -153,16 +152,41 @@ export default function PrivacyPolicyPage() {
         </ul>
       </Section>
 
-      <Section title="3. What we do not collect">
+      <Section title="3. Analytics and what we do not do">
         <p>
-          LoreWire does not load third-party advertising scripts, ad
-          retargeting pixels, or behavioral analytics SDKs on its pages.
-          There is no Facebook Pixel, no Google Analytics tracking script,
-          no marketing automation tag. Every cookie LoreWire sets is
-          first-party and functional, such as keeping you signed in,
-          remembering your cookie choice, and stopping duplicate poll votes.
-          None of them track you across other websites. The Cookies section
-          below lists them.
+          If you press Accept on the cookie banner, LoreWire loads three
+          measurement tools so we can see how the site is being used and
+          catch errors that happen in your browser.
+        </p>
+        <ul className="ml-5 list-disc">
+          <li>
+            <b>Google Analytics 4</b> records aggregated page views and
+            basic events (which page, what referred you, screen size).
+            We turn on IP anonymization and we do not enable Google
+            Signals, ad personalization, or remarketing.
+          </li>
+          <li>
+            <b>Vercel Analytics and Speed Insights</b> record aggregated
+            page views and page load timing. Vercel does not use the
+            data to track you across other sites.
+          </li>
+          <li>
+            <b>Sentry</b> records errors and the stack trace that
+            produced them, so we can fix bugs. We disable Sentry&apos;s
+            default personal-data collection (no IP, no user agent), and
+            we never attach your account to an error report.
+          </li>
+        </ul>
+        <p className="mt-3">
+          If you press Reject, none of these tools load. We also clear
+          anything LoreWire saved on this device.
+        </p>
+        <p className="mt-3">
+          LoreWire never loads third-party advertising scripts,
+          retargeting pixels, or marketing automation tags. There is no
+          Facebook Pixel and no advertising tag of any kind. The cookies
+          LoreWire sets directly are first-party and functional, listed
+          in the Cookies section below.
         </p>
       </Section>
 
@@ -301,6 +325,44 @@ export default function PrivacyPolicyPage() {
             scripts and captions. Their privacy policies cover what they
             do with inputs sent for inference.
           </li>
+          <li>
+            <b>Google Analytics 4</b>, when you have accepted the cookie
+            banner, receives aggregated page-view and event data. Google&apos;s
+            privacy policy:{" "}
+            <a
+              href="https://policies.google.com/privacy"
+              className="text-accent underline"
+            >
+              policies.google.com/privacy
+            </a>
+            .
+          </li>
+          <li>
+            <b>Vercel Analytics and Speed Insights</b>, when you have
+            accepted the cookie banner, receive aggregated page-view and
+            page-load timing data. Privacy policy:{" "}
+            <a
+              href="https://vercel.com/legal/privacy-policy"
+              className="text-accent underline"
+            >
+              vercel.com/legal/privacy-policy
+            </a>
+            .
+          </li>
+          <li>
+            <b>Sentry</b> receives stack traces and breadcrumbs when an
+            error happens in your browser or on the server. We disable
+            Sentry&apos;s default personal-data capture (no IP, no user
+            agent) and never attach your account to a report. Privacy
+            policy:{" "}
+            <a
+              href="https://sentry.io/privacy/"
+              className="text-accent underline"
+            >
+              sentry.io/privacy
+            </a>
+            .
+          </li>
         </ul>
         <p className="mt-3">
           LoreWire does not sell your data and does not share it with any
@@ -346,10 +408,8 @@ export default function PrivacyPolicyPage() {
 
       <Section title="7. Cookies">
         <p>
-          Every cookie LoreWire sets is first-party and functional. There are
-          no advertising or analytics cookies, and none are shared with or read
-          by another company. Unless noted, they are httpOnly, Secure, and
-          SameSite=Lax.
+          The cookies LoreWire sets directly are first-party and functional.
+          Unless noted, they are httpOnly, Secure, and SameSite=Lax.
         </p>
         <ul className="ml-5 list-disc">
           <li>
@@ -361,9 +421,9 @@ export default function PrivacyPolicyPage() {
             OAuth sign-in, to protect the exchange, then expire.
           </li>
           <li>
-            <b>Cookie-choice cookie</b> remembers whether you pressed Accept or
-            Reject. It is readable by the page so the banner knows your choice;
-            it stores nothing else.
+            <b>Cookie-choice cookie</b> (<code>lw_consent</code>) remembers
+            whether you pressed Accept or Reject. It is readable by the page
+            so the banner knows your choice; it stores nothing else.
           </li>
           <li>
             <b>Anonymous-activity cookie</b> (<code>lw_anon</code>) ties this
@@ -379,6 +439,14 @@ export default function PrivacyPolicyPage() {
             local storage, not a cookie.
           </li>
         </ul>
+        <p className="mt-3">
+          If you accept the cookie banner, Google Analytics also sets its own
+          cookies (typically <code>_ga</code> and <code>_ga_*</code>) to count
+          unique visitors and remember the start of a session. Vercel
+          Analytics uses an in-page beacon, not a cookie. Sentry does not set
+          a cookie. Rejecting consent prevents Google Analytics from loading
+          at all, so none of these cookies appear.
+        </p>
       </Section>
 
       <Section title="8. Retention">

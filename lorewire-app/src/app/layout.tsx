@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Archivo, Fraunces, Hanken_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
+import ConditionalAnalytics from "@/components/ConditionalAnalytics";
 import RegisterSW from "@/components/RegisterSW";
 import { getSiteSeo } from "@/lib/site-seo";
 import {
@@ -82,6 +83,7 @@ export default function RootLayout({
       <body>
         <ThemeProvider>{children}</ThemeProvider>
         <RegisterSW />
+        <ConditionalAnalytics />
       </body>
     </html>
   );
