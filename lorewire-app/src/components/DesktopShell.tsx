@@ -20,6 +20,7 @@ import WiresDesktop from "@/components/wires/WiresDesktop";
 // through the existing rails (Continue Watching, Top 10, category
 // rails). Mobile keeps the rail; see AppShell.tsx for the mount.
 import { alignScriptToWords } from "@/lib/script-graft";
+import { formatDurationMs } from "@/lib/duration";
 import {
   placeArticleImages,
   splitArticleParagraphs,
@@ -721,11 +722,16 @@ function WatchDoodle({
   liveMedia,
   pendingPlay,
   onPlayConsumed,
+  onDurationMeasured,
 }: {
   story: Story;
   liveMedia: LiveStoryMediaResult;
   pendingPlay: boolean;
   onPlayConsumed: () => void;
+  /** Reports the <video>'s real measured length (ms) up to the modal so the
+   *  meta-row duration chip matches the player. Optional — the doodle
+   *  fallback (no <video>) never calls it. */
+  onDurationMeasured?: (ms: number) => void;
 }) {
   // liveMedia is lifted to DetailModal so the WATCH / READ / GALLERY
   // surfaces all share the same single fetch. Falls back to the baked
@@ -790,6 +796,12 @@ function WatchDoodle({
             preload="metadata"
             playsInline
             className="absolute inset-0 w-full h-full object-contain"
+            onLoadedMetadata={(e) => {
+              const d = e.currentTarget.duration;
+              if (Number.isFinite(d) && d > 0) {
+                onDurationMeasured?.(Math.round(d * 1000));
+              }
+            }}
             onPlay={playEvents.onPlay}
             onTimeUpdate={playEvents.onTimeUpdate}
             onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
@@ -1441,6 +1453,17 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
     setPendingPlay(true);
   };
   const onPlayConsumed = useCallback(() => setPendingPlay(false), []);
+  // The WATCH-tab <video> reports its real measured length up here so the
+  // meta-row duration chip matches what actually plays. The stored
+  // story.dur can lag the assembled MP4 (a body-only value written before
+  // the splice probe), so a live measurement is ground truth whenever the
+  // player is mounted. Plan: _plans/2026-07-01-duration-badge-actual-mp4.md.
+  const [measuredDurationMs, setMeasuredDurationMs] = useState<number | null>(
+    null,
+  );
+  const onDurationMeasured = useCallback((ms: number) => {
+    setMeasuredDurationMs(ms);
+  }, []);
   // 2026-06-18 polls plan extension: fetch the per-story poll for the
   // modal. Re-fires whenever the modal swaps stories (the hook keys
   // on story.id). Renders below the tab content (Watch / Read /
@@ -1458,6 +1481,9 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
     setPrevStoryId(story.id);
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
+    // Drop the previous story's measured length so the chip falls back to
+    // the new story's stored dur until its <video> reports metadata.
+    setMeasuredDurationMs(null);
   }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -1581,9 +1607,17 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                     badge; the modal aligns. */}
                 <div className="flex items-center gap-2.5 flex-wrap font-body text-[14px] mb-4">
                   <span className="text-muted">{story.year}</span>
-                  {story.dur && (
-                    <span className="px-2 py-0.5 rounded border border-line text-ink/80 font-mono text-[11px]">{story.dur}</span>
-                  )}
+                  {(() => {
+                    // Live <video> length wins over the stored dur so the
+                    // chip never disagrees with the player below it.
+                    const shownDur =
+                      (measuredDurationMs
+                        ? formatDurationMs(measuredDurationMs)
+                        : null) ?? story.dur;
+                    return shownDur ? (
+                      <span className="px-2 py-0.5 rounded border border-line text-ink/80 font-mono text-[11px]">{shownDur}</span>
+                    ) : null;
+                  })()}
                   <span className="px-2 py-0.5 rounded font-mono text-[10px] uppercase tracking-wider" style={{ background: "rgba(232,70,43,.16)", color: "#E8462B" }}>True</span>
                   <span className="px-2.5 py-0.5 rounded-full text-[12px] font-semibold" style={{ background: c, color: "#fff" }}>{story.cat}</span>
                 </div>
@@ -1624,7 +1658,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
               />
             </div>
             <div className="pt-7">
-              {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} />}
+              {tab === "Watch" && <WatchDoodle story={story} liveMedia={liveMedia} pendingPlay={pendingPlay} onPlayConsumed={onPlayConsumed} onDurationMeasured={onDurationMeasured} />}
               {tab === "Read" && <Read story={story} liveMedia={liveMedia} />}
               {tab === "Read-along" && <ReadAlong story={story} liveMedia={liveMedia} />}
               {tab === "Comments" && <CommentsTab storyId={story.id} signedIn={session !== null} focusedCommentId={initialCommentId} seed={seededModalComments} />}
