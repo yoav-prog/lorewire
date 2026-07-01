@@ -1,8 +1,7 @@
 // TS multi-tag classifier for the admin dry-run reclassification (PR: admin
 // trigger for _plans/2026-07-01-category-taxonomy-multitag.md). Mirrors the
 // Python `pipeline/stages.py:classify_story_tags` so the admin path and the
-// pipeline path pick tags with the same rules — the same way
-// `category-classifier.ts` mirrors `classify_category`. Kept as a TS copy so
+// pipeline path pick tags with the same rules. Kept as a TS copy so
 // the admin action runs in Vercel (which already has the DB + LLM key), with
 // no cross-runtime job plumbing.
 //

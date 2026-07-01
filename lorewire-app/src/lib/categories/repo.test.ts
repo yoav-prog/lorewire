@@ -1,9 +1,9 @@
 // Integration test for the PR2 category tables. `seedCategories` populates
 // the `categories` registry from the manifest; `backfillStoryPrimaryTags`
 // gives each story one primary story_tag mapped from its stories.category
-// label. Uses real run/all against the SQLite test DB (mirrors
-// reclassify-stories.test.ts), with test-prefixed rows cleaned up around
-// each case. Plan: _plans/2026-07-01-category-taxonomy-multitag.md.
+// label. Uses real run/all against the SQLite test DB, with test-prefixed
+// rows cleaned up around each case. Plan:
+// _plans/2026-07-01-category-taxonomy-multitag.md.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
