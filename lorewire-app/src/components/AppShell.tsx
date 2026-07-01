@@ -1203,8 +1203,9 @@ function GenArticle({
   // get scene illustrations between paragraphs.
   const useShortScenes = liveMedia.is_short && liveMedia.images.length > 0;
   const scenes = liveMedia.images.length > 0 ? liveMedia.images : (story.images || []);
-  // placeArticleImages guarantees every scene renders — either inline
-  // between paragraphs or in the trailing extras strip below the body.
+  // placeArticleImages only lands scenes in gaps flanked by body text, so
+  // an article never trails illustrations past its last line. Scenes that
+  // don't fit are dropped rather than dumped below the body.
   const placement = placeArticleImages(paras.length, scenes);
   // eslint-disable-next-line no-console -- rule 14
   console.info("[lorewire article images]", {
@@ -1212,7 +1213,7 @@ function GenArticle({
     para_count: paras.length,
     scene_count: scenes.length,
     inline_count: placement.inline.size,
-    extras_count: placement.extras.length,
+    dropped_count: scenes.length - placement.inline.size,
     use_short_scenes: useShortScenes,
     body_source: liveMedia.body ? "live" : "static",
   });
@@ -1270,18 +1271,6 @@ function GenArticle({
           )}
         </React.Fragment>
       ))}
-      {placement.extras.length > 0 && (
-        <div className="mt-5 grid gap-4">
-          {placement.extras.map((src, idx) => (
-            <figure key={`extra-${idx}`} className="m-0">
-              <div className="rounded-[12px] overflow-hidden relative" style={sceneWrapStyle}>
-                <img src={src} alt="" className="absolute inset-0 w-full h-full object-cover" style={{ objectPosition: sceneObjectPos }} />
-              </div>
-              <figcaption className="font-mono text-[10px] text-muted mt-1.5 text-center">Illustration &middot; LoreWire Studio</figcaption>
-            </figure>
-          ))}
-        </div>
-      )}
       {redditTarget ? (
         <RedditSourceCard
           url={redditTarget.url}

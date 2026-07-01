@@ -1,14 +1,14 @@
 // Tests for the magazine-layout image placer used by the homepage modal
 // Read tab in both AppShell and DesktopShell.
 //
-// Regression context: AI-generated bodies sometimes arrive as a single
-// paragraph blob with no `\n\n` separators. The previous inline
-// `_articleImagePositions` bailed when paragraph count was below 3 and
-// silently dropped every scene image. These tests pin the new behaviour:
-// every scene is rendered (either inline between paragraphs or in the
-// trailing extras strip), and the splitter falls back to single-newline
-// then sentence chunking so a wall-of-text body still gives the
-// distributor slots to work with.
+// Context: scene images are only worth showing when they sit inside the
+// read, flanked by prose. An article that ran out of body but still had
+// scenes used to stack the leftovers below the last line, which reads as a
+// dump. These tests pin the current behaviour: a scene only lands in a gap
+// with a paragraph before AND after it, surplus scenes are dropped rather
+// than trailed, and the splitter falls back to single-newline then
+// sentence chunking so a wall-of-text body still gives the distributor
+// slots to work with.
 
 import { describe, expect, it } from "vitest";
 import {
@@ -87,28 +87,19 @@ describe("placeArticleImages", () => {
   it("returns empty placement when there are no images", () => {
     const r = placeArticleImages(10, []);
     expect(r.inline.size).toBe(0);
-    expect(r.extras).toEqual([]);
   });
 
   it("returns empty placement when there are no paragraphs", () => {
     const r = placeArticleImages(0, ["a.png"]);
     expect(r.inline.size).toBe(0);
-    expect(r.extras).toEqual([]);
   });
 
-  it("places the first scene after the opening paragraph for a 1-para body", () => {
-    // Regression: previously bailed (paraCount < 3) and dropped every
-    // image. Now we surface at least the first one inline and defer the
-    // rest to extras so the reader sees illustrations either way.
-    const r = placeArticleImages(1, ["a.png", "b.png", "c.png"]);
-    expect(r.inline.get(0)).toBe("a.png");
-    expect(r.extras).toEqual(["b.png", "c.png"]);
-  });
-
-  it("places the first scene after the opening paragraph for a 2-para body", () => {
-    const r = placeArticleImages(2, ["a.png", "b.png", "c.png"]);
-    expect(r.inline.get(0)).toBe("a.png");
-    expect(r.extras).toEqual(["b.png", "c.png"]);
+  it("places nothing for a 1- or 2-paragraph body (no gap flanked by text)", () => {
+    // Fewer than three paragraphs leaves no interior gap that has prose on
+    // both sides, so we render text-only rather than trailing a stray
+    // illustration below the last line.
+    expect(placeArticleImages(1, ["a.png", "b.png"]).inline.size).toBe(0);
+    expect(placeArticleImages(2, ["a.png", "b.png"]).inline.size).toBe(0);
   });
 
   it("distributes 3 scenes across 10 paragraphs at slots 2, 5, 7", () => {
@@ -120,40 +111,45 @@ describe("placeArticleImages", () => {
     expect(r.inline.get(2)).toBe("a.png");
     expect(r.inline.get(5)).toBe("b.png");
     expect(r.inline.get(7)).toBe("c.png");
-    expect(r.extras).toEqual([]);
   });
 
   it("never lands an image after the first or last paragraph", () => {
-    // Keeps the magazine convention: image stays inside the body
-    // between paragraphs, not above the opener or below the closer.
-    const r = placeArticleImages(5, ["a.png", "b.png"]);
-    for (const slot of r.inline.keys()) {
-      expect(slot).toBeGreaterThanOrEqual(1);
-      expect(slot).toBeLessThanOrEqual(4);
+    // The magazine convention: an image stays inside the body, with a
+    // paragraph of lead-in before it and text after it — slots live in
+    // [1, paraCount-2], never on the opener (0) or the closer (paraCount-1).
+    for (const paraCount of [3, 5, 8, 10, 25]) {
+      const imgs = Array.from({ length: 6 }, (_, i) => `i${i}.png`);
+      const r = placeArticleImages(paraCount, imgs);
+      for (const slot of r.inline.keys()) {
+        expect(slot).toBeGreaterThanOrEqual(1);
+        expect(slot).toBeLessThanOrEqual(paraCount - 2);
+      }
     }
   });
 
-  it("pushes collisions to extras instead of overwriting the inline winner", () => {
-    // A pathological case: 6 images across 4 paragraphs. The math
-    // collapses several into the same slot — the loser MUST surface in
-    // extras so it still renders as part of the trailing strip.
+  it("drops surplus scenes instead of trailing them below the body", () => {
+    // 6 scenes against 4 paragraphs: only paragraph 1 and 2 have text on
+    // both sides, so exactly two scenes render and the other four are
+    // dropped — nothing stacks past the last paragraph.
     const imgs = ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"];
     const r = placeArticleImages(4, imgs);
-    const total = r.inline.size + r.extras.length;
-    expect(total).toBe(imgs.length);
-    for (const url of r.extras) expect(imgs).toContain(url);
+    expect(r.inline.size).toBe(2);
+    for (const url of r.inline.values()) expect(imgs).toContain(url);
   });
 
-  it("preserves every input image across the inline + extras buckets", () => {
-    // Belt-and-braces invariant the renderer relies on. No matter the
-    // paragraph count, every scene is accounted for.
+  it("places at most paraCount-2 scenes, each in a distinct gap with text after it", () => {
+    // Invariant the renderer relies on: never more scenes than interior
+    // gaps, every scene keyed to a distinct slot that has a following
+    // paragraph so no illustration ever trails the text.
     for (const paraCount of [1, 2, 3, 5, 8, 10, 25]) {
       for (const imgCount of [0, 1, 2, 3, 5, 8]) {
         const imgs = Array.from({ length: imgCount }, (_, i) => `i${i}.png`);
         const r = placeArticleImages(paraCount, imgs);
-        expect(r.inline.size + r.extras.length).toBe(imgCount);
-        const seen = new Set<string>([...r.inline.values(), ...r.extras]);
-        expect(seen.size).toBe(imgCount);
+        const capacity = Math.max(0, paraCount - 2);
+        expect(r.inline.size).toBe(Math.min(imgCount, capacity));
+        for (const slot of r.inline.keys()) {
+          expect(slot + 1).toBeLessThanOrEqual(paraCount - 1);
+        }
       }
     }
   });
