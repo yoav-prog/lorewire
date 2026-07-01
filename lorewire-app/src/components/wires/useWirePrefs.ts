@@ -23,6 +23,7 @@ const AUTOPLAY_KEY = "lw.wires.autoplay.v1";
 const MUTED_KEY = "lw.wires.muted.v1";
 const ADVANCE_KEY = "lw.wires.advance.v1";
 const SLOW_KEY = "lw.wires.slow.v1";
+const HIDE_VOTED_KEY = "lw.wires.hide_voted.v1";
 
 /** Slow-mode playback rate. 0.75x is the sweet spot — noticeably calmer
  *  while keeping voices intelligible with preservesPitch enabled. */
@@ -114,6 +115,10 @@ const advanceStore = createBoolStore(ADVANCE_KEY, true);
 // slow = true → playback runs at SLOW_MODE_PLAYBACK_RATE instead of 1.0x.
 // Default OFF — the slow speed is opt-in accessibility, not the brand default.
 const slowStore = createBoolStore(SLOW_KEY, false);
+// hideVoted = true → the feed shows only wires the viewer hasn't voted on yet
+// (the server applies the filter via listPublishedShorts' onlyUnvoted param).
+// Default ON — the request was for "unvoted first," with a toggle to see all.
+const hideVotedStore = createBoolStore(HIDE_VOTED_KEY, true);
 
 export interface WirePrefs {
   autoplay: boolean;
@@ -122,6 +127,9 @@ export interface WirePrefs {
   advance: boolean;
   /** Slow mode: true = 0.75x playback for an easier pace; false = 1.0x. */
   slow: boolean;
+  /** Only-unvoted filter: true = show only wires the viewer hasn't voted on
+   *  yet (the default); false = show every published wire. */
+  hideVoted: boolean;
   setAutoplay: (v: boolean) => void;
   toggleAutoplay: () => void;
   setMuted: (v: boolean) => void;
@@ -130,6 +138,8 @@ export interface WirePrefs {
   toggleAdvance: () => void;
   setSlow: (v: boolean) => void;
   toggleSlow: () => void;
+  setHideVoted: (v: boolean) => void;
+  toggleHideVoted: () => void;
 }
 
 export function useWirePrefs(): WirePrefs {
@@ -153,11 +163,17 @@ export function useWirePrefs(): WirePrefs {
     slowStore.getSnapshot,
     slowStore.getServerSnapshot,
   );
+  const hideVoted = useSyncExternalStore(
+    hideVotedStore.subscribe,
+    hideVotedStore.getSnapshot,
+    hideVotedStore.getServerSnapshot,
+  );
   return {
     autoplay,
     muted,
     advance,
     slow,
+    hideVoted,
     setAutoplay: autoplayStore.set,
     toggleAutoplay: () => autoplayStore.set(!autoplayStore.getSnapshot()),
     setMuted: mutedStore.set,
@@ -166,5 +182,7 @@ export function useWirePrefs(): WirePrefs {
     toggleAdvance: () => advanceStore.set(!advanceStore.getSnapshot()),
     setSlow: slowStore.set,
     toggleSlow: () => slowStore.set(!slowStore.getSnapshot()),
+    setHideVoted: hideVotedStore.set,
+    toggleHideVoted: () => hideVotedStore.set(!hideVotedStore.getSnapshot()),
   };
 }

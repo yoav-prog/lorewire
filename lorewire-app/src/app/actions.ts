@@ -23,6 +23,7 @@ import {
 } from "@/lib/homepage-data";
 import {
   getWirePollsForStories,
+  listVotedStoryIdsByCookie,
   resolvePublicFloor,
   type HomepagePollRails,
   type PollRailKind,
@@ -345,6 +346,11 @@ export interface WireStory extends LiveCatalogStory {
   like_count: number;
   viewer_liked: boolean;
   poll: WirePollData | null;
+  /** Primary granular category slug (story_tags.is_primary), or null when the
+   *  story isn't tagged yet. Drives the card's category chip and matches the
+   *  category filter's taxonomy; the card falls back to the legacy `category`
+   *  label when this is null. */
+  category_slug: string | null;
 }
 
 export interface LiveCatalogResult {
@@ -375,6 +381,17 @@ export interface ListShortsOpts {
   /** Cursor: return shorts published strictly BEFORE this timestamp. Pass the
    *  previous page's `nextCursor`; omit for the first page. */
   beforePublishedAt?: string | null;
+  /** When true, exclude wires this viewer has already voted on (attributed by
+   *  the vote cookie, the same source the homepage "You Didn't Vote Yet" rail
+   *  uses). Drives the Wires feed's default "unvoted only" mode. The filter is
+   *  applied in SQL so pagination counts unvoted wires, not all published ones.
+   *  Absent cookie / no votes → no filtering (nothing to hide). Defaults off so
+   *  every other caller keeps the full feed. */
+  onlyUnvoted?: boolean;
+  /** When set, restrict to wires tagged with ANY of these granular category
+   *  slugs (story_tags.category_slug). Filtered in SQL via an EXISTS subquery so
+   *  pagination counts the filtered result. Empty / absent → no restriction. */
+  categorySlugs?: string[];
 }
 
 export interface ListShortsResult {
@@ -404,6 +421,33 @@ export async function listPublishedShorts(
     "video_url LIKE ?",
   ];
   const params: unknown[] = [SHORT_VIDEO_URL_LIKE];
+  // Only-unvoted mode (the Wires feed's default): drop wires this viewer has
+  // already voted on. Done in SQL — BEFORE the cursor clause so `where` and
+  // `params` stay in lockstep — so the LIMIT + over-fetch count unvoted wires
+  // rather than all published ones (a client-side filter would starve the feed
+  // when most wires are voted). Reuses the same cookie-attributed vote read as
+  // the homepage "You Didn't Vote Yet" rail, so both surfaces agree on what
+  // "voted" means. Absent cookie / no votes → no exclusion.
+  if (opts.onlyUnvoted) {
+    const votedIds = await listVotedStoryIdsByCookie(await readVoteToken());
+    if (votedIds.length > 0) {
+      where.push(`id NOT IN (${votedIds.map(() => "?").join(", ")})`);
+      params.push(...votedIds);
+    }
+  }
+  // Category filter: restrict to wires carrying ANY of the selected granular
+  // tags. EXISTS (not JOIN) so a multi-tagged wire yields ONE row and the LIMIT
+  // counts filtered wires correctly. Reads story_tags — the same taxonomy the
+  // /c/<slug> landing pages filter on, so the feed agrees with them.
+  const catSlugs = (opts.categorySlugs ?? []).filter(Boolean);
+  if (catSlugs.length > 0) {
+    where.push(
+      `EXISTS (SELECT 1 FROM story_tags t WHERE t.story_id = stories.id AND t.category_slug IN (${catSlugs
+        .map(() => "?")
+        .join(", ")}))`,
+    );
+    params.push(...catSlugs);
+  }
   if (opts.beforePublishedAt) {
     where.push("COALESCE(published_at, updated_at, created_at) < ?");
     params.push(opts.beforePublishedAt);
@@ -451,7 +495,10 @@ export async function listPublishedShorts(
   // `poll: null` — the card hides both surfaces in that case. Plan:
   // _plans/2026-06-25-wires-poll-wrapper.md.
   const withPolls = await attachWirePollState(withLikes);
-  return { ok: true, shorts: withPolls, nextCursor };
+  // Attach each wire's primary granular category slug so the card chip speaks
+  // the same taxonomy as the category filter.
+  const withCategory = await attachPrimaryCategorySlug(withPolls);
+  return { ok: true, shorts: withCategory, nextCursor };
 }
 
 /** Batch-resolve the per-wire poll bundle and slot it onto each row.
@@ -541,7 +588,41 @@ async function attachLikeState(rows: LiveCatalogStory[]): Promise<WireStory[]> {
     like_count: countById.get(r.id) ?? 0,
     viewer_liked: likedByViewer.has(r.id),
     poll: null,
+    // Filled by attachPrimaryCategorySlug after the poll pass; initialised here
+    // so the chained transforms satisfy the WireStory shape (mirrors `poll`).
+    category_slug: null,
   }));
+}
+
+/** Attach each wire's PRIMARY granular category slug (story_tags.is_primary=1)
+ *  in one batch query. Powers the card's category chip and keeps it aligned with
+ *  the category filter's taxonomy. Untagged stories keep `category_slug: null`
+ *  (the card falls back to the legacy `category` label). Best-effort: a failed
+ *  read logs and leaves the slugs null rather than crashing the public feed. */
+async function attachPrimaryCategorySlug(
+  shorts: WireStory[],
+): Promise<WireStory[]> {
+  if (shorts.length === 0) return shorts;
+  try {
+    const ids = shorts.map((s) => s.id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = await all<{ story_id: string; category_slug: string }>(
+      "SELECT story_id, category_slug FROM story_tags " +
+        `WHERE is_primary = 1 AND story_id IN (${placeholders})`,
+      ids,
+    );
+    const slugById = new Map(rows.map((r) => [r.story_id, r.category_slug]));
+    return shorts.map((s) => ({
+      ...s,
+      category_slug: slugById.get(s.id) ?? null,
+    }));
+  } catch (err) {
+    console.warn("[wires primary category resolve err]", {
+      story_count: shorts.length,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return shorts;
+  }
 }
 
 export interface ToggleLikeResult {

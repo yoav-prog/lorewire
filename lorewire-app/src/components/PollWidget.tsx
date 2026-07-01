@@ -28,6 +28,7 @@ import { useState, useTransition } from "react";
 // only db driver into the browser bundle. See the comment at the
 // top of lib/polls.ts.
 import type { PollResultView, PollSide } from "@/lib/polls-shared";
+import { markVotedStory } from "@/lib/voted-stories";
 
 interface PollWidgetProps {
   /** 2026-06-18 standalone-article polls (plan §15): the widget
@@ -119,6 +120,12 @@ export function PollWidget({
           return;
         }
         setResult(data.result);
+        // Reactive vote overlay: drop this story from the "You Didn't Vote
+        // Yet" rail this session, no refresh (lib/voted-stories). Marked on
+        // any successful vote (not just `inserted`) so a re-vote stays
+        // consistent with the server seed; idempotent. Article-only polls
+        // have no storyId and skip it.
+        if (storyId) markVotedStory(storyId);
         // Top 10 ranking signal (Phase 1 of
         // _plans/2026-06-25-top10-ranking.md). Story polls credit the
         // story; article-only polls have no storyId and skip the emit.

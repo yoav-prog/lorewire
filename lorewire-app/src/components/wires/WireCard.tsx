@@ -26,7 +26,7 @@
 // autoplay — a centre play button opts in.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { CAT, type Cat } from "@/lib/stories";
+import { categoryVisual } from "@/lib/categories/visuals";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
 import type { WireStory } from "@/app/actions";
@@ -34,6 +34,12 @@ import type { PollResultView, PollSide } from "@/lib/polls-shared";
 import { WirePollPanel } from "@/components/wires/WirePollPanel";
 import { WirePollPill } from "@/components/wires/WirePollPill";
 import { SLOW_MODE_PLAYBACK_RATE } from "@/components/wires/useWirePrefs";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
+
+// Granular category slug -> its display label + color (client-safe static
+// taxonomy). Lets the card chip speak the same taxonomy as the category filter
+// instead of the legacy `stories.category` label.
+const GRANULAR_BY_SLUG = new Map(GRANULAR_CATEGORIES.map((c) => [c.slug, c]));
 
 type OpenFn = (id: string, tab?: string) => void;
 
@@ -47,11 +53,10 @@ const LIKE_COUNT_THRESHOLD = 3;
 const DOUBLE_TAP_MS = 280;
 const HOLD_MS = 350;
 
-// Live `category` is a free string from the DB; map it to the brand category
-// colour when it matches one of the six, else a neutral surface tone.
+// Live `category` is a free string from the DB (the 18-set); resolve it to the
+// category colour via the shared visual resolver (unknown -> neutral swatch).
 function catColor(category: string | null): string {
-  if (category && category in CAT) return CAT[category as Cat];
-  return "var(--color-surface2)";
+  return category ? categoryVisual(category).color : "var(--color-surface2)";
 }
 
 function formatTime(sec: number): string {
@@ -155,6 +160,20 @@ const FullscreenIcon = ({ expanded, size = 18 }: { expanded: boolean; size?: num
     )}
   </svg>
 );
+// Close (X) glyph for exiting immersive mode.
+const CloseIcon = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 6l12 12M18 6 6 18" />
+  </svg>
+);
+// Three-dot "more" glyph for the consolidated playback-options menu.
+const MoreIcon = ({ size = 20 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+    <circle cx="5" cy="12" r="1.7" />
+    <circle cx="12" cy="12" r="1.7" />
+    <circle cx="19" cy="12" r="1.7" />
+  </svg>
+);
 
 export interface WireCardProps {
   short: WireStory;
@@ -207,6 +226,16 @@ export interface WireCardProps {
    *  loop). Returns true if the feed advanced to the next wire; false means
    *  there was no next one, so the card replays in place. */
   onWireEnded?: () => boolean;
+  /** Immersive (TikTok-style) fullscreen mode. The feed owns the real
+   *  Fullscreen API on its scroll container so native swipe paging works; this
+   *  flag tells the card to drop its bottom control bar and overlay the actions
+   *  on the video instead. */
+  immersive?: boolean;
+  /** Enter immersive mode (the feed fullscreens its container). Omitted →
+   *  the enter-immersive button hides (e.g. no fullscreen support). */
+  onEnterImmersive?: () => void;
+  /** Exit immersive mode. */
+  onExitImmersive?: () => void;
 }
 
 export default function WireCard({
@@ -236,6 +265,9 @@ export default function WireCard({
   onToggleSave,
   onTimeUpdate,
   onWireEnded,
+  immersive = false,
+  onEnterImmersive,
+  onExitImmersive,
 }: WireCardProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [posterOk, setPosterOk] = useState(true);
@@ -254,74 +286,24 @@ export default function WireCard({
   // Our own ShareSheet overlay (not the OS share panel).
   const [shareOpen, setShareOpen] = useState(false);
 
-  // ── Fullscreen + chrome auto-hide ────────────────────────────────────────
-  // The video stage requests fullscreen on its own (so the dark control bar
-  // below the video stays out of the immersive view), and the top chrome
-  // (chips + 4 controls + scrim + scrubber + the fullscreen button itself)
-  // auto-fades after ~3s of uninterrupted playback. Tap, pause, hover (on
-  // desktop), seeking, or any chrome interaction brings everything back.
-  // The floating WirePollPill is intentionally NOT in this group — it's
-  // engagement, not chrome, and a wire about to ask "what do you think"
-  // shouldn't hide the question while the user watches.
-  const stageRef = useRef<HTMLDivElement | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  // ── Chrome auto-hide ─────────────────────────────────────────────────────
+  // The top chrome (chips + controls + scrim + scrubber) auto-fades after ~3s
+  // of uninterrupted playback. Tap, pause, hover (desktop), seeking, immersive
+  // mode, or an open ⋯ menu brings everything back. The floating WirePollPill
+  // is intentionally NOT in this group — a wire about to ask "what do you
+  // think" shouldn't hide the question while the user watches. Real fullscreen
+  // is owned by the FEED (it fullscreens its scroll container so native swipe
+  // paging works); the `immersive` prop just reshapes this card's chrome.
   const [chromeVisible, setChromeVisible] = useState(true);
   const [interactionTick, setInteractionTick] = useState(0);
+  // The consolidated "⋯" playback-options menu. Autoplay / end-of-wire / slow /
+  // shuffle used to be four always-visible buttons crowding the top-right; they
+  // now live in this menu so the frame stays clean. Open pins the chrome so the
+  // menu doesn't fade mid-interaction.
+  const [moreOpen, setMoreOpen] = useState(false);
   const markActive = useCallback(() => {
     setChromeVisible(true);
     setInteractionTick((n) => n + 1);
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    const doc = document as Document & {
-      webkitFullscreenElement?: Element | null;
-      webkitExitFullscreen?: () => Promise<void> | void;
-    };
-    const elx = el as HTMLDivElement & {
-      webkitRequestFullscreen?: () => Promise<void> | void;
-    };
-    const inFs = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
-    try {
-      if (inFs) {
-        const p = doc.exitFullscreen
-          ? doc.exitFullscreen()
-          : doc.webkitExitFullscreen?.();
-        if (p && typeof (p as Promise<void>).catch === "function") {
-          (p as Promise<void>).catch(() => undefined);
-        }
-      } else {
-        const p = elx.requestFullscreen
-          ? elx.requestFullscreen()
-          : elx.webkitRequestFullscreen?.();
-        if (p && typeof (p as Promise<void>).catch === "function") {
-          (p as Promise<void>).catch((err: unknown) => {
-            console.warn("[wires fullscreen err]", { err: String(err) });
-          });
-        }
-      }
-    } catch (err) {
-      console.warn("[wires fullscreen err]", { err: String(err) });
-    }
-  }, []);
-
-  // Mirror the document's fullscreen state into ours so the icon flips
-  // when the user exits via ESC or the platform UI (not just our button).
-  useEffect(() => {
-    const onChange = () => {
-      const doc = document as Document & {
-        webkitFullscreenElement?: Element | null;
-      };
-      const inFs = Boolean(document.fullscreenElement || doc.webkitFullscreenElement);
-      setIsFullscreen(inFs && document.fullscreenElement === stageRef.current);
-    };
-    document.addEventListener("fullscreenchange", onChange);
-    document.addEventListener("webkitfullscreenchange", onChange);
-    return () => {
-      document.removeEventListener("fullscreenchange", onChange);
-      document.removeEventListener("webkitfullscreenchange", onChange);
-    };
   }, []);
 
   // ── Poll state mirror (read by the floating pill) ────────────────────────
@@ -337,12 +319,16 @@ export default function WireCard({
   const [pollResult, setPollResult] = useState<PollResultView | null>(
     initialPoll?.initialResult ?? null,
   );
-  // Tapping the pill flashes the panel below. Pulse nonce is a monotonic
-  // counter so the panel's pulse effect retriggers cleanly on every tap.
+  // Tapping the pill flashes the panel below (normal card). Pulse nonce is a
+  // monotonic counter so the panel's pulse effect retriggers cleanly per tap.
   const [pollPulseNonce, setPollPulseNonce] = useState(0);
+  // Immersive mode has no bottom bar, so the pill opens the poll in a sheet
+  // over the video instead of pulsing a panel that isn't there.
+  const [pollSheetOpen, setPollSheetOpen] = useState(false);
   const onPollPillClick = useCallback(() => {
-    setPollPulseNonce((n) => n + 1);
-  }, []);
+    if (immersive) setPollSheetOpen(true);
+    else setPollPulseNonce((n) => n + 1);
+  }, [immersive]);
   const onPollVoted = useCallback(
     (side: PollSide, result: PollResultView) => {
       setPollVotedSide(side);
@@ -403,6 +389,15 @@ export default function WireCard({
   const videoUrl = short.video_url;
   const poster = short.hero_image && posterOk ? short.hero_image : null;
   const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+
+  // Category chip: prefer the granular tag (matches the category filter);
+  // fall back to the legacy `stories.category` label + color when a wire isn't
+  // tagged yet.
+  const granularCat = short.category_slug
+    ? GRANULAR_BY_SLUG.get(short.category_slug)
+    : undefined;
+  const categoryLabel = granularCat?.label ?? short.category;
+  const categoryBg = granularCat?.color ?? catColor(short.category);
 
   // Start playback reliably: set the muted PROPERTY right before play() and
   // record whether the browser ACTUALLY blocked us (NotAllowedError = real
@@ -506,13 +501,24 @@ export default function WireCard({
   // the timer alongside the play/pause toggle. Skipped entirely while the
   // viewer is in fullscreen — the platform's own UI takes over there.
   useEffect(() => {
-    if (!shouldPlay || hovered || seeking || isFullscreen) {
+    if (!shouldPlay || hovered || seeking || immersive || moreOpen) {
       setChromeVisible(true);
       return;
     }
     const handle = window.setTimeout(() => setChromeVisible(false), 3000);
     return () => window.clearTimeout(handle);
-  }, [shouldPlay, hovered, seeking, isFullscreen, interactionTick]);
+  }, [shouldPlay, hovered, seeking, immersive, moreOpen, interactionTick]);
+
+  // Close the "⋯" menu on Escape (desktop). Outside taps are handled by the
+  // backdrop rendered alongside the menu.
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMoreOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [moreOpen]);
 
   // Play/pause from a single tap. In opt-in mode (reduced motion or autoplay
   // off) the first tap starts; afterwards it toggles.
@@ -700,9 +706,8 @@ export default function WireCard({
     <div className="flex h-full w-full flex-col bg-black">
       {/* ── Video stage — full frame, never cropped or covered ── */}
       <div
-        ref={stageRef}
-        // bg-black ensures fullscreen letterboxes the 9:16 frame on
-        // landscape monitors without bleeding a different color.
+        // bg-black letterboxes the 9:16 frame on wider viewports (immersive /
+        // landscape) without bleeding a different color.
         className="relative min-h-0 flex-1 bg-black"
         onMouseEnter={() => setHovered(true)}
         onMouseMove={() => setHovered(true)}
@@ -803,25 +808,21 @@ export default function WireCard({
                 chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
               }`}
             >
-              {short.category && (
+              {categoryLabel && (
                 <span
-                  className="rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
-                  style={{ background: catColor(short.category) }}
+                  className="max-w-[46vw] truncate rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
+                  style={{ background: categoryBg }}
                 >
-                  {short.category}
+                  {categoryLabel}
                 </span>
               )}
-              {/* Duration: prefer the live `<video>` metadata once it loads
-                  so intro + outro are reflected in the chip. Falls back to
-                  the DB string (which lags reality on stories whose render
-                  was reburned with new bookends). */}
-              {(duration > 0 || short.duration) && (
-                <span className="rounded px-1.5 py-0.5 font-mono text-[10px] text-ink/85" style={{ background: "rgba(0,0,0,.4)" }}>
-                  {duration > 0 ? formatTime(duration) : short.duration}
-                </span>
-              )}
+              {/* Duration lives on the scrubber (0:01 / 0:49) — no separate
+                  chip up here, one less thing on the frame. */}
             </div>
-            {short.poll && (
+            {/* Floating poll pill only in fullscreen: in the normal card the
+                poll panel sits right below the video, so the pill would just
+                duplicate it and crowd the frame. */}
+            {short.poll && immersive && (
               <WirePollPill
                 votedSide={pollVotedSide}
                 result={pollResult}
@@ -830,69 +831,24 @@ export default function WireCard({
             )}
           </div>
           <div
-            className={`flex items-center gap-2 transition-opacity duration-300 ${
+            className={`relative flex items-center gap-2 transition-opacity duration-300 ${
               chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
             }`}
           >
-            {onShuffle && (
+            {immersive && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  markActive();
-                  onShuffle();
+                  onExitImmersive?.();
                 }}
-                aria-label="Shuffle wires"
-                title="Shuffle"
+                aria-label="Exit fullscreen"
+                title="Exit fullscreen"
                 className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
                 style={{ background: "rgba(0,0,0,.4)" }}
               >
-                <ShuffleIcon size={18} />
+                <CloseIcon size={18} />
               </button>
             )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                markActive();
-                onToggleAutoplay();
-              }}
-              aria-label={autoplay ? "Turn autoplay off" : "Turn autoplay on"}
-              aria-pressed={autoplay}
-              title={autoplay ? "Autoplay on" : "Autoplay off"}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-              style={{ background: "rgba(0,0,0,.4)", opacity: autoplay ? 1 : 0.7 }}
-            >
-              <AutoplayGlyph on={autoplay} size={19} />
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                markActive();
-                onToggleAdvance();
-              }}
-              aria-label={
-                advance ? "Auto-advance on; switch to loop" : "Loop on; switch to auto-advance"
-              }
-              aria-pressed={advance}
-              title={advance ? "Auto-advance" : "Loop"}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-              style={{ background: "rgba(0,0,0,.4)" }}
-            >
-              {advance ? <AdvanceGlyph size={18} /> : <LoopGlyph size={18} />}
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                markActive();
-                onToggleSlow();
-              }}
-              aria-label={slow ? "Slow mode on; switch to normal speed" : "Turn slow mode on"}
-              aria-pressed={slow}
-              title={slow ? "Slow mode (0.75×)" : "Slow mode off"}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full font-mono text-[10px] font-semibold tabular-nums text-ink"
-              style={{ background: "rgba(0,0,0,.4)", opacity: slow ? 1 : 0.7 }}
-            >
-              {slow ? ".75×" : "1×"}
-            </button>
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -906,6 +862,45 @@ export default function WireCard({
             >
               {muted ? <SpeakerOff size={20} /> : <SpeakerOn size={20} />}
             </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                markActive();
+                setMoreOpen((o) => !o);
+              }}
+              aria-label="Playback options"
+              aria-haspopup="menu"
+              aria-expanded={moreOpen}
+              title="Options"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
+              style={{ background: "rgba(0,0,0,.4)", opacity: moreOpen ? 1 : 0.9 }}
+            >
+              <MoreIcon size={20} />
+            </button>
+            {moreOpen && (
+              <>
+                {/* Full-viewport backdrop catches the outside tap to close the
+                    menu without also toggling play/pause on the video stage. */}
+                <div
+                  className="fixed inset-0 z-40"
+                  aria-hidden
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMoreOpen(false);
+                  }}
+                />
+                <WireMoreMenu
+                  autoplay={autoplay}
+                  advance={advance}
+                  slow={slow}
+                  onToggleAutoplay={onToggleAutoplay}
+                  onToggleAdvance={onToggleAdvance}
+                  onToggleSlow={onToggleSlow}
+                  onShuffle={onShuffle}
+                  onClose={() => setMoreOpen(false)}
+                />
+              </>
+            )}
           </div>
         </div>
 
@@ -955,25 +950,27 @@ export default function WireCard({
           </div>
         )}
 
-        {/* Fullscreen toggle — sits above the scrubber on the right so the
-            CTA lands in the thumb zone without crowding the top chrome.
-            Joins the auto-hide group: fades alongside the scrubber when
-            the user just wants the video to play. */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            markActive();
-            toggleFullscreen();
-          }}
-          aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-          title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-          className={`absolute right-3 z-20 grid h-9 w-9 place-items-center rounded-full text-ink transition-opacity duration-300 ${
-            chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
-          }`}
-          style={{ background: "rgba(0,0,0,.45)", bottom: 36 }}
-        >
-          <FullscreenIcon expanded={isFullscreen} size={18} />
-        </button>
+        {/* Enter immersive (TikTok-style fullscreen) — sits above the scrubber
+            on the right so the CTA lands in the thumb zone without crowding the
+            top chrome. Joins the auto-hide group. Hidden in immersive mode,
+            where a Close button takes over top-left. */}
+        {!immersive && onEnterImmersive && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              markActive();
+              onEnterImmersive();
+            }}
+            aria-label="Enter fullscreen"
+            title="Fullscreen"
+            className={`absolute right-3 z-20 grid h-9 w-9 place-items-center rounded-full text-ink transition-opacity duration-300 ${
+              chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
+            }`}
+            style={{ background: "rgba(0,0,0,.45)", bottom: 36 }}
+          >
+            <FullscreenIcon expanded={false} size={18} />
+          </button>
+        )}
 
         {/* Scrubber + time, pinned to the bottom of the video stage. The hit
             zone is taller than the visible bar so it's easy to grab. Auto-
@@ -1031,13 +1028,119 @@ export default function WireCard({
             </div>
           </div>
         </div>
+
+        {/* ── Immersive-only overlays. The bottom control bar is hidden in
+            immersive mode, so the actions overlay the video (TikTok-style). ── */}
+        {immersive && (
+          <>
+            {/* Right action rail: like / save / share. */}
+            <div
+              className="absolute right-3 z-20 flex flex-col items-center gap-5 text-ink"
+              style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 104px)" }}
+            >
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleLike(short.id);
+                }}
+                aria-label={liked ? "Unlike" : "Like"}
+                aria-pressed={liked}
+                className="flex flex-col items-center gap-1 active:scale-90 transition"
+              >
+                <HeartIcon filled={liked} size={30} />
+                {showCount && (
+                  <span className="font-body text-[11px] font-semibold tabular-nums ink-shadow">
+                    {formatCount(likeCount)}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleSave(short.id);
+                }}
+                aria-label={saved ? "Remove from My List" : "Save to My List"}
+                aria-pressed={saved}
+                className="active:scale-90 transition"
+                style={{ color: saved ? "var(--color-accent)" : undefined }}
+              >
+                <BookmarkIcon filled={saved} size={28} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShareOpen(true);
+                }}
+                aria-label="Share"
+                className="active:scale-90 transition"
+              >
+                <ShareUpIcon size={28} />
+              </button>
+            </div>
+
+            {/* Title (bottom-left) — tap to read the full story. */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenInfo(short.id, "Read");
+              }}
+              aria-label={`Read the story: ${short.title ?? "untitled"}`}
+              className="group absolute left-4 z-20 flex max-w-[66%] items-end gap-1.5 text-left"
+              style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 92px)" }}
+              // The Read sheet lives at the shell level, outside the fullscreen
+              // element — exit immersive first so it's actually visible.
+              onClickCapture={() => onExitImmersive?.()}
+            >
+              <h2 className="line-clamp-2 font-display text-[17px] font-black uppercase leading-[1.05] tracking-tightest text-ink ink-shadow">
+                {short.title}
+              </h2>
+              <span
+                aria-hidden
+                className="shrink-0 pb-0.5 font-display text-[15px] font-bold text-ink/70 ink-shadow"
+              >
+                →
+              </span>
+            </button>
+
+            {/* Poll sheet — opened by the floating VOTE pill (the bottom poll
+                panel isn't rendered in immersive mode). */}
+            {short.poll && pollSheetOpen && (
+              <>
+                <div
+                  className="absolute inset-0 z-30 bg-black/50"
+                  aria-hidden
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPollSheetOpen(false);
+                  }}
+                />
+                <div
+                  className="absolute inset-x-0 bottom-0 z-40 px-3 pt-3"
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
+                  }}
+                >
+                  <WirePollPanel
+                    storyId={short.id}
+                    poll={short.poll}
+                    onVoted={onPollVoted}
+                  />
+                </div>
+              </>
+            )}
+          </>
+        )}
       </div>
 
-      {/* ── Control bar BELOW the video — title row + poll wrapper ── */}
-      <div
-        className="relative z-10 shrink-0 border-t border-line bg-black px-4 pt-2.5"
-        style={{ paddingBottom: insetBottom }}
-      >
+      {/* ── Control bar BELOW the video — title row + poll wrapper. Hidden in
+          immersive mode, where the actions overlay the video instead. ── */}
+      {!immersive && (
+        <div
+          className="relative z-10 shrink-0 border-t border-line bg-black px-4 pt-2.5"
+          style={{ paddingBottom: insetBottom }}
+        >
         {/* Title row sits FIRST so the order reads: video → "this is what
             you watched" → "what do you think." Removing the dedicated
             "Read the story" pill — the whole title row is now the tap
@@ -1130,7 +1233,8 @@ export default function WireCard({
             />
           </div>
         )}
-      </div>
+        </div>
+      )}
 
       {shareOpen && (
         <ShareSheet
@@ -1140,5 +1244,133 @@ export default function WireCard({
         />
       )}
     </div>
+  );
+}
+
+/** Consolidated "⋯" playback-options menu. The autoplay / end-of-wire / slow
+ *  toggles and the shuffle action used to sit as four always-visible buttons in
+ *  the top-right, crowding every frame; they live here now so the video stays
+ *  the focus. Anchored under the ⋯ button; the parent closes it on an outside
+ *  tap (backdrop) or Escape, and Shuffle closes it on select. */
+function WireMoreMenu({
+  autoplay,
+  advance,
+  slow,
+  onToggleAutoplay,
+  onToggleAdvance,
+  onToggleSlow,
+  onShuffle,
+  onClose,
+}: {
+  autoplay: boolean;
+  advance: boolean;
+  slow: boolean;
+  onToggleAutoplay: () => void;
+  onToggleAdvance: () => void;
+  onToggleSlow: () => void;
+  onShuffle?: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      role="menu"
+      aria-label="Playback options"
+      onClick={(e) => e.stopPropagation()}
+      className="absolute right-0 top-full z-50 mt-2 w-60 overflow-hidden rounded-2xl border border-line bg-[#0e0e10]/95 py-1 shadow-2xl backdrop-blur"
+    >
+      <MoreMenuToggle
+        icon={<AutoplayGlyph on={autoplay} size={18} />}
+        label="Autoplay"
+        value={autoplay ? "On" : "Off"}
+        active={autoplay}
+        title={autoplay ? "Autoplay on" : "Autoplay off"}
+        onClick={onToggleAutoplay}
+      />
+      <MoreMenuToggle
+        icon={advance ? <AdvanceGlyph size={18} /> : <LoopGlyph size={18} />}
+        label="End of wire"
+        value={advance ? "Next" : "Loop"}
+        active={advance}
+        title={advance ? "Auto-advance" : "Loop"}
+        onClick={onToggleAdvance}
+      />
+      <MoreMenuToggle
+        icon={
+          <span className="font-mono text-[9px] font-bold tabular-nums">
+            {slow ? ".75" : "1"}
+          </span>
+        }
+        label="Slow mode"
+        value={slow ? ".75×" : "1×"}
+        active={slow}
+        title={slow ? "Slow mode on; switch to normal speed" : "Slow mode off"}
+        onClick={onToggleSlow}
+      />
+      {onShuffle && (
+        <>
+          <div className="my-1 border-t border-line/60" />
+          <button
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              onShuffle();
+              onClose();
+            }}
+            className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left text-ink transition-colors hover:bg-white/5"
+          >
+            <span className="grid h-5 w-5 place-items-center text-muted">
+              <ShuffleIcon size={17} />
+            </span>
+            <span className="flex-1 font-body text-[13.5px] font-medium">
+              Shuffle wires
+            </span>
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One toggle row in the ⋯ menu: leading glyph, label, and a state chip that
+ *  reads accent when the option is on. `aria-checked` + the `title` prefix keep
+ *  it discoverable to assistive tech (and the tests). */
+function MoreMenuToggle({
+  icon,
+  label,
+  value,
+  active,
+  title,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  active: boolean;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemcheckbox"
+      aria-checked={active}
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left text-ink transition-colors hover:bg-white/5"
+    >
+      <span className="grid h-5 w-5 place-items-center text-muted">{icon}</span>
+      <span className="flex-1 font-body text-[13.5px] font-medium">{label}</span>
+      <span
+        className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-[.12em] ${
+          active ? "bg-accent text-bg" : "border border-line text-muted"
+        }`}
+      >
+        {value}
+      </span>
+    </button>
   );
 }

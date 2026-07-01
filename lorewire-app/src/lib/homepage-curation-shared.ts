@@ -14,12 +14,17 @@ export const HOMEPAGE_SURFACES = [
   "top10",
   "continue",
   "new_row",
-  "entitled_row",
-  "humor_row",
-  "wholesome_row",
-  "dating_row",
-  "roommate_row",
-  "drama_row",
+  // The 8 rail-flagged categories from the 18-set (PR5 read-path flip). The
+  // surface key IS the category slug so /c/<slug>, curation, and the rotating
+  // slot all share one identifier.
+  "entitled-people",
+  "family-feuds",
+  "cheating-betrayal",
+  "wedding-drama",
+  "workplace",
+  "dating-disasters",
+  "revenge-karma",
+  "wholesome-wins",
 ] as const;
 export type HomepageSurface = (typeof HOMEPAGE_SURFACES)[number];
 
@@ -32,12 +37,14 @@ export const SURFACE_CAPACITY: Record<HomepageSurface, number | null> = {
   top10: 10,
   continue: null,
   new_row: null,
-  entitled_row: null,
-  humor_row: null,
-  wholesome_row: null,
-  dating_row: null,
-  roommate_row: null,
-  drama_row: null,
+  "entitled-people": null,
+  "family-feuds": null,
+  "cheating-betrayal": null,
+  "wedding-drama": null,
+  workplace: null,
+  "dating-disasters": null,
+  "revenge-karma": null,
+  "wholesome-wins": null,
 };
 
 export function isHomepageSurface(v: unknown): v is HomepageSurface {
@@ -70,12 +77,14 @@ export function isHomepageSurface(v: unknown): v is HomepageSurface {
  *  HOMEPAGE_SURFACES (the six category rails only — hero / top10 /
  *  continue / new_row are not category cards). */
 export const ROTATING_CATEGORY_SURFACES = [
-  "entitled_row",
-  "humor_row",
-  "wholesome_row",
-  "dating_row",
-  "roommate_row",
-  "drama_row",
+  "entitled-people",
+  "family-feuds",
+  "cheating-betrayal",
+  "wedding-drama",
+  "workplace",
+  "dating-disasters",
+  "revenge-karma",
+  "wholesome-wins",
 ] as const;
 export type RotatingCategorySurface =
   (typeof ROTATING_CATEGORY_SURFACES)[number];

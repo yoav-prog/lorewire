@@ -103,12 +103,34 @@ const STATIC_GROUPS: SidebarGroup[] = [
         slot: <SidebarLiveBadge />,
       },
       {
+        // 2026-07-01 render + publish schedulers: auto-render the strongest
+        // Reddit sources, the human approval gate, and per-platform scheduled
+        // publishing. Gated on settings.manage (config-heavy); the approve /
+        // reject actions re-check content.manage. Plan:
+        // _plans/2026-07-01-render-and-publish-schedulers.md.
+        href: "/admin/scheduler",
+        label: "Scheduler",
+        activePrefixes: ["/admin/scheduler"],
+        capability: "settings.manage",
+      },
+      {
         // Homepage curation: which stories appear on each rail. Live
         // edits land on the next homepage load. Plan:
         // _plans/2026-06-16-homepage-curation.md.
         href: "/admin/curation",
         label: "Homepage",
         activePrefixes: ["/admin/curation"],
+        capability: "content.manage",
+      },
+      {
+        // Category reclassification: preview (dry-run) how the multi-tag
+        // classifier would tag the whole story library, then apply the
+        // reviewed tags (a separate, gated step). content.manage to match
+        // the page's requireCapability gate. Plan:
+        // _plans/2026-07-01-category-taxonomy-multitag.md.
+        href: "/admin/reclassify",
+        label: "Reclassify",
+        activePrefixes: ["/admin/reclassify"],
         capability: "content.manage",
       },
       {

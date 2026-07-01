@@ -7,7 +7,7 @@
 
 import "server-only";
 
-import { all, one } from "@/lib/db";
+import { all, one, run } from "@/lib/db";
 
 export interface CategoryRow {
   slug: string;
@@ -78,5 +78,62 @@ export async function getPrimaryTag(
     "SELECT story_id, category_slug, is_primary, source, confidence, created_at " +
       "FROM story_tags WHERE story_id = ? AND is_primary = 1",
     [storyId],
+  );
+}
+
+export interface WriteTag {
+  slug: string;
+  confidence?: number | null;
+}
+
+/** Replace a story's tags with `tags` (most-confident first — the first
+ *  becomes is_primary). Delete-then-insert so the one-primary-per-story index
+ *  always holds. Mirrors the Python `store.replace_story_tags`. Reversible:
+ *  stories.category is left untouched, so the pre-reclassification tags can be
+ *  rebuilt by re-running the backfill. Callers must pass validated slugs. */
+export async function setStoryTags(
+  storyId: string,
+  tags: WriteTag[],
+  source: string = "llm",
+): Promise<void> {
+  await run("DELETE FROM story_tags WHERE story_id = ?", [storyId]);
+  const now = new Date().toISOString();
+  for (let i = 0; i < tags.length; i++) {
+    const t = tags[i];
+    await run(
+      "INSERT INTO story_tags " +
+        "(story_id, category_slug, is_primary, source, confidence, created_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?)",
+      [storyId, t.slug, i === 0 ? 1 : 0, source, t.confidence ?? null, now],
+    );
+  }
+}
+
+export interface CategoryStoryRow {
+  id: string;
+  slug: string | null;
+  title: string | null;
+  summary: string | null;
+  hero_image: string | null;
+  is_primary: number;
+}
+
+/** Published stories tagged with `slug`, primary-first then newest. Powers the
+ *  /c/<slug> category landing pages. Reads story_tags (the applied multi-tag
+ *  classification), so it reflects the new taxonomy regardless of the legacy
+ *  stories.category value. */
+export async function getStoriesForCategory(
+  slug: string,
+  limit = 60,
+): Promise<CategoryStoryRow[]> {
+  const cap = Math.max(1, Math.min(limit, 200));
+  return all<CategoryStoryRow>(
+    "SELECT s.id, s.slug, s.title, s.summary, s.hero_image, t.is_primary " +
+      "FROM stories s " +
+      "JOIN story_tags t ON t.story_id = s.id AND t.category_slug = ? " +
+      "WHERE s.status = 'published' " +
+      "ORDER BY t.is_primary DESC, COALESCE(s.published_at, s.created_at) DESC " +
+      `LIMIT ${cap}`,
+    [slug],
   );
 }

@@ -187,18 +187,9 @@ export async function loadCurationServerRenderAction(): Promise<CurationServerRe
       ]),
     );
   }
-  const surfaces: Record<HomepageSurface, CurationServerRenderRow[]> = {
-    hero: [],
-    top10: [],
-    continue: [],
-    new_row: [],
-    entitled_row: [],
-    humor_row: [],
-    wholesome_row: [],
-    dating_row: [],
-    roommate_row: [],
-    drama_row: [],
-  };
+  const surfaces = Object.fromEntries(
+    HOMEPAGE_SURFACES.map((s) => [s, [] as CurationServerRenderRow[]]),
+  ) as Record<HomepageSurface, CurationServerRenderRow[]>;
   for (const surface of HOMEPAGE_SURFACES) {
     for (const r of grouped[surface]) {
       const info = infoMap.get(r.story_id);

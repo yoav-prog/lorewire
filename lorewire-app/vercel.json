@@ -76,6 +76,18 @@
     {
       "path": "/api/run_hero_thumbnail_finisher",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/render_enqueue",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/expire_stale_reviews",
+      "schedule": "30 * * * *"
+    },
+    {
+      "path": "/api/publish_dispatch",
+      "schedule": "*/1 * * * *"
     }
   ],
   "functions": {
@@ -126,6 +138,15 @@
     },
     "api/run_hero_thumbnail_finisher.py": {
       "maxDuration": 800
+    },
+    "src/app/api/render_enqueue/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/expire_stale_reviews/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/publish_dispatch/route.ts": {
+      "maxDuration": 300
     }
   }
 }

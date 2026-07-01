@@ -22,11 +22,13 @@ import {
 } from "@/components/wires/useWirePrefs";
 
 const SLOW_KEY = "lw.wires.slow.v1";
+const HIDE_VOTED_KEY = "lw.wires.hide_voted.v1";
 const ALL_KEYS = [
   "lw.wires.autoplay.v1",
   "lw.wires.muted.v1",
   "lw.wires.advance.v1",
   SLOW_KEY,
+  HIDE_VOTED_KEY,
 ];
 
 function setConsent(accepted: boolean): void {
@@ -106,6 +108,8 @@ describe("useWirePrefs", () => {
     expect(h.current.autoplay).toBe(true);
     expect(h.current.muted).toBe(true);
     expect(h.current.advance).toBe(true);
+    // hideVoted defaults ON — the Wires feed opens on unvoted wires.
+    expect(h.current.hideVoted).toBe(true);
     h.unmount();
   });
 
@@ -156,6 +160,46 @@ describe("useWirePrefs", () => {
     // A second component mounting sees the persisted value, not the default.
     const second = mountHook();
     expect(second.current.slow).toBe(true);
+    first.unmount();
+    second.unmount();
+  });
+});
+
+describe("useWirePrefs — hideVoted (Wires unvoted-only filter)", () => {
+  it("toggleHideVoted flips the value in-memory even without consent", () => {
+    const h = mountHook();
+    expect(h.current.hideVoted).toBe(true);
+    act(() => {
+      h.current.toggleHideVoted();
+    });
+    expect(h.current.hideVoted).toBe(false);
+    // No consent → nothing written to disk.
+    expect(window.localStorage.getItem(HIDE_VOTED_KEY)).toBeNull();
+    h.unmount();
+  });
+
+  it("setHideVoted(false) writes '0' to localStorage when consent is accepted", () => {
+    setConsent(true);
+    const h = mountHook();
+    act(() => {
+      h.current.setHideVoted(false);
+    });
+    expect(h.current.hideVoted).toBe(false);
+    expect(window.localStorage.getItem(HIDE_VOTED_KEY)).toBe("0");
+    h.unmount();
+  });
+
+  it("toggleHideVoted round-trips through localStorage across hook instances", () => {
+    setConsent(true);
+    const first = mountHook();
+    const before = first.current.hideVoted;
+    act(() => {
+      first.current.toggleHideVoted();
+    });
+    expect(first.current.hideVoted).toBe(!before);
+    // A second component mounting shares the persisted (module-singleton) value.
+    const second = mountHook();
+    expect(second.current.hideVoted).toBe(!before);
     first.unmount();
     second.unmount();
   });

@@ -3750,33 +3750,6 @@ export async function bulkDeleteContentAction(
   return { ok, failed, prev: {} };
 }
 
-// --- Bulk LLM reclassify (2026-06-21) ---------------------------------------
-// Plan: _plans/2026-06-21-category-classifier-and-pills.md.
-//
-// Thin auth + revalidate wrapper around `reclassifyDramaAndNullStories`.
-// The actual SQL + classifier loop lives in `lib/reclassify-stories.ts`
-// so it stays unit-testable without the "use server" gate.
-
-export type {
-  ReclassifyChange,
-  ReclassifyFailure,
-  ReclassifyResult,
-} from "@/lib/reclassify-stories";
-
-export async function bulkReclassifyStoriesAction() {
-  await requireCapability("content.manage");
-  const { reclassifyDramaAndNullStories } = await import(
-    "@/lib/reclassify-stories"
-  );
-  const result = await reclassifyDramaAndNullStories({ limit: MAX_BULK_ITEMS });
-  // Refresh the admin list and the public homepage. The live catalog
-  // reads category from the DB on every render, so the public site picks
-  // up the new tags on the next request.
-  revalidatePath("/admin/content");
-  revalidatePath("/");
-  return result;
-}
-
 // --- Bulk regenerate (2026-06-24) -------------------------------------------
 // Inbox-level fan-out of the per-story regen buttons that already live on the
 // story editor. Lets the operator tick N rows and re-run hero / scenes /
