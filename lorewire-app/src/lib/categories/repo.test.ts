@@ -82,8 +82,8 @@ describe("seedCategories (the legacy six)", () => {
   });
 });
 
-describe("seedGranularCategories (the 17)", () => {
-  it("seeds all 17 as active with their data (idempotent)", async () => {
+describe("seedGranularCategories (the granular set)", () => {
+  it("seeds all granular categories as active with their data (idempotent)", async () => {
     await seedGranularCategories(); // second run must no-op, not duplicate
     for (const c of GRANULAR_CATEGORIES) {
       const row = await getCategoryBySlug(c.slug);
@@ -96,7 +96,7 @@ describe("seedGranularCategories (the 17)", () => {
     }
   });
 
-  it("makes the active set exactly the 17, none of the legacy six", async () => {
+  it("makes the active set exactly the granular set, none of the legacy six", async () => {
     const activeSlugs = (await listCategories()).map((c) => c.slug);
     for (const c of GRANULAR_CATEGORIES) expect(activeSlugs).toContain(c.slug);
     for (const def of CATEGORY_DEFS) expect(activeSlugs).not.toContain(def.slug);
