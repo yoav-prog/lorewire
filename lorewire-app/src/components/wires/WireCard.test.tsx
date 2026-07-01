@@ -266,34 +266,46 @@ describe("WireCard play/pause race", () => {
   });
 });
 
-describe("WireCard slow-mode chrome toggle", () => {
-  // Plan: _plans/2026-06-25-slow-mode-playback.md. The chrome toggle sits in
-  // the top-right cluster next to autoplay/advance/mute and shows a "0.75×"
-  // label when slow is on, "1×" when off. Tapping it calls onToggleSlow and
-  // the effect mirrors the chosen rate onto the <video> element.
+function openMore(container: HTMLElement): void {
+  const btn = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Playback options"]',
+  );
+  if (!btn) throw new Error("⋯ options button not found");
+  act(() => {
+    btn.click();
+  });
+}
+
+describe("WireCard slow-mode toggle (in the ⋯ options menu)", () => {
+  // Plan: _plans/2026-06-25-slow-mode-playback.md + the 2026-07-01 wires
+  // declutter. The slow toggle moved off the frame into the ⋯ playback-options
+  // menu; it shows ".75×" when slow is on, "1×" when off, and mirrors the rate
+  // onto the <video> element. The playbackRate assertions further down are
+  // driven by the `slow` prop and are independent of the button's location.
 
   function findSlowToggle(container: HTMLElement): HTMLButtonElement | null {
-    // Both states have the same label prefix "Turn slow mode on" /
-    // "Slow mode on; switch to normal speed" — easier to match aria-pressed.
+    // In the menu the row is a menuitemcheckbox whose title starts "Slow mode".
     return container.querySelector<HTMLButtonElement>(
-      'button[aria-pressed][title^="Slow mode"]',
+      'button[role="menuitemcheckbox"][title^="Slow mode"]',
     );
   }
 
-  it("renders '1×' and aria-pressed=false when slow mode is off", () => {
+  it("renders '1×' and aria-checked=false when slow mode is off", () => {
     const m = mount(defaultProps({ slow: false }));
+    openMore(m.container);
     const btn = findSlowToggle(m.container);
     expect(btn).not.toBeNull();
-    expect(btn!.getAttribute("aria-pressed")).toBe("false");
+    expect(btn!.getAttribute("aria-checked")).toBe("false");
     expect(btn!.textContent).toContain("1×");
     unmount(m);
   });
 
-  it("renders '.75×' and aria-pressed=true when slow mode is on", () => {
+  it("renders '.75×' and aria-checked=true when slow mode is on", () => {
     const m = mount(defaultProps({ slow: true }));
+    openMore(m.container);
     const btn = findSlowToggle(m.container);
     expect(btn).not.toBeNull();
-    expect(btn!.getAttribute("aria-pressed")).toBe("true");
+    expect(btn!.getAttribute("aria-checked")).toBe("true");
     expect(btn!.textContent).toContain(".75×");
     unmount(m);
   });
@@ -306,6 +318,7 @@ describe("WireCard slow-mode chrome toggle", () => {
         onToggleSlow: () => calls.push(1),
       }),
     );
+    openMore(m.container);
     const btn = findSlowToggle(m.container)!;
     act(() => {
       btn.click();
@@ -340,6 +353,61 @@ describe("WireCard slow-mode chrome toggle", () => {
     expect(v.playbackRate).toBeCloseTo(0.75);
     rerender(m, defaultProps({ slow: false }));
     expect(v.playbackRate).toBeCloseTo(1);
+    unmount(m);
+  });
+});
+
+describe("WireCard ⋯ options menu", () => {
+  // The 2026-07-01 declutter: autoplay / end-of-wire / slow / shuffle moved off
+  // the frame into a single ⋯ menu so the video is king.
+
+  function findMenu(container: HTMLElement): HTMLElement | null {
+    return container.querySelector<HTMLElement>('[role="menu"]');
+  }
+
+  it("is closed until the ⋯ button is tapped, then reveals the three playback toggles", () => {
+    const m = mount(defaultProps());
+    expect(findMenu(m.container)).toBeNull();
+    openMore(m.container);
+    const menu = findMenu(m.container);
+    expect(menu).not.toBeNull();
+    // Autoplay + End-of-wire + Slow = three toggle rows.
+    expect(menu!.querySelectorAll('[role="menuitemcheckbox"]')).toHaveLength(3);
+    unmount(m);
+  });
+
+  it("hides the Shuffle action when no onShuffle is provided", () => {
+    const m = mount(defaultProps());
+    openMore(m.container);
+    expect(m.container.querySelector('[role="menuitem"]')).toBeNull();
+    unmount(m);
+  });
+
+  it("shows Shuffle when onShuffle is provided, and invokes + closes on select", () => {
+    const calls: number[] = [];
+    const m = mount(defaultProps({ onShuffle: () => calls.push(1) }));
+    openMore(m.container);
+    const shuffle = m.container.querySelector<HTMLButtonElement>('[role="menuitem"]');
+    expect(shuffle).not.toBeNull();
+    act(() => {
+      shuffle!.click();
+    });
+    expect(calls).toHaveLength(1);
+    // Selecting Shuffle closes the menu.
+    expect(findMenu(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("closes when the outside backdrop is tapped", () => {
+    const m = mount(defaultProps());
+    openMore(m.container);
+    expect(findMenu(m.container)).not.toBeNull();
+    const backdrop = m.container.querySelector<HTMLElement>(".fixed.inset-0");
+    expect(backdrop).not.toBeNull();
+    act(() => {
+      backdrop!.click();
+    });
+    expect(findMenu(m.container)).toBeNull();
     unmount(m);
   });
 });

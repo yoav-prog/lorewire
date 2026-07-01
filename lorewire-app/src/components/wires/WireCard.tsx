@@ -155,6 +155,14 @@ const FullscreenIcon = ({ expanded, size = 18 }: { expanded: boolean; size?: num
     )}
   </svg>
 );
+// Three-dot "more" glyph for the consolidated playback-options menu.
+const MoreIcon = ({ size = 20 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+    <circle cx="5" cy="12" r="1.7" />
+    <circle cx="12" cy="12" r="1.7" />
+    <circle cx="19" cy="12" r="1.7" />
+  </svg>
+);
 
 export interface WireCardProps {
   short: WireStory;
@@ -267,6 +275,11 @@ export default function WireCard({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [chromeVisible, setChromeVisible] = useState(true);
   const [interactionTick, setInteractionTick] = useState(0);
+  // The consolidated "⋯" playback-options menu. Autoplay / end-of-wire / slow /
+  // shuffle used to be four always-visible buttons crowding the top-right; they
+  // now live in this menu so the frame stays clean. Open pins the chrome so the
+  // menu doesn't fade mid-interaction.
+  const [moreOpen, setMoreOpen] = useState(false);
   const markActive = useCallback(() => {
     setChromeVisible(true);
     setInteractionTick((n) => n + 1);
@@ -506,13 +519,24 @@ export default function WireCard({
   // the timer alongside the play/pause toggle. Skipped entirely while the
   // viewer is in fullscreen — the platform's own UI takes over there.
   useEffect(() => {
-    if (!shouldPlay || hovered || seeking || isFullscreen) {
+    if (!shouldPlay || hovered || seeking || isFullscreen || moreOpen) {
       setChromeVisible(true);
       return;
     }
     const handle = window.setTimeout(() => setChromeVisible(false), 3000);
     return () => window.clearTimeout(handle);
-  }, [shouldPlay, hovered, seeking, isFullscreen, interactionTick]);
+  }, [shouldPlay, hovered, seeking, isFullscreen, moreOpen, interactionTick]);
+
+  // Close the "⋯" menu on Escape (desktop). Outside taps are handled by the
+  // backdrop rendered alongside the menu.
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMoreOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [moreOpen]);
 
   // Play/pause from a single tap. In opt-in mode (reduced motion or autoplay
   // off) the first tap starts; afterwards it toggles.
@@ -811,17 +835,13 @@ export default function WireCard({
                   {short.category}
                 </span>
               )}
-              {/* Duration: prefer the live `<video>` metadata once it loads
-                  so intro + outro are reflected in the chip. Falls back to
-                  the DB string (which lags reality on stories whose render
-                  was reburned with new bookends). */}
-              {(duration > 0 || short.duration) && (
-                <span className="rounded px-1.5 py-0.5 font-mono text-[10px] text-ink/85" style={{ background: "rgba(0,0,0,.4)" }}>
-                  {duration > 0 ? formatTime(duration) : short.duration}
-                </span>
-              )}
+              {/* Duration lives on the scrubber (0:01 / 0:49) — no separate
+                  chip up here, one less thing on the frame. */}
             </div>
-            {short.poll && (
+            {/* Floating poll pill only in fullscreen: in the normal card the
+                poll panel sits right below the video, so the pill would just
+                duplicate it and crowd the frame. */}
+            {short.poll && isFullscreen && (
               <WirePollPill
                 votedSide={pollVotedSide}
                 result={pollResult}
@@ -830,69 +850,10 @@ export default function WireCard({
             )}
           </div>
           <div
-            className={`flex items-center gap-2 transition-opacity duration-300 ${
+            className={`relative flex items-center gap-2 transition-opacity duration-300 ${
               chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
             }`}
           >
-            {onShuffle && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  markActive();
-                  onShuffle();
-                }}
-                aria-label="Shuffle wires"
-                title="Shuffle"
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-                style={{ background: "rgba(0,0,0,.4)" }}
-              >
-                <ShuffleIcon size={18} />
-              </button>
-            )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                markActive();
-                onToggleAutoplay();
-              }}
-              aria-label={autoplay ? "Turn autoplay off" : "Turn autoplay on"}
-              aria-pressed={autoplay}
-              title={autoplay ? "Autoplay on" : "Autoplay off"}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-              style={{ background: "rgba(0,0,0,.4)", opacity: autoplay ? 1 : 0.7 }}
-            >
-              <AutoplayGlyph on={autoplay} size={19} />
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                markActive();
-                onToggleAdvance();
-              }}
-              aria-label={
-                advance ? "Auto-advance on; switch to loop" : "Loop on; switch to auto-advance"
-              }
-              aria-pressed={advance}
-              title={advance ? "Auto-advance" : "Loop"}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-              style={{ background: "rgba(0,0,0,.4)" }}
-            >
-              {advance ? <AdvanceGlyph size={18} /> : <LoopGlyph size={18} />}
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                markActive();
-                onToggleSlow();
-              }}
-              aria-label={slow ? "Slow mode on; switch to normal speed" : "Turn slow mode on"}
-              aria-pressed={slow}
-              title={slow ? "Slow mode (0.75×)" : "Slow mode off"}
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-full font-mono text-[10px] font-semibold tabular-nums text-ink"
-              style={{ background: "rgba(0,0,0,.4)", opacity: slow ? 1 : 0.7 }}
-            >
-              {slow ? ".75×" : "1×"}
-            </button>
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -906,6 +867,45 @@ export default function WireCard({
             >
               {muted ? <SpeakerOff size={20} /> : <SpeakerOn size={20} />}
             </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                markActive();
+                setMoreOpen((o) => !o);
+              }}
+              aria-label="Playback options"
+              aria-haspopup="menu"
+              aria-expanded={moreOpen}
+              title="Options"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
+              style={{ background: "rgba(0,0,0,.4)", opacity: moreOpen ? 1 : 0.9 }}
+            >
+              <MoreIcon size={20} />
+            </button>
+            {moreOpen && (
+              <>
+                {/* Full-viewport backdrop catches the outside tap to close the
+                    menu without also toggling play/pause on the video stage. */}
+                <div
+                  className="fixed inset-0 z-40"
+                  aria-hidden
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMoreOpen(false);
+                  }}
+                />
+                <WireMoreMenu
+                  autoplay={autoplay}
+                  advance={advance}
+                  slow={slow}
+                  onToggleAutoplay={onToggleAutoplay}
+                  onToggleAdvance={onToggleAdvance}
+                  onToggleSlow={onToggleSlow}
+                  onShuffle={onShuffle}
+                  onClose={() => setMoreOpen(false)}
+                />
+              </>
+            )}
           </div>
         </div>
 
@@ -1140,5 +1140,133 @@ export default function WireCard({
         />
       )}
     </div>
+  );
+}
+
+/** Consolidated "⋯" playback-options menu. The autoplay / end-of-wire / slow
+ *  toggles and the shuffle action used to sit as four always-visible buttons in
+ *  the top-right, crowding every frame; they live here now so the video stays
+ *  the focus. Anchored under the ⋯ button; the parent closes it on an outside
+ *  tap (backdrop) or Escape, and Shuffle closes it on select. */
+function WireMoreMenu({
+  autoplay,
+  advance,
+  slow,
+  onToggleAutoplay,
+  onToggleAdvance,
+  onToggleSlow,
+  onShuffle,
+  onClose,
+}: {
+  autoplay: boolean;
+  advance: boolean;
+  slow: boolean;
+  onToggleAutoplay: () => void;
+  onToggleAdvance: () => void;
+  onToggleSlow: () => void;
+  onShuffle?: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      role="menu"
+      aria-label="Playback options"
+      onClick={(e) => e.stopPropagation()}
+      className="absolute right-0 top-full z-50 mt-2 w-60 overflow-hidden rounded-2xl border border-line bg-[#0e0e10]/95 py-1 shadow-2xl backdrop-blur"
+    >
+      <MoreMenuToggle
+        icon={<AutoplayGlyph on={autoplay} size={18} />}
+        label="Autoplay"
+        value={autoplay ? "On" : "Off"}
+        active={autoplay}
+        title={autoplay ? "Autoplay on" : "Autoplay off"}
+        onClick={onToggleAutoplay}
+      />
+      <MoreMenuToggle
+        icon={advance ? <AdvanceGlyph size={18} /> : <LoopGlyph size={18} />}
+        label="End of wire"
+        value={advance ? "Next" : "Loop"}
+        active={advance}
+        title={advance ? "Auto-advance" : "Loop"}
+        onClick={onToggleAdvance}
+      />
+      <MoreMenuToggle
+        icon={
+          <span className="font-mono text-[9px] font-bold tabular-nums">
+            {slow ? ".75" : "1"}
+          </span>
+        }
+        label="Slow mode"
+        value={slow ? ".75×" : "1×"}
+        active={slow}
+        title={slow ? "Slow mode on; switch to normal speed" : "Slow mode off"}
+        onClick={onToggleSlow}
+      />
+      {onShuffle && (
+        <>
+          <div className="my-1 border-t border-line/60" />
+          <button
+            type="button"
+            role="menuitem"
+            onClick={(e) => {
+              e.stopPropagation();
+              onShuffle();
+              onClose();
+            }}
+            className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left text-ink transition-colors hover:bg-white/5"
+          >
+            <span className="grid h-5 w-5 place-items-center text-muted">
+              <ShuffleIcon size={17} />
+            </span>
+            <span className="flex-1 font-body text-[13.5px] font-medium">
+              Shuffle wires
+            </span>
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** One toggle row in the ⋯ menu: leading glyph, label, and a state chip that
+ *  reads accent when the option is on. `aria-checked` + the `title` prefix keep
+ *  it discoverable to assistive tech (and the tests). */
+function MoreMenuToggle({
+  icon,
+  label,
+  value,
+  active,
+  title,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  active: boolean;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemcheckbox"
+      aria-checked={active}
+      title={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      className="flex w-full items-center gap-3 px-3.5 py-2.5 text-left text-ink transition-colors hover:bg-white/5"
+    >
+      <span className="grid h-5 w-5 place-items-center text-muted">{icon}</span>
+      <span className="flex-1 font-body text-[13.5px] font-medium">{label}</span>
+      <span
+        className={`rounded-full px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-[.12em] ${
+          active ? "bg-accent text-bg" : "border border-line text-muted"
+        }`}
+      >
+        {value}
+      </span>
+    </button>
   );
 }
