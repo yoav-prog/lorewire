@@ -140,7 +140,7 @@ export interface CategoryRailSpec {
 // there; this file only maps the entries into the curation-typed shape.
 export const CATEGORY_RAILS: CategoryRailSpec[] = CATEGORY_RAIL_ENTRIES.map(
   (entry) => ({
-    surface: entry.surface as keyof HomepageCuration,
+    surface: entry.surface,
     title: entry.title,
     cat: entry.cat,
   }),

@@ -8,6 +8,7 @@ import {
   type FieldDef,
   type SectionDef,
 } from "./TemplateFieldGrid";
+import { CATEGORY_LABELS } from "@/lib/categories/manifest";
 
 // Wave 3 Phase 2: the global template from Phase 1 is now the bottom of a
 // three-tier scope chain (per-story > per-category > global > defaults). The
@@ -29,7 +30,9 @@ import {
 // Override/Inherit toggle for non-global tiers. The form's hidden-input
 // contract is unchanged so saveCaptionTemplateAction keeps working.
 
-const CATEGORIES = ["Drama", "Entitled", "Humor", "Wholesome", "Dating", "Roommate"] as const;
+// Caption-template category scopes, from the shared manifest so this
+// picker can't drift from the category set (see @/lib/categories/manifest).
+const CATEGORIES = CATEGORY_LABELS;
 
 const DEFAULTS: Record<string, string> = {
   "position_y": "0.68",

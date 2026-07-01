@@ -124,11 +124,12 @@ Under multi-tag, overlap is a feature (a story gets both), so we keep granularit
 
 ## Phased build (ship value early, isolate DB risk)
 
-**PR1 - Single manifest, collapse the six lists. (No DB, no behavior change.)**
-- New `src/lib/categories/manifest.ts`: the 17 rows (`slug, label, glyph, color|null, isRail, railTitle, subreddits[]`).
-- Delete five of the six duplicate lists; each imports from the manifest. Codegen or derive the `Cat` type from the manifest + a runtime Zod enum from the same array (Executor: least likely to rot).
-- Python reads the same set from a generated JSON (single build artifact) or a mirrored constant with a test asserting parity.
-- Ends the lockstep problem in one afternoon. Everything downstream is a prerequisite of this.
+**PR1 - Single manifest, collapse the duplicated lists. (No DB, no behavior change.) [BUILT]**
+- New `src/lib/categories/manifest.ts` holds the CURRENT six categories in the rich shape (`slug, label, glyph, color, railSurface, railTitle, subreddits[]`) and derives `Cat`, `CAT_COLORS`, `CATEGORY_GLYPHS`, `CATEGORY_RAIL_ENTRIES`, `SUBREDDIT_CATEGORY`, `isCategoryLabel`. The `Cat` union is preserved from the manifest (no `string` widening); Zod was skipped in favor of the codebase's existing type-guard idiom.
+- The 17 new categories are NOT introduced here - they land in PR2 with the DB seed so existing stories (all still on the old values) are not stranded and no empty new rails appear. Slugs freeze at the PR2 seed, not PR1.
+- Category-list consumers now derive from the manifest: `stories.ts` (Cat/CAT), `admin/ui.ts` (CATEGORIES), `homepage-rails.ts` (CATEGORY_RAILS + glyphs), `admin/actions.ts` (bulk-op validation set), plus the admin surfaces `templates/page.tsx` (CATEGORIES), `settings/page.tsx` (rotating-rail dropdown + shorts list) and `settings/socials/page.tsx` (shorts list).
+- Two copies the manifest can't import at build time are guarded by `manifest.test.ts` against drift: `pipeline/stages.py` (STORY_CATEGORIES + SUBREDDIT_CATEGORY, separate runtime) and the `--color-cat-*` tokens in `globals.css` (static Tailwind).
+- **Intentionally out of scope for PR1 (own registry / follow-up):** the per-category hero-style defaults (`HERO_CATEGORY_KEYS` in `settings/page.tsx`, keyed to the Python hero resolver) and the hero-style whitelist (`hero-styles.json` / `CATEGORY_STYLE_WHITELIST` / `hero-styles.test.ts`) are a separate Python-owned registry with its own `sync_hero_styles` + `test_hero_styles_sync` parity mechanism. They will need to grow with the taxonomy in PR2+, but folding them into PR1 would entangle the hero-style subsystem.
 
 **PR2 - DB tables + backfill, read-only admin view.**
 - Add `categories` + `story_tags` to `schema.ts`. Seed `categories` from the manifest on first boot (mirror the existing `_seed_*` pattern in db.ts).

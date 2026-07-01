@@ -110,14 +110,22 @@ describe("category manifest internal consistency", () => {
 describe("category manifest parity with pipeline/stages.py", () => {
   const stagesSrc = readFileSync(findRepoFile("pipeline", "stages.py"), "utf-8");
 
+  // Strip Python `#` line comments before matching quoted strings so a
+  // future inline comment containing quotes can't corrupt the parse.
+  const stripComments = (s: string) => s.replace(/#.*$/gm, "");
+
   it("STORY_CATEGORIES matches CATEGORY_LABELS in order", () => {
-    const block = extractBlock(stagesSrc, "STORY_CATEGORIES = (", "(", ")");
+    const block = stripComments(
+      extractBlock(stagesSrc, "STORY_CATEGORIES = (", "(", ")"),
+    );
     const pyCategories = [...block.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
     expect(pyCategories).toEqual([...CATEGORY_LABELS]);
   });
 
   it("SUBREDDIT_CATEGORY matches the manifest (order-independent)", () => {
-    const block = extractBlock(stagesSrc, "SUBREDDIT_CATEGORY = {", "{", "}");
+    const block = stripComments(
+      extractBlock(stagesSrc, "SUBREDDIT_CATEGORY = {", "{", "}"),
+    );
     const pyMap: Record<string, string> = {};
     for (const m of block.matchAll(/"([^"]+)"\s*:\s*"([^"]+)"/g)) {
       pyMap[m[1]] = m[2];
