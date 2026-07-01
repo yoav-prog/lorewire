@@ -21,8 +21,8 @@ export const metadata: Metadata = {
   alternates: { canonical: "/privacy" },
 };
 
-const EFFECTIVE_DATE = "2026-06-30";
-const LEGAL_ENTITY = "LoreWire";
+const EFFECTIVE_DATE = "2026-07-01";
+const LEGAL_ENTITY = "Traffic.Club IT GmbH";
 const CONTACT_EMAIL = "contact@lorewire.com";
 
 export default function PrivacyPolicyPage() {
@@ -54,6 +54,16 @@ export default function PrivacyPolicyPage() {
             {CONTACT_EMAIL}
           </a>
           .
+        </p>
+        <p className="mt-3">
+          The data controller responsible for your personal data is{" "}
+          {LEGAL_ENTITY}, Kaiserstraße 170-174, 66386 St. Ingbert, Germany.
+          Its full company details, including the commercial register entry
+          and VAT number, are on our{" "}
+          <Link href="/imprint" className="text-accent underline">
+            Imprint
+          </Link>{" "}
+          page.
         </p>
       </Section>
 
@@ -212,7 +222,49 @@ export default function PrivacyPolicyPage() {
         </ul>
       </Section>
 
-      <Section title="5. Sharing with third parties">
+      <Section title="5. Legal bases and automated decisions">
+        <p>
+          Because {LEGAL_ENTITY} is established in the European Union, our
+          processing of personal data is governed by the EU General Data
+          Protection Regulation (GDPR). We rely on the following legal bases.
+        </p>
+        <ul className="ml-5 list-disc">
+          <li>
+            <b>Performance of a contract</b> (Art. 6(1)(b)): creating and
+            running your account, showing you stories and remembering the
+            list and reading position you save, rendering the content you
+            create, and publishing to the accounts you connect when you ask
+            us to.
+          </li>
+          <li>
+            <b>Legitimate interests</b> (Art. 6(1)(f)): keeping the service
+            secure, preventing abuse and duplicate poll votes, keeping
+            short-lived server and edge logs, and diagnosing failures. Our
+            interest is running a safe, working service, balanced against
+            your rights and freedoms.
+          </li>
+          <li>
+            <b>Consent</b> (Art. 6(1)(a)): loading Google Analytics, Vercel
+            Analytics, and Sentry, which happens only after you press Accept
+            on the cookie banner. You can withdraw this consent at any time
+            with Manage cookies in the footer, without affecting processing
+            already carried out.
+          </li>
+          <li>
+            <b>Legal obligation</b> (Art. 6(1)(c)): responding to lawful
+            requests and meeting retention duties that apply to us.
+          </li>
+        </ul>
+        <p className="mt-3">
+          {LEGAL_ENTITY} does not carry out automated decision-making or
+          profiling that produces legal or similarly significant effects
+          concerning you. We use AI models to generate content you ask for
+          (scripts, captions, images, voiceover); that generation produces
+          content, it does not make decisions about you.
+        </p>
+      </Section>
+
+      <Section title="6. Sharing with third parties">
         <p>
           LoreWire shares data with a small number of providers, each
           covered by their own privacy policy.
@@ -370,7 +422,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="6. YouTube API Services">
+      <Section title="7. YouTube API Services">
         <p>
           Features that use the YouTube Data API v3 are governed by the{" "}
           <a
@@ -406,7 +458,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="7. Cookies">
+      <Section title="8. Cookies">
         <p>
           The cookies LoreWire sets directly are first-party and functional.
           Unless noted, they are httpOnly, Secure, and SameSite=Lax.
@@ -449,7 +501,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="8. Retention">
+      <Section title="9. Retention">
         <ul className="ml-5 list-disc">
           <li>
             Account data: kept while your account is active. Deleted within
@@ -470,7 +522,7 @@ export default function PrivacyPolicyPage() {
         </ul>
       </Section>
 
-      <Section title="9. Your rights">
+      <Section title="10. Your rights">
         <ul className="ml-5 list-disc">
           <li>
             Access: email {CONTACT_EMAIL} and we will provide a copy of the
@@ -489,10 +541,42 @@ export default function PrivacyPolicyPage() {
             settings and click Disconnect. The stored token is revoked at
             the platform and removed from our database immediately.
           </li>
+          <li>
+            Restriction: ask us to pause processing your data while a question
+            about its accuracy or the lawfulness of processing is being
+            resolved.
+          </li>
+          <li>
+            Objection: object to processing we base on our legitimate
+            interests, on grounds relating to your particular situation.
+          </li>
+          <li>
+            Portability: ask for a copy of the personal data you provided to
+            us in a structured, commonly used, machine-readable format, or ask
+            us to send it to another provider where that is technically
+            feasible.
+          </li>
+          <li>
+            Withdraw consent: where we rely on your consent (the analytics and
+            error tools), withdraw it at any time with Manage cookies in the
+            footer. Withdrawing does not affect processing already carried
+            out.
+          </li>
+          <li>
+            Complain: lodge a complaint with a data protection supervisory
+            authority. For our registered seat this is the{" "}
+            <a
+              href="https://www.datenschutz.saarland.de/"
+              className="text-accent underline"
+            >
+              Unabhängiges Datenschutzzentrum Saarland
+            </a>
+            ; you may also contact the authority where you live or work.
+          </li>
         </ul>
       </Section>
 
-      <Section id="data-deletion" title="10. Data deletion">
+      <Section id="data-deletion" title="11. Data deletion">
         <p>
           You can delete your LoreWire account and the data tied to it
           whenever you want. There are three ways to do it, and they all
@@ -535,7 +619,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="11. Children">
+      <Section title="12. Children">
         <p>
           LoreWire is intended for adults and is not directed at anyone under
           16. We do not knowingly collect personal data from anyone under 16.
@@ -544,16 +628,23 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="12. International transfers">
+      <Section title="13. International transfers">
         <p>
           LoreWire&apos;s infrastructure runs in the United States and the
-          European Union depending on the provider. By using the service
-          you consent to your data being transferred to and processed in
-          those regions.
+          European Union depending on the provider, so some of your data is
+          processed outside the European Economic Area.
+        </p>
+        <p className="mt-3">
+          Where data is transferred outside the EEA, we rely on an adequacy
+          decision of the European Commission where one covers the recipient,
+          or otherwise on the Commission&apos;s Standard Contractual Clauses
+          together with additional technical and organizational safeguards, so
+          your data keeps a level of protection equivalent to the one it has in
+          the EEA.
         </p>
       </Section>
 
-      <Section title="13. Changes to this policy">
+      <Section title="14. Changes to this policy">
         <p>
           Material changes are posted here with an updated effective date,
           and existing users receive an email notice 30 days before the
@@ -561,7 +652,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="14. Contact">
+      <Section title="15. Contact">
         <p>
           Questions, requests, and complaints go to{" "}
           <a href={`mailto:${CONTACT_EMAIL}`} className="text-accent underline">
@@ -571,9 +662,12 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <footer className="mt-10 border-t border-line pt-4 text-[12px] text-muted">
+      <footer className="mt-10 flex gap-4 border-t border-line pt-4 text-[12px] text-muted">
         <Link href="/terms" className="hover:text-accent hover:underline">
           Terms of Service
+        </Link>
+        <Link href="/imprint" className="hover:text-accent hover:underline">
+          Imprint
         </Link>
       </footer>
     </main>
