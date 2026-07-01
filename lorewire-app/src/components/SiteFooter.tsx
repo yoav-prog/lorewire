@@ -53,6 +53,7 @@ export default function SiteFooter() {
             <FooterLink href="/terms">Terms</FooterLink>
             <FooterLink href="/cookie-policy">Cookie Policy</FooterLink>
             <FooterLink href="/dmca">DMCA</FooterLink>
+            <FooterLink href="/imprint">Imprint</FooterLink>
           </FooterColumn>
 
           <FooterColumn title="LoreWire">
