@@ -1,0 +1,82 @@
+// Server-only read layer for the data-driven category tables (PR2,
+// _plans/2026-07-01-category-taxonomy-multitag.md). The `categories`
+// registry and the `story_tags` join table are seeded/backfilled in db.ts;
+// this module is how the app reads them. PR2 does not yet wire these onto
+// the homepage/classifier read paths (that is PR3) — the layer exists so the
+// read-only admin view and PR3 have a typed, tested entry point.
+
+import "server-only";
+
+import { all, one } from "@/lib/db";
+
+export interface CategoryRow {
+  slug: string;
+  label: string;
+  glyph: string | null;
+  color: string | null;
+  /** 0 | 1. A homepage rail with a curated color when 1. */
+  is_rail: number;
+  rail_surface: string | null;
+  rail_title: string | null;
+  sort: number | null;
+  /** 'active' | 'archived'. Archived rows are soft-deleted. */
+  status: string;
+  description: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface StoryTagRow {
+  story_id: string;
+  category_slug: string;
+  /** 0 | 1. Exactly one primary per story (partial unique index). */
+  is_primary: number;
+  source: string | null;
+  confidence: number | null;
+  created_at: string | null;
+}
+
+/** Categories in admin/display order. Excludes archived rows unless asked. */
+export async function listCategories(
+  opts: { includeArchived?: boolean } = {},
+): Promise<CategoryRow[]> {
+  const where = opts.includeArchived ? "" : "WHERE status = 'active' ";
+  return all<CategoryRow>(
+    `SELECT slug, label, glyph, color, is_rail, rail_surface, rail_title, ` +
+      `sort, status, description, created_at, updated_at ` +
+      `FROM categories ${where}ORDER BY sort ASC, label ASC`,
+  );
+}
+
+/** One category by its immutable slug, or null. */
+export async function getCategoryBySlug(
+  slug: string,
+): Promise<CategoryRow | null> {
+  return one<CategoryRow>(
+    "SELECT slug, label, glyph, color, is_rail, rail_surface, rail_title, " +
+      "sort, status, description, created_at, updated_at " +
+      "FROM categories WHERE slug = ?",
+    [slug],
+  );
+}
+
+/** All tags for a story, primary first then by slug. */
+export async function getStoryTags(storyId: string): Promise<StoryTagRow[]> {
+  return all<StoryTagRow>(
+    "SELECT story_id, category_slug, is_primary, source, confidence, created_at " +
+      "FROM story_tags WHERE story_id = ? " +
+      "ORDER BY is_primary DESC, category_slug ASC",
+    [storyId],
+  );
+}
+
+/** The story's primary tag, or null if it has none yet. */
+export async function getPrimaryTag(
+  storyId: string,
+): Promise<StoryTagRow | null> {
+  return one<StoryTagRow>(
+    "SELECT story_id, category_slug, is_primary, source, confidence, created_at " +
+      "FROM story_tags WHERE story_id = ? AND is_primary = 1",
+    [storyId],
+  );
+}
