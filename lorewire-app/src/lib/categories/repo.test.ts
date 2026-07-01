@@ -15,6 +15,7 @@ import {
 import {
   getCategoryBySlug,
   getPrimaryTag,
+  getStoriesForCategory,
   getStoryTags,
   listCategories,
   setStoryTags,
@@ -188,5 +189,35 @@ describe("setStoryTags (write path)", () => {
     );
     expect(primaries).toHaveLength(1);
     expect(primaries[0].category_slug).toBe("wedding-drama");
+  });
+});
+
+describe("getStoriesForCategory", () => {
+  it("returns published stories tagged with the slug, primary-first, excluding unpublished", async () => {
+    const now = new Date().toISOString();
+    for (const [id, status] of [
+      [`${PFX}g1`, "published"],
+      [`${PFX}g2`, "published"],
+      [`${PFX}g3`, "review"],
+    ] as const) {
+      await run(
+        "INSERT INTO stories (id, title, status, created_at, updated_at) " +
+          "VALUES (?, 'T', ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status",
+        [id, status, now, now],
+      );
+    }
+    await setStoryTags(`${PFX}g1`, [{ slug: "neighbor-wars", confidence: 0.9 }]);
+    await setStoryTags(`${PFX}g2`, [
+      { slug: "roommate-hell", confidence: 0.9 },
+      { slug: "neighbor-wars", confidence: 0.5 },
+    ]);
+    await setStoryTags(`${PFX}g3`, [{ slug: "neighbor-wars", confidence: 0.9 }]);
+
+    const ids = (await getStoriesForCategory("neighbor-wars")).map((r) => r.id);
+    expect(ids).toContain(`${PFX}g1`);
+    expect(ids).toContain(`${PFX}g2`);
+    expect(ids).not.toContain(`${PFX}g3`);
+    // primary (g1) sorts before the secondary tag (g2)
+    expect(ids.indexOf(`${PFX}g1`)).toBeLessThan(ids.indexOf(`${PFX}g2`));
   });
 });

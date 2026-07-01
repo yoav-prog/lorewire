@@ -18,6 +18,11 @@ import {
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
 import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import {
+  getCategoryBySlug,
+  getStoriesForCategory,
+  type CategoryStoryRow,
+} from "@/lib/categories/repo";
 
 const SURFACES = ["divisive", "agreed", "unpopular"] as const;
 type RailSurface = (typeof SURFACES)[number];
@@ -80,6 +85,24 @@ export async function generateMetadata({
   const { surface } = await params;
   const seo = await getSiteSeo();
   if (!isRailSurface(surface)) {
+    // Not a poll surface — it may be a category slug (/c/family-feuds).
+    const category = await getCategoryBySlug(surface);
+    if (category && category.status === "active") {
+      const description =
+        category.description ?? `LoreWire stories tagged ${category.label}.`;
+      return {
+        title: buildPageTitle(category.label, seo.titleTemplate, seo.siteName),
+        description,
+        alternates: { canonical: `/c/${surface}` },
+        openGraph: {
+          title: category.label,
+          description,
+          type: "website",
+          url: `/c/${surface}`,
+          siteName: seo.siteName,
+        },
+      };
+    }
     return {
       title: buildPageTitle("Not found", seo.titleTemplate, seo.siteName),
     };
@@ -107,7 +130,9 @@ export default async function RailPage({
   params: Promise<Params>;
 }) {
   const { surface } = await params;
-  if (!isRailSurface(surface)) notFound();
+  if (!isRailSurface(surface)) {
+    return <CategoryLandingPage slug={surface} />;
+  }
   const meta = SURFACE_META[surface];
 
   let rows: RailCardRow[];
@@ -233,6 +258,85 @@ function RailCard({
             <span> · agreement {(1 - row.divisiveness).toFixed(2)}</span>
           )}
         </p>
+      </div>
+    </Link>
+  );
+}
+
+// Category landing page — /c/<category-slug>. Reads the applied story_tags so
+// it reflects the new multi-tag taxonomy. Reachable directly + by SEO; the
+// homepage links in once the read-path flip lands.
+async function CategoryLandingPage({ slug }: { slug: string }) {
+  const category = await getCategoryBySlug(slug);
+  if (!category || category.status !== "active") notFound();
+  const stories = await getStoriesForCategory(slug);
+  console.info("[c category page]", { slug, result_count: stories.length });
+
+  return (
+    <main className="mx-auto max-w-[900px] px-5 py-10">
+      <header className="space-y-3">
+        <Link
+          href="/"
+          className="font-mono text-[11px] uppercase tracking-wider text-muted hover:text-ink"
+        >
+          ← lorewire.com
+        </Link>
+        <h1 className="font-display text-[34px] font-extrabold leading-tight tracking-tightest text-ink">
+          {category.label}
+        </h1>
+        {category.color && (
+          <div
+            aria-hidden
+            className="h-1 w-16 rounded-full"
+            style={{ backgroundColor: category.color }}
+          />
+        )}
+        {category.description && (
+          <p className="text-[15px] leading-relaxed text-muted">
+            {category.description}
+          </p>
+        )}
+      </header>
+
+      {stories.length === 0 ? (
+        <div className="mt-10 rounded-xl border border-dashed border-line bg-surface p-8 text-center">
+          <p className="text-[14px] text-ink">No stories in this category yet.</p>
+        </div>
+      ) : (
+        <ul className="mt-8 grid gap-4 sm:grid-cols-2">
+          {stories.map((story) => (
+            <li key={story.id}>
+              <CategoryStoryCard story={story} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </main>
+  );
+}
+
+function CategoryStoryCard({ story }: { story: CategoryStoryRow }) {
+  const href = story.slug ? `/v/${story.slug}` : `/v/${story.id}`;
+  return (
+    <Link
+      href={href}
+      className="block overflow-hidden rounded-xl border border-line bg-surface transition-colors hover:border-accent"
+    >
+      {story.hero_image && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={story.hero_image}
+          alt=""
+          className="aspect-[4/3] w-full object-cover"
+        />
+      )}
+      <div className="space-y-2 p-4">
+        <h2 className="font-display text-[18px] font-bold leading-snug text-ink">
+          {story.title ?? "Untitled"}
+        </h2>
+        {story.summary && (
+          <p className="line-clamp-2 text-[13px] text-muted">{story.summary}</p>
+        )}
       </div>
     </Link>
   );

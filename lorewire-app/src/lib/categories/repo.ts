@@ -108,3 +108,32 @@ export async function setStoryTags(
     );
   }
 }
+
+export interface CategoryStoryRow {
+  id: string;
+  slug: string | null;
+  title: string | null;
+  summary: string | null;
+  hero_image: string | null;
+  is_primary: number;
+}
+
+/** Published stories tagged with `slug`, primary-first then newest. Powers the
+ *  /c/<slug> category landing pages. Reads story_tags (the applied multi-tag
+ *  classification), so it reflects the new taxonomy regardless of the legacy
+ *  stories.category value. */
+export async function getStoriesForCategory(
+  slug: string,
+  limit = 60,
+): Promise<CategoryStoryRow[]> {
+  const cap = Math.max(1, Math.min(limit, 200));
+  return all<CategoryStoryRow>(
+    "SELECT s.id, s.slug, s.title, s.summary, s.hero_image, t.is_primary " +
+      "FROM stories s " +
+      "JOIN story_tags t ON t.story_id = s.id AND t.category_slug = ? " +
+      "WHERE s.status = 'published' " +
+      "ORDER BY t.is_primary DESC, COALESCE(s.published_at, s.created_at) DESC " +
+      `LIMIT ${cap}`,
+    [slug],
+  );
+}
