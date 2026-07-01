@@ -174,6 +174,13 @@ async function ensureSchema(d: Driver): Promise<Driver> {
     // Best-effort: leaves some stories without a primary tag; self-heals on
     // a later boot once the categories seed has landed.
   }
+  try {
+    await syncStoryPrimaryCategoryImpl(d);
+  } catch {
+    // Best-effort: leaves stories.category on its previous value; self-heals
+    // on a later boot. The homepage reads stories.category, so this is what
+    // flips the visible taxonomy to the applied 18-set.
+  }
   return d;
 }
 
@@ -375,6 +382,30 @@ async function seedGranularCategoriesImpl(d: Driver): Promise<void> {
 
 export async function seedGranularCategories(): Promise<void> {
   await seedGranularCategoriesImpl(await db());
+}
+
+// 2026-07-01 PR5 read-path flip: keep stories.category in sync with the
+// PRIMARY story_tag's category label, so the homepage/browse (which read the
+// denormalized label) reflect the applied 18-category taxonomy. This is the
+// denormalized cache the plan describes — story_tags is the source of truth.
+// Guarded + self-healing: only updates rows whose label differs, so after the
+// first flip subsequent boots are a no-op, and a later re-tag re-syncs.
+async function syncStoryPrimaryCategoryImpl(d: Driver): Promise<void> {
+  await d.run(
+    "UPDATE stories SET category = (" +
+      "SELECT c.label FROM story_tags t JOIN categories c ON c.slug = t.category_slug " +
+      "WHERE t.story_id = stories.id AND t.is_primary = 1" +
+      ") WHERE EXISTS (" +
+      "SELECT 1 FROM story_tags t2 JOIN categories c2 ON c2.slug = t2.category_slug " +
+      "WHERE t2.story_id = stories.id AND t2.is_primary = 1 " +
+      "AND c2.label != COALESCE(stories.category, '')" +
+      ")",
+    [],
+  );
+}
+
+export async function syncStoryPrimaryCategory(): Promise<void> {
+  await syncStoryPrimaryCategoryImpl(await db());
 }
 
 export function db(): Promise<Driver> {

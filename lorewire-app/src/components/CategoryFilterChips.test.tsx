@@ -23,9 +23,9 @@ import type { Cat } from "@/lib/stories";
 // represented; new ones land here automatically.
 describe("CATEGORY_ORDER", () => {
   it("includes the public categories in a stable order", () => {
-    expect(CATEGORY_ORDER).toContain("Drama" as Cat);
-    expect(CATEGORY_ORDER).toContain("Entitled" as Cat);
-    expect(CATEGORY_ORDER).toContain("Humor" as Cat);
+    expect(CATEGORY_ORDER).toContain("Entitled People");
+    expect(CATEGORY_ORDER).toContain("Family Feuds");
+    expect(CATEGORY_ORDER).toContain("Revenge & Karma");
   });
 });
 

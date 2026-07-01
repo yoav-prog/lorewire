@@ -26,7 +26,7 @@
 // autoplay — a centre play button opts in.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { CAT, type Cat } from "@/lib/stories";
+import { categoryVisual } from "@/lib/categories/visuals";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
 import type { WireStory } from "@/app/actions";
@@ -47,11 +47,10 @@ const LIKE_COUNT_THRESHOLD = 3;
 const DOUBLE_TAP_MS = 280;
 const HOLD_MS = 350;
 
-// Live `category` is a free string from the DB; map it to the brand category
-// colour when it matches one of the six, else a neutral surface tone.
+// Live `category` is a free string from the DB (the 18-set); resolve it to the
+// category colour via the shared visual resolver (unknown -> neutral swatch).
 function catColor(category: string | null): string {
-  if (category && category in CAT) return CAT[category as Cat];
-  return "var(--color-surface2)";
+  return category ? categoryVisual(category).color : "var(--color-surface2)";
 }
 
 function formatTime(sec: number): string {

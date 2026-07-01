@@ -306,18 +306,9 @@ export async function loadHomepageCuration(): Promise<HomepageCurationResult> {
     );
     publishedSet = new Set(rows.map((r) => r.id));
   }
-  const curation: HomepageCuration = {
-    hero: [],
-    top10: [],
-    continue: [],
-    new_row: [],
-    entitled_row: [],
-    humor_row: [],
-    wholesome_row: [],
-    dating_row: [],
-    roommate_row: [],
-    drama_row: [],
-  };
+  const curation: HomepageCuration = Object.fromEntries(
+    HOMEPAGE_SURFACES.map((s) => [s, [] as string[]]),
+  ) as HomepageCuration;
   for (const surface of HOMEPAGE_SURFACES) {
     for (const r of grouped[surface]) {
       if (publishedSet.has(r.story_id)) {

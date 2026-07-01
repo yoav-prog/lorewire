@@ -2,11 +2,11 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CAT,
   STORIES,
   isPublishedStory,
   type Story,
 } from "@/lib/stories";
+import { categoryVisual } from "@/lib/categories/visuals";
 import {
   CategoryFilterChips,
   filterStoriesByCategory,
@@ -150,7 +150,7 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 // pass `rounded` explicitly (Search result tiles still opt out
 // with `rounded={0}`).
 function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig = false }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; vig?: boolean }) {
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
   // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
@@ -394,7 +394,7 @@ function Hero({
 
   const story = pool[Math.min(activeIndex, pool.length - 1)];
   if (!story) return null;
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const heroSrc = story.heroImageLandscape || story.heroImage;
   const isLandscape = !!story.heroImageLandscape;
   const showHero = !!heroSrc && heroImageOk;
@@ -1414,7 +1414,7 @@ function FakeReadAlong() {
 // Header block for the detail modal. Renders the hero image when the story has
 // one, falling back to the gradient + glyph the design ships with otherwise.
 function DetailModalHero({ story }: { story: Story }) {
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const [heroOk, setHeroOk] = useState(true);
   // Modal header is widescreen too; use landscape when available.
   const heroSrc = story.heroImageLandscape || story.heroImage;
@@ -1575,7 +1575,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
   const myRating = getRating(story.id) ?? 0;
   const [rateOpen, setRateOpen] = useState(false);
 
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   // "More Like This" mirrors Search / browse rails: only stories the pipeline
   // has actually produced content for. The old STORIES-based list let empty
   // sample placeholders into the rail, so cards opened to nothing. Pull from
@@ -1706,7 +1706,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                         ) : (
                           <span />
                         )}
-                        <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ background: CAT[s.cat], color: "#fff" }}>{s.cat}</span>
+                        <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ background: categoryVisual(s.cat).color, color: "#fff" }}>{s.cat}</span>
                       </div>
                       <h3 className="font-display font-bold uppercase tracking-tightest text-ink text-[15px] leading-[.98]">{s.title}</h3>
                       <p className="font-body text-[12.5px] text-muted leading-snug mt-1.5 line-clamp-2">{s.syn}</p>

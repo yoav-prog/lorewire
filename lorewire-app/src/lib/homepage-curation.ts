@@ -58,18 +58,9 @@ export async function listAllCuration(): Promise<
     "SELECT id, surface, position, story_id, created_at, updated_at " +
       "FROM homepage_curation ORDER BY surface ASC, position ASC",
   );
-  const out: Record<HomepageSurface, CurationRow[]> = {
-    hero: [],
-    top10: [],
-    continue: [],
-    new_row: [],
-    entitled_row: [],
-    humor_row: [],
-    wholesome_row: [],
-    dating_row: [],
-    roommate_row: [],
-    drama_row: [],
-  };
+  const out = Object.fromEntries(
+    HOMEPAGE_SURFACES.map((s) => [s, [] as CurationRow[]]),
+  ) as Record<HomepageSurface, CurationRow[]>;
   for (const r of rows) {
     if (isHomepageSurface(r.surface)) {
       out[r.surface].push(r);
