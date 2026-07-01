@@ -55,6 +55,10 @@ export default function WiresFeed({
 
   const [activeIdx, setActiveIdx] = useState(0);
   const [soundHintShown, setSoundHintShown] = useState(true);
+  // Immersive (TikTok-style) mode: fullscreen the scroll container so native
+  // snap-scroll pages wires with a swipe. The card drops its bottom bar and
+  // overlays the actions.
+  const [immersive, setImmersive] = useState(false);
   const reducedMotion = usePrefersReducedMotion();
   const didInitialScroll = useRef(false);
   // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
@@ -255,6 +259,67 @@ export default function WiresFeed({
     resetFeedPosition();
   }, [clearCategories, resetFeedPosition]);
 
+  // Immersive mode: fullscreen the scroll container (so native snap-scroll keeps
+  // paging on a swipe) and reshape the cards to video-only. Requesting
+  // fullscreen must ride the tap gesture, so it's synchronous here.
+  const enterImmersive = useCallback(() => {
+    setImmersive(true);
+    const el = containerRef.current as
+      | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
+      | null;
+    if (!el) return;
+    try {
+      const p = el.requestFullscreen
+        ? el.requestFullscreen()
+        : el.webkitRequestFullscreen?.();
+      if (p && typeof (p as Promise<void>).catch === "function") {
+        (p as Promise<void>).catch((err: unknown) =>
+          console.warn("[wires immersive enter err]", { err: String(err) }),
+        );
+      }
+    } catch (err) {
+      console.warn("[wires immersive enter err]", { err: String(err) });
+    }
+  }, []);
+
+  const exitImmersive = useCallback(() => {
+    setImmersive(false);
+    const doc = document as Document & {
+      webkitExitFullscreen?: () => Promise<void> | void;
+      webkitFullscreenElement?: Element | null;
+    };
+    if (!document.fullscreenElement && !doc.webkitFullscreenElement) return;
+    try {
+      const p = doc.exitFullscreen
+        ? doc.exitFullscreen()
+        : doc.webkitExitFullscreen?.();
+      if (p && typeof (p as Promise<void>).catch === "function") {
+        (p as Promise<void>).catch(() => undefined);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // If the user leaves fullscreen via Escape / the OS gesture, drop immersive
+  // so the card chrome returns to its normal (bar-below) layout.
+  useEffect(() => {
+    const onChange = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+        setImmersive(false);
+      }
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange);
+    };
+  }, []);
+
   // Auto-advance: scroll the next wire into view when the current one ends.
   // Returns false at the tail (so the card replays) and prefetches more.
   const onWireEnded = useCallback((): boolean => {
@@ -376,6 +441,9 @@ export default function WiresFeed({
               onToggleSave={toggleSave}
               onTimeUpdate={(t, d) => onShortTimeUpdate(s.id, t, d)}
               onWireEnded={onWireEnded}
+              immersive={immersive}
+              onEnterImmersive={enterImmersive}
+              onExitImmersive={exitImmersive}
             />
           </section>
         ))}

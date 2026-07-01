@@ -58,6 +58,9 @@ export default function WiresDesktop({
 }: WiresDesktopProps) {
   const [activeIdx, setActiveIdx] = useState(0);
   const [soundHintShown, setSoundHintShown] = useState(true);
+  // Immersive (video-only) mode: fullscreen the pager container. Wheel / arrow
+  // paging keeps working in fullscreen since those handlers live on it.
+  const [immersive, setImmersive] = useState(false);
   const reducedMotion = usePrefersReducedMotion();
   // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
   // `hideVoted` (default ON) drives the "unvoted only" feed via the top-center
@@ -231,6 +234,65 @@ export default function WiresDesktop({
     resetFeedPosition();
   }, [clearCategories, resetFeedPosition]);
 
+  // Immersive mode: fullscreen the pager container (video-only cards). Must ride
+  // the click gesture, so requesting fullscreen is synchronous here.
+  const enterImmersive = useCallback(() => {
+    setImmersive(true);
+    const el = containerRef.current as
+      | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
+      | null;
+    if (!el) return;
+    try {
+      const p = el.requestFullscreen
+        ? el.requestFullscreen()
+        : el.webkitRequestFullscreen?.();
+      if (p && typeof (p as Promise<void>).catch === "function") {
+        (p as Promise<void>).catch((err: unknown) =>
+          console.warn("[wires immersive enter err]", { err: String(err) }),
+        );
+      }
+    } catch (err) {
+      console.warn("[wires immersive enter err]", { err: String(err) });
+    }
+  }, []);
+
+  const exitImmersive = useCallback(() => {
+    setImmersive(false);
+    const doc = document as Document & {
+      webkitExitFullscreen?: () => Promise<void> | void;
+      webkitFullscreenElement?: Element | null;
+    };
+    if (!document.fullscreenElement && !doc.webkitFullscreenElement) return;
+    try {
+      const p = doc.exitFullscreen
+        ? doc.exitFullscreen()
+        : doc.webkitExitFullscreen?.();
+      if (p && typeof (p as Promise<void>).catch === "function") {
+        (p as Promise<void>).catch(() => undefined);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // Drop immersive if the user leaves fullscreen via Escape / the OS.
+  useEffect(() => {
+    const onChange = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+        setImmersive(false);
+      }
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange);
+    };
+  }, []);
+
   // Auto-advance to the next wire when one ends; false at the tail so the card
   // replays in place (and we prefetch the next page).
   const onWireEnded = useCallback((): boolean => {
@@ -359,6 +421,9 @@ export default function WiresDesktop({
                 onToggleLike={toggleLike}
                 onToggleSave={toggleSave}
                 onWireEnded={onWireEnded}
+                immersive={immersive}
+                onEnterImmersive={enterImmersive}
+                onExitImmersive={exitImmersive}
               />
             </div>
           ))}
