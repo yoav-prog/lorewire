@@ -126,15 +126,17 @@ Under multi-tag, overlap is a feature (a story gets both), so we keep granularit
 
 **PR1 - Single manifest, collapse the duplicated lists. (No DB, no behavior change.) [BUILT]**
 - New `src/lib/categories/manifest.ts` holds the CURRENT six categories in the rich shape (`slug, label, glyph, color, railSurface, railTitle, subreddits[]`) and derives `Cat`, `CAT_COLORS`, `CATEGORY_GLYPHS`, `CATEGORY_RAIL_ENTRIES`, `SUBREDDIT_CATEGORY`, `isCategoryLabel`. The `Cat` union is preserved from the manifest (no `string` widening); Zod was skipped in favor of the codebase's existing type-guard idiom.
-- The 17 new categories are NOT introduced here - they land in PR2 with the DB seed so existing stories (all still on the old values) are not stranded and no empty new rails appear. Slugs freeze at the PR2 seed, not PR1.
+- The 17 new categories are NOT introduced here - they land in PR3 with the classifier + reclassification so existing stories (all still on the old values) are not stranded and no empty new rails appear. PR2 stands up the DB tables and seeds today's six; the granular set + slug-freeze happen in PR3.
 - Category-list consumers now derive from the manifest: `stories.ts` (Cat/CAT), `admin/ui.ts` (CATEGORIES), `homepage-rails.ts` (CATEGORY_RAILS + glyphs), `admin/actions.ts` (bulk-op validation set), plus the admin surfaces `templates/page.tsx` (CATEGORIES), `settings/page.tsx` (rotating-rail dropdown + shorts list) and `settings/socials/page.tsx` (shorts list).
 - Two copies the manifest can't import at build time are guarded by `manifest.test.ts` against drift: `pipeline/stages.py` (STORY_CATEGORIES + SUBREDDIT_CATEGORY, separate runtime) and the `--color-cat-*` tokens in `globals.css` (static Tailwind).
 - **Intentionally out of scope for PR1 (own registry / follow-up):** the per-category hero-style defaults (`HERO_CATEGORY_KEYS` in `settings/page.tsx`, keyed to the Python hero resolver) and the hero-style whitelist (`hero-styles.json` / `CATEGORY_STYLE_WHITELIST` / `hero-styles.test.ts`) are a separate Python-owned registry with its own `sync_hero_styles` + `test_hero_styles_sync` parity mechanism. They will need to grow with the taxonomy in PR2+, but folding them into PR1 would entangle the hero-style subsystem.
 
-**PR2 - DB tables + backfill, read-only admin view.**
-- Add `categories` + `story_tags` to `schema.ts`. Seed `categories` from the manifest on first boot (mirror the existing `_seed_*` pattern in db.ts).
-- Backfill `story_tags` from current `stories.category` (each story gets its existing category as primary), then keep `stories.category` as the primary-slug cache.
-- Read-only admin list of categories. No CRUD yet.
+**PR2 - DB tables + seed + backfill + data layer. (No behavior change.) [BUILT]**
+- Added `categories` + `story_tags` to `schema.ts` (composite-unique `(story_id, category_slug)` + partial-unique `(story_id) WHERE is_primary=1` one-primary-per-story; story_tags has no single PK since createTableSql supports only one).
+- `seedCategories` + `backfillStoryPrimaryTags` in the db.ts schema chain: idempotent + self-healing (seed = ON CONFLICT DO NOTHING from the manifest; backfill joins `stories.category = categories.label` -> slug, skips already-primary + unmatched + null). Public wrappers exported for manual re-runs + tests.
+- Server-only read layer `lib/categories/repo.ts` (listCategories / getCategoryBySlug / getStoryTags / getPrimaryTag). Integration tests cover seed idempotency + backfill mapping / skip / one-primary invariants.
+- Seeds TODAY'S SIX (all rails), not the 17 - those + the classifier + reclassification are PR3. `stories.category` is untouched (stays the label the current read paths use); story_tags is the new slug source, `categories` bridges label<->slug. story_tags is populated but NOT yet on any read path (PR3 wires reads).
+- DEFERRED: the read-only admin PAGE (throwaway before PR4 CRUD) and the `pipeline/store.py` Python seed mirror (PR3, when the classifier reads categories). No TS<->Python full-schema parity test exists, so schema.ts-only is fine.
 
 **PR3 - Multi-tag classifier + the retire-Drama reclassification (the risky, irreversible step - gated).**
 - Python classifier returns 1-3 tags + confidence + primary, validated against the manifest.

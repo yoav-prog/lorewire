@@ -20,6 +20,7 @@ import {
   legacyActiveSegmentSettingKey,
   type VideoAspect,
 } from "@/lib/aspect";
+import { CATEGORY_DEFS } from "@/lib/categories/manifest";
 
 export type Row = Record<string, unknown>;
 
@@ -152,6 +153,19 @@ async function ensureSchema(d: Driver): Promise<Driver> {
     // homepage still renders correctly because resolveRailIds augments
     // curated picks with the fallback (2026-06-24 semantic change).
   }
+  try {
+    await seedCategoriesImpl(d);
+  } catch {
+    // Best-effort: a failed seed leaves the categories table empty; the app
+    // still renders today's behavior from stories.category (story_tags is
+    // not on the read path yet). Retried on the next boot.
+  }
+  try {
+    await backfillStoryPrimaryTagsImpl(d);
+  } catch {
+    // Best-effort: leaves some stories without a primary tag; self-heals on
+    // a later boot once the categories seed has landed.
+  }
   return d;
 }
 
@@ -265,6 +279,60 @@ async function cleanupStaleThinCategoryCurations(d: Driver): Promise<void> {
 
   // eslint-disable-next-line no-console -- rule 14
   console.info("[lorewire curation cleanup 2026-06-24]", { cleared, kept });
+}
+
+// 2026-07-01 data-driven category taxonomy (PR2,
+// _plans/2026-07-01-category-taxonomy-multitag.md). Seed the `categories`
+// registry from the shared manifest. Idempotent: ON CONFLICT DO NOTHING so
+// admin edits (PR4) are never clobbered. PR2 seeds today's six (all rails);
+// the granular set lands in PR3. Mirror of a future pipeline/store.py seed —
+// whichever runtime boots first against the shared DB wins, the other no-ops.
+async function seedCategoriesImpl(d: Driver): Promise<void> {
+  const now = new Date().toISOString();
+  for (let i = 0; i < CATEGORY_DEFS.length; i++) {
+    const c = CATEGORY_DEFS[i];
+    await d.run(
+      "INSERT INTO categories " +
+        "(slug, label, glyph, color, is_rail, rail_surface, rail_title, sort, status, description, created_at, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(slug) DO NOTHING",
+      [c.slug, c.label, c.glyph, c.color, 1, c.railSurface, c.railTitle, i, "active", null, now, now],
+    );
+  }
+}
+
+// Map each story's current stories.category LABEL to a category slug via the
+// seeded `categories` table and insert it as the story's primary tag. The
+// JOIN skips stories whose category matches no seeded category; the NOT
+// EXISTS guard skips stories that already carry a primary, so this is
+// idempotent and self-heals for stories created after the first run.
+// stories.category is left untouched — it stays the denormalized label the
+// current read paths use; story_tags is the new slug source and the
+// categories table bridges the two.
+async function backfillStoryPrimaryTagsImpl(d: Driver): Promise<void> {
+  const now = new Date().toISOString();
+  await d.run(
+    "INSERT INTO story_tags (story_id, category_slug, is_primary, source, confidence, created_at) " +
+      "SELECT s.id, c.slug, 1, 'migration', NULL, ? " +
+      "FROM stories s JOIN categories c ON c.label = s.category " +
+      "WHERE s.category IS NOT NULL " +
+      "AND NOT EXISTS (" +
+      "SELECT 1 FROM story_tags t WHERE t.story_id = s.id AND t.is_primary = 1" +
+      ")",
+    [now],
+  );
+}
+
+// Public, idempotent wrappers for manual re-runs + tests. They resolve the
+// driver through db() (post-schema), so they must NOT be called from inside
+// the schema chain — ensureSchema uses the *Impl functions with the raw
+// driver to avoid re-entering db() while the schema promise is resolving.
+export async function seedCategories(): Promise<void> {
+  await seedCategoriesImpl(await db());
+}
+
+export async function backfillStoryPrimaryTags(): Promise<void> {
+  await backfillStoryPrimaryTagsImpl(await db());
 }
 
 export function db(): Promise<Driver> {

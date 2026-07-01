@@ -1507,6 +1507,56 @@ export const SCHEDULER_DECISIONS: Table = {
   ],
 };
 
+// 2026-07-01 data-driven category taxonomy
+// (_plans/2026-07-01-category-taxonomy-multitag.md, PR2). `categories` is the
+// admin-managed registry that replaces the hardcoded six-item enum. `slug` is
+// the immutable join key; labels are display-only so a rename touches zero
+// denormalized rows. Seeded from src/lib/categories/manifest.ts on boot
+// (seedCategories in db.ts) — PR2 seeds today's six; the granular set +
+// reclassification land in PR3. `color` NULL = auto-assign from palette;
+// `is_rail` = homepage rail + curated color. `status` soft-deletes
+// ('active' | 'archived') so removing a category never orphans story_tags.
+// `sort` orders the admin list.
+export const CATEGORIES: Table = {
+  name: "categories",
+  columns: [
+    { name: "slug", type: "TEXT", pk: true },
+    { name: "label", type: "TEXT" },
+    { name: "glyph", type: "TEXT" },
+    { name: "color", type: "TEXT" },
+    { name: "is_rail", type: "INTEGER" },
+    { name: "rail_surface", type: "TEXT" },
+    { name: "rail_title", type: "TEXT" },
+    { name: "sort", type: "INTEGER" },
+    { name: "status", type: "TEXT" },
+    { name: "description", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
+// 2026-07-01 many-to-many story<->category tags (same plan, PR2). Source of
+// truth for a story's categories; each story has exactly one `is_primary` row
+// (partial unique index) that drives the card color/glyph and the denormalized
+// poll/favorite category. `category_slug` references categories.slug (the
+// immutable key; no FK, matching the rest of the schema). `source` records who
+// assigned it ('migration' | 'llm' | 'admin' | 'subreddit'); `confidence` is
+// the classifier score (NULL for non-LLM). PR2 backfills one primary per story
+// from stories.category; multi-tag + the classifier land in PR3. No single-
+// column PK (createTableSql only supports one) — uniqueness is the composite
+// index idx_story_tags_story_cat below.
+export const STORY_TAGS: Table = {
+  name: "story_tags",
+  columns: [
+    { name: "story_id", type: "TEXT" },
+    { name: "category_slug", type: "TEXT" },
+    { name: "is_primary", type: "INTEGER" },
+    { name: "source", type: "TEXT" },
+    { name: "confidence", type: "REAL" },
+    { name: "created_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -1514,6 +1564,8 @@ export const TABLES: Table[] = [
   USER_SAVES,
   USER_LIKES,
   USER_FAV_CATEGORIES,
+  CATEGORIES,
+  STORY_TAGS,
   USER_RECENTLY_VIEWED,
   USER_CONTINUE,
   MAGIC_LINK_TOKENS,
@@ -1727,6 +1779,17 @@ export const POST_TABLE_DDL: string[] = [
     "ON user_likes(story_id)",
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_fav_categories_user_cat " +
     "ON user_fav_categories(user_id, category)",
+  // 2026-07-01 data-driven category taxonomy (PR2). story_tags is the
+  // many-to-many source of truth. (story_id, category_slug) is unique (a
+  // story can't hold the same tag twice); a PARTIAL unique index enforces
+  // exactly one primary tag per story; the by-category index serves the
+  // rail / browse / SEO reads that filter on a slug.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_tags_story_cat " +
+    "ON story_tags(story_id, category_slug)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_tags_primary " +
+    "ON story_tags(story_id) WHERE is_primary = 1",
+  "CREATE INDEX IF NOT EXISTS idx_story_tags_category " +
+    "ON story_tags(category_slug)",
   // Recently-viewed: NOT unique on (user_id, story_id) — re-visits are
   // separate rows, the read collapses by story_id. The (user_id,
   // viewed_at) index supports both the latest-N read and the periodic
