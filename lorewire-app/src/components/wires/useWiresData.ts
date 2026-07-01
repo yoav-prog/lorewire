@@ -17,17 +17,26 @@ export interface WiresData {
   loadMore: () => void;
 }
 
-export function useWiresData(pageSize: number): WiresData {
+/** @param onlyUnvoted When true, the feed shows only wires the viewer hasn't
+ *  voted on yet (server-filtered). Flipping it refetches the feed from the
+ *  first page. */
+export function useWiresData(pageSize: number, onlyUnvoted: boolean): WiresData {
   const [shorts, setShorts] = useState<WireStory[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [reachedEnd, setReachedEnd] = useState(false);
 
-  // First page. `loading` already starts true, so no setState up front.
+  // First page. Re-runs when `onlyUnvoted` flips (the toggle) — reset the feed
+  // to a clean loading state so the new filter refetches from the top instead
+  // of appending onto the previous mode's list.
   useEffect(() => {
     let cancelled = false;
-    listPublishedShorts({ limit: pageSize })
+    setLoading(true);
+    setReachedEnd(false);
+    setCursor(null);
+    setShorts([]);
+    listPublishedShorts({ limit: pageSize, onlyUnvoted })
       .then((r) => {
         if (cancelled) return;
         setShorts(r.shorts);
@@ -45,12 +54,12 @@ export function useWiresData(pageSize: number): WiresData {
     return () => {
       cancelled = true;
     };
-  }, [pageSize]);
+  }, [pageSize, onlyUnvoted]);
 
   const loadMore = useCallback(() => {
     if (loadingMore || reachedEnd || cursor === null) return;
     setLoadingMore(true);
-    listPublishedShorts({ limit: pageSize, beforePublishedAt: cursor })
+    listPublishedShorts({ limit: pageSize, beforePublishedAt: cursor, onlyUnvoted })
       .then((r) => {
         setShorts((prev) => {
           // Dedupe by id in case a row straddles the cursor boundary.
@@ -65,7 +74,7 @@ export function useWiresData(pageSize: number): WiresData {
         setReachedEnd(true);
       })
       .finally(() => setLoadingMore(false));
-  }, [loadingMore, reachedEnd, cursor, pageSize]);
+  }, [loadingMore, reachedEnd, cursor, pageSize, onlyUnvoted]);
 
   return { shorts, loading, loadingMore, reachedEnd, loadMore };
 }

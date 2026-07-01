@@ -19,6 +19,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WireCard from "@/components/wires/WireCard";
+import { WiresFilterToggle } from "@/components/wires/WiresFilterToggle";
 import { useWiresData } from "@/components/wires/useWiresData";
 import { useWireLikes } from "@/components/wires/useWireLikes";
 import { useWirePrefs } from "@/components/wires/useWirePrefs";
@@ -51,22 +52,31 @@ export default function WiresFeed({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Array<HTMLElement | null>>([]);
 
-  const { shorts, loading, loadingMore, loadMore } = useWiresData(PAGE_SIZE);
   const [activeIdx, setActiveIdx] = useState(0);
   const [soundHintShown, setSoundHintShown] = useState(true);
   const reducedMotion = usePrefersReducedMotion();
   const didInitialScroll = useRef(false);
   // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
+  // `hideVoted` (default ON) drives the "unvoted only" feed: the server filters
+  // out wires this viewer already voted on, so the feed opens on what's left to
+  // decide. The top-center pill toggles it.
   const {
     autoplay,
     muted,
     advance,
     slow,
+    hideVoted,
+    setHideVoted,
     toggleAutoplay,
     toggleMuted,
     toggleAdvance,
     toggleSlow,
   } = useWirePrefs();
+
+  const { shorts, loading, loadingMore, loadMore } = useWiresData(
+    PAGE_SIZE,
+    hideVoted,
+  );
 
   // Shuffle: a stored permutation of story ids (null = natural order). New
   // pages (loadMore) append in server order after the shuffled ids.
@@ -204,6 +214,21 @@ export default function WiresFeed({
     });
   }, [shorts]);
 
+  // Switch the feed between "unvoted only" and "all". Flipping the pref
+  // refetches the feed from the top (useWiresData resets on the onlyUnvoted
+  // change); we also clear any shuffle order and reset to the first card so
+  // the new list starts clean instead of inheriting the old scroll position.
+  const applyFilter = useCallback(
+    (nextHideVoted: boolean) => {
+      if (nextHideVoted === hideVoted) return;
+      setHideVoted(nextHideVoted);
+      setOrder(null);
+      setActiveIdx(0);
+      if (containerRef.current) containerRef.current.scrollTop = 0;
+    },
+    [hideVoted, setHideVoted],
+  );
+
   // Auto-advance: scroll the next wire into view when the current one ends.
   // Returns false at the tail (so the card replays) and prefetches more.
   const onWireEnded = useCallback((): boolean => {
@@ -217,21 +242,41 @@ export default function WiresFeed({
     return false;
   }, []);
 
-  // ── States ────────────────────────────────────────────────────────────────
+  // ── Body: loader / empty / feed. The filter pill is rendered by the outer
+  //    wrapper below so it stays visible in every state (including empty). ──
+  let body: React.ReactNode;
   if (loading) {
-    return (
-      <div className="absolute inset-0 z-30 grid place-items-center bg-black">
+    body = (
+      <div className="grid h-full place-items-center">
         <div className="flex flex-col items-center gap-3 text-muted">
           <span className="h-7 w-7 animate-spin rounded-full border-2 border-line border-t-accent" />
           <span className="font-mono text-[11px] uppercase tracking-[.2em]">Loading wires</span>
         </div>
       </div>
     );
-  }
-
-  if (shorts.length === 0) {
-    return (
-      <div className="absolute inset-0 z-30 grid place-items-center bg-black px-8 text-center">
+  } else if (shorts.length === 0) {
+    body = hideVoted ? (
+      // Caught-up: the viewer has voted on every published wire. Never a dead
+      // end — one tap brings the full feed back (rule 10).
+      <div className="grid h-full place-items-center px-8 text-center">
+        <div>
+          <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
+            You&rsquo;re all caught up
+          </p>
+          <p className="mt-2 font-body text-[14px] text-muted">
+            You&rsquo;ve voted on every wire. Switch to All to watch them again, or check back for new ones.
+          </p>
+          <button
+            type="button"
+            onClick={() => applyFilter(false)}
+            className="mt-5 rounded-full bg-accent px-5 py-2 font-mono text-[11px] font-bold uppercase tracking-[.18em] text-bg transition active:scale-95"
+          >
+            Show all wires
+          </button>
+        </div>
+      </div>
+    ) : (
+      <div className="grid h-full place-items-center px-8 text-center">
         <div>
           <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
             No wires yet
@@ -242,58 +287,65 @@ export default function WiresFeed({
         </div>
       </div>
     );
+  } else {
+    body = (
+      <div
+        ref={containerRef}
+        className="noscroll absolute inset-0 snap-y snap-mandatory overflow-y-scroll"
+        style={{ overscrollBehavior: "contain", WebkitOverflowScrolling: "touch" }}
+      >
+        {displayShorts.map((s, i) => (
+          <section
+            key={s.id}
+            data-idx={i}
+            ref={(el) => {
+              sectionRefs.current[i] = el;
+            }}
+            className="relative h-full w-full snap-start snap-always"
+          >
+            <WireCard
+              short={s}
+              active={i === activeIdx}
+              mounted={Math.abs(i - activeIdx) <= MOUNT_RADIUS}
+              eager={i === activeIdx || i === activeIdx + 1}
+              insetBottom={84}
+              muted={muted}
+              autoplay={autoplay}
+              advance={advance}
+              slow={slow}
+              reducedMotion={reducedMotion}
+              paused={paused}
+              onToggleMute={toggleMuted}
+              onToggleAutoplay={toggleAutoplay}
+              onToggleAdvance={toggleAdvance}
+              onToggleSlow={toggleSlow}
+              onShuffle={onShuffle}
+              onOpenInfo={onOpenInfo}
+              showSoundHint={i === activeIdx && soundHintShown}
+              onDismissSoundHint={dismissSoundHint}
+              liked={getLike(s.id)?.liked ?? s.viewer_liked}
+              likeCount={getLike(s.id)?.count ?? s.like_count}
+              saved={isSaved(s.id)}
+              onToggleLike={toggleLike}
+              onToggleSave={toggleSave}
+              onTimeUpdate={(t, d) => onShortTimeUpdate(s.id, t, d)}
+              onWireEnded={onWireEnded}
+            />
+          </section>
+        ))}
+        {loadingMore && (
+          <div className="flex h-16 items-center justify-center text-muted">
+            <span className="h-5 w-5 animate-spin rounded-full border-2 border-line border-t-accent" />
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
-    <div
-      ref={containerRef}
-      className="noscroll absolute inset-0 z-30 snap-y snap-mandatory overflow-y-scroll bg-black"
-      style={{ overscrollBehavior: "contain", WebkitOverflowScrolling: "touch" }}
-    >
-      {displayShorts.map((s, i) => (
-        <section
-          key={s.id}
-          data-idx={i}
-          ref={(el) => {
-            sectionRefs.current[i] = el;
-          }}
-          className="relative h-full w-full snap-start snap-always"
-        >
-          <WireCard
-            short={s}
-            active={i === activeIdx}
-            mounted={Math.abs(i - activeIdx) <= MOUNT_RADIUS}
-            eager={i === activeIdx || i === activeIdx + 1}
-            insetBottom={84}
-            muted={muted}
-            autoplay={autoplay}
-            advance={advance}
-            slow={slow}
-            reducedMotion={reducedMotion}
-            paused={paused}
-            onToggleMute={toggleMuted}
-            onToggleAutoplay={toggleAutoplay}
-            onToggleAdvance={toggleAdvance}
-            onToggleSlow={toggleSlow}
-            onShuffle={onShuffle}
-            onOpenInfo={onOpenInfo}
-            showSoundHint={i === activeIdx && soundHintShown}
-            onDismissSoundHint={dismissSoundHint}
-            liked={getLike(s.id)?.liked ?? s.viewer_liked}
-            likeCount={getLike(s.id)?.count ?? s.like_count}
-            saved={isSaved(s.id)}
-            onToggleLike={toggleLike}
-            onToggleSave={toggleSave}
-            onTimeUpdate={(t, d) => onShortTimeUpdate(s.id, t, d)}
-            onWireEnded={onWireEnded}
-          />
-        </section>
-      ))}
-      {loadingMore && (
-        <div className="flex h-16 items-center justify-center text-muted">
-          <span className="h-5 w-5 animate-spin rounded-full border-2 border-line border-t-accent" />
-        </div>
-      )}
+    <div className="absolute inset-0 z-30 bg-black">
+      <WiresFilterToggle hideVoted={hideVoted} onSelect={applyFilter} />
+      {body}
     </div>
   );
 }
