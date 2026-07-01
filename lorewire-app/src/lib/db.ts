@@ -21,6 +21,7 @@ import {
   type VideoAspect,
 } from "@/lib/aspect";
 import { CATEGORY_DEFS } from "@/lib/categories/manifest";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
 
 export type Row = Record<string, unknown>;
 
@@ -159,6 +160,13 @@ async function ensureSchema(d: Driver): Promise<Driver> {
     // Best-effort: a failed seed leaves the categories table empty; the app
     // still renders today's behavior from stories.category (story_tags is
     // not on the read path yet). Retried on the next boot.
+  }
+  try {
+    await seedGranularCategoriesImpl(d);
+  } catch {
+    // Best-effort: a failed granular seed leaves the 17 absent / the legacy
+    // six still active; the current UI is unaffected (it reads the manifest,
+    // not the DB). Retried on the next boot.
   }
   try {
     await backfillStoryPrimaryTagsImpl(d);
@@ -333,6 +341,40 @@ export async function seedCategories(): Promise<void> {
 
 export async function backfillStoryPrimaryTags(): Promise<void> {
   await backfillStoryPrimaryTagsImpl(await db());
+}
+
+// 2026-07-01 PR3: seed the 17 granular categories and retire the legacy six.
+// The 17 become the classifier's active option set; the six stay in the
+// table (stories.category + the PR2 story_tags backfill still reference them
+// through the transition) but move to status='legacy' so they're excluded
+// from new classification and the eventual read path. Idempotent: ON CONFLICT
+// DO NOTHING on insert, plus the status guard on the retire UPDATE. Does NOT
+// touch the current UI, which reads the manifest, not the DB categories.
+async function seedGranularCategoriesImpl(d: Driver): Promise<void> {
+  const now = new Date().toISOString();
+  for (let i = 0; i < GRANULAR_CATEGORIES.length; i++) {
+    const c = GRANULAR_CATEGORIES[i];
+    await d.run(
+      "INSERT INTO categories " +
+        "(slug, label, glyph, color, is_rail, rail_surface, rail_title, sort, status, description, created_at, updated_at) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+        "ON CONFLICT(slug) DO NOTHING",
+      [c.slug, c.label, c.glyph, c.color, c.isRail ? 1 : 0, null, c.railTitle, i, "active", c.description, now, now],
+    );
+  }
+  // Retire the legacy six (drama / entitled / humor / wholesome / dating /
+  // roommate) from the active set.
+  const legacySlugs = CATEGORY_DEFS.map((c) => c.slug);
+  const placeholders = legacySlugs.map(() => "?").join(", ");
+  await d.run(
+    "UPDATE categories SET status = 'legacy', updated_at = ? " +
+      `WHERE slug IN (${placeholders}) AND status = 'active'`,
+    [now, ...legacySlugs],
+  );
+}
+
+export async function seedGranularCategories(): Promise<void> {
+  await seedGranularCategoriesImpl(await db());
 }
 
 export function db(): Promise<Driver> {
