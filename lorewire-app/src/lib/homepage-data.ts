@@ -93,22 +93,37 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   );
   // stories.duration is admin-editable (M:SS string) and rarely set for shorts —
   // the writer path that auto-applies a short as the story's video only swaps
-  // video_url, leaving duration NULL. Backfill from the latest done short_render's
-  // props.duration_ms so rail thumbnails show the real ~30-60s length instead of
-  // the historical "2:00" long-form fallback.
+  // video_url, leaving duration NULL. Resolve the real short duration from the
+  // latest done short_render so rail thumbnails show the true ~30-60s length
+  // instead of the historical "2:00" long-form fallback.
+  //
+  // Self-heal, not just backfill: a body-only value written before the
+  // assembled-MP4 probe (or by a render that missed it) sticks forever if we
+  // only fill NULLs, so the badge shows the scenes length (0:36) while the
+  // player plays the spliced MP4 (0:48). Apply the SAME safe-overwrite gate the
+  // admin backfill route uses — replace the stored value when it is empty OR
+  // equals the body-only formula (clearly auto-written), and preserve it only
+  // when it is a genuine admin override (non-empty and different from
+  // body-only). Plan: _plans/2026-07-01-duration-badge-actual-mp4.md.
   const enrichedDurations = await loadShortDurationsForStories(
-    rows.filter((r) => !r.duration).map((r) => r.id),
+    rows.map((r) => r.id),
   );
+  let durationsHealed = 0;
   for (const r of rows) {
-    if (!r.duration) {
-      const real = enrichedDurations.get(r.id);
-      if (real) r.duration = real;
+    const enriched = enrichedDurations.get(r.id);
+    if (!enriched) continue;
+    const stored = r.duration ?? null;
+    const isEmpty = stored === null || stored === "";
+    const isAutoWritten = isEmpty || stored === enriched.bodyOnly;
+    if (isAutoWritten && r.duration !== enriched.full) {
+      r.duration = enriched.full;
+      durationsHealed += 1;
     }
   }
   console.info("[homepage live catalog load]", {
     count: rows.length,
     limit: safeLimit,
-    durations_backfilled: enrichedDurations.size,
+    durations_healed: durationsHealed,
   });
   // Resolve hero/video onto the delivery base (lib/media-url); passthrough when
   // MEDIA_PUBLIC_BASE is unset.
@@ -118,6 +133,15 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
     video_url: resolveMediaUrl(s.video_url),
   }));
   return { ok: true, stories };
+}
+
+// Per-story short duration: `full` is the public-facing playback length
+// (assembled -> sum -> body-only), `bodyOnly` is the bare body length used
+// by the caller's safe-overwrite gate to detect an auto-written stored
+// value. `bodyOnly` is null only when props carries no usable duration_ms.
+interface ShortDuration {
+  full: string;
+  bodyOnly: string | null;
 }
 
 // Compute the public-facing duration of each story's latest done short and
@@ -138,8 +162,8 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
 //      badge than before _plans/2026-06-29 shipped.
 async function loadShortDurationsForStories(
   storyIds: string[],
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+): Promise<Map<string, ShortDuration>> {
+  const out = new Map<string, ShortDuration>();
   if (storyIds.length === 0) return out;
   const placeholders = storyIds.map(() => "?").join(", ");
   // Fan out the three reads in parallel: render props (carries both
@@ -230,12 +254,18 @@ async function loadShortDurationsForStories(
     }
     const formatted = formatDurationMs(totalMs);
     if (formatted) {
-      out.set(storyId, formatted);
+      // bodyOnly powers the caller's auto-written check; when the source
+      // IS body-only it equals `formatted`, which is exactly right (a
+      // stored "0:36" matches and self-heals to the same 0:36 no-op).
+      const bodyOnly =
+        props.bodyMs !== null ? formatDurationMs(props.bodyMs) : null;
+      out.set(storyId, { full: formatted, bodyOnly });
       console.info("[homepage live catalog duration]", {
         story_id: storyId,
         source,
         total_ms: totalMs,
         formatted,
+        body_only: bodyOnly,
       });
     }
   }

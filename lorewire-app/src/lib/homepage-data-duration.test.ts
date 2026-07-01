@@ -440,3 +440,68 @@ describe("loadLiveCatalog prefers props.assembled_duration_ms (_plans/2026-06-29
     expect(story?.duration).toBe("1:23");
   });
 });
+
+describe("loadLiveCatalog self-heals a stale body-only stories.duration (_plans/2026-07-01)", () => {
+  it("replaces a stored body-only value with the assembled duration", async () => {
+    // The production regression: an earlier render wrote body-only "0:36"
+    // onto stories.duration before the assembled probe existed. The reader
+    // used to skip any non-null value, so the badge showed 0:35 while the
+    // spliced MP4 plays 0:44. The stored value equals the body-only formula,
+    // so it is auto-written and must self-heal to the assembled length.
+    await seedStory("short-q", { duration: "0:35" });
+    await seedShortRender({
+      id: "render-q",
+      storyId: "short-q",
+      status: "done",
+      props: { duration_ms: 35_000, assembled_duration_ms: 44_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-q");
+    expect(story?.duration).toBe("0:44");
+  });
+
+  it("replaces a stored body-only value with the body+intro+outro sum", async () => {
+    // No assembled probe on this render, but a stamp lets us sum the spliced
+    // segments. Stored "0:42" equals the body-only formula (body 42_000), so
+    // it heals up to the 0:49 sum.
+    await seedSegment({ id: "intro-r", kind: "intro", durationMs: 4_000 });
+    await seedSegment({ id: "outro-r", kind: "outro", durationMs: 3_000 });
+    await seedStory("short-r", {
+      duration: "0:42",
+      lastRenderedSegments: {
+        intro_segment_id: "intro-r",
+        outro_segment_id: "outro-r",
+      },
+    });
+    await seedShortRender({
+      id: "render-r",
+      storyId: "short-r",
+      status: "done",
+      props: { duration_ms: 42_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-r");
+    expect(story?.duration).toBe("0:49");
+  });
+
+  it("leaves a genuine admin override untouched even with a done render", async () => {
+    // "1:23" differs from the body-only formula (0:35), so it reads as a
+    // deliberate admin value and survives the self-heal pass.
+    await seedStory("short-s", { duration: "1:23" });
+    await seedShortRender({
+      id: "render-s",
+      storyId: "short-s",
+      status: "done",
+      props: { duration_ms: 35_000, assembled_duration_ms: 44_000 },
+      finishedAt: "2026-06-20T01:00:00.000Z",
+    });
+    const { loadLiveCatalog } = await import("@/lib/homepage-data");
+    const result = await loadLiveCatalog();
+    const story = result.stories.find((s) => s.id === "short-s");
+    expect(story?.duration).toBe("1:23");
+  });
+});
