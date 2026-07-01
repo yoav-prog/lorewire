@@ -25,7 +25,7 @@ import { fetchPosterBytes } from "@/lib/poster-bytes";
 // --- Types -----------------------------------------------------------------
 
 export type FacebookPostStatus = "pending" | "posted" | "failed" | "deleted";
-export type FacebookPostTrigger = "auto" | "manual";
+export type FacebookPostTrigger = "auto" | "manual" | "scheduled";
 
 export interface FacebookPostRow {
   id: string;
@@ -539,6 +539,12 @@ export async function publishShortToFacebook(
       });
       return { status: "skipped", reason: "auto-publish toggle off" };
     }
+  }
+  // A 'scheduled' publish comes from the Publish Scheduler: it bypasses the
+  // auto_publish toggle (the schedule IS the intent) but still honors
+  // story-level dedup, so a re-dispatch or a manual+scheduled overlap
+  // cannot double-post.
+  if (args.trigger !== "manual") {
     const active = await existingActiveRowsForStory(args.storyId);
     if (active > 0) {
       log("skipped", {

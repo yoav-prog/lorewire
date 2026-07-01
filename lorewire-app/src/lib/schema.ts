@@ -1444,6 +1444,69 @@ export const STORY_EVENTS: Table = {
   ],
 };
 
+// 2026-07-01 Publish Scheduler (_plans/2026-07-01-render-and-publish-
+// schedulers.md). The scheduling queue that sits in front of the existing
+// per-platform publishers. When a human approves a reviewed story, one
+// row per enabled platform is inserted with a `scheduled_for` UTC instant
+// (the next open slot for that platform). The per-minute dispatch cron
+// claims due rows, flips `state` to 'publishing' (the idempotency key),
+// and calls the existing publish-to-<platform> function; on success the
+// row goes to 'published'. State is per-row, so a story can be published
+// on one platform while still scheduled on another (partial-publish is a
+// normal outcome, not an error).
+//   - `platform`: 'youtube' | 'facebook' | 'instagram' | 'tiktok'.
+//   - `scheduled_for`: UTC ISO instant, resolved per-day from the
+//     platform's wall-clock slots so DST is always correct.
+//   - `slot_local` / `timezone`: the "HH:MM" slot and IANA zone the
+//     instant came from, kept for display and forensics only.
+//   - `state`: 'scheduled' → 'publishing' → 'published' | 'failed' |
+//     'cancelled'.
+// The partial unique index in POST_TABLE_DDL keeps a story from being
+// double-scheduled on the same platform.
+export const SCHEDULED_PUBLISHES: Table = {
+  name: "scheduled_publishes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "platform", type: "TEXT" },
+    { name: "scheduled_for", type: "TEXT" },
+    { name: "slot_local", type: "TEXT" },
+    { name: "timezone", type: "TEXT" },
+    { name: "state", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "approved_by", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "dispatched_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-07-01 Publish Scheduler: write-only decision log. Every approve or
+// reject at the human gate appends one row capturing the source signals
+// (tier, engagement, age, subreddit) next to the human's verdict. This is
+// the cheap instrumentation the council kept from the "self-tuning
+// flywheel" idea: it makes "does strict-tier priority match human taste,
+// and would weighted scoring help" a query we can answer later, at near
+// zero cost now. Nothing reads it in v1.
+export const SCHEDULER_DECISIONS: Table = {
+  name: "scheduler_decisions",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "reddit_id", type: "TEXT" },
+    { name: "decision", type: "TEXT" },
+    { name: "tier", type: "TEXT" },
+    { name: "comments", type: "INTEGER" },
+    { name: "age_hours", type: "REAL" },
+    { name: "subreddit", type: "TEXT" },
+    { name: "decided_by", type: "TEXT" },
+    { name: "decided_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -1491,6 +1554,8 @@ export const TABLES: Table[] = [
   FACEBOOK_STORIES,
   YOUTUBE_POSTS,
   TIKTOK_POSTS,
+  SCHEDULED_PUBLISHES,
+  SCHEDULER_DECISIONS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -1776,4 +1841,22 @@ export const POST_TABLE_DDL: string[] = [
     "ON submission_reports(status, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_submission_reports_ipua " +
     "ON submission_reports(ip_ua_hash, created_at)",
+  // 2026-07-01 Publish Scheduler. At most one active scheduled_publishes
+  // row per (story, platform): approving a story twice, or a race between
+  // two approve clicks, must not double-post. lib/publish-scheduler.ts
+  // inserts with ON CONFLICT (story_id, platform) DO NOTHING against this
+  // partial unique index, so on Postgres the index MUST exist or the
+  // insert throws "no unique or exclusion constraint matching the ON
+  // CONFLICT specification". 'failed'/'cancelled' rows are excluded so a
+  // story can be rescheduled after a terminal failure.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_publishes_one_active " +
+    "ON scheduled_publishes(story_id, platform) " +
+    "WHERE state IN ('scheduled', 'publishing', 'published')",
+  // Dispatch cron read shape: claim rows due now, oldest first.
+  "CREATE INDEX IF NOT EXISTS idx_scheduled_publishes_due " +
+    "ON scheduled_publishes(state, scheduled_for)",
+  // Per-platform "today" counters (daily cap check + admin status line)
+  // filter by platform and scheduled_for range.
+  "CREATE INDEX IF NOT EXISTS idx_scheduled_publishes_platform_time " +
+    "ON scheduled_publishes(platform, scheduled_for)",
 ];
