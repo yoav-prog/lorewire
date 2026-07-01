@@ -497,6 +497,36 @@ SCHEMA_STATEMENTS = [
         updated_at      TEXT NOT NULL
     )""",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_voiceovers_name ON voiceovers(name)",
+    # 2026-07-01 data-driven category taxonomy (PR2/PR3). Mirror in
+    # lorewire-app/src/lib/schema.ts, seeded there (db.ts). The pipeline reads
+    # active categories + writes story_tags. story_tags has no single PK —
+    # uniqueness is the composite index; a partial-unique index enforces one
+    # primary tag per story. Plan: _plans/2026-07-01-category-taxonomy-multitag.md.
+    """CREATE TABLE IF NOT EXISTS categories (
+        slug          TEXT PRIMARY KEY,
+        label         TEXT,
+        glyph         TEXT,
+        color         TEXT,
+        is_rail       INTEGER,
+        rail_surface  TEXT,
+        rail_title    TEXT,
+        sort          INTEGER,
+        status        TEXT,
+        description   TEXT,
+        created_at    TEXT,
+        updated_at    TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS story_tags (
+        story_id       TEXT,
+        category_slug  TEXT,
+        is_primary     INTEGER,
+        source         TEXT,
+        confidence     REAL,
+        created_at     TEXT
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_tags_story_cat ON story_tags(story_id, category_slug)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_story_tags_primary ON story_tags(story_id) WHERE is_primary = 1",
+    "CREATE INDEX IF NOT EXISTS idx_story_tags_category ON story_tags(category_slug)",
 ]
 
 _COLUMNS = [
@@ -863,6 +893,38 @@ def active_categories() -> list[dict]:
     with _sqlite_conn() as c:
         cur = c.execute(sql)
         return [dict(r) for r in cur.fetchall()]
+
+
+def replace_story_tags(story_id: str, tags: list[dict], *, source: str = "llm") -> None:
+    """Replace a story's tags with ``tags`` ([{slug, confidence}], most-
+    confident first — the first becomes is_primary). Delete-then-insert so the
+    one-primary-per-story index always holds. Reversible: stories.category is
+    untouched, so the pre-reclassification tags can be rebuilt by re-running
+    the backfill. PR3, _plans/2026-07-01-category-taxonomy-multitag.md."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    rows = [
+        (story_id, t["slug"], 1 if i == 0 else 0, source, t.get("confidence"), now)
+        for i, t in enumerate(tags)
+    ]
+    insert = (
+        "INSERT INTO story_tags "
+        "(story_id, category_slug, is_primary, source, confidence, created_at) "
+        "VALUES ({p})"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM story_tags WHERE story_id = %s", (story_id,))
+                for r in rows:
+                    cur.execute(insert.format(p="%s, %s, %s, %s, %s, %s"), r)
+            conn.commit()
+    else:
+        with _sqlite_conn() as c:
+            c.execute("DELETE FROM story_tags WHERE story_id = ?", (story_id,))
+            for r in rows:
+                c.execute(insert.format(p="?, ?, ?, ?, ?, ?"), r)
 
 
 def get_setting(key: str) -> str | None:

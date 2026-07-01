@@ -7,11 +7,13 @@ do — and whether the 17 categories cover the corpus — before a single row
 changes. `run` is the thin IO wrapper: it reads the active categories +
 stories from the store, feeds the classifier, and prints the report.
 
-Writing story_tags (the APPLY step) is deliberately gated: `run(dry_run=False)`
-raises until the dry-run report has been reviewed and the apply is enabled in
-a follow-up. The reclassification is reversible regardless — it only ever
-writes story_tags, and stories.category is left untouched as the anchor the
-old tags can be rebuilt from.
+Writing story_tags (the APPLY step) is guarded procedurally: dry_run=True is
+the DEFAULT and the CLI only ever runs the dry-run. Applying (`run(dry_run=
+False)`) is a deliberate call, meant to be made only after the dry-run report
+has been reviewed — it writes tags for the auto-tagged stories and leaves the
+review queue untouched. Reversible regardless: it only ever writes story_tags,
+and stories.category is left untouched as the anchor the old tags can be
+rebuilt from.
 
 Run the dry-run:  python -m pipeline.reclassify_tags
 """
@@ -97,6 +99,18 @@ def build_reclassification_report(
     }
 
 
+def apply_plan(report: dict) -> list[dict]:
+    """The subset of a report's proposals to actually write: auto-tagged
+    stories only. Review-queue stories are deliberately left for a human, so
+    they keep their existing (pre-reclassification) tags until resolved. Each
+    item is ``{story_id, tags}`` ready for store.replace_story_tags."""
+    return [
+        {"story_id": p["id"], "tags": p["tags"]}
+        for p in report["proposals"]
+        if not p["needs_review"]
+    ]
+
+
 def _print_summary(report: dict, *, dry_run: bool) -> None:
     mode = "DRY RUN (no writes)" if dry_run else "APPLY"
     print(
@@ -140,10 +154,14 @@ def run(
     )
     _print_summary(report, dry_run=dry_run)
     if not dry_run:
-        raise NotImplementedError(
-            "Applying tags is gated: review the dry-run report first. The apply "
-            "step (writing story_tags) is enabled in a follow-up once approved."
+        plan = apply_plan(report)
+        print(
+            f"[reclassify] APPLYING: writing tags for {len(plan)} stories "
+            f"(review queue of {report['review_queue']} left untouched)"
         )
+        for item in plan:
+            store.replace_story_tags(item["story_id"], item["tags"], source="llm")
+        print(f"[reclassify] applied {len(plan)} stories")
     return report
 
 

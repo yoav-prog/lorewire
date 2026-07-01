@@ -6,9 +6,15 @@ primary below the floor), the confidence buckets, and the floor boundary.
 """
 from __future__ import annotations
 
+import os
+import sqlite3
+import tempfile
 import unittest
+from importlib import reload
+from pathlib import Path
+from unittest import mock
 
-from pipeline.reclassify_tags import build_reclassification_report
+from pipeline.reclassify_tags import apply_plan, build_reclassification_report
 
 CATEGORIES = [
     {"slug": "a", "label": "A", "description": "cat a"},
@@ -98,6 +104,95 @@ class BuildReclassificationReportTests(unittest.TestCase):
         self.assertEqual(rep["auto_tagged"], 2)
         self.assertEqual(rep["review_queue"], 2)
         self.assertEqual(rep["primary_counts"], {"a": 2})
+
+
+class ApplyPlanTests(unittest.TestCase):
+    def test_excludes_review_queue(self):
+        report = {
+            "proposals": [
+                {"id": "1", "tags": [{"slug": "a", "confidence": 0.9}], "needs_review": False},
+                {"id": "2", "tags": [], "needs_review": True},
+                {"id": "3", "tags": [{"slug": "b", "confidence": 0.7}], "needs_review": False},
+            ]
+        }
+        plan = apply_plan(report)
+        self.assertEqual([p["story_id"] for p in plan], ["1", "3"])
+        self.assertEqual(plan[0]["tags"], [{"slug": "a", "confidence": 0.9}])
+
+
+class ReplaceStoryTagsDBTests(unittest.TestCase):
+    """Integration test for the write path against a real isolated SQLite DB
+    (mirrors the store-test harness: temp PIPELINE_DB + store.init())."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.db_path = Path(self.tmpdir.name) / "test.db"
+        self._patch = mock.patch.dict(
+            os.environ,
+            {"PIPELINE_DB": str(self.db_path), "DATABASE_URL": ""},
+            clear=False,
+        )
+        self._patch.start()
+        from pipeline import config, store
+        reload(config)
+        reload(store)
+        store.init()
+        self.store = store
+
+    def tearDown(self):
+        self._patch.stop()
+        self.tmpdir.cleanup()
+        from pipeline import config, store
+        reload(config)
+        reload(store)
+
+    def _rows(self, story_id):
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT category_slug, is_primary, source, confidence "
+                    "FROM story_tags WHERE story_id = ? "
+                    "ORDER BY is_primary DESC, category_slug",
+                    (story_id,),
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+
+    def test_writes_one_primary_and_extras(self):
+        self.store.replace_story_tags(
+            "s1", [{"slug": "a", "confidence": 0.9}, {"slug": "b", "confidence": 0.6}]
+        )
+        rows = self._rows("s1")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["category_slug"], "a")
+        self.assertEqual(rows[0]["is_primary"], 1)
+        self.assertEqual(rows[0]["source"], "llm")
+        self.assertAlmostEqual(rows[0]["confidence"], 0.9)
+        self.assertEqual(rows[1]["is_primary"], 0)
+
+    def test_replace_swaps_tags_without_accumulation(self):
+        self.store.replace_story_tags("s1", [{"slug": "a", "confidence": 0.9}])
+        self.store.replace_story_tags("s1", [{"slug": "c", "confidence": 0.8}])
+        rows = self._rows("s1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["category_slug"], "c")
+        self.assertEqual(rows[0]["is_primary"], 1)
+
+    def test_exactly_one_primary_after_rewrite(self):
+        self.store.replace_story_tags(
+            "s1", [{"slug": "a", "confidence": 0.9}, {"slug": "b", "confidence": 0.5}]
+        )
+        self.store.replace_story_tags(
+            "s1", [{"slug": "b", "confidence": 0.9}, {"slug": "a", "confidence": 0.4}]
+        )
+        rows = self._rows("s1")
+        primaries = [r for r in rows if r["is_primary"] == 1]
+        self.assertEqual(len(primaries), 1)
+        self.assertEqual(primaries[0]["category_slug"], "b")
 
 
 if __name__ == "__main__":
