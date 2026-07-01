@@ -832,6 +832,39 @@ def all_stories() -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def stories_for_reclassify() -> list[dict]:
+    """Every story with the fields the multi-tag classifier needs
+    ({id, title, body, category}), oldest-first so a resumable batch is
+    deterministic. PR3, _plans/2026-07-01-category-taxonomy-multitag.md."""
+    sql = "SELECT id, title, body, category FROM stories ORDER BY created_at ASC"
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                return list(cur.fetchall())
+    with _sqlite_conn() as c:
+        cur = c.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+
+
+def active_categories() -> list[dict]:
+    """The active category set ({slug, label, description}) the classifier
+    picks from, in admin order. Excludes legacy (retired) categories. The
+    `categories` table is seeded by the app (db.ts) — this only reads it."""
+    sql = (
+        "SELECT slug, label, description FROM categories "
+        "WHERE status = 'active' ORDER BY sort ASC, label ASC"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+                return list(cur.fetchall())
+    with _sqlite_conn() as c:
+        cur = c.execute(sql)
+        return [dict(r) for r in cur.fetchall()]
+
+
 def get_setting(key: str) -> str | None:
     if _is_postgres():
         try:
