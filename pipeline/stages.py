@@ -132,6 +132,95 @@ def classify_category(
     return fallback_category
 
 
+def classify_story_tags(
+    title: str,
+    body: str,
+    categories: list[dict],
+    *,
+    max_tags: int = 3,
+    dry_run: bool = False,
+) -> list[dict]:
+    """Multi-tag classify a story into 1..max_tags of ``categories``.
+
+    ``categories`` is a list of ``{"slug", "label", "description"}`` — the
+    ACTIVE set, read from the DB by the caller so admin-added categories are
+    picked up automatically. Returns a list of ``{"slug": str, "confidence":
+    float}`` ordered most-confident first; the first entry is the story's
+    PRIMARY tag.
+
+    Returns ``[]`` when the LLM fails, returns nothing usable, or in the
+    offline ``dry_run`` path — so the caller can route the story to the
+    review queue instead of guessing. The closed-set validation means a model
+    inventing a slug never becomes a tag.
+
+    Plan: _plans/2026-07-01-category-taxonomy-multitag.md (PR3). Mirrored by
+    the TS admin trigger, which enqueues this classification as a pipeline job.
+    """
+    if dry_run or not categories:
+        return []
+    from pipeline import llm
+
+    valid_slugs = {c["slug"] for c in categories}
+    options = "\n".join(
+        f"- {c['slug']}: {c.get('description') or c['label']}" for c in categories
+    )
+    # Body is capped to keep the prompt small (same window as classify_category).
+    snippet = (body or "").strip()[:2000]
+    prompt = (
+        "You tag short retold-from-Reddit stories with LoreWire categories.\n"
+        "Categories (slug: what it means):\n"
+        f"{options}\n\n"
+        "Pick the 1 to 3 categories that BEST fit the story below. Prefer "
+        "fewer tags — use just one when only one clearly fits. Return ONLY a "
+        'JSON array like [{"slug": "<a slug above>", "confidence": <0.0-1.0>}], '
+        "ordered most-confident first, no prose, no code fences.\n\n"
+        f"Title: {title or '(no title)'}\n"
+        f"Story:\n{snippet}"
+    )
+    try:
+        raw = llm.chat(prompt, 200, model="openai/gpt-5-nano")
+    except Exception as e:  # noqa: BLE001 — classifier is a quality lift, not load-bearing.
+        print(f"[classify_story_tags] llm failed: {e}")
+        return []
+    parsed = _parse_tag_json(raw)
+    if not parsed:
+        print(f"[classify_story_tags] unparseable LLM response {raw!r}")
+        return []
+    # Closed-set guard + clamp + dedupe (keep the highest confidence per slug).
+    best: dict[str, float] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        slug = str(item.get("slug", "")).strip()
+        if slug not in valid_slugs:
+            continue
+        try:
+            conf = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        conf = max(0.0, min(1.0, conf))
+        if slug not in best or conf > best[slug]:
+            best[slug] = conf
+    ordered = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+    return [{"slug": s, "confidence": c} for s, c in ordered[:max_tags]]
+
+
+def _parse_tag_json(raw: str) -> list:
+    """Pull a JSON array of tag objects out of an LLM response, tolerating
+    markdown code fences and leading/trailing prose by grabbing the first
+    ``[`` through the last ``]``."""
+    text = (raw or "").strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return []
+    try:
+        data = json.loads(text[start : end + 1])
+    except (ValueError, TypeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
 def _decodo_scrape(reddit_url: str) -> dict:
     token = (config.env("DECODO_TOKEN") or "").strip()
     auth = token if token.lower().startswith("basic ") else f"Basic {token}"

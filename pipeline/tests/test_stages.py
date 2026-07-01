@@ -892,5 +892,95 @@ class ClassifyCategoryTests(unittest.TestCase):
         self.assertEqual(out, "Humor")
 
 
+class ClassifyStoryTagsTests(unittest.TestCase):
+    """Multi-tag classifier (_plans/2026-07-01-category-taxonomy-multitag.md).
+    Stubs pipeline.llm.chat so we exercise the JSON parse, the closed-set
+    guard, confidence clamping, ordering, the max-tags cap, dedupe, and the
+    safe empty-list fallback without a real network call. Mirrors the TS
+    intent so both stay pinned to the same contract."""
+
+    TITLE = "THE $800 ENVELOPE"
+    BODY = "A coworker collects cash for the boss's gift, then betrays everyone."
+    CATEGORIES = [
+        {"slug": "entitled-people", "label": "Entitled People", "description": "entitled, demanding people"},
+        {"slug": "cheating-betrayal", "label": "Cheating & Betrayal", "description": "betrayal, infidelity"},
+        {"slug": "workplace", "label": "Workplace Nightmares", "description": "toxic jobs and coworkers"},
+    ]
+
+    def _patch_llm(self, response):
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+
+        def fake_chat(_prompt, _max_tokens=2000, model=None):  # noqa: ARG001
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        pipeline_llm.chat = fake_chat
+
+    def tearDown(self):
+        from pipeline import llm as pipeline_llm
+        if hasattr(self, "_orig"):
+            pipeline_llm.chat = self._orig
+
+    def _classify(self, **kw):
+        return stages.classify_story_tags(self.TITLE, self.BODY, self.CATEGORIES, **kw)
+
+    def test_dry_run_returns_empty(self):
+        out = stages.classify_story_tags(self.TITLE, self.BODY, self.CATEGORIES, dry_run=True)
+        self.assertEqual(out, [])
+
+    def test_no_categories_returns_empty(self):
+        self.assertEqual(stages.classify_story_tags(self.TITLE, self.BODY, []), [])
+
+    def test_orders_by_confidence_primary_first(self):
+        self._patch_llm('[{"slug":"entitled-people","confidence":0.6},{"slug":"cheating-betrayal","confidence":0.9}]')
+        out = self._classify()
+        self.assertEqual([t["slug"] for t in out], ["cheating-betrayal", "entitled-people"])
+        self.assertAlmostEqual(out[0]["confidence"], 0.9)
+
+    def test_single_tag(self):
+        self._patch_llm('[{"slug":"workplace","confidence":0.8}]')
+        out = self._classify()
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["slug"], "workplace")
+
+    def test_drops_unknown_slugs(self):
+        self._patch_llm('[{"slug":"politics","confidence":0.9},{"slug":"workplace","confidence":0.7}]')
+        out = self._classify()
+        self.assertEqual([t["slug"] for t in out], ["workplace"])
+
+    def test_caps_at_max_tags(self):
+        self._patch_llm(
+            '[{"slug":"entitled-people","confidence":0.9},'
+            '{"slug":"cheating-betrayal","confidence":0.8},'
+            '{"slug":"workplace","confidence":0.7}]'
+        )
+        out = self._classify(max_tags=2)
+        self.assertEqual([t["slug"] for t in out], ["entitled-people", "cheating-betrayal"])
+
+    def test_clamps_confidence(self):
+        self._patch_llm('[{"slug":"workplace","confidence":1.7}]')
+        self.assertEqual(self._classify()[0]["confidence"], 1.0)
+
+    def test_tolerates_code_fences_and_prose(self):
+        self._patch_llm('Sure:\n```json\n[{"slug":"workplace","confidence":0.5}]\n```')
+        self.assertEqual([t["slug"] for t in self._classify()], ["workplace"])
+
+    def test_dedupes_keeping_highest_confidence(self):
+        self._patch_llm('[{"slug":"workplace","confidence":0.4},{"slug":"workplace","confidence":0.8}]')
+        out = self._classify()
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["confidence"], 0.8)
+
+    def test_empty_on_unparseable(self):
+        self._patch_llm("not json at all")
+        self.assertEqual(self._classify(), [])
+
+    def test_empty_when_llm_raises(self):
+        self._patch_llm(RuntimeError("LLM HTTP 500: boom"))
+        self.assertEqual(self._classify(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

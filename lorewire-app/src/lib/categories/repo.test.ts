@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   run,
   seedCategories,
+  seedGranularCategories,
   backfillStoryPrimaryTags,
 } from "@/lib/db";
 import {
@@ -18,6 +19,7 @@ import {
   listCategories,
 } from "@/lib/categories/repo";
 import { CATEGORY_DEFS } from "@/lib/categories/manifest";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
 
 const PFX = "test-ct-";
 
@@ -58,9 +60,9 @@ afterEach(async () => {
   await reset();
 });
 
-describe("seedCategories", () => {
-  it("seeds every manifest category (idempotent, all rails, active)", async () => {
-    await seedCategories(); // second run must no-op, not duplicate or throw
+describe("seedCategories (the legacy six)", () => {
+  it("seeds the manifest six with their data; PR3 retires them to legacy", async () => {
+    await seedCategories(); // idempotent
     for (const def of CATEGORY_DEFS) {
       const row = await getCategoryBySlug(def.slug);
       expect(row).not.toBeNull();
@@ -69,10 +71,46 @@ describe("seedCategories", () => {
       expect(row?.glyph).toBe(def.glyph);
       expect(row?.rail_surface).toBe(def.railSurface);
       expect(row?.is_rail).toBe(1);
+      // The granular seed (run in the schema chain) moves the six to legacy.
+      expect(row?.status).toBe("legacy");
+    }
+    // Retired: excluded from the active list.
+    const activeSlugs = (await listCategories()).map((c) => c.slug);
+    for (const def of CATEGORY_DEFS) {
+      expect(activeSlugs).not.toContain(def.slug);
+    }
+  });
+});
+
+describe("seedGranularCategories (the 17)", () => {
+  it("seeds all 17 as active with their data (idempotent)", async () => {
+    await seedGranularCategories(); // second run must no-op, not duplicate
+    for (const c of GRANULAR_CATEGORIES) {
+      const row = await getCategoryBySlug(c.slug);
+      expect(row).not.toBeNull();
+      expect(row?.label).toBe(c.label);
+      expect(row?.color).toBe(c.color);
+      expect(row?.is_rail).toBe(c.isRail ? 1 : 0);
+      expect(row?.description).toBe(c.description);
       expect(row?.status).toBe("active");
     }
-    const slugs = (await listCategories()).map((c) => c.slug);
-    for (const def of CATEGORY_DEFS) expect(slugs).toContain(def.slug);
+  });
+
+  it("makes the active set exactly the 17, none of the legacy six", async () => {
+    const activeSlugs = (await listCategories()).map((c) => c.slug);
+    for (const c of GRANULAR_CATEGORIES) expect(activeSlugs).toContain(c.slug);
+    for (const def of CATEGORY_DEFS) expect(activeSlugs).not.toContain(def.slug);
+  });
+
+  it("marks exactly the eight rails among the active set", async () => {
+    const railSlugs = (await listCategories())
+      .filter((c) => c.is_rail === 1)
+      .map((c) => c.slug)
+      .sort();
+    const expected = GRANULAR_CATEGORIES.filter((c) => c.isRail)
+      .map((c) => c.slug)
+      .sort();
+    expect(railSlugs).toEqual(expected);
   });
 });
 
