@@ -3401,14 +3401,10 @@ export async function countSubmissionQueueAction(): Promise<number> {
 
 const MAX_BULK_ITEMS = 200;
 
-const STORY_CATEGORIES = new Set([
-  "Drama",
-  "Entitled",
-  "Humor",
-  "Wholesome",
-  "Dating",
-  "Roommate",
-]);
+// Closed-set guard for bulk category ops. Derived from the shared
+// category list (admin/ui.ts -> @/lib/categories/manifest) so it can't
+// drift from the categories the picker actually offers.
+const STORY_CATEGORIES = new Set<string>(CATEGORIES);
 
 const STORY_STATUSES = new Set<StoryStatus>([
   "draft",

@@ -1,13 +1,11 @@
 // Small shared constants and helpers for the admin UI.
 
-export const CATEGORIES = [
-  "Drama",
-  "Entitled",
-  "Humor",
-  "Wholesome",
-  "Dating",
-  "Roommate",
-] as const;
+import { CATEGORY_LABELS } from "@/lib/categories/manifest";
+
+// Story categories, canonical order + literal types, re-exported from the
+// shared manifest so this list can't drift from the classifier, rails, or
+// color tokens. `(typeof CATEGORIES)[number]` stays the exact `Cat` union.
+export const CATEGORIES = CATEGORY_LABELS;
 
 export const STATUSES = [
   "draft",
