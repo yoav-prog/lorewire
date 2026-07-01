@@ -123,6 +123,17 @@ const STATIC_GROUPS: SidebarGroup[] = [
         capability: "content.manage",
       },
       {
+        // Category reclassification: preview (dry-run) how the multi-tag
+        // classifier would tag the whole story library, then apply the
+        // reviewed tags (a separate, gated step). content.manage to match
+        // the page's requireCapability gate. Plan:
+        // _plans/2026-07-01-category-taxonomy-multitag.md.
+        href: "/admin/reclassify",
+        label: "Reclassify",
+        activePrefixes: ["/admin/reclassify"],
+        capability: "content.manage",
+      },
+      {
         // Engagement polls overview. Author lives on the story edit
         // page; this is the cross-cutting "every poll + how it's
         // voting" view. Plan: _plans/2026-06-17-engagement-polls.md.

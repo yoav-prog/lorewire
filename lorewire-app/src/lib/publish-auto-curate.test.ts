@@ -24,21 +24,21 @@ beforeEach(async () => {
 
 describe("autoCurateOnPublish", () => {
   it("adds the story to new_row and its category rail", async () => {
-    await autoCurateOnPublish("story-1", "Entitled");
+    await autoCurateOnPublish("story-1", "Entitled People");
     const newRow = await listSurface("new_row");
-    const entitled = await listSurface("entitled_row");
+    const entitled = await listSurface("entitled-people");
     expect(newRow.map((r) => r.story_id)).toEqual(["story-1"]);
     expect(entitled.map((r) => r.story_id)).toEqual(["story-1"]);
   });
 
   it("normalises category casing before resolving the rail", async () => {
-    // "ENTITLED" or " Entitled  " should still land in entitled_row.
-    await autoCurateOnPublish("story-1", "ENTITLED");
-    await autoCurateOnPublish("story-2", " Drama  ");
-    expect((await listSurface("entitled_row")).map((r) => r.story_id)).toEqual([
+    // "ENTITLED PEOPLE" or " Entitled  " should still land in entitled_row.
+    await autoCurateOnPublish("story-1", "ENTITLED PEOPLE");
+    await autoCurateOnPublish("story-2", " Family Feuds  ");
+    expect((await listSurface("entitled-people")).map((r) => r.story_id)).toEqual([
       "story-1",
     ]);
-    expect((await listSurface("drama_row")).map((r) => r.story_id)).toEqual([
+    expect((await listSurface("family-feuds")).map((r) => r.story_id)).toEqual([
       "story-2",
     ]);
   });
@@ -66,25 +66,25 @@ describe("autoCurateOnPublish", () => {
   it("tolerates a story already in new_row (publish-then-republish)", async () => {
     await addToSurface("new_row", "story-1");
     // Should NOT throw even though new_row already has story-1.
-    await autoCurateOnPublish("story-1", "Drama");
+    await autoCurateOnPublish("story-1", "Family Feuds");
     const newRow = await listSurface("new_row");
     expect(newRow.map((r) => r.story_id)).toEqual(["story-1"]);
     // Drama rail still gets the row though, since it's empty.
-    const drama = await listSurface("drama_row");
+    const drama = await listSurface("family-feuds");
     expect(drama.map((r) => r.story_id)).toEqual(["story-1"]);
   });
 
   it("tolerates a story already in both rails", async () => {
     await addToSurface("new_row", "story-1");
-    await addToSurface("humor_row", "story-1");
+    await addToSurface("revenge-karma", "story-1");
     // Should not throw and should not duplicate.
-    await autoCurateOnPublish("story-1", "Humor");
+    await autoCurateOnPublish("story-1", "Revenge & Karma");
     expect((await listSurface("new_row")).length).toBe(1);
-    expect((await listSurface("humor_row")).length).toBe(1);
+    expect((await listSurface("revenge-karma")).length).toBe(1);
   });
 
   it("is a no-op on empty storyId", async () => {
-    await autoCurateOnPublish("", "Drama");
+    await autoCurateOnPublish("", "Family Feuds");
     const newRow = await all<{ n: number }>(
       "SELECT count(*) AS n FROM homepage_curation",
       [],

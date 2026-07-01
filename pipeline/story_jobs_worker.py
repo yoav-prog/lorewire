@@ -309,32 +309,47 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         payload={"title": branded_title, "synopsis_chars": len(branded_syn or "")},
     )
 
-    # 2026-06-21 LLM category classifier
-    # (_plans/2026-06-21-category-classifier-and-pills.md). Subreddit map
-    # is the fallback; the classifier reads the rewritten article body so
-    # it tags accurately regardless of which subreddit a CSV row came
-    # from. A failed call returns the fallback unchanged — never NULL,
-    # never junk — so the downstream upsert stays safe.
+    # 2026-07-01 multi-tag LLM classifier
+    # (_plans/2026-07-01-category-taxonomy-multitag.md). Supersedes the old
+    # single-label classify_category: the classifier now picks 1-3 of the
+    # ADMIN-managed active categories (read from the DB, so admin-added ones
+    # are picked up automatically) and the first is the story's PRIMARY tag.
+    # stories.category is set to the primary tag's LABEL so every old read
+    # path keeps working; the full tag set is written to story_tags AFTER the
+    # story row exists (upsert below — story_tags.story_id FKs stories.id).
+    # A failed or empty classify leaves the subreddit-map fallback category
+    # in place and writes no tags — the story still lands in the review queue
+    # (status 'review') where an admin retags it, so the upsert stays safe
+    # and never junk.
     prev_category = idea["category"]
-    classified = stages.classify_category(
+    active_cats = store.active_categories()
+    story_tags = stages.classify_story_tags(
         branded_title or idea["headline"],
         body,
-        fallback_category=prev_category,
+        active_cats,
     )
-    if classified != prev_category:
+    if story_tags:
+        label_by_slug = {c["slug"]: c["label"] for c in active_cats}
+        tag_slugs = [t["slug"] for t in story_tags]
+        primary_label = label_by_slug.get(tag_slugs[0], prev_category)
         print(
             f"[story-jobs classify] reddit_id={post['id']} "
-            f"{prev_category} -> {classified}"
+            f"{prev_category} -> {primary_label} tags={tag_slugs}"
         )
         store.log_story_job_event(
-            job_id, reddit_id, "category_reclassified",
-            message=f"Category {prev_category} -> {classified}",
-            payload={"prev": prev_category, "next": classified},
+            job_id, reddit_id, "category_tagged",
+            message=f"Tagged {primary_label} ({', '.join(tag_slugs)})",
+            payload={
+                "prev": prev_category,
+                "primary": primary_label,
+                "tags": tag_slugs,
+            },
         )
-        idea["category"] = classified
+        idea["category"] = primary_label
     else:
         print(
-            f"[story-jobs classify] reddit_id={post['id']} kept {prev_category}"
+            f"[story-jobs classify] reddit_id={post['id']} "
+            f"classify empty, kept fallback {prev_category}"
         )
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -429,6 +444,14 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         media_delta_usd, llm_token_delta,
     )
     store.upsert_story(row)
+    # Persist the multi-tag set now the story row exists (story_tags.story_id
+    # FKs stories.id). The primary tag's label is already mirrored into
+    # stories.category above; this writes the full 1-3 tag set. Empty when the
+    # classifier returned nothing — the review-queue admin retags then.
+    # source='pipeline' marks worker-written tags apart from the admin
+    # backfill/reclassify ('backfill'/'llm').
+    if story_tags:
+        store.replace_story_tags(row["id"], story_tags, source="pipeline")
     store.log_story_job_event(
         job_id, reddit_id, "story_persisted",
         message=f"Saved story (cost ~${row['cost_cents'] / 100:.2f})",

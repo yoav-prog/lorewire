@@ -12,22 +12,24 @@
 
 import { useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CAT, type Cat } from "@/lib/stories";
+import { categoryVisual } from "@/lib/categories/visuals";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
 
 const QUERY_KEY = "cat";
 
-// Stable order for the chip row. Reads off CAT so a new category added
-// to the type surfaces in the chip row without a second edit here.
-export const CATEGORY_ORDER: readonly Cat[] = Object.keys(CAT) as Cat[];
+// Stable order for the chip row — the 18 category labels, in seed order.
+export const CATEGORY_ORDER: readonly string[] = GRANULAR_CATEGORIES.map(
+  (c) => c.label,
+);
 
-function parseSelected(value: string | null): Set<Cat> {
+function parseSelected(value: string | null): Set<string> {
   if (!value) return new Set();
   const raw = value.split(",").map((s) => s.trim()).filter(Boolean);
-  const valid = raw.filter((s): s is Cat => (CATEGORY_ORDER as string[]).includes(s));
+  const valid = raw.filter((s) => (CATEGORY_ORDER as string[]).includes(s));
   return new Set(valid);
 }
 
-function serializeSelected(selected: Set<Cat>): string {
+function serializeSelected(selected: Set<string>): string {
   // Preserve CATEGORY_ORDER so the URL is stable regardless of click
   // order. `Drama,Humor` and `Humor,Drama` would otherwise produce two
   // different URLs for the same filter, which breaks shareable links.
@@ -35,8 +37,8 @@ function serializeSelected(selected: Set<Cat>): string {
 }
 
 export interface CategoryFilterState {
-  selected: Set<Cat>;
-  toggle: (cat: Cat) => void;
+  selected: Set<string>;
+  toggle: (cat: string) => void;
   clear: () => void;
 }
 
@@ -52,7 +54,7 @@ export function useCategoryFilter(): CategoryFilterState {
   const selected = useMemo(() => parseSelected(raw), [raw]);
 
   const writeSelected = useCallback(
-    (next: Set<Cat>) => {
+    (next: Set<string>) => {
       const sp = new URLSearchParams(params?.toString() ?? "");
       const value = serializeSelected(next);
       if (value) {
@@ -76,7 +78,7 @@ export function useCategoryFilter(): CategoryFilterState {
   );
 
   const toggle = useCallback(
-    (cat: Cat) => {
+    (cat: string) => {
       const next = new Set(selected);
       if (next.has(cat)) next.delete(cat);
       else next.add(cat);
@@ -93,8 +95,8 @@ export function useCategoryFilter(): CategoryFilterState {
 }
 
 export interface CategoryFilterChipsProps {
-  selected: Set<Cat>;
-  onToggle: (cat: Cat) => void;
+  selected: Set<string>;
+  onToggle: (cat: string) => void;
   onClear: () => void;
   /** Visual density. `desktop` uses larger pills and tracking; `mobile`
    *  drops to a tighter row that wraps cleanly inside a 360px viewport. */
@@ -140,7 +142,7 @@ export function CategoryFilterChips({
             active={active}
             onClick={() => onToggle(cat)}
             sizing={sizing}
-            tone={CAT[cat]}
+            tone={categoryVisual(cat).color}
           />
         );
       })}
@@ -186,9 +188,9 @@ function CategoryChip({
 
 // Filter a list of stories by the active selection. An empty selection
 // returns the input untouched so callers can pipe through unconditionally.
-export function filterStoriesByCategory<T extends { cat: Cat }>(
+export function filterStoriesByCategory<T extends { cat: string }>(
   items: T[],
-  selected: Set<Cat>,
+  selected: Set<string>,
 ): T[] {
   if (selected.size === 0) return items;
   return items.filter((s) => selected.has(s.cat));
