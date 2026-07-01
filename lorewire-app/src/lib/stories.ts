@@ -2,8 +2,12 @@
 // data. Later this comes from Postgres via the pipeline; the shape stays stable.
 
 import { PUBLISHED } from "@/data/published";
+import { CAT_COLORS, type Cat } from "@/lib/categories/manifest";
 
-export type Cat = "Drama" | "Entitled" | "Humor" | "Wholesome" | "Dating" | "Roommate";
+// `Cat` + the `CAT` color map are re-exported from the shared category
+// manifest so the union and the palette can't drift from the admin list,
+// the rails, or the pipeline. See @/lib/categories/manifest.
+export type { Cat };
 
 export interface AlignedWord {
   word: string;
@@ -46,14 +50,7 @@ export interface Story {
   alignment?: AlignedWord[];
 }
 
-export const CAT: Record<Cat, string> = {
-  Drama: "#9B3A30",
-  Entitled: "#C06234",
-  Humor: "#C9A227",
-  Wholesome: "#2C7E78",
-  Dating: "#A8466A",
-  Roommate: "#5B3B8A",
-};
+export const CAT: Record<Cat, string> = CAT_COLORS;
 
 export const STORIES: Story[] = [
   { id: "envelope", title: "THE $800 ENVELOPE", cat: "Entitled", dur: "2:14", match: 97, year: 2024, glyph: "$", tags: ["True Story", "Workplace", "Karma"], syn: "A coworker collects cash for the boss's retirement gift, then the envelope quietly disappears, and so does her story." },

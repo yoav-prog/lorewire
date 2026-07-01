@@ -1,5 +1,6 @@
 import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
+import { CATEGORY_LABELS } from "@/lib/categories/manifest";
 import SettingsShell from "@/app/admin/SettingsShell";
 import SettingsSection from "@/app/admin/SettingsSection";
 import {
@@ -74,14 +75,10 @@ import {
 //
 // Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
 
-const SHORT_CATEGORIES = [
-  "Dating",
-  "Drama",
-  "Entitled",
-  "Humor",
-  "Roommate",
-  "Wholesome",
-] as const;
+// Per-category tag/hashtag settings iterate the shared category set
+// (alphabetical), from the manifest so this can't drift (see
+// @/lib/categories/manifest).
+const SHORT_CATEGORIES = [...CATEGORY_LABELS].sort();
 
 const YT_PRIVACY_OPTIONS: ChipOption<string>[] = [
   {

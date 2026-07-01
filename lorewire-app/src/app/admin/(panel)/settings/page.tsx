@@ -18,6 +18,10 @@ import {
 } from "./_components/SettingControls";
 import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
 import { NARRATION_VIBES, LENGTH_PRESETS } from "@/lib/shorts-options";
+import {
+  CATEGORY_LABELS,
+  CATEGORY_RAIL_ENTRIES,
+} from "@/lib/categories/manifest";
 import { ASPECT_CHIP_OPTIONS, type ChipOption } from "@/components/ui";
 import {
   isVideoAspect,
@@ -244,16 +248,12 @@ export default async function SettingsPage() {
   // honest about which path will run.
   const rotatingCategoryOptions: SelectOption[] = [
     { id: "", label: "Auto (rotate by UTC day)" },
-    { id: "entitled_row", label: "Audacity: Entitled People" },
-    { id: "humor_row", label: "Humor & Awkward Moments" },
-    { id: "wholesome_row", label: "Wholesome Wins" },
-    { id: "dating_row", label: "Dating Disasters" },
-    { id: "roommate_row", label: "Roommate Files" },
-    { id: "drama_row", label: "Pure Drama" },
+    ...CATEGORY_RAIL_ENTRIES.map((entry) => ({
+      id: entry.surface,
+      label: entry.title,
+    })),
   ];
-  const SHORT_CATEGORIES = [
-    "Dating", "Drama", "Entitled", "Humor", "Roommate", "Wholesome",
-  ];
+  const SHORT_CATEGORIES = [...CATEGORY_LABELS].sort();
   const shortsAutoByCat: Record<string, string> = {};
   await Promise.all(
     SHORT_CATEGORIES.map(async (c) => {

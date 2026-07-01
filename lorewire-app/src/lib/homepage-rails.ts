@@ -38,6 +38,10 @@ import {
   type Cat,
   type Story,
 } from "@/lib/stories";
+import {
+  CATEGORY_GLYPHS,
+  CATEGORY_RAIL_ENTRIES,
+} from "@/lib/categories/manifest";
 import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
 
 /** 2026-06-18 polls plan extension: client-side fetch hook for the
@@ -129,17 +133,18 @@ export interface CategoryRailSpec {
   cat: Cat | null;
 }
 
-// Single source of truth for which category rails the homepage knows
-// about + the public title each renders. DesktopShell + MobileShell
-// both iterate this so adding/renaming a row is a one-line change.
-export const CATEGORY_RAILS: CategoryRailSpec[] = [
-  { surface: "entitled_row", title: "Audacity: Entitled People", cat: "Entitled" },
-  { surface: "humor_row", title: "Humor & Awkward Moments", cat: "Humor" },
-  { surface: "wholesome_row", title: "Wholesome Wins", cat: "Wholesome" },
-  { surface: "dating_row", title: "Dating Disasters", cat: "Dating" },
-  { surface: "roommate_row", title: "Roommate Files", cat: "Roommate" },
-  { surface: "drama_row", title: "Pure Drama", cat: "Drama" },
-];
+// Which category rails the homepage knows about + the public title each
+// renders. DesktopShell + MobileShell both iterate this. The rail set,
+// order, titles, and surfaces all trace back to the shared category
+// manifest (CATEGORY_RAIL_ENTRIES) so a category change is one edit
+// there; this file only maps the entries into the curation-typed shape.
+export const CATEGORY_RAILS: CategoryRailSpec[] = CATEGORY_RAIL_ENTRIES.map(
+  (entry) => ({
+    surface: entry.surface,
+    title: entry.title,
+    cat: entry.cat,
+  }),
+);
 
 // Rotating-category helpers (slice E of homepage redesign v1) moved to
 // lib/homepage-curation-shared.ts so server-only loaders can import
@@ -226,14 +231,7 @@ export function fallbackIdsForSurface(
 // against. Derived fields (year from published_at, glyph from category,
 // tags from the category alone) match the published.ts overlay so the
 // visual contract stays identical regardless of source.
-const GLYPH_BY_CAT: Record<Cat, string> = {
-  Drama: "/",
-  Entitled: "$",
-  Humor: "!",
-  Wholesome: "+",
-  Dating: "?",
-  Roommate: "#",
-};
+const GLYPH_BY_CAT: Record<Cat, string> = CATEGORY_GLYPHS;
 
 export function liveRowToStory(row: LiveCatalogStory): Story {
   const rawCat = (row.category ?? "Drama") as string;
