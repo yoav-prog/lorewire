@@ -59,7 +59,7 @@ describe("resolveRailIds — continue rail resolution order", () => {
       top10: [],
       continue: ["s_admin_1", "s_admin_2"],
       new_row: [],
-      drama_row: [],
+      "revenge-karma": [],
       entitled_row: [],
       humor_row: [],
       wholesome_row: [],
@@ -83,7 +83,7 @@ describe("resolveRailIds — continue rail resolution order", () => {
       top10: [],
       continue: [],
       new_row: [],
-      drama_row: [],
+      "revenge-karma": [],
       entitled_row: [],
       humor_row: [],
       wholesome_row: [],
@@ -107,7 +107,7 @@ describe("resolveRailIds — continue rail resolution order", () => {
       top10: [],
       continue: [],
       new_row: [],
-      drama_row: [],
+      "revenge-karma": [],
       entitled_row: [],
       humor_row: [],
       wholesome_row: [],
@@ -136,7 +136,7 @@ describe("resolveRailIds — continue rail resolution order", () => {
       top10: [],
       continue: [],
       new_row: [],
-      drama_row: [],
+      "revenge-karma": [],
       entitled_row: [],
       humor_row: [],
       wholesome_row: [],
@@ -162,7 +162,7 @@ describe("resolveRailIds — continue rail resolution order", () => {
       top10: [],
       continue: [],
       new_row: [],
-      drama_row: [],
+      "revenge-karma": [],
       entitled_row: [],
       humor_row: [],
       wholesome_row: [],
@@ -190,13 +190,13 @@ describe("resolveRailIds — continue rail resolution order", () => {
 describe("fallbackIdsForSurface — filter-before-slice (2026-06-24 fix)", () => {
   const publishedDrama = (id: string) => ({
     id,
-    cat: "Drama",
+    cat: "Revenge & Karma",
     heroImage: "x",
   });
-  const unpublishedDrama = (id: string) => ({ id, cat: "Drama" });
+  const unpublishedDrama = (id: string) => ({ id, cat: "Revenge & Karma" });
 
   it("drops unpublished entries from the rail", () => {
-    const result = fallbackIdsForSurface("drama_row", [
+    const result = fallbackIdsForSurface("revenge-karma", [
       unpublishedDrama("u1"),
       unpublishedDrama("u2"),
       publishedDrama("p1"),
@@ -222,7 +222,7 @@ describe("fallbackIdsForSurface — filter-before-slice (2026-06-24 fix)", () =>
       publishedDrama("p3"),
       publishedDrama("p4"),
     ];
-    const result = fallbackIdsForSurface("drama_row", stories as never);
+    const result = fallbackIdsForSurface("revenge-karma", stories as never);
     // Old (buggy) behavior: returns [] because slice(0, 6) only saw the
     // unpublished entries. New behavior: returns the four real published
     // Dramas regardless of position.
@@ -233,14 +233,14 @@ describe("fallbackIdsForSurface — filter-before-slice (2026-06-24 fix)", () =>
     const stories = Array.from({ length: 50 }, (_, i) =>
       publishedDrama(`p${i}`),
     );
-    const result = fallbackIdsForSurface("drama_row", stories as never);
+    const result = fallbackIdsForSurface("revenge-karma", stories as never);
     expect(result).toHaveLength(20);
     expect(result[0]).toBe("p0");
     expect(result[19]).toBe("p19");
   });
 
   it("returns empty when no stories in the catalog pass isPublishedStory", () => {
-    const result = fallbackIdsForSurface("drama_row", [
+    const result = fallbackIdsForSurface("revenge-karma", [
       unpublishedDrama("u1"),
       unpublishedDrama("u2"),
     ] as never);
@@ -264,7 +264,7 @@ describe("fallbackIdsForSurface — filter-before-slice (2026-06-24 fix)", () =>
 // the front, fallback fills the rest. Applies to discovery rails only —
 // hero stays single-pick, continue keeps its personalized chain.
 describe("resolveRailIds — curation augments fallback (discovery rails)", () => {
-  const drama = (id: string) => ({ id, cat: "Drama", heroImage: "x" });
+  const drama = (id: string) => ({ id, cat: "Revenge & Karma", heroImage: "x" });
   const fatDramaCatalog = {
     array: [
       drama("d1"),
@@ -291,11 +291,11 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
   it("pins curated ids at the front and appends fallback", () => {
     const curation = {
       ...emptyOtherSurfaces,
-      drama_row: ["d3"], // admin pinned d3
+      "revenge-karma": ["d3"], // admin pinned d3
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     const result = resolveRailIds(
-      "drama_row",
+      "revenge-karma",
       curation,
       BEHAVIOR_FALLBACK,
       fatDramaCatalog,
@@ -307,11 +307,11 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
   it("preserves curated order at the front", () => {
     const curation = {
       ...emptyOtherSurfaces,
-      drama_row: ["d4", "d2", "d5"],
+      "revenge-karma": ["d4", "d2", "d5"],
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     const result = resolveRailIds(
-      "drama_row",
+      "revenge-karma",
       curation,
       BEHAVIOR_FALLBACK,
       fatDramaCatalog,
@@ -322,11 +322,11 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
   it("deduplicates so a curated id never repeats in the fallback tail", () => {
     const curation = {
       ...emptyOtherSurfaces,
-      drama_row: ["d1", "d2", "d3", "d4", "d5"],
+      "revenge-karma": ["d1", "d2", "d3", "d4", "d5"],
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     const result = resolveRailIds(
-      "drama_row",
+      "revenge-karma",
       curation,
       BEHAVIOR_FALLBACK,
       fatDramaCatalog,
@@ -341,7 +341,7 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     const result = resolveRailIds(
-      "drama_row",
+      "revenge-karma",
       curation,
       BEHAVIOR_FALLBACK,
       fatDramaCatalog,
@@ -355,7 +355,7 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     const result = resolveRailIds(
-      "drama_row",
+      "revenge-karma",
       curation,
       BEHAVIOR_HIDE,
       fatDramaCatalog,
@@ -370,11 +370,11 @@ describe("resolveRailIds — curation augments fallback (discovery rails)", () =
     // applies when curation is the empty signal.
     const curation = {
       ...emptyOtherSurfaces,
-      drama_row: ["d3"],
+      "revenge-karma": ["d3"],
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     const result = resolveRailIds(
-      "drama_row",
+      "revenge-karma",
       curation,
       BEHAVIOR_HIDE,
       fatDramaCatalog,
@@ -410,11 +410,11 @@ describe("resolveHeroPool / pickHeroAtIndex", () => {
   const story = (id: string): any => ({
     id,
     title: id,
-    cat: "Drama",
+    cat: "Revenge & Karma",
     heroImage: `https://cdn/${id}.jpg`,
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const unpublished = (id: string): any => ({ id, title: id, cat: "Drama" });
+  const unpublished = (id: string): any => ({ id, title: id, cat: "Revenge & Karma" });
 
   const catalog = {
     array: [story("a"), story("b"), story("c"), story("d"), story("e")],
@@ -426,7 +426,7 @@ describe("resolveHeroPool / pickHeroAtIndex", () => {
     top10: [],
     continue: [],
     new_row: [],
-    drama_row: [],
+    "revenge-karma": [],
     entitled_row: [],
     humor_row: [],
     wholesome_row: [],
@@ -784,17 +784,17 @@ describe("resolveRotatingCategorySurface", () => {
   it("returns null when the kill switch is off, regardless of override", () => {
     expect(resolveRotatingCategorySurface(false, null, epoch)).toBeNull();
     expect(
-      resolveRotatingCategorySurface(false, "drama_row", epoch),
+      resolveRotatingCategorySurface(false, "revenge-karma", epoch),
     ).toBeNull();
   });
 
   it("returns the admin override when it matches a known surface", () => {
     expect(
-      resolveRotatingCategorySurface(true, "drama_row", epoch),
-    ).toBe("drama_row");
+      resolveRotatingCategorySurface(true, "revenge-karma", epoch),
+    ).toBe("revenge-karma");
     expect(
-      resolveRotatingCategorySurface(true, "humor_row", epoch),
-    ).toBe("humor_row");
+      resolveRotatingCategorySurface(true, "family-feuds", epoch),
+    ).toBe("family-feuds");
   });
 
   it("falls through to auto when override is invalid / blank / null", () => {

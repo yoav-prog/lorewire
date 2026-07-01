@@ -16,6 +16,7 @@
 import "server-only";
 import { addToSurface } from "@/lib/homepage-curation";
 import { isHomepageSurface } from "@/lib/homepage-curation-shared";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
 
 export async function autoCurateOnPublish(
   storyId: string,
@@ -38,14 +39,19 @@ export async function autoCurateOnPublish(
         position: newRowResult.row.position,
       });
     }
-    const cat = (category ?? "").toLowerCase().trim();
-    if (cat) {
-      const catRail = `${cat}_row`;
-      if (isHomepageSurface(catRail)) {
-        const catResult = await addToSurface(catRail, storyId);
+    const catLabel = (category ?? "").trim().toLowerCase();
+    if (catLabel) {
+      // Match the story's category label to a rail-flagged category and drop
+      // it into that rail's slug surface. Non-rail or unknown categories land
+      // in new_row only (above). Data-driven off the 18-set.
+      const rail = GRANULAR_CATEGORIES.find(
+        (c) => c.isRail && c.label.toLowerCase() === catLabel,
+      );
+      if (rail && isHomepageSurface(rail.slug)) {
+        const catResult = await addToSurface(rail.slug, storyId);
         if (!catResult.ok) {
           // eslint-disable-next-line no-console -- rule 14
-          console.info(`[publish auto-curate ${catRail} skipped]`, {
+          console.info(`[publish auto-curate ${rail.slug} skipped]`, {
             story_id: storyId,
             reason: catResult.error,
           });
@@ -53,7 +59,7 @@ export async function autoCurateOnPublish(
           // eslint-disable-next-line no-console -- rule 14
           console.info("[publish auto-curate]", {
             story_id: storyId,
-            surface: catRail,
+            surface: rail.slug,
             position: catResult.row.position,
           });
         }
@@ -61,8 +67,8 @@ export async function autoCurateOnPublish(
         // eslint-disable-next-line no-console -- rule 14
         console.info("[publish auto-curate skipped]", {
           story_id: storyId,
-          category: cat,
-          reason: `no rail named ${catRail}`,
+          category: catLabel,
+          reason: "no rail for category",
         });
       }
     }

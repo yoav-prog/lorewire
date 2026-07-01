@@ -2,12 +2,12 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CAT,
   STORIES,
   isPublishedStory,
   PILLS,
   type Story,
 } from "@/lib/stories";
+import { categoryVisual } from "@/lib/categories/visuals";
 import {
   CategoryFilterChips,
   filterStoriesByCategory,
@@ -147,7 +147,7 @@ function PosterArt({ story, rounded = true, showTitle = true, vig = false }: { s
   // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
   // thumbnails) — otherwise the typography stacks on top of itself.
   const renderCssTitle = showTitle && !story.heroHasBakedTitle;
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   // Heroes that 404 fall back to the gradient automatically.
   const [imageOk, setImageOk] = useState(true);
   const showImage = !!story.heroImage && imageOk;
@@ -323,7 +323,7 @@ function Billboard({
 
   const story = pool[Math.min(activeIndex, pool.length - 1)];
   if (!story) return null;
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const heroSrc = story.heroImage;
   const showHero = !!heroSrc && heroOk;
   const hasRotation = pool.length > 1;
@@ -1955,7 +1955,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   const myRating = getRating(story.id) ?? 0;
   const [rateOpen, setRateOpen] = useState(false);
 
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   // "More Like This" must only surface stories the pipeline has actually
   // produced content for — same bar as Search / New / homepage rails. The
   // old STORIES-based list pulled in empty sample placeholders and showed
@@ -2222,7 +2222,7 @@ function NewScreen({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog
               <div className="w-[110px] h-[68px] shrink-0"><PosterArt story={s} showTitle={false} /></div>
               <div className="flex-1 min-w-0 py-0.5">
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span className="font-mono text-[9px] uppercase tracking-[.16em] px-1.5 py-0.5 rounded" style={{ background: CAT[s.cat], color: "#fff" }}>{s.cat}</span>
+                  <span className="font-mono text-[9px] uppercase tracking-[.16em] px-1.5 py-0.5 rounded" style={{ background: categoryVisual(s.cat).color, color: "#fff" }}>{s.cat}</span>
                   {s.dur && (
                     <span className="font-mono text-[10px] text-muted">{s.dur}</span>
                   )}

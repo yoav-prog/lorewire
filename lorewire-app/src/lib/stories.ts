@@ -3,6 +3,7 @@
 
 import { PUBLISHED } from "@/data/published";
 import { CAT_COLORS, type Cat } from "@/lib/categories/manifest";
+import { categoryGlyph } from "@/lib/categories/visuals";
 
 // `Cat` + the `CAT` color map are re-exported from the shared category
 // manifest so the union and the palette can't drift from the admin list,
@@ -18,7 +19,10 @@ export interface AlignedWord {
 export interface Story {
   id: string;
   title: string;
-  cat: Cat;
+  // Free-form category label from the DB (the 18-category taxonomy). Colors
+  // and glyphs resolve at runtime via @/lib/categories/visuals, so this is a
+  // string, not the legacy 6-item `Cat` union.
+  cat: string;
   dur: string;
   match: number;
   year: number;
@@ -116,19 +120,10 @@ export const PILLS = ["All", "Drama", "Entitled", "Humor", "Wholesome", "Dating"
 // body, keeping the curated title, synopsis, and poster styling. Brand-new
 // published stories are appended so they appear in search, browse, and the New
 // rail. Title/synopsis generation for new stories is a pipeline follow-up.
-const GLYPH: Record<Cat, string> = {
-  Drama: "/",
-  Entitled: "$",
-  Humor: "!",
-  Wholesome: "+",
-  Dating: "?",
-  Roommate: "#",
-};
-
 for (const p of PUBLISHED) {
-  const cat: Cat = (Object.keys(CAT) as Cat[]).includes(p.cat as Cat)
-    ? (p.cat as Cat)
-    : "Drama";
+  // The published overlay carries whatever category the pipeline wrote — now
+  // a free-form label. The glyph resolves through the shared visual resolver.
+  const cat = p.cat ?? "";
   const existing = STORIES.find((s) => s.id === p.id);
   if (existing) {
     existing.body = p.body;
@@ -151,7 +146,7 @@ for (const p of PUBLISHED) {
       dur: p.dur || "",
       match: 90,
       year: p.year || 2026,
-      glyph: GLYPH[cat],
+      glyph: categoryGlyph(cat),
       tags: ["True Story", cat],
       syn: p.syn || "",
       body: p.body,

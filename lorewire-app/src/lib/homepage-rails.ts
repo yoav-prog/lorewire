@@ -31,17 +31,13 @@ import {
   type StoryPollView,
 } from "@/app/actions";
 import {
-  CAT,
   STORIES,
   isPublishedStory,
   tryById,
-  type Cat,
   type Story,
 } from "@/lib/stories";
-import {
-  CATEGORY_GLYPHS,
-  CATEGORY_RAIL_ENTRIES,
-} from "@/lib/categories/manifest";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
+import { categoryGlyph } from "@/lib/categories/visuals";
 import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
 
 /** 2026-06-18 polls plan extension: client-side fetch hook for the
@@ -130,7 +126,10 @@ export const DEFAULT_CURATION_BEHAVIOR: HomepageCurationBehavior = {
 export interface CategoryRailSpec {
   surface: keyof HomepageCuration;
   title: string;
-  cat: Cat | null;
+  /** Category LABEL this rail filters by (matched against `Story.cat`), or
+   *  null for non-category surfaces. A free string now that categories are
+   *  data-driven (the 18-set), not the legacy 6-item union. */
+  cat: string | null;
 }
 
 // Which category rails the homepage knows about + the public title each
@@ -138,13 +137,13 @@ export interface CategoryRailSpec {
 // order, titles, and surfaces all trace back to the shared category
 // manifest (CATEGORY_RAIL_ENTRIES) so a category change is one edit
 // there; this file only maps the entries into the curation-typed shape.
-export const CATEGORY_RAILS: CategoryRailSpec[] = CATEGORY_RAIL_ENTRIES.map(
-  (entry) => ({
-    surface: entry.surface,
-    title: entry.title,
-    cat: entry.cat,
-  }),
-);
+export const CATEGORY_RAILS: CategoryRailSpec[] = GRANULAR_CATEGORIES.filter(
+  (c) => c.isRail,
+).map((c) => ({
+  surface: c.slug as keyof HomepageCuration,
+  title: c.railTitle ?? c.label,
+  cat: c.label,
+}));
 
 // Rotating-category helpers (slice E of homepage redesign v1) moved to
 // lib/homepage-curation-shared.ts so server-only loaders can import
@@ -231,13 +230,11 @@ export function fallbackIdsForSurface(
 // against. Derived fields (year from published_at, glyph from category,
 // tags from the category alone) match the published.ts overlay so the
 // visual contract stays identical regardless of source.
-const GLYPH_BY_CAT: Record<Cat, string> = CATEGORY_GLYPHS;
-
 export function liveRowToStory(row: LiveCatalogStory): Story {
-  const rawCat = (row.category ?? "Drama") as string;
-  const cat: Cat = (Object.keys(CAT) as Cat[]).includes(rawCat as Cat)
-    ? (rawCat as Cat)
-    : "Drama";
+  // Free-form category label from the DB (the 18-set). Color + glyph resolve
+  // at runtime through the shared visual resolver; unknown values degrade to
+  // a neutral swatch rather than falling back to a wrong category.
+  const cat = row.category ?? "";
   const ts = row.published_at ?? row.created_at ?? "";
   let year = 2026;
   try {
@@ -257,7 +254,7 @@ export function liveRowToStory(row: LiveCatalogStory): Story {
     dur: row.duration ?? "",
     match: 90,
     year,
-    glyph: GLYPH_BY_CAT[cat],
+    glyph: categoryGlyph(cat),
     tags: ["True Story", cat],
     syn: row.summary ?? "",
   };
@@ -550,12 +547,7 @@ const AUGMENTING_SURFACES = new Set<keyof HomepageCuration>([
   "hero",
   "top10",
   "new_row",
-  "entitled_row",
-  "humor_row",
-  "wholesome_row",
-  "dating_row",
-  "roommate_row",
-  "drama_row",
+  ...CATEGORY_RAILS.map((r) => r.surface),
 ]);
 
 export function resolveRailIds(
