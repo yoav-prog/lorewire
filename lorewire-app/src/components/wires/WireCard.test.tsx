@@ -92,6 +92,7 @@ function makeStory(): WireStory {
     // here keeps the WireCard render path identical to a wire without
     // a poll, which is what these tests actually exercise.
     poll: null,
+    category_slug: null,
   };
 }
 
@@ -408,6 +409,67 @@ describe("WireCard ⋯ options menu", () => {
       backdrop!.click();
     });
     expect(findMenu(m.container)).toBeNull();
+    unmount(m);
+  });
+});
+
+describe("WireCard immersive mode", () => {
+  // TikTok-style fullscreen: the bottom control bar is dropped and the actions
+  // overlay the video. The feed owns real fullscreen; these tests exercise the
+  // card's layout switch + the enter/exit callbacks.
+
+  function bottomBar(container: HTMLElement): Element | null {
+    // The below-video control bar is the only element with border-t + border-line.
+    return container.querySelector(".border-t.border-line");
+  }
+  function exitButton(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+  }
+  function enterButton(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Enter fullscreen"]',
+    );
+  }
+
+  it("normal mode shows the bottom control bar and no exit button", () => {
+    const m = mount(defaultProps({ immersive: false }));
+    expect(bottomBar(m.container)).not.toBeNull();
+    expect(exitButton(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("shows an Enter-fullscreen button only when onEnterImmersive is set, and invokes it", () => {
+    const a = mount(defaultProps({ immersive: false }));
+    expect(enterButton(a.container)).toBeNull(); // no handler → no button
+    unmount(a);
+
+    const calls: number[] = [];
+    const m = mount(
+      defaultProps({ immersive: false, onEnterImmersive: () => calls.push(1) }),
+    );
+    const btn = enterButton(m.container);
+    expect(btn).not.toBeNull();
+    act(() => {
+      btn!.click();
+    });
+    expect(calls).toHaveLength(1);
+    unmount(m);
+  });
+
+  it("immersive mode hides the bottom bar, shows the exit button, and invokes onExitImmersive", () => {
+    const calls: number[] = [];
+    const m = mount(
+      defaultProps({ immersive: true, onExitImmersive: () => calls.push(1) }),
+    );
+    expect(bottomBar(m.container)).toBeNull();
+    const x = exitButton(m.container);
+    expect(x).not.toBeNull();
+    act(() => {
+      x!.click();
+    });
+    expect(calls).toHaveLength(1);
     unmount(m);
   });
 });

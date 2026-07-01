@@ -19,10 +19,11 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WireCard from "@/components/wires/WireCard";
-import { WiresFilterToggle } from "@/components/wires/WiresFilterToggle";
+import { WiresTopControls } from "@/components/wires/WiresTopControls";
 import { useWiresData } from "@/components/wires/useWiresData";
 import { useWireLikes } from "@/components/wires/useWireLikes";
 import { useWirePrefs } from "@/components/wires/useWirePrefs";
+import { useWireCategoryFilter } from "@/lib/wire-category-filter";
 import { useContinueReading, useSavedStories } from "@/lib/engagement-store";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 
@@ -54,6 +55,10 @@ export default function WiresFeed({
 
   const [activeIdx, setActiveIdx] = useState(0);
   const [soundHintShown, setSoundHintShown] = useState(true);
+  // Immersive (TikTok-style) mode: fullscreen the scroll container so native
+  // snap-scroll pages wires with a swipe. The card drops its bottom bar and
+  // overlays the actions.
+  const [immersive, setImmersive] = useState(false);
   const reducedMotion = usePrefersReducedMotion();
   const didInitialScroll = useRef(false);
   // Mute + autoplay are persisted viewer prefs, shared across cards and reloads.
@@ -73,9 +78,18 @@ export default function WiresFeed({
     toggleSlow,
   } = useWirePrefs();
 
+  // Category filter (session-scoped, shared store). Selected slugs restrict the
+  // feed server-side to wires tagged with those granular categories.
+  const {
+    selected: categorySlugs,
+    toggle: toggleCategory,
+    clear: clearCategories,
+  } = useWireCategoryFilter();
+
   const { shorts, loading, loadingMore, loadMore } = useWiresData(
     PAGE_SIZE,
     hideVoted,
+    categorySlugs,
   );
 
   // Shuffle: a stored permutation of story ids (null = natural order). New
@@ -214,20 +228,97 @@ export default function WiresFeed({
     });
   }, [shorts]);
 
-  // Switch the feed between "unvoted only" and "all". Flipping the pref
-  // refetches the feed from the top (useWiresData resets on the onlyUnvoted
-  // change); we also clear any shuffle order and reset to the first card so
-  // the new list starts clean instead of inheriting the old scroll position.
+  // Any filter change (Unvoted/All or category) refetches the feed from the
+  // top via useWiresData; reset the local view state so the new list starts
+  // clean — clear any shuffle order, drop to the first card, scroll to top.
+  const resetFeedPosition = useCallback(() => {
+    setOrder(null);
+    setActiveIdx(0);
+    if (containerRef.current) containerRef.current.scrollTop = 0;
+  }, []);
+
   const applyFilter = useCallback(
     (nextHideVoted: boolean) => {
       if (nextHideVoted === hideVoted) return;
       setHideVoted(nextHideVoted);
-      setOrder(null);
-      setActiveIdx(0);
-      if (containerRef.current) containerRef.current.scrollTop = 0;
+      resetFeedPosition();
     },
-    [hideVoted, setHideVoted],
+    [hideVoted, setHideVoted, resetFeedPosition],
   );
+
+  const onToggleCategory = useCallback(
+    (slug: string) => {
+      toggleCategory(slug);
+      resetFeedPosition();
+    },
+    [toggleCategory, resetFeedPosition],
+  );
+
+  const onClearCategories = useCallback(() => {
+    clearCategories();
+    resetFeedPosition();
+  }, [clearCategories, resetFeedPosition]);
+
+  // Immersive mode: fullscreen the scroll container (so native snap-scroll keeps
+  // paging on a swipe) and reshape the cards to video-only. Requesting
+  // fullscreen must ride the tap gesture, so it's synchronous here.
+  const enterImmersive = useCallback(() => {
+    setImmersive(true);
+    const el = containerRef.current as
+      | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
+      | null;
+    if (!el) return;
+    try {
+      const p = el.requestFullscreen
+        ? el.requestFullscreen()
+        : el.webkitRequestFullscreen?.();
+      if (p && typeof (p as Promise<void>).catch === "function") {
+        (p as Promise<void>).catch((err: unknown) =>
+          console.warn("[wires immersive enter err]", { err: String(err) }),
+        );
+      }
+    } catch (err) {
+      console.warn("[wires immersive enter err]", { err: String(err) });
+    }
+  }, []);
+
+  const exitImmersive = useCallback(() => {
+    setImmersive(false);
+    const doc = document as Document & {
+      webkitExitFullscreen?: () => Promise<void> | void;
+      webkitFullscreenElement?: Element | null;
+    };
+    if (!document.fullscreenElement && !doc.webkitFullscreenElement) return;
+    try {
+      const p = doc.exitFullscreen
+        ? doc.exitFullscreen()
+        : doc.webkitExitFullscreen?.();
+      if (p && typeof (p as Promise<void>).catch === "function") {
+        (p as Promise<void>).catch(() => undefined);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  // If the user leaves fullscreen via Escape / the OS gesture, drop immersive
+  // so the card chrome returns to its normal (bar-below) layout.
+  useEffect(() => {
+    const onChange = () => {
+      const doc = document as Document & {
+        webkitFullscreenElement?: Element | null;
+      };
+      if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+        setImmersive(false);
+      }
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    document.addEventListener("webkitfullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.removeEventListener("webkitfullscreenchange", onChange);
+    };
+  }, []);
 
   // Auto-advance: scroll the next wire into view when the current one ends.
   // Returns false at the tail (so the card replays) and prefetches more.
@@ -255,38 +346,58 @@ export default function WiresFeed({
       </div>
     );
   } else if (shorts.length === 0) {
-    body = hideVoted ? (
-      // Caught-up: the viewer has voted on every published wire. Never a dead
-      // end — one tap brings the full feed back (rule 10).
-      <div className="grid h-full place-items-center px-8 text-center">
-        <div>
-          <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
-            You&rsquo;re all caught up
-          </p>
-          <p className="mt-2 font-body text-[14px] text-muted">
-            You&rsquo;ve voted on every wire. Switch to All to watch them again, or check back for new ones.
-          </p>
-          <button
-            type="button"
-            onClick={() => applyFilter(false)}
-            className="mt-5 rounded-full bg-accent px-5 py-2 font-mono text-[11px] font-bold uppercase tracking-[.18em] text-bg transition active:scale-95"
-          >
-            Show all wires
-          </button>
+    body =
+      categorySlugs.length > 0 ? (
+        // Category filter yielded nothing. Offer the one tap that widens it.
+        <div className="grid h-full place-items-center px-8 text-center">
+          <div>
+            <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
+              No wires in these categories
+            </p>
+            <p className="mt-2 font-body text-[14px] text-muted">
+              Nothing matches the categories you picked{hideVoted ? " that you haven't voted on yet" : ""}. Try clearing the category filter.
+            </p>
+            <button
+              type="button"
+              onClick={onClearCategories}
+              className="mt-5 rounded-full bg-accent px-5 py-2 font-mono text-[11px] font-bold uppercase tracking-[.18em] text-bg transition active:scale-95"
+            >
+              Clear categories
+            </button>
+          </div>
         </div>
-      </div>
-    ) : (
-      <div className="grid h-full place-items-center px-8 text-center">
-        <div>
-          <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
-            No wires yet
-          </p>
-          <p className="mt-2 font-body text-[14px] text-muted">
-            New shorts show up here as soon as they&rsquo;re published. Check back soon.
-          </p>
+      ) : hideVoted ? (
+        // Caught-up: the viewer has voted on every published wire. Never a dead
+        // end — one tap brings the full feed back (rule 10).
+        <div className="grid h-full place-items-center px-8 text-center">
+          <div>
+            <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
+              You&rsquo;re all caught up
+            </p>
+            <p className="mt-2 font-body text-[14px] text-muted">
+              You&rsquo;ve voted on every wire. Switch to All to watch them again, or check back for new ones.
+            </p>
+            <button
+              type="button"
+              onClick={() => applyFilter(false)}
+              className="mt-5 rounded-full bg-accent px-5 py-2 font-mono text-[11px] font-bold uppercase tracking-[.18em] text-bg transition active:scale-95"
+            >
+              Show all wires
+            </button>
+          </div>
         </div>
-      </div>
-    );
+      ) : (
+        <div className="grid h-full place-items-center px-8 text-center">
+          <div>
+            <p className="font-display text-[22px] font-black uppercase tracking-tightest text-ink">
+              No wires yet
+            </p>
+            <p className="mt-2 font-body text-[14px] text-muted">
+              New shorts show up here as soon as they&rsquo;re published. Check back soon.
+            </p>
+          </div>
+        </div>
+      );
   } else {
     body = (
       <div
@@ -330,6 +441,9 @@ export default function WiresFeed({
               onToggleSave={toggleSave}
               onTimeUpdate={(t, d) => onShortTimeUpdate(s.id, t, d)}
               onWireEnded={onWireEnded}
+              immersive={immersive}
+              onEnterImmersive={enterImmersive}
+              onExitImmersive={exitImmersive}
             />
           </section>
         ))}
@@ -344,7 +458,14 @@ export default function WiresFeed({
 
   return (
     <div className="absolute inset-0 z-30 bg-black">
-      <WiresFilterToggle hideVoted={hideVoted} onSelect={applyFilter} />
+      <WiresTopControls
+        hideVoted={hideVoted}
+        onSelectFilter={applyFilter}
+        selectedCategories={categorySlugs}
+        onToggleCategory={onToggleCategory}
+        onClearCategories={onClearCategories}
+        variant="mobile"
+      />
       {body}
     </div>
   );
