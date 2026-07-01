@@ -86,6 +86,7 @@ import {
   useSavedStories,
   useStoryRatings,
 } from "@/lib/engagement-store";
+import { useVotedStories } from "@/lib/voted-stories";
 import RatingStars, { RatingBadge } from "@/components/RatingStars";
 
 // Mirror DesktopShell's NO_LIVE_MEDIA seed: until the live fetch resolves
@@ -744,9 +745,15 @@ function Home({
   // 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md.
   // Build the voted-story-id Set once per render so each filter pass
   // does O(1) lookups instead of rebuilding the Set per call.
+  //
+  // 2026-07-01: union the SSR seed (votes from prior sessions, resolved
+  // server-side by cookie) with the in-session vote overlay
+  // (lib/voted-stories) so casting a vote drops the story from the
+  // "You Didn't Vote Yet" rail immediately, without a page refresh.
+  const { voted: sessionVoted } = useVotedStories();
   const votedSet = useMemo(
-    () => new Set(votedStoryIds),
-    [votedStoryIds],
+    () => new Set([...votedStoryIds, ...sessionVoted]),
+    [votedStoryIds, sessionVoted],
   );
 
   // 2026-06-21 pill filter (_plans/2026-06-21-category-classifier-and-pills.md).

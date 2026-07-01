@@ -23,6 +23,7 @@ import {
 } from "@/lib/homepage-data";
 import {
   getWirePollsForStories,
+  listVotedStoryIdsByCookie,
   resolvePublicFloor,
   type HomepagePollRails,
   type PollRailKind,
@@ -375,6 +376,13 @@ export interface ListShortsOpts {
   /** Cursor: return shorts published strictly BEFORE this timestamp. Pass the
    *  previous page's `nextCursor`; omit for the first page. */
   beforePublishedAt?: string | null;
+  /** When true, exclude wires this viewer has already voted on (attributed by
+   *  the vote cookie, the same source the homepage "You Didn't Vote Yet" rail
+   *  uses). Drives the Wires feed's default "unvoted only" mode. The filter is
+   *  applied in SQL so pagination counts unvoted wires, not all published ones.
+   *  Absent cookie / no votes → no filtering (nothing to hide). Defaults off so
+   *  every other caller keeps the full feed. */
+  onlyUnvoted?: boolean;
 }
 
 export interface ListShortsResult {
@@ -404,6 +412,20 @@ export async function listPublishedShorts(
     "video_url LIKE ?",
   ];
   const params: unknown[] = [SHORT_VIDEO_URL_LIKE];
+  // Only-unvoted mode (the Wires feed's default): drop wires this viewer has
+  // already voted on. Done in SQL — BEFORE the cursor clause so `where` and
+  // `params` stay in lockstep — so the LIMIT + over-fetch count unvoted wires
+  // rather than all published ones (a client-side filter would starve the feed
+  // when most wires are voted). Reuses the same cookie-attributed vote read as
+  // the homepage "You Didn't Vote Yet" rail, so both surfaces agree on what
+  // "voted" means. Absent cookie / no votes → no exclusion.
+  if (opts.onlyUnvoted) {
+    const votedIds = await listVotedStoryIdsByCookie(await readVoteToken());
+    if (votedIds.length > 0) {
+      where.push(`id NOT IN (${votedIds.map(() => "?").join(", ")})`);
+      params.push(...votedIds);
+    }
+  }
   if (opts.beforePublishedAt) {
     where.push("COALESCE(published_at, updated_at, created_at) < ?");
     params.push(opts.beforePublishedAt);
