@@ -19,28 +19,25 @@ export function WiresFilterToggle({
   hideVoted,
   onSelect,
 }: WiresFilterToggleProps) {
+  // Position-agnostic pill: the parent (WiresTopControls) places it in the
+  // top-center cluster next to the category filter.
   return (
     <div
-      className="pointer-events-none absolute inset-x-0 z-50 flex justify-center"
-      style={{ top: "calc(env(safe-area-inset-top, 0px) + 12px)" }}
+      role="group"
+      aria-label="Filter wires by whether you've voted"
+      className="flex items-center rounded-full p-0.5"
+      style={{ background: "rgba(0,0,0,.55)", backdropFilter: "blur(6px)" }}
     >
-      <div
-        role="group"
-        aria-label="Filter wires by whether you've voted"
-        className="pointer-events-auto flex items-center rounded-full p-0.5"
-        style={{ background: "rgba(0,0,0,.55)", backdropFilter: "blur(6px)" }}
-      >
-        <FilterSegment
-          label="Unvoted"
-          active={hideVoted}
-          onClick={() => onSelect(true)}
-        />
-        <FilterSegment
-          label="All"
-          active={!hideVoted}
-          onClick={() => onSelect(false)}
-        />
-      </div>
+      <FilterSegment
+        label="Unvoted"
+        active={hideVoted}
+        onClick={() => onSelect(true)}
+      />
+      <FilterSegment
+        label="All"
+        active={!hideVoted}
+        onClick={() => onSelect(false)}
+      />
     </div>
   );
 }

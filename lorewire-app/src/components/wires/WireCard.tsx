@@ -34,6 +34,12 @@ import type { PollResultView, PollSide } from "@/lib/polls-shared";
 import { WirePollPanel } from "@/components/wires/WirePollPanel";
 import { WirePollPill } from "@/components/wires/WirePollPill";
 import { SLOW_MODE_PLAYBACK_RATE } from "@/components/wires/useWirePrefs";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
+
+// Granular category slug -> its display label + color (client-safe static
+// taxonomy). Lets the card chip speak the same taxonomy as the category filter
+// instead of the legacy `stories.category` label.
+const GRANULAR_BY_SLUG = new Map(GRANULAR_CATEGORIES.map((c) => [c.slug, c]));
 
 type OpenFn = (id: string, tab?: string) => void;
 
@@ -416,6 +422,15 @@ export default function WireCard({
   const videoUrl = short.video_url;
   const poster = short.hero_image && posterOk ? short.hero_image : null;
   const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+
+  // Category chip: prefer the granular tag (matches the category filter);
+  // fall back to the legacy `stories.category` label + color when a wire isn't
+  // tagged yet.
+  const granularCat = short.category_slug
+    ? GRANULAR_BY_SLUG.get(short.category_slug)
+    : undefined;
+  const categoryLabel = granularCat?.label ?? short.category;
+  const categoryBg = granularCat?.color ?? catColor(short.category);
 
   // Start playback reliably: set the muted PROPERTY right before play() and
   // record whether the browser ACTUALLY blocked us (NotAllowedError = real
@@ -827,12 +842,12 @@ export default function WireCard({
                 chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
               }`}
             >
-              {short.category && (
+              {categoryLabel && (
                 <span
-                  className="rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
-                  style={{ background: catColor(short.category) }}
+                  className="max-w-[46vw] truncate rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
+                  style={{ background: categoryBg }}
                 >
-                  {short.category}
+                  {categoryLabel}
                 </span>
               )}
               {/* Duration lives on the scrubber (0:01 / 0:49) — no separate

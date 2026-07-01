@@ -10,10 +10,11 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WireCard from "@/components/wires/WireCard";
-import { WiresFilterToggle } from "@/components/wires/WiresFilterToggle";
+import { WiresTopControls } from "@/components/wires/WiresTopControls";
 import { useWiresData } from "@/components/wires/useWiresData";
 import { useWireLikes } from "@/components/wires/useWireLikes";
 import { useWirePrefs } from "@/components/wires/useWirePrefs";
+import { useWireCategoryFilter } from "@/lib/wire-category-filter";
 import { useSavedStories } from "@/lib/engagement-store";
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 
@@ -73,7 +74,16 @@ export default function WiresDesktop({
     toggleAdvance,
     toggleSlow,
   } = useWirePrefs();
-  const { shorts, loading, loadMore } = useWiresData(PAGE_SIZE, hideVoted);
+  const {
+    selected: categorySlugs,
+    toggle: toggleCategory,
+    clear: clearCategories,
+  } = useWireCategoryFilter();
+  const { shorts, loading, loadMore } = useWiresData(
+    PAGE_SIZE,
+    hideVoted,
+    categorySlugs,
+  );
   const { isSaved, toggle: toggleSave } = useSavedStories();
   const { seed: seedLikes, toggle: toggleLike, get: getLike } = useWireLikes();
   useEffect(() => {
@@ -193,16 +203,33 @@ export default function WiresDesktop({
   // refetches from the top (useWiresData resets on the onlyUnvoted change); we
   // clear any shuffle order and reset to the first card so the new list starts
   // clean.
+  const resetFeedPosition = useCallback(() => {
+    setOrder(null);
+    activeIdxRef.current = 0;
+    setActiveIdx(0);
+  }, []);
+
   const applyFilter = useCallback(
     (nextHideVoted: boolean) => {
       if (nextHideVoted === hideVoted) return;
       setHideVoted(nextHideVoted);
-      setOrder(null);
-      activeIdxRef.current = 0;
-      setActiveIdx(0);
+      resetFeedPosition();
     },
-    [hideVoted, setHideVoted],
+    [hideVoted, setHideVoted, resetFeedPosition],
   );
+
+  const onToggleCategory = useCallback(
+    (slug: string) => {
+      toggleCategory(slug);
+      resetFeedPosition();
+    },
+    [toggleCategory, resetFeedPosition],
+  );
+
+  const onClearCategories = useCallback(() => {
+    clearCategories();
+    resetFeedPosition();
+  }, [clearCategories, resetFeedPosition]);
 
   // Auto-advance to the next wire when one ends; false at the tail so the card
   // replays in place (and we prefetch the next page).
@@ -226,38 +253,58 @@ export default function WiresDesktop({
       </div>
     );
   } else if (shorts.length === 0) {
-    body = hideVoted ? (
-      // Caught-up: the viewer has voted on every published wire. Never a dead
-      // end — one click brings the full feed back (rule 10).
-      <div className="grid h-full place-items-center px-8 text-center">
-        <div>
-          <p className="font-display text-[26px] font-black uppercase tracking-tightest text-ink">
-            You&rsquo;re all caught up
-          </p>
-          <p className="mt-2 font-body text-[15px] text-muted">
-            You&rsquo;ve voted on every wire. Switch to All to watch them again, or check back for new ones.
-          </p>
-          <button
-            type="button"
-            onClick={() => applyFilter(false)}
-            className="mt-6 rounded-full bg-accent px-6 py-2.5 font-mono text-[12px] font-bold uppercase tracking-[.18em] text-bg transition hover:opacity-90 active:scale-95"
-          >
-            Show all wires
-          </button>
+    body =
+      categorySlugs.length > 0 ? (
+        // Category filter yielded nothing. Offer the one click that widens it.
+        <div className="grid h-full place-items-center px-8 text-center">
+          <div>
+            <p className="font-display text-[26px] font-black uppercase tracking-tightest text-ink">
+              No wires in these categories
+            </p>
+            <p className="mt-2 font-body text-[15px] text-muted">
+              Nothing matches the categories you picked{hideVoted ? " that you haven't voted on yet" : ""}. Try clearing the category filter.
+            </p>
+            <button
+              type="button"
+              onClick={onClearCategories}
+              className="mt-6 rounded-full bg-accent px-6 py-2.5 font-mono text-[12px] font-bold uppercase tracking-[.18em] text-bg transition hover:opacity-90 active:scale-95"
+            >
+              Clear categories
+            </button>
+          </div>
         </div>
-      </div>
-    ) : (
-      <div className="grid h-full place-items-center px-8 text-center">
-        <div>
-          <p className="font-display text-[26px] font-black uppercase tracking-tightest text-ink">
-            No wires yet
-          </p>
-          <p className="mt-2 font-body text-[15px] text-muted">
-            New shorts show up here as soon as they&rsquo;re published.
-          </p>
+      ) : hideVoted ? (
+        // Caught-up: the viewer has voted on every published wire. Never a dead
+        // end — one click brings the full feed back (rule 10).
+        <div className="grid h-full place-items-center px-8 text-center">
+          <div>
+            <p className="font-display text-[26px] font-black uppercase tracking-tightest text-ink">
+              You&rsquo;re all caught up
+            </p>
+            <p className="mt-2 font-body text-[15px] text-muted">
+              You&rsquo;ve voted on every wire. Switch to All to watch them again, or check back for new ones.
+            </p>
+            <button
+              type="button"
+              onClick={() => applyFilter(false)}
+              className="mt-6 rounded-full bg-accent px-6 py-2.5 font-mono text-[12px] font-bold uppercase tracking-[.18em] text-bg transition hover:opacity-90 active:scale-95"
+            >
+              Show all wires
+            </button>
+          </div>
         </div>
-      </div>
-    );
+      ) : (
+        <div className="grid h-full place-items-center px-8 text-center">
+          <div>
+            <p className="font-display text-[26px] font-black uppercase tracking-tightest text-ink">
+              No wires yet
+            </p>
+            <p className="mt-2 font-body text-[15px] text-muted">
+              New shorts show up here as soon as they&rsquo;re published.
+            </p>
+          </div>
+        </div>
+      );
   } else {
     const atTop = activeIdx <= 0;
     const atBottom = activeIdx >= displayShorts.length - 1;
@@ -344,7 +391,14 @@ export default function WiresDesktop({
 
   return (
     <div className="fixed inset-x-0 bottom-0 top-[68px] z-30 bg-black">
-      <WiresFilterToggle hideVoted={hideVoted} onSelect={applyFilter} />
+      <WiresTopControls
+        hideVoted={hideVoted}
+        onSelectFilter={applyFilter}
+        selectedCategories={categorySlugs}
+        onToggleCategory={onToggleCategory}
+        onClearCategories={onClearCategories}
+        variant="desktop"
+      />
       {body}
     </div>
   );

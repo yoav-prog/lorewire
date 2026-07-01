@@ -92,6 +92,7 @@ function makeStory(): WireStory {
     // here keeps the WireCard render path identical to a wire without
     // a poll, which is what these tests actually exercise.
     poll: null,
+    category_slug: null,
   };
 }
 
