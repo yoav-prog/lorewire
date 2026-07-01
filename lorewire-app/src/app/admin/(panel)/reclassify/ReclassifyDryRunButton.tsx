@@ -7,19 +7,50 @@
 // BackfillButton pattern. Plan: _plans/2026-07-01-category-taxonomy-multitag.md.
 
 import { useState, useTransition } from "react";
-import { dryRunReclassifyTagsAction } from "./actions";
+import {
+  applyReclassifyTagsAction,
+  dryRunReclassifyTagsAction,
+  type ApplyResult,
+} from "./actions";
 import type { TagReport } from "@/lib/reclassify-tags";
 
 export function ReclassifyDryRunButton() {
   const [running, start] = useTransition();
   const [report, setReport] = useState<TagReport | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [applying, startApply] = useTransition();
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
 
   function onClick(): void {
     setErr(null);
+    setApplyResult(null);
     start(async () => {
       try {
         setReport(await dryRunReclassifyTagsAction());
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      }
+    });
+  }
+
+  function onApply(): void {
+    if (!report) return;
+    const items = report.proposals
+      .filter((p) => !p.needsReview)
+      .map((p) => ({ id: p.id, tags: p.tags }));
+    if (items.length === 0) return;
+    if (
+      !window.confirm(
+        `Write tags for ${items.length} stories? This is reversible ` +
+          "(stories.category is untouched) and does not change what users see yet.",
+      )
+    ) {
+      return;
+    }
+    setErr(null);
+    startApply(async () => {
+      try {
+        setApplyResult(await applyReclassifyTagsAction(items));
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e));
       }
@@ -118,6 +149,30 @@ export function ReclassifyDryRunButton() {
               </ul>
             </div>
           )}
+
+          <div className="border-t border-line pt-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-[12px] text-muted">
+                Apply writes these tags to {report.autoTagged} stories (the{" "}
+                {report.reviewQueue} review-queue stories are left untouched).
+                Reversible, and not visible to users yet.
+              </p>
+              <button
+                type="button"
+                onClick={onApply}
+                disabled={applying || report.autoTagged === 0}
+                className="shrink-0 rounded-md border border-accent px-4 py-1.5 text-[13px] font-semibold text-accent transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+              >
+                {applying ? "Applying…" : "Apply these tags"}
+              </button>
+            </div>
+            {applyResult && (
+              <p className="mt-2 rounded-md border border-cat-wholesome/40 bg-cat-wholesome/10 px-3 py-2 text-[12px] text-cat-wholesome">
+                Applied {applyResult.applied} stories
+                {applyResult.skipped > 0 ? `, skipped ${applyResult.skipped}` : ""}.
+              </p>
+            )}
+          </div>
         </div>
       )}
 

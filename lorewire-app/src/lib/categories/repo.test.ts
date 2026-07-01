@@ -17,6 +17,7 @@ import {
   getPrimaryTag,
   getStoryTags,
   listCategories,
+  setStoryTags,
 } from "@/lib/categories/repo";
 import { CATEGORY_DEFS } from "@/lib/categories/manifest";
 import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
@@ -150,5 +151,42 @@ describe("backfillStoryPrimaryTags", () => {
     await seedStory(`${PFX}null`, null);
     await backfillStoryPrimaryTags();
     expect(await getPrimaryTag(`${PFX}null`)).toBeNull();
+  });
+});
+
+describe("setStoryTags (write path)", () => {
+  it("writes one primary + extras, then rewrites without accumulation", async () => {
+    await setStoryTags(`${PFX}w1`, [
+      { slug: "family-feuds", confidence: 0.9 },
+      { slug: "in-laws", confidence: 0.6 },
+    ]);
+    const tags = await getStoryTags(`${PFX}w1`);
+    expect(tags).toHaveLength(2);
+    expect(tags[0].category_slug).toBe("family-feuds");
+    expect(tags[0].is_primary).toBe(1);
+    expect(tags[0].source).toBe("llm");
+    expect(tags[1].is_primary).toBe(0);
+
+    await setStoryTags(`${PFX}w1`, [{ slug: "workplace", confidence: 0.8 }]);
+    const after = await getStoryTags(`${PFX}w1`);
+    expect(after).toHaveLength(1);
+    expect(after[0].category_slug).toBe("workplace");
+    expect(after[0].is_primary).toBe(1);
+  });
+
+  it("keeps exactly one primary after a rewrite", async () => {
+    await setStoryTags(`${PFX}w2`, [
+      { slug: "cheating-betrayal", confidence: 0.9 },
+      { slug: "wedding-drama", confidence: 0.5 },
+    ]);
+    await setStoryTags(`${PFX}w2`, [
+      { slug: "wedding-drama", confidence: 0.9 },
+      { slug: "cheating-betrayal", confidence: 0.4 },
+    ]);
+    const primaries = (await getStoryTags(`${PFX}w2`)).filter(
+      (t) => t.is_primary === 1,
+    );
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0].category_slug).toBe("wedding-drama");
   });
 });
