@@ -56,6 +56,7 @@ describe("SiteFooter — trust links", () => {
       "/terms",
       "/cookie-policy",
       "/dmca",
+      "/imprint",
       "/about",
       "/community-guidelines",
     ]) {

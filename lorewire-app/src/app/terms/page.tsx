@@ -17,10 +17,10 @@ export const metadata: Metadata = {
   alternates: { canonical: "/terms" },
 };
 
-const EFFECTIVE_DATE = "2026-06-30";
-const LEGAL_ENTITY = "LoreWire";
+const EFFECTIVE_DATE = "2026-07-01";
+const LEGAL_ENTITY = "Traffic.Club IT GmbH";
 const CONTACT_EMAIL = "contact@lorewire.com";
-const GOVERNING_LAW = "the State of Israel";
+const GOVERNING_LAW = "Germany";
 
 export default function TermsPage() {
   return (
@@ -40,10 +40,14 @@ export default function TermsPage() {
 
       <Section title="1. The service">
         <p>
-          LoreWire is a publishing tool operated by {LEGAL_ENTITY}. It lets
-          you write, render, and post videos and articles to your own
-          connected social accounts. By using the service you agree to
-          these terms and to the{" "}
+          LoreWire is a publishing tool operated by {LEGAL_ENTITY}. Full
+          company details are on our{" "}
+          <Link href="/imprint" className="text-accent underline">
+            Imprint
+          </Link>{" "}
+          page. It lets you write, render, and post videos and articles to
+          your own connected social accounts. By using the service you agree
+          to these terms and to the{" "}
           <Link href="/privacy" className="text-accent underline">
             Privacy Policy
           </Link>
@@ -181,6 +185,12 @@ export default function TermsPage() {
           dispute that cannot be resolved by good-faith discussion will be
           brought before the courts located there.
         </p>
+        <p className="mt-3">
+          If you use LoreWire as a consumer resident in the European Union,
+          the mandatory consumer-protection rules of your country of residence
+          still apply, and nothing in this clause removes protections you have
+          under that law.
+        </p>
       </Section>
 
       <Section title="12. Changes">
@@ -201,9 +211,12 @@ export default function TermsPage() {
         </p>
       </Section>
 
-      <footer className="mt-10 border-t border-line pt-4 text-[12px] text-muted">
+      <footer className="mt-10 flex gap-4 border-t border-line pt-4 text-[12px] text-muted">
         <Link href="/privacy" className="hover:text-accent hover:underline">
           Privacy Policy
+        </Link>
+        <Link href="/imprint" className="hover:text-accent hover:underline">
+          Imprint
         </Link>
       </footer>
     </main>
