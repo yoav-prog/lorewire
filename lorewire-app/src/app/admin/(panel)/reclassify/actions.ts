@@ -13,3 +13,47 @@ export async function dryRunReclassifyTagsAction(): Promise<TagReport> {
   await requireCapability("content.manage");
   return runDryRunReport();
 }
+
+export interface ApplyTagItem {
+  id: string;
+  tags: { slug: string; confidence?: number | null }[];
+}
+
+export interface ApplyResult {
+  applied: number;
+  skipped: number;
+}
+
+/** Writes the reviewed tags to story_tags. Takes the auto-tagged proposals
+ *  from a dry-run (the caller filters out the review queue). Every slug is
+ *  re-validated server-side against the current active categories, so a
+ *  tampered payload can only ever write real category slugs. Never writes an
+ *  empty tag set (that would strip a story of all tags). Reversible: it only
+ *  touches story_tags; stories.category is untouched. */
+export async function applyReclassifyTagsAction(
+  items: ApplyTagItem[],
+): Promise<ApplyResult> {
+  await requireCapability("content.manage");
+  const { listCategories, setStoryTags } = await import("@/lib/categories/repo");
+  const activeSlugs = new Set((await listCategories()).map((c) => c.slug));
+
+  let applied = 0;
+  let skipped = 0;
+  for (const item of items) {
+    if (!item || typeof item.id !== "string" || !item.id || !Array.isArray(item.tags)) {
+      skipped += 1;
+      continue;
+    }
+    const tags = item.tags.filter(
+      (t) => t && typeof t.slug === "string" && activeSlugs.has(t.slug),
+    );
+    if (tags.length === 0) {
+      skipped += 1;
+      continue;
+    }
+    await setStoryTags(item.id, tags, "llm");
+    applied += 1;
+  }
+  console.info("[reclassify-tags apply]", { applied, skipped });
+  return { applied, skipped };
+}
