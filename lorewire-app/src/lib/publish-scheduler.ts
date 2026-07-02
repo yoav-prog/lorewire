@@ -880,7 +880,7 @@ export async function getPublishCalendar(
 export interface SchedulerDecisionInput {
   storyId: string;
   redditId?: string | null;
-  decision: "approved" | "rejected";
+  decision: "approved" | "rejected" | "auto_approved" | "auto_held";
   tier?: string | null;
   comments?: number | null;
   ageHours?: number | null;

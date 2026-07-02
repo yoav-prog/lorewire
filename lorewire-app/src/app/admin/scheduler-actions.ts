@@ -19,6 +19,11 @@ import { getStory, setStatus, setSetting } from "@/lib/repo";
 import { getRedditSource } from "@/lib/reddit-source";
 import { publishStoryIfReady } from "@/lib/auto-publish";
 import {
+  AUTOPILOT_SETTING_KEYS,
+  resetAutopilotFailures,
+  type AutopilotMode,
+} from "@/lib/autopilot";
+import {
   PUBLISH_PLATFORMS,
   cancelScheduledPublish,
   logSchedulerDecision,
@@ -240,6 +245,27 @@ export async function schedulerCancelPublishAction(
   if (!cancelled) {
     return { ok: false, error: "too late — this post already went out or is publishing" };
   }
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+/**
+ * Switch autopilot between off / shadow / live. Any deliberate mode
+ * change also resets the circuit breaker (failure counter + trip stamp):
+ * an admin turning it back on has seen the trip banner and is making a
+ * fresh start, not resuming a failing run.
+ */
+export async function setAutopilotModeAction(
+  mode: AutopilotMode,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  if (mode !== "off" && mode !== "shadow" && mode !== "live") {
+    return { ok: false, error: "unknown mode" };
+  }
+  await setSetting(AUTOPILOT_SETTING_KEYS.mode, mode);
+  await resetAutopilotFailures();
+  await setSetting(AUTOPILOT_SETTING_KEYS.trippedAt, "");
+  console.info("[scheduler autopilot_mode]", { mode, actorId: session.userId });
   revalidatePath("/admin/scheduler");
   return { ok: true };
 }
