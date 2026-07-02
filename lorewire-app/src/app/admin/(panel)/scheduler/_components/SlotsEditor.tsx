@@ -1,13 +1,34 @@
 "use client";
 
-// Posting-slot editor: existing slots as removable chips plus an input to
-// add one. Persists the whole list as a JSON array of "HH:MM" strings via
-// the generic saveSettingAction, matching what getPlatformSlots parses.
+// Weekly posting-times editor. The "Every day" times are removable chips
+// plus an input to add one; each weekday can then be customized (its own
+// times, or explicitly no posts). Persists the whole schedule as the v2
+// object shape via the generic saveSettingAction, matching what
+// parseSlotsSetting parses; the server keeps reading the old flat-array
+// shape from before this editor existed, so nothing needs migrating.
 
 import { useState, useTransition } from "react";
 import { saveSettingAction } from "@/app/admin/actions";
 
-// Client-side mirror of parseSlot (server-only, can't import here).
+// Client-side mirrors of the server-only slot types/validation
+// (publish-scheduler.ts is "server-only" and must not be imported here).
+type WeekdayKey = "sun" | "mon" | "tue" | "wed" | "thu" | "fri" | "sat";
+
+export interface WeeklySlotsValue {
+  default: string[];
+  overrides: Partial<Record<WeekdayKey, string[]>>;
+}
+
+const DAYS: { key: WeekdayKey; label: string }[] = [
+  { key: "mon", label: "Monday" },
+  { key: "tue", label: "Tuesday" },
+  { key: "wed", label: "Wednesday" },
+  { key: "thu", label: "Thursday" },
+  { key: "fri", label: "Friday" },
+  { key: "sat", label: "Saturday" },
+  { key: "sun", label: "Sunday" },
+];
+
 function normalizeSlot(raw: string): string | null {
   const m = /^(\d{1,2}):(\d{2})$/.exec(raw.trim());
   if (!m) return null;
@@ -22,15 +43,13 @@ export function SlotsEditor({
   initialSlots,
 }: {
   settingKey: string;
-  initialSlots: string[];
+  initialSlots: WeeklySlotsValue;
 }) {
-  const [slots, setSlots] = useState<string[]>(initialSlots);
-  const [draft, setDraft] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const [weekly, setWeekly] = useState<WeeklySlotsValue>(initialSlots);
   const [isPending, startTransition] = useTransition();
 
-  function persist(next: string[]) {
-    setSlots(next);
+  function persist(next: WeeklySlotsValue) {
+    setWeekly(next);
     startTransition(async () => {
       const fd = new FormData();
       fd.set("key", settingKey);
@@ -39,33 +58,118 @@ export function SlotsEditor({
     });
   }
 
+  function setDefault(slots: string[]) {
+    persist({ ...weekly, default: slots });
+  }
+
+  function setOverride(day: WeekdayKey, slots: string[]) {
+    persist({ ...weekly, overrides: { ...weekly.overrides, [day]: slots } });
+  }
+
+  function clearOverride(day: WeekdayKey) {
+    const overrides = { ...weekly.overrides };
+    delete overrides[day];
+    persist({ ...weekly, overrides });
+  }
+
+  return (
+    <div className={isPending ? "opacity-70" : ""}>
+      <SlotChips value={weekly.default} onChange={setDefault} />
+      <details className="mt-3">
+        <summary className="cursor-pointer text-[12px] font-semibold text-muted transition-colors hover:text-ink">
+          Customize by day of week
+        </summary>
+        <ul className="mt-2 space-y-2">
+          {DAYS.map(({ key, label }) => {
+            const override = weekly.overrides[key];
+            const custom = override !== undefined;
+            const resolved = override ?? weekly.default;
+            return (
+              <li
+                key={key}
+                className="rounded-lg border border-line bg-surface2/50 px-3 py-2"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[13px] text-ink">{label}</span>
+                  <span className="flex items-center gap-3">
+                    {!custom && (
+                      <span className="font-mono text-[11px] tabular-nums text-muted">
+                        {resolved.length > 0 ? resolved.join(" · ") : "no posts"}
+                      </span>
+                    )}
+                    {custom && resolved.length === 0 && (
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                        no posts
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        custom
+                          ? clearOverride(key)
+                          : setOverride(key, [...weekly.default])
+                      }
+                      className="text-[12px] text-muted transition-colors hover:text-accent"
+                    >
+                      {custom ? "Use every-day times" : "Customize"}
+                    </button>
+                  </span>
+                </div>
+                {custom && (
+                  <div className="mt-2">
+                    <SlotChips
+                      value={override}
+                      onChange={(slots) => setOverride(key, slots)}
+                      emptyHint="No times — nothing posts this day. Add one below to change that."
+                    />
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+// One chip list + add input, used for the every-day times and for each
+// customized weekday.
+function SlotChips({
+  value,
+  onChange,
+  emptyHint = "No slots yet — add one below.",
+}: {
+  value: string[];
+  onChange: (slots: string[]) => void;
+  emptyHint?: string;
+}) {
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
   function add() {
     const v = normalizeSlot(draft);
     if (!v) {
       setError("Use 24-hour HH:MM, e.g. 09:00");
       return;
     }
-    if (slots.includes(v)) {
+    if (value.includes(v)) {
       setError("That time is already a slot");
       setDraft("");
       return;
     }
     setError(null);
-    persist([...slots, v].sort((a, b) => a.localeCompare(b)));
+    onChange([...value, v].sort((a, b) => a.localeCompare(b)));
     setDraft("");
   }
 
-  function remove(slot: string) {
-    persist(slots.filter((s) => s !== slot));
-  }
-
   return (
-    <div className={isPending ? "opacity-70" : ""}>
+    <div>
       <div className="flex flex-wrap gap-1.5">
-        {slots.length === 0 && (
-          <span className="text-[12px] text-muted">No slots yet — add one below.</span>
+        {value.length === 0 && (
+          <span className="text-[12px] text-muted">{emptyHint}</span>
         )}
-        {slots.map((s) => (
+        {value.map((s) => (
           <span
             key={s}
             className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface2 px-2.5 py-0.5 font-mono text-[12px] tabular-nums text-ink"
@@ -74,7 +178,7 @@ export function SlotsEditor({
             <button
               type="button"
               aria-label={`Remove ${s}`}
-              onClick={() => remove(s)}
+              onClick={() => onChange(value.filter((x) => x !== s))}
               className="text-muted transition-colors hover:text-accent"
             >
               &times;

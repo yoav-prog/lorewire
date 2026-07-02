@@ -50,6 +50,29 @@ export const PUBLISH_DEFAULTS = {
   timezone: "America/New_York",
 } as const;
 
+// ---- weekly slots ----------------------------------------------------
+
+export const WEEKDAY_KEYS = [
+  "sun",
+  "mon",
+  "tue",
+  "wed",
+  "thu",
+  "fri",
+  "sat",
+] as const;
+export type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+
+/**
+ * Posting times for a platform, resolvable per weekday. `default` applies
+ * to any day without an override; an override that is present with an
+ * empty list means "no posts that day" (it does NOT fall back to default).
+ */
+export interface WeeklySlots {
+  default: string[];
+  overrides: Partial<Record<WeekdayKey, string[]>>;
+}
+
 // How far ahead the slot search looks before giving up. A story that
 // cannot be placed within two weeks almost certainly means every day is
 // capped; that is a signal to raise caps, not to schedule three weeks out.
@@ -98,39 +121,77 @@ export function parseSlot(slot: string): { hour: number; minute: number } | null
   return { hour, minute };
 }
 
-/**
- * Parsed, validated, de-duplicated, ascending slot list for a platform.
- * Falls back to the default slots when the setting is blank or every
- * entry is malformed, so the scheduler always has at least one time to
- * aim at.
- */
-export async function getPlatformSlots(
-  platform: PublishPlatform,
-): Promise<string[]> {
-  const raw = await getSetting(platformSettingKey(platform, "slots"));
-  let list: string[] = [...PUBLISH_DEFAULTS.slots];
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        const valid = parsed
-          .filter((s): s is string => typeof s === "string")
-          .filter((s) => parseSlot(s) !== null);
-        if (valid.length > 0) list = valid;
-      }
-    } catch {
-      // Malformed JSON: keep defaults rather than crash the scheduler.
-    }
-  }
-  // Normalize to zero-padded HH:MM, de-dupe, sort ascending by time.
-  const norm = new Map<string, { hour: number; minute: number }>();
+/** Validate one raw list into zero-padded, de-duped, ascending "HH:MM". */
+export function normalizeSlotList(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const norm = new Set<string>();
   for (const s of list) {
+    if (typeof s !== "string") continue;
     const p = parseSlot(s);
     if (!p) continue;
-    const key = `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`;
-    norm.set(key, p);
+    norm.add(
+      `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`,
+    );
   }
-  return [...norm.keys()].sort((a, b) => a.localeCompare(b));
+  return [...norm].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Parse a stored slots setting into WeeklySlots. Two shapes are accepted
+ * forever (no settings migration):
+ *   v1 flat array: ["09:00","13:00"]
+ *   v2 object:     {"default":["09:00"],"overrides":{"sat":[],"sun":["11:00"]}}
+ * A blank/malformed value or an empty v1 array falls back to the default
+ * slots so a corrupt setting never leaves the scheduler with nothing to
+ * aim at. An explicit empty `default` in the v2 shape is kept as-is: the
+ * editor writes it deliberately (e.g. a weekend-only schedule).
+ */
+export function parseSlotsSetting(raw: string | null | undefined): WeeklySlots {
+  const fallback: WeeklySlots = {
+    default: [...PUBLISH_DEFAULTS.slots],
+    overrides: {},
+  };
+  if (!raw?.trim()) return fallback;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+  if (Array.isArray(parsed)) {
+    const list = normalizeSlotList(parsed);
+    return list.length > 0 ? { default: list, overrides: {} } : fallback;
+  }
+  if (parsed && typeof parsed === "object") {
+    const obj = parsed as { default?: unknown; overrides?: unknown };
+    if (!Array.isArray(obj.default)) return fallback;
+    const overrides: WeeklySlots["overrides"] = {};
+    if (obj.overrides && typeof obj.overrides === "object") {
+      for (const key of WEEKDAY_KEYS) {
+        const v = (obj.overrides as Record<string, unknown>)[key];
+        if (Array.isArray(v)) overrides[key] = normalizeSlotList(v);
+      }
+    }
+    return { default: normalizeSlotList(obj.default), overrides };
+  }
+  return fallback;
+}
+
+/** Resolved posting times for one weekday: the override when present
+ *  (including an explicit "no posts" empty list), else the default. */
+export function slotsForWeekday(
+  weekly: WeeklySlots,
+  weekday: WeekdayKey,
+): string[] {
+  return weekly.overrides[weekday] ?? weekly.default;
+}
+
+/** Parsed weekly slots for a platform (both stored shapes accepted). */
+export async function getPlatformSlots(
+  platform: PublishPlatform,
+): Promise<WeeklySlots> {
+  const raw = await getSetting(platformSettingKey(platform, "slots"));
+  return parseSlotsSetting(raw);
 }
 
 /** Timezone for a platform, defaulting to the app default and falling
@@ -156,7 +217,7 @@ export interface PlatformConfig {
   platform: PublishPlatform;
   enabled: boolean;
   dailyCap: number;
-  slots: string[];
+  slots: WeeklySlots;
   timezone: string;
 }
 
@@ -285,11 +346,6 @@ export function enumerateSlotInstants(
   fromMs: number,
   horizonDays: number = SLOT_HORIZON_DAYS,
 ): SlotCandidate[] {
-  const parsedSlots = config.slots
-    .map((s) => ({ local: s, p: parseSlot(s) }))
-    .filter((x): x is { local: string; p: { hour: number; minute: number } } => x.p !== null);
-  if (parsedSlots.length === 0) return [];
-
   const startParts = partsInTz(fromMs, config.timezone);
   const out: SlotCandidate[] = [];
   for (let d = 0; d <= horizonDays; d++) {
@@ -301,6 +357,13 @@ export function enumerateSlotInstants(
     const y = cal.getUTCFullYear();
     const mo = cal.getUTCMonth() + 1;
     const day = cal.getUTCDate();
+    // Weekday of this LOCAL calendar day: the date came from the platform's
+    // zone, so pure calendar math on it yields the local weekday.
+    const weekday = WEEKDAY_KEYS[cal.getUTCDay()];
+    const parsedSlots = slotsForWeekday(config.slots, weekday)
+      .map((s) => ({ local: s, p: parseSlot(s) }))
+      .filter((x): x is { local: string; p: { hour: number; minute: number } } => x.p !== null);
+    if (parsedSlots.length === 0) continue;
     const { startMs, endMs } = tzDayBoundsMs(config.timezone, y, mo, day);
     for (const { local, p } of parsedSlots) {
       const ms = wallClockToUtcMs(config.timezone, y, mo, day, p.hour, p.minute);

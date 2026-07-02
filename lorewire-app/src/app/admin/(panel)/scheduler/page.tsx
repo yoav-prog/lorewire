@@ -324,7 +324,7 @@ function PlatformCard({ overview }: { overview: PlatformOverview }) {
             </div>
             <p className="mb-2 text-[12px] text-muted">
               Each approved post goes out at the next open slot, in the timezone
-              below.
+              below. Times apply every day unless a specific day is customized.
             </p>
             <SlotsEditor
               settingKey={platformSettingKey(config.platform, "slots")}

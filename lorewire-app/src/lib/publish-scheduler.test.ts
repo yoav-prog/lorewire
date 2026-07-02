@@ -16,13 +16,21 @@ import {
   getPlatformSlots,
   getPublishEnabled,
   logSchedulerDecision,
+  normalizeSlotList,
   parseSlot,
+  parseSlotsSetting,
   partsInTz,
   platformSettingKey,
   scheduleStoryPublish,
+  slotsForWeekday,
   wallClockToUtcMs,
   type PlatformConfig,
+  type WeeklySlots,
 } from "./publish-scheduler";
+
+function weekly(defaults: string[], overrides: WeeklySlots["overrides"] = {}): WeeklySlots {
+  return { default: defaults, overrides };
+}
 
 async function clear() {
   await run("DELETE FROM scheduled_publishes", []);
@@ -120,9 +128,65 @@ describe("DST-safe timezone math (America/New_York)", () => {
   });
 });
 
+describe("parseSlotsSetting", () => {
+  it("parses the v1 flat array into an every-day schedule", () => {
+    expect(parseSlotsSetting(JSON.stringify(["18:00", "09:00", "9:00"]))).toEqual({
+      default: ["09:00", "18:00"],
+      overrides: {},
+    });
+  });
+
+  it("falls back to defaults on blank, bad JSON, or an empty flat array", () => {
+    const fallback = { default: [...PUBLISH_DEFAULTS.slots], overrides: {} };
+    expect(parseSlotsSetting(null)).toEqual(fallback);
+    expect(parseSlotsSetting("  ")).toEqual(fallback);
+    expect(parseSlotsSetting("{ not json")).toEqual(fallback);
+    expect(parseSlotsSetting("[]")).toEqual(fallback);
+    expect(parseSlotsSetting(JSON.stringify(["nope"]))).toEqual(fallback);
+    expect(parseSlotsSetting(JSON.stringify(42))).toEqual(fallback);
+    expect(parseSlotsSetting(JSON.stringify({ overrides: {} }))).toEqual(fallback);
+  });
+
+  it("parses the v2 object shape, keeping an explicit empty override AND an explicit empty default", () => {
+    const parsed = parseSlotsSetting(
+      JSON.stringify({
+        default: ["13:00", "9:00"],
+        overrides: { sat: [], sun: ["11:00"], nonsense: ["10:00"] },
+      }),
+    );
+    expect(parsed).toEqual({
+      default: ["09:00", "13:00"],
+      overrides: { sat: [], sun: ["11:00"] },
+    });
+    // Weekend-only schedule: empty default is deliberate, not corruption.
+    expect(
+      parseSlotsSetting(JSON.stringify({ default: [], overrides: { sat: ["10:00"] } })),
+    ).toEqual({ default: [], overrides: { sat: ["10:00"] } });
+  });
+});
+
+describe("slotsForWeekday", () => {
+  it("uses the override when present (even empty), else the default", () => {
+    const w = weekly(["09:00"], { sat: [], sun: ["11:00"] });
+    expect(slotsForWeekday(w, "mon")).toEqual(["09:00"]);
+    expect(slotsForWeekday(w, "sat")).toEqual([]);
+    expect(slotsForWeekday(w, "sun")).toEqual(["11:00"]);
+  });
+});
+
+describe("normalizeSlotList", () => {
+  it("validates, zero-pads, de-dupes and sorts", () => {
+    expect(normalizeSlotList(["18:00", "9:05", "09:05", "bad", 7])).toEqual([
+      "09:05",
+      "18:00",
+    ]);
+    expect(normalizeSlotList("not a list")).toEqual([]);
+  });
+});
+
 describe("enumerateSlotInstants", () => {
   it("emits only future slots, ascending", () => {
-    const config = { slots: ["09:00", "13:00", "18:00"], timezone: "UTC" };
+    const config = { slots: weekly(["09:00", "13:00", "18:00"]), timezone: "UTC" };
     const from = Date.UTC(2026, 6, 1, 12, 0); // noon UTC July 1
     const cands = enumerateSlotInstants(config, from, 1);
     // July 1 09:00 is in the past; first future is July 1 13:00.
@@ -137,8 +201,45 @@ describe("enumerateSlotInstants", () => {
 
   it("returns nothing when there are no valid slots", () => {
     expect(
-      enumerateSlotInstants({ slots: [], timezone: "UTC" }, Date.now(), 3),
+      enumerateSlotInstants({ slots: weekly([]), timezone: "UTC" }, Date.now(), 3),
     ).toEqual([]);
+  });
+
+  it("skips a weekday with an explicit no-posts override", () => {
+    // 2026-07-03 is a Friday; Saturday July 4 is overridden to no posts.
+    const config = {
+      slots: weekly(["09:00"], { sat: [] }),
+      timezone: "UTC",
+    };
+    const from = Date.UTC(2026, 6, 3, 10, 0); // Friday, after 09:00
+    const cands = enumerateSlotInstants(config, from, 3);
+    expect(cands[0].ms).toBe(Date.UTC(2026, 6, 5, 9, 0)); // Sunday
+  });
+
+  it("uses a weekday's custom times instead of the default", () => {
+    // Sunday 2026-07-05 posts at 11:00 instead of 09:00.
+    const config = {
+      slots: weekly(["09:00"], { sun: ["11:00"] }),
+      timezone: "UTC",
+    };
+    const from = Date.UTC(2026, 6, 4, 10, 0); // Saturday, after 09:00
+    const cands = enumerateSlotInstants(config, from, 1);
+    expect(cands[0].ms).toBe(Date.UTC(2026, 6, 5, 11, 0));
+  });
+
+  it("resolves the weekday in the platform timezone, not UTC", () => {
+    // 03:00 UTC Saturday July 4 is still 23:00 FRIDAY July 3 in New York.
+    // With Saturdays off, the Friday view has no slots left (09:00 passed),
+    // Saturday is skipped, so the first candidate is Sunday 09:00 local.
+    const config = {
+      slots: weekly(["09:00"], { sat: [] }),
+      timezone: "America/New_York",
+    };
+    const from = Date.UTC(2026, 6, 4, 3, 0);
+    const cands = enumerateSlotInstants(config, from, 3);
+    expect(cands[0].ms).toBe(
+      wallClockToUtcMs("America/New_York", 2026, 7, 5, 9, 0),
+    );
   });
 });
 
@@ -159,14 +260,25 @@ describe("setting readers", () => {
     expect(await getPlatformDailyCap("tiktok")).toBe(5);
   });
 
-  it("slots parse, validate, de-dupe and sort; bad JSON falls back to defaults", async () => {
+  it("slots read both stored shapes; bad JSON falls back to defaults", async () => {
     await setSetting(
       platformSettingKey("youtube", "slots"),
       JSON.stringify(["18:00", "09:00", "09:00", "nope", "13:00"]),
     );
-    expect(await getPlatformSlots("youtube")).toEqual(["09:00", "13:00", "18:00"]);
+    expect(await getPlatformSlots("youtube")).toEqual(
+      weekly(["09:00", "13:00", "18:00"]),
+    );
+    await setSetting(
+      platformSettingKey("youtube", "slots"),
+      JSON.stringify({ default: ["09:00"], overrides: { sat: [] } }),
+    );
+    expect(await getPlatformSlots("youtube")).toEqual(
+      weekly(["09:00"], { sat: [] }),
+    );
     await setSetting(platformSettingKey("youtube", "slots"), "{ not json");
-    expect(await getPlatformSlots("youtube")).toEqual([...PUBLISH_DEFAULTS.slots]);
+    expect(await getPlatformSlots("youtube")).toEqual(
+      weekly([...PUBLISH_DEFAULTS.slots]),
+    );
   });
 
   it("invalid timezone falls back to the default", async () => {
