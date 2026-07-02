@@ -237,6 +237,7 @@ export default function WiresDesktop({
   // Immersive mode: fullscreen the pager container (video-only cards). Must ride
   // the click gesture, so requesting fullscreen is synchronous here.
   const enterImmersive = useCallback(() => {
+    console.info("[wires immersive enter]", { via: "button" });
     setImmersive(true);
     const el = containerRef.current as
       | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
@@ -257,6 +258,7 @@ export default function WiresDesktop({
   }, []);
 
   const exitImmersive = useCallback(() => {
+    console.info("[wires immersive exit]", { via: "button" });
     setImmersive(false);
     const doc = document as Document & {
       webkitExitFullscreen?: () => Promise<void> | void;
@@ -282,6 +284,9 @@ export default function WiresDesktop({
         webkitFullscreenElement?: Element | null;
       };
       if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (immersive) {
+          console.info("[wires immersive exit]", { via: "fullscreenchange" });
+        }
         setImmersive(false);
       }
     };
@@ -291,7 +296,7 @@ export default function WiresDesktop({
       document.removeEventListener("fullscreenchange", onChange);
       document.removeEventListener("webkitfullscreenchange", onChange);
     };
-  }, []);
+  }, [immersive]);
 
   // Auto-advance to the next wire when one ends; false at the tail so the card
   // replays in place (and we prefetch the next page).

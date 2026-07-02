@@ -263,6 +263,7 @@ export default function WiresFeed({
   // paging on a swipe) and reshape the cards to video-only. Requesting
   // fullscreen must ride the tap gesture, so it's synchronous here.
   const enterImmersive = useCallback(() => {
+    console.info("[wires immersive enter]", { via: "button" });
     setImmersive(true);
     const el = containerRef.current as
       | (HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void })
@@ -283,6 +284,7 @@ export default function WiresFeed({
   }, []);
 
   const exitImmersive = useCallback(() => {
+    console.info("[wires immersive exit]", { via: "button" });
     setImmersive(false);
     const doc = document as Document & {
       webkitExitFullscreen?: () => Promise<void> | void;
@@ -309,6 +311,9 @@ export default function WiresFeed({
         webkitFullscreenElement?: Element | null;
       };
       if (!document.fullscreenElement && !doc.webkitFullscreenElement) {
+        if (immersive) {
+          console.info("[wires immersive exit]", { via: "fullscreenchange" });
+        }
         setImmersive(false);
       }
     };
@@ -318,7 +323,7 @@ export default function WiresFeed({
       document.removeEventListener("fullscreenchange", onChange);
       document.removeEventListener("webkitfullscreenchange", onChange);
     };
-  }, []);
+  }, [immersive]);
 
   // Auto-advance: scroll the next wire into view when the current one ends.
   // Returns false at the tail (so the card replays) and prefetches more.
