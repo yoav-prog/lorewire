@@ -561,17 +561,20 @@ export interface RecentAutoPublish {
 export async function listRecentAutoPublishes(
   limit = 10,
 ): Promise<RecentAutoPublish[]> {
+  // GROUP BY story_id: overlapping cron ticks can double-log a decision,
+  // and one story must appear once no matter how it got recorded.
   const rows = await all<{
     story_id: string;
     title: string | null;
     status: string;
     decided_at: string;
   }>(
-    `SELECT d.story_id, s.title, s.status, d.decided_at
+    `SELECT d.story_id, s.title, s.status, MAX(d.decided_at) AS decided_at
      FROM scheduler_decisions d
      JOIN stories s ON s.id = d.story_id
      WHERE d.decision = 'auto_approved'
-     ORDER BY d.decided_at DESC
+     GROUP BY d.story_id, s.title, s.status
+     ORDER BY decided_at DESC
      LIMIT ?`,
     [limit],
   );
