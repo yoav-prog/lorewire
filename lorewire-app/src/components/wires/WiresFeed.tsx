@@ -463,14 +463,20 @@ export default function WiresFeed({
 
   return (
     <div className="absolute inset-0 z-30 bg-black">
-      <WiresTopControls
-        hideVoted={hideVoted}
-        onSelectFilter={applyFilter}
-        selectedCategories={categorySlugs}
-        onToggleCategory={onToggleCategory}
-        onClearCategories={onClearCategories}
-        variant="mobile"
-      />
+      {/* Filter pill + funnel hide in immersive: they'd be invisible in real
+          fullscreen anyway (rendered outside the fullscreened container), and
+          on browsers without element fullscreen they'd collide with the
+          card's EXIT pill. Immersive means video only. */}
+      {!immersive && (
+        <WiresTopControls
+          hideVoted={hideVoted}
+          onSelectFilter={applyFilter}
+          selectedCategories={categorySlugs}
+          onToggleCategory={onToggleCategory}
+          onClearCategories={onClearCategories}
+          variant="mobile"
+        />
+      )}
       {body}
     </div>
   );

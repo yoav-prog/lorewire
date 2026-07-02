@@ -461,14 +461,20 @@ export default function WiresDesktop({
 
   return (
     <div className="fixed inset-x-0 bottom-0 top-[68px] z-30 bg-black">
-      <WiresTopControls
-        hideVoted={hideVoted}
-        onSelectFilter={applyFilter}
-        selectedCategories={categorySlugs}
-        onToggleCategory={onToggleCategory}
-        onClearCategories={onClearCategories}
-        variant="desktop"
-      />
+      {/* Filter pill + funnel hide in immersive: they'd be invisible in real
+          fullscreen anyway (rendered outside the fullscreened container), and
+          on browsers without element fullscreen they'd collide with the
+          card's EXIT pill. Immersive means video only. */}
+      {!immersive && (
+        <WiresTopControls
+          hideVoted={hideVoted}
+          onSelectFilter={applyFilter}
+          selectedCategories={categorySlugs}
+          onToggleCategory={onToggleCategory}
+          onClearCategories={onClearCategories}
+          variant="desktop"
+        />
+      )}
       {body}
     </div>
   );

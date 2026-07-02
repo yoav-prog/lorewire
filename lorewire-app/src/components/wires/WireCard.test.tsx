@@ -490,19 +490,20 @@ describe("WireCard immersive mode", () => {
   // 2026-07-02 manager report: users entered fullscreen by accident (the old
   // enter button floated right above the scrubber) and then couldn't find the
   // way out (the exit control was an unlabeled X circle). These tests pin the
-  // fix: entry lives in the top control cluster, exit is labeled + pinged on
-  // arrival, and voting stays reachable from the bottom-left stack.
+  // fix: entry lives in the bottom control bar off the video stage, exit is
+  // labeled + pinged on arrival, and voting stays reachable bottom-left.
 
-  it("keeps the enter-fullscreen button in the top control cluster, next to mute", () => {
+  it("keeps the enter-fullscreen button in the bottom control bar, off the video stage", () => {
     const m = mount(
       defaultProps({ immersive: false, onEnterImmersive: () => undefined }),
     );
     const enter = enterButton(m.container);
-    // muted: true in defaultProps → the mute toggle is labeled "Unmute".
-    const mute = m.container.querySelector('button[aria-label="Unmute"]');
     expect(enter).not.toBeNull();
-    expect(mute).not.toBeNull();
-    expect(enter!.parentElement).toBe(mute!.parentElement);
+    // It sits inside the below-video bar (with like/save/share), so a tap
+    // aimed at the stage or the scrubber can never land on it.
+    expect(bottomBar(m.container)!.contains(enter)).toBe(true);
+    const share = m.container.querySelector('button[aria-label="Share"]');
+    expect(enter!.parentElement).toBe(share!.parentElement);
     unmount(m);
   });
 
