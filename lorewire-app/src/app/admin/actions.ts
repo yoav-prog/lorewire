@@ -200,15 +200,42 @@ export async function saveStory(formData: FormData): Promise<void> {
   await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) return;
+  const current = await getStoryRow(id);
+  if (!current) return;
+  // Category: closed-set check against the DB-driven taxonomy (the same
+  // label -> slug map the bulk category op validates with), so a forged
+  // form value can't land an arbitrary string in stories.category. An
+  // unchanged or unknown value leaves both the column and the story's
+  // tags alone.
+  const category = String(formData.get("category") ?? "").trim();
+  const labelToSlug =
+    category && category !== (current.category ?? "")
+      ? await loadCategoryLabelToSlug()
+      : null;
+  const categorySlug = labelToSlug?.get(category) ?? null;
   await updateStory(id, {
     title: String(formData.get("title") ?? ""),
-    category: String(formData.get("category") ?? ""),
+    ...(categorySlug ? { category } : {}),
     duration: String(formData.get("duration") ?? ""),
     source_url: String(formData.get("source_url") ?? ""),
     summary: String(formData.get("summary") ?? ""),
     body: String(formData.get("body") ?? ""),
     teleprompter: String(formData.get("teleprompter") ?? ""),
   });
+  if (categorySlug) {
+    // Write the primary story_tag too — skipping it would let
+    // syncStoryPrimaryCategory (db.ts boot chain) revert the label from
+    // the old primary tag on the next boot. Same pairing the bulk
+    // category op uses.
+    const { setPrimaryStoryTag } = await import("@/lib/categories/repo");
+    await setPrimaryStoryTag(id, categorySlug, "admin");
+    console.info("[stories action] category", {
+      id,
+      prev: current.category,
+      next: category,
+      slug: categorySlug,
+    });
+  }
   // 2026-06-18 polls plan extension: every story should have a poll.
   // Try to autodraft now that the admin has just saved (body may
   // have meaningful content). Service is idempotent — skips when an
@@ -673,29 +700,14 @@ export async function enqueueImageRegenAction(opts: {
     };
   }
 
-  // 2026-06-25: when the operator explicitly clicks "Generate hero +
-  // thumbnail from short" on a story that already has variants, the
-  // Python finisher's resume optimization (pipeline/media.py:1711)
-  // emits `variant_resumed ... already persisted — skipping i2i` and
-  // silently keeps the OLD URLs. That logic is correct for the
-  // crash-recovery case (cron reclaimed a mid-flight row, don't
-  // re-bill kie for what already landed) but wrong for the
-  // operator-clicked-regen case. NULL the 5 columns here so the
-  // finisher sees no persisted URLs and treats every variant as a
-  // fresh i2i call. Same workaround the /api/refresh_assets cron
-  // uses in advanceShortPending.
-  if (ownerKind === "story" && asset === "hero_thumbnail_from_short") {
-    await run(
-      "UPDATE stories SET hero_image = NULL, hero_image_landscape = NULL, " +
-        "thumbnail_image = NULL, thumbnail_image_landscape = NULL, " +
-        "thumbnail_image_square = NULL WHERE id = ?",
-      [ownerId],
-    );
-    console.info("[image regen action] cleared hero+thumbnail variants", {
-      owner_id: ownerId,
-      reason: "operator regen, bypass finisher resume-skip",
-    });
-  }
+  // 2026-07-03: the hero_thumbnail_from_short path no longer NULLs the
+  // 5 variant columns before enqueueing (the 2026-06-25 workaround for
+  // the finisher's resume skip). The skip now keys on the render row's
+  // own `image_saved` events instead of the story columns, so a fresh
+  // regen always redraws all five — and the old artwork stays visible
+  // on the public surfaces until each new variant lands, instead of a
+  // blank poster window (or a permanent blank when every kie call
+  // fails).
 
   const fresh = await enqueueImageRegen({
     ownerKind,

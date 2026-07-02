@@ -300,20 +300,16 @@ async function advanceShortPending(
         "no reddit_id / story_jobs row — hero+thumbnails not auto-refreshed",
     };
   }
-  // CRITICAL: the finisher in pipeline/media.py has a resume
-  // optimization — it sees the existing hero / thumbnail URLs on
-  // the story row and emits `variant_resumed ... already persisted
-  // — skipping i2i` instead of regenerating. For our refresh chain
-  // that's exactly the wrong behavior: the whole point is fresh
-  // variants from the NEW short's character. NULL the 5 columns
-  // before flipping finisher_status so the finisher treats every
-  // variant as a fresh i2i call.
-  await run(
-    "UPDATE stories SET hero_image = NULL, hero_image_landscape = NULL, " +
-      "thumbnail_image = NULL, thumbnail_image_landscape = NULL, " +
-      "thumbnail_image_square = NULL WHERE id = ?",
-    [row.id],
-  );
+  // 2026-07-03: no column-clearing needed anymore. The finisher's
+  // resume skip used to key on the story COLUMNS being non-empty (so
+  // this chain had to NULL the 5 variants first or every one came back
+  // `variant_resumed ... skipping i2i`); it now keys on the render
+  // row's own `image_saved` events, and this path runs with no render
+  // context, so every variant regenerates from the NEW short's
+  // character. Keeping the old artwork in place until the fresh
+  // variants land means the public reader never shows a blank poster
+  // mid-refresh, and a total kie failure degrades to "old artwork
+  // stays" instead of "story loses its artwork".
   await run(
     "UPDATE story_jobs SET finisher_status = 'pending' " +
       "WHERE id = (SELECT id FROM story_jobs WHERE reddit_id = ? " +
@@ -324,7 +320,7 @@ async function advanceShortPending(
     "UPDATE stories SET refresh_assets_state = 'hero_pending' WHERE id = ?",
     [row.id],
   );
-  return { kind: "advanced", message: "hero variants cleared + finisher flagged" };
+  return { kind: "advanced", message: "finisher flagged for fresh variants" };
 }
 
 async function advanceHeroPending(

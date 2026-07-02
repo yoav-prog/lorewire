@@ -104,6 +104,12 @@ def _patch_stack(stack: unittest.TestCase, **overrides):
         "update_duration": mock.patch.object(
             media.store, "update_story_duration",
         ),
+        # Resume-scope reader (variant skip keys on THIS render's own
+        # image_saved events). Empty by default: a fresh render row has
+        # no events, so every variant regenerates.
+        "render_events": mock.patch.object(
+            media.store, "render_events_of_type", return_value=[],
+        ),
     }
     base.update(overrides)
     started = {}
@@ -491,19 +497,39 @@ class ResumabilityTests(unittest.TestCase):
         self.assertEqual(result["thumbnail_index"], 4)
         self.assertEqual(result["picker_reasoning"], "from prior tick")
 
-    def test_skips_variants_whose_story_columns_are_already_populated(self):
-        # Story row already has hero_image + hero_image_landscape from a
-        # prior tick's partial success. Variant loop must skip those two,
-        # leave the carried-over URLs in place, and only fire the three
-        # thumbnail i2i calls.
-        partial_story = dict(STORY)
-        partial_story["hero_image"] = "https://prev/hero.png"
-        partial_story["hero_image_landscape"] = "https://prev/hero-landscape.png"
+    def test_skips_variants_this_render_already_saved(self):
+        # The reclaimed row carries image_saved events for the two hero
+        # variants a prior tick of the SAME render landed. Variant loop
+        # must skip those two, surface the carried-over URLs, and only
+        # fire the three thumbnail i2i calls.
+        saved_events = [
+            {
+                "event": "image_saved",
+                "payload": json.dumps({
+                    "variant": "hero portrait",
+                    "url": "https://prev/hero.webp?v=1",
+                }),
+            },
+            {
+                "event": "image_saved",
+                "payload": json.dumps({
+                    "variant": "hero landscape",
+                    "url": "https://prev/hero-landscape.webp?v=1",
+                }),
+            },
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             mocks = _patch_stack(
                 self,
-                fetch_story=mock.patch.object(
-                    media.store, "fetch_story", return_value=partial_story,
+                current_render_id=mock.patch.object(
+                    media.store, "current_render_id", return_value="render-1",
+                ),
+                first_render_event=mock.patch.object(
+                    media.store, "first_render_event", return_value=None,
+                ),
+                render_events=mock.patch.object(
+                    media.store, "render_events_of_type",
+                    return_value=saved_events,
                 ),
             )
             result = media.generate_hero_and_thumbnail_from_short(
@@ -511,7 +537,7 @@ class ResumabilityTests(unittest.TestCase):
             )
         # Three i2i calls (the three thumbnail variants), not five.
         self.assertEqual(len(mocks["generate_with_retry"].call_args_list), 3)
-        # No fresh writes to the already-populated hero columns.
+        # No fresh writes to the already-saved hero columns.
         mocks["update_hero"].assert_not_called()
         mocks["update_hero_landscape"].assert_not_called()
         # Thumbnail columns still get written (all three fresh).
@@ -520,12 +546,58 @@ class ResumabilityTests(unittest.TestCase):
         mocks["update_thumb_square"].assert_called_once()
         # Carried-over URLs surface on the result dict so the queue
         # wrapper's first-URL sample sees them.
-        self.assertEqual(result["hero_image"], "https://prev/hero.png")
+        self.assertEqual(result["hero_image"], "https://prev/hero.webp?v=1")
         self.assertEqual(
-            result["hero_image_landscape"], "https://prev/hero-landscape.png"
+            result["hero_image_landscape"],
+            "https://prev/hero-landscape.webp?v=1",
         )
         # cost_cents reflects only THIS tick's actual kie spend.
         self.assertEqual(result["cost_cents"], 15)
+
+    def test_populated_story_columns_do_not_skip_regeneration(self):
+        # The 2026-07-03 stale-artwork bug: the skip used to key on the
+        # story COLUMNS being non-empty, so an operator regen on a story
+        # with existing artwork finished as five no-ops and the old
+        # images survived (every TS caller had to NULL the columns
+        # first; the story-jobs re-run path didn't and stayed stale).
+        # A render with NO image_saved events of its own must redraw all
+        # five variants no matter what the columns hold.
+        stale_story = dict(STORY)
+        stale_story["hero_image"] = "https://old/hero.webp?v=1"
+        stale_story["hero_image_landscape"] = "https://old/hero-landscape.webp?v=1"
+        stale_story["thumbnail_image"] = "https://old/thumbnail.webp?v=1"
+        stale_story["thumbnail_image_landscape"] = (
+            "https://old/thumbnail-landscape.webp?v=1"
+        )
+        stale_story["thumbnail_image_square"] = (
+            "https://old/thumbnail-square.webp?v=1"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(
+                self,
+                fetch_story=mock.patch.object(
+                    media.store, "fetch_story", return_value=stale_story,
+                ),
+                current_render_id=mock.patch.object(
+                    media.store, "current_render_id", return_value="render-1",
+                ),
+                first_render_event=mock.patch.object(
+                    media.store, "first_render_event", return_value=None,
+                ),
+            )
+            result = media.generate_hero_and_thumbnail_from_short(
+                "abc123", Path(tmp),
+            )
+        # All five variants redraw and all five columns get fresh writes.
+        self.assertEqual(len(mocks["generate_with_retry"].call_args_list), 5)
+        mocks["update_hero"].assert_called_once()
+        mocks["update_hero_landscape"].assert_called_once()
+        mocks["update_thumb"].assert_called_once()
+        mocks["update_thumb_landscape"].assert_called_once()
+        mocks["update_thumb_square"].assert_called_once()
+        # The result carries the NEW urls, not the stale column values.
+        self.assertNotEqual(result["hero_image"], "https://old/hero.webp?v=1")
+        self.assertEqual(result["cost_cents"], 25)
 
     def test_no_render_context_runs_full_picker_and_all_variants(self):
         # The story-jobs path runs without an image_renders row id bound,
@@ -544,37 +616,43 @@ class ResumabilityTests(unittest.TestCase):
         mocks["picker"].assert_called_once()
         self.assertEqual(len(mocks["generate_with_retry"].call_args_list), 5)
 
-    def test_second_cycle_only_retries_variants_whose_columns_are_empty(self):
+    def test_second_cycle_only_retries_variants_without_image_saved_events(self):
         # The exact production bug, rolled into one test. Cycle 1 lands 3
         # of 5 variants; cycle 2 reclaims the same row. The picker must
         # NOT be called again and cycle 2's i2i attempts must be exactly
         # the 2 variants that didn't land in cycle 1 — not all 5 like
         # the unfixed code did. Note: cycle 1 itself still attempts all
-        # 5 variants because nothing is pre-existing when it starts;
-        # the resumability win shows up in cycle 2's smaller call count.
+        # 5 variants because the render row has no image_saved events
+        # when it starts; the resumability win shows up in cycle 2's
+        # smaller call count.
 
         # Story state shared across cycles. Column writers mutate it so
-        # cycle 2's fresh fetch sees what cycle 1 persisted.
+        # a fetch mid-flow sees what cycle 1 persisted.
         story_state = dict(STORY)
 
-        # The scenes_picked event log accumulates across ticks just like
-        # the real `image_render_events` table. `first_render_event`
-        # returns the oldest match (or None when empty).
-        scenes_picked_payloads: list[dict] = []
+        # The event log accumulates across ticks just like the real
+        # `image_render_events` table: scenes_picked drives the picker
+        # resume (oldest match), image_saved drives the variant skip.
+        event_log: list[dict] = []
 
         def fake_first_render_event(_render_id, event):
-            if event != "scenes_picked":
-                return None
-            if not scenes_picked_payloads:
-                return None
-            return {"payload": json.dumps(scenes_picked_payloads[0])}
+            for e in event_log:
+                if e["event"] == event:
+                    return e
+            return None
+
+        def fake_render_events_of_type(_render_id, event):
+            return [e for e in event_log if e["event"] == event]
 
         def fake_log_render_event(
             event, message=None, *, level="info",
             payload=None, render_id=None,
         ):
-            if event == "scenes_picked" and payload is not None:
-                scenes_picked_payloads.append(dict(payload))
+            if payload is not None:
+                event_log.append({
+                    "event": event,
+                    "payload": json.dumps(payload),
+                })
 
         # Track picker invocations so we can assert exactly one across
         # both cycles.
@@ -625,6 +703,10 @@ class ResumabilityTests(unittest.TestCase):
             "first_render_event": mock.patch.object(
                 media.store, "first_render_event",
                 side_effect=fake_first_render_event,
+            ),
+            "render_events": mock.patch.object(
+                media.store, "render_events_of_type",
+                side_effect=fake_render_events_of_type,
             ),
             "log_render_event": mock.patch.object(
                 media.store, "log_render_event",
@@ -680,10 +762,11 @@ class ResumabilityTests(unittest.TestCase):
             self.assertEqual(len(picker_calls), 1)
 
             # Cycle 2 — reclaim. Picker MUST NOT fire again. Only the
-            # 2 unfinished variants should re-enter i2i; the 3 already
-            # persisted to the story row are skipped at the top of the
-            # loop. If the resumability guard regresses, cycle 2's
-            # delta would be 5 (the original bug's footprint).
+            # 2 unfinished variants should re-enter i2i; the 3 whose
+            # image_saved events this render already logged are skipped
+            # at the top of the loop. If the resumability guard
+            # regresses, cycle 2's delta would be 5 (the original bug's
+            # footprint).
             active = cycle2_results
             media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
 

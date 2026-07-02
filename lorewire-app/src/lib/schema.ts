@@ -137,6 +137,13 @@ export const STORIES: Table = {
     { name: "thumbnail_image", type: "TEXT" },
     { name: "thumbnail_image_landscape", type: "TEXT" },
     { name: "thumbnail_image_square", type: "TEXT" },
+    // 1 when the hero artwork bakes the title into the image itself so
+    // the UI suppresses its CSS title overlay. Written by the Python
+    // cinematic hero path (pipeline/store.py declares the same column
+    // via ALTER); co-declared here — like the four variants above — so
+    // TS-only environments (tests, fresh DBs) can SELECT it in the
+    // homepage/wires projections without the Python boot having run.
+    { name: "hero_has_baked_title", type: "INTEGER" },
     // 2026-06-25 bulk complete-and-publish
     // (_plans/2026-06-25-bulk-complete-and-publish.md). Flag the
     // /api/auto_complete_publish cron watches. 1 = enqueue social
