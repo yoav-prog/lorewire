@@ -28,6 +28,7 @@ import { getBudgetSummary, formatCents } from "@/lib/story-jobs-budget";
 import {
   PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
+  getPublishCalendar,
   getSchedulerOverview,
   listSchedulableStories,
   listUpcomingPublishes,
@@ -43,6 +44,7 @@ import {
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
 import { ReviewActions } from "./_components/ReviewActions";
+import { CalendarPreview } from "./_components/CalendarPreview";
 import { SchedulePostForm } from "./_components/SchedulePostForm";
 import { UpcomingPosts } from "./_components/UpcomingPosts";
 
@@ -101,6 +103,7 @@ export default async function SchedulerPage() {
     reviewRows,
     upcoming,
     schedulable,
+    calendars,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -116,6 +119,7 @@ export default async function SchedulerPage() {
     ),
     listUpcomingPublishes(50),
     listSchedulableStories(50),
+    getPublishCalendar(7),
   ]);
 
   const rendering = gate.reason === "ok";
@@ -292,6 +296,12 @@ export default async function SchedulerPage() {
             <PlatformCard key={p.config.platform} overview={p} />
           ))}
         </div>
+      </section>
+
+      {/* ── Next 7 days ──────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">Next 7 days</h2>
+        <CalendarPreview calendars={calendars} platformLabels={PLATFORM_LABELS} />
       </section>
 
       {/* ── Posting queue ────────────────────────────────────────────── */}

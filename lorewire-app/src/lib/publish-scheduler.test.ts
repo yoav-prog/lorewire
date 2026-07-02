@@ -9,6 +9,7 @@ import { all, run } from "@/lib/db";
 import {
   PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
+  buildCalendarDays,
   cancelScheduledPublish,
   computeNextOpenSlot,
   enumerateSlotInstants,
@@ -404,6 +405,76 @@ describe("scheduleStoryPublish", () => {
     const b = await scheduleStoryPublish("b", { nowMs: now });
     expect(a.outcomes.find((o) => o.platform === "youtube")?.slotLocal).toBe("09:00");
     expect(b.outcomes.find((o) => o.platform === "youtube")?.slotLocal).toBe("13:00");
+  });
+});
+
+describe("buildCalendarDays", () => {
+  const config = {
+    slots: weekly(["09:00", "13:00"], { sat: [] }),
+    timezone: "UTC",
+    dailyCap: 2,
+  };
+
+  it("merges queued posts with projected open slots, ascending, capped", () => {
+    // Wednesday 2026-07-01, 08:00 UTC. One post queued at 09:00.
+    const from = Date.UTC(2026, 6, 1, 8, 0);
+    const days = buildCalendarDays(
+      config,
+      [
+        {
+          storyId: "s1",
+          storyTitle: "Queued",
+          scheduledForIso: new Date(Date.UTC(2026, 6, 1, 9, 0)).toISOString(),
+        },
+      ],
+      from,
+      3,
+    );
+    expect(days).toHaveLength(3);
+    expect(days[0].isToday).toBe(true);
+    expect(days[0].entries.map((e) => [e.kind, e.timeLocal])).toEqual([
+      ["queued", "09:00"],
+      ["open", "13:00"],
+    ]);
+    // Thursday: nothing queued, both slots open (cap 2).
+    expect(days[1].entries.map((e) => [e.kind, e.timeLocal])).toEqual([
+      ["open", "09:00"],
+      ["open", "13:00"],
+    ]);
+  });
+
+  it("projects nothing past the daily cap and nothing in the past", () => {
+    // 10:00: today's 09:00 is gone; two queued posts fill the cap.
+    const from = Date.UTC(2026, 6, 1, 10, 0);
+    const queued = [11, 12].map((h) => ({
+      storyId: `s${h}`,
+      storyTitle: null,
+      scheduledForIso: new Date(Date.UTC(2026, 6, 1, h, 0)).toISOString(),
+    }));
+    const days = buildCalendarDays(config, queued, from, 1);
+    expect(days[0].entries.map((e) => e.kind)).toEqual(["queued", "queued"]);
+  });
+
+  it("shows no open slots on a no-posts weekday but still shows queued rows", () => {
+    // Saturday 2026-07-04 is overridden to no posts; an explicit post
+    // scheduled by hand that day must still appear.
+    const from = Date.UTC(2026, 6, 4, 6, 0);
+    const days = buildCalendarDays(
+      config,
+      [
+        {
+          storyId: "s1",
+          storyTitle: "By hand",
+          scheduledForIso: new Date(Date.UTC(2026, 6, 4, 15, 0)).toISOString(),
+        },
+      ],
+      from,
+      1,
+    );
+    expect(days[0].weekday).toBe("sat");
+    expect(days[0].entries.map((e) => [e.kind, e.timeLocal])).toEqual([
+      ["queued", "15:00"],
+    ]);
   });
 });
 

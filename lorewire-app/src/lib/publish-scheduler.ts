@@ -726,6 +726,155 @@ export async function listSchedulableStories(
   );
 }
 
+// ---- calendar preview --------------------------------------------------
+
+export interface CalendarEntry {
+  /** queued = a real scheduled_publishes row; open = a projected free slot. */
+  kind: "queued" | "open";
+  timeLocal: string;
+  scheduledForIso: string;
+  storyId?: string;
+  storyTitle?: string | null;
+}
+
+export interface CalendarDay {
+  year: number;
+  month: number; // 1-12
+  day: number;
+  weekday: WeekdayKey;
+  isToday: boolean;
+  entries: CalendarEntry[];
+}
+
+export interface QueuedCalendarRow {
+  storyId: string;
+  storyTitle: string | null;
+  scheduledForIso: string;
+}
+
+/**
+ * The next `days` local calendar days for one platform: real queued posts
+ * merged with the open slots automatic scheduling would still fill.
+ * Projected slots stop once queued + projected reaches the daily cap, so
+ * the preview shows what can actually happen, not the raw slot list.
+ * Pure (clock passed in), so DST and weekday behavior are unit testable.
+ */
+export function buildCalendarDays(
+  config: Pick<PlatformConfig, "slots" | "timezone" | "dailyCap">,
+  queued: QueuedCalendarRow[],
+  fromMs: number,
+  days = 7,
+): CalendarDay[] {
+  const startParts = partsInTz(fromMs, config.timezone);
+  const out: CalendarDay[] = [];
+  for (let d = 0; d < days; d++) {
+    const cal = new Date(
+      Date.UTC(startParts.year, startParts.month - 1, startParts.day + d),
+    );
+    const y = cal.getUTCFullYear();
+    const mo = cal.getUTCMonth() + 1;
+    const day = cal.getUTCDate();
+    const weekday = WEEKDAY_KEYS[cal.getUTCDay()];
+    const { startMs, endMs } = tzDayBoundsMs(config.timezone, y, mo, day);
+
+    const entries: CalendarEntry[] = [];
+    const queuedMs = new Set<number>();
+    for (const q of queued) {
+      const ms = Date.parse(q.scheduledForIso);
+      if (!Number.isFinite(ms) || ms < startMs || ms >= endMs) continue;
+      queuedMs.add(ms);
+      const p = partsInTz(ms, config.timezone);
+      entries.push({
+        kind: "queued",
+        timeLocal: `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`,
+        scheduledForIso: q.scheduledForIso,
+        storyId: q.storyId,
+        storyTitle: q.storyTitle,
+      });
+    }
+
+    let capacityLeft = Math.max(0, config.dailyCap - entries.length);
+    for (const local of slotsForWeekday(config.slots, weekday)) {
+      if (capacityLeft <= 0) break;
+      const p = parseSlot(local);
+      if (!p) continue;
+      const ms = wallClockToUtcMs(config.timezone, y, mo, day, p.hour, p.minute);
+      if (ms <= fromMs || queuedMs.has(ms)) continue;
+      entries.push({
+        kind: "open",
+        timeLocal: local,
+        scheduledForIso: new Date(ms).toISOString(),
+      });
+      capacityLeft -= 1;
+    }
+
+    entries.sort((a, b) => a.scheduledForIso.localeCompare(b.scheduledForIso));
+    out.push({ year: y, month: mo, day, weekday, isToday: d === 0, entries });
+  }
+  return out;
+}
+
+export interface PlatformCalendar {
+  platform: PublishPlatform;
+  timezone: string;
+  days: CalendarDay[];
+}
+
+/** Calendar preview for every ENABLED platform: queued posts (any active
+ *  state) within the window plus projected open slots. */
+export async function getPublishCalendar(
+  days = 7,
+  nowMs: number = Date.now(),
+): Promise<PlatformCalendar[]> {
+  const out: PlatformCalendar[] = [];
+  for (const platform of PUBLISH_PLATFORMS) {
+    const config = await getPlatformConfig(platform);
+    if (!config.enabled) continue;
+    const startParts = partsInTz(nowMs, config.timezone);
+    const windowStart = wallClockToUtcMs(
+      config.timezone,
+      startParts.year,
+      startParts.month,
+      startParts.day,
+      0,
+      0,
+    );
+    const windowEnd = windowStart + (days + 1) * 86_400_000;
+    const rows = await all<{
+      story_id: string;
+      title: string | null;
+      scheduled_for: string;
+    }>(
+      `SELECT sp.story_id, s.title, sp.scheduled_for
+       FROM scheduled_publishes sp
+       LEFT JOIN stories s ON s.id = sp.story_id
+       WHERE sp.platform = ?
+         AND sp.state IN ${ACTIVE_STATES_SQL}
+         AND sp.scheduled_for >= ? AND sp.scheduled_for < ?`,
+      [
+        platform,
+        new Date(windowStart).toISOString(),
+        new Date(windowEnd).toISOString(),
+      ],
+    );
+    out.push({
+      platform,
+      timezone: config.timezone,
+      days: buildCalendarDays(
+        config,
+        rows.map((r) => ({
+          storyId: r.story_id,
+          storyTitle: r.title,
+          scheduledForIso: r.scheduled_for,
+        })),
+        nowMs,
+        days,
+      ),
+    });
+  }
+  return out;
+}
+
 // ---- decision log ----------------------------------------------------
 
 export interface SchedulerDecisionInput {
