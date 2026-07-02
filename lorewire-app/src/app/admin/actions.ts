@@ -3352,6 +3352,95 @@ export async function stopAllActiveLiveRunsAction(): Promise<StopAllLiveRunsActi
   return { ok: true, scanned: active.length, stopped };
 }
 
+// 2026-07-03 unified live runs (_plans/2026-07-03-unified-live-runs-and-stop.md).
+// The live page shows EVERY run kind, not just pipeline story jobs:
+// image renders, voice renders, short renders, hero+thumbnail finishers,
+// and refresh-assets chains, in one normalized snapshot next to the
+// pipeline event cards. Filters/search run client-side on the snapshot.
+
+export interface AllRunsSnapshot {
+  /** Pipeline story jobs with their event streams (the existing cards). */
+  jobs: Awaited<
+    ReturnType<typeof import("@/lib/story-jobs-live").listActiveJobsWithEvents>
+  >;
+  /** Everything else, normalized (lib/runs.ts). */
+  runs: import("@/lib/runs").UnifiedRun[];
+}
+
+export async function listAllRunsAction(): Promise<AllRunsSnapshot> {
+  await requireCapability("content.manage");
+  const { listActiveJobsWithEvents } = await import("@/lib/story-jobs-live");
+  const { listUnifiedRuns } = await import("@/lib/runs");
+  const [jobs, runs] = await Promise.all([
+    listActiveJobsWithEvents(),
+    listUnifiedRuns(),
+  ]);
+  const perKind: Record<string, number> = {};
+  for (const r of runs) perKind[r.kind] = (perKind[r.kind] ?? 0) + 1;
+  console.info("[runs list]", { pipeline: jobs.length, ...perKind });
+  return { jobs, runs };
+}
+
+// Per-run Stop for the non-pipeline kinds (pipeline rows keep
+// stopLiveRunAction, which settles every stage of the job). `changed`
+// is false when the row was already settled — the client surfaces that
+// as "nothing to stop" instead of an error.
+export async function stopUnifiedRunAction(
+  kind: import("@/lib/runs").UnifiedRunKind,
+  id: string,
+): Promise<{ ok: boolean; changed: boolean }> {
+  const session = await requireCapability("content.manage");
+  if (!id) return { ok: false, changed: false };
+  const { stopUnifiedRun } = await import("@/lib/runs");
+  const changed = await stopUnifiedRun(
+    kind,
+    id,
+    "Stopped by operator from Live Runs",
+  );
+  console.info("[runs stop]", { kind, id, changed, user_id: session.userId });
+  return { ok: true, changed };
+}
+
+// Bulk STOP RUNS from /admin/content: cancels everything in flight for
+// the selected rows. Stories get the full treatment (images, voice,
+// shorts, pipeline jobs, pending finishers, refresh chains); articles
+// only ever have image renders, so that's all there is to stop.
+export interface BulkStopRunsResult {
+  stories: number;
+  articles: number;
+  counts: import("@/lib/runs").StopRunsCounts;
+}
+
+export async function bulkStopRunsAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkStopRunsResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+  const reason = "Stopped by operator (bulk stop runs)";
+  const storyIds = items.filter((i) => i.kind === "story").map((i) => i.id);
+  const articleIds = items
+    .filter((i) => i.kind === "article")
+    .map((i) => i.id);
+  console.info("[content bulk stop] start", {
+    stories: storyIds.length,
+    articles: articleIds.length,
+    user_id: session.userId,
+  });
+  const { stopRunsForStories } = await import("@/lib/runs");
+  const counts = await stopRunsForStories(storyIds, reason);
+  for (const id of articleIds) {
+    const { cancelled } = await cancelAllImageRendersForOwner(
+      "article",
+      id,
+      reason,
+    );
+    counts.images += cancelled.length;
+  }
+  console.info("[content bulk stop] done", counts);
+  revalidatePath("/admin/content");
+  return { stories: storyIds.length, articles: articleIds.length, counts };
+}
+
 // 2026-06-28 sidebar live-runs badge. Polled at a lower cadence (~15s)
 // across every admin page so the count is visible without staying on
 // the live page. Returns a single integer; never a row payload.
@@ -3820,6 +3909,7 @@ export async function bulkDeleteContentAction(
 
 export type BulkRegenTarget =
   | "hero"
+  | "hero_thumbnail"
   | "scenes"
   | "voice"
   | "pipeline"
@@ -3827,6 +3917,7 @@ export type BulkRegenTarget =
 
 const BULK_REGEN_TARGETS: ReadonlySet<BulkRegenTarget> = new Set([
   "hero",
+  "hero_thumbnail",
   "scenes",
   "voice",
   "pipeline",
@@ -3884,6 +3975,25 @@ export async function bulkRegenerateContentAction(
           ownerKind: "story",
           ownerId: item.id,
           asset: "hero",
+          promptHash: null,
+          requestedBy: session.userId,
+        });
+        revalidateOwnerPanels("story", item.id);
+      } else if (target === "hero_thumbnail") {
+        // 2026-07-03: the full finisher set in one go — clean hero
+        // (portrait + landscape) AND the three title-baked thumbnails,
+        // all i2i'd from the short's character + a picker-chosen scene.
+        // Same queue asset the per-story "Generate hero + thumbnail
+        // from short" button enqueues; five paid calls per story.
+        const pre = await canEnqueueImageRegen("hero_thumbnail_from_short");
+        if (!pre.ok) {
+          failed.push({ ...item, reason: "daily-budget-exceeded" });
+          continue;
+        }
+        await enqueueImageRegen({
+          ownerKind: "story",
+          ownerId: item.id,
+          asset: "hero_thumbnail_from_short",
           promptHash: null,
           requestedBy: session.userId,
         });

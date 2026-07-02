@@ -354,7 +354,7 @@ export function StoriesViewer({ playlist, startId, onClose }: StoriesViewerProps
             ref={videoRef}
             key={`video-${active.id}-${restartToken}`}
             src={active.videoUrl}
-            poster={active.heroImage ?? undefined}
+            poster={active.thumbnailImage ?? active.heroImage ?? undefined}
             muted={muted}
             playsInline
             autoPlay

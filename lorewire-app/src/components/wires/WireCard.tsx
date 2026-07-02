@@ -387,7 +387,11 @@ export default function WireCard({
   }
 
   const videoUrl = short.video_url;
-  const poster = short.hero_image && posterOk ? short.hero_image : null;
+  // Pre-play poster: the title-baked thumbnail (what the homepage cards
+  // show), falling back to the clean hero for wires that pre-date the
+  // finisher.
+  const posterSrc = short.thumbnail_image || short.hero_image;
+  const poster = posterSrc && posterOk ? posterSrc : null;
   const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
 
   // Category chip: prefer the granular tag (matches the category filter);

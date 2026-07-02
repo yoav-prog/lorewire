@@ -494,6 +494,35 @@ class BakeTitleWiringTests(unittest.TestCase):
             )
             media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
         mocks["update_baked"].assert_not_called()
+        # And with NO fresh portrait, the stale-pair guard must not
+        # clear the old landscape either.
+        mocks["update_hero_landscape"].assert_not_called()
+
+    def test_hero_landscape_failure_clears_the_stale_landscape(self):
+        # 2026-07-03 stale-pair guard: portrait lands, landscape i2i
+        # fails. The old landscape must be cleared so the billboard's
+        # 16:9-first fallback shows the fresh portrait, not a previous
+        # run's protagonist (the mismatched hero-vs-cards report).
+        results = iter([
+            "https://kie/hero.png",   # hero portrait lands
+            None,                     # hero landscape FAILS
+            "https://kie/t1.png",
+            "https://kie/t2.png",
+            "https://kie/t3.png",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(
+                self,
+                generate_with_retry=mock.patch.object(
+                    media, "_generate_with_retry",
+                    side_effect=lambda *a, **k: next(results),
+                ),
+            )
+            media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
+        # The only landscape write is the clear — the variant itself
+        # never landed.
+        mocks["update_hero_landscape"].assert_called_once_with("abc123", None)
+        mocks["update_hero"].assert_called_once()
 
 
 class ResumabilityTests(unittest.TestCase):
