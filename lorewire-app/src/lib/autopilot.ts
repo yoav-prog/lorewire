@@ -545,6 +545,44 @@ async function recordAutopilotFailure(
   return true;
 }
 
+// ---- recent auto-publishes ----------------------------------------------
+
+export interface RecentAutoPublish {
+  storyId: string;
+  title: string | null;
+  status: string;
+  decidedAt: string;
+}
+
+/** The latest stories autopilot published, newest first, for the
+ *  scheduler page's retract list. Status comes along so an already
+ *  retracted story shows as archived instead of offering a second
+ *  retract. */
+export async function listRecentAutoPublishes(
+  limit = 10,
+): Promise<RecentAutoPublish[]> {
+  const rows = await all<{
+    story_id: string;
+    title: string | null;
+    status: string;
+    decided_at: string;
+  }>(
+    `SELECT d.story_id, s.title, s.status, d.decided_at
+     FROM scheduler_decisions d
+     JOIN stories s ON s.id = d.story_id
+     WHERE d.decision = 'auto_approved'
+     ORDER BY d.decided_at DESC
+     LIMIT ?`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    storyId: r.story_id,
+    title: r.title,
+    status: r.status,
+    decidedAt: r.decided_at,
+  }));
+}
+
 // ---- admin overview ----------------------------------------------------
 
 export interface AutopilotStatus {

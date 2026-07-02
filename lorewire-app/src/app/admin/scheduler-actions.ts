@@ -23,6 +23,7 @@ import {
   resetAutopilotFailures,
   type AutopilotMode,
 } from "@/lib/autopilot";
+import { retractStory, type RetractResult } from "@/lib/retract-story";
 import {
   PUBLISH_PLATFORMS,
   cancelScheduledPublish,
@@ -247,6 +248,38 @@ export async function schedulerCancelPublishAction(
   }
   revalidatePath("/admin/scheduler");
   return { ok: true };
+}
+
+/**
+ * Recall a story everywhere: cancel queued posts, pull it off the site,
+ * delete the platform posts that APIs allow deleting (TikTok reports
+ * back for manual removal). Destructive; the UI confirms before calling.
+ */
+export async function schedulerRetractStoryAction(
+  storyId: string,
+): Promise<RetractResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) {
+    return {
+      ok: false,
+      error: "missing story id",
+      cancelledQueued: 0,
+      archived: false,
+      platforms: [],
+    };
+  }
+  const result = await retractStory(storyId);
+  console.info("[scheduler retract]", {
+    storyId,
+    actorId: session.userId,
+    ok: result.ok,
+    cancelledQueued: result.cancelledQueued,
+    archived: result.archived,
+    platforms: result.platforms.map((p) => `${p.platform}:${p.status}`),
+  });
+  revalidatePath("/admin/scheduler");
+  revalidatePath(`/admin/stories/${storyId}`);
+  return result;
 }
 
 /**

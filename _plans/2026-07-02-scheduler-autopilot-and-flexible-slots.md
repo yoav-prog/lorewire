@@ -116,14 +116,16 @@ Five-advisor council + anonymous peer review. Consensus findings folded in:
   - `autopilot.mode`: `off | shadow | live` (`off`)
   - `autopilot.daily_limit`: int (`1`)
   - internal: `autopilot.consecutive_failures`, `autopilot.tripped_at`
-- **Pull tick** (inside the existing `/api/render_enqueue` cron handler, after
-  the normal drip): if mode != off AND non-autopilot review count == 0 AND
-  today's autopilot pulls < daily_limit AND budget gate open AND sources with
+- **Pull tick** (in the new `/api/autopilot_tick` cron, every 2 min, before
+  the approve tick — one dedicated route keeps autopilot's switch, logs, and
+  failure surface independent of the render drip): if mode != off AND
+  non-autopilot review count == 0 AND today's autopilot pulls < daily_limit
+  AND budget gate open AND review headroom exists AND sources with
   `strength='strong'` exist → `bulkEnqueueStoryJobs(..., {requested_by:
   'autopilot'})` for the shortfall. Pull count = story_jobs rows with
   `requested_by='autopilot'` requested today (platform timezone-agnostic: UTC
   day, documented).
-- **Auto-approve tick** (new `/api/autopilot_approve` cron, every 2 min):
+- **Auto-approve tick** (same `/api/autopilot_tick` cron, after the pull):
   - mode must be `live`; skip entirely in shadow.
   - candidates: stories in `status='review'` whose story_job has
     `requested_by='autopilot'`.

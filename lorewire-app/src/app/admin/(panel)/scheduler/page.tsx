@@ -29,6 +29,7 @@ import {
   AUTOPILOT_DEFAULTS,
   AUTOPILOT_SETTING_KEYS,
   getAutopilotStatus,
+  listRecentAutoPublishes,
 } from "@/lib/autopilot";
 import {
   PUBLISH_DEFAULTS,
@@ -47,6 +48,7 @@ import {
   SettingToggle,
 } from "@/app/admin/(panel)/settings/_components/SettingControls";
 import { AutopilotModeSelect } from "./_components/AutopilotModeSelect";
+import { RecentAutoPublishes } from "./_components/RecentAutoPublishes";
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
 import { ReviewActions } from "./_components/ReviewActions";
@@ -115,6 +117,7 @@ export default async function SchedulerPage() {
     schedulable,
     calendars,
     autopilot,
+    recentAutoPublishes,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -137,6 +140,7 @@ export default async function SchedulerPage() {
     listSchedulableStories(50),
     getPublishCalendar(7),
     getAutopilotStatus(),
+    listRecentAutoPublishes(10),
   ]);
 
   const rendering = gate.reason === "ok";
@@ -309,6 +313,21 @@ export default async function SchedulerPage() {
               placeholder="you@example.com"
             />
           </>
+        )}
+        {(autopilot.mode !== "off" || recentAutoPublishes.length > 0) && (
+          <div>
+            <div className="mb-2 text-[13px] font-semibold text-ink">
+              Published by autopilot
+            </div>
+            <RecentAutoPublishes
+              items={recentAutoPublishes.map((r) => ({
+                storyId: r.storyId,
+                title: r.title || r.storyId,
+                status: r.status,
+                whenLabel: ageLabel(r.decidedAt),
+              }))}
+            />
+          </div>
         )}
       </section>
 
