@@ -14,6 +14,7 @@ import {
 } from "@/lib/rate-limit";
 import { verifyMfaForLogin } from "@/lib/users";
 import { randomUUID } from "node:crypto";
+import { isHeroStyleId } from "@/lib/hero-styles";
 import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
 import {
@@ -925,13 +926,10 @@ const SETTING_VALUE_VALIDATORS: Record<
   // plus the empty string which the resolver reads as "fall through".
   // Per rule 13: closed-enum validation here is the safety net
   // against a tampered client poisoning the prompt downstream.
+  // hero.category_default.<cat> keys are validated by prefix in
+  // saveSettingAction — the category set is DB-driven now, so a static
+  // per-key entry list would go stale the moment a category is added.
   "hero.global_style_id": makeHeroStyleIdValidator(),
-  "hero.category_default.entitled": makeHeroStyleIdValidator(),
-  "hero.category_default.drama": makeHeroStyleIdValidator(),
-  "hero.category_default.humor": makeHeroStyleIdValidator(),
-  "hero.category_default.wholesome": makeHeroStyleIdValidator(),
-  "hero.category_default.dating": makeHeroStyleIdValidator(),
-  "hero.category_default.roommate": makeHeroStyleIdValidator(),
   // 2026-06-17 outro tail-pad fix. Bounded so a typo can't produce a
   // half-hour silent gap; matches the Python-side clamp in
   // pipeline/segments.py:resolve_outro_lead_in_sec.
@@ -984,30 +982,14 @@ export async function saveStoryHeroStyleAction(
   revalidatePath(`/admin/stories/${storyId}`);
 }
 
-/** Per-category settings keys for the hero style registry resolution chain.
- *  Lowercased category names match what the resolver in
- *  `pipeline/stages.py:resolve_hero_style` reads. Centralised so the
- *  picker UI + the validator + the per-category read loop all agree on
- *  one source of truth. */
-const HERO_CATEGORY_DEFAULT_KEYS = [
-  "hero.category_default.entitled",
-  "hero.category_default.drama",
-  "hero.category_default.humor",
-  "hero.category_default.wholesome",
-  "hero.category_default.dating",
-  "hero.category_default.roommate",
-] as const;
 
 /** Validator factory for hero style id settings. Accepts an empty
  *  string (= "clear this layer") or a known style id; rejects
  *  everything else so a tampered client can't poison the prompt
- *  downstream. Lazily imports the registry so the action file stays
- *  cheap to load. */
+ *  downstream. */
 function makeHeroStyleIdValidator() {
   return (raw: string): string | null => {
     if (raw === "") return "";
-    // eslint-disable-next-line @typescript-eslint/no-require-imports -- closed-enum lookup, no need for the whole module
-    const { isHeroStyleId } = require("@/lib/hero-styles") as typeof import("@/lib/hero-styles");
     return isHeroStyleId(raw) ? raw : null;
   };
 }
@@ -1015,8 +997,9 @@ function makeHeroStyleIdValidator() {
 export interface HeroStyleSettingsSnapshot {
   /** Empty string when unset. The picker treats empty as "Auto-pick / use default". */
   globalStyleId: string;
-  /** Per-category default lookups keyed by the lowercased Cat name. Empty
-   *  string when unset. */
+  /** Per-category default lookups keyed by the lowercased category label
+   *  (the same derivation heroCategoryDefaultKey uses). Empty string when
+   *  unset. Covers the ACTIVE DB categories. */
   categoryDefaults: Record<string, string>;
   /** Each style's pre-generated preview URL, keyed by style id. Null
    *  means step 3 hasn't run for that style yet — the picker shows a
@@ -1025,24 +1008,30 @@ export interface HeroStyleSettingsSnapshot {
 }
 
 /** Read everything the hero style picker needs in one round trip — the
- *  global default, every per-category default, and every pre-generated
- *  thumbnail URL. Callers (the settings page; the per-story edit page
- *  in step 5) render off the snapshot without re-querying. */
+ *  global default, every per-category default (for the active DB
+ *  category set), and every pre-generated thumbnail URL. Callers (the
+ *  settings page; the per-story edit page in step 5) render off the
+ *  snapshot without re-querying. */
 export async function loadHeroStyleSettings(): Promise<HeroStyleSettingsSnapshot> {
   await requireCapability("content.manage");
   const { HERO_STYLES } = await import("@/lib/hero-styles");
+  const { listCategories } = await import("@/lib/categories/repo");
+  const { heroCategoryDefaultKey } = await import("@/lib/category-settings");
   const styleIds = HERO_STYLES.map((s) => s.id);
+  const categoryKeys = (await listCategories()).map((c) =>
+    heroCategoryDefaultKey(c.label),
+  );
 
   const [globalStyleId, ...categoryValues] = await Promise.all([
     getSetting("hero.global_style_id"),
-    ...HERO_CATEGORY_DEFAULT_KEYS.map((k) => getSetting(k)),
+    ...categoryKeys.map((k) => getSetting(k)),
   ]);
   const thumbnailValues = await Promise.all(
     styleIds.map((id) => getSetting(`hero.thumbnail.${id}`)),
   );
 
   const categoryDefaults: Record<string, string> = {};
-  HERO_CATEGORY_DEFAULT_KEYS.forEach((key, idx) => {
+  categoryKeys.forEach((key, idx) => {
     const cat = key.replace("hero.category_default.", "");
     categoryDefaults[cat] = (categoryValues[idx] ?? "") || "";
   });
@@ -1065,7 +1054,14 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
   const key = String(formData.get("key") ?? "");
   if (!key) return;
   const rawValue = String(formData.get("value") ?? "");
-  const validator = SETTING_VALUE_VALIDATORS[key];
+  // Prefix match for the per-category hero defaults: the category set is
+  // DB-driven, so the style-id validator applies to every
+  // hero.category_default.* key rather than a fixed six-entry list.
+  const validator =
+    SETTING_VALUE_VALIDATORS[key] ??
+    (key.startsWith("hero.category_default.")
+      ? makeHeroStyleIdValidator()
+      : undefined);
   const value = validator ? validator(rawValue) : rawValue;
   if (value === null) {
     console.warn(

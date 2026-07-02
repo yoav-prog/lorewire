@@ -1,6 +1,6 @@
 import { requireCapability } from "@/lib/dal";
 import { getSetting } from "@/lib/repo";
-import { CATEGORY_LABELS } from "@/lib/categories/manifest";
+import { listCategories } from "@/lib/categories/repo";
 import SettingsShell from "@/app/admin/SettingsShell";
 import SettingsSection from "@/app/admin/SettingsSection";
 import {
@@ -75,10 +75,11 @@ import {
 //
 // Plan: _plans/2026-06-24-youtube-and-tiktok-auto-publish-and-socials-admin.md.
 
-// Per-category tag/hashtag settings iterate the shared category set
-// (alphabetical), from the manifest so this can't drift (see
-// @/lib/categories/manifest).
-const SHORT_CATEGORIES = [...CATEGORY_LABELS].sort();
+// Per-category tag/hashtag settings iterate the ACTIVE DB categories
+// (alphabetical, fetched per request inside the page) — the publishers
+// resolve `publisher.<platform>.<field>.<label>` with the story's
+// granular label, so rows for the retired legacy six would never match.
+// Plan: _plans/2026-07-02-per-category-settings-granular.md.
 
 const YT_PRIVACY_OPTIONS: ChipOption<string>[] = [
   {
@@ -144,6 +145,10 @@ function readToggle(raw: string | null, defaultOn = false): boolean {
 
 export default async function SocialsSettingsPage() {
   await requireCapability("settings.manage");
+
+  const SHORT_CATEGORIES = (await listCategories())
+    .map((c) => c.label)
+    .sort();
 
   // Facebook block.
   const [fbAutoPublishRaw, fbCaptionTemplateRaw, fbStoryAutoPublishRaw] =
