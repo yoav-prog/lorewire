@@ -61,8 +61,10 @@ import {
 } from "@/components/stories/stories-playlist";
 import { useStoriesUrlState } from "@/components/stories/use-stories-url-state";
 import { useViewedWires } from "@/components/stories/use-viewed-wires";
+import Ccm19Bridge from "@/components/Ccm19Bridge";
 import CookieConsent from "@/components/CookieConsent";
 import CrossDeviceNudge from "@/components/CrossDeviceNudge";
+import { CCM19_ENABLED } from "@/lib/ccm19";
 import SignInChip from "@/components/SignInChip";
 import SiteFooter from "@/components/SiteFooter";
 import { CommentsTab } from "@/components/CommentsTab";
@@ -2559,15 +2561,17 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
 // call so the first paint already shows the correct hero + rails. See
 // _plans/2026-06-18-homepage-no-flash-ssr.md.
 export default function AppShell({ initial }: { initial: HomepageInitial }) {
-  // CookieConsent + CrossDeviceNudge both mount at the shell level so
-  // they're shared across the mobile and desktop adapters — one banner,
-  // one nudge, one decision, one source of truth. Both are fixed-position
-  // so they float over whichever subview is rendered. The banner's own
-  // visibility logic handles SSR (renders nothing) and the grandfather
-  // branch (silent accept for existing users with prior persisted state).
-  // The nudge's own visibility logic handles the first-save trigger,
-  // 7-day snooze, and signed-in skip. Plan:
-  // _plans/2026-06-19-anonymous-first-auth.md.
+  // The consent surface + CrossDeviceNudge both mount at the shell level
+  // so they're shared across the mobile and desktop adapters — one banner,
+  // one nudge, one decision, one source of truth. With CCM19 enabled
+  // (NEXT_PUBLIC_CCM19_SRC set) the CCM19 widget is the banner and
+  // Ccm19Bridge syncs its choices into lw_consent; otherwise the
+  // first-party CookieConsent banner runs, whose visibility logic handles
+  // SSR (renders nothing) and the grandfather branch (silent accept for
+  // existing users with prior persisted state). The nudge's own
+  // visibility logic handles the first-save trigger, 7-day snooze, and
+  // signed-in skip. Plans: _plans/2026-06-19-anonymous-first-auth.md,
+  // _plans/2026-07-02-gdpr-ccm19-consent.md.
   return (
     <>
       <div className="lg:hidden">
@@ -2576,7 +2580,7 @@ export default function AppShell({ initial }: { initial: HomepageInitial }) {
       <div className="hidden lg:block">
         <DesktopShell initial={initial} />
       </div>
-      <CookieConsent />
+      {CCM19_ENABLED ? <Ccm19Bridge /> : <CookieConsent />}
       <CrossDeviceNudge session={initial.session} />
     </>
   );
