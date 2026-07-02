@@ -13,7 +13,9 @@
 // 'done', story.status flips to 'published', autocurate fires, the
 // Facebook publisher cron catches the new published row on its next
 // tick. On not-ready: row to 'failed' with the missing-list captured so
-// the admin can see why and re-process.
+// the admin can see why and re-process, plus an admin notification
+// (lib/admin-notifications) so the failure is visible in the
+// Notifications inbox without digging into job rows.
 //
 // Auth: CRON_SECRET Bearer (same as retry_facebook_publishes /
 // render_short). Race: two concurrent firings COULD pick up the same row
@@ -28,6 +30,7 @@ import "server-only";
 import { NextResponse, type NextRequest } from "next/server";
 import { all, run } from "@/lib/db";
 import { publishStoryIfReady } from "@/lib/auto-publish";
+import { notifyAdmin } from "@/lib/admin-notifications";
 
 // Cap per cron firing. Each row is a publish + autocurate + 5 revalidate
 // paths; 25 is generous for the realistic queue depth (a Process-N of
@@ -118,6 +121,25 @@ async function serve(req: NextRequest): Promise<NextResponse> {
           reddit_id: row.reddit_id,
           reason: result.reason,
           missing: result.reason === "not_ready" ? result.missing : undefined,
+        });
+        // A blocked row is terminal for this drain (single attempt per
+        // pending row) — surface it in the admin Notifications inbox so
+        // the operator doesn't have to spot it in job-row error text.
+        // notifyAdmin never throws. Plan:
+        // _plans/2026-07-02-never-publish-without-video.md.
+        await notifyAdmin({
+          severity: "error",
+          source: "full-pipeline",
+          subjectKind: "story",
+          subjectId: row.story_id ?? row.reddit_id,
+          title: "Full-pipeline story did not auto-publish",
+          detail: {
+            reason: result.reason,
+            missing: result.reason === "not_ready" ? result.missing : undefined,
+            job_id: row.id,
+            reddit_id: row.reddit_id,
+          },
+          dedupeKey: `full-pipeline-blocked:${row.id}`,
         });
       }
     } catch (e) {

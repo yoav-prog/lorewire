@@ -465,6 +465,18 @@ export async function createStory(input: CreateStoryInput): Promise<void> {
 // Reddit thread — which contradicts "every story is from Reddit".
 // Throwing here means the admin's publish click reports the failure
 // instead of silently shipping a dummy row.
+//
+// The flip to 'published' additionally requires a non-empty video_url —
+// the last line of defense behind evaluateAssetCompleteness's gate. On
+// 2026-07-02 two stories went live with finished renders in storage but
+// a NULL video_url, so the public Watch tab had nothing to play. Any
+// pipeline/Reddit path that reaches this write without a playable video
+// is a bug upstream, and failing closed here is the point.
+// Submission-origin stories are exempt: the poll-only approval mode
+// publishes them as text polls with no render spend BY DESIGN
+// (lib/submission-promote.ts, plan 2026-06-29-user-submitted-stories.md),
+// the same early-return that already exempts them from the fixture
+// guard. Plan: _plans/2026-07-02-never-publish-without-video.md.
 const FIXTURE_PLACEHOLDER_IDS = new Set([
   "envelope",
   "example",
@@ -475,14 +487,18 @@ const FIXTURE_PLACEHOLDER_IDS = new Set([
 ]);
 const FIXTURE_DRY_RUN_BODY_MARKER = "[DRY RUN ARTICLE]";
 
-async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
+async function assertStoryReadyForPublicStatus(
+  id: string,
+  targetStatus: StoryStatus,
+): Promise<void> {
   const row = await one<{
     reddit_id: string | null;
     submission_id: string | null;
     source_url: string | null;
     body: string | null;
+    video_url: string | null;
   }>(
-    "SELECT reddit_id, submission_id, source_url, body FROM stories WHERE id = ?",
+    "SELECT reddit_id, submission_id, source_url, body, video_url FROM stories WHERE id = ?",
     [id],
   );
   if (!row) {
@@ -491,8 +507,10 @@ async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
     );
   }
   // User-submission origin: vetted by moderation + human approval, not a Reddit
-  // dry-run fixture. The guard below targets fixture Reddit rows and does not
-  // apply here. Plan: 2026-06-29-user-submitted-stories.md (Phase 3).
+  // dry-run fixture, and legitimately publishable WITHOUT a video (the
+  // poll-only approval mode). Neither the fixture guard nor the media
+  // invariant below applies. Plan: 2026-06-29-user-submitted-stories.md
+  // (Phase 3) + 2026-07-02-never-publish-without-video.md.
   if (row.submission_id) return;
   const redditId = row.reddit_id?.toLowerCase() ?? "";
   if (!redditId || FIXTURE_PLACEHOLDER_IDS.has(redditId)) {
@@ -511,12 +529,23 @@ async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
       `[stories repo] cannot publish story id=${id}: body is a dry-run fixture`,
     );
   }
+  // Publish-time media invariant. Last of the checks so the more
+  // specific fixture errors above keep their messages. 'ready' is
+  // exempt: a story may be reviewed-ready while its render is queued.
+  if (
+    targetStatus === "published" &&
+    (!row.video_url || row.video_url.trim() === "")
+  ) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: video_url is empty — render the short and apply it before publishing`,
+    );
+  }
 }
 
 export async function setStatus(id: string, status: StoryStatus): Promise<void> {
   const now = new Date().toISOString();
   if (status === "ready" || status === "published") {
-    await assertStoryReadyForPublicStatus(id);
+    await assertStoryReadyForPublicStatus(id, status);
   }
   if (status === "published") {
     await run(

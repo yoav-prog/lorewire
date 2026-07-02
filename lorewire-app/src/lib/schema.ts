@@ -1557,6 +1557,35 @@ export const STORY_TAGS: Table = {
   ],
 };
 
+// 2026-07-02 admin notifications inbox
+// (_plans/2026-07-02-never-publish-without-video.md). Append-only feed of
+// failures the operator must see — written by the auto-publish drains when
+// a story could NOT go live (attempt cap reached / gate blocked), read by
+// the /admin/notifications page + the sidebar unread badge. `severity` is
+// 'error' | 'warning'; `source` names the writing subsystem
+// ('auto-publish' | 'full-pipeline'); `subject_kind`/`subject_id` link the
+// row to the thing that failed (today always 'story'). `detail` is a JSON
+// blob of writer-specific context (missing gates, attempt counts).
+// `dedupe_key`: a writer that retries (cron ticks) reuses one key so the
+// inbox gets ONE unread row per stuck subject, not one per tick; rows the
+// operator already read don't suppress a fresh occurrence. `read_at` NULL =
+// unread. TS-owned table — the Python pipeline neither reads nor writes it.
+export const ADMIN_NOTIFICATIONS: Table = {
+  name: "admin_notifications",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "created_at", type: "TEXT" },
+    { name: "severity", type: "TEXT" },
+    { name: "source", type: "TEXT" },
+    { name: "subject_kind", type: "TEXT" },
+    { name: "subject_id", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "detail", type: "TEXT" },
+    { name: "dedupe_key", type: "TEXT" },
+    { name: "read_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
   SETTINGS,
@@ -1608,6 +1637,7 @@ export const TABLES: Table[] = [
   TIKTOK_POSTS,
   SCHEDULED_PUBLISHES,
   SCHEDULER_DECISIONS,
+  ADMIN_NOTIFICATIONS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -1922,4 +1952,13 @@ export const POST_TABLE_DDL: string[] = [
   // filter by platform and scheduled_for range.
   "CREATE INDEX IF NOT EXISTS idx_scheduled_publishes_platform_time " +
     "ON scheduled_publishes(platform, scheduled_for)",
+  // 2026-07-02 admin notifications. Two hot reads: the sidebar badge
+  // counts unread rows on a 15s poll across every admin screen, and the
+  // writer's dedupe check looks up an unread row by dedupe_key. Both are
+  // partial on the (small) unread set. TS-owned table — not mirrored in
+  // pipeline/store.py.
+  "CREATE INDEX IF NOT EXISTS idx_admin_notifications_unread " +
+    "ON admin_notifications(created_at) WHERE read_at IS NULL",
+  "CREATE INDEX IF NOT EXISTS idx_admin_notifications_dedupe " +
+    "ON admin_notifications(dedupe_key) WHERE read_at IS NULL",
 ];

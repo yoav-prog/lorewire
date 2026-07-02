@@ -25,6 +25,7 @@ interface SeedOverrides {
   thumbnail_image_square?: string | null;
   status?: string;
   short_config?: object | null;
+  video_url?: string | null;
 }
 
 const COMPLETE_SHORT_CONFIG = {
@@ -68,14 +69,18 @@ async function seedComplete(overrides: SeedOverrides = {}): Promise<void> {
     overrides.short_config === null
       ? null
       : JSON.stringify(overrides.short_config ?? COMPLETE_SHORT_CONFIG);
+  const videoUrl =
+    overrides.video_url === null
+      ? null
+      : overrides.video_url ?? "https://example.com/short.mp4";
 
   await run(
     `INSERT INTO stories
        (id, category, title, status, body, hero_image,
         hero_image_landscape, thumbnail_image, thumbnail_image_landscape,
-        thumbnail_image_square, short_config, created_at, updated_at)
-     VALUES (?, 'Drama', 'T', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [STORY_ID, status, body, hero, heroLand, thumb, thumbLand, thumbSq, shortConfig, now, now],
+        thumbnail_image_square, short_config, video_url, created_at, updated_at)
+     VALUES (?, 'Drama', 'T', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [STORY_ID, status, body, hero, heroLand, thumb, thumbLand, thumbSq, shortConfig, videoUrl, now, now],
   );
 
   // short_render row representing a completed assembly — what the
@@ -114,6 +119,7 @@ describe("evaluateAssetCompleteness", () => {
     expect(r.details.body_present).toBe(true);
     expect(r.details.hero_image_present).toBe(true);
     expect(r.details.short_render_present).toBe(true);
+    expect(r.details.video_url_present).toBe(true);
     expect(r.details.voiceover_present).toBe(true);
     expect(r.details.poll_present_and_enabled).toBe(true);
     expect(r.details.scenes_with_url).toBe(r.details.scenes_total);
@@ -157,6 +163,27 @@ describe("evaluateAssetCompleteness", () => {
     await run("UPDATE short_renders SET status = 'rendering' WHERE story_id = ?", [STORY_ID]);
     const r = await evaluateAssetCompleteness(STORY_ID);
     expect(r.missing).toContain("short_render");
+  });
+
+  // The 2026-07-02 incident: a done render existed in storage but the
+  // copy onto stories.video_url was missed, and the gate let the story
+  // publish with nothing for the public reader to play. The gate must
+  // require the column itself, independent of the render row.
+  // Plan: _plans/2026-07-02-never-publish-without-video.md.
+  it("flags video_url when NULL even though a done short render exists", async () => {
+    await seedComplete({ video_url: null });
+    const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.details.short_render_present).toBe(true);
+    expect(r.missing).toContain("video_url");
+    expect(r.details.video_url_present).toBe(false);
+    expect(r.ready).toBe(false);
+  });
+
+  it("flags video_url when it is an empty string", async () => {
+    await seedComplete({ video_url: "" });
+    const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.missing).toContain("video_url");
+    expect(r.ready).toBe(false);
   });
 
   it("does NOT flag voiceover when short_render is done, even if short_config has no voiceover_url", async () => {

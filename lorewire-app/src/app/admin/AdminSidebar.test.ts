@@ -125,8 +125,9 @@ describe("buildGroups", () => {
     // curation (2026-06-16), Polls (2026-06-18), the Users area (2026-06-22,
     // capability-gated), Comments (2026-06-22, gated under content.manage), the
     // Live runs aggregator (2026-06-28, nested under Reddit Sources), the
-    // one-time Migrate + Compress media tools (2026-06-22), and the category
-    // Reclassify tool (2026-07-01, after Homepage). Each insertion
+    // one-time Migrate + Compress media tools (2026-06-22), the category
+    // Reclassify tool (2026-07-01, after Homepage), and the failure
+    // Notifications inbox (2026-07-02, right after Overview). Each insertion
     // sits between Content and the trailing Settings / Migrate / Compress block.
     // With no caps passed, every item shows. This test pins membership + order.
     for (const dev of [false, true]) {
@@ -134,6 +135,7 @@ describe("buildGroups", () => {
       expect(groups[0].label).toBeNull();
       expect(groups[0].items.map((i) => i.label)).toEqual([
         "Overview",
+        "Notifications",
         "Content",
         "Reddit Sources",
         "Live runs",

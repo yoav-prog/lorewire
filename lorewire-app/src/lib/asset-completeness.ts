@@ -24,6 +24,17 @@
 //      finish without them). So gates 4 below are SUPPRESSED when
 //      this gate passes — we trust the render over the editor blob.
 //
+//   3b. stories.video_url — the column the public reader actually
+//      plays. A done short_renders row proves the video EXISTS in
+//      storage; this gate proves the story can PLAY it. The copy from
+//      short_renders.output_url onto the story row (pipeline finisher /
+//      applyShortToStory) is a separate write that can be missed — on
+//      2026-07-02 two stories published with finished renders in GCS
+//      but a NULL video_url, shipping a video story with no video.
+//      Callers that hit this gate with a done render present should
+//      self-heal via applyLatestDoneShortToStory (both publish drains
+//      do). Plan: _plans/2026-07-02-never-publish-without-video.md.
+//
 //   4. Voiceover + every scene image — only checked when the short
 //      itself is missing, as informational hints so the operator
 //      knows which sub-asset to re-enqueue. Suppressing these when
@@ -70,6 +81,7 @@ export type AssetGate =
   | "thumbnail_image_landscape"
   | "thumbnail_image_square"
   | "short_render"
+  | "video_url"
   | "voiceover"
   | "scene_images"
   | "poll"
@@ -91,6 +103,7 @@ export interface AssetCompleteness {
     thumbnail_image_landscape_present: boolean;
     thumbnail_image_square_present: boolean;
     short_render_present: boolean;
+    video_url_present: boolean;
     voiceover_present: boolean;
     scenes_with_url: number;
     scenes_total: number;
@@ -188,6 +201,11 @@ export async function evaluateAssetCompleteness(
     !!render && render.status === "done" && !!render.output_url;
   if (!shortRenderPresent) missing.push("short_render");
 
+  // stories.video_url — what /v/[slug] actually plays. Required
+  // independently of the render row above; see gate 3b in the header.
+  const videoUrlPresent = nonEmpty(story.video_url);
+  if (!videoUrlPresent) missing.push("video_url");
+
   // Voiceover + scene images are INPUTS to the short render. A
   // completed short_renders row is the proof that both existed at
   // render time, so we trust the render and skip the sub-checks.
@@ -233,6 +251,7 @@ export async function evaluateAssetCompleteness(
       ),
       thumbnail_image_square_present: nonEmpty(thumbs.thumbnail_image_square),
       short_render_present: shortRenderPresent,
+      video_url_present: videoUrlPresent,
       voiceover_present: sceneState.voiceoverPresent,
       scenes_with_url: sceneState.scenesWithUrl,
       scenes_total: sceneState.scenesTotal,
@@ -327,6 +346,7 @@ function emptyDetails(
       thumbnail_image_landscape_present: false,
       thumbnail_image_square_present: false,
       short_render_present: false,
+      video_url_present: false,
       voiceover_present: false,
       scenes_with_url: 0,
       scenes_total: 0,

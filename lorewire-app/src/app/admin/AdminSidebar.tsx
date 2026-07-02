@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { Capability } from "@/lib/authz";
 import SidebarLiveBadge from "./SidebarLiveBadge";
+import SidebarNotificationsBadge from "./SidebarNotificationsBadge";
 import SidebarSubmissionsBadge from "./SidebarSubmissionsBadge";
 
 // Studio sidebar. Three primary destinations: Overview, Content, Settings.
@@ -62,6 +63,18 @@ const STATIC_GROUPS: SidebarGroup[] = [
     label: null,
     items: [
       { href: "/admin", label: "Overview", exact: true },
+      {
+        // 2026-07-02 failure inbox: everything that needed a human and
+        // could not complete (auto-publish give-ups, blocked full-
+        // pipeline rows). The badge shows the unread count so a failure
+        // is glanceable from any admin screen. Plan:
+        // _plans/2026-07-02-never-publish-without-video.md.
+        href: "/admin/notifications",
+        label: "Notifications",
+        activePrefixes: ["/admin/notifications"],
+        capability: "content.manage",
+        slot: <SidebarNotificationsBadge />,
+      },
       {
         href: "/admin/content",
         label: "Content",

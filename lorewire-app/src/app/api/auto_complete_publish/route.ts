@@ -12,10 +12,12 @@
 // double-posts. Then clear the flag.
 //
 // Not-ready rows: increment auto_publish_attempts. If the per-story
-// cap is reached, clear the flag + log the give-up so the operator
-// sees the stuck story in observability. The cap prevents a
-// permanently-broken asset (an exhausted external API key, a
-// silently-failing render lane) from piling up infinite cron work.
+// cap is reached, clear the flag, log the give-up, and write an
+// admin notification (lib/admin-notifications) so the operator sees
+// the stuck story in the Notifications inbox — not just in Vercel
+// logs. The cap prevents a permanently-broken asset (an exhausted
+// external API key, a silently-failing render lane) from piling up
+// infinite cron work.
 //
 // Auth: CRON_SECRET Bearer, same pattern as
 // auto_publish_full_pipeline + every retry_* cron in the project.
@@ -29,7 +31,11 @@ import { all, one, run } from "@/lib/db";
 import { getStory, getSetting, setStatus, type SocialPlatform } from "@/lib/repo";
 import { evaluateAssetCompleteness } from "@/lib/asset-completeness";
 import { autoDraftPollForSubject } from "@/lib/poll-autodraft";
-import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
+import {
+  applyLatestDoneShortToStory,
+  latestDoneShortRenderForStory,
+} from "@/lib/short-render-queue";
+import { notifyAdmin } from "@/lib/admin-notifications";
 import { ensureSeoMetadataForStory } from "@/lib/seo-metadata";
 import { autoCurateOnPublish } from "@/lib/publish-auto-curate";
 import { publishShortToFacebook } from "@/lib/publish-to-facebook";
@@ -171,6 +177,35 @@ async function serve(req: NextRequest): Promise<NextResponse> {
         missing: completeness.missing,
       });
 
+      // Self-heal the "render done, copy missed" gap: the short
+      // finished (video exists in storage) but stories.video_url never
+      // received its output_url — the 2026-07-02 incident shipped two
+      // stories to production this way. Apply the latest done render
+      // and re-run the gate. Plan:
+      // _plans/2026-07-02-never-publish-without-video.md.
+      if (
+        !completeness.ready &&
+        completeness.missing.includes("video_url")
+      ) {
+        try {
+          const applied = await applyLatestDoneShortToStory(row.id);
+          namespacedLog("video_url_heal", { story_id: row.id, applied });
+          if (applied) {
+            completeness = await evaluateAssetCompleteness(row.id);
+            namespacedLog("gate_after_video_url_heal", {
+              story_id: row.id,
+              ready: completeness.ready,
+              missing: completeness.missing,
+            });
+          }
+        } catch (e) {
+          namespacedLog("video_url_heal_error", {
+            story_id: row.id,
+            message: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
       // Already-published shouldn't happen given the WHERE clause
       // above, but the gate's belt-and-suspenders check guards
       // against the race where setStatus was called between the
@@ -234,6 +269,20 @@ async function serve(req: NextRequest): Promise<NextResponse> {
             story_id: row.id,
             attempts,
             last_missing: completeness.missing,
+          });
+          // The give-up clears the flag and resets the counter, so the
+          // failure evidence vanishes from the queue tables. Persist it
+          // where the operator will see it — the admin Notifications
+          // inbox. notifyAdmin never throws; a notification failure
+          // must not break the drain.
+          await notifyAdmin({
+            severity: "error",
+            source: "auto-publish",
+            subjectKind: "story",
+            subjectId: row.id,
+            title: `Story did not publish — gave up after ${attempts} attempts`,
+            detail: { missing: completeness.missing, attempts },
+            dedupeKey: `auto-publish-giveup:${row.id}`,
           });
         } else {
           stillWaiting += 1;
