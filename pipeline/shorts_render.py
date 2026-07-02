@@ -327,6 +327,8 @@ def _extend_first_scene_over_hook(
     doodle_frames: list[dict],
     caption_chunks: list[dict],
     hook_end_ms: int,
+    *,
+    exact_boundary: bool = False,
 ) -> tuple[list[dict], int]:
     """Force the FIRST doodle scene to span the entire spoken hook, and return the
     caption-aligned boundary where scene 2 begins so the hook-first splice cuts on
@@ -350,21 +352,37 @@ def _extend_first_scene_over_hook(
     chunk begins after the hook (the hook spans the whole clip). The frame indices
     point into the same `caption_chunks` list the props carry as `captions`. Per
     _plans/2026-06-29-hook-first-clean-pacing.md.
+
+    `exact_boundary=True` is the measured two-clip mode
+    (_plans/2026-07-02-hook-clip-measured-boundary.md): `hook_end_ms` is a
+    frame-counted fact sitting inside a constructed silence buffer, so the cut
+    must NOT be snapped anywhere — the returned split is `hook_end_ms`
+    unchanged, and the scene shift keys off the first caption chunk starting
+    on/after it (the rest clip's first line, by construction past the buffer).
     """
     if hook_end_ms <= 0 or len(doodle_frames) < 2 or not caption_chunks:
         return doodle_frames, hook_end_ms
     last_idx = len(caption_chunks) - 1
-    # The hook ends on a caption boundary (its last word's end). HOOK_END_PAD_MS
-    # pushes hook_end_ms a few frames PAST that boundary, which can land it inside
-    # the NEXT line's caption — so "first chunk starting at/after hook_end_ms"
-    # would skip the real boundary and leave the next line's caption before the
-    # intro. Instead, find the hook's last caption by the chunk whose END is
-    # nearest hook_end_ms; scene 2 and the splice start at the chunk AFTER it.
-    last_hook_chunk = min(
-        range(len(caption_chunks)),
-        key=lambda i: abs(int(caption_chunks[i].get("end_ms", 0) or 0) - hook_end_ms),
-    )
-    first_post_hook = last_hook_chunk + 1
+    if exact_boundary:
+        first_post_hook = next(
+            (
+                i for i, c in enumerate(caption_chunks)
+                if int(c.get("start_ms", 0) or 0) >= hook_end_ms
+            ),
+            last_idx + 1,
+        )
+    else:
+        # The hook ends on a caption boundary (its last word's end). HOOK_END_PAD_MS
+        # pushes hook_end_ms a few frames PAST that boundary, which can land it inside
+        # the NEXT line's caption — so "first chunk starting at/after hook_end_ms"
+        # would skip the real boundary and leave the next line's caption before the
+        # intro. Instead, find the hook's last caption by the chunk whose END is
+        # nearest hook_end_ms; scene 2 and the splice start at the chunk AFTER it.
+        last_hook_chunk = min(
+            range(len(caption_chunks)),
+            key=lambda i: abs(int(caption_chunks[i].get("end_ms", 0) or 0) - hook_end_ms),
+        )
+        first_post_hook = last_hook_chunk + 1
     # No chunk after the hook -> the hook covers the whole clip; leave the frames
     # untouched rather than collapse every scene onto the last caption.
     if not (0 < first_post_hook <= last_idx):
@@ -380,9 +398,14 @@ def _extend_first_scene_over_hook(
         )
         frame["caption_chunk_start_index"] = new_idx
         used = new_idx
-    # The split is the scene/caption edge where the post-hook line begins. It can
-    # sit a few frames BEFORE the padded hook_end_ms (the pad overshoots the
-    # boundary), which is correct — we want the cut on the caption edge.
+    # Estimated mode: the split is the scene/caption edge where the post-hook
+    # line begins. It can sit a few frames BEFORE the padded hook_end_ms (the
+    # pad overshoots the boundary), which is correct — we want the cut on the
+    # caption edge. Measured mode keeps the cut at the frame-counted boundary
+    # (mid-silence-buffer); snapping to the rest clip's first ESTIMATED word
+    # start would reintroduce the alignment-error class this mode eliminates.
+    if exact_boundary:
+        return doodle_frames, hook_end_ms
     split_ms = int(caption_chunks[first_post_hook].get("start_ms", hook_end_ms) or hook_end_ms)
     return doodle_frames, split_ms
 
@@ -493,34 +516,68 @@ def build_short_props(
         # global DB voice setting can't change the shorts narrator out from under
         # the chosen preset; the editor's Lane B re-render is the per-short path.
         voiceover = voiceovers.resolve_voiceover(row.get("category"))
-        vres = narration.render_narration(
-            spoken,
-            audio_path,
-            override_provider=voiceover["provider"],
-            override_voice_id=voiceover["voice_id"],
-            speaking_rate=voiceover["speaking_rate"],
-            hook_pause=voiceover["hook_pause"],
-            hook_text=assets.script.get("hook"),
-            style_prompt=voiceover["style_prompt"],
-        )
-        caption_chunks = video._chunk_alignment(vres.get("words") or [])
+        # Two-clip measured-boundary narration first (the permanent hook-splice
+        # fix, _plans/2026-07-02-hook-clip-measured-boundary.md): the hook and
+        # the rest of the script are SEPARATE TTS calls joined around a real
+        # silence buffer, so `hook_end_ms` is a frame-counted fact instead of
+        # an alignment estimate and the splice cut lands in constructed
+        # silence. Falls back to the legacy single-clip + estimated-boundary
+        # path when the script has no hook or the two-clip path can't run
+        # (render_hook_first_narration logs every fallback reason loudly).
+        hook_text = (assets.script.get("hook") or "").strip()
+        vres = None
+        if hook_text:
+            vres = narration.render_hook_first_narration(
+                spoken,
+                audio_path,
+                override_provider=voiceover["provider"],
+                override_voice_id=voiceover["voice_id"],
+                speaking_rate=voiceover["speaking_rate"],
+                style_prompt=voiceover["style_prompt"],
+                hook=hook_text,
+            )
+        measured = vres is not None
+        if not measured:
+            vres = narration.render_narration(
+                spoken,
+                audio_path,
+                override_provider=voiceover["provider"],
+                override_voice_id=voiceover["voice_id"],
+                speaking_rate=voiceover["speaking_rate"],
+                hook_pause=voiceover["hook_pause"],
+                hook_text=assets.script.get("hook"),
+                style_prompt=voiceover["style_prompt"],
+            )
+        # Measured mode chunks captions PER CLIP so no caption chunk can span
+        # the splice seam (the rest clip's timings are already offset past the
+        # silence buffer). Legacy mode chunks the single alignment as before.
+        if measured:
+            caption_chunks = video._chunk_alignment(
+                vres["hook_words"]
+            ) + video._chunk_alignment(vres["rest_words"])
+        else:
+            caption_chunks = video._chunk_alignment(vres.get("words") or [])
         if not caption_chunks:
             print(f"[short id={safe_id}] alignment produced no caption chunks; skipping")
             return None
 
-        # Compute the cold-open hook boundary so the splice can reorder to
+        # The cold-open hook boundary lets the splice reorder to
         # [body_hook][intro][body_rest][outro] — the manager directive in
         # _plans/2026-06-28-hook-before-brand-intro.md. The dispatcher reads
         # `hook_end_ms` off `props`, converts to seconds, and POSTs it to
-        # Cloud Run as `segments.hookEndSec`. Computed here (not in the
-        # dispatcher) because the alignment data is only in scope at this
-        # point of the pipeline. Zero means "splice falls through to legacy
-        # ordering" — preserves back-compat for rows with no hook or no
-        # alignment.
-        hook_end_ms, hook_end_source = compute_hook_end_ms(
-            assets.script.get("hook"),
-            vres.get("words") or [],
-        )
+        # Cloud Run as `segments.hookEndSec`. Measured mode carries the
+        # ground-truth value from the two-clip synthesis; the legacy path
+        # estimates it from the alignment here (not in the dispatcher) because
+        # the alignment data is only in scope at this point of the pipeline.
+        # Zero means "splice falls through to legacy ordering" — preserves
+        # back-compat for rows with no hook or no alignment.
+        if measured:
+            hook_end_ms, hook_end_source = int(vres["hook_end_ms"]), "measured"
+        else:
+            hook_end_ms, hook_end_source = compute_hook_end_ms(
+                assets.script.get("hook"),
+                vres.get("words") or [],
+            )
         print(
             f"[short id={safe_id} hook_boundary] computed "
             f"hook_end_ms={hook_end_ms} source={hook_end_source}"
@@ -669,7 +726,7 @@ def build_short_props(
         # Per _plans/2026-06-29-hook-first-clean-pacing.md.
         before_idx = [f["caption_chunk_start_index"] for f in doodle_frames]
         doodle_frames, hook_split_ms = _extend_first_scene_over_hook(
-            doodle_frames, caption_chunks, hook_end_ms
+            doodle_frames, caption_chunks, hook_end_ms, exact_boundary=measured
         )
         after_idx = [f["caption_chunk_start_index"] for f in doodle_frames]
         if before_idx != after_idx or hook_split_ms != hook_end_ms:
@@ -682,17 +739,23 @@ def build_short_props(
         # lands exactly between scene 1 (the hook) and scene 2 (the rest).
         hook_end_ms = hook_split_ms
 
-        # Size the hook-first audio tail-hold to the REAL gap before the next
-        # spoken word so the hold finishes the hook word without bleeding into
-        # the next sentence (the dispatcher forwards it as
-        # `segments.hookTailHoldSec`). hook_end_ms here is already snapped to the
-        # caption edge. Per _plans/2026-06-29-hook-first-clean-pacing.md.
-        hook_tail_hold_ms = compute_hook_tail_hold_ms(
-            assets.script.get("hook"), vres.get("words") or [], hook_end_ms
-        )
+        # Size the hook-first audio tail-hold (the dispatcher forwards it as
+        # `segments.hookTailHoldSec`). Measured mode holds through the second
+        # half of the constructed silence buffer — pure silence by design.
+        # Legacy mode sizes it to the REAL gap before the next spoken word so
+        # the hold finishes the hook word without bleeding into the next
+        # sentence; hook_end_ms there is already snapped to the caption edge.
+        # Per _plans/2026-06-29-hook-first-clean-pacing.md.
+        if measured:
+            hook_tail_hold_ms = int(vres["hook_tail_hold_ms"])
+        else:
+            hook_tail_hold_ms = compute_hook_tail_hold_ms(
+                assets.script.get("hook"), vres.get("words") or [], hook_end_ms
+            )
         print(
             f"[short id={safe_id} hook_tail] cut @{hook_end_ms}ms -> "
-            f"tail_hold={hook_tail_hold_ms}ms (cap {HOOK_TAIL_HOLD_MAX_MS}ms)"
+            f"tail_hold={hook_tail_hold_ms}ms "
+            f"({'measured buffer' if measured else f'cap {HOOK_TAIL_HOLD_MAX_MS}ms'})"
         )
 
         caption_template = {
