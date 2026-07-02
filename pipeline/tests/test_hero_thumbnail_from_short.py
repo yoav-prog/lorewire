@@ -454,32 +454,30 @@ class RegenWrapperTests(unittest.TestCase):
 
 
 class BakeTitleWiringTests(unittest.TestCase):
-    """The 2026-07-03 rollback of the brief clean-hero experiment: every
-    variant (heroes included) prompts with the baked title — the rail
-    posters render the hero artwork with no HTML title of their own, so
-    title-less heroes left the cards blank. A landed hero writes
-    stories.hero_has_baked_title=1 so the billboard's CSS overlay stops
-    stacking a second title on top of the baked one.
+    """The 2026-07-03 clean-hero change: hero variants prompt with
+    bake_title=False (the site overlays its own HTML title), thumbnail
+    variants keep bake_title=True (social cards want the baked text),
+    and a landed hero clears stories.hero_has_baked_title so the CSS
+    overlay comes back for stories whose old hero baked the title in.
     """
 
-    def test_every_variant_prompts_with_baked_title(self):
+    def test_heroes_prompt_clean_thumbnails_prompt_baked(self):
         with tempfile.TemporaryDirectory() as tmp:
             mocks = _patch_stack(self)
             media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
         # Variant order mirrors _HERO_THUMB_VARIANTS: hero 3:4, hero 16:9,
-        # thumb 3:4, thumb 16:9, thumb 1:1. Every call must leave
-        # bake_title at its baked default — a regression here blanks the
-        # homepage rail cards again.
-        calls = mocks["make_thumb"].call_args_list
-        self.assertEqual(len(calls), 5)
-        for c in calls:
-            self.assertTrue(c.kwargs.get("bake_title", True))
+        # thumb 3:4, thumb 16:9, thumb 1:1.
+        flags = [
+            c.kwargs["bake_title"]
+            for c in mocks["make_thumb"].call_args_list
+        ]
+        self.assertEqual(flags, [False, False, True, True, True])
 
-    def test_landed_hero_sets_baked_title_flag(self):
+    def test_landed_hero_clears_baked_title_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
             mocks = _patch_stack(self)
             media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
-        mocks["update_baked"].assert_called_once_with("abc123", 1)
+        mocks["update_baked"].assert_called_once_with("abc123", 0)
 
     def test_thumbnail_only_outcome_leaves_baked_title_flag_alone(self):
         # Both hero i2i calls fail; the three thumbnails land. The story

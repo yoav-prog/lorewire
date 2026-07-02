@@ -1171,13 +1171,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     portrait_url: str | None = None
 
     # ─── 1. Portrait hero (3:4) — same prompt + dimensions as before. ─────
-    # Baked title kept (2026-07-03 rollback of the brief clean-hero
-    # experiment): the homepage rail posters render this artwork with no
-    # HTML title of their own, so title-less heroes left the cards blank.
-    # The billboard's double-title is fixed by the flag write below instead.
+    # bake_title=False (2026-07-03): heroes render clean; the site overlays
+    # its own HTML title, and baked typography underneath it doubled up.
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
     )
     store.log_render_event(
         "prompt_built",
@@ -1221,10 +1219,9 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         payload={"variant": "portrait", "url": portrait_url},
     )
     store.update_story_hero(story["id"], portrait_url)
-    # The artwork carries the title, so suppress the UI's CSS title overlay
-    # for this story — without this write the homepage billboard stacked
-    # its HTML title on top of the baked one.
-    store.update_story_hero_baked_title(story["id"], 1)
+    # The new hero is clean artwork, so the CSS title overlay must render
+    # again even if the previous hero was a title-baked cinematic one.
+    store.update_story_hero_baked_title(story["id"], 0)
     total_cents += per_image_cents
 
     # ─── 2. Landscape hero (16:9) — best-effort. ──────────────────────────
@@ -1232,7 +1229,7 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     # coherent poster series.
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
     )
     store.log_render_event(
         "kie_request_sent",
@@ -1297,7 +1294,7 @@ def _regen_hero_from_short(
     """Regenerate the hero set (portrait + landscape) using the short's
     `character_base_url` as the i2i seed.
 
-    Mirrors `_regen_hero` step-for-step (same title-baked cinematic prompt,
+    Mirrors `_regen_hero` step-for-step (same clean-hero cinematic prompt,
     same per-image cost, same portrait-first / landscape-best-effort flow)
     except both kie calls pass `image_input=[character_base_url]`. The
     prompt also flips to the character-faithful variant via
@@ -1374,12 +1371,12 @@ def _regen_hero_from_short(
     portrait_url: str | None = None
 
     # ─── 1. Portrait (3:4) ────────────────────────────────────────────────
-    # Baked title kept (2026-07-03 rollback of the brief clean-hero
-    # experiment): the rail posters rely on the artwork carrying the title.
+    # bake_title=False (2026-07-03): heroes render clean; the site overlays
+    # its own HTML title, and baked typography underneath it doubled up.
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
         character_base_url=character_base_url,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
     )
     store.log_render_event(
         "prompt_built",
@@ -1433,10 +1430,9 @@ def _regen_hero_from_short(
         payload={"variant": "portrait", "url": portrait_url, "mode": "i2i"},
     )
     store.update_story_hero(story["id"], portrait_url)
-    # The artwork carries the title, so suppress the UI's CSS title overlay
-    # for this story — without this write the homepage billboard stacked
-    # its HTML title on top of the baked one.
-    store.update_story_hero_baked_title(story["id"], 1)
+    # The new hero is clean artwork, so the CSS title overlay must render
+    # again even if the previous hero was a title-baked cinematic one.
+    store.update_story_hero_baked_title(story["id"], 0)
     total_cents += per_image_cents
 
     # ─── 2. Landscape (16:9) — best-effort ────────────────────────────────
@@ -1445,7 +1441,7 @@ def _regen_hero_from_short(
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
         character_base_url=character_base_url,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
     )
     store.log_render_event(
         "kie_request_sent",
@@ -1783,14 +1779,14 @@ def _build_hero_and_thumbnail_from_short(
             )
             continue
         scene_url = seed_to_scene[seed]
-        # All five variants keep the baked title (2026-07-03 rollback of
-        # the brief clean-hero experiment): the rail posters render the
-        # hero artwork with no HTML title of their own, so title-less
-        # heroes left the cards blank.
+        # Heroes render clean (the site overlays its own HTML title);
+        # thumbnails keep the click-stopping baked-title treatment for the
+        # social cards.
         prompt = stages.make_thumbnail_prompt(
             title, category, body, aspect_ratio=aspect, dry_run=False,
             character_base_url=character_base_url,
             scene_image_url=scene_url,
+            bake_title=(seed == "thumbnail"),
         )
         store.log_render_event(
             "kie_request_sent",
@@ -1852,13 +1848,12 @@ def _build_hero_and_thumbnail_from_short(
         result[column] = stored_url
         result["cost_cents"] += per_image_cents
 
-    # A landed hero carries its baked title, so suppress the UI's CSS
-    # title overlay for this story — without this write the homepage
-    # billboard stacked its HTML title on top of the baked one.
-    # Thumbnail-only outcomes leave the flag alone — the story is still
-    # showing its old hero.
+    # A landed hero variant is clean artwork now, so the CSS title overlay
+    # must render again even if the previous hero was a title-baked
+    # cinematic one. Thumbnail-only outcomes leave the flag alone — the
+    # story is still showing its old hero.
     if result["hero_image"] or result["hero_image_landscape"]:
-        store.update_story_hero_baked_title(story["id"], 1)
+        store.update_story_hero_baked_title(story["id"], 0)
 
     return result
 
