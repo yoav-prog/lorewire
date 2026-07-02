@@ -64,8 +64,9 @@ def _cache_bust(url: str) -> str:
     the full URL, so a new `v=` is a new cache entry.
 
     Idempotent: a URL already carrying `v=` is returned unchanged so
-    the resume path (`_build_hero_and_thumbnail_from_short` re-reading
-    `existing[column]` after a Vercel-function kill) doesn't double-stamp.
+    the resume path (`_build_hero_and_thumbnail_from_short` reusing a
+    prior tick's `image_saved` URL after a Vercel-function kill)
+    doesn't double-stamp.
     """
     if not url:
         return url
@@ -1715,44 +1716,56 @@ def _build_hero_and_thumbnail_from_short(
 
     per_image_cents = _per_image_cost_cents()
     seed_to_scene = {"hero": hero_scene_url, "thumbnail": thumb_scene_url}
-    # Re-fetch the story so a partial-success from a prior reclaim is
-    # visible. Each successful i2i in the loop below already commits
-    # its URL to the relevant `stories` column (see
-    # `_HERO_THUMB_COLUMN_WRITERS`), so the column read here is the
-    # authoritative "what's already done" signal even when the previous
-    # tick died before reaching `finish_image_render`. Skipping variants
-    # we already have stops re-burning kie credits on each reclaim.
-    fresh = store.fetch_story(story["id"]) or story
-    existing = {
-        col: (fresh.get(col) or "").strip()
-        for _seed, _aspect, _filename, _label, col in _HERO_THUMB_VARIANTS
-    }
+    # Resume scope: skip ONLY variants THIS render row already saved —
+    # recovered from its own `image_saved` events, which survive a
+    # Vercel function kill and travel with the reclaimed row. The old
+    # guard keyed on the story COLUMNS being non-empty, which cannot
+    # tell "saved by this render's earlier tick" from "the story has
+    # carried a hero for weeks": an operator regen on a story with
+    # existing artwork finished instantly as five `variant_resumed`
+    # no-ops and the old images survived. Every TS caller had to
+    # remember to NULL the five columns first (the 2026-06-25
+    # workaround), and the story-jobs re-run path that didn't stayed
+    # stale. A fresh render row has no events, so it always redraws all
+    # five regardless of what the columns hold.
+    resumed: dict[str, str] = {}
+    if render_id:
+        for ev in store.render_events_of_type(render_id, "image_saved"):
+            try:
+                payload = json.loads(ev.get("payload") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            variant = payload.get("variant")
+            url = payload.get("url")
+            if variant and url:
+                resumed[variant] = url
     result: dict = {
-        "hero_image": existing["hero_image"] or None,
-        "hero_image_landscape": existing["hero_image_landscape"] or None,
-        "thumbnail_image": existing["thumbnail_image"] or None,
-        "thumbnail_image_landscape": existing["thumbnail_image_landscape"] or None,
-        "thumbnail_image_square": existing["thumbnail_image_square"] or None,
+        col: resumed.get(label) or None
+        for _seed, _aspect, _filename, label, col in _HERO_THUMB_VARIANTS
+    }
+    result.update({
         "cost_cents": 0,
         "hero_index": hero_idx,
         "thumbnail_index": thumb_idx,
         "picker_reasoning": pick["picker_reasoning"],
-    }
+    })
 
     for seed, aspect, filename, label, column in _HERO_THUMB_VARIANTS:
-        if existing[column]:
+        if resumed.get(label):
             store.log_render_event(
                 "variant_resumed",
-                f"{label} already persisted — skipping i2i",
+                f"{label} already saved by this render — skipping i2i",
                 payload={
                     "variant": label,
-                    "url": existing[column],
+                    "url": resumed[label],
                     "resumed": True,
                 },
             )
             print(
                 f"[hero+thumb from-short] id={safe_id} {label} "
-                f"already persisted, skipping"
+                f"already saved by this render, skipping"
             )
             continue
         scene_url = seed_to_scene[seed]

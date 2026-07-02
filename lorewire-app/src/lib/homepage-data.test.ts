@@ -193,3 +193,42 @@ describe("loadHomepageSSRData (failure isolation)", () => {
     expect(calls[0][1]).toMatchObject({ source: "polls" });
   });
 });
+
+// 2026-07-03: the live-catalog projection must carry the 16:9 landscape
+// hero + the baked-title flag. The desktop Hero / Billboard prefer
+// heroImageLandscape, so dropping the columns from this SELECT silently
+// downgraded every live story to the center-cropped portrait (clipped +
+// pixelated) and let a static overlay entry's hardcoded landscape URL
+// outlive regens. Companion pins: homepage-rails.test.ts liveRowToStory.
+describe("loadLiveCatalog projection", () => {
+  it("carries hero_image_landscape and hero_has_baked_title", async () => {
+    const { run } = await import("@/lib/db");
+    const id = "hp-landscape-projection-1";
+    await run("DELETE FROM stories WHERE id = ?", [id]);
+    await run(
+      "INSERT INTO stories (id, slug, title, status, category, hero_image, " +
+        "hero_image_landscape, hero_has_baked_title, created_at, updated_at) " +
+        "VALUES (?, ?, ?, 'published', 'Family Feuds', ?, ?, 1, " +
+        "'2026-07-03T00:00:00.000Z', '2026-07-03T00:00:00.000Z')",
+      [
+        id,
+        id,
+        "Landscape projection row",
+        "https://media/hero.webp?v=1",
+        "https://media/hero-landscape.webp?v=1",
+      ],
+    );
+    try {
+      const { loadLiveCatalog } = await import("@/lib/homepage-data");
+      const result = await loadLiveCatalog();
+      const row = result.stories.find((s) => s.id === id);
+      expect(row).toBeTruthy();
+      expect(row?.hero_image_landscape).toBe(
+        "https://media/hero-landscape.webp?v=1",
+      );
+      expect(row?.hero_has_baked_title).toBe(1);
+    } finally {
+      await run("DELETE FROM stories WHERE id = ?", [id]);
+    }
+  });
+});

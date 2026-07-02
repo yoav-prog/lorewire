@@ -259,6 +259,17 @@ export function liveRowToStory(row: LiveCatalogStory): Story {
     syn: row.summary ?? "",
   };
   if (row.hero_image) story.heroImage = row.hero_image;
+  // The 16:9 variant the desktop Hero / Billboard / modal headers prefer.
+  // Without this mapping every live story fell back to the 3:4 portrait,
+  // which the wide hero region center-crops and upscales (clipped +
+  // pixelated), and a static overlay entry's hardcoded landscape URL
+  // could never be replaced by a regen.
+  if (row.hero_image_landscape) {
+    story.heroImageLandscape = row.hero_image_landscape;
+  }
+  if (row.hero_has_baked_title != null) {
+    story.heroHasBakedTitle = row.hero_has_baked_title === 1;
+  }
   if (row.video_url) story.videoUrl = row.video_url;
   // 2026-06-25 stories-reader-navigation plan: propagate slug so the
   // Stories viewer's "Read full →" CTA can navigate to /v/[slug]

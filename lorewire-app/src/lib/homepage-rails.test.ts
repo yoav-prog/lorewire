@@ -695,6 +695,37 @@ describe("liveRowToStory — slug propagation", () => {
     const story = liveRowToStory(buildRow({ slug: "" }));
     expect(story.slug).toBeUndefined();
   });
+
+  // 2026-07-03: the desktop Hero / Billboard read heroImageLandscape with
+  // a portrait fallback, but the live projection never carried the 16:9
+  // variant — every live story rendered the center-cropped, upscaled
+  // portrait, and a regen could never replace a static overlay entry's
+  // hardcoded landscape URL. These pin the mapping.
+  it("copies hero_image_landscape onto Story.heroImageLandscape", () => {
+    const story = liveRowToStory(
+      buildRow({ hero_image_landscape: "https://media/hero-landscape.webp?v=1" }),
+    );
+    expect(story.heroImageLandscape).toBe(
+      "https://media/hero-landscape.webp?v=1",
+    );
+  });
+
+  it("omits heroImageLandscape when the row has none", () => {
+    const story = liveRowToStory(buildRow({ hero_image_landscape: null }));
+    expect(story.heroImageLandscape).toBeUndefined();
+  });
+
+  it("maps hero_has_baked_title 1/0 to boolean, absent when null", () => {
+    expect(
+      liveRowToStory(buildRow({ hero_has_baked_title: 1 })).heroHasBakedTitle,
+    ).toBe(true);
+    expect(
+      liveRowToStory(buildRow({ hero_has_baked_title: 0 })).heroHasBakedTitle,
+    ).toBe(false);
+    expect(
+      liveRowToStory(buildRow({ hero_has_baked_title: null })).heroHasBakedTitle,
+    ).toBeUndefined();
+  });
 });
 
 // ─── Rotating category (slice E of homepage redesign v1) ──────────────────

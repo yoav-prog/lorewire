@@ -478,6 +478,7 @@ export async function listPublishedShorts(
     .map((s) => ({
       ...s,
       hero_image: resolveMediaUrl(s.hero_image),
+      hero_image_landscape: resolveMediaUrl(s.hero_image_landscape),
       video_url: resolveMediaUrl(s.video_url),
     }));
   // Cursor matches the SQL COALESCE order so a row with NULL published_at

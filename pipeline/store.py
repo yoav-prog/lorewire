@@ -2615,6 +2615,35 @@ def first_render_event(render_id: str, event: str) -> dict | None:
         return dict(row) if row else None
 
 
+def render_events_of_type(render_id: str, event: str) -> list[dict]:
+    """All events of the given type for a render row, oldest first.
+    Companion to `first_render_event` for resume paths that need every
+    occurrence, not just the first — the hero+thumb finisher reads this
+    render's `image_saved` events to learn which variants a prior tick
+    of the SAME row already landed, so a kill-and-reclaim cycle skips
+    only what it personally paid for (never what an older render or the
+    fresh pipeline wrote to the story columns)."""
+    sql_pg = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = %s AND event = %s "
+        "ORDER BY ts ASC"
+    )
+    sql_sqlite = (
+        "SELECT id, render_id, ts, level, event, message, payload "
+        "FROM image_render_events WHERE render_id = ? AND event = ? "
+        "ORDER BY ts ASC"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql_pg, (render_id, event))
+                return [dict(r) for r in cur.fetchall()]
+    with _sqlite_conn() as c:
+        return [
+            dict(r) for r in c.execute(sql_sqlite, (render_id, event)).fetchall()
+        ]
+
+
 def update_story_hero(story_id: str, hero_url: str) -> None:
     """Patch a single column. Used by the image regen worker after a hero
     regen completes so the public reader sees the new image immediately."""
