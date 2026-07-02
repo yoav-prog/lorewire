@@ -803,22 +803,26 @@ export default function WireCard({
             frame. Part of the auto-hide chrome group — fades out alongside
             the buttons during a clean play so the artwork breathes. */}
         <div
-          className={`pointer-events-none absolute inset-x-0 top-0 h-20 transition-opacity duration-300 ${
-            chromeVisible ? "opacity-100" : "opacity-0"
-          }`}
+          className={`pointer-events-none absolute inset-x-0 top-0 transition-opacity duration-300 ${
+            immersive ? "h-20" : "h-28"
+          } ${chromeVisible ? "opacity-100" : "opacity-0"}`}
           style={{ background: "linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,0) 100%)" }}
         />
 
         {/* Top row: category chip (left); EXIT (immersive only), mute,
             options (right). Everything here rides the chromeVisible
-            auto-hide group (pinned visible while immersive). The feed's
-            centered filter pill + funnel share this strip, so the right
-            cluster stays at two buttons outside immersive. The poll pill
+            auto-hide group (pinned visible while immersive). Outside
+            immersive the row sits BELOW the feed's centered filter pill +
+            funnel — on a phone the pill painted straight over the chip when
+            they shared one row, so each gets its own. In immersive the feed
+            controls are hidden and the row returns to the top. The poll pill
             lives in the bottom-left stack in immersive mode — engagement
             stays visible while the user watches. */}
         <div
           className="absolute inset-x-0 top-0 flex items-start justify-between px-4"
-          style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 14px)" }}
+          style={{
+            paddingTop: `calc(env(safe-area-inset-top, 0px) + ${immersive ? 14 : 56}px)`,
+          }}
         >
           <div
             className={`flex items-center gap-2 transition-opacity duration-300 ${
@@ -938,7 +942,7 @@ export default function WireCard({
               onToggleMute();
               onDismissSoundHint();
             }}
-            className="absolute left-1/2 top-[60px] -translate-x-1/2 flex items-center gap-1.5 rounded-full px-3 py-1.5 font-body text-[12.5px] font-semibold text-ink active:scale-95 transition"
+            className="absolute left-1/2 top-[104px] -translate-x-1/2 flex items-center gap-1.5 rounded-full px-3 py-1.5 font-body text-[12.5px] font-semibold text-ink active:scale-95 transition"
             style={{ background: "rgba(0,0,0,.55)", backdropFilter: "blur(4px)" }}
           >
             <SpeakerOff size={15} /> Tap for sound

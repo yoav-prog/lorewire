@@ -44,6 +44,17 @@ placement trap:
    fullscreen they're invisible anyway (rendered outside the fullscreened
    container); on browsers without element fullscreen (iPhone Safari) they
    would collide with the EXIT pill. Immersive means video only.
+
+   *Revision 2, same day:* the top strip had a SECOND mobile-only collision,
+   pre-existing but caught by Yoav on the preview: the feed's centered
+   UNVOTED/ALL pill painted straight over the category chip (chip max-w-46vw
+   ends ~195px at 390px; the centered pill starts ~100px). Fix: outside
+   immersive the card's chip/mute/options row now sits a row BELOW the pill
+   (+56px instead of +14px top offset); in immersive (pill hidden) it
+   returns to the top. The top scrim deepens to h-28 outside immersive and
+   the "Tap for sound" hint drops to 104px so nothing shares pixels. Not
+   unit-testable: happy-dom's CSSOM rejects calc(env()) inline values, so
+   the offset is pinned by preview QA instead.
 3. **Exit becomes a labeled pill**: X icon + "Exit" in the card's mono
    uppercase type, hairline border so it reads as a control (same treatment as
    the poll pill). Stays pinned visible (immersive pins chrome). On entering
