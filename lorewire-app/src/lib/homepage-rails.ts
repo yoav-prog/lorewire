@@ -270,6 +270,9 @@ export function liveRowToStory(row: LiveCatalogStory): Story {
   if (row.hero_has_baked_title != null) {
     story.heroHasBakedTitle = row.hero_has_baked_title === 1;
   }
+  // The title-baked 3:4 thumbnail the rail poster cards prefer over the
+  // clean hero artwork.
+  if (row.thumbnail_image) story.thumbnailImage = row.thumbnail_image;
   if (row.video_url) story.videoUrl = row.video_url;
   // 2026-06-25 stories-reader-navigation plan: propagate slug so the
   // Stories viewer's "Read full →" CTA can navigate to /v/[slug]
@@ -337,6 +340,7 @@ function mergeLiveOverStatic(staticStory: Story, liveStory: Story): Story {
     heroImageLandscape: liveStory.heroImageLandscape ?? staticStory.heroImageLandscape,
     heroHasBakedTitle:
       liveStory.heroHasBakedTitle ?? staticStory.heroHasBakedTitle,
+    thumbnailImage: liveStory.thumbnailImage ?? staticStory.thumbnailImage,
     videoUrl: liveStory.videoUrl ?? staticStory.videoUrl,
     // Live slug wins for the same reason title / heroImage do — the DB
     // is the source of truth for the public reader path. Static seed

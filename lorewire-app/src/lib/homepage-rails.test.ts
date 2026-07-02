@@ -673,6 +673,7 @@ describe("liveRowToStory — slug propagation", () => {
     hero_image: null,
     hero_image_landscape: null,
     hero_has_baked_title: null,
+    thumbnail_image: null,
     video_url: null,
     published_at: "2026-06-25T12:00:00Z",
     created_at: null,
@@ -724,6 +725,20 @@ describe("liveRowToStory — slug propagation", () => {
     ).toBe(false);
     expect(
       liveRowToStory(buildRow({ hero_has_baked_title: null })).heroHasBakedTitle,
+    ).toBeUndefined();
+  });
+
+  // 2026-07-03: the rail poster cards prefer the title-baked 3:4 thumbnail
+  // over the clean hero. Dropping this mapping silently blanks every card
+  // title again (heroes carry no baked text since the clean-hero change).
+  it("copies thumbnail_image onto Story.thumbnailImage, absent when null", () => {
+    expect(
+      liveRowToStory(
+        buildRow({ thumbnail_image: "https://media/thumbnail.webp?v=1" }),
+      ).thumbnailImage,
+    ).toBe("https://media/thumbnail.webp?v=1");
+    expect(
+      liveRowToStory(buildRow({ thumbnail_image: null })).thumbnailImage,
     ).toBeUndefined();
   });
 });

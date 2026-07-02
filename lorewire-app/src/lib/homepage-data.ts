@@ -84,8 +84,8 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   const safeLimit = Math.max(1, Math.min(limit, 500));
   const rows = await all<LiveCatalogStory>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
-      "hero_image_landscape, hero_has_baked_title, video_url, " +
-      "published_at, created_at FROM stories " +
+      "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
+      "video_url, published_at, created_at FROM stories " +
       "WHERE status IN ('ready', 'published') " +
       "AND slug IS NOT NULL " +
       "AND (noindex IS NULL OR noindex = 0) " +
@@ -132,6 +132,7 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
     ...s,
     hero_image: resolveMediaUrl(s.hero_image),
     hero_image_landscape: resolveMediaUrl(s.hero_image_landscape),
+    thumbnail_image: resolveMediaUrl(s.thumbnail_image),
     video_url: resolveMediaUrl(s.video_url),
   }));
   return { ok: true, stories };
