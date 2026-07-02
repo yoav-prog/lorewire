@@ -1277,6 +1277,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
             f"[image regen hero] id={safe_id} landscape FAILED; "
             "portrait still updated"
         )
+        # Clear the stale landscape: the hero surfaces prefer 16:9 with a
+        # portrait fallback, so keeping the OLD landscape would pair the
+        # fresh portrait with a previous run's protagonist (the billboard
+        # and modal header would show a different person than the cards).
+        store.update_story_hero_landscape(story["id"], None)
     else:
         try:
             landscape_local = out_dir / "hero-landscape.png"
@@ -1301,6 +1306,8 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
                 f"[image regen hero] id={safe_id} landscape download FAILED: {e}; "
                 "portrait still updated"
             )
+            # Same stale-pair guard as the kie-failure branch above.
+            store.update_story_hero_landscape(story["id"], None)
 
     # The queue's output_url shows the portrait by convention (the reader
     # picks portrait as primary). The full success is reflected in total_cents.
@@ -1494,6 +1501,10 @@ def _regen_hero_from_short(
             f"[image regen hero from-short] id={safe_id} landscape FAILED; "
             "portrait still updated"
         )
+        # Clear the stale landscape so the hero surfaces fall back to the
+        # fresh portrait instead of pairing it with an older run's
+        # protagonist (mismatched hero vs cards).
+        store.update_story_hero_landscape(story["id"], None)
     else:
         try:
             landscape_local = out_dir / "hero-landscape.png"
@@ -1518,6 +1529,8 @@ def _regen_hero_from_short(
                 f"[image regen hero from-short] id={safe_id} landscape download FAILED: {e}; "
                 "portrait still updated"
             )
+            # Same stale-pair guard as the kie-failure branch above.
+            store.update_story_hero_landscape(story["id"], None)
 
     return portrait_url, total_cents
 
@@ -1873,6 +1886,13 @@ def _build_hero_and_thumbnail_from_short(
     # story is still showing its old hero.
     if result["hero_image"] or result["hero_image_landscape"]:
         store.update_story_hero_baked_title(story["id"], 0)
+
+    # Stale-pair guard: when the portrait landed but the landscape call
+    # failed, clear the OLD landscape so the hero surfaces (which prefer
+    # 16:9 with a portrait fallback) don't pair the fresh protagonist
+    # with a previous run's artwork.
+    if result["hero_image"] and not result["hero_image_landscape"]:
+        store.update_story_hero_landscape(story["id"], None)
 
     return result
 

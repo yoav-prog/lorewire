@@ -797,7 +797,10 @@ function WatchDoodle({
           <video
             ref={videoRef}
             src={videoUrl}
-            poster={story.heroImage}
+            // Pre-play poster: the title-baked thumbnail (what the
+            // cards show), falling back to the clean hero for stories
+            // that pre-date the finisher.
+            poster={story.thumbnailImage || story.heroImage}
             controls
             preload="metadata"
             playsInline

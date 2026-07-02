@@ -28,6 +28,7 @@ import {
   bulkFullPipelineAction,
   bulkPublishToSocialsAction,
   bulkRefreshAssetsAction,
+  bulkStopRunsAction,
   bulkUpdateContentAction,
   bulkDeleteContentAction,
   bulkRegenerateContentAction,
@@ -42,6 +43,7 @@ import {
   type BulkRefreshAssetsResult,
   type BulkRegenResult,
   type BulkRegenTarget,
+  type BulkStopRunsResult,
   type BulkUpdateOp,
 } from "@/app/admin/actions";
 import {
@@ -249,6 +251,12 @@ const REGEN_TARGET_META: Record<
     perStoryHint: "~1 i2i call per story",
     body: "Queues a hero re-render per story. Each story passes through the daily image-budget gate, so spend pauses once today's cap is reached.",
   },
+  hero_thumbnail: {
+    label: "Hero + thumbnails (from short)",
+    verb: "Regenerate hero + thumbnails",
+    perStoryHint: "5 i2i calls per story (~$0.25)",
+    body: "Rebuilds the full poster set per story from the short's character + a picker-chosen scene: the clean hero (portrait + landscape) AND the three title-baked thumbnails. Use this when the hero and the card thumbnail stopped matching. Each story passes through the daily image-budget gate.",
+  },
   scenes: {
     label: "Scene images (article illustrations)",
     verb: "Regenerate all scene images",
@@ -348,6 +356,11 @@ export function ContentList({
   >(null);
   const [fullPipelineResult, setFullPipelineResult] =
     useState<BulkFullPipelineResult | null>(null);
+  // 2026-07-03 STOP RUNS: cancel everything in flight for the selected
+  // rows. Result banner shows per-kind cancel counts. Plan:
+  // _plans/2026-07-03-unified-live-runs-and-stop.md.
+  const [stopRunsResult, setStopRunsResult] =
+    useState<BulkStopRunsResult | null>(null);
   // label → color hex for the row chips; misses (legacy / unclassified
   // labels) fall back to the muted chip class.
   const categoryColorByLabel = useMemo(() => {
@@ -619,6 +632,35 @@ export function ContentList({
     });
   }
 
+  // 2026-07-03 STOP RUNS. window.confirm (not the typed-confirm modal)
+  // because stopping is recoverable — anything cancelled can simply be
+  // re-queued; the copy still says spend already incurred is gone.
+  function runStopRuns() {
+    if (selectedItems.length === 0) return;
+    const ok = window.confirm(
+      `Stop all runs for ${selectedItems.length} selected item${selectedItems.length === 1 ? "" : "s"}?\n\n` +
+        "Queued and in-flight work settles as cancelled: image renders, voiceovers, shorts, pipeline jobs, pending hero+thumbnail finishers, and refresh chains. Spend already incurred is non-refundable.",
+    );
+    if (!ok) return;
+    console.info("[content list stop-runs request]", {
+      count: selectedItems.length,
+    });
+    setStopRunsResult(null);
+    startTransition(async () => {
+      try {
+        const result = await bulkStopRunsAction(selectedItems);
+        console.info("[content list stop-runs result]", result.counts);
+        setStopRunsResult(result);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error("[content list stop-runs failed]", { error: reason });
+        setFailures([{ ...selectedItems[0], reason }]);
+      }
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   function runBulkPublish(platforms: SocialPlatform[]) {
     // Stories-only at the request edge — server enforces too but trimming
     // here keeps the result banner honest. Articles in the selection would
@@ -876,6 +918,13 @@ export function ContentList({
         />
       )}
 
+      {stopRunsResult && (
+        <StopRunsResultBanner
+          result={stopRunsResult}
+          onDismiss={() => setStopRunsResult(null)}
+        />
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-2">
         <span className="font-mono text-[11px] text-muted">
           Rebuild <span className="text-ink">{publishedShortsItems.length}</span>{" "}
@@ -1083,6 +1132,7 @@ export function ContentList({
           onBulkComplete={requestComplete}
           onBulkRefresh={requestRefresh}
           onFullPipeline={requestFullPipeline}
+          onStopRuns={runStopRuns}
           onClear={clearSelection}
         />
       )}
@@ -1155,6 +1205,7 @@ function BulkActionBar({
   onBulkComplete,
   onBulkRefresh,
   onFullPipeline,
+  onStopRuns,
   onClear,
 }: {
   counts: { total: number; stories: number; articles: number };
@@ -1166,6 +1217,7 @@ function BulkActionBar({
   onBulkComplete: () => void;
   onBulkRefresh: () => void;
   onFullPipeline: () => void;
+  onStopRuns: () => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
@@ -1275,6 +1327,15 @@ function BulkActionBar({
             if (value === RESTART_SHORT_MENU_VALUE) onBulkRefresh();
             else onRegen(value as BulkRegenTarget);
           }}
+        />
+        {/* STOP RUNS: cancel everything in flight for the selection
+            (images, voice, shorts, pipeline jobs, pending finishers,
+            refresh chains). Sits between the run-starting controls and
+            Delete because it is their undo-ish counterpart. */}
+        <BarButton
+          label="Stop runs"
+          disabled={disabled}
+          onClick={onStopRuns}
         />
         <BarButton
           label="Delete"
@@ -1887,6 +1948,50 @@ function RegenResultBanner({
           {overflow > 0 && <li>…and {overflow} more</li>}
         </ul>
       )}
+    </div>
+  );
+}
+
+// 2026-07-03 STOP RUNS result banner. Counts-only (no per-row failure
+// list): the action is a broad sweep and its per-kind cancel counts are
+// the useful signal; a story with nothing in flight simply contributes
+// zeros. Plan: _plans/2026-07-03-unified-live-runs-and-stop.md.
+function StopRunsResultBanner({
+  result,
+  onDismiss,
+}: {
+  result: BulkStopRunsResult;
+  onDismiss: () => void;
+}) {
+  const c = result.counts;
+  const parts = [
+    c.images > 0 ? `${c.images} image${c.images === 1 ? "" : "s"}` : null,
+    c.voices > 0 ? `${c.voices} voice` : null,
+    c.shorts > 0 ? `${c.shorts} short${c.shorts === 1 ? "" : "s"}` : null,
+    c.jobs > 0 ? `${c.jobs} pipeline job${c.jobs === 1 ? "" : "s"}` : null,
+    c.finishers > 0 ? `${c.finishers} finisher${c.finishers === 1 ? "" : "s"}` : null,
+    c.refreshes > 0 ? `${c.refreshes} refresh chain${c.refreshes === 1 ? "" : "s"}` : null,
+  ].filter(Boolean);
+  const scope =
+    result.articles > 0
+      ? `${result.stories} stories · ${result.articles} articles`
+      : `${result.stories} stor${result.stories === 1 ? "y" : "ies"}`;
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <span>
+        <span className="text-muted">Stop runs ({scope}):</span>{" "}
+        {parts.length > 0
+          ? `cancelled ${parts.join(", ")}`
+          : "nothing was in flight"}
+      </span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="text-muted transition-colors hover:text-ink"
+        aria-label="Dismiss"
+      >
+        ×
+      </button>
     </div>
   );
 }

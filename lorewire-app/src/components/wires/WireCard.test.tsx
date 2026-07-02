@@ -82,6 +82,7 @@ function makeStory(): WireStory {
     hero_image: null,
     hero_image_landscape: null,
     hero_has_baked_title: 0,
+    thumbnail_image: null,
     video_url: "https://example.invalid/v.mp4",
     published_at: null,
     created_at: null,

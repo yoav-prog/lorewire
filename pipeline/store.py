@@ -2665,11 +2665,15 @@ def update_story_hero(story_id: str, hero_url: str) -> None:
         )
 
 
-def update_story_hero_landscape(story_id: str, hero_url: str) -> None:
+def update_story_hero_landscape(story_id: str, hero_url: str | None) -> None:
     """Sibling of `update_story_hero` for the 16:9 landscape variant. The
     fresh-run pipeline writes both columns; the regen path mirrors it so
     a landscape video story doesn't ship with a stale 16:9 hero after a
-    hero regen. Caller still updates the portrait column separately."""
+    hero regen. Caller still updates the portrait column separately.
+    Pass None to CLEAR the column — the regen paths do this when the
+    portrait landed but the landscape call failed, so the hero surfaces
+    fall back to the fresh portrait instead of pairing it with a stale
+    landscape from an older run (mismatched protagonist)."""
     now = _now_iso()
     if _is_postgres():
         with _pg_conn() as conn:

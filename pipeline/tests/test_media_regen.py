@@ -187,6 +187,36 @@ class HeroRegenTests(unittest.TestCase):
             )
             mocks["update_hero"].assert_called_with("abc123", url)
 
+    def test_landscape_failure_clears_the_stale_landscape(self):
+        """2026-07-03 stale-pair guard: when the portrait lands but the
+        landscape call fails, the OLD landscape must be cleared — the
+        hero surfaces prefer 16:9 with a portrait fallback, so keeping
+        it pairs the fresh protagonist with a previous run's artwork
+        (the mismatched billboard/modal Yoav reported)."""
+        results = iter(["https://kie/portrait.png", None])
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches({
+                "update_hero": mock.patch.object(media.store, "update_story_hero"),
+                "update_hero_landscape": mock.patch.object(
+                    media.store, "update_story_hero_landscape",
+                ),
+                "make_thumb": mock.patch.object(
+                    media.stages, "make_thumbnail_prompt",
+                    return_value="cinematic prompt",
+                ),
+                "generate_with_retry": mock.patch.object(
+                    media, "_generate_with_retry",
+                    side_effect=lambda *a, **k: next(results),
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, cents = media.regen_one("abc123", "hero", Path(tmp))
+        # Portrait landed and was written; only 1 image billed.
+        mocks["update_hero"].assert_called_once()
+        self.assertEqual(cents, 5)
+        # The stale landscape is cleared, not left in place.
+        mocks["update_hero_landscape"].assert_called_once_with("abc123", None)
+
     def test_hero_url_has_cache_bust_query_param(self):
         """2026-06-27: hero/thumbnail filenames are stable per story so
         each regen overwrites the same R2 object key. Without a query-
