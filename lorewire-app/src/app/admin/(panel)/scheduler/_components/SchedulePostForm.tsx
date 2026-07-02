@@ -1,12 +1,15 @@
 "use client";
 
-// Queue a specific story to a specific date/time on one platform. The
-// time is entered in the platform's own timezone (shown next to the
-// picker so there is no guessing). Success and every failure mode report
-// inline.
+// Queue a story to an exact date/time on one or more platforms. The
+// story is picked with a type-ahead search, platforms are multi-select
+// chips, and the time is entered as each platform's own wall clock —
+// the timezone(s) are shown next to the picker so there is no guessing.
+// Every platform reports its own outcome inline.
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import { schedulerScheduleAtAction } from "@/app/admin/scheduler-actions";
+import { StoryCombobox, type StoryOption } from "./StoryCombobox";
 
 export interface SchedulePlatformOption {
   id: string;
@@ -18,38 +21,82 @@ export function SchedulePostForm({
   stories,
   platforms,
 }: {
-  stories: { id: string; title: string }[];
+  stories: StoryOption[];
   platforms: SchedulePlatformOption[];
 }) {
-  const [storyId, setStoryId] = useState(stories[0]?.id ?? "");
-  const [platform, setPlatform] = useState(platforms[0]?.id ?? "");
+  const router = useRouter();
+  const [story, setStory] = useState<StoryOption | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(
+    new Set(platforms[0] ? [platforms[0].id] : []),
+  );
   const [whenLocal, setWhenLocal] = useState("");
-  const [note, setNote] = useState<{ tone: "ok" | "warn" | "error"; text: string } | null>(null);
+  const [notes, setNotes] = useState<{ tone: "ok" | "warn" | "error"; text: string }[]>([]);
   const [isPending, startTransition] = useTransition();
 
-  const timezone =
-    platforms.find((p) => p.id === platform)?.timezone ?? "";
+  const timezones = [
+    ...new Set(
+      platforms.filter((p) => selected.has(p.id)).map((p) => p.timezone),
+    ),
+  ];
+  const tzLabel =
+    timezones.length === 1
+      ? timezones[0]
+      : timezones.length > 1
+        ? "each platform's own timezone"
+        : "";
+
+  function togglePlatform(id: string) {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelected(next);
+  }
 
   function submit() {
-    if (!storyId || !platform || !whenLocal) {
-      setNote({ tone: "error", text: "Pick a story, a platform, and a time." });
+    if (!story || selected.size === 0 || !whenLocal) {
+      setNotes([
+        { tone: "error", text: "Pick a story, at least one platform, and a time." },
+      ]);
       return;
     }
     startTransition(async () => {
-      const r = await schedulerScheduleAtAction({ storyId, platform, whenLocal });
-      if (!r.ok) {
-        setNote({ tone: "error", text: r.error ?? "could not schedule" });
+      const r = await schedulerScheduleAtAction({
+        storyId: story.id,
+        platforms: [...selected],
+        whenLocal,
+      });
+      if (!r.ok || !r.results) {
+        setNotes([{ tone: "error", text: r.error ?? "could not schedule" }]);
         return;
       }
-      setNote(
-        r.capExceeded
-          ? {
-              tone: "warn",
-              text: "Queued — heads up, that day is already at this platform's daily cap.",
-            }
-          : { tone: "ok", text: "Queued. It will show in the list above." },
+      const label = (id: string) =>
+        platforms.find((p) => p.id === id)?.label ?? id;
+      setNotes(
+        r.results.map((res) => {
+          if (res.status === "scheduled") {
+            return res.capExceeded
+              ? {
+                  tone: "warn" as const,
+                  text: `${label(res.platform)}: queued — heads up, that day is already at its daily cap.`,
+                }
+              : { tone: "ok" as const, text: `${label(res.platform)}: queued.` };
+          }
+          if (res.status === "duplicate") {
+            return {
+              tone: "warn" as const,
+              text: `${label(res.platform)}: already queued for this story.`,
+            };
+          }
+          return {
+            tone: "error" as const,
+            text: `${label(res.platform)}: that time is in the past.`,
+          };
+        }),
       );
-      setWhenLocal("");
+      if (r.results.some((res) => res.status === "scheduled")) {
+        setWhenLocal("");
+        router.refresh();
+      }
     });
   }
 
@@ -71,35 +118,31 @@ export function SchedulePostForm({
         Skips the regular slots and posts exactly when you say.
       </p>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <select
-          value={storyId}
-          onChange={(e) => setStoryId(e.target.value)}
-          className="max-w-[260px] rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
-        >
-          {stories.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.title}
-            </option>
-          ))}
-        </select>
-        <select
-          value={platform}
-          onChange={(e) => setPlatform(e.target.value)}
-          className="rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
-        >
+        <StoryCombobox stories={stories} value={story} onChange={setStory} />
+        <span className="flex flex-wrap gap-1.5">
           {platforms.map((p) => (
-            <option key={p.id} value={p.id}>
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => togglePlatform(p.id)}
+              aria-pressed={selected.has(p.id)}
+              className={`rounded-full border px-3 py-1 text-[12px] transition-colors ${
+                selected.has(p.id)
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-line text-muted hover:text-ink"
+              }`}
+            >
               {p.label}
-            </option>
+            </button>
           ))}
-        </select>
+        </span>
         <input
           type="datetime-local"
           value={whenLocal}
           onChange={(e) => setWhenLocal(e.target.value)}
           className="rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-[13px] text-ink outline-none focus:border-accent"
         />
-        <span className="text-[11px] text-muted">{timezone}</span>
+        {tzLabel && <span className="text-[11px] text-muted">{tzLabel}</span>}
         <button
           type="button"
           onClick={submit}
@@ -109,16 +152,17 @@ export function SchedulePostForm({
           {isPending ? "Scheduling…" : "Schedule"}
         </button>
       </div>
-      {note && (
-        <p
-          className={`mt-2 text-[12px] ${
-            note.tone === "error" || note.tone === "warn"
-              ? "text-accent"
-              : "text-muted"
-          }`}
-        >
-          {note.text}
-        </p>
+      {notes.length > 0 && (
+        <div className="mt-2 space-y-0.5">
+          {notes.map((n, i) => (
+            <p
+              key={i}
+              className={`text-[12px] ${n.tone === "ok" ? "text-muted" : "text-accent"}`}
+            >
+              {n.text}
+            </p>
+          ))}
+        </div>
       )}
     </div>
   );
