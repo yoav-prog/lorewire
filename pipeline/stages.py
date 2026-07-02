@@ -668,12 +668,14 @@ def make_thumbnail_prompt(
     and '1:1' for the Instagram-square thumbnail variant.
 
     `bake_title` (2026-07-03): True keeps the click-stopping baked-title
-    treatment the social THUMBNAIL variants want. False produces clean
-    artwork with an explicit no-text instruction and negative space for
-    an overlay - the HERO variants use it because the site renders its
-    own HTML title on top of the hero, and a baked title underneath it
-    doubled up (and read as AI-made typography). Default True so legacy
-    callers keep byte-identical prompts.
+    treatment. False produces clean artwork with an explicit no-text
+    instruction and negative space reserved for overlay text. No
+    production caller passes False today: the clean-hero experiment was
+    rolled back the same day because the homepage rail posters render
+    the hero artwork with no HTML title of their own, so title-less
+    heroes left the cards blank. The switch stays (tested) for a future
+    surface that draws its own title. Default True keeps every legacy
+    caller byte-identical.
 
     When `character_base_url` is supplied the prompt switches to a
     character-faithful redraw: the caller MUST also pass
