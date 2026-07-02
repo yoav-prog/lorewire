@@ -137,13 +137,17 @@ export default async function SchedulerPage() {
        FROM stories WHERE status = 'review' ORDER BY updated_at DESC LIMIT 50`,
     ),
     listUpcomingPublishes(50),
-    listSchedulableStories(50),
+    listSchedulableStories(200),
     getPublishCalendar(7),
     getAutopilotStatus(),
     listRecentAutoPublishes(10),
   ]);
 
   const rendering = gate.reason === "ok";
+  const storyOptions = schedulable.map((s) => ({
+    id: s.id,
+    title: s.title || s.id,
+  }));
 
   return (
     <div className="mx-auto max-w-[900px] space-y-10">
@@ -396,7 +400,11 @@ export default async function SchedulerPage() {
       {/* ── Next 7 days ──────────────────────────────────────────────── */}
       <section className="space-y-3">
         <h2 className="font-display text-lg text-ink">Next 7 days</h2>
-        <CalendarPreview calendars={calendars} platformLabels={PLATFORM_LABELS} />
+        <CalendarPreview
+          calendars={calendars}
+          platformLabels={PLATFORM_LABELS}
+          stories={storyOptions}
+        />
       </section>
 
       {/* ── Posting queue ────────────────────────────────────────────── */}
@@ -420,7 +428,7 @@ export default async function SchedulerPage() {
           }))}
         />
         <SchedulePostForm
-          stories={schedulable.map((s) => ({ id: s.id, title: s.title || s.id }))}
+          stories={storyOptions}
           platforms={overview.platforms.map((p) => ({
             id: p.config.platform,
             label: PLATFORM_LABELS[p.config.platform] ?? p.config.platform,

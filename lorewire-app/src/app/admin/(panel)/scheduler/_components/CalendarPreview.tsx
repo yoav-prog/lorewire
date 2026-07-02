@@ -1,9 +1,17 @@
-// Read-only next-7-days preview, one row per enabled platform. Real
-// queued posts render solid; projected open slots render dashed, so a
-// glance separates "will happen" from "could happen". Server component:
-// everything is computed in publish-scheduler.ts and passed down.
+"use client";
 
-import type { PlatformCalendar } from "@/lib/publish-scheduler";
+// Next-7-days preview, one row per enabled platform — and a scheduling
+// surface: real queued posts render solid and link to their story;
+// dashed open slots are buttons that open an inline picker to drop a
+// story into exactly that slot. All data is computed server-side in
+// publish-scheduler.ts and passed down; this component only adds the
+// interaction.
+
+import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
+import { schedulerScheduleAtAction } from "@/app/admin/scheduler-actions";
+import type { CalendarEntry, PlatformCalendar } from "@/lib/publish-scheduler";
+import { StoryCombobox, type StoryOption } from "./StoryCombobox";
 
 const WEEKDAY_LABELS: Record<string, string> = {
   sun: "Sun",
@@ -15,13 +23,33 @@ const WEEKDAY_LABELS: Record<string, string> = {
   sat: "Sat",
 };
 
+const MONTH_LABELS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+interface PickedSlot {
+  platform: string;
+  /** "YYYY-MM-DDTHH:MM" wall clock in the platform's timezone. */
+  whenLocal: string;
+  label: string;
+}
+
+function pad(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
 export function CalendarPreview({
   calendars,
   platformLabels,
+  stories,
 }: {
   calendars: PlatformCalendar[];
   platformLabels: Record<string, string>;
+  stories: StoryOption[];
 }) {
+  const [picked, setPicked] = useState<PickedSlot | null>(null);
+
   if (calendars.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-line bg-surface p-6 text-center text-[13px] text-muted">
@@ -72,24 +100,141 @@ export function CalendarPreview({
                         {e.storyTitle ?? e.storyId}
                       </a>
                     ) : (
-                      <div
+                      <OpenSlotButton
                         key={e.scheduledForIso}
-                        className="rounded border border-dashed border-line px-1 py-0.5 text-center font-mono text-[10px] tabular-nums text-muted/70"
-                      >
-                        {e.timeLocal}
-                      </div>
+                        entry={e}
+                        active={
+                          picked?.platform === cal.platform &&
+                          picked?.whenLocal ===
+                            `${day.year}-${pad(day.month)}-${pad(day.day)}T${e.timeLocal}`
+                        }
+                        onPick={() =>
+                          setPicked({
+                            platform: cal.platform,
+                            whenLocal: `${day.year}-${pad(day.month)}-${pad(day.day)}T${e.timeLocal}`,
+                            label: `${WEEKDAY_LABELS[day.weekday]} ${MONTH_LABELS[day.month - 1]} ${day.day}, ${e.timeLocal}`,
+                          })
+                        }
+                      />
                     ),
                   )}
                 </div>
               </div>
             ))}
           </div>
+          {picked?.platform === cal.platform && (
+            <SlotScheduler
+              key={picked.whenLocal}
+              picked={picked}
+              platformLabel={platformLabels[cal.platform] ?? cal.platform}
+              stories={stories}
+              onClose={() => setPicked(null)}
+            />
+          )}
         </div>
       ))}
       <p className="text-[11px] text-muted">
-        Solid entries are queued posts. Dashed times are open slots the
-        scheduler can still fill.
+        Solid entries are queued posts. Dashed times are open slots — click
+        one to schedule a story into it.
       </p>
+    </div>
+  );
+}
+
+function OpenSlotButton({
+  entry,
+  active,
+  onPick,
+}: {
+  entry: CalendarEntry;
+  active: boolean;
+  onPick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      title="Schedule a story into this slot"
+      className={`block w-full rounded border border-dashed px-1 py-0.5 text-center font-mono text-[10px] tabular-nums transition-colors ${
+        active
+          ? "border-accent text-accent"
+          : "border-line text-muted/70 hover:border-accent hover:text-accent"
+      }`}
+    >
+      {entry.timeLocal}
+    </button>
+  );
+}
+
+// The inline picker under the platform's grid: pick a story, confirm,
+// done. The slot's platform and time are fixed — that is the point.
+function SlotScheduler({
+  picked,
+  platformLabel,
+  stories,
+  onClose,
+}: {
+  picked: PickedSlot;
+  platformLabel: string;
+  stories: StoryOption[];
+  onClose: () => void;
+}) {
+  const router = useRouter();
+  const [story, setStory] = useState<StoryOption | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  function schedule() {
+    if (!story) {
+      setNote("Pick a story first.");
+      return;
+    }
+    startTransition(async () => {
+      const r = await schedulerScheduleAtAction({
+        storyId: story.id,
+        platforms: [picked.platform],
+        whenLocal: picked.whenLocal,
+      });
+      const result = r.results?.[0];
+      if (!r.ok || !result) {
+        setNote(r.error ?? "could not schedule");
+        return;
+      }
+      if (result.status === "duplicate") {
+        setNote("This story is already queued for this platform.");
+        return;
+      }
+      if (result.status === "in_past") {
+        setNote("That slot just passed — pick a later one.");
+        return;
+      }
+      router.refresh();
+      onClose();
+    });
+  }
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-accent/5 p-3">
+      <span className="text-[12px] text-ink">
+        {platformLabel} · {picked.label}:
+      </span>
+      <StoryCombobox stories={stories} value={story} onChange={setStory} />
+      <button
+        type="button"
+        onClick={schedule}
+        disabled={isPending}
+        className="rounded-lg border border-accent px-3 py-1.5 text-[13px] text-accent transition-colors hover:bg-accent hover:text-bg disabled:opacity-50"
+      >
+        {isPending ? "Scheduling…" : "Schedule here"}
+      </button>
+      <button
+        type="button"
+        onClick={onClose}
+        className="rounded-lg border border-line px-3 py-1.5 text-[13px] text-muted hover:text-ink"
+      >
+        Cancel
+      </button>
+      {note && <p className="w-full text-[12px] text-accent">{note}</p>}
     </div>
   );
 }

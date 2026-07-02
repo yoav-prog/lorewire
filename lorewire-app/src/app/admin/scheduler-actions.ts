@@ -155,30 +155,42 @@ export async function schedulerRejectStoryAction(
   return { ok: true };
 }
 
-interface ScheduleAtResult {
-  ok: boolean;
-  error?: string;
-  status?: ExplicitScheduleResult["status"];
+export interface ScheduleAtPlatformResult {
+  platform: string;
+  status: ExplicitScheduleResult["status"];
   scheduledForIso?: string;
   capExceeded?: boolean;
 }
 
+interface ScheduleAtResult {
+  ok: boolean;
+  error?: string;
+  /** Per-platform outcome, in the order requested. */
+  results?: ScheduleAtPlatformResult[];
+}
+
 /**
- * Queue one story to post on one platform at an explicit date/time,
- * entered as the platform's local wall clock ("YYYY-MM-DDTHH:MM" from a
- * datetime-local input). Bypasses next-open-slot math; still one active
- * row per (story, platform).
+ * Queue one story to post at an explicit date/time on one or more
+ * platforms, entered as each platform's local wall clock
+ * ("YYYY-MM-DDTHH:MM" from a datetime-local input). Bypasses
+ * next-open-slot math; still one active row per (story, platform), and
+ * each platform reports its own outcome.
  */
 export async function schedulerScheduleAtAction(input: {
   storyId: string;
-  platform: string;
+  platforms: string[];
   whenLocal: string;
 }): Promise<ScheduleAtResult> {
   const session = await requireCapability("content.manage");
-  const { storyId, platform, whenLocal } = input;
+  const { storyId, platforms, whenLocal } = input;
   if (!storyId) return { ok: false, error: "missing story id" };
-  if (!(PUBLISH_PLATFORMS as readonly string[]).includes(platform)) {
-    return { ok: false, error: "unknown platform" };
+  if (!Array.isArray(platforms) || platforms.length === 0) {
+    return { ok: false, error: "pick at least one platform" };
+  }
+  for (const platform of platforms) {
+    if (!(PUBLISH_PLATFORMS as readonly string[]).includes(platform)) {
+      return { ok: false, error: "unknown platform" };
+    }
   }
 
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(whenLocal ?? "");
@@ -194,41 +206,33 @@ export async function schedulerScheduleAtAction(input: {
   const story = await getStory(storyId);
   if (!story) return { ok: false, error: "story_not_found" };
 
-  const result = await scheduleStoryPublishAt(
-    storyId,
-    platform as PublishPlatform,
-    when,
-    { approvedBy: session.userId },
-  );
+  const results: ScheduleAtPlatformResult[] = [];
+  for (const platform of platforms) {
+    const result = await scheduleStoryPublishAt(
+      storyId,
+      platform as PublishPlatform,
+      when,
+      { approvedBy: session.userId },
+    );
+    results.push({
+      platform,
+      status: result.status,
+      scheduledForIso: result.scheduledForIso,
+      capExceeded: result.capExceeded,
+    });
+  }
 
   console.info("[scheduler schedule_at]", {
     storyId,
-    platform,
     whenLocal,
     actorId: session.userId,
-    status: result.status,
-    scheduledForIso: result.scheduledForIso ?? null,
-    capExceeded: result.capExceeded ?? false,
+    results: results.map((r) => `${r.platform}:${r.status}`),
   });
 
-  if (result.status === "in_past") {
-    return { ok: false, error: "that time is in the past", status: result.status };
+  if (results.some((r) => r.status === "scheduled")) {
+    revalidatePath("/admin/scheduler");
   }
-  if (result.status === "duplicate") {
-    return {
-      ok: false,
-      error: "this story is already queued for that platform",
-      status: result.status,
-    };
-  }
-
-  revalidatePath("/admin/scheduler");
-  return {
-    ok: true,
-    status: result.status,
-    scheduledForIso: result.scheduledForIso,
-    capExceeded: result.capExceeded,
-  };
+  return { ok: true, results };
 }
 
 /**
