@@ -507,6 +507,12 @@ describe("WireCard immersive mode", () => {
     unmount(m);
   });
 
+  // NOT unit-tested: the top row's +56px offset below the feed's centered
+  // pill (vs +14px in immersive, where the pill is hidden). It's a
+  // calc(env(safe-area-inset-top)) inline style and happy-dom's CSSOM
+  // rejects calc(env()) values entirely — neither style.paddingTop nor the
+  // style attribute reflects them. Covered by preview QA on a real phone.
+
   it("labels the exit control so it reads as the way out", () => {
     const m = mount(
       defaultProps({ immersive: true, onExitImmersive: () => undefined }),
