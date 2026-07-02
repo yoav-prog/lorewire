@@ -122,26 +122,34 @@ export async function generateMetadata({
       // malformed short_config — fall through to hero chain
     }
   }
-  const ogImage = ogPosterUrl ?? heroImage;
+  // Share-card fallback when there is no designed OG poster: the titled
+  // 16:9 thumbnail. Heroes render clean (no baked text) since 2026-07-03,
+  // so a hero-based share card would carry no title at all. The PORTRAIT
+  // thumbnail is deliberately NOT in this chain — crawlers center-crop to
+  // ~1.91:1, which cuts off exactly the lower-third band the title lives
+  // in. The clean hero stays as the last resort before the site default.
+  const thumbLandscape = story.thumbnail_image_landscape ?? undefined;
+  const ogImage = ogPosterUrl ?? thumbLandscape ?? heroImage;
   // og:image:width / og:image:height are non-negotiable per the
   // crawler-doc audit: WhatsApp silently drops the preview on first
   // share without them; Facebook benefits too (synchronous render).
-  // Set ONLY when we have a designed poster; the legacy hero fallback
-  // has unknown dimensions so we let the crawler sniff bytes.
+  // Set ONLY when we have a designed poster; the thumbnail / hero
+  // fallbacks have unknown dimensions so we let the crawler sniff bytes.
   const ogImageWidth = ogPosterUrl ? OG_POSTER_WIDTH : undefined;
   const ogImageHeight = ogPosterUrl ? OG_POSTER_HEIGHT : undefined;
-  // Force summary_large_image when the poster is present so Twitter
-  // renders the 1200×630 designed landscape correctly. Without the
-  // override, Twitter would respect seo.twitterCardType (often
-  // "summary" by default), which renders as a small square thumb.
-  const twitterCardType = ogPosterUrl
+  // Force summary_large_image when a wide image is present (designed
+  // poster or the 16:9 thumbnail) so Twitter renders the landscape
+  // correctly. Without the override, Twitter would respect
+  // seo.twitterCardType (often "summary" by default), which renders as
+  // a small square thumb.
+  const twitterCardType = (ogPosterUrl ?? thumbLandscape)
     ? "summary_large_image"
     : seo.twitterCardType;
   // twitter:image explicit removes Twitterbot's array-order ambiguity
   // — verified via the crawler-doc audit: Twitter looks for
   // twitter:image first, falls back to og:image, so an explicit
   // setting is the surest way to control what X picks.
-  const twitterImage = ogPosterUrl ?? heroImage;
+  const twitterImage = ogPosterUrl ?? thumbLandscape ?? heroImage;
 
   return {
     title,
