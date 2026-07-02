@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { Archivo, Fraunces, Hanken_Grotesk, Spline_Sans_Mono, Caveat } from "next/font/google";
+import Script from "next/script";
 import ConditionalAnalytics from "@/components/ConditionalAnalytics";
 import RegisterSW from "@/components/RegisterSW";
+import { CCM19_ENABLED, CCM19_SRC } from "@/lib/ccm19";
 import { getSiteSeo } from "@/lib/site-seo";
 import {
   ThemeProvider,
@@ -72,6 +74,20 @@ export default function RootLayout({
       className={`${archivo.variable} ${fraunces.variable} ${hanken.variable} ${spline.variable} ${caveat.variable}`}
     >
       <head>
+        {/* CCM19 consent manager. beforeInteractive = injected into the
+         * server HTML head and fetched before any first-party bundle, the
+         * documented strategy for cookie consent managers. Only rendered
+         * when NEXT_PUBLIC_CCM19_SRC is set; otherwise the first-party
+         * CookieConsent banner keeps running. Ccm19Bridge (AppShell)
+         * syncs its decisions into lw_consent.
+         * Plan: _plans/2026-07-02-gdpr-ccm19-consent.md. */}
+        {CCM19_ENABLED ? (
+          <Script
+            src={CCM19_SRC}
+            strategy="beforeInteractive"
+            referrerPolicy="origin"
+          />
+        ) : null}
         {/* Runs BEFORE React hydration so the document paints with the
          * right palette on first paint. No FOUC. Reads localStorage,
          * checks prefers-color-scheme when choice="system", applies
