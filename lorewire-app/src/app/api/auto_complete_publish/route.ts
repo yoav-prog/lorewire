@@ -138,6 +138,32 @@ async function serve(req: NextRequest): Promise<NextResponse> {
 
   for (const row of flagged) {
     try {
+      // A queued/processing story_jobs run is actively REWRITING this
+      // story (article, voice, then a forced short + finisher). The
+      // completeness gate can't see that — right after the worker's
+      // upsert the OLD assets still look complete — so publishing here
+      // would ship stale media. Skip without burning an attempt: the
+      // retry budget should start when the pipeline lands, not while
+      // it runs. Added with the bulk Full-pipeline action
+      // (_plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md).
+      if (row.reddit_id) {
+        const activeJob = await one<{ id: string; status: string }>(
+          `SELECT id, status FROM story_jobs
+           WHERE reddit_id = ? AND status IN ('queued', 'processing')
+           LIMIT 1`,
+          [row.reddit_id],
+        );
+        if (activeJob) {
+          namespacedLog("pipeline_running", {
+            story_id: row.id,
+            job_id: activeJob.id,
+            job_status: activeJob.status,
+          });
+          stillWaiting += 1;
+          continue;
+        }
+      }
+
       let completeness = await evaluateAssetCompleteness(row.id);
       namespacedLog("gate", {
         story_id: row.id,

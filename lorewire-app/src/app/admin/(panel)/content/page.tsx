@@ -24,9 +24,11 @@ import {
   type SocialPlatform,
 } from "@/lib/repo";
 import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
-import { CATEGORIES, STATUSES } from "@/app/admin/ui";
+import { STATUSES } from "@/app/admin/ui";
+import { listCategories } from "@/lib/categories/repo";
 import { ContentList } from "./ContentList";
 import { AutoRefresh } from "./AutoRefresh";
+import { FilterPanel, type ActiveFilterChip } from "./FilterPanel";
 
 const LIST_LIMIT = 200;
 
@@ -194,15 +196,20 @@ export default async function ContentPage({
 }) {
   await requireCapability("content.manage");
   const sp = await searchParams;
+  // Categories are DB rows now (the 2026-07-01 taxonomy arc): the 18
+  // granular actives drive the chips + the ContentList pickers; the
+  // retired legacy six stay valid as a FILTER value only, so old links
+  // and not-yet-reclassified stories remain reachable.
+  const allCategories = await listCategories({ includeArchived: true });
+  const activeCategories = allCategories.filter((c) => c.status === "active");
+  const categoryLabels = new Set(allCategories.map((c) => c.label));
   const subKind = isSubKind(sp.kind) ? sp.kind : undefined;
   const status = sp.status || undefined;
   const language = sp.language || undefined;
-  // Closed-enum guard so a hand-edited URL with `?category=Foo` collapses
+  // Closed-set guard so a hand-edited URL with `?category=Foo` collapses
   // to "All" instead of producing an empty SQL clause.
   const category =
-    sp.category && (CATEGORIES as readonly string[]).includes(sp.category)
-      ? sp.category
-      : undefined;
+    sp.category && categoryLabels.has(sp.category) ? sp.category : undefined;
   const publishedOn = parsePlatformList(sp.publishedOn);
   const publishedNotOn = parsePlatformList(sp.publishedNotOn);
   const jobStatus = isJobStatus(sp.jobStatus) ? sp.jobStatus : undefined;
@@ -298,6 +305,91 @@ export default async function ContentPage({
     </Link>
   );
 
+  // Active-filter summary for the collapsed FilterPanel header: one chip
+  // per dimension (multi-selects join with " + "), each linking to the
+  // URL with just that dimension cleared. Everything the operator applied
+  // stays visible even while the full chip rows are collapsed.
+  const activeFilters: ActiveFilterChip[] = [];
+  if (subKind) {
+    activeFilters.push({
+      key: "Kind",
+      label: SUBKIND_FILTER_LABELS[subKind],
+      clearHref: `/admin/content${baseQs({ kind: undefined })}`,
+    });
+  }
+  if (status) {
+    activeFilters.push({
+      key: "Status",
+      label: status,
+      clearHref: `/admin/content${baseQs({ status: undefined })}`,
+    });
+  }
+  if (category) {
+    activeFilters.push({
+      key: "Category",
+      label: category,
+      clearHref: `/admin/content${baseQs({ category: undefined })}`,
+    });
+  }
+  if (language) {
+    activeFilters.push({
+      key: "Language",
+      label:
+        ARTICLE_LANGUAGE_LABELS[
+          language as keyof typeof ARTICLE_LANGUAGE_LABELS
+        ] ?? language,
+      clearHref: `/admin/content${baseQs({ language: undefined })}`,
+    });
+  }
+  if (publishedOn.length > 0) {
+    activeFilters.push({
+      key: "On",
+      label: publishedOn.map((p) => PLATFORM_FILTER_LABELS[p]).join(" + "),
+      clearHref: `/admin/content${baseQs({ publishedOn: undefined })}`,
+    });
+  }
+  if (publishedNotOn.length > 0) {
+    activeFilters.push({
+      key: "Not on",
+      label: publishedNotOn.map((p) => PLATFORM_FILTER_LABELS[p]).join(" + "),
+      clearHref: `/admin/content${baseQs({ publishedNotOn: undefined })}`,
+    });
+  }
+  if (jobStatus) {
+    activeFilters.push({
+      key: "Job",
+      label: jobStatus,
+      clearHref: `/admin/content${baseQs({ jobStatus: undefined })}`,
+    });
+  }
+  if (flaggedFilter !== undefined) {
+    activeFilters.push({
+      key: "Flagged",
+      label: flaggedFilter ? "waiting for auto-publish" : "not flagged",
+      clearHref: `/admin/content${baseQs({ flagged: undefined })}`,
+    });
+  }
+  if (activeKindFilter) {
+    activeFilters.push({
+      key: "Active",
+      label: ACTIVE_KIND_LABELS[activeKindFilter],
+      clearHref: `/admin/content${baseQs({ active: undefined })}`,
+    });
+  }
+  if (updatedBucket) {
+    const rangeNote =
+      updatedBucket === "custom"
+        ? [sp.updatedAfter, sp.updatedBefore].filter(Boolean).join(" → ")
+        : "";
+    activeFilters.push({
+      key: "Updated",
+      label: rangeNote
+        ? `${DATE_BUCKET_LABELS[updatedBucket]} ${rangeNote}`
+        : DATE_BUCKET_LABELS[updatedBucket],
+      clearHref: `/admin/content${baseQs({ updatedBucket: undefined, updatedAfter: undefined, updatedBefore: undefined })}`,
+    });
+  }
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-4">
@@ -356,7 +448,7 @@ export default async function ContentPage({
         </div>
       )}
 
-      <div className="space-y-2">
+      <FilterPanel active={activeFilters} clearAllHref="/admin/content">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
             Kind
@@ -394,11 +486,11 @@ export default async function ContentPage({
             "All",
             !category,
           )}
-          {CATEGORIES.map((c) =>
+          {activeCategories.map((c) =>
             chip(
-              `/admin/content${baseQs({ category: c })}`,
-              c,
-              category === c,
+              `/admin/content${baseQs({ category: c.label })}`,
+              c.label,
+              category === c.label,
             ),
           )}
           <span className="font-mono text-[10px] text-muted">
@@ -631,9 +723,15 @@ export default async function ContentPage({
             )}
           </form>
         )}
-      </div>
+      </FilterPanel>
 
-      <ContentList rows={rows} />
+      <ContentList
+        rows={rows}
+        categories={activeCategories.map((c) => ({
+          label: c.label,
+          color: c.color,
+        }))}
+      />
 
       {rows.length >= LIST_LIMIT && (
         <p className="font-mono text-[11px] text-muted">

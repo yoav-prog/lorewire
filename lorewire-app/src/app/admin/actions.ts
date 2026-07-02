@@ -14,7 +14,6 @@ import {
 } from "@/lib/rate-limit";
 import { verifyMfaForLogin } from "@/lib/users";
 import { randomUUID } from "node:crypto";
-import { CATEGORIES } from "@/app/admin/ui";
 import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
 import {
@@ -1139,7 +1138,9 @@ export async function setCategoryVoiceoverAction(
   await requireCapability("content.manage");
   const category = String(formData.get("category") ?? "").trim();
   const id = String(formData.get("id") ?? "").trim();
-  if (!CATEGORIES.includes(category as (typeof CATEGORIES)[number])) return;
+  // Same DB-driven closed set the bulk category op validates against.
+  const known = await loadCategoryLabelToSlug();
+  if (!known.has(category)) return;
   await setCategoryVoiceoverId(category, id);
   console.info("[voiceover action] set category", { category, id });
   revalidatePath("/admin/voiceovers");
@@ -3401,10 +3402,17 @@ export async function countSubmissionQueueAction(): Promise<number> {
 
 const MAX_BULK_ITEMS = 200;
 
-// Closed-set guard for bulk category ops. Derived from the shared
-// category list (admin/ui.ts -> @/lib/categories/manifest) so it can't
-// drift from the categories the picker actually offers.
-const STORY_CATEGORIES = new Set<string>(CATEGORIES);
+// Closed-set guard for bulk category ops. Reads the `categories` table —
+// the data-driven taxonomy (_plans/2026-07-01-category-taxonomy-multitag.md)
+// — so admin-added categories validate without a deploy. Legacy rows
+// (status='legacy') are deliberately included: the Undo banner replays the
+// story's PREVIOUS category, which can still be a legacy label. Returns a
+// label -> slug map so the write path can also set the primary story_tag.
+async function loadCategoryLabelToSlug(): Promise<Map<string, string>> {
+  const { listCategories } = await import("@/lib/categories/repo");
+  const rows = await listCategories({ includeArchived: true });
+  return new Map(rows.map((c) => [c.label, c.slug]));
+}
 
 const STORY_STATUSES = new Set<StoryStatus>([
   "draft",
@@ -3491,6 +3499,9 @@ export async function bulkUpdateContentAction(
   if (!op || typeof op !== "object" || typeof op.type !== "string") {
     throw new Error("bulk-action: invalid op");
   }
+  // Populated only for category ops; the write loop reuses it to resolve
+  // the label to its slug for the primary story_tag write.
+  let categoryLabelToSlug: Map<string, string> | null = null;
   if (op.type === "status") {
     // Closed-enum check: status string must be in at least one of the two
     // kind-specific sets. Per-item validation below narrows further so a
@@ -3502,7 +3513,8 @@ export async function bulkUpdateContentAction(
       throw new Error("bulk-action: invalid status");
     }
   } else if (op.type === "category") {
-    if (!STORY_CATEGORIES.has(op.category)) {
+    categoryLabelToSlug = await loadCategoryLabelToSlug();
+    if (!categoryLabelToSlug.has(op.category)) {
       throw new Error("bulk-action: invalid category");
     }
   } else {
@@ -3581,9 +3593,26 @@ export async function bulkUpdateContentAction(
           }
           prev[`${item.kind}:${item.id}`] = prevStatus;
         } else {
-          // category — story only
+          // category — story only. Write BOTH the denormalized label
+          // (stories.category, what every read path renders today) and the
+          // primary story_tag (the taxonomy's source of truth). Skipping
+          // the tag write would let syncStoryPrimaryCategory revert the
+          // label from the old primary tag on the next boot.
           const prevCategory = story.category;
           await setStoryCategory(item.id, op.category);
+          const slug = categoryLabelToSlug?.get(op.category);
+          if (slug) {
+            const { setPrimaryStoryTag } = await import(
+              "@/lib/categories/repo"
+            );
+            await setPrimaryStoryTag(item.id, slug, "admin");
+          }
+          console.info("[content bulk action] category", {
+            id: item.id,
+            prev: prevCategory,
+            next: op.category,
+            slug: slug ?? null,
+          });
           prev[`${item.kind}:${item.id}`] = prevCategory;
         }
       } else {
@@ -4847,5 +4876,181 @@ export async function bulkRefreshAssetsAction(
     erroredCount,
     outcomes,
   };
+}
+
+// ─── Bulk full pipeline & publish ────────────────────────────────────────────
+// 2026-07-02, plan: _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
+//
+// The "rebuild absolutely everything, then ship it everywhere" gesture:
+// re-runs the Python story_jobs pipeline (article + voice), which then
+// force-enqueues a fresh hook-first short and the hero+thumbnail finisher,
+// and flags the story for the auto_complete_publish cron so it publishes
+// to the site + all social surfaces the moment every fresh asset is ready.
+//
+// Three preparations make the re-run genuinely FRESH instead of resumed:
+//   1. bulkEnqueueStoryJobs({ allowUsed: true }) — published stories'
+//      reddit sources sit at status='used', which the default gate refuses.
+//   2. The story's settled short_renders rows are cancelled + stripped of
+//      props. The Python enqueue_short_render coalesces on a DONE row
+//      (only error/cancelled reset), so without this the worker's
+//      end-of-job force-enqueue would keep the OLD short.
+//   3. The 5 hero/thumbnail columns are NULLed — the finisher resumes
+//      ("variant_resumed … skipping i2i") when they're set.
+//
+// fullPipeline is forced to 0 on the job so the site-only full-pipeline
+// lane can't publish ahead of the flag lane (whose query excludes
+// published rows — the socials would never fire).
+//
+// Lifecycle: enqueue → worker rewrites article+voice (status flips to
+// 'review', story leaves the public site) → worker force-enqueues the
+// short (fresh generation, new body) → finisher regenerates hero + 5
+// thumbnails → auto_complete_publish cron publishes site + socials
+// (per-platform dedup skips surfaces that already have the story).
+
+export interface BulkFullPipelineOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state: "started" | "skipped" | "errored";
+  reason?: string;
+}
+
+export interface BulkFullPipelineResult {
+  startedCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkFullPipelineOutcome[];
+}
+
+export async function bulkFullPipelineAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkFullPipelineResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  const t0 = Date.now();
+  console.info("[bulk-full-pipeline click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+
+  const outcomes: BulkFullPipelineOutcome[] = [];
+  let startedCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "articles have no story pipeline",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "not-found",
+        });
+        erroredCount += 1;
+        continue;
+      }
+      if (!story.reddit_id) {
+        // The article body can only be regenerated from the reddit
+        // source. Manual seeds should use "Restart short + hero +
+        // thumbnails" (the refresh-assets chain) instead.
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason: "no-reddit-source",
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      const r = await bulkEnqueueStoryJobs([story.reddit_id], {
+        with_media: true,
+        requested_by: session.email,
+        allowUsed: true,
+        fullPipeline: false,
+      });
+      if (r.enqueued === 0) {
+        const reason =
+          r.skipped_active > 0
+            ? "pipeline-already-running"
+            : r.skipped_status > 0
+              ? "reddit-source-locked"
+              : "not-enqueued";
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason,
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      // The job is in. Clear the resumable state so every downstream
+      // stage regenerates instead of coalescing on the old assets.
+      // Ordering (after the enqueue) matters: a refused enqueue must
+      // not have already stripped a live story's media pointers.
+      await run(
+        "UPDATE short_renders SET status = 'cancelled', props = NULL " +
+          "WHERE story_id = ? AND status IN ('done', 'error', 'cancelled')",
+        [item.id],
+      );
+      await run(
+        "UPDATE stories SET hero_image = NULL, hero_image_landscape = NULL, " +
+          "thumbnail_image = NULL, thumbnail_image_landscape = NULL, " +
+          "thumbnail_image_square = NULL WHERE id = ?",
+        [item.id],
+      );
+      await flagStoryForAutoPublish(item.id);
+
+      console.info("[bulk-full-pipeline started]", {
+        story_id: item.id,
+        reddit_id: story.reddit_id,
+        job_ids: r.enqueued_ids,
+      });
+      outcomes.push({ kind: item.kind, id: item.id, state: "started" });
+      startedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[bulk-full-pipeline errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+  console.info("[bulk-full-pipeline result]", {
+    user_id: session.userId,
+    startedCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return { startedCount, skippedCount, erroredCount, outcomes };
 }
 
