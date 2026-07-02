@@ -61,18 +61,21 @@ vi.mock("@/lib/gcs", () => ({
 import {
   bulkUpdateContentAction,
   bulkDeleteContentAction,
+  bulkFullPipelineAction,
   bulkRegenerateContentAction,
   type BulkContentItem,
 } from "@/app/admin/actions";
 
 async function reset(): Promise<void> {
   await run("DELETE FROM stories WHERE 1=1", []);
+  await run("DELETE FROM story_tags WHERE 1=1", []);
   await run("DELETE FROM articles WHERE 1=1", []);
   await run("DELETE FROM article_revisions WHERE 1=1", []);
   await run("DELETE FROM image_renders WHERE 1=1", []);
   await run("DELETE FROM voice_renders WHERE 1=1", []);
   await run("DELETE FROM story_jobs WHERE 1=1", []);
   await run("DELETE FROM reddit_source WHERE 1=1", []);
+  await run("DELETE FROM short_renders WHERE 1=1", []);
   gcsCalls.length = 0;
 }
 
@@ -289,6 +292,46 @@ describe("bulkUpdateContentAction: category change", () => {
       [storyId],
     );
     expect(after!.category).toBe("Wholesome");
+  });
+
+  it("accepts a granular DB category and writes the primary story_tag", async () => {
+    // "Creepy" exists only in the categories TABLE (granular seed), not in
+    // the legacy manifest — this locks the validation to the DB set. The
+    // primary story_tag write is what stops syncStoryPrimaryCategory from
+    // reverting the admin's change on the next boot.
+    const storyId = await seedStory({ category: "Drama" });
+    const result = await bulkUpdateContentAction(
+      [{ kind: "story", id: storyId }],
+      { type: "category", category: "Creepy" },
+    );
+    expect(result.ok).toHaveLength(1);
+    const after = await one<{ category: string }>(
+      "SELECT category FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(after!.category).toBe("Creepy");
+    const tag = await one<{ category_slug: string; is_primary: number; source: string }>(
+      "SELECT category_slug, is_primary, source FROM story_tags " +
+        "WHERE story_id = ? AND is_primary = 1",
+      [storyId],
+    );
+    expect(tag).not.toBeNull();
+    expect(tag!.category_slug).toBe("creepy");
+    expect(tag!.source).toBe("admin");
+  });
+
+  it("still accepts a legacy label (the Undo banner replays old values)", async () => {
+    const storyId = await seedStory({ category: "Creepy" });
+    const result = await bulkUpdateContentAction(
+      [{ kind: "story", id: storyId }],
+      { type: "category", category: "Roommate" },
+    );
+    expect(result.ok).toHaveLength(1);
+    const after = await one<{ category: string }>(
+      "SELECT category FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(after!.category).toBe("Roommate");
   });
 
   it("rejects category change for articles with kind-mismatch-category", async () => {
@@ -529,5 +572,120 @@ describe("bulkRegenerateContentAction: pipeline target", () => {
     );
     expect(result.ok).toHaveLength(0);
     expect(result.failed[0].reason).toBe("not-enqueued");
+  });
+});
+
+// --- Full pipeline & publish --------------------------------------------------
+// Plan: _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
+
+describe("bulkFullPipelineAction", () => {
+  async function seedFullPipelineStory(): Promise<{
+    storyId: string;
+    redditId: string;
+  }> {
+    const storyId = await seedStory({ status: "published" });
+    const story = await one<{ reddit_id: string }>(
+      "SELECT reddit_id FROM stories WHERE id = ?",
+      [storyId],
+    );
+    const redditId = story!.reddit_id;
+    // Published stories' sources sit at 'used' — the exact status the
+    // default enqueue gate refuses and allowUsed exists for.
+    await run(
+      "INSERT INTO reddit_source (reddit_id, full_text, status, first_synced, last_synced) " +
+        "VALUES (?, 'seed body', 'used', '2026-07-02T00:00:00.000Z', '2026-07-02T00:00:00.000Z')",
+      [redditId],
+    );
+    // Stale media the action must strip so the re-run regenerates
+    // instead of resuming: a DONE short row + the 5 hero/thumb columns.
+    await run(
+      "INSERT INTO short_renders (id, story_id, config_hash, status, progress, props, requested_at) " +
+        "VALUES (?, ?, 'hash-old', 'done', 1.0, '{\"old\":true}', '2026-07-01T00:00:00.000Z')",
+      [randomUUID(), storyId],
+    );
+    await run(
+      "UPDATE stories SET hero_image = 'h', hero_image_landscape = 'hl', " +
+        "thumbnail_image = 't', thumbnail_image_landscape = 'tl', " +
+        "thumbnail_image_square = 'ts' WHERE id = ?",
+      [storyId],
+    );
+    return { storyId, redditId };
+  }
+
+  it("enqueues the job for a used source, strips stale media, and flags auto-publish", async () => {
+    const { storyId, redditId } = await seedFullPipelineStory();
+    const result = await bulkFullPipelineAction([{ kind: "story", id: storyId }]);
+    expect(result.startedCount).toBe(1);
+    expect(result.erroredCount).toBe(0);
+
+    const jobs = await all<{ reddit_id: string; status: string; full_pipeline: number }>(
+      "SELECT reddit_id, status, full_pipeline FROM story_jobs",
+      [],
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].reddit_id).toBe(redditId);
+    expect(jobs[0].status).toBe("queued");
+    // Forced off so the site-only full-pipeline lane can't publish ahead
+    // of the flag lane (which also posts the socials).
+    expect(jobs[0].full_pipeline).toBe(0);
+
+    const shorts = await all<{ status: string; props: string | null }>(
+      "SELECT status, props FROM short_renders WHERE story_id = ?",
+      [storyId],
+    );
+    expect(shorts).toHaveLength(1);
+    expect(shorts[0].status).toBe("cancelled");
+    expect(shorts[0].props).toBeNull();
+
+    const after = await one<{
+      hero_image: string | null;
+      thumbnail_image_square: string | null;
+      auto_publish_when_ready: number;
+    }>(
+      "SELECT hero_image, thumbnail_image_square, auto_publish_when_ready " +
+        "FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(after!.hero_image).toBeNull();
+    expect(after!.thumbnail_image_square).toBeNull();
+    expect(after!.auto_publish_when_ready).toBe(1);
+  });
+
+  it("skips a story whose pipeline is already running, without touching its media", async () => {
+    const { storyId, redditId } = await seedFullPipelineStory();
+    await run(
+      "INSERT INTO story_jobs (id, reddit_id, status, requested_at) VALUES (?, ?, 'processing', '2026-07-02T00:00:00.000Z')",
+      [randomUUID(), redditId],
+    );
+    const result = await bulkFullPipelineAction([{ kind: "story", id: storyId }]);
+    expect(result.startedCount).toBe(0);
+    expect(result.skippedCount).toBe(1);
+    expect(result.outcomes[0].reason).toBe("pipeline-already-running");
+    // The stale-media strip must NOT have run for a refused enqueue.
+    const after = await one<{ hero_image: string | null }>(
+      "SELECT hero_image FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(after!.hero_image).toBe("h");
+  });
+
+  it("skips stories without a reddit source and articles", async () => {
+    const id = randomUUID();
+    await run(
+      "INSERT INTO stories (id, slug, title, status, body, created_at, updated_at) " +
+        "VALUES (?, ?, 'Manual seed', 'published', 'body', '2026-07-02T00:00:00.000Z', '2026-07-02T00:00:00.000Z')",
+      [id, `story-${id.slice(0, 6)}`],
+    );
+    const articleId = await seedArticle({});
+    const result = await bulkFullPipelineAction([
+      { kind: "story", id },
+      { kind: "article", id: articleId },
+    ]);
+    expect(result.startedCount).toBe(0);
+    expect(result.skippedCount).toBe(2);
+    const reasons = result.outcomes.map((o) => o.reason).sort();
+    expect(reasons).toEqual(
+      ["articles have no story pipeline", "no-reddit-source"].sort(),
+    );
   });
 });

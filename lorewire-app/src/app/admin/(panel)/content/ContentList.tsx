@@ -15,9 +15,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+  type CSSProperties,
+} from "react";
 import {
   bulkCompleteAndPublishAction,
+  bulkFullPipelineAction,
   bulkPublishToSocialsAction,
   bulkRefreshAssetsAction,
   bulkUpdateContentAction,
@@ -27,6 +35,8 @@ import {
   type BulkCompleteAndPublishOutcome,
   type BulkCompleteAndPublishResult,
   type BulkContentItem,
+  type BulkFullPipelineOutcome,
+  type BulkFullPipelineResult,
   type BulkPublishResult,
   type BulkRefreshAssetsOutcome,
   type BulkRefreshAssetsResult,
@@ -46,8 +56,18 @@ import type {
   PublishedOn,
   SocialPlatform,
 } from "@/lib/repo";
-import { CATEGORIES, STATUSES, statusClass } from "@/app/admin/ui";
+import { STATUSES, statusClass } from "@/app/admin/ui";
 import { matchesContentSearch } from "@/lib/content-search";
+
+/** Active category options for the row chip + the bulk picker. Fetched
+ *  from the `categories` table by the server page (the 2026-07-01 data-
+ *  driven taxonomy) and passed down — the old hardcoded six-item manifest
+ *  no longer matches what the classifier writes. */
+export interface CategoryOption {
+  label: string;
+  /** Hex like "#C06234", or null for rows seeded without a color. */
+  color: string | null;
+}
 
 const SUBKIND_LABELS: Record<ContentSubKind, string> = {
   video: "Video story",
@@ -71,26 +91,21 @@ function statusesFor(kinds: { stories: number; articles: number }): readonly str
 
 const UNDO_TIMEOUT_MS = 10_000;
 
-// Per-category chip tint, matched to the --color-cat-* design tokens.
-// Explicit strings (not dynamic Tailwind class generation) so the purge
-// step keeps the classes in the production bundle. Same mapping the
-// CategoryChipGroup in the story editor uses — keeping the two surfaces
-// visually consistent.
-type CategoryName = (typeof CATEGORIES)[number];
-const CATEGORY_CHIP_CLASS: Record<CategoryName, string> = {
-  Drama: "border-cat-drama/40 bg-cat-drama/15 text-cat-drama",
-  Entitled: "border-cat-entitled/40 bg-cat-entitled/15 text-cat-entitled",
-  Humor: "border-cat-humor/40 bg-cat-humor/15 text-cat-humor",
-  Wholesome: "border-cat-wholesome/40 bg-cat-wholesome/15 text-cat-wholesome",
-  Dating: "border-cat-dating/40 bg-cat-dating/15 text-cat-dating",
-  Roommate: "border-cat-roommate/40 bg-cat-roommate/15 text-cat-roommate",
-};
-function categoryChipClass(category: string | null | undefined): string {
-  if (!category) return "border-line bg-bg text-muted";
-  return (
-    CATEGORY_CHIP_CLASS[category as CategoryName] ??
-    "border-line bg-bg text-muted"
-  );
+// Per-category chip tint. Categories are DB rows now (admin-editable
+// hex per row), so the tint is an inline style derived from the hex —
+// static Tailwind classes can't exist for runtime-created categories
+// (they'd be purged at build). "66"/"26" are the 40%/15% alpha suffixes
+// the old --color-cat-* classes used.
+const CATEGORY_CHIP_FALLBACK_CLASS = "border-line bg-bg text-muted";
+function categoryChipStyle(
+  color: string | null | undefined,
+): CSSProperties | undefined {
+  if (!color) return undefined;
+  return {
+    borderColor: `${color}66`,
+    backgroundColor: `${color}26`,
+    color,
+  };
 }
 
 // 2026-06-24 latest pipeline-job state per row. Explicit class strings (no
@@ -235,10 +250,10 @@ const REGEN_TARGET_META: Record<
     body: "Queues a hero re-render per story. Each story passes through the daily image-budget gate, so spend pauses once today's cap is reached.",
   },
   scenes: {
-    label: "All scene images",
+    label: "Scene images (article illustrations)",
     verb: "Regenerate all scene images",
     perStoryHint: "~30 i2i calls per story (varies by duration)",
-    body: "Queues a per-scene rebuild for each story. Largest bulk op. Each story passes through the daily image-budget gate.",
+    body: "Queues a per-scene rebuild for each story's stories.images set — the inline article illustrations. Largest bulk op. Each story passes through the daily image-budget gate.",
   },
   voice: {
     label: "Voiceover",
@@ -248,24 +263,36 @@ const REGEN_TARGET_META: Record<
     body: "Queues a TTS re-synthesis per story using each story's voice override (provider + voice id). Already-in-flight stories are skipped, not double-charged.",
   },
   pipeline: {
-    label: "Restart entire pipeline",
+    label: "Restart entire pipeline (article + media)",
     verb: "Restart the entire pipeline",
     perStoryHint: "≈ $0.50 per story (LLM + TTS + images + assembly)",
-    body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Only stories with a reddit_source can be re-run; pre-pipeline manual seeds are skipped.",
+    body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Only stories with an unused reddit_source can be re-run; already-shipped and pre-pipeline manual seeds are skipped — use Full pipeline & publish for those.",
   },
   // 2026-06-28 short re-render target. Re-runs the full shorts pipeline so
   // the LLM is called against the CURRENT shorts_narration prompt — the only
-  // way the latest brand-voice rules (clarity bar + POV + hook charge) reach
+  // way the latest rules (hook-first structure + clarity bar + POV) reach
   // an existing short's script. See _plans/2026-06-28-bulk-regen-shorts.md.
   short: {
-    label: "Short video (to latest voice)",
+    label: "Short video (hook-first rebuild)",
     verb: "Regenerate short video",
     perStoryHint: "≈ $1.13 per story (LLM + ~22 images + voice + render)",
-    body: "Re-runs the full short pipeline using the current brand voice rules: fresh script (third-person narrator, hook names the loss directly), fresh scene art, fresh narration, fresh MP4. Replaces the existing MP4 when done. In-flight renders are skipped.",
+    body: "Re-runs the full short pipeline on the current hook-first flow — hook first, then intro, story, outro — with the locked brand voice rules: fresh script (third-person narrator, hook names the loss directly), fresh scene art, fresh narration, fresh MP4. Replaces the existing MP4 when done. Hero + thumbnails are NOT touched — pick Restart short + hero + thumbnails for that. In-flight renders are skipped.",
   },
 };
 
-export function ContentList({ rows }: { rows: ContentRow[] }) {
+// The Regenerate menu also offers the refresh-assets chain (voice → short →
+// hero + 5 thumbnails, /api/refresh_assets cron) under a name that says what
+// it does. It is not a BulkRegenTarget — the picker routes it to the
+// existing bulk Refresh assets flow, which has its own confirm + banner.
+const RESTART_SHORT_MENU_VALUE = "restart-short-everything";
+
+export function ContentList({
+  rows,
+  categories,
+}: {
+  rows: ContentRow[];
+  categories: CategoryOption[];
+}) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
@@ -313,6 +340,21 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   >(null);
   const [refreshResult, setRefreshResult] =
     useState<BulkRefreshAssetsResult | null>(null);
+  // 2026-07-02 bulk full pipeline & publish. Same confirm/result pattern
+  // as the other bulk flows. Plan:
+  // _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
+  const [fullPipelineConfirm, setFullPipelineConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [fullPipelineResult, setFullPipelineResult] =
+    useState<BulkFullPipelineResult | null>(null);
+  // label → color hex for the row chips; misses (legacy / unclassified
+  // labels) fall back to the muted chip class.
+  const categoryColorByLabel = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const c of categories) m.set(c.label, c.color);
+    return m;
+  }, [categories]);
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -706,6 +748,48 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     });
   }
 
+  function requestFullPipeline() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    setFullPipelineResult(null);
+    setFullPipelineConfirm(storyItems);
+  }
+
+  function runFullPipelineConfirmed() {
+    if (!fullPipelineConfirm) return;
+    const items = fullPipelineConfirm;
+    console.info("[content list full-pipeline request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkFullPipelineResult;
+      try {
+        result = await bulkFullPipelineAction(items);
+      } catch (err) {
+        result = {
+          startedCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list full-pipeline result]", {
+        startedCount: result.startedCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setFullPipelineConfirm(null);
+      setFullPipelineResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   // --- render ---------------------------------------------------------------
 
   return (
@@ -784,12 +868,20 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         />
       )}
 
+      {fullPipelineResult && (
+        <FullPipelineResultBanner
+          result={fullPipelineResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setFullPipelineResult(null)}
+        />
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-2">
         <span className="font-mono text-[11px] text-muted">
-          <span className="text-ink">{publishedShortsItems.length}</span> publish
-          {publishedShortsItems.length === 1 ? "ed story" : "ed stories"} on the
-          latest voice rules?
-          {publishedShortsItems.length === 0 ? " Nothing to refresh." : ""}
+          Rebuild <span className="text-ink">{publishedShortsItems.length}</span>{" "}
+          published {publishedShortsItems.length === 1 ? "short" : "shorts"} on
+          the current hook-first flow (hook → intro → story → outro)?
+          {publishedShortsItems.length === 0 ? " Nothing to rebuild." : ""}
         </span>
         <button
           type="button"
@@ -804,7 +896,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
             setRegenConfirm({ target: "short", items: publishedShortsItems });
           }}
           disabled={pending || publishedShortsItems.length === 0}
-          title="Re-render every published story's short using the current brand voice rules (third-person narrator, hook names the loss directly). Cost is surfaced before commit."
+          title="Re-render every published story's short on the current hook-first flow (hook → intro → story → outro) with the locked brand voice rules. Cost is surfaced before commit."
           className="rounded-md border border-accent/50 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-40"
         >
           {pending
@@ -925,6 +1017,8 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   {r.kind === "story" && (
                     <RowCategoryChip
                       currentCategory={r.badge}
+                      categories={categories}
+                      colorByLabel={categoryColorByLabel}
                       disabled={pending}
                       onPick={(category) =>
                         requestAction([{ kind: "story", id: r.id }], {
@@ -965,6 +1059,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   </span>
                   <RowMenu
                     row={r}
+                    categories={categories}
                     disabled={pending}
                     onAction={(op) =>
                       requestAction([{ kind: r.kind, id: r.id }], op)
@@ -980,12 +1075,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
       {anySelected && (
         <BulkActionBar
           counts={counts}
+          categories={categories}
           disabled={pending}
           onAction={(op) => requestAction(selectedItems, op)}
           onRegen={requestRegen}
           onBulkPublish={runBulkPublish}
           onBulkComplete={requestComplete}
           onBulkRefresh={requestRefresh}
+          onFullPipeline={requestFullPipeline}
           onClear={clearSelection}
         />
       )}
@@ -1032,6 +1129,16 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           onRun={runRefreshConfirmed}
         />
       )}
+
+      {fullPipelineConfirm && (
+        <FullPipelineConfirmModal
+          items={fullPipelineConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setFullPipelineConfirm(null)}
+          onRun={runFullPipelineConfirmed}
+        />
+      )}
     </>
   );
 }
@@ -1040,21 +1147,25 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
 
 function BulkActionBar({
   counts,
+  categories,
   disabled,
   onAction,
   onRegen,
   onBulkPublish,
   onBulkComplete,
   onBulkRefresh,
+  onFullPipeline,
   onClear,
 }: {
   counts: { total: number; stories: number; articles: number };
+  categories: CategoryOption[];
   disabled: boolean;
   onAction: (op: BulkUpdateOp | { type: "delete" }) => void;
   onRegen: (target: BulkRegenTarget) => void;
   onBulkPublish: (platforms: SocialPlatform[]) => void;
   onBulkComplete: () => void;
   onBulkRefresh: () => void;
+  onFullPipeline: () => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
@@ -1064,7 +1175,7 @@ function BulkActionBar({
   const regenDisabled = counts.stories === 0;
   const bulkPublishDisabled = counts.stories === 0;
   const completeDisabled = counts.stories === 0;
-  const refreshDisabled = counts.stories === 0;
+  const fullPipelineDisabled = counts.stories === 0;
   return (
     <div className="sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2 px-4 py-3 shadow-2xl">
       <span className="font-mono text-[11px] uppercase tracking-wider text-ink">
@@ -1086,16 +1197,16 @@ function BulkActionBar({
           disabled={disabled || completeDisabled}
           onClick={onBulkComplete}
         />
-        {/* Refresh assets: voice + short + hero + thumbnails regenerated
-            in place. Preserves story_id / URL / SEO / comments. For the
-            case where a story is already published with stale media
-            (old voice, hero not aligned to short character) and
-            "Restart entire pipeline" refuses because reddit_source is
-            'used'. */}
+        {/* Full pipeline: rebuild EVERYTHING from the reddit source —
+            article, voice, hook-first short, hero + thumbnails — then
+            auto-publish to the site + every social when the fresh set is
+            ready. The expensive sibling of Complete & publish (which only
+            fills in what's missing). */}
         <BarButton
-          label="Refresh assets"
-          disabled={disabled || refreshDisabled}
-          onClick={onBulkRefresh}
+          label="Full pipeline"
+          accent
+          disabled={disabled || fullPipelineDisabled}
+          onClick={onFullPipeline}
         />
         <BulkPublishPicker
           disabled={disabled || bulkPublishDisabled}
@@ -1134,7 +1245,7 @@ function BulkActionBar({
           disabledHint={
             categoryDisabled ? "Category applies to video stories only" : null
           }
-          options={CATEGORIES.map((c) => ({ value: c, label: c }))}
+          options={categories.map((c) => ({ value: c.label, label: c.label }))}
           onPick={(value) => onAction({ type: "category", category: value })}
         />
         <Picker
@@ -1146,13 +1257,24 @@ function BulkActionBar({
               ? "Regenerate targets only apply to video stories"
               : null
           }
-          options={(Object.keys(REGEN_TARGET_META) as BulkRegenTarget[]).map(
-            (t) => ({
-              value: t,
-              label: REGEN_TARGET_META[t].label,
-            }),
-          )}
-          onPick={(value) => onRegen(value as BulkRegenTarget)}
+          options={[
+            ...(Object.keys(REGEN_TARGET_META) as BulkRegenTarget[]).map(
+              (t) => ({
+                value: t,
+                label: REGEN_TARGET_META[t].label,
+              }),
+            ),
+            // The refresh-assets chain, surfaced where the operator looks
+            // for "rebuild the short". Routes to its own confirm flow.
+            {
+              value: RESTART_SHORT_MENU_VALUE,
+              label: "Restart short + hero + thumbnails",
+            },
+          ]}
+          onPick={(value) => {
+            if (value === RESTART_SHORT_MENU_VALUE) onBulkRefresh();
+            else onRegen(value as BulkRegenTarget);
+          }}
         />
         <BarButton
           label="Delete"
@@ -1251,7 +1373,7 @@ function Picker({
       </button>
       {open && (
         <ul
-          className={`absolute right-0 z-20 ${menuPos} min-w-[180px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl`}
+          className={`absolute right-0 z-20 ${menuPos} max-h-80 min-w-[180px] overflow-auto rounded-md border border-line bg-surface shadow-2xl`}
         >
           {options.map((o) => (
             <li key={o.value}>
@@ -1277,10 +1399,12 @@ function Picker({
 
 function RowMenu({
   row,
+  categories,
   disabled,
   onAction,
 }: {
   row: ContentRow;
+  categories: CategoryOption[];
   disabled: boolean;
   onAction: (op: BulkUpdateOp | { type: "delete" }) => void;
 }) {
@@ -1317,7 +1441,7 @@ function RowMenu({
         ⋯
       </button>
       {open && (
-        <ul className="absolute right-3 top-full z-20 mt-1 min-w-[180px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
+        <ul className="absolute right-3 top-full z-20 mt-1 max-h-96 min-w-[180px] overflow-auto rounded-md border border-line bg-surface shadow-2xl">
           <RowMenuItem
             label={isPublished ? "Unpublish" : "Publish"}
             onClick={() => {
@@ -1342,7 +1466,10 @@ function RowMenu({
           {isStory && (
             <RowMenuPicker
               label="Set category →"
-              options={CATEGORIES.map((c) => ({ value: c, label: c }))}
+              options={categories.map((c) => ({
+                value: c.label,
+                label: c.label,
+              }))}
               onPick={(value) => {
                 setOpen(false);
                 onAction({ type: "category", category: value });
@@ -1417,15 +1544,20 @@ function RowMenuPicker({
 
 // 2026-06-21 inline category chip for the story rows. Visible at all
 // times so the current category is glanceable, and clickable to open a
-// 6-option dropdown that calls the existing single-item bulk-update
-// path. Articles don't render this — they have no writable category
-// column. Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+// dropdown of the ACTIVE categories (DB-driven since the 2026-07-01
+// taxonomy arc) that calls the existing single-item bulk-update path.
+// Articles don't render this — they have no writable category column.
+// Plan: _plans/2026-06-21-category-classifier-and-pills.md.
 function RowCategoryChip({
   currentCategory,
+  categories,
+  colorByLabel,
   disabled,
   onPick,
 }: {
   currentCategory: string | null;
+  categories: CategoryOption[];
+  colorByLabel: Map<string, string | null>;
   disabled: boolean;
   onPick: (category: string) => void;
 }) {
@@ -1447,6 +1579,9 @@ function RowCategoryChip({
     };
   }, [open]);
   const label = currentCategory ?? "uncategorized";
+  const currentStyle = currentCategory
+    ? categoryChipStyle(colorByLabel.get(currentCategory))
+    : undefined;
   return (
     <div ref={wrap} className="relative mr-2 flex shrink-0 items-center">
       <button
@@ -1455,33 +1590,39 @@ function RowCategoryChip({
         disabled={disabled}
         aria-label={`Change category (currently ${label})`}
         title="Change category"
-        className={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ${categoryChipClass(
-          currentCategory,
-        )}`}
+        style={currentStyle}
+        className={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ${
+          currentStyle ? "" : CATEGORY_CHIP_FALLBACK_CLASS
+        }`}
       >
         {label}
       </button>
       {open && (
-        <ul className="absolute right-0 top-full z-20 mt-1 min-w-[140px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
-          {CATEGORIES.map((c) => (
-            <li key={c}>
+        <ul className="absolute right-0 top-full z-20 mt-1 max-h-72 min-w-[200px] overflow-auto rounded-md border border-line bg-surface shadow-2xl">
+          {categories.map((c) => (
+            <li key={c.label}>
               <button
                 type="button"
                 onClick={() => {
                   setOpen(false);
-                  if (c === currentCategory) return;
-                  onPick(c);
+                  if (c.label === currentCategory) return;
+                  onPick(c.label);
                 }}
                 className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[11px] transition-colors hover:bg-surface2 ${
-                  c === currentCategory ? "text-muted" : "text-ink"
+                  c.label === currentCategory ? "text-muted" : "text-ink"
                 }`}
               >
                 <span
                   aria-hidden
-                  className={`inline-block h-2 w-2 rounded-full border ${categoryChipClass(c)}`}
+                  style={
+                    c.color ? { backgroundColor: c.color } : undefined
+                  }
+                  className={`inline-block h-2 w-2 rounded-full ${
+                    c.color ? "" : "border border-line"
+                  }`}
                 />
-                {c}
-                {c === currentCategory ? (
+                {c.label}
+                {c.label === currentCategory ? (
                   <span className="ml-auto text-muted">current</span>
                 ) : null}
               </button>
@@ -2450,4 +2591,188 @@ function RefreshingPill({ state }: { state: string }) {
       refresh · {label}
     </span>
   );
+}
+
+// --- Full pipeline confirm modal + result banner -----------------------------
+// 2026-07-02. Same modal/banner pattern as the other bulk flows. The
+// action rebuilds article + voice + hook-first short + hero + thumbnails
+// from the reddit source and flags the story so the auto-publish cron
+// ships it to the site + all socials once every fresh asset is ready.
+// Plan: _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
+
+function FullPipelineConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="full-pipeline-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="full-pipeline-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Run the full pipeline for {items.length}{" "}
+          {items.length === 1 ? "story" : "stories"}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          Rebuilds EVERYTHING from the reddit source: fresh article, fresh
+          voice, fresh hook-first short (hook → intro → story → outro),
+          fresh hero + 5 thumbnails. When the full set is ready, the
+          auto-publish cron ships each story to the site and every social
+          platform. Platforms that already have the story are skipped, so
+          nothing double-posts.
+        </p>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          A story that is currently live leaves the public site while it
+          rebuilds (typically 15–30 min) and republishes automatically.
+          Story id, URL, and comments are preserved. Stories without a
+          reddit source are skipped — use Restart short + hero + thumbnails
+          for those.
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          Worst case: ≈ $1.50 per story (article LLM + short + hero +
+          thumbnails) · ≈ ${(items.length * 1.5).toFixed(2)} total.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Starting…" : `Rebuild & publish ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FullPipelineResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkFullPipelineResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const skipped = result.outcomes.filter((o) => o.state === "skipped");
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  const previewSkipped = skipped.slice(0, 5);
+  const overflowSkipped = skipped.length - previewSkipped.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Full pipeline:</span> Started{" "}
+          <span className="text-accent">{result.startedCount}</span>
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+          <span className="ml-1 text-muted">
+            (watch the row pills — each story republishes on its own once
+            everything fresh is ready)
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">
+                {fullPipelineLabelFor(o, rowByKey)}
+              </span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "unknown")}
+              </span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+      {previewSkipped.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Skipped
+          </li>
+          {previewSkipped.map((o) => (
+            <li key={`skip:${o.kind}:${o.id}`}>
+              <span className="text-ink">
+                {fullPipelineLabelFor(o, rowByKey)}
+              </span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "—")}
+              </span>
+            </li>
+          ))}
+          {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function fullPipelineLabelFor(
+  outcome: BulkFullPipelineOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
 }
