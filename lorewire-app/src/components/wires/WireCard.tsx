@@ -809,11 +809,13 @@ export default function WireCard({
           style={{ background: "linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,0) 100%)" }}
         />
 
-        {/* Top row: category chip (left); fullscreen / EXIT, mute, options
-            (right). Everything here rides the chromeVisible auto-hide group
-            (pinned visible while immersive). The poll pill lives in the
-            bottom-left stack in immersive mode — engagement stays visible
-            while the user watches. */}
+        {/* Top row: category chip (left); EXIT (immersive only), mute,
+            options (right). Everything here rides the chromeVisible
+            auto-hide group (pinned visible while immersive). The feed's
+            centered filter pill + funnel share this strip, so the right
+            cluster stays at two buttons outside immersive. The poll pill
+            lives in the bottom-left stack in immersive mode — engagement
+            stays visible while the user watches. */}
         <div
           className="absolute inset-x-0 top-0 flex items-start justify-between px-4"
           style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 14px)" }}
@@ -839,12 +841,14 @@ export default function WireCard({
               chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
             }`}
           >
-            {/* Fullscreen entry lives up here with the other system controls —
-                NOT floating near the scrubber, where it faded in under the
-                thumb mid-scrub and got tapped by accident (manager-reported
-                2026-07-02). In immersive the same slot holds a labeled EXIT
-                pill, so the way out is never a mystery icon. */}
-            {immersive ? (
+            {/* In immersive the cluster leads with a labeled EXIT pill, so
+                the way out is never a mystery icon. The feed's centered
+                filter pill + funnel hide in immersive, so this is the only
+                thing sharing the strip with mute + options. (Fullscreen
+                ENTRY lives in the bottom control bar — the top strip is
+                already full on phones, and the old spot above the scrubber
+                got tapped by accident; manager-reported 2026-07-02.) */}
+            {immersive && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -870,22 +874,6 @@ export default function WireCard({
                   Exit
                 </span>
               </button>
-            ) : (
-              onEnterImmersive && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    markActive();
-                    onEnterImmersive();
-                  }}
-                  aria-label="Enter fullscreen"
-                  title="Fullscreen"
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-                  style={{ background: "rgba(0,0,0,.4)" }}
-                >
-                  <FullscreenIcon expanded={false} size={18} />
-                </button>
-              )
             )}
             <button
               onClick={(e) => {
@@ -1248,6 +1236,26 @@ export default function WireCard({
             >
               <ShareUpIcon size={21} />
             </button>
+            {/* Fullscreen entry — off the video stage entirely, so it can
+                never be hit while tapping or scrubbing, and it doesn't crowd
+                the top strip (the feed's filter pill + funnel live there).
+                The divider marks it as a view control, not engagement. */}
+            {onEnterImmersive && (
+              <>
+                <span aria-hidden className="h-5 w-px bg-line" />
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onEnterImmersive();
+                  }}
+                  aria-label="Enter fullscreen"
+                  title="Fullscreen"
+                  className="active:scale-90 transition"
+                >
+                  <FullscreenIcon expanded={false} size={20} />
+                </button>
+              </>
+            )}
           </div>
         </div>
 

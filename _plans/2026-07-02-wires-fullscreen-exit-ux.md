@@ -27,15 +27,29 @@ placement trap:
 
 ## Fix (all client UI, `WireCard` + a CSS keyframe + logs in the two feeds)
 
-1. **Move the enter button into the top-right control cluster** (before mute):
-   `[fullscreen] [mute] [more]`. Nobody scrubs or taps there by accident. The
-   floating bottom-right button is deleted.
-2. **Exit becomes a labeled pill**: X icon + "Exit" in the card's mono
+1. **Move the enter button into the bottom control bar**, at the end of the
+   like/save/share row behind a thin divider (view control, not engagement).
+   It's off the video stage entirely — a tap aimed at the stage or the
+   scrubber can never land on it. The floating bottom-right button is
+   deleted.
+
+   *Revision, same day:* the first cut put it in the top-right cluster next
+   to mute. On a 390px phone that strip already holds the category chip, the
+   feed's centered UNVOTED/ALL pill, and the funnel — the old two-button
+   cluster cleared the funnel by ~4px, and the third button collided with
+   it (Yoav caught it on a live screenshot). The top strip is full; the
+   bottom bar is the only calm home.
+
+2. **Filter pill + funnel hide in immersive** (both feeds). In real
+   fullscreen they're invisible anyway (rendered outside the fullscreened
+   container); on browsers without element fullscreen (iPhone Safari) they
+   would collide with the EXIT pill. Immersive means video only.
+3. **Exit becomes a labeled pill**: X icon + "Exit" in the card's mono
    uppercase type, hairline border so it reads as a control (same treatment as
    the poll pill). Stays pinned visible (immersive pins chrome). On entering
    immersive it plays a one-shot triple ping ring (~2.4s) so the eye lands on
    the way out first. Skipped under `prefers-reduced-motion`.
-3. **Voting moves to the thumb zone**: in immersive, the poll pill relocates
+4. **Voting moves to the thumb zone**: in immersive, the poll pill relocates
    from top-left to the bottom-left stack, directly above the title, where
    TikTok-style UIs put content actions. Pill stays out of the auto-hide
    group (always visible). Tapping it opens the existing poll bottom sheet.
@@ -76,8 +90,9 @@ existing `reducedMotion` prop rather than a setting.
 ## Testing
 
 `WireCard.test.tsx` (vitest + happy-dom, existing harness):
-- enter button renders inside the top-right cluster (shares a parent with
-  mute) and still invokes `onEnterImmersive`.
+- enter button renders inside the bottom control bar (shares a row with
+  Share, contained in the below-video bar) and still invokes
+  `onEnterImmersive`.
 - exit pill carries the "Exit" label and invokes `onExitImmersive`
   (existing test, extended).
 - immersive + poll: the vote pill renders in the bottom-left stack with the
@@ -85,8 +100,10 @@ existing `reducedMotion` prop rather than a setting.
 - entry ping renders when `reducedMotion` is false, not when true.
 
 Out of scope: real Fullscreen API behavior (jsdom has none — the feed's
-enter/exit/`fullscreenchange` wiring is unchanged by this fix) and visual
-regression of the ping animation.
+enter/exit/`fullscreenchange` wiring is unchanged by this fix), visual
+regression of the ping animation, and the feeds' one-line
+`{!immersive && <WiresTopControls/>}` conditional (the feeds have no render
+test harness; covered by manual QA on the preview).
 
 ## Deploy
 
