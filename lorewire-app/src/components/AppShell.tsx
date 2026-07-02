@@ -44,6 +44,7 @@ import {
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
+import PosterMeta from "@/components/PosterMeta";
 import { renderHeroVerdictBadge } from "@/lib/polls-shared";
 import {
   BackToTop,
@@ -178,12 +179,7 @@ function PosterArt({ story, rounded = true, showTitle = true, vig = false }: { s
           (.55 opacity at the bottom) still provides enough contrast
           for non-baked CSS titles. */}
       {vig && <div className="absolute inset-0 poster-vig"></div>}
-      <div className="absolute left-2.5 top-2.5">
-        <span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.32)" }}>{story.cat}</span>
-      </div>
-      {story.dur && (
-        <div className="absolute right-2 top-2 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
-      )}
+      <PosterMeta cat={story.cat} dur={story.dur} />
       {renderCssTitle && (
         <div className="absolute left-3 right-3 bottom-3">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 22, color: "#F5F3EF" }}>{story.title}</h3>
