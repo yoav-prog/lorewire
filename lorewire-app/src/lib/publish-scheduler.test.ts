@@ -9,12 +9,14 @@ import { all, run } from "@/lib/db";
 import {
   PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
+  cancelScheduledPublish,
   computeNextOpenSlot,
   enumerateSlotInstants,
   getPlatformConfig,
   getPlatformDailyCap,
   getPlatformSlots,
   getPublishEnabled,
+  listUpcomingPublishes,
   logSchedulerDecision,
   normalizeSlotList,
   parseSlot,
@@ -22,6 +24,7 @@ import {
   partsInTz,
   platformSettingKey,
   scheduleStoryPublish,
+  scheduleStoryPublishAt,
   slotsForWeekday,
   wallClockToUtcMs,
   type PlatformConfig,
@@ -401,6 +404,126 @@ describe("scheduleStoryPublish", () => {
     const b = await scheduleStoryPublish("b", { nowMs: now });
     expect(a.outcomes.find((o) => o.platform === "youtube")?.slotLocal).toBe("09:00");
     expect(b.outcomes.find((o) => o.platform === "youtube")?.slotLocal).toBe("13:00");
+  });
+});
+
+describe("scheduleStoryPublishAt", () => {
+  beforeEach(async () => {
+    await clear();
+    await run("DELETE FROM stories", []);
+  });
+
+  it("schedules at the explicit wall-clock time in the platform timezone", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 3, tz: "America/New_York" });
+    const now = Date.UTC(2026, 6, 1, 0, 0);
+    const r = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { year: 2026, month: 7, day: 4, hour: 15, minute: 30 },
+      { nowMs: now },
+    );
+    expect(r.status).toBe("scheduled");
+    expect(r.slotLocal).toBe("15:30");
+    expect(r.capExceeded).toBe(false);
+    // 15:30 EDT (UTC-4) = 19:30 UTC.
+    expect(r.scheduledForIso).toBe(
+      new Date(Date.UTC(2026, 6, 4, 19, 30)).toISOString(),
+    );
+  });
+
+  it("rejects a time in the past", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 3, tz: "UTC" });
+    const now = Date.UTC(2026, 6, 4, 12, 0);
+    const r = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { year: 2026, month: 7, day: 4, hour: 9, minute: 0 },
+      { nowMs: now },
+    );
+    expect(r.status).toBe("in_past");
+  });
+
+  it("reports duplicate when the story already has an active row", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 3, tz: "UTC" });
+    const now = Date.UTC(2026, 6, 1, 0, 0);
+    const when = { year: 2026, month: 7, day: 4, hour: 9, minute: 0 };
+    const first = await scheduleStoryPublishAt("s1", "youtube", when, { nowMs: now });
+    expect(first.status).toBe("scheduled");
+    const second = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { ...when, hour: 12 },
+      { nowMs: now },
+    );
+    expect(second.status).toBe("duplicate");
+  });
+
+  it("still lands past the daily cap but says so", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 1, tz: "UTC" });
+    const now = Date.UTC(2026, 6, 1, 0, 0);
+    await insertSlotRow("youtube", new Date(Date.UTC(2026, 6, 4, 9, 0)).toISOString());
+    const r = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { year: 2026, month: 7, day: 4, hour: 12, minute: 0 },
+      { nowMs: now },
+    );
+    expect(r.status).toBe("scheduled");
+    expect(r.capExceeded).toBe(true);
+  });
+});
+
+describe("cancelScheduledPublish", () => {
+  beforeEach(clear);
+
+  async function insertRow(id: string, platform: string, state: string) {
+    await run(
+      "INSERT INTO scheduled_publishes (id, story_id, platform, scheduled_for, state, attempts, created_at) " +
+        "VALUES (?, 's1', ?, '2026-07-04T09:00:00.000Z', ?, 0, '2026-07-01T00:00:00.000Z')",
+      [id, platform, state],
+    );
+  }
+
+  it("cancels a waiting row; a second cancel is a harmless yes", async () => {
+    await insertRow("row1", "youtube", "scheduled");
+    expect(await cancelScheduledPublish("row1")).toBe(true);
+    expect(await cancelScheduledPublish("row1")).toBe(true);
+    const back = await all<{ state: string }>(
+      "SELECT state FROM scheduled_publishes WHERE id = 'row1'",
+      [],
+    );
+    expect(back[0].state).toBe("cancelled");
+  });
+
+  it("refuses a row the dispatcher already claimed or posted", async () => {
+    await insertRow("row2", "youtube", "publishing");
+    await insertRow("row3", "tiktok", "published");
+    expect(await cancelScheduledPublish("row2")).toBe(false);
+    expect(await cancelScheduledPublish("row3")).toBe(false);
+  });
+});
+
+describe("listUpcomingPublishes", () => {
+  beforeEach(async () => {
+    await clear();
+    await run("DELETE FROM stories", []);
+  });
+
+  it("returns waiting rows soonest-first with story titles", async () => {
+    await run(
+      "INSERT INTO stories (id, title, status, created_at, updated_at) VALUES ('s1', 'A Story', 'published', '2026-07-01', '2026-07-01')",
+      [],
+    );
+    await run(
+      "INSERT INTO scheduled_publishes (id, story_id, platform, scheduled_for, state, attempts, created_at) VALUES " +
+        "('later', 's1', 'youtube', '2026-07-05T09:00:00.000Z', 'scheduled', 0, '2026-07-01'), " +
+        "('sooner', 's1', 'tiktok', '2026-07-04T09:00:00.000Z', 'scheduled', 0, '2026-07-01'), " +
+        "('done', 's1', 'facebook', '2026-07-03T09:00:00.000Z', 'published', 0, '2026-07-01')",
+      [],
+    );
+    const rows = await listUpcomingPublishes();
+    expect(rows.map((r) => r.id)).toEqual(["sooner", "later"]);
+    expect(rows[0].storyTitle).toBe("A Story");
   });
 });
 

@@ -21,7 +21,7 @@
 
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { one, run } from "@/lib/db";
+import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 
 // ---- platforms + settings --------------------------------------------
@@ -564,6 +564,166 @@ async function insertScheduledPublish(args: {
     [id],
   );
   return back !== null;
+}
+
+// ---- explicit scheduling + queue management ---------------------------
+
+export interface ExplicitScheduleResult {
+  status: "scheduled" | "duplicate" | "in_past";
+  scheduledForIso?: string;
+  slotLocal?: string;
+  timezone?: string;
+  /** True when the target local day was already at/over the daily cap.
+   *  The row still lands — a deliberate human choice wins — but the UI
+   *  should say so. */
+  capExceeded?: boolean;
+}
+
+/**
+ * Schedule one story to an explicit wall-clock date/time on one platform,
+ * bypassing next-open-slot math. The time is interpreted in the
+ * platform's configured timezone. Explicit rows occupy capacity like any
+ * other active row, so automatic slot assignment flows around them.
+ * Idempotent per (story, platform) via the same partial unique index.
+ */
+export async function scheduleStoryPublishAt(
+  storyId: string,
+  platform: PublishPlatform,
+  when: { year: number; month: number; day: number; hour: number; minute: number },
+  opts: { renderId?: string | null; approvedBy?: string | null; nowMs?: number } = {},
+): Promise<ExplicitScheduleResult> {
+  const nowMs = opts.nowMs ?? Date.now();
+  const config = await getPlatformConfig(platform);
+  const ms = wallClockToUtcMs(
+    config.timezone,
+    when.year,
+    when.month,
+    when.day,
+    when.hour,
+    when.minute,
+  );
+  if (ms <= nowMs) return { status: "in_past" };
+
+  const slotLocal = `${String(when.hour).padStart(2, "0")}:${String(when.minute).padStart(2, "0")}`;
+  const { startMs, endMs } = tzDayBoundsMs(
+    config.timezone,
+    when.year,
+    when.month,
+    when.day,
+  );
+  const dayCount = await countActiveScheduledInRange(
+    platform,
+    new Date(startMs).toISOString(),
+    new Date(endMs).toISOString(),
+  );
+
+  const slot: OpenSlot = {
+    scheduledForMs: ms,
+    scheduledForIso: new Date(ms).toISOString(),
+    slotLocal,
+    timezone: config.timezone,
+  };
+  const landed = await insertScheduledPublish({
+    storyId,
+    renderId: opts.renderId ?? null,
+    platform,
+    slot,
+    approvedBy: opts.approvedBy ?? null,
+    nowMs,
+  });
+  if (!landed) return { status: "duplicate" };
+  return {
+    status: "scheduled",
+    scheduledForIso: slot.scheduledForIso,
+    slotLocal,
+    timezone: config.timezone,
+    capExceeded: dayCount >= config.dailyCap,
+  };
+}
+
+/**
+ * Cancel a queued post. Only rows still waiting to fire can be cancelled;
+ * a row the dispatcher already claimed (or posted) stays put. Returns
+ * whether the row is cancelled afterwards, so a double-click is a no-op
+ * that still reads as success.
+ */
+export async function cancelScheduledPublish(id: string): Promise<boolean> {
+  await run(
+    "UPDATE scheduled_publishes SET state = 'cancelled' WHERE id = ? AND state = 'scheduled'",
+    [id],
+  );
+  const back = await one<{ state: string }>(
+    "SELECT state FROM scheduled_publishes WHERE id = ?",
+    [id],
+  );
+  return back?.state === "cancelled";
+}
+
+export interface UpcomingPublishRow {
+  id: string;
+  storyId: string;
+  storyTitle: string | null;
+  platform: string;
+  scheduledFor: string;
+  slotLocal: string | null;
+  timezone: string | null;
+}
+
+/** Every post still waiting to fire, soonest first, with its story title
+ *  for display. */
+export async function listUpcomingPublishes(
+  limit = 50,
+): Promise<UpcomingPublishRow[]> {
+  const rows = await all<{
+    id: string;
+    story_id: string;
+    title: string | null;
+    platform: string;
+    scheduled_for: string;
+    slot_local: string | null;
+    timezone: string | null;
+  }>(
+    `SELECT sp.id, sp.story_id, s.title, sp.platform, sp.scheduled_for,
+            sp.slot_local, sp.timezone
+     FROM scheduled_publishes sp
+     LEFT JOIN stories s ON s.id = sp.story_id
+     WHERE sp.state = 'scheduled'
+     ORDER BY sp.scheduled_for ASC
+     LIMIT ?`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    storyId: r.story_id,
+    storyTitle: r.title,
+    platform: r.platform,
+    scheduledFor: r.scheduled_for,
+    slotLocal: r.slot_local,
+    timezone: r.timezone,
+  }));
+}
+
+export interface SchedulableStory {
+  id: string;
+  title: string | null;
+}
+
+/** Recent stories that could be queued to a platform by hand: published
+ *  or ready, with a finished short render the dispatcher can post. */
+export async function listSchedulableStories(
+  limit = 50,
+): Promise<SchedulableStory[]> {
+  return all<SchedulableStory>(
+    `SELECT s.id, s.title FROM stories s
+     WHERE s.status IN ('published', 'ready')
+       AND EXISTS (
+         SELECT 1 FROM short_renders r
+         WHERE r.story_id = s.id AND r.status = 'done' AND r.output_url IS NOT NULL
+       )
+     ORDER BY s.updated_at DESC
+     LIMIT ?`,
+    [limit],
+  );
 }
 
 // ---- decision log ----------------------------------------------------

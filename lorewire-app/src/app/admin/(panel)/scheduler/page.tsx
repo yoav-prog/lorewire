@@ -26,8 +26,11 @@ import {
 } from "@/lib/render-scheduler";
 import { getBudgetSummary, formatCents } from "@/lib/story-jobs-budget";
 import {
+  PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
   getSchedulerOverview,
+  listSchedulableStories,
+  listUpcomingPublishes,
   platformSettingKey,
   type PlatformOverview,
 } from "@/lib/publish-scheduler";
@@ -40,6 +43,8 @@ import {
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
 import { ReviewActions } from "./_components/ReviewActions";
+import { SchedulePostForm } from "./_components/SchedulePostForm";
+import { UpcomingPosts } from "./_components/UpcomingPosts";
 
 interface ReviewRow {
   id: string;
@@ -94,6 +99,8 @@ export default async function SchedulerPage() {
     eligibility,
     overview,
     reviewRows,
+    upcoming,
+    schedulable,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -107,6 +114,8 @@ export default async function SchedulerPage() {
     all<ReviewRow>(
       "SELECT id, title, category, updated_at FROM stories WHERE status = 'review' ORDER BY updated_at DESC LIMIT 50",
     ),
+    listUpcomingPublishes(50),
+    listSchedulableStories(50),
   ]);
 
   const rendering = gate.reason === "ok";
@@ -283,6 +292,36 @@ export default async function SchedulerPage() {
             <PlatformCard key={p.config.platform} overview={p} />
           ))}
         </div>
+      </section>
+
+      {/* ── Posting queue ────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">
+          Posting queue{" "}
+          <span className="font-mono text-[13px] text-muted">
+            ({upcoming.length})
+          </span>
+        </h2>
+        <UpcomingPosts
+          items={upcoming.map((u) => ({
+            id: u.id,
+            storyId: u.storyId,
+            title: u.storyTitle || u.storyId,
+            platformLabel: PLATFORM_LABELS[u.platform] ?? u.platform,
+            whenLabel: formatSlot(
+              u.scheduledFor,
+              u.timezone || PUBLISH_DEFAULTS.timezone,
+            ),
+          }))}
+        />
+        <SchedulePostForm
+          stories={schedulable.map((s) => ({ id: s.id, title: s.title || s.id }))}
+          platforms={overview.platforms.map((p) => ({
+            id: p.config.platform,
+            label: PLATFORM_LABELS[p.config.platform] ?? p.config.platform,
+            timezone: p.config.timezone,
+          }))}
+        />
       </section>
     </div>
   );

@@ -19,9 +19,13 @@ import { getStory, setStatus, setSetting } from "@/lib/repo";
 import { getRedditSource } from "@/lib/reddit-source";
 import { publishStoryIfReady } from "@/lib/auto-publish";
 import {
+  PUBLISH_PLATFORMS,
+  cancelScheduledPublish,
   logSchedulerDecision,
   platformSettingKey,
   scheduleStoryPublish,
+  scheduleStoryPublishAt,
+  type ExplicitScheduleResult,
   type PlatformScheduleOutcome,
   type PublishPlatform,
 } from "@/lib/publish-scheduler";
@@ -142,6 +146,101 @@ export async function schedulerRejectStoryAction(
   console.info("[scheduler reject]", { storyId, actorId: session.userId });
   revalidatePath("/admin/scheduler");
   revalidatePath(`/admin/stories/${storyId}`);
+  return { ok: true };
+}
+
+interface ScheduleAtResult {
+  ok: boolean;
+  error?: string;
+  status?: ExplicitScheduleResult["status"];
+  scheduledForIso?: string;
+  capExceeded?: boolean;
+}
+
+/**
+ * Queue one story to post on one platform at an explicit date/time,
+ * entered as the platform's local wall clock ("YYYY-MM-DDTHH:MM" from a
+ * datetime-local input). Bypasses next-open-slot math; still one active
+ * row per (story, platform).
+ */
+export async function schedulerScheduleAtAction(input: {
+  storyId: string;
+  platform: string;
+  whenLocal: string;
+}): Promise<ScheduleAtResult> {
+  const session = await requireCapability("content.manage");
+  const { storyId, platform, whenLocal } = input;
+  if (!storyId) return { ok: false, error: "missing story id" };
+  if (!(PUBLISH_PLATFORMS as readonly string[]).includes(platform)) {
+    return { ok: false, error: "unknown platform" };
+  }
+
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(whenLocal ?? "");
+  if (!m) return { ok: false, error: "pick a date and time" };
+  const when = {
+    year: Number(m[1]),
+    month: Number(m[2]),
+    day: Number(m[3]),
+    hour: Number(m[4]),
+    minute: Number(m[5]),
+  };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story_not_found" };
+
+  const result = await scheduleStoryPublishAt(
+    storyId,
+    platform as PublishPlatform,
+    when,
+    { approvedBy: session.userId },
+  );
+
+  console.info("[scheduler schedule_at]", {
+    storyId,
+    platform,
+    whenLocal,
+    actorId: session.userId,
+    status: result.status,
+    scheduledForIso: result.scheduledForIso ?? null,
+    capExceeded: result.capExceeded ?? false,
+  });
+
+  if (result.status === "in_past") {
+    return { ok: false, error: "that time is in the past", status: result.status };
+  }
+  if (result.status === "duplicate") {
+    return {
+      ok: false,
+      error: "this story is already queued for that platform",
+      status: result.status,
+    };
+  }
+
+  revalidatePath("/admin/scheduler");
+  return {
+    ok: true,
+    status: result.status,
+    scheduledForIso: result.scheduledForIso,
+    capExceeded: result.capExceeded,
+  };
+}
+
+/**
+ * Cancel a queued post before the dispatcher claims it. Rows already
+ * publishing or posted stay put.
+ */
+export async function schedulerCancelPublishAction(
+  id: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("content.manage");
+  if (!id) return { ok: false, error: "missing id" };
+
+  const cancelled = await cancelScheduledPublish(id);
+  console.info("[scheduler cancel]", { id, actorId: session.userId, cancelled });
+  if (!cancelled) {
+    return { ok: false, error: "too late — this post already went out or is publishing" };
+  }
+  revalidatePath("/admin/scheduler");
   return { ok: true };
 }
 
