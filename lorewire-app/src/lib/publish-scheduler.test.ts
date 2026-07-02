@@ -9,20 +9,32 @@ import { all, run } from "@/lib/db";
 import {
   PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
+  buildCalendarDays,
+  cancelScheduledPublish,
   computeNextOpenSlot,
   enumerateSlotInstants,
   getPlatformConfig,
   getPlatformDailyCap,
   getPlatformSlots,
   getPublishEnabled,
+  listUpcomingPublishes,
   logSchedulerDecision,
+  normalizeSlotList,
   parseSlot,
+  parseSlotsSetting,
   partsInTz,
   platformSettingKey,
   scheduleStoryPublish,
+  scheduleStoryPublishAt,
+  slotsForWeekday,
   wallClockToUtcMs,
   type PlatformConfig,
+  type WeeklySlots,
 } from "./publish-scheduler";
+
+function weekly(defaults: string[], overrides: WeeklySlots["overrides"] = {}): WeeklySlots {
+  return { default: defaults, overrides };
+}
 
 async function clear() {
   await run("DELETE FROM scheduled_publishes", []);
@@ -120,9 +132,65 @@ describe("DST-safe timezone math (America/New_York)", () => {
   });
 });
 
+describe("parseSlotsSetting", () => {
+  it("parses the v1 flat array into an every-day schedule", () => {
+    expect(parseSlotsSetting(JSON.stringify(["18:00", "09:00", "9:00"]))).toEqual({
+      default: ["09:00", "18:00"],
+      overrides: {},
+    });
+  });
+
+  it("falls back to defaults on blank, bad JSON, or an empty flat array", () => {
+    const fallback = { default: [...PUBLISH_DEFAULTS.slots], overrides: {} };
+    expect(parseSlotsSetting(null)).toEqual(fallback);
+    expect(parseSlotsSetting("  ")).toEqual(fallback);
+    expect(parseSlotsSetting("{ not json")).toEqual(fallback);
+    expect(parseSlotsSetting("[]")).toEqual(fallback);
+    expect(parseSlotsSetting(JSON.stringify(["nope"]))).toEqual(fallback);
+    expect(parseSlotsSetting(JSON.stringify(42))).toEqual(fallback);
+    expect(parseSlotsSetting(JSON.stringify({ overrides: {} }))).toEqual(fallback);
+  });
+
+  it("parses the v2 object shape, keeping an explicit empty override AND an explicit empty default", () => {
+    const parsed = parseSlotsSetting(
+      JSON.stringify({
+        default: ["13:00", "9:00"],
+        overrides: { sat: [], sun: ["11:00"], nonsense: ["10:00"] },
+      }),
+    );
+    expect(parsed).toEqual({
+      default: ["09:00", "13:00"],
+      overrides: { sat: [], sun: ["11:00"] },
+    });
+    // Weekend-only schedule: empty default is deliberate, not corruption.
+    expect(
+      parseSlotsSetting(JSON.stringify({ default: [], overrides: { sat: ["10:00"] } })),
+    ).toEqual({ default: [], overrides: { sat: ["10:00"] } });
+  });
+});
+
+describe("slotsForWeekday", () => {
+  it("uses the override when present (even empty), else the default", () => {
+    const w = weekly(["09:00"], { sat: [], sun: ["11:00"] });
+    expect(slotsForWeekday(w, "mon")).toEqual(["09:00"]);
+    expect(slotsForWeekday(w, "sat")).toEqual([]);
+    expect(slotsForWeekday(w, "sun")).toEqual(["11:00"]);
+  });
+});
+
+describe("normalizeSlotList", () => {
+  it("validates, zero-pads, de-dupes and sorts", () => {
+    expect(normalizeSlotList(["18:00", "9:05", "09:05", "bad", 7])).toEqual([
+      "09:05",
+      "18:00",
+    ]);
+    expect(normalizeSlotList("not a list")).toEqual([]);
+  });
+});
+
 describe("enumerateSlotInstants", () => {
   it("emits only future slots, ascending", () => {
-    const config = { slots: ["09:00", "13:00", "18:00"], timezone: "UTC" };
+    const config = { slots: weekly(["09:00", "13:00", "18:00"]), timezone: "UTC" };
     const from = Date.UTC(2026, 6, 1, 12, 0); // noon UTC July 1
     const cands = enumerateSlotInstants(config, from, 1);
     // July 1 09:00 is in the past; first future is July 1 13:00.
@@ -137,8 +205,45 @@ describe("enumerateSlotInstants", () => {
 
   it("returns nothing when there are no valid slots", () => {
     expect(
-      enumerateSlotInstants({ slots: [], timezone: "UTC" }, Date.now(), 3),
+      enumerateSlotInstants({ slots: weekly([]), timezone: "UTC" }, Date.now(), 3),
     ).toEqual([]);
+  });
+
+  it("skips a weekday with an explicit no-posts override", () => {
+    // 2026-07-03 is a Friday; Saturday July 4 is overridden to no posts.
+    const config = {
+      slots: weekly(["09:00"], { sat: [] }),
+      timezone: "UTC",
+    };
+    const from = Date.UTC(2026, 6, 3, 10, 0); // Friday, after 09:00
+    const cands = enumerateSlotInstants(config, from, 3);
+    expect(cands[0].ms).toBe(Date.UTC(2026, 6, 5, 9, 0)); // Sunday
+  });
+
+  it("uses a weekday's custom times instead of the default", () => {
+    // Sunday 2026-07-05 posts at 11:00 instead of 09:00.
+    const config = {
+      slots: weekly(["09:00"], { sun: ["11:00"] }),
+      timezone: "UTC",
+    };
+    const from = Date.UTC(2026, 6, 4, 10, 0); // Saturday, after 09:00
+    const cands = enumerateSlotInstants(config, from, 1);
+    expect(cands[0].ms).toBe(Date.UTC(2026, 6, 5, 11, 0));
+  });
+
+  it("resolves the weekday in the platform timezone, not UTC", () => {
+    // 03:00 UTC Saturday July 4 is still 23:00 FRIDAY July 3 in New York.
+    // With Saturdays off, the Friday view has no slots left (09:00 passed),
+    // Saturday is skipped, so the first candidate is Sunday 09:00 local.
+    const config = {
+      slots: weekly(["09:00"], { sat: [] }),
+      timezone: "America/New_York",
+    };
+    const from = Date.UTC(2026, 6, 4, 3, 0);
+    const cands = enumerateSlotInstants(config, from, 3);
+    expect(cands[0].ms).toBe(
+      wallClockToUtcMs("America/New_York", 2026, 7, 5, 9, 0),
+    );
   });
 });
 
@@ -159,14 +264,25 @@ describe("setting readers", () => {
     expect(await getPlatformDailyCap("tiktok")).toBe(5);
   });
 
-  it("slots parse, validate, de-dupe and sort; bad JSON falls back to defaults", async () => {
+  it("slots read both stored shapes; bad JSON falls back to defaults", async () => {
     await setSetting(
       platformSettingKey("youtube", "slots"),
       JSON.stringify(["18:00", "09:00", "09:00", "nope", "13:00"]),
     );
-    expect(await getPlatformSlots("youtube")).toEqual(["09:00", "13:00", "18:00"]);
+    expect(await getPlatformSlots("youtube")).toEqual(
+      weekly(["09:00", "13:00", "18:00"]),
+    );
+    await setSetting(
+      platformSettingKey("youtube", "slots"),
+      JSON.stringify({ default: ["09:00"], overrides: { sat: [] } }),
+    );
+    expect(await getPlatformSlots("youtube")).toEqual(
+      weekly(["09:00"], { sat: [] }),
+    );
     await setSetting(platformSettingKey("youtube", "slots"), "{ not json");
-    expect(await getPlatformSlots("youtube")).toEqual([...PUBLISH_DEFAULTS.slots]);
+    expect(await getPlatformSlots("youtube")).toEqual(
+      weekly([...PUBLISH_DEFAULTS.slots]),
+    );
   });
 
   it("invalid timezone falls back to the default", async () => {
@@ -289,6 +405,196 @@ describe("scheduleStoryPublish", () => {
     const b = await scheduleStoryPublish("b", { nowMs: now });
     expect(a.outcomes.find((o) => o.platform === "youtube")?.slotLocal).toBe("09:00");
     expect(b.outcomes.find((o) => o.platform === "youtube")?.slotLocal).toBe("13:00");
+  });
+});
+
+describe("buildCalendarDays", () => {
+  const config = {
+    slots: weekly(["09:00", "13:00"], { sat: [] }),
+    timezone: "UTC",
+    dailyCap: 2,
+  };
+
+  it("merges queued posts with projected open slots, ascending, capped", () => {
+    // Wednesday 2026-07-01, 08:00 UTC. One post queued at 09:00.
+    const from = Date.UTC(2026, 6, 1, 8, 0);
+    const days = buildCalendarDays(
+      config,
+      [
+        {
+          storyId: "s1",
+          storyTitle: "Queued",
+          scheduledForIso: new Date(Date.UTC(2026, 6, 1, 9, 0)).toISOString(),
+        },
+      ],
+      from,
+      3,
+    );
+    expect(days).toHaveLength(3);
+    expect(days[0].isToday).toBe(true);
+    expect(days[0].entries.map((e) => [e.kind, e.timeLocal])).toEqual([
+      ["queued", "09:00"],
+      ["open", "13:00"],
+    ]);
+    // Thursday: nothing queued, both slots open (cap 2).
+    expect(days[1].entries.map((e) => [e.kind, e.timeLocal])).toEqual([
+      ["open", "09:00"],
+      ["open", "13:00"],
+    ]);
+  });
+
+  it("projects nothing past the daily cap and nothing in the past", () => {
+    // 10:00: today's 09:00 is gone; two queued posts fill the cap.
+    const from = Date.UTC(2026, 6, 1, 10, 0);
+    const queued = [11, 12].map((h) => ({
+      storyId: `s${h}`,
+      storyTitle: null,
+      scheduledForIso: new Date(Date.UTC(2026, 6, 1, h, 0)).toISOString(),
+    }));
+    const days = buildCalendarDays(config, queued, from, 1);
+    expect(days[0].entries.map((e) => e.kind)).toEqual(["queued", "queued"]);
+  });
+
+  it("shows no open slots on a no-posts weekday but still shows queued rows", () => {
+    // Saturday 2026-07-04 is overridden to no posts; an explicit post
+    // scheduled by hand that day must still appear.
+    const from = Date.UTC(2026, 6, 4, 6, 0);
+    const days = buildCalendarDays(
+      config,
+      [
+        {
+          storyId: "s1",
+          storyTitle: "By hand",
+          scheduledForIso: new Date(Date.UTC(2026, 6, 4, 15, 0)).toISOString(),
+        },
+      ],
+      from,
+      1,
+    );
+    expect(days[0].weekday).toBe("sat");
+    expect(days[0].entries.map((e) => [e.kind, e.timeLocal])).toEqual([
+      ["queued", "15:00"],
+    ]);
+  });
+});
+
+describe("scheduleStoryPublishAt", () => {
+  beforeEach(async () => {
+    await clear();
+    await run("DELETE FROM stories", []);
+  });
+
+  it("schedules at the explicit wall-clock time in the platform timezone", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 3, tz: "America/New_York" });
+    const now = Date.UTC(2026, 6, 1, 0, 0);
+    const r = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { year: 2026, month: 7, day: 4, hour: 15, minute: 30 },
+      { nowMs: now },
+    );
+    expect(r.status).toBe("scheduled");
+    expect(r.slotLocal).toBe("15:30");
+    expect(r.capExceeded).toBe(false);
+    // 15:30 EDT (UTC-4) = 19:30 UTC.
+    expect(r.scheduledForIso).toBe(
+      new Date(Date.UTC(2026, 6, 4, 19, 30)).toISOString(),
+    );
+  });
+
+  it("rejects a time in the past", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 3, tz: "UTC" });
+    const now = Date.UTC(2026, 6, 4, 12, 0);
+    const r = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { year: 2026, month: 7, day: 4, hour: 9, minute: 0 },
+      { nowMs: now },
+    );
+    expect(r.status).toBe("in_past");
+  });
+
+  it("reports duplicate when the story already has an active row", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 3, tz: "UTC" });
+    const now = Date.UTC(2026, 6, 1, 0, 0);
+    const when = { year: 2026, month: 7, day: 4, hour: 9, minute: 0 };
+    const first = await scheduleStoryPublishAt("s1", "youtube", when, { nowMs: now });
+    expect(first.status).toBe("scheduled");
+    const second = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { ...when, hour: 12 },
+      { nowMs: now },
+    );
+    expect(second.status).toBe("duplicate");
+  });
+
+  it("still lands past the daily cap but says so", async () => {
+    await configurePlatform("youtube", { enabled: true, cap: 1, tz: "UTC" });
+    const now = Date.UTC(2026, 6, 1, 0, 0);
+    await insertSlotRow("youtube", new Date(Date.UTC(2026, 6, 4, 9, 0)).toISOString());
+    const r = await scheduleStoryPublishAt(
+      "s1",
+      "youtube",
+      { year: 2026, month: 7, day: 4, hour: 12, minute: 0 },
+      { nowMs: now },
+    );
+    expect(r.status).toBe("scheduled");
+    expect(r.capExceeded).toBe(true);
+  });
+});
+
+describe("cancelScheduledPublish", () => {
+  beforeEach(clear);
+
+  async function insertRow(id: string, platform: string, state: string) {
+    await run(
+      "INSERT INTO scheduled_publishes (id, story_id, platform, scheduled_for, state, attempts, created_at) " +
+        "VALUES (?, 's1', ?, '2026-07-04T09:00:00.000Z', ?, 0, '2026-07-01T00:00:00.000Z')",
+      [id, platform, state],
+    );
+  }
+
+  it("cancels a waiting row; a second cancel is a harmless yes", async () => {
+    await insertRow("row1", "youtube", "scheduled");
+    expect(await cancelScheduledPublish("row1")).toBe(true);
+    expect(await cancelScheduledPublish("row1")).toBe(true);
+    const back = await all<{ state: string }>(
+      "SELECT state FROM scheduled_publishes WHERE id = 'row1'",
+      [],
+    );
+    expect(back[0].state).toBe("cancelled");
+  });
+
+  it("refuses a row the dispatcher already claimed or posted", async () => {
+    await insertRow("row2", "youtube", "publishing");
+    await insertRow("row3", "tiktok", "published");
+    expect(await cancelScheduledPublish("row2")).toBe(false);
+    expect(await cancelScheduledPublish("row3")).toBe(false);
+  });
+});
+
+describe("listUpcomingPublishes", () => {
+  beforeEach(async () => {
+    await clear();
+    await run("DELETE FROM stories", []);
+  });
+
+  it("returns waiting rows soonest-first with story titles", async () => {
+    await run(
+      "INSERT INTO stories (id, title, status, created_at, updated_at) VALUES ('s1', 'A Story', 'published', '2026-07-01', '2026-07-01')",
+      [],
+    );
+    await run(
+      "INSERT INTO scheduled_publishes (id, story_id, platform, scheduled_for, state, attempts, created_at) VALUES " +
+        "('later', 's1', 'youtube', '2026-07-05T09:00:00.000Z', 'scheduled', 0, '2026-07-01'), " +
+        "('sooner', 's1', 'tiktok', '2026-07-04T09:00:00.000Z', 'scheduled', 0, '2026-07-01'), " +
+        "('done', 's1', 'facebook', '2026-07-03T09:00:00.000Z', 'published', 0, '2026-07-01')",
+      [],
+    );
+    const rows = await listUpcomingPublishes();
+    expect(rows.map((r) => r.id)).toEqual(["sooner", "later"]);
+    expect(rows[0].storyTitle).toBe("A Story");
   });
 });
 

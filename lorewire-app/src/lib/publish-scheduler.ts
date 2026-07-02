@@ -21,7 +21,7 @@
 
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { one, run } from "@/lib/db";
+import { all, one, run } from "@/lib/db";
 import { getSetting } from "@/lib/repo";
 
 // ---- platforms + settings --------------------------------------------
@@ -49,6 +49,29 @@ export const PUBLISH_DEFAULTS = {
   slots: ["09:00", "13:00", "18:00"] as readonly string[],
   timezone: "America/New_York",
 } as const;
+
+// ---- weekly slots ----------------------------------------------------
+
+export const WEEKDAY_KEYS = [
+  "sun",
+  "mon",
+  "tue",
+  "wed",
+  "thu",
+  "fri",
+  "sat",
+] as const;
+export type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+
+/**
+ * Posting times for a platform, resolvable per weekday. `default` applies
+ * to any day without an override; an override that is present with an
+ * empty list means "no posts that day" (it does NOT fall back to default).
+ */
+export interface WeeklySlots {
+  default: string[];
+  overrides: Partial<Record<WeekdayKey, string[]>>;
+}
 
 // How far ahead the slot search looks before giving up. A story that
 // cannot be placed within two weeks almost certainly means every day is
@@ -98,39 +121,77 @@ export function parseSlot(slot: string): { hour: number; minute: number } | null
   return { hour, minute };
 }
 
-/**
- * Parsed, validated, de-duplicated, ascending slot list for a platform.
- * Falls back to the default slots when the setting is blank or every
- * entry is malformed, so the scheduler always has at least one time to
- * aim at.
- */
-export async function getPlatformSlots(
-  platform: PublishPlatform,
-): Promise<string[]> {
-  const raw = await getSetting(platformSettingKey(platform, "slots"));
-  let list: string[] = [...PUBLISH_DEFAULTS.slots];
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        const valid = parsed
-          .filter((s): s is string => typeof s === "string")
-          .filter((s) => parseSlot(s) !== null);
-        if (valid.length > 0) list = valid;
-      }
-    } catch {
-      // Malformed JSON: keep defaults rather than crash the scheduler.
-    }
-  }
-  // Normalize to zero-padded HH:MM, de-dupe, sort ascending by time.
-  const norm = new Map<string, { hour: number; minute: number }>();
+/** Validate one raw list into zero-padded, de-duped, ascending "HH:MM". */
+export function normalizeSlotList(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const norm = new Set<string>();
   for (const s of list) {
+    if (typeof s !== "string") continue;
     const p = parseSlot(s);
     if (!p) continue;
-    const key = `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`;
-    norm.set(key, p);
+    norm.add(
+      `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`,
+    );
   }
-  return [...norm.keys()].sort((a, b) => a.localeCompare(b));
+  return [...norm].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Parse a stored slots setting into WeeklySlots. Two shapes are accepted
+ * forever (no settings migration):
+ *   v1 flat array: ["09:00","13:00"]
+ *   v2 object:     {"default":["09:00"],"overrides":{"sat":[],"sun":["11:00"]}}
+ * A blank/malformed value or an empty v1 array falls back to the default
+ * slots so a corrupt setting never leaves the scheduler with nothing to
+ * aim at. An explicit empty `default` in the v2 shape is kept as-is: the
+ * editor writes it deliberately (e.g. a weekend-only schedule).
+ */
+export function parseSlotsSetting(raw: string | null | undefined): WeeklySlots {
+  const fallback: WeeklySlots = {
+    default: [...PUBLISH_DEFAULTS.slots],
+    overrides: {},
+  };
+  if (!raw?.trim()) return fallback;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+  if (Array.isArray(parsed)) {
+    const list = normalizeSlotList(parsed);
+    return list.length > 0 ? { default: list, overrides: {} } : fallback;
+  }
+  if (parsed && typeof parsed === "object") {
+    const obj = parsed as { default?: unknown; overrides?: unknown };
+    if (!Array.isArray(obj.default)) return fallback;
+    const overrides: WeeklySlots["overrides"] = {};
+    if (obj.overrides && typeof obj.overrides === "object") {
+      for (const key of WEEKDAY_KEYS) {
+        const v = (obj.overrides as Record<string, unknown>)[key];
+        if (Array.isArray(v)) overrides[key] = normalizeSlotList(v);
+      }
+    }
+    return { default: normalizeSlotList(obj.default), overrides };
+  }
+  return fallback;
+}
+
+/** Resolved posting times for one weekday: the override when present
+ *  (including an explicit "no posts" empty list), else the default. */
+export function slotsForWeekday(
+  weekly: WeeklySlots,
+  weekday: WeekdayKey,
+): string[] {
+  return weekly.overrides[weekday] ?? weekly.default;
+}
+
+/** Parsed weekly slots for a platform (both stored shapes accepted). */
+export async function getPlatformSlots(
+  platform: PublishPlatform,
+): Promise<WeeklySlots> {
+  const raw = await getSetting(platformSettingKey(platform, "slots"));
+  return parseSlotsSetting(raw);
 }
 
 /** Timezone for a platform, defaulting to the app default and falling
@@ -156,7 +217,7 @@ export interface PlatformConfig {
   platform: PublishPlatform;
   enabled: boolean;
   dailyCap: number;
-  slots: string[];
+  slots: WeeklySlots;
   timezone: string;
 }
 
@@ -285,11 +346,6 @@ export function enumerateSlotInstants(
   fromMs: number,
   horizonDays: number = SLOT_HORIZON_DAYS,
 ): SlotCandidate[] {
-  const parsedSlots = config.slots
-    .map((s) => ({ local: s, p: parseSlot(s) }))
-    .filter((x): x is { local: string; p: { hour: number; minute: number } } => x.p !== null);
-  if (parsedSlots.length === 0) return [];
-
   const startParts = partsInTz(fromMs, config.timezone);
   const out: SlotCandidate[] = [];
   for (let d = 0; d <= horizonDays; d++) {
@@ -301,6 +357,13 @@ export function enumerateSlotInstants(
     const y = cal.getUTCFullYear();
     const mo = cal.getUTCMonth() + 1;
     const day = cal.getUTCDate();
+    // Weekday of this LOCAL calendar day: the date came from the platform's
+    // zone, so pure calendar math on it yields the local weekday.
+    const weekday = WEEKDAY_KEYS[cal.getUTCDay()];
+    const parsedSlots = slotsForWeekday(config.slots, weekday)
+      .map((s) => ({ local: s, p: parseSlot(s) }))
+      .filter((x): x is { local: string; p: { hour: number; minute: number } } => x.p !== null);
+    if (parsedSlots.length === 0) continue;
     const { startMs, endMs } = tzDayBoundsMs(config.timezone, y, mo, day);
     for (const { local, p } of parsedSlots) {
       const ms = wallClockToUtcMs(config.timezone, y, mo, day, p.hour, p.minute);
@@ -503,12 +566,321 @@ async function insertScheduledPublish(args: {
   return back !== null;
 }
 
+// ---- explicit scheduling + queue management ---------------------------
+
+export interface ExplicitScheduleResult {
+  status: "scheduled" | "duplicate" | "in_past";
+  scheduledForIso?: string;
+  slotLocal?: string;
+  timezone?: string;
+  /** True when the target local day was already at/over the daily cap.
+   *  The row still lands — a deliberate human choice wins — but the UI
+   *  should say so. */
+  capExceeded?: boolean;
+}
+
+/**
+ * Schedule one story to an explicit wall-clock date/time on one platform,
+ * bypassing next-open-slot math. The time is interpreted in the
+ * platform's configured timezone. Explicit rows occupy capacity like any
+ * other active row, so automatic slot assignment flows around them.
+ * Idempotent per (story, platform) via the same partial unique index.
+ */
+export async function scheduleStoryPublishAt(
+  storyId: string,
+  platform: PublishPlatform,
+  when: { year: number; month: number; day: number; hour: number; minute: number },
+  opts: { renderId?: string | null; approvedBy?: string | null; nowMs?: number } = {},
+): Promise<ExplicitScheduleResult> {
+  const nowMs = opts.nowMs ?? Date.now();
+  const config = await getPlatformConfig(platform);
+  const ms = wallClockToUtcMs(
+    config.timezone,
+    when.year,
+    when.month,
+    when.day,
+    when.hour,
+    when.minute,
+  );
+  if (ms <= nowMs) return { status: "in_past" };
+
+  const slotLocal = `${String(when.hour).padStart(2, "0")}:${String(when.minute).padStart(2, "0")}`;
+  const { startMs, endMs } = tzDayBoundsMs(
+    config.timezone,
+    when.year,
+    when.month,
+    when.day,
+  );
+  const dayCount = await countActiveScheduledInRange(
+    platform,
+    new Date(startMs).toISOString(),
+    new Date(endMs).toISOString(),
+  );
+
+  const slot: OpenSlot = {
+    scheduledForMs: ms,
+    scheduledForIso: new Date(ms).toISOString(),
+    slotLocal,
+    timezone: config.timezone,
+  };
+  const landed = await insertScheduledPublish({
+    storyId,
+    renderId: opts.renderId ?? null,
+    platform,
+    slot,
+    approvedBy: opts.approvedBy ?? null,
+    nowMs,
+  });
+  if (!landed) return { status: "duplicate" };
+  return {
+    status: "scheduled",
+    scheduledForIso: slot.scheduledForIso,
+    slotLocal,
+    timezone: config.timezone,
+    capExceeded: dayCount >= config.dailyCap,
+  };
+}
+
+/**
+ * Cancel a queued post. Only rows still waiting to fire can be cancelled;
+ * a row the dispatcher already claimed (or posted) stays put. Returns
+ * whether the row is cancelled afterwards, so a double-click is a no-op
+ * that still reads as success.
+ */
+export async function cancelScheduledPublish(id: string): Promise<boolean> {
+  await run(
+    "UPDATE scheduled_publishes SET state = 'cancelled' WHERE id = ? AND state = 'scheduled'",
+    [id],
+  );
+  const back = await one<{ state: string }>(
+    "SELECT state FROM scheduled_publishes WHERE id = ?",
+    [id],
+  );
+  return back?.state === "cancelled";
+}
+
+export interface UpcomingPublishRow {
+  id: string;
+  storyId: string;
+  storyTitle: string | null;
+  platform: string;
+  scheduledFor: string;
+  slotLocal: string | null;
+  timezone: string | null;
+}
+
+/** Every post still waiting to fire, soonest first, with its story title
+ *  for display. */
+export async function listUpcomingPublishes(
+  limit = 50,
+): Promise<UpcomingPublishRow[]> {
+  const rows = await all<{
+    id: string;
+    story_id: string;
+    title: string | null;
+    platform: string;
+    scheduled_for: string;
+    slot_local: string | null;
+    timezone: string | null;
+  }>(
+    `SELECT sp.id, sp.story_id, s.title, sp.platform, sp.scheduled_for,
+            sp.slot_local, sp.timezone
+     FROM scheduled_publishes sp
+     LEFT JOIN stories s ON s.id = sp.story_id
+     WHERE sp.state = 'scheduled'
+     ORDER BY sp.scheduled_for ASC
+     LIMIT ?`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    storyId: r.story_id,
+    storyTitle: r.title,
+    platform: r.platform,
+    scheduledFor: r.scheduled_for,
+    slotLocal: r.slot_local,
+    timezone: r.timezone,
+  }));
+}
+
+export interface SchedulableStory {
+  id: string;
+  title: string | null;
+}
+
+/** Recent stories that could be queued to a platform by hand: published
+ *  or ready, with a finished short render the dispatcher can post. */
+export async function listSchedulableStories(
+  limit = 50,
+): Promise<SchedulableStory[]> {
+  return all<SchedulableStory>(
+    `SELECT s.id, s.title FROM stories s
+     WHERE s.status IN ('published', 'ready')
+       AND EXISTS (
+         SELECT 1 FROM short_renders r
+         WHERE r.story_id = s.id AND r.status = 'done' AND r.output_url IS NOT NULL
+       )
+     ORDER BY s.updated_at DESC
+     LIMIT ?`,
+    [limit],
+  );
+}
+
+// ---- calendar preview --------------------------------------------------
+
+export interface CalendarEntry {
+  /** queued = a real scheduled_publishes row; open = a projected free slot. */
+  kind: "queued" | "open";
+  timeLocal: string;
+  scheduledForIso: string;
+  storyId?: string;
+  storyTitle?: string | null;
+}
+
+export interface CalendarDay {
+  year: number;
+  month: number; // 1-12
+  day: number;
+  weekday: WeekdayKey;
+  isToday: boolean;
+  entries: CalendarEntry[];
+}
+
+export interface QueuedCalendarRow {
+  storyId: string;
+  storyTitle: string | null;
+  scheduledForIso: string;
+}
+
+/**
+ * The next `days` local calendar days for one platform: real queued posts
+ * merged with the open slots automatic scheduling would still fill.
+ * Projected slots stop once queued + projected reaches the daily cap, so
+ * the preview shows what can actually happen, not the raw slot list.
+ * Pure (clock passed in), so DST and weekday behavior are unit testable.
+ */
+export function buildCalendarDays(
+  config: Pick<PlatformConfig, "slots" | "timezone" | "dailyCap">,
+  queued: QueuedCalendarRow[],
+  fromMs: number,
+  days = 7,
+): CalendarDay[] {
+  const startParts = partsInTz(fromMs, config.timezone);
+  const out: CalendarDay[] = [];
+  for (let d = 0; d < days; d++) {
+    const cal = new Date(
+      Date.UTC(startParts.year, startParts.month - 1, startParts.day + d),
+    );
+    const y = cal.getUTCFullYear();
+    const mo = cal.getUTCMonth() + 1;
+    const day = cal.getUTCDate();
+    const weekday = WEEKDAY_KEYS[cal.getUTCDay()];
+    const { startMs, endMs } = tzDayBoundsMs(config.timezone, y, mo, day);
+
+    const entries: CalendarEntry[] = [];
+    const queuedMs = new Set<number>();
+    for (const q of queued) {
+      const ms = Date.parse(q.scheduledForIso);
+      if (!Number.isFinite(ms) || ms < startMs || ms >= endMs) continue;
+      queuedMs.add(ms);
+      const p = partsInTz(ms, config.timezone);
+      entries.push({
+        kind: "queued",
+        timeLocal: `${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`,
+        scheduledForIso: q.scheduledForIso,
+        storyId: q.storyId,
+        storyTitle: q.storyTitle,
+      });
+    }
+
+    let capacityLeft = Math.max(0, config.dailyCap - entries.length);
+    for (const local of slotsForWeekday(config.slots, weekday)) {
+      if (capacityLeft <= 0) break;
+      const p = parseSlot(local);
+      if (!p) continue;
+      const ms = wallClockToUtcMs(config.timezone, y, mo, day, p.hour, p.minute);
+      if (ms <= fromMs || queuedMs.has(ms)) continue;
+      entries.push({
+        kind: "open",
+        timeLocal: local,
+        scheduledForIso: new Date(ms).toISOString(),
+      });
+      capacityLeft -= 1;
+    }
+
+    entries.sort((a, b) => a.scheduledForIso.localeCompare(b.scheduledForIso));
+    out.push({ year: y, month: mo, day, weekday, isToday: d === 0, entries });
+  }
+  return out;
+}
+
+export interface PlatformCalendar {
+  platform: PublishPlatform;
+  timezone: string;
+  days: CalendarDay[];
+}
+
+/** Calendar preview for every ENABLED platform: queued posts (any active
+ *  state) within the window plus projected open slots. */
+export async function getPublishCalendar(
+  days = 7,
+  nowMs: number = Date.now(),
+): Promise<PlatformCalendar[]> {
+  const out: PlatformCalendar[] = [];
+  for (const platform of PUBLISH_PLATFORMS) {
+    const config = await getPlatformConfig(platform);
+    if (!config.enabled) continue;
+    const startParts = partsInTz(nowMs, config.timezone);
+    const windowStart = wallClockToUtcMs(
+      config.timezone,
+      startParts.year,
+      startParts.month,
+      startParts.day,
+      0,
+      0,
+    );
+    const windowEnd = windowStart + (days + 1) * 86_400_000;
+    const rows = await all<{
+      story_id: string;
+      title: string | null;
+      scheduled_for: string;
+    }>(
+      `SELECT sp.story_id, s.title, sp.scheduled_for
+       FROM scheduled_publishes sp
+       LEFT JOIN stories s ON s.id = sp.story_id
+       WHERE sp.platform = ?
+         AND sp.state IN ${ACTIVE_STATES_SQL}
+         AND sp.scheduled_for >= ? AND sp.scheduled_for < ?`,
+      [
+        platform,
+        new Date(windowStart).toISOString(),
+        new Date(windowEnd).toISOString(),
+      ],
+    );
+    out.push({
+      platform,
+      timezone: config.timezone,
+      days: buildCalendarDays(
+        config,
+        rows.map((r) => ({
+          storyId: r.story_id,
+          storyTitle: r.title,
+          scheduledForIso: r.scheduled_for,
+        })),
+        nowMs,
+        days,
+      ),
+    });
+  }
+  return out;
+}
+
 // ---- decision log ----------------------------------------------------
 
 export interface SchedulerDecisionInput {
   storyId: string;
   redditId?: string | null;
-  decision: "approved" | "rejected";
+  decision: "approved" | "rejected" | "auto_approved" | "auto_held";
   tier?: string | null;
   comments?: number | null;
   ageHours?: number | null;

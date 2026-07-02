@@ -26,8 +26,18 @@ import {
 } from "@/lib/render-scheduler";
 import { getBudgetSummary, formatCents } from "@/lib/story-jobs-budget";
 import {
+  AUTOPILOT_DEFAULTS,
+  AUTOPILOT_SETTING_KEYS,
+  getAutopilotStatus,
+  listRecentAutoPublishes,
+} from "@/lib/autopilot";
+import {
+  PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
+  getPublishCalendar,
   getSchedulerOverview,
+  listSchedulableStories,
+  listUpcomingPublishes,
   platformSettingKey,
   type PlatformOverview,
 } from "@/lib/publish-scheduler";
@@ -37,15 +47,24 @@ import {
   SettingText,
   SettingToggle,
 } from "@/app/admin/(panel)/settings/_components/SettingControls";
+import { AutopilotModeSelect } from "./_components/AutopilotModeSelect";
+import { RecentAutoPublishes } from "./_components/RecentAutoPublishes";
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
 import { ReviewActions } from "./_components/ReviewActions";
+import { CalendarPreview } from "./_components/CalendarPreview";
+import { SchedulePostForm } from "./_components/SchedulePostForm";
+import { UpcomingPosts } from "./_components/UpcomingPosts";
 
 interface ReviewRow {
   id: string;
   title: string | null;
   category: string | null;
   updated_at: string | null;
+  /** 1 when autopilot enqueued this story's render. */
+  autopilot: number;
+  /** 1 when the safety judge held this story for a human. */
+  auto_held: number;
 }
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -94,6 +113,11 @@ export default async function SchedulerPage() {
     eligibility,
     overview,
     reviewRows,
+    upcoming,
+    schedulable,
+    calendars,
+    autopilot,
+    recentAutoPublishes,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -105,8 +129,18 @@ export default async function SchedulerPage() {
     getEligibilityMinStrength(),
     getSchedulerOverview(),
     all<ReviewRow>(
-      "SELECT id, title, category, updated_at FROM stories WHERE status = 'review' ORDER BY updated_at DESC LIMIT 50",
+      `SELECT id, title, category, updated_at,
+         EXISTS(SELECT 1 FROM story_jobs j
+                WHERE j.story_id = stories.id AND j.requested_by = 'autopilot') AS autopilot,
+         EXISTS(SELECT 1 FROM scheduler_decisions d
+                WHERE d.story_id = stories.id AND d.decision = 'auto_held') AS auto_held
+       FROM stories WHERE status = 'review' ORDER BY updated_at DESC LIMIT 50`,
     ),
+    listUpcomingPublishes(50),
+    listSchedulableStories(50),
+    getPublishCalendar(7),
+    getAutopilotStatus(),
+    listRecentAutoPublishes(10),
   ]);
 
   const rendering = gate.reason === "ok";
@@ -232,6 +266,71 @@ export default async function SchedulerPage() {
         </details>
       </section>
 
+      {/* ── Autopilot ────────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">Autopilot</h2>
+        <p className="text-[13px] text-muted">
+          When nothing is waiting for you below, autopilot pulls the strongest
+          Reddit sources — strong tier only — renders them, and (in Live)
+          publishes them without a click. Your track record on strong sources:
+          approved {autopilot.strongApproved}, rejected {autopilot.strongRejected}.
+        </p>
+        {autopilot.trippedAt && (
+          <p className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-[12px] text-accent">
+            Autopilot switched itself off on{" "}
+            {new Date(autopilot.trippedAt).toLocaleString("en-US")} after
+            repeated publish failures. Check the newest stories, then pick a
+            mode below to start fresh.
+          </p>
+        )}
+        <div className="rounded-xl border border-line bg-surface p-4">
+          <AutopilotModeSelect initialMode={autopilot.mode} />
+          {autopilot.mode !== "off" && (
+            <p className="mt-3 font-mono text-[12px] text-muted">
+              {autopilot.usedToday}/{autopilot.dailyLimit} pulled today ·{" "}
+              {autopilot.autoApproved} auto-published all-time ·{" "}
+              {autopilot.autoHeld} held for you
+            </p>
+          )}
+        </div>
+        {autopilot.mode !== "off" && (
+          <>
+            <SettingSlider
+              settingKey={AUTOPILOT_SETTING_KEYS.dailyLimit}
+              label="Stories per day"
+              hint="How many sources autopilot may pull per day. Start at 1 and raise it as the results earn trust."
+              initial={String(autopilot.dailyLimit)}
+              min={1}
+              max={20}
+              step={1}
+              unit="/day"
+            />
+            <SettingText
+              settingKey={AUTOPILOT_SETTING_KEYS.alertEmail}
+              label="Alert email"
+              hint={`If autopilot disables itself (after ${AUTOPILOT_DEFAULTS.breakerThreshold} failed publishes in a row), this address gets an email. Leave blank for logs only.`}
+              initial={autopilot.alertEmail ?? ""}
+              placeholder="you@example.com"
+            />
+          </>
+        )}
+        {(autopilot.mode !== "off" || recentAutoPublishes.length > 0) && (
+          <div>
+            <div className="mb-2 text-[13px] font-semibold text-ink">
+              Published by autopilot
+            </div>
+            <RecentAutoPublishes
+              items={recentAutoPublishes.map((r) => ({
+                storyId: r.storyId,
+                title: r.title || r.storyId,
+                status: r.status,
+                whenLabel: ageLabel(r.decidedAt),
+              }))}
+            />
+          </div>
+        )}
+      </section>
+
       {/* ── Review queue (the human gate) ────────────────────────────── */}
       <section className="space-y-3">
         <h2 className="font-display text-lg text-ink">
@@ -260,6 +359,15 @@ export default async function SchedulerPage() {
                   </a>
                   <p className="mt-0.5 font-mono text-[11px] uppercase tracking-wider text-muted">
                     {row.category || "uncategorized"} · {ageLabel(row.updated_at)}
+                    {row.auto_held ? (
+                      <span className="ml-2 rounded-full border border-accent px-2 py-px text-[10px] normal-case tracking-normal text-accent">
+                        Held by safety check
+                      </span>
+                    ) : row.autopilot ? (
+                      <span className="ml-2 rounded-full border border-line px-2 py-px text-[10px] normal-case tracking-normal text-muted">
+                        Autopilot
+                      </span>
+                    ) : null}
                   </p>
                 </div>
                 <ReviewActions storyId={row.id} />
@@ -283,6 +391,42 @@ export default async function SchedulerPage() {
             <PlatformCard key={p.config.platform} overview={p} />
           ))}
         </div>
+      </section>
+
+      {/* ── Next 7 days ──────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">Next 7 days</h2>
+        <CalendarPreview calendars={calendars} platformLabels={PLATFORM_LABELS} />
+      </section>
+
+      {/* ── Posting queue ────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">
+          Posting queue{" "}
+          <span className="font-mono text-[13px] text-muted">
+            ({upcoming.length})
+          </span>
+        </h2>
+        <UpcomingPosts
+          items={upcoming.map((u) => ({
+            id: u.id,
+            storyId: u.storyId,
+            title: u.storyTitle || u.storyId,
+            platformLabel: PLATFORM_LABELS[u.platform] ?? u.platform,
+            whenLabel: formatSlot(
+              u.scheduledFor,
+              u.timezone || PUBLISH_DEFAULTS.timezone,
+            ),
+          }))}
+        />
+        <SchedulePostForm
+          stories={schedulable.map((s) => ({ id: s.id, title: s.title || s.id }))}
+          platforms={overview.platforms.map((p) => ({
+            id: p.config.platform,
+            label: PLATFORM_LABELS[p.config.platform] ?? p.config.platform,
+            timezone: p.config.timezone,
+          }))}
+        />
       </section>
     </div>
   );
@@ -324,7 +468,7 @@ function PlatformCard({ overview }: { overview: PlatformOverview }) {
             </div>
             <p className="mb-2 text-[12px] text-muted">
               Each approved post goes out at the next open slot, in the timezone
-              below.
+              below. Times apply every day unless a specific day is customized.
             </p>
             <SlotsEditor
               settingKey={platformSettingKey(config.platform, "slots")}

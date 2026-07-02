@@ -88,6 +88,10 @@
     {
       "path": "/api/publish_dispatch",
       "schedule": "*/1 * * * *"
+    },
+    {
+      "path": "/api/autopilot_tick",
+      "schedule": "*/2 * * * *"
     }
   ],
   "functions": {
@@ -146,6 +150,9 @@
       "maxDuration": 60
     },
     "src/app/api/publish_dispatch/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/autopilot_tick/route.ts": {
       "maxDuration": 300
     }
   }

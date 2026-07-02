@@ -467,11 +467,14 @@ export interface ExpireStaleResult {
  * queue and (via backpressure) stalls fresh rendering.
  *
  * Scope is deliberately narrow: only stories whose story_job was enqueued
- * by the render scheduler (requested_by = RENDER_SCHEDULER_REQUESTED_BY)
- * are touched. A story a human created or is intentionally holding in
- * review is never archived out from under them. "Age" is updated_at, so
- * anything an admin has touched recently is safe even if it was
- * scheduler-created.
+ * by an automated lane — the render scheduler drip or autopilot
+ * (requested_by 'render-scheduler' / 'autopilot') — are touched. A story
+ * a human created or is intentionally holding in review is never archived
+ * out from under them. Autopilot rows are included on purpose: shadow
+ * stories and safety-held stories sit in review for a human exactly like
+ * drip stories do, and rot the same way when nobody looks. "Age" is
+ * updated_at, so anything an admin has touched recently is safe even if
+ * it was scheduler-created.
  */
 export async function expireStaleReviews(
   nowMs: number = Date.now(),
@@ -486,7 +489,7 @@ export async function expireStaleReviews(
        AND s.updated_at < ?
        AND s.id IN (
          SELECT story_id FROM story_jobs
-         WHERE requested_by = ? AND story_id IS NOT NULL
+         WHERE requested_by IN (?, 'autopilot') AND story_id IS NOT NULL
        )`,
     [cutoff, RENDER_SCHEDULER_REQUESTED_BY],
   );
