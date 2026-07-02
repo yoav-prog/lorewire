@@ -437,6 +437,151 @@ class HappyPathTests(_LaneBTestCase):
         )
 
 
+class HookBoundaryRecomputeTests(_LaneBTestCase):
+    """A Lane B voice re-render MUST re-derive the hook splice boundary from
+    the NEW audio. Carrying the baseline's hook_end_ms cut the fresh narration
+    at a stale offset — the exact bug fixed in
+    _plans/2026-07-02-hook-clip-measured-boundary.md."""
+
+    def _baseline_props(self, **over) -> dict:
+        base = {
+            "config_version": 2,
+            "voiceover_url": "https://gcs/old-voice.mp3",
+            "duration_ms": 30000,
+            "title": "Old title",
+            "doodle_frames": [
+                {"id": "frame-00", "url": "https://gcs/00.png", "caption_chunk_start_index": 0},
+            ],
+            "captions": [{"start_ms": 0, "end_ms": 2000, "text": "old line"}],
+            # Stale boundary from the OLD waveform — must never survive.
+            "hook_end_ms": 2000,
+            "hook_tail_hold_ms": 0,
+        }
+        base.update(over)
+        return base
+
+    def _claimed(self, render_id: str, story_id: str, script: str) -> dict:
+        return {
+            "id": f"lane-b-{render_id}",
+            "story_id": story_id,
+            "lane_inputs": json.dumps(
+                {"source_render_id": render_id, "script": script, "voice": None},
+            ),
+        }
+
+    def test_measured_boundary_replaces_stale_baseline_values(self):
+        self._seed_baseline(
+            "baseline-h", "story-h", self._baseline_props(hook="Brand new.")
+        )
+        hook_words = [
+            {"word": "Brand", "start": 0.0, "end": 0.5},
+            {"word": "new.", "start": 0.5, "end": 0.9},
+        ]
+        rest_words = [
+            {"word": "narration", "start": 1.36, "end": 2.0},
+            {"word": "text.", "start": 2.0, "end": 2.4},
+        ]
+        measured = {
+            "audio": "voice.mp3",
+            "words": hook_words + rest_words,
+            "provider": "google",
+            "spoken_script": "Brand new. narration text.",
+            "hook_words": hook_words,
+            "rest_words": rest_words,
+            "hook_end_ms": 1180,
+            "hook_tail_hold_ms": 180,
+            "boundary": "measured",
+        }
+        with (
+            mock.patch.object(
+                shorts_lane_b.narration, "render_hook_first_narration",
+                return_value=measured,
+            ) as hook_first,
+            mock.patch.object(
+                shorts_lane_b.narration, "render_narration",
+                side_effect=AssertionError("legacy path must not run"),
+            ),
+            mock.patch.object(
+                shorts_lane_b.gcs, "publish",
+                side_effect=lambda local, key, fallback: f"https://gcs/{key}",
+            ),
+        ):
+            built = shorts_lane_b.build_short_props_lane_b(
+                self._claimed("baseline-h", "story-h", "Brand new. narration text."),
+                Path(self._tmpdir.name), remote=True,
+            )
+
+        hook_first.assert_called_once()
+        self.assertEqual(hook_first.call_args.kwargs.get("hook"), "Brand new.")
+        self.assertEqual(built.props["hook_end_ms"], 1180)
+        self.assertEqual(built.props["hook_tail_hold_ms"], 180)
+        # Captions were chunked per clip over the new alignment.
+        self.assertGreater(len(built.props["captions"]), 0)
+
+    def test_fallback_recomputes_estimate_from_new_alignment(self):
+        # Two-clip path can't run (e.g. edited script) -> the boundary is
+        # re-estimated against the NEW words — still never the stale 2000ms.
+        self._seed_baseline(
+            "baseline-e", "story-e", self._baseline_props(hook="Brand new.")
+        )
+        new_words = [
+            {"word": "brand", "start": 0.0, "end": 0.5},
+            {"word": "new", "start": 0.5, "end": 0.9},
+            {"word": "narration", "start": 1.4, "end": 2.0},
+            {"word": "text", "start": 2.0, "end": 2.4},
+        ]
+        with (
+            mock.patch.object(
+                shorts_lane_b.narration, "render_hook_first_narration",
+                return_value=None,
+            ),
+            mock.patch(
+                "pipeline.voice.synthesize",
+                return_value={"words": new_words, "audio": "voice.mp3", "provider": "g"},
+            ),
+            mock.patch.object(
+                shorts_lane_b.gcs, "publish",
+                side_effect=lambda local, key, fallback: f"https://gcs/{key}",
+            ),
+        ):
+            built = shorts_lane_b.build_short_props_lane_b(
+                self._claimed("baseline-e", "story-e", "Brand new. narration text."),
+                Path(self._tmpdir.name), remote=True,
+            )
+
+        # "new" ends at 900ms + HOOK_END_PAD_MS(80) = 980 (aligned estimate);
+        # the 500ms gap to "narration" (1400) caps the tail hold at 300.
+        self.assertEqual(built.props["hook_end_ms"], 980)
+        self.assertEqual(built.props["hook_tail_hold_ms"], 300)
+
+    def test_baseline_without_hook_zeroes_the_stale_boundary(self):
+        # Pre-hook-first baseline (no hook text to re-derive from): zero means
+        # the splice falls through to the legacy [intro][body][outro] order,
+        # which cuts nothing — a stale boundary would cut the new audio
+        # mid-word.
+        self._seed_baseline("baseline-z", "story-z", self._baseline_props())
+        with (
+            mock.patch(
+                "pipeline.voice.synthesize",
+                return_value={
+                    "words": [{"word": "x", "start": 0, "end": 0.3}],
+                    "audio": "voice.mp3",
+                    "provider": "g",
+                },
+            ),
+            mock.patch.object(
+                shorts_lane_b.gcs, "publish",
+                side_effect=lambda local, key, fallback: f"https://gcs/{key}",
+            ),
+        ):
+            built = shorts_lane_b.build_short_props_lane_b(
+                self._claimed("baseline-z", "story-z", "Whatever long enough"),
+                Path(self._tmpdir.name), remote=True,
+            )
+        self.assertEqual(built.props["hook_end_ms"], 0)
+        self.assertEqual(built.props["hook_tail_hold_ms"], 0)
+
+
 class CaptionStyleOverrideTests(_LaneBTestCase):
     """Lane B merges short_config.caption_style onto baseline.caption_template
     so the Style tab's picks roll into a voice-track re-render."""
