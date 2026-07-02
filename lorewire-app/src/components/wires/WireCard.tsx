@@ -509,6 +509,24 @@ export default function WireCard({
     return () => window.clearTimeout(handle);
   }, [shouldPlay, hovered, seeking, immersive, moreOpen, interactionTick]);
 
+  // One-shot attention ping on the EXIT pill when immersive engages, so the
+  // way out is the first thing the eye finds (manager-reported 2026-07-02:
+  // "can't leave fullscreen"). Armed on the immersive transition during
+  // render (the same pattern as prevActive below) — cards that MOUNT already
+  // immersive (windowed neighbours while browsing fullscreen) stay quiet.
+  // The timeout only disarms after the rings finish; reduced motion skips.
+  const [exitHello, setExitHello] = useState(false);
+  const [prevImmersive, setPrevImmersive] = useState(immersive);
+  if (prevImmersive !== immersive) {
+    setPrevImmersive(immersive);
+    setExitHello(immersive && !reducedMotion);
+  }
+  useEffect(() => {
+    if (!exitHello) return;
+    const handle = window.setTimeout(() => setExitHello(false), 2600);
+    return () => window.clearTimeout(handle);
+  }, [exitHello]);
+
   // Close the "⋯" menu on Escape (desktop). Outside taps are handled by the
   // backdrop rendered alongside the menu.
   useEffect(() => {
@@ -791,51 +809,42 @@ export default function WireCard({
           style={{ background: "linear-gradient(180deg, rgba(0,0,0,.45) 0%, rgba(0,0,0,0) 100%)" }}
         />
 
-        {/* Top row: category + duration (left), autoplay + mute (right).
-            The chips + 4-button row are wrapped in chromeVisible opacity
-            classes; the floating poll pill is intentionally NOT wrapped —
-            engagement stays visible while the user watches. */}
+        {/* Top row: category chip (left); fullscreen / EXIT, mute, options
+            (right). Everything here rides the chromeVisible auto-hide group
+            (pinned visible while immersive). The poll pill lives in the
+            bottom-left stack in immersive mode — engagement stays visible
+            while the user watches. */}
         <div
           className="absolute inset-x-0 top-0 flex items-start justify-between px-4"
           style={{ paddingTop: "calc(env(safe-area-inset-top, 0px) + 14px)" }}
         >
-          {/* Left stack: category + duration chips on top (auto-hidden),
-              the floating poll pill on its own row underneath (always
-              visible while the wire has a live poll). */}
-          <div className="flex flex-col items-start gap-2">
-            <div
-              className={`flex items-center gap-2 transition-opacity duration-300 ${
-                chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
-              }`}
-            >
-              {categoryLabel && (
-                <span
-                  className="max-w-[46vw] truncate rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
-                  style={{ background: categoryBg }}
-                >
-                  {categoryLabel}
-                </span>
-              )}
-              {/* Duration lives on the scrubber (0:01 / 0:49) — no separate
-                  chip up here, one less thing on the frame. */}
-            </div>
-            {/* Floating poll pill only in fullscreen: in the normal card the
-                poll panel sits right below the video, so the pill would just
-                duplicate it and crowd the frame. */}
-            {short.poll && immersive && (
-              <WirePollPill
-                votedSide={pollVotedSide}
-                result={pollResult}
-                onClick={onPollPillClick}
-              />
+          <div
+            className={`flex items-center gap-2 transition-opacity duration-300 ${
+              chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
+            }`}
+          >
+            {categoryLabel && (
+              <span
+                className="max-w-[46vw] truncate rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-[.16em] text-ink ink-shadow"
+                style={{ background: categoryBg }}
+              >
+                {categoryLabel}
+              </span>
             )}
+            {/* Duration lives on the scrubber (0:01 / 0:49) — no separate
+                chip up here, one less thing on the frame. */}
           </div>
           <div
             className={`relative flex items-center gap-2 transition-opacity duration-300 ${
               chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
             }`}
           >
-            {immersive && (
+            {/* Fullscreen entry lives up here with the other system controls —
+                NOT floating near the scrubber, where it faded in under the
+                thumb mid-scrub and got tapped by accident (manager-reported
+                2026-07-02). In immersive the same slot holds a labeled EXIT
+                pill, so the way out is never a mystery icon. */}
+            {immersive ? (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -843,11 +852,40 @@ export default function WireCard({
                 }}
                 aria-label="Exit fullscreen"
                 title="Exit fullscreen"
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
-                style={{ background: "rgba(0,0,0,.4)" }}
+                className="relative flex h-9 shrink-0 items-center gap-1.5 rounded-full pl-2.5 pr-3 text-ink active:scale-95 transition"
+                style={{
+                  background: "rgba(0,0,0,.55)",
+                  backdropFilter: "blur(6px)",
+                  boxShadow: "inset 0 0 0 1px rgba(255,255,255,.3)",
+                }}
               >
-                <CloseIcon size={18} />
+                {exitHello && (
+                  <span
+                    aria-hidden
+                    className="wire-exit-ping absolute inset-0 rounded-full"
+                  />
+                )}
+                <CloseIcon size={14} />
+                <span className="font-mono text-[10px] font-bold uppercase tracking-[.18em]">
+                  Exit
+                </span>
               </button>
+            ) : (
+              onEnterImmersive && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    markActive();
+                    onEnterImmersive();
+                  }}
+                  aria-label="Enter fullscreen"
+                  title="Fullscreen"
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink"
+                  style={{ background: "rgba(0,0,0,.4)" }}
+                >
+                  <FullscreenIcon expanded={false} size={18} />
+                </button>
+              )
             )}
             <button
               onClick={(e) => {
@@ -948,28 +986,6 @@ export default function WireCard({
               <HeartIcon filled size={132} />
             </span>
           </div>
-        )}
-
-        {/* Enter immersive (TikTok-style fullscreen) — sits above the scrubber
-            on the right so the CTA lands in the thumb zone without crowding the
-            top chrome. Joins the auto-hide group. Hidden in immersive mode,
-            where a Close button takes over top-left. */}
-        {!immersive && onEnterImmersive && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              markActive();
-              onEnterImmersive();
-            }}
-            aria-label="Enter fullscreen"
-            title="Fullscreen"
-            className={`absolute right-3 z-20 grid h-9 w-9 place-items-center rounded-full text-ink transition-opacity duration-300 ${
-              chromeVisible ? "opacity-100" : "opacity-0 pointer-events-none"
-            }`}
-            style={{ background: "rgba(0,0,0,.45)", bottom: 36 }}
-          >
-            <FullscreenIcon expanded={false} size={18} />
-          </button>
         )}
 
         {/* Scrubber + time, pinned to the bottom of the video stage. The hit
@@ -1078,30 +1094,47 @@ export default function WireCard({
               </button>
             </div>
 
-            {/* Title (bottom-left) — tap to read the full story. */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenInfo(short.id, "Read");
-              }}
-              aria-label={`Read the story: ${short.title ?? "untitled"}`}
-              className="group absolute left-4 z-20 flex max-w-[66%] items-end gap-1.5 text-left"
+            {/* Bottom-left stack: the vote pill above the title, in the thumb
+                zone where TikTok-style UIs keep content actions. The pill is
+                intentionally NOT in the auto-hide group — a wire about to ask
+                "what do you think" shouldn't hide the question. In the normal
+                card the poll panel sits below the video, so the pill only
+                exists here. */}
+            <div
+              className="absolute left-4 z-20 flex max-w-[66%] flex-col items-start gap-2.5"
               style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 92px)" }}
-              // The Read sheet lives at the shell level, outside the fullscreen
-              // element — exit immersive first so it's actually visible.
-              onClickCapture={() => onExitImmersive?.()}
             >
-              <h2 className="line-clamp-2 font-display text-[17px] font-black uppercase leading-[1.05] tracking-tightest text-ink ink-shadow">
-                {short.title}
-              </h2>
-              <span
-                aria-hidden
-                className="shrink-0 pb-0.5 font-display text-[15px] font-bold text-ink/70 ink-shadow"
+              {short.poll && (
+                <WirePollPill
+                  votedSide={pollVotedSide}
+                  result={pollResult}
+                  onClick={onPollPillClick}
+                />
+              )}
+              {/* Title — tap to read the full story. */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenInfo(short.id, "Read");
+                }}
+                aria-label={`Read the story: ${short.title ?? "untitled"}`}
+                className="group flex items-end gap-1.5 text-left"
+                // The Read sheet lives at the shell level, outside the fullscreen
+                // element — exit immersive first so it's actually visible.
+                onClickCapture={() => onExitImmersive?.()}
               >
-                →
-              </span>
-            </button>
+                <h2 className="line-clamp-2 font-display text-[17px] font-black uppercase leading-[1.05] tracking-tightest text-ink ink-shadow">
+                  {short.title}
+                </h2>
+                <span
+                  aria-hidden
+                  className="shrink-0 pb-0.5 font-display text-[15px] font-bold text-ink/70 ink-shadow"
+                >
+                  →
+                </span>
+              </button>
+            </div>
 
             {/* Poll sheet — opened by the floating VOTE pill (the bottom poll
                 panel isn't rendered in immersive mode). */}

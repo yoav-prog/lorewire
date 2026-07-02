@@ -96,6 +96,20 @@ function makeStory(): WireStory {
   };
 }
 
+// Pre-vote poll bundle for the immersive-mode surface tests. The full poll
+// state machine is covered by WirePollPanel.test.tsx; here the poll only
+// needs to exist so the pill + sheet render.
+function makeWirePoll(): NonNullable<WireStory["poll"]> {
+  return {
+    pollId: "poll-1",
+    question: "Was that smart pushback, or too far?",
+    optionA: "Smart Pushback",
+    optionB: "Too Far",
+    initialResult: null,
+    initialVotedSide: null,
+  };
+}
+
 function defaultProps(overrides: Partial<WireCardProps> = {}): WireCardProps {
   return {
     short: makeStory(),
@@ -470,6 +484,97 @@ describe("WireCard immersive mode", () => {
       x!.click();
     });
     expect(calls).toHaveLength(1);
+    unmount(m);
+  });
+
+  // 2026-07-02 manager report: users entered fullscreen by accident (the old
+  // enter button floated right above the scrubber) and then couldn't find the
+  // way out (the exit control was an unlabeled X circle). These tests pin the
+  // fix: entry lives in the top control cluster, exit is labeled + pinged on
+  // arrival, and voting stays reachable from the bottom-left stack.
+
+  it("keeps the enter-fullscreen button in the top control cluster, next to mute", () => {
+    const m = mount(
+      defaultProps({ immersive: false, onEnterImmersive: () => undefined }),
+    );
+    const enter = enterButton(m.container);
+    // muted: true in defaultProps → the mute toggle is labeled "Unmute".
+    const mute = m.container.querySelector('button[aria-label="Unmute"]');
+    expect(enter).not.toBeNull();
+    expect(mute).not.toBeNull();
+    expect(enter!.parentElement).toBe(mute!.parentElement);
+    unmount(m);
+  });
+
+  it("labels the exit control so it reads as the way out", () => {
+    const m = mount(
+      defaultProps({ immersive: true, onExitImmersive: () => undefined }),
+    );
+    expect(exitButton(m.container)!.textContent).toMatch(/exit/i);
+    unmount(m);
+  });
+
+  it("pings the exit pill on the immersive transition, but not under reduced motion", () => {
+    // Entering immersive (false → true) arms the ping.
+    const a = mount(defaultProps({ immersive: false }));
+    act(() => {
+      a.root.render(
+        <WireCard
+          {...defaultProps({ immersive: true, onExitImmersive: () => undefined })}
+        />,
+      );
+    });
+    expect(a.container.querySelector(".wire-exit-ping")).not.toBeNull();
+    unmount(a);
+
+    // Same transition under reduced motion stays quiet.
+    const b = mount(defaultProps({ immersive: false, reducedMotion: true }));
+    act(() => {
+      b.root.render(
+        <WireCard
+          {...defaultProps({
+            immersive: true,
+            reducedMotion: true,
+            onExitImmersive: () => undefined,
+          })}
+        />,
+      );
+    });
+    expect(b.container.querySelector(".wire-exit-ping")).toBeNull();
+    unmount(b);
+
+    // A card that MOUNTS already immersive (windowed neighbour while
+    // browsing fullscreen) doesn't ping — only the entry transition does.
+    const c = mount(
+      defaultProps({ immersive: true, onExitImmersive: () => undefined }),
+    );
+    expect(c.container.querySelector(".wire-exit-ping")).toBeNull();
+    unmount(c);
+  });
+
+  it("stacks the vote pill with the title bottom-left and opens the poll sheet", () => {
+    const m = mount(
+      defaultProps({
+        short: { ...makeStory(), poll: makeWirePoll() },
+        immersive: true,
+        onExitImmersive: () => undefined,
+      }),
+    );
+    const pill = m.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Vote on this poll"]',
+    );
+    const title = m.container.querySelector(
+      'button[aria-label="Read the story: Test wire"]',
+    );
+    expect(pill).not.toBeNull();
+    expect(title).not.toBeNull();
+    expect(pill!.parentElement).toBe(title!.parentElement);
+    // Tapping the pill opens the poll sheet over the video (the panel's
+    // answer buttons appear).
+    act(() => {
+      pill!.click();
+    });
+    expect(m.container.querySelector('button[data-side="A"]')).not.toBeNull();
     unmount(m);
   });
 });
