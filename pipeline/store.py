@@ -2689,6 +2689,30 @@ def update_story_hero_landscape(story_id: str, hero_url: str) -> None:
         )
 
 
+def update_story_hero_baked_title(story_id: str, value: int) -> None:
+    """Patch stories.hero_has_baked_title alone. The hero paths write 0
+    after a clean (no baked typography) hero lands so the UI's CSS title
+    overlay comes back for stories whose previous hero carried baked
+    text from the retired cinematic long-form path; that path wrote 1."""
+    now = _now_iso()
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE stories SET hero_has_baked_title = %s, "
+                    "updated_at = %s WHERE id = %s",
+                    (value, now, story_id),
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            "UPDATE stories SET hero_has_baked_title = ?, updated_at = ? "
+            "WHERE id = ?",
+            (value, now, story_id),
+        )
+
+
 def update_story_cost_cents(story_id: str, cents: int) -> None:
     """Patch stories.cost_cents alone, leaving every other column intact.
 

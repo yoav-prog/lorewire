@@ -104,6 +104,9 @@ def _patch_stack(stack: unittest.TestCase, **overrides):
         "update_duration": mock.patch.object(
             media.store, "update_story_duration",
         ),
+        "update_baked": mock.patch.object(
+            media.store, "update_story_hero_baked_title",
+        ),
         # Resume-scope reader (variant skip keys on THIS render's own
         # image_saved events). Empty by default: a fresh render row has
         # no events, so every variant regenerates.
@@ -448,6 +451,49 @@ class RegenWrapperTests(unittest.TestCase):
                 media.regen_one(
                     "abc123", "hero_thumbnail_from_short", Path(tmp),
                 )
+
+
+class BakeTitleWiringTests(unittest.TestCase):
+    """The 2026-07-03 clean-hero change: hero variants prompt with
+    bake_title=False (the site overlays its own HTML title), thumbnail
+    variants keep bake_title=True (social cards want the baked text),
+    and a landed hero clears stories.hero_has_baked_title so the CSS
+    overlay comes back for stories whose old hero baked the title in.
+    """
+
+    def test_heroes_prompt_clean_thumbnails_prompt_baked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self)
+            media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
+        # Variant order mirrors _HERO_THUMB_VARIANTS: hero 3:4, hero 16:9,
+        # thumb 3:4, thumb 16:9, thumb 1:1.
+        flags = [
+            c.kwargs["bake_title"]
+            for c in mocks["make_thumb"].call_args_list
+        ]
+        self.assertEqual(flags, [False, False, True, True, True])
+
+    def test_landed_hero_clears_baked_title_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(self)
+            media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
+        mocks["update_baked"].assert_called_once_with("abc123", 0)
+
+    def test_thumbnail_only_outcome_leaves_baked_title_flag_alone(self):
+        # Both hero i2i calls fail; the three thumbnails land. The story
+        # is still showing its OLD hero, so the flag must not change.
+        results = iter([None, None, "https://kie/t1.png",
+                        "https://kie/t2.png", "https://kie/t3.png"])
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(
+                self,
+                generate_with_retry=mock.patch.object(
+                    media, "_generate_with_retry",
+                    side_effect=lambda *a, **k: next(results),
+                ),
+            )
+            media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
+        mocks["update_baked"].assert_not_called()
 
 
 class ResumabilityTests(unittest.TestCase):
