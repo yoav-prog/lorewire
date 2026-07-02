@@ -18,10 +18,13 @@ import {
 } from "./_components/SettingControls";
 import { SubredditAutocomplete } from "./_components/SubredditAutocomplete";
 import { NARRATION_VIBES, LENGTH_PRESETS } from "@/lib/shorts-options";
+import { HERO_STYLES } from "@/lib/hero-styles";
+import { listCategories } from "@/lib/categories/repo";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
 import {
-  CATEGORY_LABELS,
-  CATEGORY_RAIL_ENTRIES,
-} from "@/lib/categories/manifest";
+  heroCategoryDefaultKey,
+  shortsAutoCategoryKey,
+} from "@/lib/category-settings";
 import { ASPECT_CHIP_OPTIONS, type ChipOption } from "@/components/ui";
 import {
   isVideoAspect,
@@ -38,6 +41,7 @@ import {
 import {
   COLD_START_FLOOR_DEFAULT,
   coldStartFloorSettingKey,
+  ROTATING_CATEGORY_SURFACES,
   rotatingCategoryEnabledSettingKey,
   rotatingCategoryOverrideSettingKey,
 } from "@/lib/homepage-curation-shared";
@@ -54,19 +58,12 @@ import {
 // and ElevenLabs land in the follow-up commit once provider credentials
 // are wired into the Node side.
 
-/** Categories paired with their lowercased settings key + display
- *  label. Matches the resolver in `pipeline/stages.py:resolve_hero_style`
- *  which reads `hero.category_default.<lowercase cat>` — the lowercase
- *  is intentional so the admin UI's casing doesn't have to match the
- *  story rows' casing. */
-const HERO_CATEGORY_KEYS: { category: string; key: string; label: string }[] = [
-  { category: "Entitled", key: "entitled", label: "Entitled" },
-  { category: "Drama", key: "drama", label: "Drama" },
-  { category: "Humor", key: "humor", label: "Humor" },
-  { category: "Wholesome", key: "wholesome", label: "Wholesome" },
-  { category: "Dating", key: "dating", label: "Dating" },
-  { category: "Roommate", key: "roommate", label: "Roommate" },
-];
+// Per-category rows (hero style defaults, shorts.auto overrides) iterate
+// the ACTIVE categories from the DB (the 2026-07-01 granular taxonomy) —
+// the hardcoded legacy six stopped matching what stories.category holds.
+// Keys derive from the label via @/lib/category-settings so the write
+// side here and the pipeline's read side can't drift. Plan:
+// _plans/2026-07-02-per-category-settings-granular.md.
 
 const STYLE_PRESETS = [
   { label: "Doodle marker", value: "doodle explainer, off-white paper, single marker" },
@@ -245,19 +242,28 @@ export default async function SettingsPage() {
   // Rotating-category dropdown options. "" is the "auto rotation"
   // sentinel — the resolver treats blank / unknown the same way and
   // falls through to the UTC-day modulo, so the dropdown stays
-  // honest about which path will run.
+  // honest about which path will run. Options come from the resolver's
+  // OWN closed set (the granular rail slugs) — the previous options
+  // were the legacy manifest surfaces, which isRotatingCategorySurface
+  // rejects, so every pin the dropdown produced silently fell back to
+  // auto-rotation.
+  const railTitleBySlug = new Map(
+    GRANULAR_CATEGORIES.map((c) => [c.slug, c.railTitle ?? c.label]),
+  );
   const rotatingCategoryOptions: SelectOption[] = [
     { id: "", label: "Auto (rotate by UTC day)" },
-    ...CATEGORY_RAIL_ENTRIES.map((entry) => ({
-      id: entry.surface,
-      label: entry.title,
+    ...ROTATING_CATEGORY_SURFACES.map((slug) => ({
+      id: slug,
+      label: railTitleBySlug.get(slug) ?? slug,
     })),
   ];
-  const SHORT_CATEGORIES = [...CATEGORY_LABELS].sort();
+  const SHORT_CATEGORIES = (await listCategories())
+    .map((c) => c.label)
+    .sort();
   const shortsAutoByCat: Record<string, string> = {};
   await Promise.all(
     SHORT_CATEGORIES.map(async (c) => {
-      shortsAutoByCat[c] = (await getSetting(`shorts.auto.category.${c}`)) ?? "";
+      shortsAutoByCat[c] = (await getSetting(shortsAutoCategoryKey(c))) ?? "";
     }),
   );
   const narrationOptions: SelectOption[] = NARRATION_VIBES.map((v) => ({
@@ -323,7 +329,7 @@ export default async function SettingsPage() {
           {SHORT_CATEGORIES.map((c) => (
             <SettingSelect
               key={c}
-              settingKey={`shorts.auto.category.${c}`}
+              settingKey={shortsAutoCategoryKey(c)}
               label={`Category override: ${c}`}
               hint="Inherit follows the global toggle above; Always / Never force it for this category."
               initial={shortsAutoByCat[c] ?? ""}
@@ -345,19 +351,41 @@ export default async function SettingsPage() {
             includeAutoOption
             autoOptionLabel="Auto-pick per category"
           />
-          {HERO_CATEGORY_KEYS.map(({ category, key, label }) => {
+          {SHORT_CATEGORIES.map((label) => {
+            const key = label.toLowerCase();
             const selected = heroStyleSettings.categoryDefaults[key] ?? "";
+            const selectedLabel = selected
+              ? HERO_STYLES.find((s) => s.id === selected)?.label ?? selected
+              : "use global default";
+            // Nested <details> per category: with the granular set this
+            // is one picker per category — expanded, that's a wall of
+            // thumbnail grids; collapsed, the summary still shows what
+            // each category resolves to.
             return (
-              <HeroStylePicker
+              <details
                 key={key}
-                settingKey={`hero.category_default.${key}`}
-                label={`${label} default`}
-                hint={`Style applied to ${label} stories that don't have their own per-story pin.`}
-                selectedId={selected}
-                thumbnails={heroStyleSettings.thumbnails}
-                includeAutoOption
-                autoOptionLabel="Use global default"
-              />
+                className="rounded-lg border border-line bg-surface"
+              >
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+                  <span className="text-[13px] font-semibold text-ink">
+                    {label}
+                  </span>
+                  <span className="font-mono text-[11px] text-muted">
+                    {selectedLabel}
+                  </span>
+                </summary>
+                <div className="border-t border-line px-3 py-3">
+                  <HeroStylePicker
+                    settingKey={heroCategoryDefaultKey(label)}
+                    label={`${label} default`}
+                    hint={`Style applied to ${label} stories that don't have their own per-story pin.`}
+                    selectedId={selected}
+                    thumbnails={heroStyleSettings.thumbnails}
+                    includeAutoOption
+                    autoOptionLabel="Use global default"
+                  />
+                </div>
+              </details>
             );
           })}
           <p className="text-[12px] text-ink/55">
