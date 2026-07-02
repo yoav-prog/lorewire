@@ -193,7 +193,42 @@ describe("bulkUpdateContentAction: validation", () => {
 
 describe("bulkUpdateContentAction: status change", () => {
   it("publishes one story and one article together; not-found is reported in failures", async () => {
-    const storyId = await seedStory({ status: "ready" });
+    // The bulk publish path runs evaluateAssetCompleteness (2026-06-25)
+    // and setStatus's publish-time media invariant (2026-07-02), so the
+    // story fixture needs the FULL asset chain: hero + thumbnail
+    // variants + a done short render + video_url + an enabled poll.
+    // Pre-2026-07-02 this fixture was incomplete and the test failed
+    // with `asset-incomplete` — fixed alongside the video_url gate
+    // (_plans/2026-07-02-never-publish-without-video.md).
+    const storyId = await seedStory({
+      status: "ready",
+      videoUrl: "https://example.com/short.mp4",
+    });
+    await run(
+      "UPDATE stories SET hero_image = ?, hero_image_landscape = ?, " +
+        "thumbnail_image = ?, thumbnail_image_landscape = ?, " +
+        "thumbnail_image_square = ? WHERE id = ?",
+      [
+        "https://example.com/hero.png",
+        "https://example.com/hero-landscape.png",
+        "https://example.com/thumb.png",
+        "https://example.com/thumb-landscape.png",
+        "https://example.com/thumb-square.png",
+        storyId,
+      ],
+    );
+    await run(
+      "INSERT INTO short_renders (id, story_id, status, output_url, props, requested_at) " +
+        "VALUES (?, ?, 'done', 'https://example.com/short.mp4', '{}', '2026-06-24T00:00:00.000Z')",
+      [`${storyId}-short`, storyId],
+    );
+    await run(
+      "INSERT INTO polls (id, story_id, article_id, question, option_a_text, option_b_text, " +
+        "enabled, category, created_at, updated_at) " +
+        "VALUES (?, ?, NULL, 'Who is right?', 'A', 'B', 1, 'Drama', " +
+        "'2026-06-24T00:00:00.000Z', '2026-06-24T00:00:00.000Z')",
+      [`${storyId}-poll`, storyId],
+    );
     const articleId = await seedArticle({ document: { type: "doc", content: [] } });
     const ghostId = randomUUID();
     const items: BulkContentItem[] = [

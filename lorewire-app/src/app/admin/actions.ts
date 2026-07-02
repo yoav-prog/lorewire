@@ -3363,6 +3363,20 @@ export async function countSubmissionQueueAction(): Promise<number> {
   return count;
 }
 
+// 2026-07-02 sidebar notifications badge. Same shape as the two badges
+// above: a single integer, polled across admin pages so an unread
+// failure notification is glanceable from anywhere in the studio.
+// Plan: _plans/2026-07-02-never-publish-without-video.md.
+export async function countUnreadAdminNotificationsAction(): Promise<number> {
+  await requireCapability("content.manage");
+  const { countUnreadAdminNotifications } = await import(
+    "@/lib/admin-notifications"
+  );
+  const count = await countUnreadAdminNotifications();
+  console.info("[sidebar notifications badge action] count", { count });
+  return count;
+}
+
 // --- Bulk content actions (2026-06-19) --------------------------------------
 // Plan: _plans/2026-06-19-content-bulk-actions.md.
 //

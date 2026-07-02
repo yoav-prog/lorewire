@@ -404,6 +404,29 @@ export async function applyShortToStory(
   }
 }
 
+// Self-heal for the "render done, copy missed" gap: when a story's
+// latest done render has an output_url but stories.video_url never
+// received it (the 2026-07-02 publish-without-video incident), apply
+// that render via applyShortToStory. Returns whether a render was
+// applied so callers can decide to re-run the asset gate. Idempotent —
+// re-applying the same URL is a no-op write. Plan:
+// _plans/2026-07-02-never-publish-without-video.md.
+export async function applyLatestDoneShortToStory(
+  storyId: string,
+): Promise<boolean> {
+  const render = await latestDoneShortRenderForStory(storyId);
+  if (!render || render.status !== "done" || !render.output_url) {
+    return false;
+  }
+  await applyShortToStory(storyId, render.output_url, render.props ?? null);
+  console.info("[short apply heal]", {
+    story_id: storyId,
+    render_id: render.id,
+    output_url: render.output_url,
+  });
+  return true;
+}
+
 /** Resolve the M:SS duration string for `stories.duration` from a
  *  short_renders.props JSON blob.
  *
