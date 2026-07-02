@@ -18,6 +18,7 @@ import {
   getStoriesForCategory,
   getStoryTags,
   listCategories,
+  setPrimaryStoryTag,
   setStoryTags,
 } from "@/lib/categories/repo";
 import { CATEGORY_DEFS } from "@/lib/categories/manifest";
@@ -189,6 +190,51 @@ describe("setStoryTags (write path)", () => {
     );
     expect(primaries).toHaveLength(1);
     expect(primaries[0].category_slug).toBe("wedding-drama");
+  });
+});
+
+describe("setPrimaryStoryTag (admin category write)", () => {
+  it("inserts the tag as primary when the story has no tags yet", async () => {
+    await setPrimaryStoryTag(`${PFX}p1`, "creepy");
+    const tags = await getStoryTags(`${PFX}p1`);
+    expect(tags).toHaveLength(1);
+    expect(tags[0].category_slug).toBe("creepy");
+    expect(tags[0].is_primary).toBe(1);
+    expect(tags[0].source).toBe("admin");
+  });
+
+  it("switches the primary while preserving existing secondary tags", async () => {
+    await setStoryTags(`${PFX}p2`, [
+      { slug: "family-feuds", confidence: 0.9 },
+      { slug: "in-laws", confidence: 0.6 },
+    ]);
+    await setPrimaryStoryTag(`${PFX}p2`, "in-laws");
+    const tags = await getStoryTags(`${PFX}p2`);
+    expect(tags).toHaveLength(2);
+    const primaries = tags.filter((t) => t.is_primary === 1);
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0].category_slug).toBe("in-laws");
+    expect(
+      tags.find((t) => t.category_slug === "family-feuds")?.is_primary,
+    ).toBe(0);
+  });
+
+  it("adds a brand-new tag as primary next to existing tags", async () => {
+    await setStoryTags(`${PFX}p3`, [{ slug: "workplace", confidence: 0.9 }]);
+    await setPrimaryStoryTag(`${PFX}p3`, "bad-bosses");
+    const tags = await getStoryTags(`${PFX}p3`);
+    expect(tags).toHaveLength(2);
+    const primaries = tags.filter((t) => t.is_primary === 1);
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0].category_slug).toBe("bad-bosses");
+  });
+
+  it("is idempotent: re-setting the same primary keeps one primary", async () => {
+    await setPrimaryStoryTag(`${PFX}p4`, "breakups");
+    await setPrimaryStoryTag(`${PFX}p4`, "breakups");
+    const tags = await getStoryTags(`${PFX}p4`);
+    expect(tags).toHaveLength(1);
+    expect(tags[0].is_primary).toBe(1);
   });
 });
 

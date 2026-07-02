@@ -109,6 +109,42 @@ export async function setStoryTags(
   }
 }
 
+/** Make `slug` the story's primary tag without touching its other tags.
+ *  Demote-then-upsert so the one-primary-per-story partial index always
+ *  holds. Used by the admin "set category" path: writing ONLY
+ *  stories.category is not enough because syncStoryPrimaryCategory (db.ts
+ *  boot chain) re-syncs the label from the primary story_tag — an admin
+ *  change that skips story_tags silently reverts on the next boot. */
+export async function setPrimaryStoryTag(
+  storyId: string,
+  slug: string,
+  source: string = "admin",
+): Promise<void> {
+  const now = new Date().toISOString();
+  await run(
+    "UPDATE story_tags SET is_primary = 0 WHERE story_id = ? AND is_primary = 1",
+    [storyId],
+  );
+  const existing = await one<{ story_id: string }>(
+    "SELECT story_id FROM story_tags WHERE story_id = ? AND category_slug = ?",
+    [storyId, slug],
+  );
+  if (existing) {
+    await run(
+      "UPDATE story_tags SET is_primary = 1, source = ? " +
+        "WHERE story_id = ? AND category_slug = ?",
+      [source, storyId, slug],
+    );
+  } else {
+    await run(
+      "INSERT INTO story_tags " +
+        "(story_id, category_slug, is_primary, source, confidence, created_at) " +
+        "VALUES (?, ?, 1, ?, NULL, ?)",
+      [storyId, slug, source, now],
+    );
+  }
+}
+
 export interface CategoryStoryRow {
   id: string;
   slug: string | null;
