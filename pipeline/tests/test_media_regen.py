@@ -37,6 +37,13 @@ def _patches(extra: dict | None = None) -> dict:
         "get_selected": mock.patch.object(
             media.models, "get_selected", return_value="kie/gpt-image-2",
         ),
+        # No completed short by default, so asset='hero' deterministically
+        # takes the text-only fallback the HeroRegenTests exercise. The
+        # HeroDispatchTests override the private helpers directly to pin
+        # the preference order.
+        "latest_short": mock.patch.object(
+            media.store, "latest_short_render_for_story", return_value=None,
+        ),
     }
     if extra:
         patches.update(extra)
@@ -50,6 +57,63 @@ def _apply(patches: dict, stack: unittest.TestCase):
         started[name] = p.start()
         stack.addCleanup(p.stop)
     return started
+
+
+class HeroDispatchTests(unittest.TestCase):
+    """2026-07-03: asset='hero' prefers the short-character i2i path so a
+    hero regen keeps the SAME protagonist as the Watch tab and the
+    thumbnails (the bulk "Hero image" action used to route straight to
+    the text-only path, which invents a fresh face in a registry style
+    every run — modal heroes stopped matching the cards). Text-only is
+    the fallback ONLY for setup failures (no completed short)."""
+
+    def test_hero_prefers_the_short_character_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _apply(_patches({
+                "from_short": mock.patch.object(
+                    media, "_regen_hero_from_short",
+                    return_value=("https://x/hero.png?v=1", 10),
+                ),
+                "text_only": mock.patch.object(media, "_regen_hero"),
+            }), self)
+            url, cents = media.regen_one("abc123", "hero", Path(tmp))
+        self.assertEqual(url, "https://x/hero.png?v=1")
+        self.assertEqual(cents, 10)
+        mocks["from_short"].assert_called_once()
+        mocks["text_only"].assert_not_called()
+
+    def test_hero_falls_back_to_text_only_without_a_short(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _apply(_patches({
+                "from_short": mock.patch.object(
+                    media, "_regen_hero_from_short",
+                    side_effect=ValueError("no completed short render"),
+                ),
+                "text_only": mock.patch.object(
+                    media, "_regen_hero",
+                    return_value=("https://x/hero.png?v=2", 10),
+                ),
+            }), self)
+            url, _ = media.regen_one("abc123", "hero", Path(tmp))
+        self.assertEqual(url, "https://x/hero.png?v=2")
+        mocks["from_short"].assert_called_once()
+        mocks["text_only"].assert_called_once()
+
+    def test_hero_kie_failure_does_not_fall_back(self):
+        # A RuntimeError (kie failed after retries) must surface to the
+        # queue as a failed render — silently switching to the text-only
+        # path would bill a second set of kie calls and hide the outage.
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _apply(_patches({
+                "from_short": mock.patch.object(
+                    media, "_regen_hero_from_short",
+                    side_effect=RuntimeError("kie portrait (i2i) failed"),
+                ),
+                "text_only": mock.patch.object(media, "_regen_hero"),
+            }), self)
+            with self.assertRaises(RuntimeError):
+                media.regen_one("abc123", "hero", Path(tmp))
+        mocks["text_only"].assert_not_called()
 
 
 class HeroRegenTests(unittest.TestCase):

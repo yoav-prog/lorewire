@@ -1042,7 +1042,26 @@ def regen_one(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if asset == "hero":
-        return _regen_hero(story, out_dir, safe_id)
+        # 2026-07-03: prefer the short-character i2i path so a hero regen
+        # keeps the SAME protagonist as the Watch tab and the thumbnails.
+        # The text-only path invents a fresh face in a registry style on
+        # every run — after the bulk "Hero image" action ran it, modal
+        # heroes stopped matching the cards. Text-only remains the
+        # fallback for stories that have no completed short to seed from
+        # (_regen_hero_from_short raises ValueError in that case).
+        try:
+            return _regen_hero_from_short(story, out_dir, safe_id)
+        except ValueError as e:
+            print(
+                f"[image regen hero] id={safe_id} no short character to "
+                f"seed from ({e}); falling back to text-only hero"
+            )
+            store.log_render_event(
+                "hero_fallback_text_only",
+                "No completed short to seed from — text-only hero path",
+                payload={"reason": str(e)[:200]},
+            )
+            return _regen_hero(story, out_dir, safe_id)
 
     if asset == "hero_from_short":
         # Pulls the short's persisted character (character_base_url) out of

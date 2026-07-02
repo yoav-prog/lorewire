@@ -96,10 +96,19 @@ export interface StoryRow {
   refresh_assets_state: string | null;
   refresh_assets_started_at: string | null;
   refresh_assets_attempts: number | null;
+  // Python-finisher artwork variants (2026-06-25 columns, surfaced here
+  // 2026-07-03): the 16:9 hero, the baked-title flag, and the three
+  // title-baked thumbnails. The public reader reads the landscape
+  // thumbnail as the og:image fallback now that heroes render clean.
+  hero_image_landscape: string | null;
+  hero_has_baked_title: number | null;
+  thumbnail_image: string | null;
+  thumbnail_image_landscape: string | null;
+  thumbnail_image_square: string | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts, hero_image_landscape, hero_has_baked_title, thumbnail_image, thumbnail_image_landscape, thumbnail_image_square";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
