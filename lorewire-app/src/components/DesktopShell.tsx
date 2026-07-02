@@ -63,6 +63,7 @@ import {
 import { PollRailCard } from "@/components/PollRail";
 import { renderHeroVerdictBadge } from "@/lib/polls-shared";
 import { PollWidget } from "@/components/PollWidget";
+import PosterMeta from "@/components/PosterMeta";
 import {
   BackToTop,
   InlineJumpToPoll,
@@ -179,10 +180,7 @@ function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig =
           contrast for non-baked CSS titles. Callers can opt back in with
           vig={true} if a specific surface needs the deeper darkening. */}
       {vig && <div className="absolute inset-0 poster-vig"></div>}
-      {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
-      {story.dur && (
-        <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
-      )}
+      <PosterMeta cat={kicker ? story.cat : undefined} dur={story.dur} />
       {renderCssTitle && (
         <div className="absolute left-3.5 right-3.5 bottom-5">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 23, color: "#F5F3EF" }}>{story.title}</h3>
