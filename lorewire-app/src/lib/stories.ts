@@ -48,6 +48,11 @@ export interface Story {
   // true, the UI suppresses its CSS title overlay so it doesn't double up
   // with the title typography already in the artwork.
   heroHasBakedTitle?: boolean;
+  // 3:4 thumbnail variant from the hero+thumbnail finisher — always carries
+  // the baked cinematic title. The rail poster cards prefer it over
+  // heroImage (heroes render clean since 2026-07-03, so a card showing the
+  // hero would have no title at all).
+  thumbnailImage?: string;
   images?: string[];
   audioUrl?: string;
   videoUrl?: string;

@@ -153,20 +153,27 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig = false }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; vig?: boolean }) {
   const c = categoryVisual(story.cat).color;
   const [imageOk, setImageOk] = useState(true);
-  const showImage = !!story.heroImage && imageOk;
-  // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
-  // thumbnails) so the same words don't stack on top of themselves.
-  const renderCssTitle = showTitle && !story.heroHasBakedTitle;
+  // Cards prefer the 3:4 thumbnail (always carries the baked cinematic
+  // title) over the hero, which renders clean since 2026-07-03 — a card
+  // showing the clean hero would have no title in the artwork at all.
+  // Stories that pre-date the finisher fall back to the hero.
+  const artSrc = story.thumbnailImage || story.heroImage;
+  const artIsThumbnail = !!story.thumbnailImage;
+  const showImage = !!artSrc && imageOk;
+  // Suppress the CSS title when the shown artwork has it baked in —
+  // thumbnails always do; heroes only when flagged (legacy cinematic).
+  const artHasBakedTitle = showImage && (artIsThumbnail || !!story.heroHasBakedTitle);
+  const renderCssTitle = showTitle && !artHasBakedTitle;
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded, background: c }}>
       {showImage && (
         <img
-          src={story.heroImage}
+          src={artSrc}
           alt=""
           className="absolute inset-0 w-full h-full object-cover"
           onError={() => {
             setImageOk(false);
-            console.warn("[lorewire poster err]", { storyId: story.id, src: story.heroImage });
+            console.warn("[lorewire poster err]", { storyId: story.id, src: artSrc });
           }}
         />
       )}

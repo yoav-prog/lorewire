@@ -328,6 +328,9 @@ export interface LiveCatalogStory {
   /** Python pipeline writes 1 when the hero artwork already has the
    *  title baked in so the CSS title overlay doesn't double up. */
   hero_has_baked_title: number | null;
+  /** 3:4 thumbnail variant (always title-baked); the rail poster cards
+   *  prefer it over the clean hero artwork. */
+  thumbnail_image: string | null;
   video_url: string | null;
   published_at: string | null;
   created_at: string | null;
@@ -458,8 +461,8 @@ export async function listPublishedShorts(
   // across equal published_at values.
   const rows = await all<LiveCatalogStory>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
-      "hero_image_landscape, hero_has_baked_title, video_url, " +
-      "published_at, created_at FROM stories " +
+      "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
+      "video_url, published_at, created_at FROM stories " +
       `${clause} ` +
       "ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC " +
       `LIMIT ${limit + 1}`,
@@ -479,6 +482,7 @@ export async function listPublishedShorts(
       ...s,
       hero_image: resolveMediaUrl(s.hero_image),
       hero_image_landscape: resolveMediaUrl(s.hero_image_landscape),
+      thumbnail_image: resolveMediaUrl(s.thumbnail_image),
       video_url: resolveMediaUrl(s.video_url),
     }));
   // Cursor matches the SQL COALESCE order so a row with NULL published_at

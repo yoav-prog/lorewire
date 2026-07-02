@@ -147,23 +147,30 @@ const WiresI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.
 
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true, vig = false }: { story: Story; rounded?: boolean; showTitle?: boolean; vig?: boolean }) {
-  // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
-  // thumbnails) — otherwise the typography stacks on top of itself.
-  const renderCssTitle = showTitle && !story.heroHasBakedTitle;
   const c = categoryVisual(story.cat).color;
-  // Heroes that 404 fall back to the gradient automatically.
+  // Artwork that 404s falls back to the gradient automatically.
   const [imageOk, setImageOk] = useState(true);
-  const showImage = !!story.heroImage && imageOk;
+  // Cards prefer the 3:4 thumbnail (always carries the baked cinematic
+  // title) over the hero, which renders clean since 2026-07-03 — a card
+  // showing the clean hero would have no title in the artwork at all.
+  // Stories that pre-date the finisher fall back to the hero.
+  const artSrc = story.thumbnailImage || story.heroImage;
+  const artIsThumbnail = !!story.thumbnailImage;
+  const showImage = !!artSrc && imageOk;
+  // Suppress the CSS title when the shown artwork has it baked in —
+  // thumbnails always do; heroes only when flagged (legacy cinematic).
+  const artHasBakedTitle = showImage && (artIsThumbnail || !!story.heroHasBakedTitle);
+  const renderCssTitle = showTitle && !artHasBakedTitle;
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded ? 12 : 0, background: c }}>
       {showImage && (
         <img
-          src={story.heroImage}
+          src={artSrc}
           alt=""
           className="absolute inset-0 w-full h-full object-cover"
           onError={() => {
             setImageOk(false);
-            console.warn("[lorewire poster err]", { storyId: story.id, src: story.heroImage });
+            console.warn("[lorewire poster err]", { storyId: story.id, src: artSrc });
           }}
         />
       )}
