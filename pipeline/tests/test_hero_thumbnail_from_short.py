@@ -453,6 +453,46 @@ class RegenWrapperTests(unittest.TestCase):
                 )
 
 
+class StaleShortRefHealTests(unittest.TestCase):
+    """2026-07-04: props rows written before the renderer stamped a
+    cache token carried an un-versioned character_base_url at a stable,
+    immutably-cached object key — so kie kept fetching the PREVIOUS
+    render's character and every hero/thumbnail regen redrew a person
+    who isn't in the video (idea_d4cd2bfe6e66). The finisher heals such
+    rows read-side: the reference URLs get a token derived from the
+    render row, stable per render and fresh per re-render."""
+
+    def test_pre_token_refs_get_busted_with_the_render_timestamp(self):
+        dated_short = dict(DONE_SHORT)
+        dated_short["finished_at"] = "2026-07-03T00:23:17.390Z"
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _patch_stack(
+                self,
+                latest_short=mock.patch.object(
+                    media.store, "latest_short_render_for_story",
+                    return_value=dated_short,
+                ),
+            )
+            media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
+        token = "20260703002317"
+        for c in mocks["generate_with_retry"].call_args_list:
+            char_ref, scene_ref = c.kwargs["image_input"]
+            self.assertEqual(char_ref, f"{CHARACTER_URL}?v={token}")
+            self.assertTrue(scene_ref.endswith(f"?v={token}"), scene_ref)
+
+    def test_refs_that_already_carry_a_token_pass_through(self):
+        self.assertEqual(
+            media._bust_stale_short_ref("https://x/base.webp?v=abc", "123"),
+            "https://x/base.webp?v=abc",
+        )
+        # No token derivable (legacy row without finished_at/id) — the
+        # URL is left alone rather than stamped with an empty version.
+        self.assertEqual(
+            media._bust_stale_short_ref("https://x/base.webp", ""),
+            "https://x/base.webp",
+        )
+
+
 class BakeTitleWiringTests(unittest.TestCase):
     """The 2026-07-03 clean-hero change: hero variants prompt with
     bake_title=False (the site overlays its own HTML title), thumbnail

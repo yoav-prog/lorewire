@@ -77,6 +77,34 @@ def _cache_bust(url: str) -> str:
     return f"{url}{sep}v={bust}"
 
 
+def _bust_stale_short_ref(url: str, render_token: str) -> str:
+    """Version a short-render reference URL that predates the renderer's
+    per-render cache token. `base.webp` lives at a stable object key with
+    a one-year immutable Cache-Control, so an un-versioned URL keeps
+    serving the PREVIOUS render's character to every i2i consumer — kie
+    fetched the old protagonist no matter how many times the short was
+    restarted (2026-07-04, idea_d4cd2bfe6e66's phantom cover character).
+    New renders stamp the token at staging time (shorts_render.py); this
+    read-side twin heals rows persisted before that fix. The token is
+    derived from the render row, so it is STABLE per render (repeat reads
+    stay cache-friendly) and fresh for every re-render. URLs that already
+    carry `v=` pass through unchanged."""
+    if not url or "v=" in url or not render_token:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={render_token}"
+
+
+def _short_render_token(render_row: dict) -> str:
+    """Per-render token for `_bust_stale_short_ref`: the digits of the
+    row's finished_at (stable, unique per re-render), falling back to a
+    prefix of the row id for rows without a finish timestamp."""
+    digits = "".join(
+        ch for ch in str(render_row.get("finished_at") or "") if ch.isdigit()
+    )[:14]
+    return digits or str(render_row.get("id") or "")[:8]
+
+
 def _staging_dir(safe_id: str, repo_root: Path) -> Path:
     """Where intermediate PNG/MP3/etc. files land before GCS upload.
 
@@ -1456,6 +1484,11 @@ def _regen_hero_from_short(
             f"story {safe_id} short render has no character_base_url — "
             "re-render the short on the current shorts pipeline so the base is persisted"
         )
+    # Heal pre-token rows so kie fetches THIS render's character, not a
+    # cached previous one (see _bust_stale_short_ref).
+    character_base_url = _bust_stale_short_ref(
+        character_base_url, _short_render_token(latest),
+    )
     # Resolve which named poster style this render should use. Same
     # chain as the text-only _regen_hero; the i2i seed and the style
     # band are orthogonal — character comes from the reference image,
@@ -1711,6 +1744,11 @@ def _build_hero_and_thumbnail_from_short(
             f"story {safe_id} short render has no character_base_url — "
             "re-render the short on the current shorts pipeline so the base is persisted"
         )
+    # Heal pre-token rows so kie fetches THIS render's character, not a
+    # cached previous one (see _bust_stale_short_ref).
+    character_base_url = _bust_stale_short_ref(
+        character_base_url, _short_render_token(latest),
+    )
 
     # Scenes live under either `scenes` (raw assets list from shorts.py) or
     # `doodle_frames` (post-render Remotion props shape). Either source has a
@@ -1823,8 +1861,12 @@ def _build_hero_and_thumbnail_from_short(
         pick = stages.pick_hero_and_thumbnail_scenes(title, body, scenes, dry_run=False)
     hero_idx = pick["hero_index"]
     thumb_idx = pick["thumbnail_index"]
-    hero_scene_url = scenes[hero_idx].get("url") or ""
-    thumb_scene_url = scenes[thumb_idx].get("url") or ""
+    hero_scene_url = _bust_stale_short_ref(
+        scenes[hero_idx].get("url") or "", _short_render_token(latest),
+    )
+    thumb_scene_url = _bust_stale_short_ref(
+        scenes[thumb_idx].get("url") or "", _short_render_token(latest),
+    )
     if not hero_scene_url or not thumb_scene_url:
         raise ValueError(
             f"story {safe_id} picked scenes are missing URLs "

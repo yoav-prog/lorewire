@@ -672,9 +672,18 @@ def build_short_props(
         character_base_ref: str | None = None
         try:
             images.download(assets.base_url, base_local)
-            character_base_ref = (
+            # Same per-render token as the frames. The base lives at a
+            # stable object key with a long immutable Cache-Control, so an
+            # un-versioned URL kept serving the PREVIOUS render's character
+            # to every i2i consumer (hero+thumbnail finisher, per-scene
+            # regen, kie's own fetch) no matter how many times the short
+            # was restarted — 2026-07-04, idea_d4cd2bfe6e66's phantom
+            # cover protagonist. The comment on `cache_token` above always
+            # claimed the base carried the token; now it actually does.
+            character_base_ref = _cache_bust(
                 gcs.publish(base_local, f"{safe_id}/{base_fname}", assets.base_url)
-                if remote else f"{safe_id}/{base_fname}"
+                if remote else f"{safe_id}/{base_fname}",
+                cache_token,
             )
         except Exception as e:
             print(f"[short id={safe_id} stage] base image staging FAILED: {e}")
@@ -829,9 +838,22 @@ def build_short_props(
             # the renderer walks `doodle_frames` only, so these URLs are
             # invisible in the rendered video. Empty dicts when the story
             # has no recurring supporting cast / locations / items.
-            "supporting_character_refs": dict(assets.reference_gallery.supporting_chars),
-            "location_refs": dict(assets.reference_gallery.locations),
-            "item_refs": dict(assets.reference_gallery.items),
+            # Busted with the same per-render token as the frames/base —
+            # these are also stable-key uploads, and Lane C per-scene regen
+            # replays them as i2i input_urls (a stale cached wife/kitchen
+            # is the same bug as the stale character base).
+            "supporting_character_refs": {
+                k: _cache_bust(u, cache_token)
+                for k, u in assets.reference_gallery.supporting_chars.items()
+            },
+            "location_refs": {
+                k: _cache_bust(u, cache_token)
+                for k, u in assets.reference_gallery.locations.items()
+            },
+            "item_refs": {
+                k: _cache_bust(u, cache_token)
+                for k, u in assets.reference_gallery.items.items()
+            },
             "doodle_frames": doodle_frames,
             "captions": caption_chunks,
             "ken_burns": False,
