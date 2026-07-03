@@ -806,6 +806,27 @@ class ThumbnailPromptBakeTitleTests(unittest.TestCase):
         self.assertNotIn("no-title", baked)
         self.assertIn("no-title", clean)
 
+    def test_include_story_context_false_drops_the_body_excerpt(self):
+        # 2026-07-04 moderation fallback: kie deterministically flags
+        # some story excerpts (minors + charged phrasing), so the
+        # fallback prompt must carry NO story text in any of the three
+        # prompt modes — while keeping the title treatment intact.
+        for kwargs in (
+            {},
+            {"character_base_url": "https://gcs/base.png"},
+            {
+                "character_base_url": "https://gcs/base.png",
+                "scene_image_url": "https://gcs/scene.png",
+            },
+        ):
+            out = stages.make_thumbnail_prompt(
+                self.TITLE, self.CATEGORY, self.BODY, "3:4", False,
+                include_story_context=False, **kwargs,
+            )
+            self.assertNotIn("from the story", out)
+            self.assertNotIn("blind date", out)
+            self.assertIn(f'Render the title "{self.TITLE}"', out)
+
 
 class BuildArticlePromptTests(unittest.TestCase):
     """The article prompt mirrors the short's _clarity_block.

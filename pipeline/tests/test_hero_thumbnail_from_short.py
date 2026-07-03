@@ -467,11 +467,14 @@ class BakeTitleWiringTests(unittest.TestCase):
             media.generate_hero_and_thumbnail_from_short("abc123", Path(tmp))
         # Variant order mirrors _HERO_THUMB_VARIANTS: hero 3:4, hero 16:9,
         # thumb 3:4, thumb 16:9, thumb 1:1.
-        flags = [
-            c.kwargs["bake_title"]
-            for c in mocks["make_thumb"].call_args_list
-        ]
-        self.assertEqual(flags, [False, False, True, True, True])
+        # Two prompts per variant since the 2026-07-04 moderation
+        # fallback: the live prompt plus its no-story-context twin.
+        calls = mocks["make_thumb"].call_args_list
+        self.assertEqual(len(calls), 10)
+        flags = [c.kwargs["bake_title"] for c in calls]
+        self.assertEqual(flags, [False] * 4 + [True] * 6)
+        ctx = [c.kwargs.get("include_story_context", True) for c in calls]
+        self.assertEqual(ctx, [True, False] * 5)
 
     def test_landed_hero_clears_baked_title_flag(self):
         with tempfile.TemporaryDirectory() as tmp:

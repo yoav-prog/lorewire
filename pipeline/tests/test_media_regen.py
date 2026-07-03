@@ -59,6 +59,81 @@ def _apply(patches: dict, stack: unittest.TestCase):
     return started
 
 
+class ModerationFallbackTests(unittest.TestCase):
+    """2026-07-04: kie's content moderation deterministically flags some
+    story excerpts inside the image prompt (story 1m4fjwq: all five
+    finisher variants failed with "flagged as sensitive"). The fallback
+    retries ONCE with the story text stripped; every other failure kind
+    passes through untouched."""
+
+    MOD_ERROR = Exception(
+        "kie task 4a1461 failed: The input or output was flagged as "
+        "sensitive. Please try again."
+    )
+
+    def setUp(self):
+        # The error stash is a module global; reset around each test so
+        # a stale "moderation" kind can't leak into other suites (the
+        # finisher tests return mocked Nones and would otherwise trigger
+        # phantom fallbacks).
+        self.addCleanup(
+            lambda: media._LAST_KIE_ERROR.update({"msg": None, "kind": None})
+        )
+        media._LAST_KIE_ERROR.update({"msg": None, "kind": None})
+
+    def test_moderation_error_sets_kind_and_skips_identical_retry(self):
+        calls = []
+        def flag(*a, **k):
+            calls.append(a[0])
+            raise self.MOD_ERROR
+        with mock.patch.object(media.images, "generate", side_effect=flag):
+            url = media._generate_with_retry("prompt A", "test label")
+        self.assertIsNone(url)
+        # One call, not two — the identical retry can only re-flag.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(media.last_kie_error_kind(), "moderation")
+
+    def test_fallback_retries_once_without_story_context(self):
+        seen = []
+        def flag_then_pass(prompt, **k):
+            seen.append(prompt)
+            if len(seen) == 1:
+                raise self.MOD_ERROR
+            return "https://kie/safe.png"
+        with mock.patch.object(
+            media.images, "generate", side_effect=flag_then_pass,
+        ):
+            url = media._generate_with_moderation_fallback(
+                "prompt WITH story text",
+                "prompt WITHOUT story text",
+                "test label",
+            )
+        self.assertEqual(url, "https://kie/safe.png")
+        self.assertEqual(
+            seen, ["prompt WITH story text", "prompt WITHOUT story text"],
+        )
+
+    def test_generic_failure_does_not_trigger_the_fallback(self):
+        seen = []
+        def always_fail(prompt, **k):
+            seen.append(prompt)
+            raise Exception("transient network wobble")
+        with mock.patch.object(
+            media.images, "generate", side_effect=always_fail,
+        ):
+            url = media._generate_with_moderation_fallback(
+                "prompt WITH story text",
+                "prompt WITHOUT story text",
+                "test label",
+            )
+        self.assertIsNone(url)
+        # Two attempts of the SAME prompt (the normal retry), never the
+        # softened twin — a reworded prompt can't fix a network error.
+        self.assertEqual(
+            seen, ["prompt WITH story text", "prompt WITH story text"],
+        )
+
+
 class HeroDispatchTests(unittest.TestCase):
     """2026-07-03: asset='hero' prefers the short-character i2i path so a
     hero regen keeps the SAME protagonist as the Watch tab and the
