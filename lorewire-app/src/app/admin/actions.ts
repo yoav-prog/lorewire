@@ -284,7 +284,7 @@ export async function changeStatus(formData: FormData): Promise<void> {
       );
       const completeness = await evaluateAssetCompleteness(id);
       if (!completeness.ready) {
-        const reason = encodeURIComponent(completeness.missing.join(" | "));
+        const reason = encodeURIComponent(completeness.blocking.join(" | "));
         console.warn("[stories action] publish-blocked", {
           id,
           missing: completeness.missing,
@@ -3056,7 +3056,7 @@ export async function publishReviewedStoryAction(
   );
   const completeness = await evaluateAssetCompleteness(story!.id);
   if (!completeness.ready) {
-    const reason = encodeURIComponent(completeness.missing.join(" | "));
+    const reason = encodeURIComponent(completeness.blocking.join(" | "));
     console.warn("[reddit-review publish-blocked]", {
       reddit_id: redditId,
       missing: completeness.missing,
@@ -3669,7 +3669,7 @@ export async function bulkUpdateContentAction(
             if (!completeness.ready) {
               failed.push({
                 ...item,
-                reason: `asset-incomplete: ${completeness.missing.join(",")}`,
+                reason: `asset-incomplete: ${completeness.blocking.join(",")}`,
               });
               continue;
             }
