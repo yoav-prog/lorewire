@@ -22,6 +22,7 @@ import {
   fullDurationMsFromParts,
   parseLastRenderedSegments,
 } from "@/lib/duration";
+import { bustShortVideoUrl } from "@/lib/short-video-url";
 
 export type ShortRenderStatus =
   | "queued"
@@ -284,6 +285,13 @@ export async function finishShortRender(
   assembledDurationMs: number | null = null,
 ): Promise<void> {
   const now = new Date().toISOString();
+  // Cache-bust the stored URL (2026-07-03): the renderer overwrites the
+  // SAME R2 object key on every re-render, so without a fresh `?v=` the
+  // byte-identical URL keeps serving the OLD MP4 from browser/edge
+  // caches (one-year immutable Cache-Control). Everything downstream
+  // (finisher's stories.video_url apply, applyShortToStory, the wires
+  // feed) copies this row's output_url, so busting here covers them all.
+  const outputUrlBusted = bustShortVideoUrl(outputUrl);
   // Merge the probed duration onto the props row in a single write that
   // also flips status to 'done'. Read-modify-write at the application
   // layer (rather than a SQL-side JSON patch) because the props column
@@ -303,14 +311,14 @@ export async function finishShortRender(
       `UPDATE short_renders SET status = 'done', progress = 1.0, phase = 'done',
          output_url = ?, finished_at = ?, props = ?
        WHERE id = ? AND status = 'rendering'`,
-      [outputUrl, now, mergedProps, renderId],
+      [outputUrlBusted, now, mergedProps, renderId],
     );
   } else {
     await run(
       `UPDATE short_renders SET status = 'done', progress = 1.0, phase = 'done',
          output_url = ?, finished_at = ?
        WHERE id = ? AND status = 'rendering'`,
-      [outputUrl, now, renderId],
+      [outputUrlBusted, now, renderId],
     );
   }
   console.info("[short finish duration]", {
@@ -319,7 +327,7 @@ export async function finishShortRender(
   });
   await logShortRenderEvent(renderId, "finished", {
     message: "Short render done",
-    payload: { url: outputUrl, assembled_duration_ms: assembledDurationMs },
+    payload: { url: outputUrlBusted, assembled_duration_ms: assembledDurationMs },
   });
 }
 

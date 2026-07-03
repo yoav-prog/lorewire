@@ -107,7 +107,12 @@ describe("finishShortRender duration merge", () => {
     await finishShortRender("r-1", "https://gcs/bucket/short.mp4", 44_000);
     const row = await readRow("r-1");
     expect(row?.status).toBe("done");
-    expect(row?.output_url).toBe("https://gcs/bucket/short.mp4");
+    // 2026-07-03: the stored URL carries a `?v={epoch}` cache-bust — the
+    // renderer overwrites the same object key per story, so a verbatim
+    // URL kept serving the OLD MP4 from caches after a restart.
+    expect(row?.output_url).toMatch(
+      /^https:\/\/gcs\/bucket\/short\.mp4\?v=\d+$/,
+    );
     expect(row?.finished_at).not.toBeNull();
     const parsed = JSON.parse(row?.props ?? "{}") as Record<string, unknown>;
     expect(parsed.assembled_duration_ms).toBe(44_000);
