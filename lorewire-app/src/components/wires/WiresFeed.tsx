@@ -70,12 +70,14 @@ export default function WiresFeed({
     muted,
     advance,
     slow,
+    skipIntro,
     hideVoted,
     setHideVoted,
     toggleAutoplay,
     toggleMuted,
     toggleAdvance,
     toggleSlow,
+    toggleSkipIntro,
   } = useWirePrefs();
 
   // Category filter (session-scoped, shared store). Selected slugs restrict the
@@ -429,12 +431,14 @@ export default function WiresFeed({
               autoplay={autoplay}
               advance={advance}
               slow={slow}
+              skipIntro={skipIntro}
               reducedMotion={reducedMotion}
               paused={paused}
               onToggleMute={toggleMuted}
               onToggleAutoplay={toggleAutoplay}
               onToggleAdvance={toggleAdvance}
               onToggleSlow={toggleSlow}
+              onToggleSkipIntro={toggleSkipIntro}
               onShuffle={onShuffle}
               onOpenInfo={onOpenInfo}
               showSoundHint={i === activeIdx && soundHintShown}

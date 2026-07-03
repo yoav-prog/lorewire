@@ -59,6 +59,14 @@ export default function SettingsClient({ hasSession }: SettingsClientProps) {
           value={wires.slow}
           onChange={(v) => settingsLog("wires.slow", wires.slow, v, wires.setSlow)}
         />
+        <ToggleRow
+          label="Always skip intro"
+          description="Jump past the LoreWire intro on every video. When off, a Skip intro button shows while the intro plays."
+          value={wires.skipIntro}
+          onChange={(v) =>
+            settingsLog("wires.skip_intro", wires.skipIntro, v, wires.setSkipIntro)
+          }
+        />
         <SegmentedRow
           label="When a wire ends"
           description="Whether to move to the next wire or loop the current one."

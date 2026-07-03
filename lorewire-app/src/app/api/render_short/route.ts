@@ -28,6 +28,7 @@ import {
 } from "@/lib/short-render-queue";
 import { getStory, setStoryShortConfigJson } from "@/lib/repo";
 import { one } from "@/lib/db";
+import { deriveIntroWindow, type IntroWindow } from "@/lib/intro-window";
 import { resolveShortSegments } from "@/lib/short-segments";
 import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
 import { rewriteStoredMediaUrlsDeep } from "@/lib/media-url";
@@ -165,6 +166,10 @@ interface ResolvedSpliceSegments {
    *  field; the splice then uses its own constant fallback hold. Per
    *  _plans/2026-06-29-hook-first-clean-pacing.md. */
   hookTailHoldSec: number | null;
+  /** video_segments.duration_ms of the intro being spliced (null when no
+   *  intro). Feeds the Skip Intro window persisted onto props at render-
+   *  finish. Per _plans/2026-07-04-skip-intro.md. */
+  introDurationMs: number | null;
 }
 
 /** Resolve the 9:16 intro/outro for a short, defensively (everything-null on any
@@ -182,6 +187,7 @@ async function resolveShortSegmentsSafe(
     outro_segment_id: null,
     hookEndSec: null,
     hookTailHoldSec: null,
+    introDurationMs: null,
   };
   if (!story) return empty;
   try {
@@ -201,6 +207,7 @@ async function resolveShortSegmentsSafe(
       // (it's a script-side concept, not a per-story setting).
       hookEndSec: null,
       hookTailHoldSec: null,
+      introDurationMs: resolved.intro.segment?.duration_ms ?? null,
     };
   } catch {
     return empty;
@@ -296,6 +303,33 @@ export function stripHookFromProps(inputProps: unknown): {
     return { hook: null, propsStripped: stripped };
   }
   return { hook: raw, propsStripped: stripped };
+}
+
+/** Compute the Skip Intro window for the render THIS dispatch just ran, from
+ *  the exact segments payload Cloud Run spliced with. `hookEndSec` is only
+ *  set when the hook-first reorder actually engaged (hook boundary + intro
+ *  both present — the gate in serve()), so its presence selects the paced
+ *  generation; no intro → introDurationMs is null and the derivation returns
+ *  null. Persisted onto stories.props beside assembled_duration_ms so the
+ *  players never need to re-derive for rows rendered from here on. Per
+ *  _plans/2026-07-04-skip-intro.md. Exported for pure-logic tests; the
+ *  dispatcher is the only production caller. */
+export function computePersistedIntroWindow(
+  segments: Pick<
+    ResolvedSpliceSegments,
+    "hookEndSec" | "hookTailHoldSec" | "introDurationMs"
+  >,
+  assembledDurationMs: number | null,
+): IntroWindow | null {
+  return deriveIntroWindow({
+    generation:
+      segments.hookEndSec !== null ? "paced-hook-first" : "intro-first",
+    hookEndMs: segments.hookEndSec !== null ? segments.hookEndSec * 1000 : null,
+    hookTailHoldMs:
+      segments.hookTailHoldSec !== null ? segments.hookTailHoldSec * 1000 : null,
+    introDurationMs: segments.introDurationMs,
+    assembledDurationMs,
+  });
 }
 
 async function serve(req: NextRequest): Promise<NextResponse> {
@@ -469,6 +503,10 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     });
   }
 
+  // Skip Intro window for THIS render, from the same numbers Cloud Run
+  // spliced with. Persisted below so the players read it straight off props
+  // instead of re-deriving. Per _plans/2026-07-04-skip-intro.md.
+  const introWindow = computePersistedIntroWindow(segments, result.durationMs);
   namespacedLog("done", {
     render_id: claimed.id,
     story_id: claimed.story_id,
@@ -476,6 +514,8 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     intro_segment_id: segments.intro_segment_id,
     outro_segment_id: segments.outro_segment_id,
     assembled_duration_ms: result.durationMs,
+    intro_start_ms: introWindow?.start_ms ?? null,
+    intro_end_ms: introWindow?.end_ms ?? null,
   });
   await finishShortRender(claimed.id, result.url, result.durationMs);
   // Point the story at the freshly-rendered short (stories.video_url +
@@ -484,14 +524,23 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   // video_url — the new MP4 landed in R2 but the story kept pointing at the
   // prior render. Best-effort: a failure must NOT break the render response.
   // claimed.props predates the assembled duration finishShortRender just
-  // persisted, so fold result.durationMs in for an accurate stories.duration.
+  // persisted, so fold result.durationMs in for an accurate stories.duration —
+  // and the Skip Intro window alongside it. A null window still DELETES any
+  // stale intro_* keys: a re-render can drop the intro, and a leftover window
+  // from the previous render would make the player skip real story content.
   let applyProps = claimed.props;
-  if (result.durationMs && claimed.props) {
+  if (claimed.props) {
     try {
-      applyProps = JSON.stringify({
-        ...(JSON.parse(claimed.props) as Record<string, unknown>),
-        assembled_duration_ms: result.durationMs,
-      });
+      const merged = JSON.parse(claimed.props) as Record<string, unknown>;
+      if (result.durationMs) merged.assembled_duration_ms = result.durationMs;
+      if (introWindow) {
+        merged.intro_start_ms = introWindow.start_ms;
+        merged.intro_end_ms = introWindow.end_ms;
+      } else {
+        delete merged.intro_start_ms;
+        delete merged.intro_end_ms;
+      }
+      applyProps = JSON.stringify(merged);
     } catch {
       // Unparseable props: keep claimed.props; duration falls to the legacy sum.
     }

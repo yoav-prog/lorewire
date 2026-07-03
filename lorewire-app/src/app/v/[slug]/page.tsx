@@ -34,7 +34,9 @@ import {
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
 import { getSubmissionAttribution } from "@/lib/submissions";
+import { resolveIntroWindowForStory } from "@/lib/intro-window-resolve";
 import { SubmissionReportLink } from "./SubmissionReportLink";
+import StoryVideo from "./StoryVideo";
 
 // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
 // rendered aspect for a story so the reader's <video> container CSS
@@ -213,6 +215,14 @@ export default async function StoryReader({
   const videoAspect = await resolveStoryAspect(story.video_config);
   const videoCssRatio = aspectDims(videoAspect).cssRatio;
 
+  // Skip Intro: where the brand intro sits in this story's MP4 (explicit on
+  // props for new renders, derived for older ones). Null → the player shows
+  // no button and never auto-seeks. The aspect matters only for legacy
+  // long-form videos; shorts resolve at 9:16 regardless.
+  const introWindow = story.video_url
+    ? await resolveIntroWindowForStory(story, { aspect: videoAspect })
+    : null;
+
   // User-submitted stories carry no Reddit source; instead we attribute them to
   // the submitter, linking to their public contributor profile (unless they've
   // hidden it or are suspended, in which case the name shows as plain text).
@@ -262,6 +272,7 @@ export default async function StoryReader({
     bodyLen: story.body?.length ?? 0,
     has_poll: hasLivePoll,
     poll_already_voted: Boolean(initialVotedSide),
+    intro_window: introWindow,
   });
 
   // Body is plain text from the Reddit pipeline; render as paragraphs so
@@ -291,18 +302,13 @@ export default async function StoryReader({
         </header>
 
         {story.video_url ? (
-          <div className="overflow-hidden rounded-2xl border border-line bg-bg">
-            {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-            <video
-              src={story.video_url}
-              controls
-              playsInline
-              preload="metadata"
-              poster={story.hero_image ?? undefined}
-              className="block w-full"
-              style={{ aspectRatio: videoCssRatio }}
-            />
-          </div>
+          <StoryVideo
+            storyId={story.id}
+            src={story.video_url}
+            poster={story.hero_image}
+            cssRatio={videoCssRatio}
+            introWindow={introWindow}
+          />
         ) : story.hero_image ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img

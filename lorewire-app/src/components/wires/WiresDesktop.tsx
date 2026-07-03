@@ -70,12 +70,14 @@ export default function WiresDesktop({
     muted,
     advance,
     slow,
+    skipIntro,
     hideVoted,
     setHideVoted,
     toggleAutoplay,
     toggleMuted,
     toggleAdvance,
     toggleSlow,
+    toggleSkipIntro,
   } = useWirePrefs();
   const {
     selected: categorySlugs,
@@ -410,12 +412,14 @@ export default function WiresDesktop({
                 autoplay={autoplay}
                 advance={advance}
                 slow={slow}
+                skipIntro={skipIntro}
                 reducedMotion={reducedMotion}
                 paused={paused}
                 onToggleMute={toggleMuted}
                 onToggleAutoplay={toggleAutoplay}
                 onToggleAdvance={toggleAdvance}
                 onToggleSlow={toggleSlow}
+                onToggleSkipIntro={toggleSkipIntro}
                 onShuffle={onShuffle}
                 onOpenInfo={onOpenInfo}
                 showSoundHint={i === activeIdx && soundHintShown}

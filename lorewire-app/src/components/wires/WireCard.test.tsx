@@ -94,6 +94,9 @@ function makeStory(): WireStory {
     // a poll, which is what these tests actually exercise.
     poll: null,
     category_slug: null,
+    // No intro window on the base fixture; the Skip Intro tests below
+    // override it explicitly.
+    intro_window: null,
   };
 }
 
@@ -120,6 +123,7 @@ function defaultProps(overrides: Partial<WireCardProps> = {}): WireCardProps {
     autoplay: true,
     advance: true,
     slow: false,
+    skipIntro: false,
     reducedMotion: false,
     paused: false,
     eager: true,
@@ -128,6 +132,7 @@ function defaultProps(overrides: Partial<WireCardProps> = {}): WireCardProps {
     onToggleAutoplay: () => undefined,
     onToggleAdvance: () => undefined,
     onToggleSlow: () => undefined,
+    onToggleSkipIntro: () => undefined,
     onOpenInfo: () => undefined,
     showSoundHint: false,
     onDismissSoundHint: () => undefined,
@@ -381,14 +386,14 @@ describe("WireCard ⋯ options menu", () => {
     return container.querySelector<HTMLElement>('[role="menu"]');
   }
 
-  it("is closed until the ⋯ button is tapped, then reveals the three playback toggles", () => {
+  it("is closed until the ⋯ button is tapped, then reveals the playback toggles", () => {
     const m = mount(defaultProps());
     expect(findMenu(m.container)).toBeNull();
     openMore(m.container);
     const menu = findMenu(m.container);
     expect(menu).not.toBeNull();
-    // Autoplay + End-of-wire + Slow = three toggle rows.
-    expect(menu!.querySelectorAll('[role="menuitemcheckbox"]')).toHaveLength(3);
+    // Autoplay + End-of-wire + Slow + Skip intro = four toggle rows.
+    expect(menu!.querySelectorAll('[role="menuitemcheckbox"]')).toHaveLength(4);
     unmount(m);
   });
 
@@ -583,6 +588,160 @@ describe("WireCard immersive mode", () => {
       pill!.click();
     });
     expect(m.container.querySelector('button[data-side="A"]')).not.toBeNull();
+    unmount(m);
+  });
+});
+
+// ─── Skip Intro ───────────────────────────────────────────────────────────────
+// _plans/2026-07-04-skip-intro.md. The intro window arrives server-resolved on
+// short.intro_window; the card shows a "Skip intro" pill while playback sits
+// inside it, and the always-skip pref auto-seeks on entry. Playback time is
+// simulated by stubbing currentTime/duration on the element and dispatching
+// real timeupdate events (React attaches media events straight to the node).
+
+const INTRO_WINDOW = { start_ms: 3000, end_ms: 9000 };
+
+function stubPlayback(
+  video: HTMLVideoElement,
+  durationSec: number,
+): { set: (tSec: number) => void } {
+  let cur = 0;
+  Object.defineProperty(video, "currentTime", {
+    configurable: true,
+    get: () => cur,
+    set: (v: number) => {
+      cur = v;
+    },
+  });
+  Object.defineProperty(video, "duration", {
+    configurable: true,
+    get: () => durationSec,
+  });
+  return {
+    set: (tSec) => {
+      cur = tSec;
+    },
+  };
+}
+
+function tick(video: HTMLVideoElement): void {
+  act(() => {
+    video.dispatchEvent(new Event("timeupdate"));
+  });
+}
+
+function skipButton(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Skip intro"]',
+  );
+}
+
+describe("WireCard — Skip intro", () => {
+  it("shows the button only inside the intro window; the click seeks past it", () => {
+    const m = mount(
+      defaultProps({ short: { ...makeStory(), intro_window: INTRO_WINDOW } }),
+    );
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 60);
+
+    pb.set(1);
+    tick(video);
+    expect(skipButton(m.container)).toBeNull();
+
+    pb.set(4);
+    tick(video);
+    const btn = skipButton(m.container);
+    expect(btn).not.toBeNull();
+
+    act(() => {
+      btn!.click();
+    });
+    expect(video.currentTime).toBe(9);
+    expect(skipButton(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("auto-skips on entering the window when the always-skip pref is on", () => {
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: { ...makeStory(), intro_window: INTRO_WINDOW },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 60);
+
+    pb.set(3.1);
+    tick(video);
+    expect(video.currentTime).toBe(9);
+    unmount(m);
+  });
+
+  it("a keyboard seek INTO the window suppresses auto-skip but keeps the button", () => {
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: { ...makeStory(), intro_window: INTRO_WINDOW },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    stubPlayback(video, 60);
+
+    // ArrowRight seeks 0 → 5s, landing inside the window — an explicit
+    // choice to watch the intro, so the pref must not yank playback away.
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    });
+    tick(video);
+    expect(video.currentTime).toBe(5);
+    expect(skipButton(m.container)).not.toBeNull();
+    unmount(m);
+  });
+
+  it("auto-skips an intro-first row (window at 0) as soon as metadata loads", () => {
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: {
+          ...makeStory(),
+          intro_window: { start_ms: 0, end_ms: 4000 },
+        },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    stubPlayback(video, 60);
+    act(() => {
+      video.dispatchEvent(new Event("loadedmetadata"));
+    });
+    expect(video.currentTime).toBe(4);
+    unmount(m);
+  });
+
+  it("never renders the button when the row has no intro window", () => {
+    const m = mount(defaultProps());
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 60);
+    pb.set(4);
+    tick(video);
+    expect(skipButton(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("ignores a window that doesn't fit the real file duration", () => {
+    // The element says the file is 8s long; a window ending at 9s must be
+    // treated as wrong (no button, no auto-seek) rather than jumping to EOF.
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: { ...makeStory(), intro_window: INTRO_WINDOW },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 8);
+    pb.set(4);
+    tick(video);
+    expect(video.currentTime).toBe(4);
+    expect(skipButton(m.container)).toBeNull();
     unmount(m);
   });
 });

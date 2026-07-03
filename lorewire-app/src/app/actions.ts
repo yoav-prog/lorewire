@@ -32,6 +32,11 @@ import {
 import { readVoteToken } from "@/lib/poll-cookie";
 import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 import { resolveMediaUrl } from "@/lib/media-url";
+import type { IntroWindow } from "@/lib/intro-window";
+import {
+  resolveIntroWindowsForStories,
+  type IntroWindowStoryRow,
+} from "@/lib/intro-window-resolve";
 import { randomUUID } from "node:crypto";
 import { currentUser } from "@/lib/dal";
 import { getOrIssueAnonToken, readAnonToken } from "@/lib/anon";
@@ -354,6 +359,12 @@ export interface WireStory extends LiveCatalogStory {
    *  category filter's taxonomy; the card falls back to the legacy `category`
    *  label when this is null. */
   category_slug: string | null;
+  /** Where the brand intro sits in this wire's MP4 (server-resolved via
+   *  lib/intro-window-resolve). Drives the card's "Skip intro" button and
+   *  the always-skip pref. Null when the row has no intro or the position
+   *  can't be determined confidently — the card then never skips. Plan:
+   *  _plans/2026-07-04-skip-intro.md. */
+  intro_window: IntroWindow | null;
 }
 
 export interface LiveCatalogResult {
@@ -458,11 +469,18 @@ export async function listPublishedShorts(
   const clause = `WHERE ${where.join(" AND ")}`;
   // Over-fetch by one so we know whether a further page exists without a second
   // COUNT round-trip. id is the deterministic tiebreak so the sort is stable
-  // across equal published_at values.
-  const rows = await all<LiveCatalogStory>(
+  // across equal published_at values. The projection is LiveCatalogStory plus
+  // the Skip Intro resolver's inputs (props, short_config, the segment
+  // columns) — those extra columns are consumed server-side by
+  // resolveIntroWindowsForStories and NEVER reach the client; the public rows
+  // are rebuilt field-by-field below so a private column can't leak through a
+  // spread.
+  const rows = await all<LiveCatalogStory & IntroWindowStoryRow>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
-      "video_url, published_at, created_at FROM stories " +
+      "video_url, published_at, created_at, props, short_config, " +
+      "intro_segment_id, outro_segment_id, skip_intro, skip_outro, " +
+      "video_config FROM stories " +
       `${clause} ` +
       "ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC " +
       `LIMIT ${limit + 1}`,
@@ -472,19 +490,32 @@ export async function listPublishedShorts(
   const page = hasMore ? rows.slice(0, limit) : rows;
   // Belt and braces: the SQL LIKE already filters, but re-assert the exact
   // suffix in JS so a URL that merely contains the substring mid-path can't
-  // slip a non-short into the feed (the regex anchors it to the end). Filter on
-  // the STORED value to stay aligned with the SQL LIKE, then resolve the
-  // survivors' media onto the delivery base for the client (passthrough when
-  // MEDIA_PUBLIC_BASE is unset; suffix is preserved either way).
-  const shorts = page
-    .filter((s) => isShortVideoUrl(s.video_url))
-    .map((s) => ({
-      ...s,
+  // slip a non-short into the feed (the regex anchors it to the end). Filter
+  // on the STORED value to stay aligned with the SQL LIKE.
+  const withVideo = page.filter((s) => isShortVideoUrl(s.video_url));
+  // Resolve each wire's Skip Intro window off the RAW rows (the resolver
+  // reads props/short_config and the stored video_url), then rebuild the
+  // public projection with the survivors' media resolved onto the delivery
+  // base (passthrough when MEDIA_PUBLIC_BASE is unset; suffix is preserved
+  // either way).
+  const introWindows = await resolveIntroWindowsForStories(withVideo);
+  const shorts = withVideo.map(
+    (s): LiveCatalogStory => ({
+      id: s.id,
+      slug: s.slug,
+      title: s.title,
+      category: s.category,
+      summary: s.summary,
+      duration: s.duration,
       hero_image: resolveMediaUrl(s.hero_image),
       hero_image_landscape: resolveMediaUrl(s.hero_image_landscape),
+      hero_has_baked_title: s.hero_has_baked_title,
       thumbnail_image: resolveMediaUrl(s.thumbnail_image),
       video_url: resolveMediaUrl(s.video_url),
-    }));
+      published_at: s.published_at,
+      created_at: s.created_at,
+    }),
+  );
   // Cursor matches the SQL COALESCE order so a row with NULL published_at
   // still produces a usable next-page key (uses created_at instead).
   const last = page[page.length - 1];
@@ -503,7 +534,12 @@ export async function listPublishedShorts(
   // Attach each wire's primary granular category slug so the card chip speaks
   // the same taxonomy as the category filter.
   const withCategory = await attachPrimaryCategorySlug(withPolls);
-  return { ok: true, shorts: withCategory, nextCursor };
+  // Slot in the Skip Intro windows resolved off the raw rows above.
+  const withIntroWindows = withCategory.map((s) => ({
+    ...s,
+    intro_window: introWindows.get(s.id) ?? null,
+  }));
+  return { ok: true, shorts: withIntroWindows, nextCursor };
 }
 
 /** Batch-resolve the per-wire poll bundle and slot it onto each row.
@@ -596,6 +632,8 @@ async function attachLikeState(rows: LiveCatalogStory[]): Promise<WireStory[]> {
     // Filled by attachPrimaryCategorySlug after the poll pass; initialised here
     // so the chained transforms satisfy the WireStory shape (mirrors `poll`).
     category_slug: null,
+    // Filled by the caller's final intro-window pass (mirrors `poll`).
+    intro_window: null,
   }));
 }
 
