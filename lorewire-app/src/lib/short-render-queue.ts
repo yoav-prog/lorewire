@@ -22,6 +22,7 @@ import {
   fullDurationMsFromParts,
   parseLastRenderedSegments,
 } from "@/lib/duration";
+import type { IntroWindow } from "@/lib/intro-window";
 import { bustShortVideoUrl } from "@/lib/short-video-url";
 
 export type ShortRenderStatus =
@@ -283,6 +284,14 @@ export async function finishShortRender(
    *  (renderer logs the failure but still ships the URL). Plan:
    *  _plans/2026-06-29-actual-mp4-duration.md. */
   assembledDurationMs: number | null = null,
+  /** Optional: where the brand intro sits in the rendered MP4, computed by
+   *  the dispatcher from the exact segments payload Cloud Run spliced with.
+   *  Merged onto `short_renders.props` as `intro_start_ms` / `intro_end_ms`
+   *  — the players' Skip Intro feature reads them off the story's latest
+   *  done render. Null still DELETES any stale intro_* keys so a render
+   *  without an intro can't inherit the previous window. Plan:
+   *  _plans/2026-07-04-skip-intro.md. */
+  introWindow: IntroWindow | null = null,
 ): Promise<void> {
   const now = new Date().toISOString();
   // Cache-bust the stored URL (2026-07-03): the renderer overwrites the
@@ -292,21 +301,29 @@ export async function finishShortRender(
   // (finisher's stories.video_url apply, applyShortToStory, the wires
   // feed) copies this row's output_url, so busting here covers them all.
   const outputUrlBusted = bustShortVideoUrl(outputUrl);
-  // Merge the probed duration onto the props row in a single write that
-  // also flips status to 'done'. Read-modify-write at the application
-  // layer (rather than a SQL-side JSON patch) because the props column
-  // is TEXT on both SQLite + Postgres drivers — keeping JSON shaping in
-  // TS avoids dialect-specific JSON ops and matches the pattern every
+  const assembledValid =
+    assembledDurationMs !== null &&
+    Number.isFinite(assembledDurationMs) &&
+    assembledDurationMs > 0;
+  // Merge the probed duration + intro window onto the props row in a single
+  // write that also flips status to 'done'. Read-modify-write at the
+  // application layer (rather than a SQL-side JSON patch) because the props
+  // column is TEXT on both SQLite + Postgres drivers — keeping JSON shaping
+  // in TS avoids dialect-specific JSON ops and matches the pattern every
   // other props mutator uses.
-  if (assembledDurationMs !== null && Number.isFinite(assembledDurationMs) && assembledDurationMs > 0) {
+  if (assembledValid || introWindow !== null) {
     const existing = await one<{ props: string | null }>(
       `SELECT props FROM short_renders WHERE id = ?`,
       [renderId],
     );
-    const mergedProps = mergeAssembledDurationIntoProps(
-      existing?.props ?? null,
-      Math.round(assembledDurationMs),
-    );
+    let mergedProps = existing?.props ?? null;
+    if (assembledValid) {
+      mergedProps = mergeAssembledDurationIntoProps(
+        mergedProps,
+        Math.round(assembledDurationMs),
+      );
+    }
+    mergedProps = mergeIntroWindowIntoProps(mergedProps, introWindow);
     await run(
       `UPDATE short_renders SET status = 'done', progress = 1.0, phase = 'done',
          output_url = ?, finished_at = ?, props = ?
@@ -324,6 +341,8 @@ export async function finishShortRender(
   console.info("[short finish duration]", {
     render_id: renderId,
     assembled_duration_ms: assembledDurationMs,
+    intro_start_ms: introWindow?.start_ms ?? null,
+    intro_end_ms: introWindow?.end_ms ?? null,
   });
   await logShortRenderEvent(renderId, "finished", {
     message: "Short render done",
@@ -357,6 +376,60 @@ export function mergeAssembledDurationIntoProps(
   }
   base.assembled_duration_ms = assembledDurationMs;
   return JSON.stringify(base);
+}
+
+/** Merge the Skip Intro window into a short_renders.props JSON blob, or
+ *  DELETE the intro_* keys when the render spliced no intro (null window) —
+ *  a leftover window from a previous render would make the players skip
+ *  real story content. Null props stay null when there is nothing to
+ *  record; a valid window lands even on malformed props (same trade as
+ *  mergeAssembledDurationIntoProps). Exported for unit-testability; the
+ *  only production caller is finishShortRender. Plan:
+ *  _plans/2026-07-04-skip-intro.md. */
+export function mergeIntroWindowIntoProps(
+  existingPropsJson: string | null | undefined,
+  introWindow: IntroWindow | null,
+): string | null {
+  let base: Record<string, unknown> | null = null;
+  if (existingPropsJson) {
+    try {
+      const parsed = JSON.parse(existingPropsJson) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        base = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Malformed row: recorded below only if there is a window to save.
+    }
+  }
+  if (introWindow === null) {
+    if (base === null) return existingPropsJson ?? null;
+    delete base.intro_start_ms;
+    delete base.intro_end_ms;
+    return JSON.stringify(base);
+  }
+  const next = base ?? {};
+  next.intro_start_ms = introWindow.start_ms;
+  next.intro_end_ms = introWindow.end_ms;
+  return JSON.stringify(next);
+}
+
+/** Latest done render props per story, in one batch query — the Skip Intro
+ *  resolver's source of truth for a whole wires page. Later `requested_at`
+ *  wins per story (the same ordering latestDoneShortRenderForStory uses). */
+export async function latestDoneShortRenderPropsByStory(
+  storyIds: string[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (storyIds.length === 0) return out;
+  const placeholders = storyIds.map(() => "?").join(", ");
+  const rows = await all<{ story_id: string; props: string }>(
+    `SELECT story_id, props FROM short_renders
+     WHERE status = 'done' AND props IS NOT NULL AND story_id IN (${placeholders})
+     ORDER BY requested_at ASC`,
+    storyIds,
+  );
+  for (const r of rows) out.set(r.story_id, r.props);
+  return out;
 }
 
 export async function failShortRender(

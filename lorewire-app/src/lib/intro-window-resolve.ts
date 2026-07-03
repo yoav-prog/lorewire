@@ -1,21 +1,34 @@
 // Server half of the Skip Intro feature: figure out where the brand intro
-// sits inside an EXISTING story's rendered MP4. Rows rendered after the
-// feature shipped carry the window explicitly on props (the dispatcher
-// persists intro_start_ms / intro_end_ms at render-finish); everything older
-// is derived from the same inputs the splice ran with:
+// sits inside an EXISTING story's rendered MP4.
 //
+// The source of truth is the story's latest DONE `short_renders` row — its
+// props blob is the DoodleShort render record (hook_end_ms /
+// hook_tail_hold_ms / assembled_duration_ms, and intro_start_ms /
+// intro_end_ms once the dispatcher has persisted a window). `stories.props`
+// is deliberately NOT read: that column holds the story-world artwork list
+// ({url,label,side} dicts — see pipeline/store.py:update_story_props), a
+// completely different blob. Reading it was the 2026-07-04 bug where the
+// button skipped the HOOK instead of the intro (no hook fields found →
+// misclassified as intro-first → window [0, intro duration]).
+//
+// Resolution per row:
 //   which intro?   short_config._last_rendered_segments stamp (exact record
 //                  of what was spliced) → the live resolver chain
 //                  (lib/short-segments for shorts, pickSegmentPure with the
 //                  story's aspect for legacy long-form) for pre-stamp rows
 //   how long?      video_segments.duration_ms
-//   where?         props.hook_end_ms / hook_tail_hold_ms classify the splice
-//                  generation; lib/intro-window mirrors the timeline math
+//   where?         explicit intro_start_ms/intro_end_ms on the render props,
+//                  else derived: the render props' hook fields classify the
+//                  splice generation and lib/intro-window mirrors the math
 //
-// Fail-closed everywhere: any missing/ambiguous input → null → the players
-// show no button and never auto-seek. Plan: _plans/2026-07-04-skip-intro.md.
+// Fail-closed everywhere: a SHORT with no render record can't be classified
+// (assuming intro-first would recreate the hook-skipping bug), so it gets no
+// window; same for any missing/ambiguous input. Long-form videos predate
+// hooks entirely, so they classify as intro-first without a render record.
+// Plan: _plans/2026-07-04-skip-intro.md.
 
 import "server-only";
+import { isVideoAspect, resolveAspect, type VideoAspect } from "@/lib/aspect";
 import { assembledDurationMsFromPropsJson } from "@/lib/duration";
 import {
   classifySpliceGeneration,
@@ -28,17 +41,19 @@ import {
 import { getSegment, getSetting, type SegmentRow } from "@/lib/repo";
 import { pickSegmentPure } from "@/lib/segment-resolver";
 import { parseShortConfig, type ShortConfig } from "@/lib/short-config";
+import {
+  latestDoneShortRenderForStory,
+  latestDoneShortRenderPropsByStory,
+} from "@/lib/short-render-queue";
 import { resolveShortSegments } from "@/lib/short-segments";
 import { isShortVideoUrl } from "@/lib/short-video-url";
-import type { VideoAspect } from "@/lib/aspect";
 
-/** The columns a caller must select for the resolver to work. Matches the
- *  stories table (all already in StoryRow); listPublishedShorts widens its
- *  projection with these server-side and strips them before the client. */
+/** The story columns the resolver reads. All already on StoryRow;
+ *  listPublishedShorts widens its projection with these server-side and
+ *  strips them before the client. */
 export interface IntroWindowStoryRow {
   id: string;
   video_url: string | null;
-  props: string | null;
   short_config: string | null;
   intro_segment_id: string | null;
   outro_segment_id: string | null;
@@ -50,6 +65,19 @@ export interface IntroWindowStoryRow {
 /** Per-batch cache so a wires page resolving 12 rows hits video_segments
  *  once per distinct intro (in practice: once). */
 export type SegmentCache = Map<string, Promise<SegmentRow | null>>;
+
+export interface ResolveIntroWindowOpts {
+  /** Aspect for the LEGACY LONG-FORM segment chain only (shorts are always
+   *  9:16). Omitted → derived from video_config + the global default, the
+   *  same chain the reader page uses. */
+  aspect?: VideoAspect;
+  /** The story's latest done short_renders.props, when the caller already
+   *  has it (the wires batch). `null` means "known to have none";
+   *  undefined means "fetch it here". */
+  renderPropsJson?: string | null;
+  /** Per-batch segment lookup cache. */
+  segmentCache?: SegmentCache;
+}
 
 export function createSegmentCache(): SegmentCache {
   return new Map();
@@ -122,19 +150,55 @@ async function resolveIntroSegmentId(
   return pick.segment?.id ?? null;
 }
 
-/** Resolve the intro window for one story row. `aspect` matters only for
- *  legacy long-form videos (shorts are always 9:16); callers that only ever
- *  handle shorts can omit it. */
+/** The aspect a LEGACY LONG-FORM row rendered at — per-story
+ *  video_config.aspect → global default → legacy 9:16. Mirrors the reader
+ *  page's resolveStoryAspect; only consulted when the caller didn't pass
+ *  one (shorts never need it). */
+async function resolveRowAspect(row: IntroWindowStoryRow): Promise<VideoAspect> {
+  let configAspect: VideoAspect | undefined;
+  if (row.video_config) {
+    try {
+      const parsed = JSON.parse(row.video_config);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        isVideoAspect((parsed as { aspect?: unknown }).aspect)
+      ) {
+        configAspect = (parsed as { aspect: VideoAspect }).aspect;
+      }
+    } catch {
+      // malformed config column — fall through to the global default
+    }
+  }
+  const globalRaw = await getSetting("video.default_aspect");
+  const global = isVideoAspect(globalRaw) ? globalRaw : undefined;
+  return resolveAspect(configAspect, global);
+}
+
+/** Resolve the intro window for one story row. */
 export async function resolveIntroWindowForStory(
   row: IntroWindowStoryRow,
-  opts: { aspect?: VideoAspect; segmentCache?: SegmentCache } = {},
+  opts: ResolveIntroWindowOpts = {},
 ): Promise<IntroWindow | null> {
   try {
+    const isShort = isShortVideoUrl(row.video_url);
+    const renderProps =
+      opts.renderPropsJson !== undefined
+        ? opts.renderPropsJson
+        : ((await latestDoneShortRenderForStory(row.id))?.props ?? null);
+
     // Rows rendered after the feature shipped carry the exact window.
-    const explicit = introWindowFromPropsJson(row.props);
+    const explicit = introWindowFromPropsJson(renderProps);
     if (explicit) return explicit;
 
-    const introId = await resolveIntroSegmentId(row, opts.aspect ?? "9:16");
+    // A short whose render record is gone can't be classified — assuming
+    // intro-first here would skip the HOOK on a hook-first video.
+    if (isShort && !renderProps) return null;
+
+    const aspect = isShort
+      ? "9:16"
+      : (opts.aspect ?? (await resolveRowAspect(row)));
+    const introId = await resolveIntroSegmentId(row, aspect);
     if (!introId) return null;
     const segment = await getSegmentCached(
       introId,
@@ -142,14 +206,18 @@ export async function resolveIntroWindowForStory(
     );
     if (!segment) return null;
 
-    const hookEndMs = hookEndMsFromPropsJson(row.props);
-    const hookTailHoldMs = hookTailHoldMsFromPropsJson(row.props);
+    // Long-form predates hooks — its render record isn't in short_renders,
+    // and its splice was always [intro][body][outro].
+    const hookEndMs = isShort ? hookEndMsFromPropsJson(renderProps) : null;
+    const hookTailHoldMs = isShort
+      ? hookTailHoldMsFromPropsJson(renderProps)
+      : null;
     return deriveIntroWindow({
       generation: classifySpliceGeneration(hookEndMs, hookTailHoldMs),
       hookEndMs,
       hookTailHoldMs,
       introDurationMs: segment.duration_ms,
-      assembledDurationMs: assembledDurationMsFromPropsJson(row.props),
+      assembledDurationMs: assembledDurationMsFromPropsJson(renderProps),
     });
   } catch (err) {
     // A resolver hiccup must never take down a public page — no window,
@@ -162,15 +230,19 @@ export async function resolveIntroWindowForStory(
   }
 }
 
-/** Batch resolver for the wires feed: one shared segment cache, one summary
- *  log line per page instead of one per row. */
+/** Batch resolver for the wires feed: one render-props query, one shared
+ *  segment cache, one summary log line per page instead of one per row. */
 export async function resolveIntroWindowsForStories(
   rows: IntroWindowStoryRow[],
 ): Promise<Map<string, IntroWindow | null>> {
   const cache = createSegmentCache();
+  const renderPropsById = await latestDoneShortRenderPropsByStory(
+    rows.map((r) => r.id),
+  );
   const entries = await Promise.all(
     rows.map(async (row) => {
       const window = await resolveIntroWindowForStory(row, {
+        renderPropsJson: renderPropsById.get(row.id) ?? null,
         segmentCache: cache,
       });
       return [row.id, window] as const;

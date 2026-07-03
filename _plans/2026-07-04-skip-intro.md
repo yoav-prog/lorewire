@@ -21,12 +21,14 @@ past it:
 ## The core problem: where is the intro in the final MP4?
 
 Nothing persisted today says "the intro spans [a, b] in the final timeline".
-But the inputs to that math ARE persisted:
+But the inputs to that math ARE persisted — on the story's latest DONE
+`short_renders` row (its props blob is the render record):
 
-- `stories.props.hook_end_ms` — where the hook ends (written by the Python
-  pipeline; the dispatcher strips it only from the copy sent to Remotion).
-- `stories.props.hook_tail_hold_ms` — per-video audio hold (paced-splice era,
-  2026-06-29 onward). Cloud Run floors it at 0.15s
+- `short_renders.props.hook_end_ms` — where the hook ends (written by the
+  Python pipeline; the dispatcher strips it only from the copy sent to
+  Remotion).
+- `short_renders.props.hook_tail_hold_ms` — per-video audio hold
+  (paced-splice era, 2026-06-29 onward). Cloud Run floors it at 0.15s
   (`video/server/render.ts:MIN_HOOK_AUDIO_TAIL_HOLD_SEC`), fallback 0.3s when
   the field is absent.
 - Paced-seam constants mirrored in `video/server/ffmpeg.ts` and
@@ -35,8 +37,22 @@ But the inputs to that math ARE persisted:
   intro_segment_id` (stamped by the dispatcher at render-finish), falling back
   to the live resolver chain (`lib/short-segments.ts`) for rows that predate
   the stamp. Its length is `video_segments.duration_ms`.
-- `stories.props.assembled_duration_ms` — real MP4 length (2026-06-29 onward),
-  used as a sanity clamp.
+- `short_renders.props.assembled_duration_ms` — real MP4 length (2026-06-29
+  onward), used as a sanity clamp.
+
+**Correction (2026-07-04, post-v1):** the first cut read these fields off
+`stories.props`. That column is the story-world artwork LIST
+(`{url,label,side}` dicts — `pipeline/store.py:update_story_props`), not the
+render record, so every hook-first short classified as intro-first and the
+button skipped the HOOK. The resolver now reads the latest done
+`short_renders.props`; a short with no render record fails closed instead of
+assuming intro-first.
+
+**Also added post-v1:** the story detail's WATCH tab (DesktopShell modal +
+AppShell title sheet) is a third player v1 missed — it now gets the same
+button + always-skip via `getLiveStoryMedia.intro_window`. Deliberately NOT
+covered: StoriesViewer (the ephemeral auto-advancing stories surface — its
+playlist shape has no window plumbing; revisit if viewers ask).
 
 ### Final-timeline math (mirrors `video/server/ffmpeg.ts`)
 
@@ -61,10 +77,11 @@ But the inputs to that math ARE persisted:
 The dispatcher (`src/app/api/render_short/route.ts`) already knows every
 input at render-finish (it computed `segments.hookEndSec` /
 `hookTailHoldSec` and resolved the intro segment row). Compute
-`intro_start_ms` / `intro_end_ms` there with the same pure function and fold
-them into the props written by `applyShortToStory`, exactly like
-`assembled_duration_ms`. No Cloud Run change, no redeploy sequencing. The
-read-time derivation then only serves rows rendered before this ships.
+`intro_start_ms` / `intro_end_ms` there with the same pure function and pass
+it to `finishShortRender`, which merges it onto `short_renders.props` beside
+`assembled_duration_ms` (a null window deletes stale intro keys). No Cloud
+Run change, no redeploy sequencing. The read-time derivation then only
+serves rows rendered before this ships.
 
 ## Approach
 
