@@ -89,10 +89,30 @@ export type AssetGate =
   | "story_missing"
   | "wrong_kind";
 
+// Gates that are reported (and auto-backfilled by the complete-and-
+// publish cron via `missing`) but do NOT block publishing. Every one
+// has a graceful fallback on its surface: the billboard falls back to
+// the portrait hero, the OG card falls back through thumbnail → hero →
+// site default, and the square thumbnail is consumed only by the
+// Instagram publisher (which fails per-platform, not site-wide).
+// 2026-07-04: a single flaky kie call on thumbnail_image_square was
+// hard-blocking story publishes (1l23hhc) — a web publish must never
+// hinge on an Instagram-only asset.
+const ADVISORY_GATES: ReadonlySet<AssetGate> = new Set([
+  "hero_image_landscape",
+  "thumbnail_image_landscape",
+  "thumbnail_image_square",
+]);
+
 export interface AssetCompleteness {
+  /** True when no BLOCKING gate is missing (advisory gates may be). */
   ready: boolean;
-  /** Stable codes the cron logs + the action surfaces in toasts. */
+  /** Stable codes the cron logs + the action surfaces in toasts.
+   *  Includes advisory gates so the complete-and-publish cron still
+   *  re-enqueues them; `blocking` is what `ready` is computed from. */
   missing: AssetGate[];
+  /** The subset of `missing` that actually blocks publish. */
+  blocking: AssetGate[];
   /** Free-form per-gate detail for the structured log. The cron writes
    *  this verbatim; the action surfaces `missing` only. */
   details: {
@@ -238,9 +258,11 @@ export async function evaluateAssetCompleteness(
     poll.question.trim() !== "";
   if (!pollReady) missing.push("poll");
 
+  const blocking = missing.filter((g) => !ADVISORY_GATES.has(g));
   return {
-    ready: missing.length === 0,
+    ready: blocking.length === 0,
     missing,
+    blocking,
     details: {
       body_present: !!(story.body && story.body.trim() !== ""),
       hero_image_present: !!story.hero_image,
@@ -338,6 +360,9 @@ function emptyDetails(
 ): AssetCompleteness {
   return {
     ...partial,
+    // story_missing / wrong_kind are never advisory, so the blocking
+    // set mirrors `missing` verbatim on this early-exit path.
+    blocking: partial.missing,
     details: {
       body_present: false,
       hero_image_present: false,

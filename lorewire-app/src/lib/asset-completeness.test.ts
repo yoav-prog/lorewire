@@ -156,6 +156,35 @@ describe("evaluateAssetCompleteness", () => {
     expect(r.missing).toContain("thumbnail_image");
     expect(r.missing).toContain("thumbnail_image_landscape");
     expect(r.missing).toContain("thumbnail_image_square");
+    // The portrait thumbnail is load-bearing (homepage cards); the
+    // landscape/square variants are advisory and must not block.
+    expect(r.blocking).toContain("thumbnail_image");
+    expect(r.blocking).not.toContain("hero_image_landscape");
+    expect(r.blocking).not.toContain("thumbnail_image_landscape");
+    expect(r.blocking).not.toContain("thumbnail_image_square");
+  });
+
+  // 2026-07-04 (1l23hhc): a single flaky kie call on the Instagram-only
+  // square thumbnail was hard-blocking web publishes. Advisory gates
+  // are still REPORTED (so the complete-and-publish cron backfills
+  // them) but publish readiness no longer hinges on them.
+  it("stays ready when only advisory variants are missing", async () => {
+    await seedComplete({
+      hero_image_landscape: null,
+      thumbnail_image_landscape: null,
+      thumbnail_image_square: null,
+    });
+    const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.ready).toBe(true);
+    expect(r.blocking).toEqual([]);
+    expect(r.missing).toContain("thumbnail_image_square");
+  });
+
+  it("does not publish-block on advisory gates but does on the portrait thumbnail", async () => {
+    await seedComplete({ thumbnail_image: null });
+    const r = await evaluateAssetCompleteness(STORY_ID);
+    expect(r.ready).toBe(false);
+    expect(r.blocking).toEqual(["thumbnail_image"]);
   });
 
   it("flags short_render when no completed short exists", async () => {
