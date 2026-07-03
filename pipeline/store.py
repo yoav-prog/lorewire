@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime
 import json
 import sqlite3
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -1955,8 +1956,25 @@ def update_short_render_progress(
             )
 
 
+def _cache_bust_video_url(url: str) -> str:
+    """Append `?v={epoch_seconds}` so caches treat each re-render as a
+    fresh asset. The renderer overwrites the SAME object key per story
+    (`<id>-short/video.mp4`) with a one-year immutable Cache-Control, so
+    a byte-identical URL keeps playing the OLD MP4 after a restart (bug
+    observed 2026-07-03). Mirror of media._cache_bust — duplicated here
+    because media imports store, so store can't import media. Idempotent:
+    a URL already carrying `v=` passes through unchanged."""
+    if not url or "v=" in url:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={int(time.time())}"
+
+
 def finish_short_render(render_id: str, output_url: str) -> None:
-    """Mark a short render done."""
+    """Mark a short render done. The stored URL is cache-busted (see
+    `_cache_bust_video_url`) — everything downstream (the finisher's
+    stories.video_url apply, the wires feed) copies this row's value."""
+    output_url = _cache_bust_video_url(output_url)
     now = _now_iso()
     if _is_postgres():
         with _pg_conn() as conn:
