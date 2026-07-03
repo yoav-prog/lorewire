@@ -656,6 +656,7 @@ def make_thumbnail_prompt(
     scene_image_url: str | None = None,
     style: HeroStyle | None = None,
     bake_title: bool = True,
+    include_story_context: bool = True,
 ) -> str:
     """Build a cinematic thumbnail/hero prompt for poster art.
 
@@ -764,7 +765,22 @@ def make_thumbnail_prompt(
 
     # Take just the first couple of sentences of the article as the scene cue
     # so the model gets context without re-rendering the whole body each call.
+    # `include_story_context=False` (2026-07-03) drops the sentence entirely:
+    # kie's content moderation deterministically flags some story excerpts
+    # (minors + charged phrasing in family-drama bodies), and the scene
+    # reference image already carries the composition — the moderation
+    # fallback in media.py rebuilds the prompt this way and retries once.
     opening = " ".join(body.split()[:60])
+    scene_context = (
+        f"Scene context from the story: {opening} "
+        if include_story_context
+        else ""
+    )
+    composition_context = (
+        f"Composition focused on this scene from the story: {opening} "
+        if include_story_context
+        else ""
+    )
 
     # The shared tail of every variant: how to treat the title, then the
     # composition cue and the finish. Baked mode keeps the historical wording
@@ -802,7 +818,7 @@ def make_thumbnail_prompt(
             f"mood, lighting, and dramatic moment. Reimagined as a cinematic "
             f"editorial poster for a short documentary titled \"{title}\". "
             f"{style_band} "
-            f"Scene context from the story: {opening} "
+            f"{scene_context}"
             f"{title_treatment}"
         )
 
@@ -817,14 +833,14 @@ def make_thumbnail_prompt(
             f"face, gender, build, hair, clothing, age — but reimagined as a "
             f"cinematic editorial poster for a short documentary titled "
             f"\"{title}\". {style_band} "
-            f"Composition focused on this scene from the story: {opening} "
+            f"{composition_context}"
             f"{title_treatment}"
         )
 
     return (
         f"Cinematic editorial poster for a short documentary titled \"{title}\". "
         f"{style_band} "
-        f"Composition focused on this scene from the story: {opening} "
+        f"{composition_context}"
         f"{title_treatment}"
     )
 

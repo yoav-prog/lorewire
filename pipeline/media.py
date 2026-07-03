@@ -360,6 +360,23 @@ def _is_kie_quota_error(msg: str) -> bool:
     return any(m in msg for m in _KIE_QUOTA_MARKERS)
 
 
+# kie's content-moderation rejection ("The input or output was flagged as
+# sensitive. Please try again."). Deterministic for a given prompt+inputs —
+# an identical retry can never pass — but a SOFTENED prompt often can: the
+# flag usually trips on the story-body excerpt (family-drama stories
+# routinely contain minors + charged phrasing, e.g. 1m4fjwq "my 15yo kid
+# got his GF pregnant"), not on the reference images. Callers branch on
+# this to retry once WITHOUT the story text instead of failing the run.
+_KIE_MODERATION_MARKERS = (
+    "flagged as sensitive",
+)
+
+
+def _is_kie_moderation_error(msg: str) -> bool:
+    """True when `msg` is kie's content-moderation rejection."""
+    return any(m in msg for m in _KIE_MODERATION_MARKERS)
+
+
 def last_kie_error() -> str | None:
     """Return the upstream exception text from the most recent
     `_generate_with_retry` failure, or `None` when the last call
@@ -390,6 +407,12 @@ def _kie_failed_msg(label: str) -> str:
         return (
             f"{label} — kie.ai daily points cap exceeded; "
             "wait for the daily reset or top up the account"
+        )
+    if _LAST_KIE_ERROR["kind"] == "moderation":
+        return (
+            f"{label} — kie content moderation flagged this story even "
+            "without the story text; soften the title wording or pick a "
+            "different scene"
         )
     return f"{label} returned no URL after retries"
 
@@ -462,6 +485,20 @@ def _generate_with_retry(
                 _LAST_KIE_ERROR["msg"] = str(e)
                 _LAST_KIE_ERROR["kind"] = "quota"
                 return None
+            if _is_kie_moderation_error(str(e)):
+                # No identical retry on a moderation flag either — the
+                # same prompt + inputs deterministically re-flag. The
+                # caller reads kind == "moderation" and retries once
+                # with the story text stripped from the prompt (see
+                # _generate_with_moderation_fallback).
+                print(
+                    f"[media image moderation] {label} attempt {attempt} "
+                    f"refs={ref_count} model={model or 'global'} "
+                    "flagged as sensitive; skipping identical retry"
+                )
+                _LAST_KIE_ERROR["msg"] = str(e)
+                _LAST_KIE_ERROR["kind"] = "moderation"
+                return None
             if attempt < attempts:
                 print(
                     f"[media image retry] {label} attempt {attempt} "
@@ -475,6 +512,42 @@ def _generate_with_retry(
     _LAST_KIE_ERROR["msg"] = str(last) if last is not None else None
     _LAST_KIE_ERROR["kind"] = "generic" if last is not None else None
     return None
+
+
+def _generate_with_moderation_fallback(
+    prompt: str,
+    fallback_prompt: str,
+    label: str,
+    **gen_kwargs,
+) -> str | None:
+    """`_generate_with_retry`, plus ONE softened retry when kie's content
+    moderation flags the first prompt.
+
+    The flag is deterministic for a given prompt + inputs, and in
+    practice it trips on the story-body excerpt inside the prompt
+    (family-drama stories routinely contain minors + charged phrasing —
+    2026-07-03, story 1m4fjwq, all five finisher variants flagged).
+    `fallback_prompt` is the same prompt built WITHOUT the story text
+    (make_thumbnail_prompt include_story_context=False): the scene
+    reference image still carries the composition, so quality loss is
+    minimal. Any other failure kind returns None immediately — quota
+    caps and transient errors gain nothing from a reworded prompt."""
+    url = _generate_with_retry(prompt, label, **gen_kwargs)
+    if url is not None or last_kie_error_kind() != "moderation":
+        return url
+    store.log_render_event(
+        "moderation_retry",
+        f"{label} flagged as sensitive — retrying without story text",
+        level="warn",
+        payload={"label": label, "error": last_kie_error()},
+    )
+    print(
+        f"[media image moderation] {label} retrying once without "
+        "story context"
+    )
+    return _generate_with_retry(
+        fallback_prompt, f"{label} (no story context)", **gen_kwargs,
+    )
 
 
 # Wave 3 Phase 3 PropSlideIn budgets. Default 5 props per story; admin can
@@ -1196,6 +1269,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         title, category, body, aspect_ratio="3:4", dry_run=False,
         style=resolved.style, bake_title=False,
     )
+    portrait_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="3:4", dry_run=False,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
+    )
     store.log_render_event(
         "prompt_built",
         f"Portrait hero prompt ready ({len(portrait_prompt)} chars)",
@@ -1206,8 +1284,9 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         "Submitted to kie — waiting on portrait generation",
         payload={"variant": "portrait", "aspect": "3:4"},
     )
-    portrait_kie = _generate_with_retry(
-        portrait_prompt, f"id={safe_id} hero regen portrait", aspect_ratio="3:4",
+    portrait_kie = _generate_with_moderation_fallback(
+        portrait_prompt, portrait_prompt_safe,
+        f"id={safe_id} hero regen portrait", aspect_ratio="3:4",
     )
     if portrait_kie is None:
         store.log_render_event(
@@ -1250,13 +1329,19 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         title, category, body, aspect_ratio="16:9", dry_run=False,
         style=resolved.style, bake_title=False,
     )
+    landscape_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="16:9", dry_run=False,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
+    )
     store.log_render_event(
         "kie_request_sent",
         "Submitted to kie — waiting on landscape generation",
         payload={"variant": "landscape", "aspect": "16:9"},
     )
-    landscape_kie = _generate_with_retry(
-        landscape_prompt, f"id={safe_id} hero regen landscape", aspect_ratio="16:9",
+    landscape_kie = _generate_with_moderation_fallback(
+        landscape_prompt, landscape_prompt_safe,
+        f"id={safe_id} hero regen landscape", aspect_ratio="16:9",
     )
     if landscape_kie is None:
         store.log_render_event(
@@ -1404,6 +1489,12 @@ def _regen_hero_from_short(
         character_base_url=character_base_url,
         style=resolved.style, bake_title=False,
     )
+    portrait_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="3:4", dry_run=False,
+        character_base_url=character_base_url,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
+    )
     store.log_render_event(
         "prompt_built",
         f"Portrait hero (i2i) prompt ready ({len(portrait_prompt)} chars)",
@@ -1414,8 +1505,9 @@ def _regen_hero_from_short(
         "Submitted to kie — waiting on portrait generation (i2i)",
         payload={"variant": "portrait", "aspect": "3:4", "mode": "i2i"},
     )
-    portrait_kie = _generate_with_retry(
+    portrait_kie = _generate_with_moderation_fallback(
         portrait_prompt,
+        portrait_prompt_safe,
         f"id={safe_id} hero regen portrait (i2i)",
         aspect_ratio="3:4",
         image_input=[character_base_url],
@@ -1469,13 +1561,20 @@ def _regen_hero_from_short(
         character_base_url=character_base_url,
         style=resolved.style, bake_title=False,
     )
+    landscape_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="16:9", dry_run=False,
+        character_base_url=character_base_url,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
+    )
     store.log_render_event(
         "kie_request_sent",
         "Submitted to kie — waiting on landscape generation (i2i)",
         payload={"variant": "landscape", "aspect": "16:9", "mode": "i2i"},
     )
-    landscape_kie = _generate_with_retry(
+    landscape_kie = _generate_with_moderation_fallback(
         landscape_prompt,
+        landscape_prompt_safe,
         f"id={safe_id} hero regen landscape (i2i)",
         aspect_ratio="16:9",
         image_input=[character_base_url],
@@ -1813,20 +1912,31 @@ def _build_hero_and_thumbnail_from_short(
         scene_url = seed_to_scene[seed]
         # Heroes render clean (the site overlays its own HTML title);
         # thumbnails keep the click-stopping baked-title treatment for the
-        # social cards.
+        # social cards. The no-context twin backs the moderation fallback
+        # (kie deterministically flags some story excerpts — see
+        # _generate_with_moderation_fallback).
+        bake = seed == "thumbnail"
         prompt = stages.make_thumbnail_prompt(
             title, category, body, aspect_ratio=aspect, dry_run=False,
             character_base_url=character_base_url,
             scene_image_url=scene_url,
-            bake_title=(seed == "thumbnail"),
+            bake_title=bake,
+        )
+        prompt_safe = stages.make_thumbnail_prompt(
+            title, category, body, aspect_ratio=aspect, dry_run=False,
+            character_base_url=character_base_url,
+            scene_image_url=scene_url,
+            bake_title=bake,
+            include_story_context=False,
         )
         store.log_render_event(
             "kie_request_sent",
             f"Submitted {label} to kie (hybrid i2i)",
             payload={"variant": label, "aspect": aspect, "mode": "i2i+scene"},
         )
-        kie_url = _generate_with_retry(
+        kie_url = _generate_with_moderation_fallback(
             prompt,
+            prompt_safe,
             f"id={safe_id} {label} (hybrid i2i)",
             aspect_ratio=aspect,
             # Order MUST be [character, scene] — `make_thumbnail_prompt`'s
