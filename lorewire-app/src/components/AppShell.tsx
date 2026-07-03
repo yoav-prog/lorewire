@@ -74,6 +74,13 @@ import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed"
 import { alignScriptToWords } from "@/lib/script-graft";
 import { formatDurationMs } from "@/lib/duration";
 import {
+  isSlideSwipeExempt,
+  resolveSwipeDirection,
+  slidePosition,
+  slideTarget,
+  type SlideContext,
+} from "@/lib/slide-context";
+import {
   placeArticleImages,
   splitArticleParagraphs,
 } from "@/lib/article-image-positions";
@@ -109,7 +116,10 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   found: false,
 };
 
-type OpenFn = (id: string, tab?: string) => void;
+// The optional slide context is the ordered story list of the surface the
+// open came from — the detail sheet slides prev/next within it (wrap-around).
+// See _plans/2026-07-04-slide-between-row-stories.md.
+type OpenFn = (id: string, tab?: string, slide?: SlideContext) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
 type IconCmp = (p: IconProps) => React.ReactElement;
 
@@ -144,6 +154,8 @@ const PlusI: IconCmp = (p) => <Ico {...p} d={<path d="M12 5v14M5 12h14" />} />;
 const StarI: IconCmp = (p) => <Ico {...p} d={<path d="M12 4.5l2.2 4.6 5 .6-3.7 3.4 1 4.9L12 16.1 7.5 18.5l1-4.9L4.8 10.2l5-.6z" />} />;
 const ShareI: IconCmp = (p) => <Ico {...p} d={<><circle cx="6" cy="12" r="2.3" /><circle cx="17" cy="6" r="2.3" /><circle cx="17" cy="18" r="2.3" /><path d="M8 11l7-4M8 13l7 4" /></>} />;
 const ChevDown: IconCmp = (p) => <Ico {...p} d={<path d="m6 9 6 6 6-6" />} />;
+const ChevL: IconCmp = (p) => <Ico {...p} d={<path d="m15 6-6 6 6 6" />} />;
+const ChevR: IconCmp = (p) => <Ico {...p} d={<path d="m9 6 6 6-6 6" />} />;
 const ShuffleI: IconCmp = (p) => <Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5" /><path d="m18 5 2 2-2 2M18 15l2 2-2 2" /></>} />;
 const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /><path d="M12 11v5M12 8h.01" /></>} />;
 const WiresI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
@@ -849,7 +861,7 @@ function Home({
               // PosterCard (132x192) instead of the legacy landscape
               // w=150 h=96 crop, which was clipping the baked-in
               // titles off the top and bottom of the artwork.
-              return <PosterCard key={id} story={s} onOpen={onOpen} />;
+              return <PosterCard key={id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: continueIds, label: "You Didn't Vote Yet" })} />;
             })}
           </div>
         </section>
@@ -864,11 +876,11 @@ function Home({
               scrollable (no grid-cols-10 fit constraint) so cells stay
               at the standard 132x192 portrait size. */}
           <div className="flex gap-2 px-4 overflow-x-auto noscroll pb-1">
-            {top10Ids.slice(0, 10).map((id, i) => {
+            {top10Ids.slice(0, 10).map((id, i, visible) => {
               const s = resolveStory(id);
               if (!s) return null;
               return (
-                <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 active:scale-[.97] transition">
+                <button key={id} onClick={() => onOpen(id, undefined, { ids: visible, label: "Top 10 Today" })} className="relative shrink-0 active:scale-[.97] transition">
                   <div className="relative w-[132px] h-[192px]">
                     <PosterArt story={s} showTitle={false} />
                     <span
@@ -917,12 +929,13 @@ function Home({
         // half-built rail (1-3 posters) doesn't read as broken. Admin
         // can set the floor to 0 to disable (legacy `> 0` gate).
         if (items.length < Math.max(1, coldStartFloor)) return null;
+        const railSlide = { ids: items.map((s) => s.id), label: rail.title };
         return (
           <section key={rail.surface} className="mt-7">
             <RailHead>{rail.title}</RailHead>
             <div className={railClass}>
               {items.map((s) => (
-                <PosterCard key={s.id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[s.id]} />
+                <PosterCard key={s.id} story={s} onOpen={(sid, t) => onOpen(sid, t, railSlide)} voteCount={posterVoteCounts[s.id]} />
               ))}
             </div>
           </section>
@@ -968,7 +981,7 @@ function Home({
             {newRowIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[id]} />;
+              return <PosterCard key={id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: newRowIds, label: "New on LoreWire" })} voteCount={posterVoteCounts[id]} />;
             })}
           </div>
         </section>
@@ -1877,7 +1890,7 @@ function FakeReadAlong() {
 }
 
 /* ----------------------------- TITLE SHEET ----------------------------- */
-function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog }) {
+function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog, slide }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog; slide?: SlideContext }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the big white button under the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll the
@@ -1906,6 +1919,19 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   // `story` lets the server lazy-autodraft on first open when no poll
   // exists yet (every-story-has-a-poll invariant).
   const { view: pollView } = useStoryPoll(story.id, story);
+  // Row slide navigation (_plans/2026-07-04-slide-between-row-stories.md):
+  // where this story sits inside the list it was opened from. Null hides
+  // every slide affordance (deep links, single-item lists, id not in the
+  // snapshot). goSlide stashes the direction in pendingSlideDir so the
+  // prev-props block below can turn it into the entrance animation for the
+  // incoming story — a story swap from More Like This (no slide) animates
+  // nothing. State rather than a ref because the render-time prev-props
+  // pattern may only read/write state (react-hooks/refs).
+  const pos = slidePosition(slide, story.id);
+  const [pendingSlideDir, setPendingSlideDir] = useState<-1 | 1 | null>(null);
+  const [slideDir, setSlideDir] = useState<-1 | 1 | null>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
+
   // Reset the tab whenever the parent swaps in a different story or hands us
   // a new initialTab. React 19's set-state-in-effect rule rejects the old
   // useEffect pattern; the sanctioned alternative is to track the previous
@@ -1913,6 +1939,13 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   const [prevStoryId, setPrevStoryId] = useState(story.id);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (prevStoryId !== story.id || prevInitialTab !== initialTab) {
+    if (prevStoryId !== story.id) {
+      // Consume the pending slide direction (null for non-slide swaps, e.g.
+      // a More Like This tap) so the keyed content wrapper animates only
+      // real slides, and only in the direction the user moved.
+      setSlideDir(pendingSlideDir);
+      setPendingSlideDir(null);
+    }
     setPrevStoryId(story.id);
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
@@ -1920,6 +1953,69 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
     // the new story's stored dur until its <video> reports metadata.
     setMeasuredDurationMs(null);
   }
+
+  // A slide swaps the story in place; without this the new story keeps the
+  // old scroll offset and can open mid-article. Also runs on first mount,
+  // where scrolling an already-at-top sheet is a no-op.
+  useEffect(() => {
+    sheetRef.current?.scrollTo({ top: 0 });
+  }, [story.id]);
+
+  const goSlide = (dir: -1 | 1) => {
+    const target = slideTarget(slide, story.id, dir);
+    if (!target || !slide || !pos) return;
+    setPendingSlideDir(dir);
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[slide nav]", {
+      shell: "mobile",
+      label: slide.label,
+      from: story.id,
+      to: target,
+      dir,
+      index: pos.index,
+      total: pos.total,
+    });
+    // Keep the user's current tab while flipping (reading -> keep reading)
+    // and carry the same context so the chain continues from the new story.
+    onOpen(target, tab, slide);
+  };
+
+  // Swipe left/right anywhere on the sheet slides within the row. Same
+  // touchstart/touchend classification the Billboard uses; gestures that
+  // start inside a horizontal scroller (tab strip, More Like This rail,
+  // gallery), the video player, or an input are exempt so their own
+  // interactions keep working. Listen-only — never preventDefault — so
+  // vertical scrolling stays native.
+  const slideTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const onSlideTouchStart = (e: React.TouchEvent) => {
+    if (!pos || isSlideSwipeExempt(e.target, sheetRef.current)) {
+      slideTouchStart.current = null;
+      return;
+    }
+    const t = e.touches[0];
+    slideTouchStart.current = { x: t.clientX, y: t.clientY };
+  };
+  const onSlideTouchEnd = (e: React.TouchEvent) => {
+    const start = slideTouchStart.current;
+    slideTouchStart.current = null;
+    if (!start || !pos) return;
+    const t = e.changedTouches[0];
+    const dir = resolveSwipeDirection(t.clientX - start.x, t.clientY - start.y);
+    if (dir) goSlide(dir);
+  };
+
+  // Rule-14 breadcrumb for "the arrows are missing": a context arrived but
+  // isn't slidable, so the affordances hid on purpose.
+  useEffect(() => {
+    if (!slide || slidePosition(slide, story.id)) return;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[slide nav hidden]", {
+      shell: "mobile",
+      label: slide.label,
+      id: story.id,
+      reason: slide.ids.includes(story.id) ? "single_item" : "id_not_in_context",
+    });
+  }, [slide, story.id]);
 
   // Comment count for the tab badge. Fetched lightly (count + kill-switch
   // only, never the full thread) so the badge appears the moment the sheet
@@ -2016,10 +2112,16 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   const headerHeroSrc = story.heroImageLandscape || story.heroImage;
   const isHeaderLandscape = !!story.heroImageLandscape;
   const showHeaderHero = !!headerHeroSrc && headerHeroOk;
+  // Keyed by story id so a slide animates the incoming story in from the
+  // side the user moved toward. Applied to both top-level blocks (header +
+  // body) rather than one wrapper so the sheet's existing structure stays
+  // put; the two animate in lockstep. Keying also remounts the tab content
+  // for the new story, which is the clean state anyway.
+  const slideAnimClass = slideDir === 1 ? " slide-nav-next" : slideDir === -1 ? " slide-nav-prev" : "";
   return (
-    <div id="article-top" className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }}>
+    <div id="article-top" ref={sheetRef} className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }} onTouchStart={onSlideTouchStart} onTouchEnd={onSlideTouchEnd}>
       {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
-      <div className="relative h-[300px]">
+      <div key={`hdr-${story.id}`} className={`relative h-[300px]${slideAnimClass}`}>
         <div className="absolute inset-0" style={{ background: c }}>
           {showHeaderHero && (
             <img
@@ -2044,9 +2146,26 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
         <button onClick={onPlayClick} aria-label="Play" className="absolute left-1/2 top-[120px] -translate-x-1/2 w-16 h-16 rounded-full flex items-center justify-center text-bg active:scale-95 transition" style={{ background: "#F5F3EF", boxShadow: "0 10px 30px rgba(0,0,0,.4)" }}>
           <PlayI size={28} />
         </button>
+        {/* Row slide affordances: chevrons at the header edges (the swipe
+            gesture works sheet-wide, the chevrons make it discoverable)
+            plus a position chip naming the row. All hidden when there's
+            nothing to slide to. */}
+        {pos && slide && (
+          <>
+            <button onClick={() => goSlide(-1)} aria-label="Previous story" className="absolute left-3 top-[132px] w-9 h-9 rounded-full flex items-center justify-center text-ink active:scale-95 transition z-10" style={{ background: "rgba(0,0,0,.4)" }}>
+              <ChevL size={20} />
+            </button>
+            <button onClick={() => goSlide(1)} aria-label="Next story" className="absolute right-3 top-[132px] w-9 h-9 rounded-full flex items-center justify-center text-ink active:scale-95 transition z-10" style={{ background: "rgba(0,0,0,.4)" }}>
+              <ChevR size={20} />
+            </button>
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 font-mono text-[10px] uppercase tracking-wider rounded px-2 py-0.5 whitespace-nowrap z-10" style={{ background: "rgba(0,0,0,.45)", color: "rgba(245,243,239,.9)" }}>
+              {pos.index + 1} / {pos.total} &middot; {slide.label}
+            </div>
+          </>
+        )}
       </div>
 
-      <div className="px-4 -mt-6 relative pb-28">
+      <div key={`body-${story.id}`} className={`px-4 -mt-6 relative pb-28${slideAnimClass}`}>
         <h1 className="font-display font-black uppercase tracking-tightest leading-[.92] text-ink ink-shadow" style={{ fontSize: 34 }}>{story.title}</h1>
 
         {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
@@ -2172,7 +2291,10 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
         <section className="mt-8 -mx-4">
           <RailHead>More Like This</RailHead>
           <div className="flex gap-3 px-4 overflow-x-auto noscroll pb-1">
-            {more.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} w={120} h={174} />)}
+            {/* Opening from here re-anchors the slide context to THIS rail —
+                the user is browsing this shelf now, not the one they came
+                from. */}
+            {more.map((s) => <PosterCard key={s.id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: more.map((m) => m.id), label: "More Like This" })} w={120} h={174} />)}
           </div>
         </section>
       </div>
@@ -2231,7 +2353,10 @@ function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog })
       <div className="grid grid-cols-2 gap-3">
         {res.map((s) => (
           <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-            <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+            {/* Slide context = the FILTERED result set (query + category
+                chips), so prev/next in the sheet covers exactly the grid
+                the user tapped, never the whole catalog. */}
+            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: res.map((r) => r.id), label: "Search" })} w={"100%"} h={"100%"} />
           </div>
         ))}
       </div>
@@ -2261,7 +2386,7 @@ function NewScreen({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog
       ) : (
         <div className="flex flex-col gap-3">
           {list.map((s) => (
-            <button key={s.id} onClick={() => onOpen(s.id)} className="flex gap-3 items-stretch text-left active:scale-[.99] transition">
+            <button key={s.id} onClick={() => onOpen(s.id, undefined, { ids: list.map((x) => x.id), label: "New & Hot" })} className="flex gap-3 items-stretch text-left active:scale-[.99] transition">
               <div className="w-[110px] h-[68px] shrink-0"><PosterArt story={s} showTitle={false} /></div>
               <div className="flex-1 min-w-0 py-0.5">
                 <div className="flex items-center gap-2 mb-0.5">
@@ -2344,7 +2469,7 @@ function MyList({
         <div className="grid grid-cols-2 gap-3">
           {items.map((s) => (
             <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-              <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+              <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: items.map((x) => x.id), label: "My List" })} w={"100%"} h={"100%"} />
             </div>
           ))}
         </div>
@@ -2383,7 +2508,7 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
 function MobileShell({ initial }: { initial: HomepageInitial }) {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
-  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string } | null>(null);
+  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string; slide?: SlideContext } | null>(null);
 
   // Deep-link landing: `/?story=X&tab=Y&c=Z` opens the modal at story X
   // on tab Y (default Watch), and Z (when present) becomes the focused
@@ -2463,8 +2588,8 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   );
   const { openWireId, openWire, closeWire } = useStoriesUrlState();
 
-  const open: OpenFn = (id, t) => {
-    setActive({ id, tab: t });
+  const open: OpenFn = (id, t, slide) => {
+    setActive({ id, tab: t, slide });
     recordView(id);
   };
   const close = () => setActive(null);
@@ -2570,6 +2695,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             session={initial.session}
             seededModalComments={initial.seededModalComments}
             catalog={catalog}
+            slide={active.slide}
           />
         ) : null;
       })()}
