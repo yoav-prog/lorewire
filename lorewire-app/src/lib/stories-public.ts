@@ -22,8 +22,11 @@ import type { StoryRow } from "@/lib/repo";
 // The artwork variants (landscape hero, baked-title flag, thumbnails) are
 // selected for the og:image fallback chain: heroes render clean, so the
 // titled 16:9 thumbnail is what a share card should show.
+// props feeds the Skip Intro window resolver (lib/intro-window-resolve) on
+// the reader page. Server-side only — the page passes the two derived
+// numbers to the client, never the raw blob.
 const PUBLIC_COLS =
-  "id, reddit_id, submission_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, hero_image_landscape, hero_has_baked_title, thumbnail_image, thumbnail_image_landscape, thumbnail_image_square";
+  "id, reddit_id, submission_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, props, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, hero_image_landscape, hero_has_baked_title, thumbnail_image, thumbnail_image_landscape, thumbnail_image_square";
 
 export interface PublicStoryListRow {
   id: string;

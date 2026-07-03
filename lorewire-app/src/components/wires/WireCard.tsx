@@ -29,6 +29,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { categoryVisual } from "@/lib/categories/visuals";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
+import SkipIntroButton from "@/components/SkipIntroButton";
+import { useSkipIntro } from "@/components/useSkipIntro";
 import type { WireStory } from "@/app/actions";
 import type { PollResultView, PollSide } from "@/lib/polls-shared";
 import { WirePollPanel } from "@/components/wires/WirePollPanel";
@@ -174,6 +176,14 @@ const MoreIcon = ({ size = 20 }: { size?: number }) => (
     <circle cx="19" cy="12" r="1.7" />
   </svg>
 );
+// Skip-forward glyph for the ⋯ menu's "Skip intro" toggle (mirrors the
+// SkipIntroButton pill's glyph).
+const SkipIntroGlyph = ({ size = 18 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+    <path d="M5 5.5v13l9-6.5z" />
+    <path d="M16.5 5h2v14h-2z" />
+  </svg>
+);
 
 export interface WireCardProps {
   short: WireStory;
@@ -190,6 +200,10 @@ export interface WireCardProps {
   /** Slow mode: when true, the video plays at SLOW_MODE_PLAYBACK_RATE (0.75x)
    *  with pitch preservation so voices stay intelligible. */
   slow: boolean;
+  /** Always skip intro: when true, the card auto-seeks past the brand intro
+   *  (window on short.intro_window); when false, a "Skip intro" button shows
+   *  while the intro plays. */
+  skipIntro: boolean;
   /** prefers-reduced-motion — suppress autoplay, require an explicit tap. */
   reducedMotion: boolean;
   /** A modal (Title sheet) is open over the feed — keep playback paused. */
@@ -206,6 +220,8 @@ export interface WireCardProps {
   onToggleAdvance: () => void;
   /** Toggle slow-mode playback (0.75x ↔ 1.0x). */
   onToggleSlow: () => void;
+  /** Toggle the always-skip-intro pref. */
+  onToggleSkipIntro: () => void;
   /** Shuffle the feed order (feed-level). When omitted, the control hides. */
   onShuffle?: () => void;
   onOpenInfo: OpenFn;
@@ -246,6 +262,7 @@ export default function WireCard({
   autoplay,
   advance,
   slow,
+  skipIntro,
   reducedMotion,
   paused,
   eager = false,
@@ -254,6 +271,7 @@ export default function WireCard({
   onToggleAutoplay,
   onToggleAdvance,
   onToggleSlow,
+  onToggleSkipIntro,
   onShuffle,
   onOpenInfo,
   showSoundHint,
@@ -355,6 +373,24 @@ export default function WireCard({
   // and the centre Play overlay sticks until tap.
   const playGenRef = useRef(0);
 
+  // Skip Intro: the shared hook owns the button-visibility + auto-skip
+  // decisions off the server-resolved window; the card just wires its
+  // handlers into the <video> events and the user-seek paths below.
+  // Plan: _plans/2026-07-04-skip-intro.md.
+  const {
+    showSkip: showSkipIntro,
+    skipNow: skipIntroNow,
+    handleTimeUpdate: skipIntroOnTime,
+    handleLoadedMetadata: skipIntroOnMeta,
+    notifyManualSeek: skipIntroOnManualSeek,
+    reset: resetSkipIntro,
+  } = useSkipIntro({
+    introWindow: short.intro_window,
+    autoSkip: skipIntro,
+    logNs: "wires skip-intro",
+    id: short.id,
+  });
+
   // Autoplay is suppressed by reduced-motion OR the feed-level toggle; in
   // either case the user must opt in with a tap (tracked by userStarted).
   const autoStart = autoplay && !reducedMotion;
@@ -380,6 +416,7 @@ export default function WireCard({
       setBuffering(false);
       setSeeking(false);
       setCurrentTime(0);
+      resetSkipIntro();
     } else {
       setBlocked(false);
       setUserPaused(false);
@@ -584,15 +621,17 @@ export default function WireCard({
         e.preventDefault();
         v.currentTime = Math.max(0, v.currentTime - 5);
         setCurrentTime(v.currentTime);
+        skipIntroOnManualSeek(v.currentTime * 1000);
       } else if (e.key === "ArrowRight" && v && Number.isFinite(v.duration)) {
         e.preventDefault();
         v.currentTime = Math.min(v.duration, v.currentTime + 5);
         setCurrentTime(v.currentTime);
+        skipIntroOnManualSeek(v.currentTime * 1000);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, paused, togglePlayPause]);
+  }, [active, paused, togglePlayPause, skipIntroOnManualSeek]);
 
   const burstLike = useCallback(() => {
     if (!liked) onToggleLike(short.id);
@@ -663,16 +702,23 @@ export default function WireCard({
 
   // Scrubber: drag anywhere on the bar to seek. Pointer capture keeps the drag
   // tracking even when the finger/cursor strays off the thin bar.
-  const seekToClientX = useCallback((clientX: number) => {
-    const track = trackRef.current;
-    const v = videoRef.current;
-    if (!track || !v || !Number.isFinite(v.duration) || v.duration <= 0) return;
-    const rect = track.getBoundingClientRect();
-    const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    const t = frac * v.duration;
-    v.currentTime = t;
-    setCurrentTime(t);
-  }, []);
+  const seekToClientX = useCallback(
+    (clientX: number) => {
+      const track = trackRef.current;
+      const v = videoRef.current;
+      if (!track || !v || !Number.isFinite(v.duration) || v.duration <= 0)
+        return;
+      const rect = track.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      const t = frac * v.duration;
+      v.currentTime = t;
+      setCurrentTime(t);
+      // A drag INTO the intro window is an explicit choice to watch it —
+      // suppress the always-skip auto-seek for this pass.
+      skipIntroOnManualSeek(t * 1000);
+    },
+    [skipIntroOnManualSeek],
+  );
 
   const onSeekDown = useCallback(
     (e: React.PointerEvent) => {
@@ -752,6 +798,9 @@ export default function WireCard({
             onLoadedMetadata={(e) => {
               const v = e.currentTarget;
               if (Number.isFinite(v.duration)) setDuration(v.duration);
+              // Always-skip on an intro-first row: seek before the first
+              // frame paints instead of flashing the intro for one tick.
+              skipIntroOnMeta(v);
             }}
             onWaiting={() => setBuffering(true)}
             onPlaying={() => setBuffering(false)}
@@ -780,6 +829,7 @@ export default function WireCard({
             }}
             onTimeUpdate={(e) => {
               const v = e.currentTarget;
+              skipIntroOnTime(v);
               if (Number.isFinite(v.duration) && v.duration > 0) {
                 if (!seekingRef.current) setCurrentTime(v.currentTime);
                 onTimeUpdate?.(v.currentTime, v.duration);
@@ -927,9 +977,11 @@ export default function WireCard({
                   autoplay={autoplay}
                   advance={advance}
                   slow={slow}
+                  skipIntro={skipIntro}
                   onToggleAutoplay={onToggleAutoplay}
                   onToggleAdvance={onToggleAdvance}
                   onToggleSlow={onToggleSlow}
+                  onToggleSkipIntro={onToggleSkipIntro}
                   onShuffle={onShuffle}
                   onClose={() => setMoreOpen(false)}
                 />
@@ -981,6 +1033,21 @@ export default function WireCard({
             <span className="wire-heart-burst">
               <HeartIcon filled size={132} />
             </span>
+          </div>
+        )}
+
+        {/* "Skip intro" — bottom-right while playback sits inside the brand
+            intro (Netflix placement). Deliberately outside the chromeVisible
+            auto-hide group: the button is time-boxed by the intro itself.
+            Sits above the scrubber + time chip so neither is covered. */}
+        {active && showSkipIntro && (
+          <div className="absolute bottom-14 right-3 z-20">
+            <SkipIntroButton
+              onClick={() => {
+                markActive();
+                skipIntroNow(videoRef.current);
+              }}
+            />
           </div>
         )}
 
@@ -1305,18 +1372,22 @@ function WireMoreMenu({
   autoplay,
   advance,
   slow,
+  skipIntro,
   onToggleAutoplay,
   onToggleAdvance,
   onToggleSlow,
+  onToggleSkipIntro,
   onShuffle,
   onClose,
 }: {
   autoplay: boolean;
   advance: boolean;
   slow: boolean;
+  skipIntro: boolean;
   onToggleAutoplay: () => void;
   onToggleAdvance: () => void;
   onToggleSlow: () => void;
+  onToggleSkipIntro: () => void;
   onShuffle?: () => void;
   onClose: () => void;
 }) {
@@ -1354,6 +1425,18 @@ function WireMoreMenu({
         active={slow}
         title={slow ? "Slow mode on; switch to normal speed" : "Slow mode off"}
         onClick={onToggleSlow}
+      />
+      <MoreMenuToggle
+        icon={<SkipIntroGlyph size={17} />}
+        label="Skip intro"
+        value={skipIntro ? "Always" : "Off"}
+        active={skipIntro}
+        title={
+          skipIntro
+            ? "Every video jumps past the intro"
+            : "Skip intro off — a button shows during the intro"
+        }
+        onClick={onToggleSkipIntro}
       />
       {onShuffle && (
         <>
