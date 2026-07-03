@@ -1763,7 +1763,13 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
       )}
       <div className="min-h-full flex items-start justify-center py-10 px-4">
         <div id="article-top" ref={cardRef} className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden scroll-mt-0" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()} onTouchStart={onSlideTouchStart} onTouchEnd={onSlideTouchEnd}>
-          <div key={`hdr-${story.id}`} className={`relative h-[400px]${slideAnimClass}`}>
+          {/* Static classes stay in a plain quoted string: Tailwind's
+              scanner reads raw source tokens, and a template literal that
+              glues `${` onto a class name (h-[400px]${...}) makes the class
+              an invalid candidate — it silently vanishes from the built
+              CSS. This took down the sheet header in production on
+              2026-07-04. */}
+          <div key={`hdr-${story.id}`} className={"relative h-[400px]" + slideAnimClass}>
             <DetailModalHero story={story} />
 
             <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background: "linear-gradient(0deg,#15141A 4%, rgba(21,20,26,0) 100%)" }}></div>
@@ -1781,7 +1787,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
               </div>
             )}
           </div>
-          <div key={`body-${story.id}`} className={`px-10 pb-12${slideAnimClass}`}>
+          <div key={`body-${story.id}`} className={"px-10 pb-12" + slideAnimClass}>
             <div className="flex items-start gap-8 pt-6">
               <div className="flex-1">
                 {/* 2026-06-26 slice H follow-up: removed "{match}% Match"

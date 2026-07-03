@@ -2121,7 +2121,12 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   return (
     <div id="article-top" ref={sheetRef} className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }} onTouchStart={onSlideTouchStart} onTouchEnd={onSlideTouchEnd}>
       {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
-      <div key={`hdr-${story.id}`} className={`relative h-[300px]${slideAnimClass}`}>
+      {/* Static classes stay in a plain quoted string: Tailwind's scanner
+          reads raw source tokens, and a template literal that glues `${`
+          onto a class name (h-[300px]${...}) makes the class an invalid
+          candidate — it silently vanishes from the built CSS. This took
+          down the sheet header in production on 2026-07-04. */}
+      <div key={`hdr-${story.id}`} className={"relative h-[300px]" + slideAnimClass}>
         <div className="absolute inset-0" style={{ background: c }}>
           {showHeaderHero && (
             <img
@@ -2165,7 +2170,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
         )}
       </div>
 
-      <div key={`body-${story.id}`} className={`px-4 -mt-6 relative pb-28${slideAnimClass}`}>
+      <div key={`body-${story.id}`} className={"px-4 -mt-6 relative pb-28" + slideAnimClass}>
         <h1 className="font-display font-black uppercase tracking-tightest leading-[.92] text-ink ink-shadow" style={{ fontSize: 34 }}>{story.title}</h1>
 
         {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
