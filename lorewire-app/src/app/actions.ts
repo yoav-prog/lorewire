@@ -34,6 +34,7 @@ import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 import { resolveMediaUrl } from "@/lib/media-url";
 import type { IntroWindow } from "@/lib/intro-window";
 import {
+  resolveIntroWindowForStory,
   resolveIntroWindowsForStories,
   type IntroWindowStoryRow,
 } from "@/lib/intro-window-resolve";
@@ -79,6 +80,12 @@ export interface LiveStoryMediaResult {
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
   is_short: boolean;
+  /** Where the brand intro sits in the video (server-resolved via
+   *  lib/intro-window-resolve). Drives the WATCH-tab player's "Skip intro"
+   *  button + the always-skip pref. Null when there is no intro or the
+   *  position can't be determined confidently — the player then never
+   *  skips. Plan: _plans/2026-07-04-skip-intro.md. */
+  intro_window: IntroWindow | null;
   /** True when the story exists in the DB and is publicly readable.
    *  False when the id doesn't match any published row (e.g. the
    *  catalog still has a legacy sample story that isn't in the DB).
@@ -186,11 +193,15 @@ export async function getLiveStoryMedia(
     audio_url: null,
     alignment: [],
     is_short: false,
+    intro_window: null,
     found: false,
   };
   if (!idOrSlug || typeof idOrSlug !== "string") return empty;
 
   // Try by id first — handles new pipeline UUIDs and legacy ids ("envelope").
+  // The trailing columns (short_config, the segment columns, video_config)
+  // are the Skip Intro resolver's inputs — consumed server-side below,
+  // never returned to the client.
   let row = await one<{
     id: string;
     slug: string | null;
@@ -199,8 +210,16 @@ export async function getLiveStoryMedia(
     body: string | null;
     audio_url: string | null;
     alignment: string | null;
+    short_config: string | null;
+    intro_segment_id: string | null;
+    outro_segment_id: string | null;
+    skip_intro: number | null;
+    skip_outro: number | null;
+    video_config: string | null;
   }>(
-    "SELECT id, slug, video_url, images, body, audio_url, alignment FROM stories " +
+    "SELECT id, slug, video_url, images, body, audio_url, alignment, " +
+      "short_config, intro_segment_id, outro_segment_id, skip_intro, " +
+      "skip_outro, video_config FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -217,6 +236,12 @@ export async function getLiveStoryMedia(
         body: bySlug.body,
         audio_url: bySlug.audio_url,
         alignment: bySlug.alignment,
+        short_config: bySlug.short_config,
+        intro_segment_id: bySlug.intro_segment_id,
+        outro_segment_id: bySlug.outro_segment_id,
+        skip_intro: bySlug.skip_intro,
+        skip_outro: bySlug.skip_outro,
+        video_config: bySlug.video_config,
       };
     }
   }
@@ -225,15 +250,26 @@ export async function getLiveStoryMedia(
   const isShort = isShortVideoUrl(row.video_url);
   // When the applied video is a short, replace the long-form image list
   // with the short's doodle scene frames so the article reads as the
-  // 9:16 doodle visual story instead of mixing styles.
+  // 9:16 doodle visual story instead of mixing styles. The same render
+  // props feed the Skip Intro window below.
+  const renderPropsJson = isShort
+    ? await latestDoneShortPropsForStory(row.id)
+    : null;
   let images: string[];
   if (isShort) {
-    const propsJson = await latestDoneShortPropsForStory(row.id);
-    const shortImages = parseShortFrameUrls(propsJson);
+    const shortImages = parseShortFrameUrls(renderPropsJson);
     images = shortImages.length > 0 ? shortImages : parseStoryImageList(row.images);
   } else {
     images = parseStoryImageList(row.images);
   }
+
+  // Skip Intro: where the brand intro sits in the video the WATCH tab
+  // plays. Passing the already-fetched render props (null for long-form,
+  // which never has short_renders rows) saves the resolver its own read;
+  // long-form derives its aspect internally.
+  const introWindow = row.video_url
+    ? await resolveIntroWindowForStory(row, { renderPropsJson })
+    : null;
 
   // Long-form audio + alignment come straight off the stories row — these
   // are what the voice_renders_worker writes when the admin clicks
@@ -253,6 +289,7 @@ export async function getLiveStoryMedia(
     audio_url: resolveMediaUrl(row.audio_url),
     alignment: parseStoryAlignment(row.alignment),
     is_short: isShort,
+    intro_window: introWindow,
     found: true,
   };
 }
@@ -470,15 +507,15 @@ export async function listPublishedShorts(
   // Over-fetch by one so we know whether a further page exists without a second
   // COUNT round-trip. id is the deterministic tiebreak so the sort is stable
   // across equal published_at values. The projection is LiveCatalogStory plus
-  // the Skip Intro resolver's inputs (props, short_config, the segment
-  // columns) — those extra columns are consumed server-side by
+  // the Skip Intro resolver's inputs (short_config, the segment columns) —
+  // those extra columns are consumed server-side by
   // resolveIntroWindowsForStories and NEVER reach the client; the public rows
   // are rebuilt field-by-field below so a private column can't leak through a
   // spread.
   const rows = await all<LiveCatalogStory & IntroWindowStoryRow>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
-      "video_url, published_at, created_at, props, short_config, " +
+      "video_url, published_at, created_at, short_config, " +
       "intro_segment_id, outro_segment_id, skip_intro, skip_outro, " +
       "video_config FROM stories " +
       `${clause} ` +

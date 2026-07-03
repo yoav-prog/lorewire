@@ -504,8 +504,11 @@ async function serve(req: NextRequest): Promise<NextResponse> {
   }
 
   // Skip Intro window for THIS render, from the same numbers Cloud Run
-  // spliced with. Persisted below so the players read it straight off props
-  // instead of re-deriving. Per _plans/2026-07-04-skip-intro.md.
+  // spliced with. finishShortRender merges it onto short_renders.props
+  // (beside assembled_duration_ms) — the players' resolver reads the
+  // story's latest done render, NOT stories.props (that column is the
+  // story-world artwork list, an entirely different blob). Per
+  // _plans/2026-07-04-skip-intro.md.
   const introWindow = computePersistedIntroWindow(segments, result.durationMs);
   namespacedLog("done", {
     render_id: claimed.id,
@@ -517,30 +520,21 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     intro_start_ms: introWindow?.start_ms ?? null,
     intro_end_ms: introWindow?.end_ms ?? null,
   });
-  await finishShortRender(claimed.id, result.url, result.durationMs);
+  await finishShortRender(claimed.id, result.url, result.durationMs, introWindow);
   // Point the story at the freshly-rendered short (stories.video_url +
   // duration) so the site + admin show it. Auto-renders previously left this to
   // a manual admin click, so a regenerated short never replaced the old
   // video_url — the new MP4 landed in R2 but the story kept pointing at the
   // prior render. Best-effort: a failure must NOT break the render response.
   // claimed.props predates the assembled duration finishShortRender just
-  // persisted, so fold result.durationMs in for an accurate stories.duration —
-  // and the Skip Intro window alongside it. A null window still DELETES any
-  // stale intro_* keys: a re-render can drop the intro, and a leftover window
-  // from the previous render would make the player skip real story content.
+  // persisted, so fold result.durationMs in for an accurate stories.duration.
   let applyProps = claimed.props;
-  if (claimed.props) {
+  if (result.durationMs && claimed.props) {
     try {
-      const merged = JSON.parse(claimed.props) as Record<string, unknown>;
-      if (result.durationMs) merged.assembled_duration_ms = result.durationMs;
-      if (introWindow) {
-        merged.intro_start_ms = introWindow.start_ms;
-        merged.intro_end_ms = introWindow.end_ms;
-      } else {
-        delete merged.intro_start_ms;
-        delete merged.intro_end_ms;
-      }
-      applyProps = JSON.stringify(merged);
+      applyProps = JSON.stringify({
+        ...(JSON.parse(claimed.props) as Record<string, unknown>),
+        assembled_duration_ms: result.durationMs,
+      });
     } catch {
       // Unparseable props: keep claimed.props; duration falls to the legacy sum.
     }

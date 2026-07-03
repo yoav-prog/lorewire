@@ -83,6 +83,8 @@ import {
 } from "@/app/actions";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
+import SkipIntroButton from "@/components/SkipIntroButton";
+import { useSkipIntro } from "@/components/useSkipIntro";
 import {
   useContinueReading,
   useRecentlyViewed,
@@ -103,6 +105,7 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   audio_url: null,
   alignment: [],
   is_short: false,
+  intro_window: null,
   found: false,
 };
 
@@ -1055,7 +1058,7 @@ function WatchDoodle({
   // toggle. preservesPitch keeps voices intelligible at 0.75x.
   // Plan: _plans/2026-06-25-slow-mode-playback.md (Layer 2 follow-up — this
   // surface was missed in the original PR #105 scope).
-  const { slow, toggleSlow } = useWirePrefs();
+  const { slow, toggleSlow, skipIntro } = useWirePrefs();
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -1069,6 +1072,23 @@ function WatchDoodle({
     v.playbackRate = rate;
     console.info("[detail watch playback rate]", { storyId: story.id, rate, slow });
   }, [slow, story.id, videoUrl]);
+
+  // Skip Intro: liveMedia carries the server-resolved intro window; the
+  // shared hook decides when the button shows and when the always-skip
+  // pref auto-seeks. Same behavior as WireCard + the /v reader player.
+  // Plan: _plans/2026-07-04-skip-intro.md.
+  const {
+    showSkip: showSkipIntro,
+    skipNow: skipIntroNow,
+    handleTimeUpdate: skipIntroOnTime,
+    handleLoadedMetadata: skipIntroOnMeta,
+    notifyManualSeek: skipIntroOnManualSeek,
+  } = useSkipIntro({
+    introWindow: liveMedia.intro_window,
+    autoSkip: skipIntro,
+    logNs: "detail skip-intro",
+    id: story.id,
+  });
 
   if (videoUrl) {
     return (
@@ -1090,11 +1110,26 @@ function WatchDoodle({
               if (Number.isFinite(d) && d > 0) {
                 onDurationMeasured?.(Math.round(d * 1000));
               }
+              skipIntroOnMeta(e.currentTarget);
             }}
             onPlay={playEvents.onPlay}
-            onTimeUpdate={playEvents.onTimeUpdate}
+            onTimeUpdate={(e) => {
+              skipIntroOnTime(e.currentTarget);
+              playEvents.onTimeUpdate(e);
+            }}
+            // Native controls own seeking here; our own skip's target sits
+            // OUTSIDE the window, so it never suppresses itself.
+            onSeeking={(e) =>
+              skipIntroOnManualSeek(e.currentTarget.currentTime * 1000)
+            }
             onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
+          {/* Above the native control bar, Netflix placement. */}
+          {showSkipIntro && (
+            <div className="absolute bottom-16 right-3 z-10">
+              <SkipIntroButton onClick={() => skipIntroNow(videoRef.current)} />
+            </div>
+          )}
           {/* Slow-mode pill — top-right of the video frame, matching the
               WireCard chrome cluster. Native HTML5 controls live at the
               bottom of the video so this pill never collides with them. */}
