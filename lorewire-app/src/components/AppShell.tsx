@@ -2163,7 +2163,10 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
             <button onClick={() => goSlide(1)} aria-label="Next story" className="absolute right-3 top-[132px] w-9 h-9 rounded-full flex items-center justify-center text-ink active:scale-95 transition z-10" style={{ background: "rgba(0,0,0,.4)" }}>
               <ChevR size={20} />
             </button>
-            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 font-mono text-[10px] uppercase tracking-wider rounded px-2 py-0.5 whitespace-nowrap z-10" style={{ background: "rgba(0,0,0,.45)", color: "rgba(245,243,239,.9)" }}>
+            {/* Top of the header, centered on the close button's row — the
+                header's BOTTOM is where the -mt-6 title overlaps, so a chip
+                anchored there sat on top of the title text. */}
+            <div className="absolute top-6 left-1/2 -translate-x-1/2 font-mono text-[10px] uppercase tracking-wider rounded px-2 py-0.5 whitespace-nowrap z-10" style={{ background: "rgba(0,0,0,.45)", color: "rgba(245,243,239,.9)" }}>
               {pos.index + 1} / {pos.total} &middot; {slide.label}
             </div>
           </>
