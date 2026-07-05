@@ -351,6 +351,15 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
             f"[story-jobs classify] reddit_id={post['id']} "
             f"classify empty, kept fallback {prev_category}"
         )
+        # Surfaced as a job event (not just a print) since 2026-07-05: the
+        # classifier silently returned [] for two days and every story kept
+        # the "Drama" fallback with nothing visible in the live-run view.
+        store.log_story_job_event(
+            job_id, reddit_id, "category_fallback",
+            message=f"Classifier returned no tags; kept fallback {prev_category}",
+            level="warn",
+            payload={"fallback": prev_category},
+        )
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     row = {
