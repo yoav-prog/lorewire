@@ -61,8 +61,8 @@ STORY_CATEGORIES = (
 
 # Rough subreddit -> LoreWire category. Editorial, so the admin can re-tag.
 # Used as the fast-path / fallback when the LLM classifier fails. The
-# classifier (`classify_category`) runs after the article body is written
-# and overrides this when it returns a confident match.
+# classifier (`classify_story_tags`, called by the story-jobs worker after
+# the article body is written) overrides this when it returns tags.
 SUBREDDIT_CATEGORY = {
     "amitheasshole": "Entitled",
     "entitledparents": "Entitled",
@@ -76,6 +76,15 @@ SUBREDDIT_CATEGORY = {
     "mademesmile": "Wholesome",
     "humansbeingbros": "Wholesome",
 }
+
+# gpt-5-nano is a reasoning model: its hidden reasoning tokens are spent from
+# max_completion_tokens BEFORE any visible output, and a starved cap returns
+# EMPTY content rather than truncated JSON. At the original cap of 200 every
+# classify came back '' once the active-category prompt grew (2026-07-03), so
+# every new story silently kept the subreddit-map fallback, usually "Drama".
+# 2000 is headroom, not spend: the model bills only the tokens it actually
+# uses (~500/call including reasoning).
+CLASSIFIER_MAX_COMPLETION_TOKENS = 2000
 
 
 def classify_category(
@@ -115,7 +124,9 @@ def classify_category(
         f"Story:\n{snippet}"
     )
     try:
-        raw = llm.chat(prompt, 20, model="openai/gpt-5-nano").strip()
+        raw = llm.chat(
+            prompt, CLASSIFIER_MAX_COMPLETION_TOKENS, model="openai/gpt-5-nano"
+        ).strip()
     except Exception as e:  # noqa: BLE001 — classifier is a quality lift, not load-bearing.
         print(f"[classify_category] llm failed, using fallback: {e}")
         return fallback_category
@@ -178,7 +189,7 @@ def classify_story_tags(
         f"Story:\n{snippet}"
     )
     try:
-        raw = llm.chat(prompt, 200, model="openai/gpt-5-nano")
+        raw = llm.chat(prompt, CLASSIFIER_MAX_COMPLETION_TOKENS, model="openai/gpt-5-nano")
     except Exception as e:  # noqa: BLE001 — classifier is a quality lift, not load-bearing.
         print(f"[classify_story_tags] llm failed: {e}")
         return []

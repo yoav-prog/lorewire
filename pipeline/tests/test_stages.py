@@ -978,6 +978,23 @@ class ClassifyCategoryTests(unittest.TestCase):
         out = stages.classify_category(self.TITLE, self.BODY, "Drama")
         self.assertEqual(out, "Humor")
 
+    def test_token_cap_leaves_room_for_reasoning(self):
+        # gpt-5-nano spends hidden reasoning tokens from max_completion_tokens
+        # before emitting any content; a starved cap returns '' and the
+        # classifier falls back every time. The original cap of 20 could
+        # never work. Pin a floor so the starvation can't regress.
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+        seen = {}
+
+        def fake_chat(_prompt, max_tokens, model=None):  # noqa: ARG001
+            seen["max_tokens"] = max_tokens
+            return "Humor"
+
+        pipeline_llm.chat = fake_chat
+        stages.classify_category(self.TITLE, self.BODY, "Drama")
+        self.assertGreaterEqual(seen["max_tokens"], 1000)
+
 
 class ClassifyStoryTagsTests(unittest.TestCase):
     """Multi-tag classifier (_plans/2026-07-01-category-taxonomy-multitag.md).
@@ -1067,6 +1084,25 @@ class ClassifyStoryTagsTests(unittest.TestCase):
     def test_empty_when_llm_raises(self):
         self._patch_llm(RuntimeError("LLM HTTP 500: boom"))
         self.assertEqual(self._classify(), [])
+
+    def test_token_cap_leaves_room_for_reasoning(self):
+        # gpt-5-nano spends hidden reasoning tokens from max_completion_tokens
+        # before emitting any content; a starved cap returns '' and every
+        # story keeps the subreddit-map fallback. That is exactly what
+        # happened at cap 200 once the active-category prompt grew
+        # (2026-07-03: every new story landed as "Drama"). Pin a floor so the
+        # starvation can't regress.
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+        seen = {}
+
+        def fake_chat(_prompt, max_tokens, model=None):  # noqa: ARG001
+            seen["max_tokens"] = max_tokens
+            return '[{"slug":"workplace","confidence":0.8}]'
+
+        pipeline_llm.chat = fake_chat
+        self._classify()
+        self.assertGreaterEqual(seen["max_tokens"], 1000)
 
 
 if __name__ == "__main__":
