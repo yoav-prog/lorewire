@@ -27,6 +27,7 @@ import {
   bulkCompleteAndPublishAction,
   bulkFullPipelineAction,
   bulkPublishToSocialsAction,
+  bulkReclassifyContentAction,
   bulkRefreshAssetsAction,
   bulkStopRunsAction,
   bulkUpdateContentAction,
@@ -39,6 +40,8 @@ import {
   type BulkFullPipelineOutcome,
   type BulkFullPipelineResult,
   type BulkPublishResult,
+  type BulkReclassifyOutcome,
+  type BulkReclassifyResult,
   type BulkRefreshAssetsOutcome,
   type BulkRefreshAssetsResult,
   type BulkRegenResult,
@@ -361,6 +364,14 @@ export function ContentList({
   // _plans/2026-07-03-unified-live-runs-and-stop.md.
   const [stopRunsResult, setStopRunsResult] =
     useState<BulkStopRunsResult | null>(null);
+  // 2026-07-05 bulk AI reclassify: re-run the multi-tag classifier on the
+  // selection. Same confirm/result pattern as the other bulk flows. Plan:
+  // _plans/2026-07-05-bulk-ai-reclassify.md.
+  const [reclassifyConfirm, setReclassifyConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [reclassifyResult, setReclassifyResult] =
+    useState<BulkReclassifyResult | null>(null);
   // label → color hex for the row chips; misses (legacy / unclassified
   // labels) fall back to the muted chip class.
   const categoryColorByLabel = useMemo(() => {
@@ -832,6 +843,52 @@ export function ContentList({
     });
   }
 
+  function requestReclassify() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    setReclassifyResult(null);
+    setReclassifyConfirm(storyItems);
+  }
+
+  function runReclassifyConfirmed() {
+    if (!reclassifyConfirm) return;
+    const items = reclassifyConfirm;
+    console.info("[content list reclassify-ai request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkReclassifyResult;
+      try {
+        result = await bulkReclassifyContentAction(items);
+      } catch (err) {
+        result = {
+          retaggedCount: 0,
+          unchangedCount: 0,
+          needsReviewCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list reclassify-ai result]", {
+        retaggedCount: result.retaggedCount,
+        unchangedCount: result.unchangedCount,
+        needsReviewCount: result.needsReviewCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setReclassifyConfirm(null);
+      setReclassifyResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   // --- render ---------------------------------------------------------------
 
   return (
@@ -922,6 +979,14 @@ export function ContentList({
         <StopRunsResultBanner
           result={stopRunsResult}
           onDismiss={() => setStopRunsResult(null)}
+        />
+      )}
+
+      {reclassifyResult && (
+        <ReclassifyResultBanner
+          result={reclassifyResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setReclassifyResult(null)}
         />
       )}
 
@@ -1132,6 +1197,7 @@ export function ContentList({
           onBulkComplete={requestComplete}
           onBulkRefresh={requestRefresh}
           onFullPipeline={requestFullPipeline}
+          onReclassify={requestReclassify}
           onStopRuns={runStopRuns}
           onClear={clearSelection}
         />
@@ -1189,6 +1255,16 @@ export function ContentList({
           onRun={runFullPipelineConfirmed}
         />
       )}
+
+      {reclassifyConfirm && (
+        <ReclassifyConfirmModal
+          items={reclassifyConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setReclassifyConfirm(null)}
+          onRun={runReclassifyConfirmed}
+        />
+      )}
     </>
   );
 }
@@ -1205,6 +1281,7 @@ function BulkActionBar({
   onBulkComplete,
   onBulkRefresh,
   onFullPipeline,
+  onReclassify,
   onStopRuns,
   onClear,
 }: {
@@ -1217,10 +1294,14 @@ function BulkActionBar({
   onBulkComplete: () => void;
   onBulkRefresh: () => void;
   onFullPipeline: () => void;
+  onReclassify: () => void;
   onStopRuns: () => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
+  // AI reclassify only touches stories; mixed selections stay clickable and
+  // the server skips articles, matching the Regenerate menu's semantics.
+  const reclassifyDisabled = counts.stories === 0;
   // Regen targets fan out to story-pipeline primitives — articles are not
   // pipeline citizens, so the menu is dark when the selection is articles-
   // only. Mixed selections light up but the server filters to stories.
@@ -1299,6 +1380,14 @@ function BulkActionBar({
           }
           options={categories.map((c) => ({ value: c.label, label: c.label }))}
           onPick={(value) => onAction({ type: "category", category: value })}
+        />
+        {/* The AI sibling of the manual Category picker: re-runs the
+            multi-tag classifier on the selection and writes tags + label.
+            Low-confidence stories are left untouched for a manual pick. */}
+        <BarButton
+          label="Reclassify AI"
+          disabled={disabled || reclassifyDisabled}
+          onClick={onReclassify}
         />
         <Picker
           label="Regenerate ▾"
@@ -2876,6 +2965,197 @@ function FullPipelineResultBanner({
 
 function fullPipelineLabelFor(
   outcome: BulkFullPipelineOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
+}
+
+function ReclassifyConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reclassify-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="reclassify-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Reclassify {items.length}{" "}
+          {items.length === 1 ? "story" : "stories"} with AI?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          Runs the category classifier on each story and applies the result:
+          category label + tags, first tag primary. A story the model is not
+          confident about (below 60%) is left exactly as it is and listed for
+          a manual pick via its row chip. Uses the Writing (LLM) model from
+          the Models page.
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          One small LLM call per story — well under a cent each.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Classifying…" : `Reclassify ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReclassifyResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkReclassifyResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const retagged = result.outcomes.filter((o) => o.state === "retagged");
+  const needsReview = result.outcomes.filter(
+    (o) => o.state === "needs_review",
+  );
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const previewRetagged = retagged.slice(0, 5);
+  const overflowRetagged = retagged.length - previewRetagged.length;
+  const previewReview = needsReview.slice(0, 5);
+  const overflowReview = needsReview.length - previewReview.length;
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Reclassify AI:</span> Retagged{" "}
+          <span className="text-accent">{result.retaggedCount}</span>
+          {result.unchangedCount > 0
+            ? ` · Already right ${result.unchangedCount}`
+            : ""}
+          {result.needsReviewCount > 0
+            ? ` · Needs a manual pick ${result.needsReviewCount}`
+            : ""}
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewRetagged.length > 0 && (
+        <ul className="space-y-0.5 border-t border-accent/30 pt-2">
+          {previewRetagged.map((o) => (
+            <li key={`re:${o.kind}:${o.id}`}>
+              <span className="text-ink">{reclassifyLabelFor(o, rowByKey)}</span>
+              <span className="text-muted">
+                {" "}
+                — {o.prevCategory ?? "uncategorized"} →{" "}
+              </span>
+              <span className="text-accent">{o.nextCategory}</span>
+              {typeof o.confidence === "number" && (
+                <span className="text-muted">
+                  {" "}
+                  ({Math.round(o.confidence * 100)}%)
+                </span>
+              )}
+            </li>
+          ))}
+          {overflowRetagged > 0 && (
+            <li className="text-muted">…and {overflowRetagged} more</li>
+          )}
+        </ul>
+      )}
+      {previewReview.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Needs a manual pick
+          </li>
+          {previewReview.map((o) => (
+            <li key={`rev:${o.kind}:${o.id}`}>
+              <span className="text-ink">{reclassifyLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70"> — {o.reason ?? "—"}</span>
+            </li>
+          ))}
+          {overflowReview > 0 && <li>…and {overflowReview} more</li>}
+        </ul>
+      )}
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">{reclassifyLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "unknown")}
+              </span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function reclassifyLabelFor(
+  outcome: BulkReclassifyOutcome,
   rowByKey: Map<string, ContentRow>,
 ): string {
   const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);

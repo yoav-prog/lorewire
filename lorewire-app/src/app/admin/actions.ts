@@ -5010,6 +5010,197 @@ export async function bulkRefreshAssetsAction(
   };
 }
 
+// ─── Bulk AI reclassify ──────────────────────────────────────────────────────
+// 2026-07-05, plan: _plans/2026-07-05-bulk-ai-reclassify.md.
+//
+// Re-runs the multi-tag LLM classifier on a hand-picked selection — the
+// surgical sibling of the whole-library /admin/reclassify tool. Per story it
+// writes BOTH story_tags (source "llm", first tag primary) and the
+// denormalized stories.category label: category-only writes get reverted by
+// syncStoryPrimaryCategory on the next boot, tag-only writes leave the
+// visible chip stale until one.
+//
+// Same review-queue semantics as /admin/reclassify: an empty classify or a
+// primary below DEFAULT_CONFIDENCE_FLOOR writes NOTHING and reports
+// needs_review, so a hesitant model can never overwrite a human's manual
+// retag with a coin flip.
+
+export interface BulkReclassifyOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state: "retagged" | "unchanged" | "needs_review" | "skipped" | "errored";
+  prevCategory?: string | null;
+  nextCategory?: string;
+  /** Applied tag slugs, primary first. Present on retagged/unchanged. */
+  tags?: string[];
+  /** Primary tag confidence 0..1. Present on retagged/unchanged. */
+  confidence?: number;
+  reason?: string;
+}
+
+export interface BulkReclassifyResult {
+  retaggedCount: number;
+  unchangedCount: number;
+  needsReviewCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkReclassifyOutcome[];
+}
+
+export async function bulkReclassifyContentAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkReclassifyResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  const t0 = Date.now();
+  console.info("[bulk-reclassify click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  const { listCategories, setStoryTags } = await import(
+    "@/lib/categories/repo"
+  );
+  const { classifyStoryTags } = await import("@/lib/category-tags-classifier");
+  const { DEFAULT_CONFIDENCE_FLOOR } = await import("@/lib/reclassify-tags");
+
+  const active = await listCategories();
+  const categories = active.map((c) => ({
+    slug: c.slug,
+    label: c.label,
+    description: c.description,
+  }));
+  const labelBySlug = new Map(active.map((c) => [c.slug, c.label]));
+
+  const outcomes: BulkReclassifyOutcome[] = [];
+  let retaggedCount = 0;
+  let unchangedCount = 0;
+  let needsReviewCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "articles have no story category",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "not-found",
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      const raw = await classifyStoryTags({
+        title: story.title,
+        body: story.body,
+        categories,
+      });
+      // Closed-set re-check against the CURRENT active slugs (mirrors
+      // applyReclassifyTagsAction) — the classifier validates too, but the
+      // active set can change between its read and this write.
+      const tags = raw.filter((t) => labelBySlug.has(t.slug));
+      const primary = tags[0];
+      if (!primary) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "needs_review",
+          prevCategory: story.category,
+          reason: "classifier returned no usable tags — pick one via the row chip",
+        });
+        needsReviewCount += 1;
+        continue;
+      }
+      if (primary.confidence < DEFAULT_CONFIDENCE_FLOOR) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "needs_review",
+          prevCategory: story.category,
+          reason: `low confidence (${Math.round(primary.confidence * 100)}%) — pick one via the row chip`,
+        });
+        needsReviewCount += 1;
+        continue;
+      }
+
+      // labelBySlug.has(primary.slug) held above, so the label exists.
+      const nextCategory = labelBySlug.get(primary.slug) as string;
+      await setStoryTags(item.id, tags, "llm");
+      await setStoryCategory(item.id, nextCategory);
+
+      const state = nextCategory === story.category ? "unchanged" : "retagged";
+      console.info("[bulk-reclassify item]", {
+        story_id: item.id,
+        state,
+        prev: story.category,
+        next: nextCategory,
+        tags: tags.map((t) => t.slug),
+        confidence: primary.confidence,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state,
+        prevCategory: story.category,
+        nextCategory,
+        tags: tags.map((t) => t.slug),
+        confidence: primary.confidence,
+      });
+      if (state === "retagged") retaggedCount += 1;
+      else unchangedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[bulk-reclassify errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+  console.info("[bulk-reclassify result]", {
+    user_id: session.userId,
+    retaggedCount,
+    unchangedCount,
+    needsReviewCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return {
+    retaggedCount,
+    unchangedCount,
+    needsReviewCount,
+    skippedCount,
+    erroredCount,
+    outcomes,
+  };
+}
+
 // ─── Bulk full pipeline & publish ────────────────────────────────────────────
 // 2026-07-02, plan: _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
 //
