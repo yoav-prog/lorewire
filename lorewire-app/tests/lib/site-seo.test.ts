@@ -1,11 +1,16 @@
 // Tests for the site-seo resolver. The defaults must hold when no settings
 // are persisted; explicit settings must override; the title-template
-// substitution must survive malformed templates.
+// sanitizer must survive malformed templates; the origin resolver must
+// back metadataBase / robots / sitemap consistently.
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setSetting } from "@/lib/repo";
 import { run } from "@/lib/db";
-import { buildPageTitle, getSiteSeo } from "@/lib/site-seo";
+import {
+  getSiteSeo,
+  resolveSiteOrigin,
+  safeTitleTemplate,
+} from "@/lib/site-seo";
 
 async function clearSeoSettings(): Promise<void> {
   await run("DELETE FROM settings WHERE key LIKE 'seo.%'", []);
@@ -20,6 +25,11 @@ describe("getSiteSeo defaults", () => {
     const seo = await getSiteSeo();
     expect(seo.siteName).toBe("LoreWire");
     expect(seo.titleTemplate).toBe("%s · LoreWire");
+    // The homepage default must be more than the bare brand — it's the
+    // site's strongest indexed page (2026-07-05 SEO pass).
+    expect(seo.homeTitle).toBe(
+      "LoreWire · True Internet Stories, Animated & Voted On",
+    );
     expect(seo.themeColor).toBe("#0A0A0C");
     expect(seo.twitterCardType).toBe("summary_large_image");
     expect(seo.organizationSameAs).toEqual([]);
@@ -31,6 +41,7 @@ describe("getSiteSeo with persisted settings", () => {
   it("overrides defaults with whatever the admin set", async () => {
     await setSetting("seo.site_name", "Acme Wire");
     await setSetting("seo.title_template", "%s | Acme");
+    await setSetting("seo.home_title", "Acme Wire · Custom Home");
     await setSetting("seo.theme_color", "#FF0066");
     await setSetting("seo.twitter_card_type", "summary");
     await setSetting("seo.twitter_handle", "@AcmeWire");
@@ -38,6 +49,7 @@ describe("getSiteSeo with persisted settings", () => {
     const seo = await getSiteSeo();
     expect(seo.siteName).toBe("Acme Wire");
     expect(seo.titleTemplate).toBe("%s | Acme");
+    expect(seo.homeTitle).toBe("Acme Wire · Custom Home");
     expect(seo.themeColor).toBe("#FF0066");
     expect(seo.twitterCardType).toBe("summary");
     expect(seo.twitterHandle).toBe("@AcmeWire");
@@ -87,25 +99,42 @@ describe("getSiteSeo with persisted settings", () => {
   });
 });
 
-describe("buildPageTitle", () => {
-  it("substitutes %s with the page title", () => {
-    expect(buildPageTitle("My Article", "%s · LoreWire", "LoreWire")).toBe(
-      "My Article · LoreWire",
+// safeTitleTemplate replaced buildPageTitle in the 2026-07-05 SEO pass:
+// pages now return BARE titles and the root layout's title.template is the
+// single branding authority — buildPageTitle pre-branded titles and the
+// layout template then appended the brand a second time
+// ("Title · LoreWire · LoreWire" in the live crawl).
+describe("safeTitleTemplate", () => {
+  it("passes through a template that contains the %s token", () => {
+    expect(safeTitleTemplate("%s · LoreWire", "LoreWire")).toBe(
+      "%s · LoreWire",
+    );
+    expect(safeTitleTemplate("%s | Acme", "LoreWire")).toBe("%s | Acme");
+  });
+
+  it("falls back to '%s · siteName' when the template lacks %s", () => {
+    // Defensive: malformed admin input shouldn't swallow page titles.
+    expect(safeTitleTemplate("no placeholder", "Brand")).toBe("%s · Brand");
+    expect(safeTitleTemplate("", "Brand")).toBe("%s · Brand");
+  });
+});
+
+describe("resolveSiteOrigin", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("prefers the admin seo.site_url setting and strips a trailing slash", () => {
+    vi.stubEnv("NEXT_PUBLIC_SITE_ORIGIN", "https://env.example");
+    expect(resolveSiteOrigin("https://www.lorewire.com/")).toBe(
+      "https://www.lorewire.com",
     );
   });
 
-  it("supports multiple separators", () => {
-    expect(buildPageTitle("Hello", "%s | Brand", "Brand")).toBe("Hello | Brand");
-  });
-
-  it("returns just the site name when page title is empty", () => {
-    expect(buildPageTitle("", "%s · LoreWire", "LoreWire")).toBe("LoreWire");
-  });
-
-  it("falls back to ' · siteName' when the template lacks %s", () => {
-    // Defensive: malformed admin input shouldn't produce an empty title.
-    expect(buildPageTitle("My Article", "no placeholder", "Brand")).toBe(
-      "My Article · Brand",
-    );
+  it("falls back to NEXT_PUBLIC_SITE_ORIGIN, then empty", () => {
+    vi.stubEnv("NEXT_PUBLIC_SITE_ORIGIN", "https://env.example");
+    expect(resolveSiteOrigin("")).toBe("https://env.example");
+    vi.stubEnv("NEXT_PUBLIC_SITE_ORIGIN", "");
+    expect(resolveSiteOrigin("")).toBe("");
   });
 });

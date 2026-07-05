@@ -17,7 +17,7 @@ import {
   type RailCardRow,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
-import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { getSiteSeo } from "@/lib/site-seo";
 import {
   getCategoryBySlug,
   getStoriesForCategory,
@@ -91,7 +91,8 @@ export async function generateMetadata({
       const description =
         category.description ?? `LoreWire stories tagged ${category.label}.`;
       return {
-        title: buildPageTitle(category.label, seo.titleTemplate, seo.siteName),
+        // Bare title — the root layout's title.template appends the brand.
+        title: category.label,
         description,
         alternates: { canonical: `/c/${surface}` },
         openGraph: {
@@ -103,13 +104,11 @@ export async function generateMetadata({
         },
       };
     }
-    return {
-      title: buildPageTitle("Not found", seo.titleTemplate, seo.siteName),
-    };
+    return { title: "Not found" };
   }
   const meta = SURFACE_META[surface];
   return {
-    title: buildPageTitle(meta.title, seo.titleTemplate, seo.siteName),
+    title: meta.title,
     description: meta.description,
     alternates: {
       canonical: `/c/${surface}`,

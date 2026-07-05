@@ -18,7 +18,7 @@ import {
   type ArticleRailCardRow,
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
-import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { getSiteSeo } from "@/lib/site-seo";
 
 const SURFACES = ["divisive", "agreed", "unpopular"] as const;
 type RailSurface = (typeof SURFACES)[number];
@@ -76,13 +76,12 @@ export async function generateMetadata({
   const { surface } = await params;
   const seo = await getSiteSeo();
   if (!isRailSurface(surface)) {
-    return {
-      title: buildPageTitle("Not found", seo.titleTemplate, seo.siteName),
-    };
+    return { title: "Not found" };
   }
   const meta = SURFACE_META[surface];
   return {
-    title: buildPageTitle(meta.title, seo.titleTemplate, seo.siteName),
+    // Bare title — the root layout's title.template appends the brand.
+    title: meta.title,
     description: meta.description,
     alternates: {
       canonical: `/c/articles/${surface}`,

@@ -4,7 +4,13 @@ import Script from "next/script";
 import ConditionalAnalytics from "@/components/ConditionalAnalytics";
 import RegisterSW from "@/components/RegisterSW";
 import { CCM19_ENABLED, CCM19_SRC } from "@/lib/ccm19";
-import { getSiteSeo } from "@/lib/site-seo";
+import {
+  getSiteSeo,
+  resolveSiteOrigin,
+  safeTitleTemplate,
+} from "@/lib/site-seo";
+import { serializeJsonLd } from "@/lib/jsonld";
+import { buildSiteJsonLd } from "@/lib/site-jsonld";
 import {
   ThemeProvider,
   THEME_INIT_SCRIPT,
@@ -30,13 +36,22 @@ const caveat = Caveat({ subsets: ["latin"], variable: "--font-caveat" });
 
 export async function generateMetadata(): Promise<Metadata> {
   const seo = await getSiteSeo();
+  const origin = resolveSiteOrigin(seo.siteUrl);
   return {
+    // Absolutizes every relative canonical/OG URL in the metadata tree
+    // (the static pages set canonical: "/faq" etc.). Guarded — new URL("")
+    // throws, and a fresh install may have neither seo.site_url nor
+    // NEXT_PUBLIC_SITE_ORIGIN configured yet.
+    metadataBase: origin ? new URL(origin) : undefined,
     applicationName: seo.siteName,
     title: {
       default: seo.siteName,
-      // Per-page generateMetadata calls handle their own templates; this
-      // is the fallback title for any page that doesn't set its own.
-      template: seo.titleTemplate,
+      // The single branding authority for page titles: child pages return
+      // BARE titles and this template appends the brand. Pages must never
+      // pre-brand (that rendered "Title · LoreWire · LoreWire" until
+      // 2026-07-05). safeTitleTemplate guards against an admin-typed
+      // template with no %s token, which would swallow page titles.
+      template: safeTitleTemplate(seo.titleTemplate, seo.siteName),
     },
     description: seo.defaultMetaDescription,
     appleWebApp: {
@@ -63,11 +78,19 @@ export async function generateViewport(): Promise<Viewport> {
   };
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Organization + WebSite JSON-LD on every page — the brand identity
+  // payload Google's knowledge panel reads, built from the admin's
+  // Settings -> SEO -> Organization fields.
+  // Plan: _plans/2026-07-05-seo-structured-data.md.
+  const seo = await getSiteSeo();
+  const siteJsonLd = serializeJsonLd(
+    buildSiteJsonLd(seo, resolveSiteOrigin(seo.siteUrl)),
+  );
   return (
     <html
       lang="en"
@@ -97,6 +120,10 @@ export default function RootLayout({
         />
       </head>
       <body>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: siteJsonLd }}
+        />
         <ThemeProvider>{children}</ThemeProvider>
         <RegisterSW />
         <ConditionalAnalytics />

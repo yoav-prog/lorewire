@@ -25,7 +25,7 @@ import {
   articleDirection,
 } from "@/lib/articles";
 import type { ArticleLanguage, ArticleRow, ArticleType } from "@/lib/repo";
-import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { getSiteSeo, resolveSiteOrigin } from "@/lib/site-seo";
 import { PollWidget } from "@/components/PollWidget";
 import {
   computeArticlePollAggregate,
@@ -175,12 +175,6 @@ async function loadArticle(params: Params): Promise<ArticleRow | null> {
 // Origin used to absolutize OG/canonical URLs. Prefer the admin-configured
 // seo.site_url; fall back to the NEXT_PUBLIC_SITE_ORIGIN env var; empty
 // string for local dev produces sensible relative URLs.
-function resolveOrigin(siteUrlSetting: string): string {
-  return (
-    siteUrlSetting || process.env.NEXT_PUBLIC_SITE_ORIGIN || ""
-  ).replace(/\/$/, "");
-}
-
 export async function generateMetadata({
   params,
 }: {
@@ -189,15 +183,14 @@ export async function generateMetadata({
   const article = await loadArticle(await params);
   const seo = await getSiteSeo();
   if (!article) {
-    return {
-      title: buildPageTitle("Not found", seo.titleTemplate, seo.siteName),
-    };
+    // Bare page title — the root layout's title.template appends the
+    // brand exactly once (pre-branding here doubled it).
+    return { title: "Not found" };
   }
-  const origin = resolveOrigin(seo.siteUrl);
+  const origin = resolveSiteOrigin(seo.siteUrl);
   const canonical = `${origin}/articles/${article.language}/${article.slug}`;
   const pageTitle =
     article.meta_title ?? article.title ?? "Article";
-  const title = buildPageTitle(pageTitle, seo.titleTemplate, seo.siteName);
   const description =
     article.meta_description ?? article.summary ?? seo.defaultMetaDescription;
   const ogImage =
@@ -208,14 +201,14 @@ export async function generateMetadata({
   const noindex = article.noindex === 1;
 
   return {
-    title,
+    title: pageTitle,
     description,
     alternates: { canonical },
     robots: noindex
       ? { index: false, follow: false }
       : { index: true, follow: true },
     openGraph: {
-      title,
+      title: pageTitle,
       description,
       type: "article",
       url: canonical,
@@ -225,7 +218,7 @@ export async function generateMetadata({
     },
     twitter: {
       card: seo.twitterCardType,
-      title,
+      title: pageTitle,
       description,
       images: ogImage ? [ogImage] : undefined,
       site: seo.twitterHandle || undefined,
@@ -259,7 +252,7 @@ export default async function ArticleReader({
   const seo = await getSiteSeo();
   const jsonLd = buildArticleJsonLd({
     article,
-    siteOrigin: resolveOrigin(seo.siteUrl),
+    siteOrigin: resolveSiteOrigin(seo.siteUrl),
     siteName: seo.siteName,
   });
 
