@@ -72,6 +72,7 @@ export default async function SeoPage() {
     siteName,
     siteUrl,
     titleTemplate,
+    homeTitle,
     defaultMetaDescription,
     themeColor,
     defaultOgImage,
@@ -88,6 +89,7 @@ export default async function SeoPage() {
     getSetting("seo.site_name"),
     getSetting("seo.site_url"),
     getSetting("seo.title_template"),
+    getSetting("seo.home_title"),
     getSetting("seo.default_meta_description"),
     getSetting("seo.theme_color"),
     getSetting("seo.default_og_image"),
@@ -138,6 +140,13 @@ export default async function SeoPage() {
             presets={TITLE_TEMPLATE_PRESETS}
             placeholder="%s · LoreWire"
             rows={1}
+          />
+          <SettingTextField
+            settingKey="seo.home_title"
+            label="Homepage title"
+            hint="The homepage's <title> — shown in Google results and browser tabs. Lead with what LoreWire is; the template above is not applied here."
+            initial={homeTitle ?? ""}
+            placeholder="LoreWire · True Internet Stories, Animated & Voted On"
           />
           <SettingTextField
             settingKey="seo.default_meta_description"

@@ -18,6 +18,7 @@ export interface SiteSeoSettings {
   siteName: string;
   siteUrl: string;
   titleTemplate: string;
+  homeTitle: string;
   defaultMetaDescription: string;
   themeColor: string;
   defaultOgImage: string;
@@ -38,6 +39,9 @@ const DEFAULTS: SiteSeoSettings = {
   // here keeps the type clean.
   siteUrl: "",
   titleTemplate: "%s · LoreWire",
+  // Homepage <title>. The homepage is the site's strongest indexed page,
+  // so the default carries the value proposition instead of the bare brand.
+  homeTitle: "LoreWire · True Internet Stories, Animated & Voted On",
   defaultMetaDescription:
     "Every internet story ends with your verdict. Watch a 60-second short, decide who's right, see what the crowd said.",
   themeColor: "#0A0A0C",
@@ -82,6 +86,7 @@ export async function getSiteSeo(): Promise<SiteSeoSettings> {
     siteName: v.site_name || DEFAULTS.siteName,
     siteUrl: v.site_url || DEFAULTS.siteUrl,
     titleTemplate: v.title_template || DEFAULTS.titleTemplate,
+    homeTitle: v.home_title || DEFAULTS.homeTitle,
     defaultMetaDescription:
       v.default_meta_description || DEFAULTS.defaultMetaDescription,
     themeColor: v.theme_color || DEFAULTS.themeColor,
@@ -101,17 +106,25 @@ export async function getSiteSeo(): Promise<SiteSeoSettings> {
   };
 }
 
-// Compose a page title using the configured template. The template should
-// contain `%s` where the per-page title goes. If the template lacks the
-// token (admin typed something weird), append a separator + brand.
-export function buildPageTitle(
-  pageTitle: string,
-  template: string,
-  siteName: string,
-): string {
-  if (!pageTitle) return siteName;
-  if (template.includes("%s")) return template.replace("%s", pageTitle);
-  // Defensive fallback so a malformed template still produces a sensible
-  // title — never an empty string.
-  return `${pageTitle} · ${siteName}`;
+// Canonical site origin, no trailing slash: the admin-configured
+// seo.site_url first, then the NEXT_PUBLIC_SITE_ORIGIN env var, empty
+// string when neither is set. Shared by the root layout (metadataBase),
+// robots.ts, sitemap.ts, and the readers' canonical/OG URLs.
+export function resolveSiteOrigin(siteUrlSetting: string): string {
+  return (
+    siteUrlSetting || process.env.NEXT_PUBLIC_SITE_ORIGIN || ""
+  ).replace(/\/$/, "");
+}
+
+// Sanitize the admin-configured title template for the root layout's
+// `title.template`. Next.js substitutes `%s` with each page's bare title;
+// a template missing the token (admin typed something weird) would swallow
+// every page title, so fall back to the default separator + brand.
+//
+// This is the ONLY place page titles get branded. Pages must return bare
+// titles — the old buildPageTitle() helper pre-branded them and the layout
+// template then appended the brand a second time ("· LoreWire · LoreWire").
+export function safeTitleTemplate(template: string, siteName: string): string {
+  if (template.includes("%s")) return template;
+  return `%s · ${siteName}`;
 }

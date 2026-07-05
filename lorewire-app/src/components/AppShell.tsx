@@ -68,6 +68,7 @@ import CrossDeviceNudge from "@/components/CrossDeviceNudge";
 import { CCM19_ENABLED } from "@/lib/ccm19";
 import SignInChip from "@/components/SignInChip";
 import SiteFooter from "@/components/SiteFooter";
+import { StoryLink } from "@/components/StoryLink";
 import { CommentsTab } from "@/components/CommentsTab";
 import { JumpToComments } from "@/components/JumpToComments";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
@@ -181,7 +182,9 @@ function PosterArt({ story, rounded = true, showTitle = true, vig = false }: { s
       {showImage && (
         <img
           src={artSrc}
-          alt=""
+          // Content image: thumbnails bake the title into the pixels, so
+          // the alt is the only text form of it for image search + AT.
+          alt={story.title}
           className="absolute inset-0 w-full h-full object-cover"
           onError={() => {
             setImageOk(false);
@@ -426,7 +429,11 @@ function Billboard({
           {showHero && (
             <img
               src={heroSrc}
-              alt=""
+              alt={story.title}
+              // Mobile LCP element — eager + high priority so the browser
+              // doesn't queue it behind rail thumbnails (PSI LCP was 7.7s).
+              loading="eager"
+              fetchPriority="high"
               className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
               draggable={false}
               onError={() => {
@@ -529,12 +536,12 @@ function Billboard({
               for editorial display at large sizes; uppercase serif at
               ~15px button size reads odd. Bold sans CTAs against serif
               headlines = classic magazine pairing. */}
-          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
+          <StoryLink story={story} onActivate={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
             Watch &amp; Vote
-          </button>
-          <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
+          </StoryLink>
+          <StoryLink story={story} onActivate={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
             <InfoI size={18} /> Read the article
-          </button>
+          </StoryLink>
         </div>
         <button onClick={onShuffle} className="mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-[10px] border border-line font-mono text-[11px] uppercase tracking-[.2em] text-ink/80 active:scale-[.98] transition">
           <ShuffleI size={15} /> Surprise me
@@ -607,7 +614,7 @@ function Billboard({
 function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number | string; progress?: number; voteCount?: number }) {
   const { getRating } = useStoryRatings();
   return (
-    <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
+    <StoryLink story={story} onActivate={() => onOpen(story.id)} aria-label={story.title} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
       {/* showTitle={false} across every rail (mobile parity with
           desktop PosterCard): the baked title in the artwork carries
           the rail; the white CSS overlay was just doubling up. */}
@@ -631,7 +638,7 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { 
           <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }}></div>
         </div>
       )}
-    </button>
+    </StoryLink>
   );
 }
 
@@ -880,7 +887,7 @@ function Home({
               const s = resolveStory(id);
               if (!s) return null;
               return (
-                <button key={id} onClick={() => onOpen(id, undefined, { ids: visible, label: "Top 10 Today" })} className="relative shrink-0 active:scale-[.97] transition">
+                <StoryLink key={id} story={s} onActivate={() => onOpen(id, undefined, { ids: visible, label: "Top 10 Today" })} aria-label={s.title} className="relative shrink-0 active:scale-[.97] transition">
                   <div className="relative w-[132px] h-[192px]">
                     <PosterArt story={s} showTitle={false} />
                     <span
@@ -897,7 +904,7 @@ function Home({
                       {i + 1}
                     </span>
                   </div>
-                </button>
+                </StoryLink>
               );
             })}
           </div>

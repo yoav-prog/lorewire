@@ -71,6 +71,7 @@ import {
   readShuffleRecents,
 } from "@/lib/play-shuffle";
 import { PollRailCard } from "@/components/PollRail";
+import { StoryLink } from "@/components/StoryLink";
 import { renderHeroVerdictBadge } from "@/lib/polls-shared";
 import { PollWidget } from "@/components/PollWidget";
 import PosterMeta from "@/components/PosterMeta";
@@ -183,7 +184,9 @@ function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig =
       {showImage && (
         <img
           src={artSrc}
-          alt=""
+          // Content image: thumbnails bake the title into the pixels, so
+          // the alt is the only text form of it for image search + AT.
+          alt={story.title}
           className="absolute inset-0 w-full h-full object-cover"
           onError={() => {
             setImageOk(false);
@@ -441,7 +444,11 @@ function Hero({
           {showHero && (
             <img
               src={heroSrc}
-              alt=""
+              alt={story.title}
+              // Desktop LCP element — eager + high priority so the browser
+              // doesn't queue it behind the rail thumbnails.
+              loading="eager"
+              fetchPriority="high"
               className="absolute inset-0 w-full h-full object-cover"
               // Landscape variant fits naturally; portrait fallback needs
               // object-position to keep characters' faces visible.
@@ -544,8 +551,8 @@ function Hero({
                   locked to Archivo Black. Fraunces serif uppercase at
                   button sizes reads odd; bold sans CTAs against
                   serif headlines = classic magazine pairing. */}
-              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</button>
-              <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</button>
+              <StoryLink story={story} onActivate={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</StoryLink>
+              <StoryLink story={story} onActivate={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</StoryLink>
               <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
             </div>
           </div>
@@ -620,7 +627,7 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
   // 180ms ease-out matches the spec; group-focus-visible mirrors the
   // hover so keyboard navigation gets the same affordance.
   return (
-    <button onClick={() => onOpen(story.id)} className="group relative shrink-0" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
+    <StoryLink story={story} onActivate={() => onOpen(story.id)} aria-label={story.title} className="group relative shrink-0" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
       <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}>
         {/* showTitle={false} across every rail: every cinematic hero
             already has the title baked into the artwork, so the white
@@ -656,7 +663,7 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
         className="absolute left-1 right-1 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
         style={{ transitionDuration: "180ms" }}
       />
-    </button>
+    </StoryLink>
   );
 }
 
@@ -704,7 +711,7 @@ function Top10Row({
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id, undefined, { ids: visible, label: "Top 10 Today" })} className="group relative min-w-0">
+          <StoryLink key={id} story={s} onActivate={() => onOpen(id, undefined, { ids: visible, label: "Top 10 Today" })} aria-label={s.title} className="group relative min-w-0">
             <div
               className="relative w-full"
               style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
@@ -729,7 +736,7 @@ function Top10Row({
               className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
               style={{ transitionDuration: "180ms" }}
             />
-          </button>
+          </StoryLink>
         );
       })}
     </div>

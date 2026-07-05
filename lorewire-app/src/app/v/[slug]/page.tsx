@@ -13,7 +13,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
-import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { getSiteSeo, resolveSiteOrigin } from "@/lib/site-seo";
 import { getSetting } from "@/lib/repo";
 import { parseShortConfig } from "@/lib/short-config";
 import { OG_POSTER_HEIGHT, OG_POSTER_WIDTH } from "@/lib/short-poster";
@@ -70,12 +70,6 @@ interface Params {
   slug: string;
 }
 
-function resolveOrigin(siteUrlSetting: string): string {
-  return (
-    siteUrlSetting || process.env.NEXT_PUBLIC_SITE_ORIGIN || ""
-  ).replace(/\/$/, "");
-}
-
 export async function generateMetadata({
   params,
 }: {
@@ -85,14 +79,15 @@ export async function generateMetadata({
   const story = await getPublishedStoryBySlug(slug);
   const seo = await getSiteSeo();
   if (!story) {
-    return {
-      title: buildPageTitle("Not found", seo.titleTemplate, seo.siteName),
-    };
+    // Bare page title — the root layout's title.template appends the
+    // brand exactly once. Pre-branding here doubled it ("· LoreWire ·
+    // LoreWire") because Next applies the parent template to child
+    // page titles (see node_modules/next/dist/docs generate-metadata).
+    return { title: "Not found" };
   }
-  const origin = resolveOrigin(seo.siteUrl);
+  const origin = resolveSiteOrigin(seo.siteUrl);
   const canonical = `${origin}/v/${story.slug}`;
   const pageTitle = story.title ?? "Story";
-  const title = buildPageTitle(pageTitle, seo.titleTemplate, seo.siteName);
   const description =
     story.summary ?? seo.defaultMetaDescription;
   const heroImage = story.hero_image ?? seo.defaultOgImage ?? undefined;
@@ -154,14 +149,14 @@ export async function generateMetadata({
   const twitterImage = ogPosterUrl ?? thumbLandscape ?? heroImage;
 
   return {
-    title,
+    title: pageTitle,
     description,
     alternates: { canonical },
     robots: noindex
       ? { index: false, follow: false }
       : { index: true, follow: true },
     openGraph: {
-      title,
+      title: pageTitle,
       description,
       type: videoUrl ? "video.other" : "article",
       url: canonical,
@@ -172,7 +167,7 @@ export async function generateMetadata({
               url: ogImage,
               width: ogImageWidth,
               height: ogImageHeight,
-              alt: `Lorewire: ${pageTitle}`,
+              alt: `${seo.siteName}: ${pageTitle}`,
             },
           ]
         : undefined,
@@ -189,7 +184,7 @@ export async function generateMetadata({
     },
     twitter: {
       card: twitterCardType,
-      title,
+      title: pageTitle,
       description,
       images: twitterImage ? [twitterImage] : undefined,
       site: seo.twitterHandle || undefined,
