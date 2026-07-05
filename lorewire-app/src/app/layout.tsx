@@ -9,6 +9,8 @@ import {
   resolveSiteOrigin,
   safeTitleTemplate,
 } from "@/lib/site-seo";
+import { serializeJsonLd } from "@/lib/jsonld";
+import { buildSiteJsonLd } from "@/lib/site-jsonld";
 import {
   ThemeProvider,
   THEME_INIT_SCRIPT,
@@ -76,11 +78,19 @@ export async function generateViewport(): Promise<Viewport> {
   };
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Organization + WebSite JSON-LD on every page — the brand identity
+  // payload Google's knowledge panel reads, built from the admin's
+  // Settings -> SEO -> Organization fields.
+  // Plan: _plans/2026-07-05-seo-structured-data.md.
+  const seo = await getSiteSeo();
+  const siteJsonLd = serializeJsonLd(
+    buildSiteJsonLd(seo, resolveSiteOrigin(seo.siteUrl)),
+  );
   return (
     <html
       lang="en"
@@ -110,6 +120,10 @@ export default function RootLayout({
         />
       </head>
       <body>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: siteJsonLd }}
+        />
         <ThemeProvider>{children}</ThemeProvider>
         <RegisterSW />
         <ConditionalAnalytics />
