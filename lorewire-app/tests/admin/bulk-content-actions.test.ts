@@ -57,11 +57,23 @@ vi.mock("@/lib/gcs", () => ({
   }),
 }));
 
+// The bulk AI reclassify action calls the TS classifier once per story;
+// mocking the module boundary keeps the suite offline and lets each test
+// script the model's answer. Referenced lazily inside the factory (same
+// pattern as gcsCalls above) so vi.mock hoisting doesn't hit the TDZ.
+const classifyStoryTagsMock = vi.fn<
+  (input: unknown) => Promise<{ slug: string; confidence: number }[]>
+>();
+vi.mock("@/lib/category-tags-classifier", () => ({
+  classifyStoryTags: (input: unknown) => classifyStoryTagsMock(input),
+}));
+
 // Import AFTER vi.mock so the action module picks up the mocked deps.
 import {
   bulkUpdateContentAction,
   bulkDeleteContentAction,
   bulkFullPipelineAction,
+  bulkReclassifyContentAction,
   bulkRegenerateContentAction,
   type BulkContentItem,
 } from "@/app/admin/actions";
@@ -147,6 +159,7 @@ async function seedArticle(opts: {
 
 beforeEach(async () => {
   await reset();
+  classifyStoryTagsMock.mockReset();
 });
 
 // --- Input validation -------------------------------------------------------
@@ -722,5 +735,140 @@ describe("bulkFullPipelineAction", () => {
     expect(reasons).toEqual(
       ["articles have no story pipeline", "no-reddit-source"].sort(),
     );
+  });
+});
+
+// --- Bulk AI reclassify -------------------------------------------------------
+// Plan: _plans/2026-07-05-bulk-ai-reclassify.md. The classifier is mocked at
+// the module boundary (classifyStoryTagsMock above); everything below the
+// mock — closed-set filtering, the confidence floor, the paired
+// story_tags + stories.category write — is the real action against the
+// real test DB, including the granular category seed (creepy,
+// roommate-hell, ...).
+
+describe("bulkReclassifyContentAction", () => {
+  it("retags a confident story: category label + tags, primary first, source llm", async () => {
+    const storyId = await seedStory({ category: "Drama" });
+    classifyStoryTagsMock.mockResolvedValue([
+      { slug: "roommate-hell", confidence: 0.9 },
+      { slug: "creepy", confidence: 0.7 },
+    ]);
+    const result = await bulkReclassifyContentAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.retaggedCount).toBe(1);
+    expect(result.outcomes[0]).toMatchObject({
+      state: "retagged",
+      prevCategory: "Drama",
+      nextCategory: "Roommate Hell",
+      tags: ["roommate-hell", "creepy"],
+      confidence: 0.9,
+    });
+    const after = await one<{ category: string }>(
+      "SELECT category FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(after!.category).toBe("Roommate Hell");
+    const tags = await all<{
+      category_slug: string;
+      is_primary: number;
+      source: string;
+    }>(
+      "SELECT category_slug, is_primary, source FROM story_tags " +
+        "WHERE story_id = ? ORDER BY is_primary DESC",
+      [storyId],
+    );
+    expect(tags).toHaveLength(2);
+    expect(tags[0]).toMatchObject({
+      category_slug: "roommate-hell",
+      is_primary: 1,
+      source: "llm",
+    });
+    expect(tags[1]).toMatchObject({ category_slug: "creepy", is_primary: 0 });
+  });
+
+  it("reports unchanged when the label already matches, but still refreshes tags", async () => {
+    const storyId = await seedStory({ category: "Creepy" });
+    classifyStoryTagsMock.mockResolvedValue([
+      { slug: "creepy", confidence: 0.8 },
+    ]);
+    const result = await bulkReclassifyContentAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.unchangedCount).toBe(1);
+    expect(result.retaggedCount).toBe(0);
+    const tag = await one<{ category_slug: string }>(
+      "SELECT category_slug FROM story_tags WHERE story_id = ? AND is_primary = 1",
+      [storyId],
+    );
+    expect(tag!.category_slug).toBe("creepy");
+  });
+
+  it("leaves a below-floor story untouched and reports needs_review", async () => {
+    const storyId = await seedStory({ category: "Drama" });
+    classifyStoryTagsMock.mockResolvedValue([
+      { slug: "roommate-hell", confidence: 0.4 },
+    ]);
+    const result = await bulkReclassifyContentAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.needsReviewCount).toBe(1);
+    expect(result.outcomes[0].reason).toContain("low confidence (40%)");
+    const after = await one<{ category: string }>(
+      "SELECT category FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(after!.category).toBe("Drama");
+    const tags = await all<{ story_id: string }>(
+      "SELECT story_id FROM story_tags WHERE story_id = ?",
+      [storyId],
+    );
+    expect(tags).toHaveLength(0);
+  });
+
+  it("reports needs_review when the classifier returns nothing", async () => {
+    const storyId = await seedStory({ category: "Drama" });
+    classifyStoryTagsMock.mockResolvedValue([]);
+    const result = await bulkReclassifyContentAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.needsReviewCount).toBe(1);
+    const after = await one<{ category: string }>(
+      "SELECT category FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(after!.category).toBe("Drama");
+  });
+
+  it("drops hallucinated slugs; nothing usable left means needs_review, no writes", async () => {
+    const storyId = await seedStory({ category: "Drama" });
+    classifyStoryTagsMock.mockResolvedValue([
+      { slug: "politics", confidence: 0.99 },
+    ]);
+    const result = await bulkReclassifyContentAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.needsReviewCount).toBe(1);
+    const tags = await all<{ story_id: string }>(
+      "SELECT story_id FROM story_tags WHERE story_id = ?",
+      [storyId],
+    );
+    expect(tags).toHaveLength(0);
+  });
+
+  it("skips articles without calling the classifier and errors unknown ids", async () => {
+    const articleId = await seedArticle({});
+    const result = await bulkReclassifyContentAction([
+      { kind: "article", id: articleId },
+      { kind: "story", id: "no-such-story" },
+    ]);
+    expect(result.skippedCount).toBe(1);
+    expect(result.erroredCount).toBe(1);
+    expect(result.outcomes[0].state).toBe("skipped");
+    expect(result.outcomes[1]).toMatchObject({
+      state: "errored",
+      reason: "not-found",
+    });
+    expect(classifyStoryTagsMock).not.toHaveBeenCalled();
   });
 });
