@@ -427,6 +427,15 @@ SCHEMA_STATEMENTS = [
     #   -> 'failed' (finisher hit an unrecoverable error)
     "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS finisher_status TEXT",
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_finisher_status ON story_jobs(finisher_status, finished_at)",
+    # 2026-07-05 finisher crash recovery (_plans/2026-07-05-finisher-stale-
+    # running-recovery.md). claimed_at is stamped by claim_finisher_job so
+    # reap_stale_finisher_jobs has hard evidence that a 'running' row's
+    # function died — Vercel's 800s SIGKILL bypasses the except path that
+    # writes 'failed', which left story 1kg8vng at 'running' for 4 hours.
+    # attempts counts reaper/timeout revives; read with COALESCE(...,0)
+    # because the TS-side ADD COLUMN emits no DEFAULT for existing rows.
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS finisher_claimed_at TEXT",
+    "ALTER TABLE story_jobs ADD COLUMN IF NOT EXISTS finisher_attempts INTEGER DEFAULT 0",
     # Worker hot path: oldest queued first. Mirrors the index on
     # image_renders(status, requested_at).
     "CREATE INDEX IF NOT EXISTS idx_story_jobs_status_requested ON story_jobs(status, requested_at)",
@@ -2308,7 +2317,7 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
             with conn.cursor() as cur:
                 for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
                     cur.execute(
-                        "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                        "SELECT id, COALESCE(attempts, 0) AS attempts FROM short_renders "
                         f"WHERE status='{status}' AND started_at IS NOT NULL "
                         "AND started_at < %s AND COALESCE(attempts, 0) >= %s",
                         (cutoff, cap),
@@ -2321,9 +2330,9 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                         (give_up_msg, now, cutoff, cap),
                     )
                     total += cur.rowcount
-                    gave_up.extend((row[0], status) for row in give_up_rows)
+                    gave_up.extend((row["id"], status) for row in give_up_rows)
                     cur.execute(
-                        "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                        "SELECT id, COALESCE(attempts, 0) AS attempts FROM short_renders "
                         f"WHERE status='{status}' AND started_at IS NOT NULL "
                         "AND started_at < %s AND COALESCE(attempts, 0) < %s",
                         (cutoff, cap),
@@ -2337,13 +2346,13 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                         (cutoff, cap),
                     )
                     total += cur.rowcount
-                    revived.extend((row[0], status, int(row[1])) for row in revive_rows)
+                    revived.extend((row["id"], status, int(row["attempts"])) for row in revive_rows)
             conn.commit()
     else:
         with _sqlite_conn() as c:
             for status, cutoff in (("generating", gen_cutoff), ("rendering", ren_cutoff)):
                 give_up_rows = c.execute(
-                    "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                    "SELECT id, COALESCE(attempts, 0) AS attempts FROM short_renders "
                     f"WHERE status='{status}' AND started_at IS NOT NULL "
                     "AND started_at < ? AND COALESCE(attempts, 0) >= ?",
                     (cutoff, cap),
@@ -2355,9 +2364,9 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                     (give_up_msg, now, cutoff, cap),
                 )
                 total += cur.rowcount
-                gave_up.extend((row[0], status) for row in give_up_rows)
+                gave_up.extend((row["id"], status) for row in give_up_rows)
                 revive_rows = c.execute(
-                    "SELECT id, COALESCE(attempts, 0) FROM short_renders "
+                    "SELECT id, COALESCE(attempts, 0) AS attempts FROM short_renders "
                     f"WHERE status='{status}' AND started_at IS NOT NULL "
                     "AND started_at < ? AND COALESCE(attempts, 0) < ?",
                     (cutoff, cap),
@@ -2370,7 +2379,7 @@ def reap_stale_short_renders(generating_after_s: int, rendering_after_s: int) ->
                     (cutoff, cap),
                 )
                 total += cur.rowcount
-                revived.extend((row[0], status, int(row[1])) for row in revive_rows)
+                revived.extend((row["id"], status, int(row["attempts"])) for row in revive_rows)
     # Per-row timeline events so the admin sees a stuck row come unstuck. Done
     # outside the transaction so a logging hiccup doesn't roll back the reset
     # itself; log_short_render_event already fire-and-swallows.
@@ -3938,13 +3947,18 @@ def claim_finisher_job() -> dict | None:
     is idle. The /api/run_hero_thumbnail_finisher cron calls this per
     tick. Postgres path uses FOR UPDATE SKIP LOCKED so concurrent crons
     can't double-claim; SQLite uses a conditional UPDATE with a single
-    short_renders lookup since SKIP LOCKED is a no-op there."""
+    short_renders lookup since SKIP LOCKED is a no-op there.
+
+    Stamps finisher_claimed_at so reap_stale_finisher_jobs can tell a
+    live claim from one whose function died (2026-07-05 crash recovery)."""
     cols = ", ".join(f"j.{c}" for c in _STORY_JOB_COLUMNS)
+    now = _now_iso()
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"UPDATE story_jobs SET finisher_status='running' "
+                    f"UPDATE story_jobs SET finisher_status='running', "
+                    "finisher_claimed_at=%s "
                     "WHERE id = ("
                     f"  SELECT j.id FROM story_jobs j "
                     "   JOIN short_renders s ON s.story_id = j.story_id "
@@ -3955,6 +3969,7 @@ def claim_finisher_job() -> dict | None:
                     "   FOR UPDATE SKIP LOCKED"
                     ") "
                     f"RETURNING {cols.replace('j.', '')}",
+                    (now,),
                 )
                 row = cur.fetchone()
             conn.commit()
@@ -3971,9 +3986,10 @@ def claim_finisher_job() -> dict | None:
         if not candidate:
             return None
         c.execute(
-            "UPDATE story_jobs SET finisher_status='running' "
+            "UPDATE story_jobs SET finisher_status='running', "
+            "finisher_claimed_at=? "
             "WHERE id=? AND finisher_status='pending'",
-            (candidate["id"],),
+            (now, candidate["id"]),
         )
         if c.total_changes == 0:
             return None
@@ -3987,23 +4003,27 @@ def claim_finisher_job() -> dict | None:
 def set_finisher_status(job_id: str, status: str) -> None:
     """Terminal-state writer for the finisher cron. `status` is one of
     'done' / 'failed' — the cron writes 'done' after the i2i loop lands
-    and 'failed' on an unrecoverable error. Unconditional so a row in
-    any current state is updated (the cron is the only writer of these
-    terminal values after `claim_finisher_job` flipped it to 'running')."""
+    and 'failed' on an unrecoverable error. Conditional on the row still
+    being 'running' (2026-07-05, was unconditional): the cron's worker
+    thread can outlive its DEADLINE_S timeout, and a frozen instance can
+    thaw and resume, so an orphaned late write must not clobber a row an
+    admin cancelled or the reaper already requeued/failed."""
     if status not in {"done", "failed"}:
         raise ValueError(f"set_finisher_status: invalid status {status!r}")
     if _is_postgres():
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE story_jobs SET finisher_status=%s WHERE id=%s",
+                    "UPDATE story_jobs SET finisher_status=%s "
+                    "WHERE id=%s AND finisher_status='running'",
                     (status, job_id),
                 )
             conn.commit()
         return
     with _sqlite_conn() as c:
         c.execute(
-            "UPDATE story_jobs SET finisher_status=? WHERE id=?",
+            "UPDATE story_jobs SET finisher_status=? "
+            "WHERE id=? AND finisher_status='running'",
             (status, job_id),
         )
 
@@ -4022,6 +4042,242 @@ def count_pending_finisher_jobs() -> int:
     with _sqlite_conn() as c:
         row = c.execute(sql).fetchone()
         return int(row["n"]) if row else 0
+
+
+# Hard ceiling on how many times a dead finisher claim will be revived
+# (by the reaper or the cron's in-process timeout) before the job is
+# marked 'failed'. Each attempt costs 5 paid i2i calls, so the cap bounds
+# worst-case spend at MAX_FINISHER_ATTEMPTS + 1 runs per job. Mirrors
+# MAX_SHORT_RENDER_ATTEMPTS.
+MAX_FINISHER_ATTEMPTS = 1
+
+# WHERE fragment shared by the reaper and the timeout helper: a claim is
+# dead when its stamp predates the cutoff, or when it has no stamp at all
+# — every post-2026-07-05 claim stamps finisher_claimed_at, so NULL on a
+# 'running' row means it was claimed before the column existed and its
+# function is long gone (that exact zombie held story 1kg8vng for 4h).
+_STALE_FINISHER_WHERE = (
+    "finisher_status='running' "
+    "AND (finisher_claimed_at IS NULL OR finisher_claimed_at < {ph})"
+)
+
+
+def reap_stale_finisher_jobs(stale_after_s: int) -> int:
+    """Crash recovery for the hero+thumbnail finisher lane, mirroring
+    reap_stale_short_renders. A finisher whose function was SIGKILLed
+    (Vercel's 800s ceiling) leaves finisher_status='running' forever —
+    the except path that writes 'failed' never ran. Rows whose
+    finisher_claimed_at is older than `stale_after_s` (or NULL, see
+    _STALE_FINISHER_WHERE) are revived to 'pending' so the next tick
+    re-claims them, or marked 'failed' once they exhaust
+    MAX_FINISHER_ATTEMPTS. Returns the number of rows acted on
+    (revived + given up); safe to call on every tick."""
+    import datetime
+    cutoff = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(seconds=stale_after_s)
+    ).isoformat()
+    cap = MAX_FINISHER_ATTEMPTS
+    give_up_msg = (
+        f"finisher claim dead and max attempts ({cap}) exhausted; giving up"
+    )
+    gave_up: list[tuple[str, str, int]] = []
+    revived: list[tuple[str, str, int]] = []
+    # Same select-then-update split as reap_stale_short_renders: the ids
+    # feed per-row timeline events, and the drain ticks serialize via the
+    # cron schedule so the split adds no real race risk.
+    if _is_postgres():
+        where = _STALE_FINISHER_WHERE.format(ph="%s")
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, reddit_id, COALESCE(finisher_attempts, 0) AS attempts "
+                    f"FROM story_jobs WHERE {where} "
+                    "AND COALESCE(finisher_attempts, 0) >= %s",
+                    (cutoff, cap),
+                )
+                gave_up = [
+                    (r["id"], r["reddit_id"], int(r["attempts"]))
+                    for r in cur.fetchall()
+                ]
+                cur.execute(
+                    f"UPDATE story_jobs SET finisher_status='failed' "
+                    f"WHERE {where} AND COALESCE(finisher_attempts, 0) >= %s",
+                    (cutoff, cap),
+                )
+                cur.execute(
+                    "SELECT id, reddit_id, COALESCE(finisher_attempts, 0) AS attempts "
+                    f"FROM story_jobs WHERE {where} "
+                    "AND COALESCE(finisher_attempts, 0) < %s",
+                    (cutoff, cap),
+                )
+                revived = [
+                    (r["id"], r["reddit_id"], int(r["attempts"]))
+                    for r in cur.fetchall()
+                ]
+                cur.execute(
+                    "UPDATE story_jobs SET finisher_status='pending', "
+                    "finisher_claimed_at=NULL, "
+                    "finisher_attempts=COALESCE(finisher_attempts, 0) + 1 "
+                    f"WHERE {where} AND COALESCE(finisher_attempts, 0) < %s",
+                    (cutoff, cap),
+                )
+            conn.commit()
+    else:
+        where = _STALE_FINISHER_WHERE.format(ph="?")
+        with _sqlite_conn() as c:
+            gave_up = [
+                (r["id"], r["reddit_id"], int(r["attempts"]))
+                for r in c.execute(
+                    "SELECT id, reddit_id, COALESCE(finisher_attempts, 0) AS attempts "
+                    f"FROM story_jobs WHERE {where} "
+                    "AND COALESCE(finisher_attempts, 0) >= ?",
+                    (cutoff, cap),
+                ).fetchall()
+            ]
+            c.execute(
+                f"UPDATE story_jobs SET finisher_status='failed' "
+                f"WHERE {where} AND COALESCE(finisher_attempts, 0) >= ?",
+                (cutoff, cap),
+            )
+            revived = [
+                (r["id"], r["reddit_id"], int(r["attempts"]))
+                for r in c.execute(
+                    "SELECT id, reddit_id, COALESCE(finisher_attempts, 0) AS attempts "
+                    f"FROM story_jobs WHERE {where} "
+                    "AND COALESCE(finisher_attempts, 0) < ?",
+                    (cutoff, cap),
+                ).fetchall()
+            ]
+            c.execute(
+                "UPDATE story_jobs SET finisher_status='pending', "
+                "finisher_claimed_at=NULL, "
+                "finisher_attempts=COALESCE(finisher_attempts, 0) + 1 "
+                f"WHERE {where} AND COALESCE(finisher_attempts, 0) < ?",
+                (cutoff, cap),
+            )
+    # Per-row timeline events outside the transaction, matching the
+    # short-render reaper: a logging hiccup must not roll back the reset.
+    for job_id, reddit_id, attempts in gave_up:
+        try:
+            log_story_job_event(
+                job_id, reddit_id, "finisher_reaper_gave_up",
+                level="error",
+                message=give_up_msg,
+                payload={"attempts": attempts, "attempts_cap": cap},
+            )
+        except Exception:
+            pass
+    for job_id, reddit_id, attempts in revived:
+        try:
+            log_story_job_event(
+                job_id, reddit_id, "finisher_reaper_revived",
+                level="warn",
+                message="Finisher claim dead; requeued for a fresh attempt",
+                payload={
+                    "previous_attempts": attempts,
+                    "new_attempts": attempts + 1,
+                },
+            )
+        except Exception:
+            pass
+    return len(gave_up) + len(revived)
+
+
+def requeue_or_fail_timed_out_finisher(job_id: str) -> str | None:
+    """Single-row twin of reap_stale_finisher_jobs for the cron's
+    in-process DEADLINE_S timeout: unlike the SIGKILL case the function
+    is still alive, so it settles its own row instead of leaving a
+    zombie for the 30-minute reaper. Under MAX_FINISHER_ATTEMPTS the row
+    goes back to 'pending' (attempts+1, claimed_at cleared); at the cap
+    it goes to 'failed'. Conditional on finisher_status='running' — an
+    admin may have cancelled the run mid-flight. Returns 'requeued' |
+    'failed' | None (row missing or no longer running)."""
+    cap = MAX_FINISHER_ATTEMPTS
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT reddit_id, COALESCE(finisher_attempts, 0) AS attempts "
+                    "FROM story_jobs "
+                    "WHERE id=%s AND finisher_status='running'",
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    conn.commit()
+                    return None
+                reddit_id, attempts = row["reddit_id"], int(row["attempts"])
+                if attempts >= cap:
+                    cur.execute(
+                        "UPDATE story_jobs SET finisher_status='failed' "
+                        "WHERE id=%s AND finisher_status='running'",
+                        (job_id,),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE story_jobs SET finisher_status='pending', "
+                        "finisher_claimed_at=NULL, "
+                        "finisher_attempts=COALESCE(finisher_attempts, 0) + 1 "
+                        "WHERE id=%s AND finisher_status='running'",
+                        (job_id,),
+                    )
+                changed = cur.rowcount
+            conn.commit()
+    else:
+        with _sqlite_conn() as c:
+            row = c.execute(
+                "SELECT reddit_id, COALESCE(finisher_attempts, 0) AS attempts "
+                "FROM story_jobs "
+                "WHERE id=? AND finisher_status='running'",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                return None
+            reddit_id, attempts = row["reddit_id"], int(row["attempts"])
+            if attempts >= cap:
+                cur = c.execute(
+                    "UPDATE story_jobs SET finisher_status='failed' "
+                    "WHERE id=? AND finisher_status='running'",
+                    (job_id,),
+                )
+            else:
+                cur = c.execute(
+                    "UPDATE story_jobs SET finisher_status='pending', "
+                    "finisher_claimed_at=NULL, "
+                    "finisher_attempts=COALESCE(finisher_attempts, 0) + 1 "
+                    "WHERE id=? AND finisher_status='running'",
+                    (job_id,),
+                )
+            changed = cur.rowcount
+    if not changed:
+        # Race-lost against an admin cancel between select and update.
+        return None
+    outcome = "failed" if attempts >= cap else "requeued"
+    try:
+        if outcome == "failed":
+            log_story_job_event(
+                job_id, reddit_id, "finisher_timeout_gave_up",
+                level="error",
+                message=(
+                    f"Finisher timed out and max attempts ({cap}) "
+                    "exhausted; giving up"
+                ),
+                payload={"attempts": attempts, "attempts_cap": cap},
+            )
+        else:
+            log_story_job_event(
+                job_id, reddit_id, "finisher_timeout_requeued",
+                level="warn",
+                message="Finisher timed out; requeued for a fresh attempt",
+                payload={
+                    "previous_attempts": attempts,
+                    "new_attempts": attempts + 1,
+                },
+            )
+    except Exception:
+        pass
+    return outcome
 
 
 def request_story_job_auto_publish(job_id: str) -> None:

@@ -138,17 +138,21 @@ export async function listUnifiedRuns(
         ORDER BY requested_at DESC LIMIT ${PER_KIND_CAP}`,
       [cutoff],
     ),
-    // Finisher runs piggyback on story_jobs rows. There is no dedicated
-    // finisher timestamp, so "recently settled" approximates with the
-    // job's finished_at — good enough for a 15-minute live window.
+    // Finisher runs piggyback on story_jobs rows. finisher_claimed_at
+    // (2026-07-05 crash recovery) is when the cron claimed the row —
+    // the closest thing to a start time. "Recently settled" still
+    // approximates with the job's finished_at — good enough for a
+    // 15-minute live window.
     all<{
       id: string;
       story_id: string | null;
       finisher_status: string;
+      finisher_claimed_at: string | null;
       requested_at: string;
       finished_at: string | null;
     }>(
-      `SELECT id, story_id, finisher_status, requested_at, finished_at
+      `SELECT id, story_id, finisher_status, finisher_claimed_at,
+              requested_at, finished_at
          FROM story_jobs
         WHERE finisher_status IN ('pending','running')
            OR (finisher_status IN ('done','failed')
@@ -220,7 +224,7 @@ export async function listUnifiedRuns(
       status: normalize(r.finisher_status, ["running"]),
       progress: null,
       requestedAt: r.requested_at,
-      startedAt: null,
+      startedAt: r.finisher_claimed_at,
       finishedAt: r.finished_at,
       error: null,
     })),
