@@ -680,6 +680,14 @@ export const STORY_JOBS: Table = {
     // Splitting this stage off keeps every Vercel function under the
     // 800s ceiling.
     { name: "finisher_status", type: "TEXT" },
+    // 2026-07-05 finisher crash recovery (_plans/2026-07-05-finisher-
+    // stale-running-recovery.md). claimed_at is stamped by the Python
+    // claim so reap_stale_finisher_jobs can spot a 'running' row whose
+    // function died; attempts counts reaper/timeout revives. This
+    // ADD COLUMN path emits no DEFAULT, so read attempts with
+    // COALESCE(attempts, 0) — same convention as SHORT_RENDERS.attempts.
+    { name: "finisher_claimed_at", type: "TEXT" },
+    { name: "finisher_attempts", type: "INTEGER" },
   ],
 };
 
