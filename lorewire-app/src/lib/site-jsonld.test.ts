@@ -55,7 +55,17 @@ describe("buildSiteJsonLd", () => {
     expect(org.name).toBe("LoreWire");
   });
 
+  it("falls back to the built-in /logo.png when no logo URL is set", () => {
+    const [org] = buildSiteJsonLd(
+      seo({ organizationLogoUrl: "" }),
+      "https://www.lorewire.com",
+    );
+    expect(org.logo).toBe("https://www.lorewire.com/logo.png");
+  });
+
   it("drops url/logo/sameAs when unset instead of emitting empties", () => {
+    // No origin -> even the built-in logo fallback is skipped (JSON-LD
+    // needs absolute URLs).
     const [org, site] = buildSiteJsonLd(
       seo({ organizationLogoUrl: "", organizationSameAs: [] }),
       "",

@@ -19,7 +19,11 @@ import type { Metadata } from "next";
 import AppShell from "@/components/AppShell";
 import ImpersonationBanner from "@/components/ImpersonationBanner";
 import { loadHomepageSSRData } from "@/lib/homepage-data";
-import { getSiteSeo } from "@/lib/site-seo";
+import {
+  fallbackBrandAsset,
+  getSiteSeo,
+  resolveSiteOrigin,
+} from "@/lib/site-seo";
 
 interface PageProps {
   searchParams: Promise<{ story?: string; tab?: string; c?: string }>;
@@ -32,7 +36,13 @@ interface PageProps {
 // no share preview.
 export async function generateMetadata(): Promise<Metadata> {
   const seo = await getSiteSeo();
-  const image = seo.defaultOgImage || undefined;
+  // Admin-set OG image first, else the built-in /public/og.png brand
+  // card — a share should never render without a preview image.
+  const image = fallbackBrandAsset(
+    seo.defaultOgImage,
+    resolveSiteOrigin(seo.siteUrl),
+    "/og.png",
+  );
   return {
     // homeTitle already carries the brand, so it bypasses the layout's
     // title.template via `absolute` — a string title would get the brand
