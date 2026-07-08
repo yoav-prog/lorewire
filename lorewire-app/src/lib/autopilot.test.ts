@@ -1,6 +1,7 @@
 // Tests for Autopilot: the pull gates (mode, queue-empty, daily limit,
-// headroom, STRONG-only selection), the approve tick (safety hold, the
-// human-approve path reuse, idempotent skip), and the circuit breaker.
+// headroom, min-strength selection, autonomous mode), the approve tick
+// (safety hold, the human-approve path reuse, idempotent skip), and the
+// circuit breaker.
 // publishStoryIfReady, the LLM judge, and the alert email are mocked;
 // everything else runs against the real store like the other scheduler
 // tests.
@@ -29,6 +30,7 @@ import {
   countAutopilotPullsToday,
   countHumanReviewDepth,
   getAutopilotDailyLimit,
+  getAutopilotMinStrength,
   getAutopilotMode,
   runAutopilotApprove,
   runAutopilotPull,
@@ -115,10 +117,12 @@ function publishSucceeds() {
 describe("setting readers", () => {
   beforeEach(clear);
 
-  it("mode defaults off; unknown values read as off", async () => {
+  it("mode defaults off; parses autonomous; unknown values read as off", async () => {
     expect(await getAutopilotMode()).toBe("off");
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
     expect(await getAutopilotMode()).toBe("shadow");
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    expect(await getAutopilotMode()).toBe("autonomous");
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "banana");
     expect(await getAutopilotMode()).toBe("off");
   });
@@ -129,6 +133,16 @@ describe("setting readers", () => {
     expect(await getAutopilotDailyLimit()).toBe(AUTOPILOT_DEFAULTS.dailyLimit);
     await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
     expect(await getAutopilotDailyLimit()).toBe(5);
+  });
+
+  it("min_strength defaults to strong; parses medium/none; rejects nonsense", async () => {
+    expect(await getAutopilotMinStrength()).toBe("strong");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "medium");
+    expect(await getAutopilotMinStrength()).toBe("medium");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "none");
+    expect(await getAutopilotMinStrength()).toBe("none");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "banana");
+    expect(await getAutopilotMinStrength()).toBe("strong");
   });
 });
 
@@ -219,6 +233,82 @@ describe("runAutopilotPull", () => {
     const r = await runAutopilotPull(NOW);
     expect(r.reason).toBe("no_candidates");
   });
+
+  it("min_strength widens the pool: medium is eligible when set to medium", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "medium");
+    await insertSource("medium-1", { strength: "medium" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
+    const jobs = await all<{ reddit_id: string }>(
+      "SELECT reddit_id FROM story_jobs",
+      [],
+    );
+    expect(jobs[0].reddit_id).toBe("medium-1");
+  });
+
+  it("autonomous pulls past a non-empty human review queue", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // A manual (non-autopilot) story sits in review — this blocks shadow/live
+    // with reason 'queue_not_empty' but must NOT block autonomous.
+    await insertReviewStory("human-1");
+    await insertSource("s1", { strength: "strong" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
+  });
+
+  it("autonomous headroom ignores a manual backlog over the cap", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting("render.review_queue_cap", "1");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // Two manual review items — total review (2) exceeds the cap (1), which
+    // would trip 'no_headroom' in live. Autonomous scopes headroom to its
+    // OWN footprint (zero here), so it still pulls.
+    await insertReviewStory("human-1");
+    await insertReviewStory("human-2");
+    await insertSource("s1", { strength: "strong" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
+  });
+
+  it("autonomous still respects its OWN review cap (held/in-review footprint)", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting("render.review_queue_cap", "1");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // An autopilot-owned story already in review fills autopilot's own cap.
+    await insertReviewStory("auto-1");
+    await insertJob("j1", { storyId: "auto-1" });
+    await insertSource("s1", { strength: "strong" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("no_headroom");
+  });
+
+  // The owner's exact ask (2026-07-08): fully hands-off, 10/day, all
+  // sources, publishing past whatever sits in the manual review queue.
+  it("owner scenario: autonomous + all tiers + 10/day pulls the whole pool past a manual backlog", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "10");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "none"); // all tiers
+    await insertReviewStory("human-backlog"); // would block live/shadow
+    await insertSource("strong-1", { strength: "strong" });
+    await insertSource("strong-2", { strength: "strong" });
+    await insertSource("medium-1", { strength: "medium" });
+    await insertSource("weak-1", { strength: "none" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(4); // every eligible source, all tiers
+    const jobs = await all<{ requested_by: string }>(
+      "SELECT requested_by FROM story_jobs",
+      [],
+    );
+    expect(jobs).toHaveLength(4);
+    expect(jobs.every((j) => j.requested_by === AUTOPILOT_REQUESTED_BY)).toBe(true);
+  });
 });
 
 describe("screenStoryForAutopilot", () => {
@@ -252,12 +342,22 @@ describe("runAutopilotApprove", () => {
     await insertJob(`job-${n}`, { redditId: `r-${n}`, storyId: `story-${n}` });
   }
 
-  it("does nothing outside live mode", async () => {
+  it("does nothing in shadow/off mode", async () => {
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
     await seedCandidate(1);
     const r = await runAutopilotApprove(NOW);
     expect(r.reason).toBe("not_live");
     expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+  });
+
+  it("publishes in autonomous mode too", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+    const r = await runAutopilotApprove(NOW);
+    expect(r.approved).toBe(1);
+    expect(vi.mocked(publishStoryIfReady)).toHaveBeenCalledWith("r-1");
   });
 
   it("publishes a safe story through the human-approve path and logs it", async () => {

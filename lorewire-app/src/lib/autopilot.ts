@@ -1,28 +1,35 @@
 // Autopilot: the hands-off lane of the scheduler.
 //
-// When the HUMAN review queue is empty (nothing a person is expected to
-// look at), autopilot pulls STRONG-only Reddit sources up to a daily
-// limit, lets the normal pipeline render them, and — in live mode —
-// approves the finished stories through the exact same
-// publishStoryIfReady() + scheduleStoryPublish() path a human Approve
-// uses. One publish path: slots, caps, and dedup all still apply.
+// Autopilot pulls eligible Reddit sources (tier configurable via
+// autopilot.min_strength, default STRONG) up to a daily limit, lets the
+// normal pipeline render them, and — in live/autonomous mode — approves
+// the finished stories through the exact same publishStoryIfReady() +
+// scheduleStoryPublish() path a human Approve uses. One publish path:
+// slots, caps, and dedup all still apply.
 //
 // Trust is earned in stages:
-//   off    — nothing happens (default).
-//   shadow — autopilot pulls and renders, but every story stops in the
-//            review queue tagged "autopilot" so a human can eyeball a
-//            week of what WOULD have been published.
-//   live   — a safety judge screens each rendered story; clean ones
-//            publish, doubtful ones hold in review for a human.
+//   off        — nothing happens (default).
+//   shadow     — autopilot pulls and renders, but every story stops in
+//                the review queue tagged "autopilot" so a human can
+//                eyeball a week of what WOULD have been published.
+//   live       — a safety judge screens each rendered story; clean ones
+//                publish, doubtful ones hold in review for a human. Pulls
+//                only when the human review queue is empty (a fallback,
+//                not a firehose — manual curation stays primary).
+//   autonomous — same as live but runs continuously: it does NOT wait for
+//                the human queue to empty, and bounds only its own review
+//                footprint. Fully hands-off (owner choice, 2026-07-08).
+//                The judge still screens every story; doubtful ones hold.
 //
-// STRONG is a triage tier, not a safety gate (it ranks source potential
-// for a human who was going to read the story anyway), so live mode
-// never publishes on tier alone: the judge screens the actual generated
-// story, and any judge failure fails closed to a human. A circuit
-// breaker flips autopilot off after consecutive publish failures and
-// emails the admin — nobody is awake to notice a 3am log line.
+// Source strength is a triage/volume tier, not a safety gate (it ranks
+// source potential for a human who was going to read the story anyway),
+// so no mode publishes on tier alone: the judge screens the actual
+// generated story, and any judge failure fails closed to a human. A
+// circuit breaker flips autopilot off after consecutive publish failures
+// and emails the admin — nobody is awake to notice a 3am log line.
 //
-// Plan: _plans/2026-07-02-scheduler-autopilot-and-flexible-slots.md.
+// Plans: _plans/2026-07-02-scheduler-autopilot-and-flexible-slots.md,
+// _plans/2026-07-08-autopilot-autonomous-mode.md.
 
 import "server-only";
 
@@ -30,10 +37,14 @@ import { all, one } from "@/lib/db";
 import { getSetting, setSetting } from "@/lib/repo";
 import { getBudgetSummary } from "@/lib/story-jobs-budget";
 import { bulkEnqueueStoryJobs, countPendingStoryJobs } from "@/lib/story-jobs";
-import { getReviewQueueCap, selectRenderCandidates } from "@/lib/render-scheduler";
+import {
+  countStoriesInReview,
+  getReviewQueueCap,
+  selectRenderCandidates,
+} from "@/lib/render-scheduler";
 import { publishStoryIfReady } from "@/lib/auto-publish";
 import { logSchedulerDecision, scheduleStoryPublish } from "@/lib/publish-scheduler";
-import { getRedditSource } from "@/lib/reddit-source";
+import { getRedditSource, type RedditSourceStrength } from "@/lib/reddit-source";
 import { chatCompletion } from "@/lib/llm";
 import { sendBrevoEmail } from "@/lib/email";
 
@@ -45,6 +56,10 @@ export const AUTOPILOT_SETTING_KEYS = {
   /** Max sources autopilot pulls per UTC day. Default 1: unattended
    *  publishing earns trust one post at a time. */
   dailyLimit: "autopilot.daily_limit",
+  /** Minimum source strength autopilot will pull: "strong" (default),
+   *  "medium", or "none" (all). Widening trades quality for volume; the
+   *  safety judge screens every story regardless of tier. */
+  minStrength: "autopilot.min_strength",
   /** Where the circuit-breaker alert email goes. Blank = log only. */
   alertEmail: "autopilot.alert_email",
   /** Internal: consecutive publish failures. The breaker trips at the
@@ -64,13 +79,13 @@ export const AUTOPILOT_DEFAULTS = {
  *  empty-queue gate, provenance). */
 export const AUTOPILOT_REQUESTED_BY = "autopilot";
 
-export type AutopilotMode = "off" | "shadow" | "live";
+export type AutopilotMode = "off" | "shadow" | "live" | "autonomous";
 
 // ---- setting readers ---------------------------------------------------
 
 export async function getAutopilotMode(): Promise<AutopilotMode> {
   const raw = (await getSetting(AUTOPILOT_SETTING_KEYS.mode))?.trim().toLowerCase();
-  if (raw === "shadow" || raw === "live") return raw;
+  if (raw === "shadow" || raw === "live" || raw === "autonomous") return raw;
   return "off";
 }
 
@@ -84,6 +99,20 @@ export async function getAutopilotDailyLimit(): Promise<number> {
 export async function getAutopilotAlertEmail(): Promise<string | null> {
   const raw = (await getSetting(AUTOPILOT_SETTING_KEYS.alertEmail))?.trim();
   return raw && raw.includes("@") ? raw : null;
+}
+
+/** Minimum source strength autopilot will pull, defaulting to "strong"
+ *  (the original councilled 2026-07-02 behaviour). Widening to "medium"
+ *  or "none" (all) is an explicit admin choice; an unknown stored value
+ *  falls back to "strong" rather than silently widening the pool. Tier is
+ *  a volume/quality dial — the safety judge screens every rendered story
+ *  regardless of tier, so widening does not weaken the safety gate. */
+export async function getAutopilotMinStrength(): Promise<RedditSourceStrength> {
+  const raw = (await getSetting(AUTOPILOT_SETTING_KEYS.minStrength))
+    ?.trim()
+    .toLowerCase();
+  if (raw === "none" || raw === "medium" || raw === "strong") return raw;
+  return "strong";
 }
 
 // ---- queue reads -------------------------------------------------------
@@ -122,6 +151,19 @@ export async function countAutopilotPullsToday(
   return Number(row?.n ?? 0);
 }
 
+/** Autopilot's own in-flight jobs (queued or processing). Used only by
+ *  the autonomous-mode headroom calc, which bounds autopilot's OWN review
+ *  footprint rather than total review depth — a manual backlog must not
+ *  starve the autonomous lane. */
+export async function countAutopilotInFlight(): Promise<number> {
+  const row = await one<{ n: number | string }>(
+    `SELECT count(*) AS n FROM story_jobs
+     WHERE requested_by = ? AND status IN ('queued', 'processing')`,
+    [AUTOPILOT_REQUESTED_BY],
+  );
+  return Number(row?.n ?? 0);
+}
+
 // ---- the pull tick -----------------------------------------------------
 
 export type AutopilotPullReason =
@@ -143,11 +185,11 @@ export interface AutopilotPullResult {
 }
 
 /**
- * One pull tick. Runs in shadow AND live (shadow is the same intake with
- * the approve step withheld). Gates, in order: mode, budget, human queue
- * must be empty, daily limit, review headroom (autopilot must not
- * overflow the review cap with held/shadow items), STRONG candidates
- * available. Everything defaults closed.
+ * One pull tick. Runs in shadow, live, and autonomous. Gates, in order:
+ * mode, budget, human queue empty (SKIPPED in autonomous), daily limit,
+ * review headroom (total review depth in shadow/live; autopilot-only
+ * footprint in autonomous), eligible candidates at or above
+ * autopilot.min_strength. Everything defaults closed.
  */
 export async function runAutopilotPull(
   nowMs: number = Date.now(),
@@ -166,7 +208,11 @@ export async function runAutopilotPull(
   if (budget.exhausted) {
     return { enqueued: 0, reason: "budget_exhausted", ...base };
   }
-  if (humanReviewDepth > 0) {
+  // The empty-queue gate is the "fallback, not a firehose" rule for
+  // shadow/live: autopilot waits until the human's plate is clear.
+  // Autonomous drops it on purpose — it runs continuously and publishes
+  // past a non-empty review queue (owner choice, 2026-07-08).
+  if (mode !== "autonomous" && humanReviewDepth > 0) {
     return { enqueued: 0, reason: "queue_not_empty", ...base };
   }
   const remaining = dailyLimit - usedToday;
@@ -174,25 +220,38 @@ export async function runAutopilotPull(
     return { enqueued: 0, reason: "daily_limit_reached", ...base };
   }
 
-  // Review headroom: total review depth (including autopilot's own held
-  // or shadow items) plus in-flight jobs must stay under the review cap.
-  const [reviewCap, totalInReview, inFlight] = await Promise.all([
-    getReviewQueueCap(),
-    one<{ n: number | string }>(
-      "SELECT count(*) AS n FROM stories WHERE status = 'review'",
-      [],
-    ).then((r) => Number(r?.n ?? 0)),
-    countPendingStoryJobs(),
-  ]);
-  const headroom = Math.max(0, reviewCap - totalInReview - inFlight);
+  // Review headroom. Shadow/live bound TOTAL review depth so autopilot's
+  // held/shadow items can't push the human queue past its cap. Autonomous
+  // bypasses the human queue on purpose, so it bounds only its OWN
+  // footprint (autopilot's held/in-review stories + its in-flight jobs);
+  // a manual backlog must not starve it. Daily limit + budget stay the
+  // primary volume bounds.
+  const reviewCap = await getReviewQueueCap();
+  let headroom: number;
+  if (mode === "autonomous") {
+    const [totalInReview, autopilotInFlight] = await Promise.all([
+      countStoriesInReview(),
+      countAutopilotInFlight(),
+    ]);
+    const autopilotReviewDepth = Math.max(0, totalInReview - humanReviewDepth);
+    headroom = Math.max(0, reviewCap - autopilotReviewDepth - autopilotInFlight);
+  } else {
+    const [totalInReview, inFlight] = await Promise.all([
+      countStoriesInReview(),
+      countPendingStoryJobs(),
+    ]);
+    headroom = Math.max(0, reviewCap - totalInReview - inFlight);
+  }
   const want = Math.min(remaining, headroom);
   if (want <= 0) {
     return { enqueued: 0, reason: "no_headroom", ...base };
   }
 
-  // STRONG only, hard-coded on purpose: widening autopilot to weaker
-  // tiers is a decision to make with data, not a knob to bump.
-  const candidates = await selectRenderCandidates(want, "strong");
+  // Tier is a volume/quality dial (autopilot.min_strength), not a safety
+  // gate — the judge screens every rendered story regardless of tier.
+  // Default "strong" preserves the original councilled behaviour.
+  const minStrength = await getAutopilotMinStrength();
+  const candidates = await selectRenderCandidates(want, minStrength);
   if (candidates.length === 0) {
     return { enqueued: 0, reason: "no_candidates", ...base };
   }
@@ -380,18 +439,19 @@ async function selectApproveCandidates(): Promise<ApproveCandidate[]> {
 }
 
 /**
- * One approve tick (live mode only; shadow stops at the review queue).
- * Each candidate is screened, then pushed through the exact human-approve
- * path. Idempotent under overlapping crons: publishStoryIfReady reports
- * an already-published story as not_ready/already_published (counted as
- * skipped, not failed) and scheduleStoryPublish dedupes per (story,
- * platform) on a partial unique index.
+ * One approve tick (live and autonomous; shadow/off stop at the review
+ * queue). Each candidate is screened, then pushed through the exact
+ * human-approve path. Idempotent under overlapping crons:
+ * publishStoryIfReady reports an already-published story as
+ * not_ready/already_published (counted as skipped, not failed) and
+ * scheduleStoryPublish dedupes per (story, platform) on a partial unique
+ * index.
  */
 export async function runAutopilotApprove(
   nowMs: number = Date.now(),
 ): Promise<AutopilotApproveResult> {
   const mode = await getAutopilotMode();
-  if (mode !== "live") {
+  if (mode !== "live" && mode !== "autonomous") {
     return { reason: "not_live", approved: 0, held: 0, failed: 0, skipped: 0, tripped: false };
   }
 
@@ -591,6 +651,7 @@ export async function listRecentAutoPublishes(
 export interface AutopilotStatus {
   mode: AutopilotMode;
   dailyLimit: number;
+  minStrength: RedditSourceStrength;
   usedToday: number;
   humanReviewDepth: number;
   alertEmail: string | null;
@@ -607,21 +668,31 @@ export interface AutopilotStatus {
 export async function getAutopilotStatus(
   nowMs: number = Date.now(),
 ): Promise<AutopilotStatus> {
-  const [mode, dailyLimit, usedToday, humanReviewDepth, alertEmail, trippedAt, failures, decisions] =
-    await Promise.all([
-      getAutopilotMode(),
-      getAutopilotDailyLimit(),
-      countAutopilotPullsToday(nowMs),
-      countHumanReviewDepth(),
-      getAutopilotAlertEmail(),
-      getSetting(AUTOPILOT_SETTING_KEYS.trippedAt),
-      getConsecutiveFailures(),
-      all<{ decision: string; tier: string | null; n: number | string }>(
-        `SELECT decision, tier, count(*) AS n FROM scheduler_decisions
-         GROUP BY decision, tier`,
-        [],
-      ),
-    ]);
+  const [
+    mode,
+    dailyLimit,
+    minStrength,
+    usedToday,
+    humanReviewDepth,
+    alertEmail,
+    trippedAt,
+    failures,
+    decisions,
+  ] = await Promise.all([
+    getAutopilotMode(),
+    getAutopilotDailyLimit(),
+    getAutopilotMinStrength(),
+    countAutopilotPullsToday(nowMs),
+    countHumanReviewDepth(),
+    getAutopilotAlertEmail(),
+    getSetting(AUTOPILOT_SETTING_KEYS.trippedAt),
+    getConsecutiveFailures(),
+    all<{ decision: string; tier: string | null; n: number | string }>(
+      `SELECT decision, tier, count(*) AS n FROM scheduler_decisions
+       GROUP BY decision, tier`,
+      [],
+    ),
+  ]);
 
   let strongApproved = 0;
   let strongRejected = 0;
@@ -638,6 +709,7 @@ export async function getAutopilotStatus(
   return {
     mode,
     dailyLimit,
+    minStrength,
     usedToday,
     humanReviewDepth,
     alertEmail,

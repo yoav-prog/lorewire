@@ -287,16 +287,21 @@ export async function schedulerRetractStoryAction(
 }
 
 /**
- * Switch autopilot between off / shadow / live. Any deliberate mode
- * change also resets the circuit breaker (failure counter + trip stamp):
- * an admin turning it back on has seen the trip banner and is making a
- * fresh start, not resuming a failing run.
+ * Switch autopilot between off / shadow / live / autonomous. Any
+ * deliberate mode change also resets the circuit breaker (failure counter
+ * + trip stamp): an admin turning it back on has seen the trip banner and
+ * is making a fresh start, not resuming a failing run.
  */
 export async function setAutopilotModeAction(
   mode: AutopilotMode,
 ): Promise<{ ok: boolean; error?: string }> {
   const session = await requireCapability("settings.manage");
-  if (mode !== "off" && mode !== "shadow" && mode !== "live") {
+  if (
+    mode !== "off" &&
+    mode !== "shadow" &&
+    mode !== "live" &&
+    mode !== "autonomous"
+  ) {
     return { ok: false, error: "unknown mode" };
   }
   await setSetting(AUTOPILOT_SETTING_KEYS.mode, mode);

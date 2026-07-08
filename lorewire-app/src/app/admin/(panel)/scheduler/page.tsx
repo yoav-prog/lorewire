@@ -274,9 +274,10 @@ export default async function SchedulerPage() {
       <section className="space-y-3">
         <h2 className="font-display text-lg text-ink">Autopilot</h2>
         <p className="text-[13px] text-muted">
-          When nothing is waiting for you below, autopilot pulls the strongest
-          Reddit sources — strong tier only — renders them, and (in Live)
-          publishes them without a click. Your track record on strong sources:
+          Autopilot pulls Reddit sources at or above the strength you set below,
+          renders them, and (in Live and Autonomous) publishes them without a
+          click. Live waits until your review queue is empty; Autonomous runs
+          continuously and does not wait. Your track record on strong sources:
           approved {autopilot.strongApproved}, rejected {autopilot.strongRejected}.
         </p>
         {autopilot.trippedAt && (
@@ -297,6 +298,15 @@ export default async function SchedulerPage() {
             </p>
           )}
         </div>
+        {autopilot.mode === "autonomous" && (
+          <p className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-[12px] text-accent">
+            Autonomous is fully unattended: it publishes to the site and every
+            enabled social platform without waiting for your review, up to your
+            daily limit. Only the automated safety check stands between a
+            rendered story and going live. Keep the alert email set and check
+            &ldquo;Published by autopilot&rdquo; below regularly.
+          </p>
+        )}
         {autopilot.mode !== "off" && (
           <>
             <SettingSlider
@@ -308,6 +318,17 @@ export default async function SchedulerPage() {
               max={20}
               step={1}
               unit="/day"
+            />
+            <SettingSelect
+              settingKey={AUTOPILOT_SETTING_KEYS.minStrength}
+              label="Which sources autopilot may use"
+              hint="Wider tiers give more volume but lower average source quality. The safety check screens every story regardless of tier. 'All' includes weak and uncategorized sources."
+              initial={autopilot.minStrength}
+              options={[
+                { id: "strong", label: "Strong only" },
+                { id: "medium", label: "Strong + Medium" },
+                { id: "none", label: "All sources" },
+              ]}
             />
             <SettingText
               settingKey={AUTOPILOT_SETTING_KEYS.alertEmail}
