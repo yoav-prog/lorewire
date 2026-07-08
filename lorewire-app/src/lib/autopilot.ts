@@ -56,8 +56,8 @@ export const AUTOPILOT_SETTING_KEYS = {
   /** Max sources autopilot pulls per UTC day. Default 1: unattended
    *  publishing earns trust one post at a time. */
   dailyLimit: "autopilot.daily_limit",
-  /** Minimum source strength autopilot will pull: "strong" (default),
-   *  "medium", or "none" (all). Widening trades quality for volume; the
+  /** Minimum source strength autopilot will pull: "none" (all, default),
+   *  "medium", or "strong". Narrowing trades volume for quality; the
    *  safety judge screens every story regardless of tier. */
   minStrength: "autopilot.min_strength",
   /** Where the circuit-breaker alert email goes. Blank = log only. */
@@ -101,18 +101,22 @@ export async function getAutopilotAlertEmail(): Promise<string | null> {
   return raw && raw.includes("@") ? raw : null;
 }
 
-/** Minimum source strength autopilot will pull, defaulting to "strong"
- *  (the original councilled 2026-07-02 behaviour). Widening to "medium"
- *  or "none" (all) is an explicit admin choice; an unknown stored value
- *  falls back to "strong" rather than silently widening the pool. Tier is
- *  a volume/quality dial — the safety judge screens every rendered story
- *  regardless of tier, so widening does not weaken the safety gate. */
+/** Minimum source strength autopilot will pull, defaulting to "none"
+ *  (all tiers). The original 2026-07-02 design defaulted to "strong", but
+ *  real pools are dominated by unrated ("none") sources — in production,
+ *  ~30k of ~30.5k imported sources are unrated and essentially zero strong
+ *  sources are ever eligible — so a "strong" default silently pulled
+ *  nothing. "none" makes the setting match the data; narrowing to "medium"
+ *  or "strong" is an explicit admin choice. An unknown stored value falls
+ *  back to "none". Tier is a volume/quality dial — the safety judge screens
+ *  every rendered story regardless of tier, so the default does not weaken
+ *  the safety gate. */
 export async function getAutopilotMinStrength(): Promise<RedditSourceStrength> {
   const raw = (await getSetting(AUTOPILOT_SETTING_KEYS.minStrength))
     ?.trim()
     .toLowerCase();
   if (raw === "none" || raw === "medium" || raw === "strong") return raw;
-  return "strong";
+  return "none";
 }
 
 // ---- queue reads -------------------------------------------------------

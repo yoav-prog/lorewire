@@ -147,3 +147,19 @@ Nothing else to configure; it runs on the existing 2-min cron.
 
 - Confirm the budget cap is set for 10/day before flipping to autonomous.
 - AI-disclosure: leave off, or turn on now given the German operator?
+
+## Follow-up 2026-07-08: default tier flipped "strong" -> "none" (all)
+
+After shipping, autonomous produced `no_candidates` on the first run. A
+read-only count of the production `reddit_source` pool showed why: of
+30,555 imported sources, 30,380 are unrated ("none"), 320 medium, 209
+strong — and **zero** strong sources were currently eligible (the strong
+ones are all already used or on the legacy full_pipeline path). So the
+`min_strength="strong"` default silently matched nothing.
+
+`getAutopilotMinStrength()` now defaults to `"none"` (all tiers) so the
+setting matches real data; narrowing to medium/strong stays an explicit
+admin choice. The safety judge still screens every rendered story, so the
+default does not weaken the safety gate — it only stops the pull from
+being empty by default. Tests updated to set an explicit `strong` floor
+where they were relying on the old default.

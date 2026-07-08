@@ -135,14 +135,14 @@ describe("setting readers", () => {
     expect(await getAutopilotDailyLimit()).toBe(5);
   });
 
-  it("min_strength defaults to strong; parses medium/none; rejects nonsense", async () => {
-    expect(await getAutopilotMinStrength()).toBe("strong");
+  it("min_strength defaults to none (all); parses medium/strong; rejects nonsense", async () => {
+    expect(await getAutopilotMinStrength()).toBe("none");
     await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "medium");
     expect(await getAutopilotMinStrength()).toBe("medium");
-    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "none");
-    expect(await getAutopilotMinStrength()).toBe("none");
-    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "banana");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "strong");
     expect(await getAutopilotMinStrength()).toBe("strong");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "banana");
+    expect(await getAutopilotMinStrength()).toBe("none");
   });
 });
 
@@ -210,9 +210,10 @@ describe("runAutopilotPull", () => {
     expect(r.reason).toBe("no_headroom");
   });
 
-  it("pulls STRONG sources only, tagged as autopilot", async () => {
+  it("honours a strong floor, pulling only strong sources, tagged as autopilot", async () => {
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
     await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "strong");
     await insertSource("strong-1", { strength: "strong" });
     await insertSource("medium-1", { strength: "medium", comments: 9999 });
     const r = await runAutopilotPull(NOW);
@@ -227,11 +228,23 @@ describe("runAutopilotPull", () => {
     expect(jobs[0].requested_by).toBe(AUTOPILOT_REQUESTED_BY);
   });
 
-  it("reports no_candidates when no strong sources exist", async () => {
+  it("reports no_candidates when nothing meets an explicit strong floor", async () => {
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "strong");
     await insertSource("medium-1", { strength: "medium" });
     const r = await runAutopilotPull(NOW);
     expect(r.reason).toBe("no_candidates");
+  });
+
+  it("default tier (none) pulls an unrated source that a strong floor would skip", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // No min_strength set -> default "none". An unrated source (the bulk of
+    // a real pool) is now eligible; under the old "strong" default it was not.
+    await insertSource("unrated-1", { strength: "none" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
   });
 
   it("min_strength widens the pool: medium is eligible when set to medium", async () => {
