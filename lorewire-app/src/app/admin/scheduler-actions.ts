@@ -21,6 +21,8 @@ import { publishStoryIfReady } from "@/lib/auto-publish";
 import {
   AUTOPILOT_SETTING_KEYS,
   resetAutopilotFailures,
+  runAutopilotApprove,
+  runAutopilotPull,
   type AutopilotMode,
 } from "@/lib/autopilot";
 import { retractStory, type RetractResult } from "@/lib/retract-story";
@@ -310,6 +312,61 @@ export async function setAutopilotModeAction(
   console.info("[scheduler autopilot_mode]", { mode, actorId: session.userId });
   revalidatePath("/admin/scheduler");
   return { ok: true };
+}
+
+export interface RunAutopilotNowResult {
+  ok: boolean;
+  error?: string;
+  pull?: { reason: string; enqueued: number };
+  approve?: {
+    reason: string;
+    approved: number;
+    held: number;
+    failed: number;
+    skipped: number;
+    tripped: boolean;
+  };
+}
+
+/**
+ * Run one autopilot tick immediately from the admin: one pull then one
+ * approve — the exact pair the /api/autopilot_tick cron runs. Lets an
+ * admin kick autopilot without waiting for the 2-minute cadence, and
+ * makes it usable in local dev / preview deploys where Vercel crons do
+ * not fire. Admin-gated (settings.manage); no CRON_SECRET involved since
+ * it calls the tick functions directly rather than self-POSTing the route.
+ *
+ * The pull only ENQUEUES renders, so a fresh pull publishes nothing this
+ * tick — the approve step publishes autopilot stories that already
+ * finished rendering and passed the safety judge. All the same gates
+ * (mode, budget, headroom, judge, breaker) still apply.
+ */
+export async function runAutopilotTickNowAction(): Promise<RunAutopilotNowResult> {
+  const session = await requireCapability("settings.manage");
+  const pull = await runAutopilotPull();
+  const approve = await runAutopilotApprove();
+  console.info("[scheduler autopilot_run_now]", {
+    actorId: session.userId,
+    pull_reason: pull.reason,
+    enqueued: pull.enqueued,
+    approved: approve.approved,
+    held: approve.held,
+    failed: approve.failed,
+    tripped: approve.tripped,
+  });
+  revalidatePath("/admin/scheduler");
+  return {
+    ok: true,
+    pull: { reason: pull.reason, enqueued: pull.enqueued },
+    approve: {
+      reason: approve.reason,
+      approved: approve.approved,
+      held: approve.held,
+      failed: approve.failed,
+      skipped: approve.skipped,
+      tripped: approve.tripped,
+    },
+  };
 }
 
 /**
