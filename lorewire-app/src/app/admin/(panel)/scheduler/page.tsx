@@ -48,6 +48,7 @@ import {
   SettingToggle,
 } from "@/app/admin/(panel)/settings/_components/SettingControls";
 import { AutopilotModeSelect } from "./_components/AutopilotModeSelect";
+import { RunNowButton } from "./_components/RunNowButton";
 import { RecentAutoPublishes } from "./_components/RecentAutoPublishes";
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
@@ -291,11 +292,21 @@ export default async function SchedulerPage() {
         <div className="rounded-xl border border-line bg-surface p-4">
           <AutopilotModeSelect initialMode={autopilot.mode} />
           {autopilot.mode !== "off" && (
-            <p className="mt-3 font-mono text-[12px] text-muted">
-              {autopilot.usedToday}/{autopilot.dailyLimit} pulled today ·{" "}
-              {autopilot.autoApproved} auto-published all-time ·{" "}
-              {autopilot.autoHeld} held for you
-            </p>
+            <>
+              <p className="mt-3 font-mono text-[12px] text-muted">
+                {autopilot.usedToday}/{autopilot.dailyLimit} pulled today ·{" "}
+                {autopilot.autoApproved} auto-published all-time ·{" "}
+                {autopilot.autoHeld} held for you
+              </p>
+              <div className="mt-3 border-t border-line pt-3">
+                <RunNowButton />
+                <p className="mt-1.5 text-[11px] text-muted">
+                  Fires one tick immediately instead of waiting for the
+                  2-minute cron. Pulling renders takes a few minutes; the
+                  publish happens on a later tick once a story is ready.
+                </p>
+              </div>
+            </>
           )}
         </div>
         {autopilot.mode === "autonomous" && (
