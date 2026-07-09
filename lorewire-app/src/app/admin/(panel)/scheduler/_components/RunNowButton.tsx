@@ -35,11 +35,18 @@ function summarize(r: RunAutopilotNowResult): string {
     );
   }
   // 'not_live' just means this mode does not auto-publish (shadow/off); no
-  // need to surface publish counts then.
+  // need to surface publish counts then. Deferred (waiting on assets,
+  // retried next tick) only shows when non-zero to keep the line short.
   if (r.approve && r.approve.reason !== "not_live") {
-    parts.push(
-      `published ${r.approve.approved}, held ${r.approve.held}, failed ${r.approve.failed}`,
-    );
+    const counts = [
+      `published ${r.approve.approved}`,
+      `held ${r.approve.held}`,
+      ...(r.approve.deferred > 0
+        ? [`waiting on assets ${r.approve.deferred}`]
+        : []),
+      `failed ${r.approve.failed}`,
+    ];
+    parts.push(counts.join(", "));
   }
   if (r.approve?.tripped) parts.push("breaker tripped, autopilot is now off");
   return parts.join(" · ");

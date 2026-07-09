@@ -54,6 +54,7 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     reason: approve.reason,
     approved: approve.approved,
     held: approve.held,
+    deferred: approve.deferred,
     failed: approve.failed,
     skipped: approve.skipped,
     tripped: approve.tripped,

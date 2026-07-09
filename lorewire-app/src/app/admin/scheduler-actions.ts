@@ -322,6 +322,7 @@ export interface RunAutopilotNowResult {
     reason: string;
     approved: number;
     held: number;
+    deferred: number;
     failed: number;
     skipped: number;
     tripped: boolean;
@@ -351,6 +352,7 @@ export async function runAutopilotTickNowAction(): Promise<RunAutopilotNowResult
     enqueued: pull.enqueued,
     approved: approve.approved,
     held: approve.held,
+    deferred: approve.deferred,
     failed: approve.failed,
     tripped: approve.tripped,
   });
@@ -362,6 +364,7 @@ export async function runAutopilotTickNowAction(): Promise<RunAutopilotNowResult
       reason: approve.reason,
       approved: approve.approved,
       held: approve.held,
+      deferred: approve.deferred,
       failed: approve.failed,
       skipped: approve.skipped,
       tripped: approve.tripped,

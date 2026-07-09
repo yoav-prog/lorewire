@@ -25,11 +25,18 @@
 // source potential for a human who was going to read the story anyway),
 // so no mode publishes on tier alone: the judge screens the actual
 // generated story, and any judge failure fails closed to a human. A
-// circuit breaker flips autopilot off after consecutive publish failures
-// and emails the admin — nobody is awake to notice a 3am log line.
+// circuit breaker flips autopilot off after consecutive publish
+// EXCEPTIONS (systemic failures: DB down, network dead) and emails the
+// admin — nobody is awake to notice a 3am log line. A publish-gate
+// refusal is a per-story problem, not a systemic one: it defers a few
+// ticks (so asset backfill can land) and then holds the story for a
+// human, without ever feeding the breaker — on 2026-07-09 one degenerate
+// story retried every tick tripped the breaker and took the whole
+// autonomous lane down four minutes after its first pull.
 //
 // Plans: _plans/2026-07-02-scheduler-autopilot-and-flexible-slots.md,
-// _plans/2026-07-08-autopilot-autonomous-mode.md.
+// _plans/2026-07-08-autopilot-autonomous-mode.md,
+// _plans/2026-07-09-autopilot-gate-refusal-hold-and-degenerate-guard.md.
 
 import "server-only";
 
@@ -72,6 +79,12 @@ export const AUTOPILOT_SETTING_KEYS = {
 export const AUTOPILOT_DEFAULTS = {
   dailyLimit: 1,
   breakerThreshold: 3,
+  /** Publish-gate refusals a story gets before it is held for a human.
+   *  Below this the story stays a candidate and the next tick retries,
+   *  giving the asset-backfill crons ~8-10 minutes (2-min cadence) to
+   *  land a transiently missing thumbnail/poll. Gate refusals never
+   *  feed the breaker — one bad story must not disable autopilot. */
+  gateRefusalHoldAfter: 5,
 } as const;
 
 /** Stamped on story_jobs.requested_by for every row autopilot enqueues,
@@ -283,6 +296,7 @@ export interface AutopilotJudgeOutput {
     | "sexual"
     | "graphic_or_shocking"
     | "platform_policy_risk"
+    | "not_a_story"
     | "borderline";
   reason: string;
   confidence: number;
@@ -305,6 +319,7 @@ const JUDGE_SCHEMA = {
           "sexual",
           "graphic_or_shocking",
           "platform_policy_risk",
+          "not_a_story",
           "borderline",
         ],
       },
@@ -324,6 +339,7 @@ Hold (decision "hold") when the story:
 - is sexually explicit,
 - is gratuitously graphic or shocking (gore, cruelty presented for shock),
 - would plausibly violate mainstream platform content policies for a general audience (the videos run on all four platforms above),
+- is not actually a retellable story: placeholder or apology text about missing or unusable source material, meta-commentary about instructions or prompts found in the source, or text that only describes the absence of a story,
 - or is genuinely borderline and a reasonable person would want a human to look first.
 
 Publish (decision "publish") when it is ordinary interpersonal drama, humor, wholesome or dating/roommate stories — the site's normal fare — with none of the above. Strong emotions, arguments, and everyday conflict are the site's normal content and are fine. Profanity alone is fine.
@@ -337,13 +353,60 @@ export interface AutopilotScreenResult {
   confidence: number | null;
 }
 
+// Deterministic degenerate-generation signals, checked before the LLM
+// judge. The generator sometimes emits a meta "story" when the source has
+// no usable content ("NO STORY FOUND") or contains prompt-injection
+// instructions ("NO STORY, ONLY INSTRUCTIONS", 2026-07-09 incident). The
+// judge screens for harm, not quality, so these read as "safe" — they
+// must be caught here or they auto-publish garbage under the brand. Real
+// LoreWire bodies are article-length; 250 chars is far below any
+// legitimate story.
+const DEGENERATE_MIN_BODY_CHARS = 250;
+const DEGENERATE_TITLE_RE = /\bNO STORY\b/i;
+
+/** Reason a story is a degenerate generation (not a real story), or null
+ *  when it looks legitimate. Deterministic and cheap — no LLM call. */
+export function detectDegenerateStory(story: {
+  title: string | null;
+  body: string | null;
+}): string | null {
+  const text = (story.body ?? "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length < DEGENERATE_MIN_BODY_CHARS) {
+    return `body is ${text.length} chars — too short to be a real story`;
+  }
+  if (DEGENERATE_TITLE_RE.test(story.title ?? "")) {
+    return "title declares there is no story";
+  }
+  return null;
+}
+
 /** Screen one rendered story for unattended publishing. Fails closed:
- *  any judge outage or malformed output holds the story for a human. */
+ *  any judge outage or malformed output holds the story for a human.
+ *  Degenerate generations are held deterministically, without spending
+ *  a judge call — and without handing prompt-injection artifacts
+ *  another model to talk to. */
 export async function screenStoryForAutopilot(story: {
   id: string;
   title: string | null;
   body: string | null;
 }): Promise<AutopilotScreenResult> {
+  const degenerate = detectDegenerateStory(story);
+  if (degenerate) {
+    console.info("[autopilot safety] degenerate story held without judge", {
+      story_id: story.id,
+      reason: degenerate,
+    });
+    return {
+      safe: false,
+      category: "not_a_story",
+      reason: degenerate,
+      confidence: null,
+    };
+  }
+
   const bodyText = (story.body ?? "")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
@@ -405,6 +468,10 @@ export interface AutopilotApproveResult {
   reason: AutopilotApproveReason;
   approved: number;
   held: number;
+  /** Stories whose publish gate refused but that stay candidates for the
+   *  next tick (asset backfill may still land). Held after the
+   *  gateRefusalHoldAfter threshold. */
+  deferred: number;
   failed: number;
   skipped: number;
   /** True when this tick tripped the circuit breaker (mode is now off). */
@@ -456,16 +523,17 @@ export async function runAutopilotApprove(
 ): Promise<AutopilotApproveResult> {
   const mode = await getAutopilotMode();
   if (mode !== "live" && mode !== "autonomous") {
-    return { reason: "not_live", approved: 0, held: 0, failed: 0, skipped: 0, tripped: false };
+    return { reason: "not_live", approved: 0, held: 0, deferred: 0, failed: 0, skipped: 0, tripped: false };
   }
 
   const candidates = await selectApproveCandidates();
   if (candidates.length === 0) {
-    return { reason: "no_candidates", approved: 0, held: 0, failed: 0, skipped: 0, tripped: false };
+    return { reason: "no_candidates", approved: 0, held: 0, deferred: 0, failed: 0, skipped: 0, tripped: false };
   }
 
   let approved = 0;
   let held = 0;
+  let deferred = 0;
   let failed = 0;
   let skipped = 0;
   let tripped = false;
@@ -517,13 +585,34 @@ export async function runAutopilotApprove(
           skipped += 1; // an overlapping tick won the race; benign
           continue;
         }
-        failed += 1;
+        // A gate refusal is a per-story content/asset problem, not a
+        // systemic publish failure — it never feeds the breaker. Defer a
+        // few ticks so in-flight asset backfill can land, then hold the
+        // story for a human, which also removes it from the candidate
+        // set (before 2026-07-09 it retried forever and one bad story
+        // tripped the breaker).
+        const refusals = (await countGateRefusals(story.id)) + 1;
+        await logSchedulerDecision(
+          { storyId: story.id, decision: "auto_gate_refused", ...decisionSignals },
+          nowMs,
+        );
+        const holdNow = refusals >= AUTOPILOT_DEFAULTS.gateRefusalHoldAfter;
+        if (holdNow) {
+          held += 1;
+          await logSchedulerDecision(
+            { storyId: story.id, decision: "auto_held", ...decisionSignals },
+            nowMs,
+          );
+        } else {
+          deferred += 1;
+        }
         console.warn("[autopilot approve] publish gate refused", {
           story_id: story.id,
           reason: published.reason,
           missing: published.missing ?? [],
+          attempt: refusals,
+          held: holdNow,
         });
-        tripped = (await recordAutopilotFailure(story.id, published.reason, nowMs)) || tripped;
         continue;
       }
 
@@ -540,7 +629,19 @@ export async function runAutopilotApprove(
         story_id: story.id,
         publishEnabled: scheduled.publishEnabled,
         scheduled: scheduled.scheduled,
+        outcomes: scheduled.outcomes.map((o) => `${o.platform}:${o.status}`),
       });
+      // The story is live on the site; zero queued social posts means the
+      // master switch is off, every platform is disabled, or every slot
+      // horizon is full. Silent before 2026-07-09 — an admin expecting
+      // "auto upload to socials" got nothing and no signal why.
+      if (scheduled.scheduled === 0) {
+        console.warn("[autopilot approve] story published but ZERO social posts queued", {
+          story_id: story.id,
+          publish_enabled: scheduled.publishEnabled,
+          outcomes: scheduled.outcomes.map((o) => `${o.platform}:${o.status}`),
+        });
+      }
     } catch (e) {
       failed += 1;
       const msg = e instanceof Error ? e.message : String(e);
@@ -553,7 +654,18 @@ export async function runAutopilotApprove(
     if (tripped) break; // breaker fired: stop the batch immediately
   }
 
-  return { reason: "ok", approved, held, failed, skipped, tripped };
+  return { reason: "ok", approved, held, deferred, failed, skipped, tripped };
+}
+
+// Publish-gate refusals recorded for one story across ticks. Drives the
+// defer-then-hold ladder; the decision log doubles as the counter so no
+// new table or column is needed.
+async function countGateRefusals(storyId: string): Promise<number> {
+  const row = await one<{ n: number | string }>(
+    "SELECT count(*) AS n FROM scheduler_decisions WHERE story_id = ? AND decision = 'auto_gate_refused'",
+    [storyId],
+  );
+  return Number(row?.n ?? 0);
 }
 
 // ---- circuit breaker ---------------------------------------------------
