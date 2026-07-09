@@ -1,6 +1,7 @@
 // Tests for Autopilot: the pull gates (mode, queue-empty, daily limit,
 // headroom, min-strength selection, autonomous mode), the approve tick
-// (safety hold, the human-approve path reuse, idempotent skip), and the
+// (safety hold, the human-approve path reuse, idempotent skip, the
+// gate-refusal defer/hold ladder), the degenerate-story guard, and the
 // circuit breaker.
 // publishStoryIfReady, the LLM judge, and the alert email are mocked;
 // everything else runs against the real store like the other scheduler
@@ -29,6 +30,7 @@ import {
   AUTOPILOT_SETTING_KEYS,
   countAutopilotPullsToday,
   countHumanReviewDepth,
+  detectDegenerateStory,
   getAutopilotDailyLimit,
   getAutopilotMinStrength,
   getAutopilotMode,
@@ -39,6 +41,11 @@ import {
 
 const NOW = Date.UTC(2026, 6, 2, 12, 0);
 const NOW_ISO = new Date(NOW).toISOString();
+
+// Story-length body so fixtures clear the degenerate-generation guard
+// (real LoreWire bodies are article-length; the guard holds anything
+// under 250 stripped chars).
+const STORY_BODY = `<p>${"A roommate borrowed the car without asking and returned it with a dent. ".repeat(8).trim()}</p>`;
 
 async function clear() {
   await run("DELETE FROM stories", []);
@@ -79,7 +86,7 @@ async function insertReviewStory(
   await run(
     "INSERT INTO stories (id, reddit_id, title, body, status, created_at, updated_at) " +
       "VALUES (?, ?, ?, ?, 'review', ?, ?)",
-    [id, opts.redditId ?? null, opts.title ?? "T", opts.body ?? "<p>Body</p>", NOW_ISO, NOW_ISO],
+    [id, opts.redditId ?? null, opts.title ?? "T", opts.body ?? STORY_BODY, NOW_ISO, NOW_ISO],
   );
 }
 
@@ -329,20 +336,70 @@ describe("screenStoryForAutopilot", () => {
 
   it("passes a confident publish verdict", async () => {
     judgeSays("publish", 0.9);
-    const r = await screenStoryForAutopilot({ id: "s", title: "T", body: "<p>B</p>" });
+    const r = await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY });
     expect(r.safe).toBe(true);
   });
 
   it("holds on a hold verdict, low confidence, or judge outage", async () => {
     judgeSays("hold", 0.9);
-    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: "B" })).safe).toBe(false);
+    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY })).safe).toBe(false);
     judgeSays("publish", 0.4);
-    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: "B" })).safe).toBe(false);
+    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY })).safe).toBe(false);
     vi.mocked(chatCompletion).mockResolvedValue({
       ok: false,
       error: "down",
     } as Awaited<ReturnType<typeof chatCompletion>>);
-    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: "B" })).safe).toBe(false);
+    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY })).safe).toBe(false);
+  });
+});
+
+describe("degenerate-story guard", () => {
+  beforeEach(clear);
+
+  it("detectDegenerateStory flags a too-short body and a NO STORY title", () => {
+    // The 2026-07-09 production artifacts, verbatim shapes.
+    expect(
+      detectDegenerateStory({
+        title: "NO STORY FOUND",
+        body: "No story text was provided in the source, so there are no events, characters, outcomes, or quotes to retell.",
+      }),
+    ).toMatch(/too short/);
+    expect(
+      detectDegenerateStory({
+        title: "NO STORY, ONLY INSTRUCTIONS",
+        body: STORY_BODY, // long meta-body — the title is the tell
+      }),
+    ).toMatch(/no story/);
+    expect(detectDegenerateStory({ title: null, body: null })).toMatch(/too short/);
+    expect(detectDegenerateStory({ title: "T", body: STORY_BODY })).toBeNull();
+  });
+
+  it("screens a degenerate story as unsafe without spending a judge call", async () => {
+    const r = await screenStoryForAutopilot({
+      id: "s",
+      title: "NO STORY FOUND",
+      body: "No story text was provided.",
+    });
+    expect(r.safe).toBe(false);
+    expect(r.category).toBe("not_a_story");
+    expect(vi.mocked(chatCompletion)).not.toHaveBeenCalled();
+  });
+
+  it("approve tick holds a degenerate story: no publish, no judge, out of future ticks", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await insertSource("r-1", { strength: "strong" });
+    await insertReviewStory("story-1", {
+      redditId: "r-1",
+      title: "NO STORY FOUND",
+      body: "No story text was provided.",
+    });
+    await insertJob("job-1", { redditId: "r-1", storyId: "story-1" });
+    const first = await runAutopilotApprove(NOW);
+    expect(first.held).toBe(1);
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+    expect(vi.mocked(chatCompletion)).not.toHaveBeenCalled();
+    const second = await runAutopilotApprove(NOW);
+    expect(second.reason).toBe("no_candidates");
   });
 });
 
@@ -421,16 +478,70 @@ describe("runAutopilotApprove", () => {
     expect(r.failed).toBe(0);
   });
 
-  it("trips the breaker after consecutive failures: mode off + alert email", async () => {
-    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
+  it("defers a gate refusal without touching the breaker; the next tick retries it", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
     await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
-    for (let n = 1; n <= 3; n++) await seedCandidate(n);
+    await seedCandidate(1);
     judgeSays("publish");
     vi.mocked(publishStoryIfReady).mockResolvedValue({
       ok: false,
       reason: "not_ready",
-      missing: ["short"],
+      missing: ["thumbnail_image"],
     });
+    const r = await runAutopilotApprove(NOW);
+    expect(r.deferred).toBe(1);
+    expect(r.failed).toBe(0);
+    expect(r.tripped).toBe(false);
+    expect(await getAutopilotMode()).toBe("autonomous");
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+    const failures = await all<{ value: string }>(
+      "SELECT value FROM settings WHERE key = ?",
+      [AUTOPILOT_SETTING_KEYS.consecutiveFailures],
+    );
+    expect(failures).toEqual([]); // never written — refusals bypass the breaker
+    // Still a candidate: the next tick tries the gate again.
+    const again = await runAutopilotApprove(NOW);
+    expect(again.deferred).toBe(1);
+  });
+
+  it("holds a story for a human after the gate-refusal threshold, without tripping", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    vi.mocked(publishStoryIfReady).mockResolvedValue({
+      ok: false,
+      reason: "not_ready",
+      missing: ["thumbnail_image"],
+    });
+    for (let tick = 1; tick < AUTOPILOT_DEFAULTS.gateRefusalHoldAfter; tick++) {
+      const r = await runAutopilotApprove(NOW);
+      expect(r.deferred).toBe(1);
+      expect(r.held).toBe(0);
+    }
+    const final = await runAutopilotApprove(NOW);
+    expect(final.held).toBe(1);
+    expect(final.deferred).toBe(0);
+    expect(final.tripped).toBe(false);
+    expect(await getAutopilotMode()).toBe("autonomous");
+    const decisions = await all<{ decision: string }>(
+      "SELECT decision FROM scheduler_decisions WHERE story_id = 'story-1' ORDER BY decided_at",
+      [],
+    );
+    expect(
+      decisions.filter((d) => d.decision === "auto_gate_refused"),
+    ).toHaveLength(AUTOPILOT_DEFAULTS.gateRefusalHoldAfter);
+    expect(decisions.filter((d) => d.decision === "auto_held")).toHaveLength(1);
+    // The hold removes it from every future tick.
+    const after = await runAutopilotApprove(NOW);
+    expect(after.reason).toBe("no_candidates");
+  });
+
+  it("trips the breaker after consecutive publish EXCEPTIONS: mode off + alert email", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    for (let n = 1; n <= 3; n++) await seedCandidate(n);
+    judgeSays("publish");
+    vi.mocked(publishStoryIfReady).mockRejectedValue(new Error("db connection lost"));
     const r = await runAutopilotApprove(NOW);
     expect(r.failed).toBe(AUTOPILOT_DEFAULTS.breakerThreshold);
     expect(r.tripped).toBe(true);
