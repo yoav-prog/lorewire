@@ -24,6 +24,7 @@ import {
   getStaleHours,
   resolveRenderGate,
 } from "@/lib/render-scheduler";
+import { getRenderAutoPublishStatus } from "@/lib/render-auto-publish";
 import { getBudgetSummary, formatCents } from "@/lib/story-jobs-budget";
 import {
   AUTOPILOT_DEFAULTS,
@@ -48,6 +49,7 @@ import {
   SettingToggle,
 } from "@/app/admin/(panel)/settings/_components/SettingControls";
 import { AutopilotModeSelect } from "./_components/AutopilotModeSelect";
+import { RenderAutoPublishToggle } from "./_components/RenderAutoPublishToggle";
 import { RunNowButton } from "./_components/RunNowButton";
 import { RecentAutoPublishes } from "./_components/RecentAutoPublishes";
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
@@ -112,6 +114,7 @@ export default async function SchedulerPage() {
     staleHours,
     ttlDays,
     eligibility,
+    renderAutoPublish,
     overview,
     reviewRows,
     upcoming,
@@ -128,6 +131,7 @@ export default async function SchedulerPage() {
     getStaleHours(),
     getFreshnessTtlDays(),
     getEligibilityMinStrength(),
+    getRenderAutoPublishStatus(),
     getSchedulerOverview(),
     all<ReviewRow>(
       `SELECT id, title, category, updated_at,
@@ -232,6 +236,32 @@ export default async function SchedulerPage() {
             { id: "none", label: "All sources" },
           ]}
         />
+        <div className="rounded-xl border border-line bg-surface p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold text-ink">
+                Auto-publish when ready
+              </div>
+              <p className="mt-1 text-[12px] text-muted">
+                Publish scheduler-rendered stories automatically once their
+                assets are complete and they pass the AI safety check, with no
+                approval click. The safety check is the only gate before a story
+                goes live on the site and enabled social platforms. Only touches
+                stories the scheduler rendered, never ones you are reviewing by
+                hand. Off by default.
+              </p>
+            </div>
+            <RenderAutoPublishToggle initialOn={renderAutoPublish.enabled} />
+          </div>
+        </div>
+        {renderAutoPublish.trippedAt && (
+          <p className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-[12px] text-accent">
+            Auto-publish switched itself off on{" "}
+            {new Date(renderAutoPublish.trippedAt).toLocaleString("en-US")} after
+            repeated publish failures. Check the newest stories, then turn it
+            back on to start fresh.
+          </p>
+        )}
         <details className="rounded-xl border border-line bg-surface">
           <summary className="cursor-pointer px-4 py-3 text-[13px] font-semibold text-ink">
             Advanced backpressure

@@ -25,6 +25,11 @@ import {
   runAutopilotPull,
   type AutopilotMode,
 } from "@/lib/autopilot";
+import { RENDER_SETTING_KEYS } from "@/lib/render-scheduler";
+import {
+  RENDER_AUTOPUBLISH_SETTING_KEYS,
+  resetRenderAutoPublishFailures,
+} from "@/lib/render-auto-publish";
 import { retractStory, type RetractResult } from "@/lib/retract-story";
 import {
   PUBLISH_PLATFORMS,
@@ -310,6 +315,29 @@ export async function setAutopilotModeAction(
   await resetAutopilotFailures();
   await setSetting(AUTOPILOT_SETTING_KEYS.trippedAt, "");
   console.info("[scheduler autopilot_mode]", { mode, actorId: session.userId });
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+/**
+ * Turn render-scheduler auto-publish on/off. Enabling it also clears any
+ * prior circuit-breaker trip (failure counter + trip stamp): an admin turning
+ * it back on has seen the trip banner and is making a fresh start, not
+ * resuming a failing run. Mirrors setAutopilotModeAction's reset semantics.
+ */
+export async function setRenderAutoPublishEnabledAction(
+  enabled: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  await setSetting(RENDER_SETTING_KEYS.autoPublish, enabled ? "1" : "0");
+  if (enabled) {
+    await resetRenderAutoPublishFailures();
+    await setSetting(RENDER_AUTOPUBLISH_SETTING_KEYS.trippedAt, "");
+  }
+  console.info("[scheduler render_auto_publish]", {
+    enabled,
+    actorId: session.userId,
+  });
   revalidatePath("/admin/scheduler");
   return { ok: true };
 }
