@@ -8,10 +8,11 @@ import {
 } from "@/lib/stories";
 import { categoryVisual } from "@/lib/categories/visuals";
 import {
+  CATEGORY_ORDER,
   CategoryFilterChips,
-  filterStoriesByCategory,
   useCategoryFilter,
 } from "@/components/CategoryFilterChips";
+import { useBrowseData } from "@/components/browse/useBrowseData";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import WiresDesktop from "@/components/wires/WiresDesktop";
 // Stories rail + viewer intentionally NOT mounted on desktop — final
@@ -49,6 +50,7 @@ import {
   POLL_RAIL_TITLES,
   filterIdsByNotVoted,
   filterIdsByPublished,
+  liveRowToStory,
   pickHeroAtIndex,
   resolveHeroPool,
   resolveRailIds,
@@ -2215,55 +2217,121 @@ function GridPage({
   );
 }
 
-// Browse advertises the public catalog of real stories. The bare
-// STORIES array carries 16 sample placeholders the design was built
-// against; only entries with actual produced content (videoUrl /
-// heroImage / audioUrl / body) belong in the grid. Source is the
-// merged catalog so freshly-published live rows surface even before
-// src/data/published.ts is rebaked. Wraps GridPage so the URL-backed
-// category filter (?cat=Drama,Humor) can drive the visible set without
-// turning GridPage into a Browse-specific component.
+// Browse advertises the full public catalog of real stories. Unlike the
+// homepage rails (which read the shared 200-row in-memory catalog), Browse pages
+// the WHOLE published catalog through listBrowseStories so it never caps — the
+// old GridPage-over-catalog.array version silently stopped at ~201 titles once
+// production passed 200 stories. The URL-backed category filter (?cat=…) drives a
+// server-side WHERE so pagination counts the filtered set, and an
+// IntersectionObserver sentinel appends pages as the user scrolls. Rows loaded
+// here are lifted to the shell (onStoriesLoaded) so a story beyond the rails'
+// catalog window still opens its detail modal. Plan:
+// _plans/2026-07-14-browse-pagination.md.
+const BROWSE_PAGE_SIZE = 60;
 function BrowsePage({
-  catalog,
   onOpen,
-  resolveStory,
+  onStoriesLoaded,
 }: {
-  catalog: MergedCatalog;
   onOpen: OpenFn;
-  resolveStory: (id: string) => Story | null;
+  onStoriesLoaded: (stories: Story[]) => void;
 }) {
   const { selected, toggle, clear } = useCategoryFilter();
-  const published = catalog.array.filter(isPublishedStory);
-  const visible = filterStoriesByCategory(published, selected);
-  // eslint-disable-next-line no-console -- rule 14
+  // Stable, sorted category list (CATEGORY_ORDER order) so the pager's refetch
+  // dep is deterministic regardless of chip-click order.
+  const categories = useMemo(
+    () => CATEGORY_ORDER.filter((c) => selected.has(c)),
+    [selected],
+  );
+  const { stories: liveRows, total, loading, loadingMore, reachedEnd, loadMore } =
+    useBrowseData(BROWSE_PAGE_SIZE, categories);
+  const stories = useMemo(() => liveRows.map(liveRowToStory), [liveRows]);
+  // Lift the resolved stories up so the shell can open one that isn't in the
+  // rails' 200-row catalog (resolveStory would otherwise miss it).
+  useEffect(() => {
+    onStoriesLoaded(stories);
+  }, [stories, onStoriesLoaded]);
+
+  // Infinite scroll: fire loadMore when a sentinel near the grid's tail scrolls
+  // into view. The 600px rootMargin pre-fetches the next page before the user
+  // reaches the bottom so scrolling stays smooth. loadMore is a no-op while a
+  // fetch is in flight or the list is exhausted, so re-firing is safe.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) loadMore();
+      },
+      { rootMargin: "600px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loadMore]);
+
+  const loadedCount = stories.length;
+  const totalLabel = total ?? loadedCount;
   console.info("[browse render]", {
-    total_catalog: catalog.array.length,
-    published_count: published.length,
-    selected: Array.from(selected),
-    visible_count: visible.length,
+    loaded: loadedCount,
+    total,
+    categories,
+    reached_end: reachedEnd,
   });
-  const ids = visible.map((s) => s.id);
   const sub =
     selected.size === 0
-      ? `All true stories · ${published.length} titles`
-      : `${visible.length} of ${published.length} titles · ${Array.from(selected).join(", ")}`;
+      ? `All true stories · ${totalLabel} titles`
+      : `${loadedCount} of ${totalLabel} titles · ${categories.join(", ")}`;
+  // Slide context = the grid exactly as loaded so the modal's prev/next covers
+  // every card fetched so far; recomputed each render so a click after scrolling
+  // carries the grown id list.
+  const slide = { ids: stories.map((s) => s.id), label: "Browse" };
   return (
-    <GridPage
-      title="Browse"
-      sub={sub}
-      ids={ids}
-      onOpen={onOpen}
-      resolveStory={resolveStory}
-      belowHeader={
-        <CategoryFilterChips
-          selected={selected}
-          onToggle={toggle}
-          onClear={clear}
-          variant="desktop"
-        />
-      }
-      emptyMessage="No stories in this category yet."
-    />
+    <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
+      <div className="flex items-end justify-between gap-6">
+        <div>
+          <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">
+            Browse
+          </h1>
+          <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">
+            {sub}
+          </p>
+        </div>
+      </div>
+      <CategoryFilterChips
+        selected={selected}
+        onToggle={toggle}
+        onClear={clear}
+        variant="desktop"
+      />
+      <div className="grid grid-cols-5 gap-5 mt-9">
+        {stories.map((s) => (
+          <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
+            <PosterCard
+              story={s}
+              onOpen={(sid, t) => onOpen(sid, t, slide)}
+              w={"100%"}
+              h={"100%"}
+            />
+          </div>
+        ))}
+      </div>
+      {loading && loadedCount === 0 && (
+        <p className="font-body text-muted mt-12">Loading stories…</p>
+      )}
+      {!loading && loadedCount === 0 && (
+        <p className="font-body text-muted mt-12">
+          No stories in this category yet.
+        </p>
+      )}
+      {/* Sentinel drives infinite scroll; kept below the grid with a little
+          height so the observer has a real box to watch. */}
+      <div ref={sentinelRef} className="h-10" aria-hidden />
+      {loadingMore && (
+        <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted text-center mt-2">
+          Loading more…
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -2373,6 +2441,25 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     recordView(id);
   };
   const close = () => setActive(null);
+  // Browse pages the whole catalog beyond the rails' 200-row window, so a
+  // clicked Browse card can be a story resolveStory (rails catalog + static
+  // STORIES) doesn't know. BrowsePage reports its loaded rows here and the modal
+  // resolution below falls back to this map so those stories still open. Held in
+  // state (read during render) — it only grows on a Browse page append, a
+  // handful of times across a full scroll, so the extra shell renders are cheap.
+  const [browseAdditions, setBrowseAdditions] = useState<Map<string, Story>>(
+    () => new Map(),
+  );
+  const handleBrowseStories = useCallback((stories: Story[]) => {
+    setBrowseAdditions((prev) => {
+      // Only churn the map (and re-render) when a genuinely new id arrives.
+      const additions = stories.filter((s) => !prev.has(s.id));
+      if (additions.length === 0) return prev;
+      const next = new Map(prev);
+      for (const s of additions) next.set(s.id, s);
+      return next;
+    });
+  }, []);
   // "Play Something" picks a random playable story and opens it on the
   // Watch tab — same affordance as the hero's Play button, so the modal's
   // existing autoplay path kicks in. Excludes the current hero so the
@@ -2440,7 +2527,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
       {view === "Browse" && (
-        <BrowsePage catalog={catalog} onOpen={open} resolveStory={resolveStory} />
+        <BrowsePage onOpen={open} onStoriesLoaded={handleBrowseStories} />
       )}
       {view === "Today's Verdicts" && (() => {
         // Same published-only gate as Browse. New & Hot promises "fresh
@@ -2479,10 +2566,11 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Wires feed (not in STORIES) still open the modal.
-        // Stale id -> render nothing; close button still works because
-        // `active` is set.
-        const s = resolveStory(active.id);
+        // through the Wires feed (not in STORIES) still open the modal. The
+        // browseAdditions fallback covers stories paged in on Browse beyond the
+        // rails' 200-row catalog window. Stale id -> render nothing; close
+        // button still works because `active` is set.
+        const s = resolveStory(active.id) ?? browseAdditions.get(active.id) ?? null;
         return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} catalog={catalog} slide={active.slide} /> : null;
       })()}
     </div>
