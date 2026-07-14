@@ -92,50 +92,193 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
       "ORDER BY COALESCE(published_at, updated_at, created_at) DESC " +
       `LIMIT ${safeLimit}`,
   );
-  // stories.duration is admin-editable (M:SS string) and rarely set for shorts —
-  // the writer path that auto-applies a short as the story's video only swaps
-  // video_url, leaving duration NULL. Resolve the real short duration from the
-  // latest done short_render so rail thumbnails show the true ~30-60s length
-  // instead of the historical "2:00" long-form fallback.
-  //
-  // Self-heal, not just backfill: a body-only value written before the
-  // assembled-MP4 probe (or by a render that missed it) sticks forever if we
-  // only fill NULLs, so the badge shows the scenes length (0:36) while the
-  // player plays the spliced MP4 (0:48). Apply the SAME safe-overwrite gate the
-  // admin backfill route uses — replace the stored value when it is empty OR
-  // equals the body-only formula (clearly auto-written), and preserve it only
-  // when it is a genuine admin override (non-empty and different from
-  // body-only). Plan: _plans/2026-07-01-duration-badge-actual-mp4.md.
-  const enrichedDurations = await loadShortDurationsForStories(
-    rows.map((r) => r.id),
-  );
-  let durationsHealed = 0;
-  for (const r of rows) {
-    const enriched = enrichedDurations.get(r.id);
-    if (!enriched) continue;
-    const stored = r.duration ?? null;
-    const isEmpty = stored === null || stored === "";
-    const isAutoWritten = isEmpty || stored === enriched.bodyOnly;
-    if (isAutoWritten && r.duration !== enriched.full) {
-      r.duration = enriched.full;
-      durationsHealed += 1;
-    }
-  }
+  const { stories, durationsHealed } = await projectCatalogRows(rows);
   console.info("[homepage live catalog load]", {
     count: rows.length,
     limit: safeLimit,
     durations_healed: durationsHealed,
   });
-  // Resolve hero/video onto the delivery base (lib/media-url); passthrough when
-  // MEDIA_PUBLIC_BASE is unset.
-  const stories = rows.map((s) => ({
-    ...s,
-    hero_image: resolveMediaUrl(s.hero_image),
-    hero_image_landscape: resolveMediaUrl(s.hero_image_landscape),
-    thumbnail_image: resolveMediaUrl(s.thumbnail_image),
-    video_url: resolveMediaUrl(s.video_url),
-  }));
   return { ok: true, stories };
+}
+
+// Shared catalog-row projection for loadLiveCatalog + loadBrowsePage (single
+// source of truth): self-heal each story's duration, then resolve media URLs
+// onto the delivery base. Rebuilt field-by-field rather than spread so a caller
+// that SELECTs extra private columns for its own use (e.g. loadBrowsePage's
+// cursor column) can never leak them to the client.
+//
+// stories.duration is admin-editable (M:SS string) and rarely set for shorts —
+// the writer path that auto-applies a short as the story's video only swaps
+// video_url, leaving duration NULL. Resolve the real short duration from the
+// latest done short_render so rail thumbnails show the true ~30-60s length
+// instead of the historical "2:00" long-form fallback.
+//
+// Self-heal, not just backfill: a body-only value written before the
+// assembled-MP4 probe (or by a render that missed it) sticks forever if we only
+// fill NULLs, so the badge shows the scenes length (0:36) while the player plays
+// the spliced MP4 (0:48). Apply the SAME safe-overwrite gate the admin backfill
+// route uses — replace the stored value when it is empty OR equals the body-only
+// formula (clearly auto-written), and preserve it only when it is a genuine
+// admin override. Plan: _plans/2026-07-01-duration-badge-actual-mp4.md.
+async function projectCatalogRows(
+  rows: LiveCatalogStory[],
+): Promise<{ stories: LiveCatalogStory[]; durationsHealed: number }> {
+  const enrichedDurations = await loadShortDurationsForStories(
+    rows.map((r) => r.id),
+  );
+  let durationsHealed = 0;
+  const stories = rows.map((r) => {
+    let duration = r.duration;
+    const enriched = enrichedDurations.get(r.id);
+    if (enriched) {
+      const stored = r.duration ?? null;
+      const isEmpty = stored === null || stored === "";
+      const isAutoWritten = isEmpty || stored === enriched.bodyOnly;
+      if (isAutoWritten && r.duration !== enriched.full) {
+        duration = enriched.full;
+        durationsHealed += 1;
+      }
+    }
+    return {
+      id: r.id,
+      slug: r.slug,
+      title: r.title,
+      category: r.category,
+      summary: r.summary,
+      duration,
+      hero_image: resolveMediaUrl(r.hero_image),
+      hero_image_landscape: resolveMediaUrl(r.hero_image_landscape),
+      hero_has_baked_title: r.hero_has_baked_title,
+      thumbnail_image: resolveMediaUrl(r.thumbnail_image),
+      video_url: resolveMediaUrl(r.video_url),
+      published_at: r.published_at,
+      created_at: r.created_at,
+    };
+  });
+  return { stories, durationsHealed };
+}
+
+// ─── Browse: full published catalog, cursor-paginated ────────────────────────
+// Browse must show EVERY published story, not the 200-row window loadLiveCatalog
+// caps for the homepage rails. It pages the same catalog with a compound keyset
+// cursor so a growing catalog scrolls without a ceiling and without the
+// skip/duplicate bug a single-column cursor hits when stories share a timestamp.
+// Public gate mirrors loadLiveCatalog exactly. Plan:
+// _plans/2026-07-14-browse-pagination.md.
+
+// Public gate: same status / slug / noindex rule as loadLiveCatalog, PLUS a
+// media requirement. Browse used to render `catalog.array.filter(isPublishedStory)`
+// and for a live row liveRowToStory only carries heroImage / videoUrl (never
+// audioUrl / body), so the EFFECTIVE old bar was "has hero_image OR video_url".
+// Replicating it here keeps the header count equal to the rendered cards and
+// stops a published-but-artless row from surfacing as a blank poster.
+const BROWSE_GATE =
+  "status IN ('ready', 'published') AND slug IS NOT NULL " +
+  "AND (noindex IS NULL OR noindex = 0) " +
+  "AND (hero_image IS NOT NULL OR video_url IS NOT NULL)";
+
+export interface BrowsePageOpts {
+  /** Page size, clamped to 1..100. */
+  limit?: number;
+  /** Opaque cursor from the previous page's `nextCursor`; omit for page one. */
+  beforeCursor?: string | null;
+  /** Restrict to these exact `stories.category` labels (the chip filter).
+   *  Empty / absent → the whole catalog. */
+  categories?: string[];
+  /** Compute the total row count (respecting `categories`). Pass only on the
+   *  first page — the client caches it for the header across pages. */
+  withTotal?: boolean;
+}
+
+export interface BrowsePageResult {
+  ok: boolean;
+  stories: LiveCatalogStory[];
+  /** Cursor for the next page, or null when this was the final page. */
+  nextCursor: string | null;
+  /** Total eligible rows for the active filter; null on non-first pages. */
+  total: number | null;
+}
+
+// The cursor packs the ORDER BY key: the coalesced sort timestamp (TEXT ISO-8601,
+// so lexicographic compares chronologically) and the id tiebreak, joined by a
+// delimiter that can't appear in an ISO timestamp or a story id. A malformed
+// cursor degrades to "no cursor" (first page) rather than throwing on a public
+// read path.
+const BROWSE_CURSOR_SEP = "|";
+function encodeBrowseCursor(ts: string, id: string): string {
+  return `${ts}${BROWSE_CURSOR_SEP}${id}`;
+}
+function decodeBrowseCursor(
+  cursor: string,
+): { ts: string; id: string } | null {
+  const i = cursor.indexOf(BROWSE_CURSOR_SEP);
+  if (i <= 0 || i >= cursor.length - 1) return null;
+  return { ts: cursor.slice(0, i), id: cursor.slice(i + 1) };
+}
+
+export async function loadBrowsePage(
+  opts: BrowsePageOpts = {},
+): Promise<BrowsePageResult> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 60, 100));
+  const where: string[] = [BROWSE_GATE];
+  const filterParams: unknown[] = [];
+  const categories = (opts.categories ?? []).filter(Boolean);
+  if (categories.length > 0) {
+    where.push(`category IN (${categories.map(() => "?").join(", ")})`);
+    filterParams.push(...categories);
+  }
+  // Total is counted over the filtered set BEFORE the cursor clause is added,
+  // so the header shows the whole count, not just the tail after the cursor.
+  let total: number | null = null;
+  if (opts.withTotal) {
+    const countRows = await all<{ n: number | string }>(
+      `SELECT COUNT(*) AS n FROM stories WHERE ${where.join(" AND ")}`,
+      filterParams,
+    );
+    total = Number(countRows[0]?.n ?? 0);
+  }
+  const cursorParams: unknown[] = [];
+  const decoded = opts.beforeCursor
+    ? decodeBrowseCursor(opts.beforeCursor)
+    : null;
+  if (decoded) {
+    where.push(
+      "(COALESCE(published_at, updated_at, created_at) < ? " +
+        "OR (COALESCE(published_at, updated_at, created_at) = ? AND id < ?))",
+    );
+    cursorParams.push(decoded.ts, decoded.ts, decoded.id);
+  }
+  // Over-fetch by one so we know whether a further page exists without a second
+  // round trip. _cursor_ts mirrors the ORDER BY key so the next cursor is exact;
+  // projectCatalogRows rebuilds the public projection field-by-field, so
+  // _cursor_ts never reaches the client.
+  const rows = await all<LiveCatalogStory & { _cursor_ts: string }>(
+    "SELECT id, slug, title, category, summary, duration, hero_image, " +
+      "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
+      "video_url, published_at, created_at, " +
+      "COALESCE(published_at, updated_at, created_at) AS _cursor_ts " +
+      "FROM stories " +
+      `WHERE ${where.join(" AND ")} ` +
+      "ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC " +
+      `LIMIT ${limit + 1}`,
+    [...filterParams, ...cursorParams],
+  );
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const last = page[page.length - 1];
+  const nextCursor =
+    hasMore && last ? encodeBrowseCursor(last._cursor_ts, last.id) : null;
+  const { stories, durationsHealed } = await projectCatalogRows(page);
+  console.info("[browse page load]", {
+    limit,
+    categories,
+    has_cursor: decoded !== null,
+    count: stories.length,
+    has_more: hasMore,
+    total,
+    durations_healed: durationsHealed,
+  });
+  return { ok: true, stories, nextCursor, total };
 }
 
 // Per-story short duration: `full` is the public-facing playback length

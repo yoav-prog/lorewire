@@ -17,9 +17,12 @@ import { getPublishedStoryBySlug } from "@/lib/stories-public";
 import { all, one, run } from "@/lib/db";
 import { type HomepageSurface } from "@/lib/homepage-curation";
 import {
+  loadBrowsePage,
   loadHomepageCuration,
   loadHomepagePolls,
   loadLiveCatalog,
+  type BrowsePageOpts,
+  type BrowsePageResult,
 } from "@/lib/homepage-data";
 import {
   getWirePollsForStories,
@@ -415,6 +418,17 @@ export interface LiveCatalogResult {
 // render. Plan: _plans/2026-06-18-homepage-no-flash-ssr.md.
 export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   return loadLiveCatalog(limit);
+}
+
+// Public client entry for the Browse grid's cursor pagination. Thin "use server"
+// wrapper over loadBrowsePage (@/lib/homepage-data) so the query logic stays in a
+// server-only lib the tests can import directly, mirroring getLiveCatalog /
+// loadLiveCatalog. Plan: _plans/2026-07-14-browse-pagination.md.
+export type { BrowsePageOpts, BrowsePageResult };
+export async function listBrowseStories(
+  opts: BrowsePageOpts = {},
+): Promise<BrowsePageResult> {
+  return loadBrowsePage(opts);
 }
 
 // ─── Wires feed: published shorts, cursor-paginated ──────────────────────────
