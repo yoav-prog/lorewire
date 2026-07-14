@@ -423,8 +423,10 @@ export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
 // Public client entry for the Browse grid's cursor pagination. Thin "use server"
 // wrapper over loadBrowsePage (@/lib/homepage-data) so the query logic stays in a
 // server-only lib the tests can import directly, mirroring getLiveCatalog /
-// loadLiveCatalog. Plan: _plans/2026-07-14-browse-pagination.md.
-export type { BrowsePageOpts, BrowsePageResult };
+// loadLiveCatalog. A "use server" module may only export async functions, so the
+// BrowsePageOpts / BrowsePageResult types are NOT re-exported here — callers that
+// need them import from @/lib/homepage-data, and the client hook reads the return
+// value structurally. Plan: _plans/2026-07-14-browse-pagination.md.
 export async function listBrowseStories(
   opts: BrowsePageOpts = {},
 ): Promise<BrowsePageResult> {
