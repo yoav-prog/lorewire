@@ -23,6 +23,13 @@ export const MAX_BULK_ITEMS = 200;
 export const MAX_BULK_DESTRUCTIVE_ITEMS = 50;
 export const MAX_BULK_PAID_ITEMS = 50;
 
+// Select-all-matching (cheap, reversible status / category ops applied to a
+// whole filter, resolved server-side) is bounded well above the tick caps but
+// still capped so one click can't rewrite the entire library — and so the
+// synchronous chunked apply stays inside the serverless time budget. Past this,
+// the action asks the operator to narrow the filter.
+export const MAX_BULK_BY_FILTER_ITEMS = 1000;
+
 // Above this estimated spend, the regenerate confirm demands a typed count
 // (echoing the resolved number) instead of a single click.
 export const SPEND_CONFIRM_THRESHOLD_USD = 20;

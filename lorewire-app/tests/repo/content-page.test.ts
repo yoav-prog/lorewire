@@ -22,13 +22,15 @@ async function seedStory(opts: {
   updatedAt: string;
   category?: string;
   status?: string;
+  redditId?: string;
 }): Promise<string> {
   const id = randomUUID();
   await run(
-    "INSERT INTO stories (id, slug, category, title, status, created_at, updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO stories (id, reddit_id, slug, category, title, status, created_at, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     [
       id,
+      opts.redditId ?? null,
       `story-${id.slice(0, 6)}`,
       opts.category ?? "Entitled",
       `${opts.tok} story ${opts.n}`,
@@ -225,5 +227,111 @@ describe("loadContentPage / edge cases", () => {
     await seedStory({ tok, n: 1, updatedAt: "2026-06-07T00:00:00.000Z" });
     const page = await loadContentPage({ q: tok, cursor: "not-a-cursor", limit: 50 });
     expect(page.rows).toHaveLength(1);
+  });
+});
+
+// --- Phase 2 aggregate filters (now in SQL, stories only) -------------------
+// Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+
+async function seedPost(
+  table: string,
+  storyId: string,
+  status = "posted",
+): Promise<void> {
+  await run(`INSERT INTO ${table} (id, story_id, status) VALUES (?, ?, ?)`, [
+    randomUUID(),
+    storyId,
+    status,
+  ]);
+}
+
+describe("loadContentPage / publishedOn + publishedNotOn", () => {
+  it("publishedOn keeps only stories live on the platform, drops articles", async () => {
+    const tok = token();
+    const onFb = await seedStory({ tok, n: 1, updatedAt: "2026-06-04T00:00:00.000Z" });
+    await seedPost("facebook_posts", onFb);
+    const offFb = await seedStory({ tok, n: 2, updatedAt: "2026-06-03T00:00:00.000Z" });
+    await seedArticle({ tok, n: 3, updatedAt: "2026-06-05T00:00:00.000Z" });
+    const page = await loadContentPage({
+      q: tok,
+      publishedOn: ["facebook"],
+      limit: 50,
+      withTotal: true,
+    });
+    expect(page.total).toBe(1);
+    expect(page.rows.map((r) => r.id)).toEqual([onFb]);
+    expect(page.rows.some((r) => r.id === offFb)).toBe(false);
+  });
+
+  it("publishedNotOn keeps stories NOT on the platform plus articles (vacuously not-on)", async () => {
+    const tok = token();
+    const onTk = await seedStory({ tok, n: 1, updatedAt: "2026-06-04T00:00:00.000Z" });
+    await seedPost("tiktok_posts", onTk);
+    const offTk = await seedStory({ tok, n: 2, updatedAt: "2026-06-03T00:00:00.000Z" });
+    const art = await seedArticle({ tok, n: 3, updatedAt: "2026-06-05T00:00:00.000Z" });
+    const page = await loadContentPage({
+      q: tok,
+      publishedNotOn: ["tiktok"],
+      limit: 50,
+      withTotal: true,
+    });
+    expect(page.total).toBe(2);
+    expect(page.rows.map((r) => r.id).sort()).toEqual([offTk, art].sort());
+    expect(page.rows.some((r) => r.id === onTk)).toBe(false);
+  });
+});
+
+describe("loadContentPage / jobStatus", () => {
+  it("matches the latest story_jobs status by reddit_id, drops articles", async () => {
+    const tok = token();
+    const reddit = `t3_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    const proc = await seedStory({
+      tok,
+      n: 1,
+      updatedAt: "2026-06-04T00:00:00.000Z",
+      redditId: reddit,
+    });
+    // Older done, newer processing — the newest must win.
+    await run(
+      "INSERT INTO story_jobs (id, reddit_id, status, requested_at) VALUES (?, ?, 'done', '2026-06-01T00:00:00.000Z')",
+      [randomUUID(), reddit],
+    );
+    await run(
+      "INSERT INTO story_jobs (id, reddit_id, status, requested_at) VALUES (?, ?, 'processing', '2026-06-02T00:00:00.000Z')",
+      [randomUUID(), reddit],
+    );
+    await seedStory({ tok, n: 2, updatedAt: "2026-06-03T00:00:00.000Z" });
+    await seedArticle({ tok, n: 3, updatedAt: "2026-06-05T00:00:00.000Z" });
+    const page = await loadContentPage({
+      q: tok,
+      jobStatus: "processing",
+      limit: 50,
+      withTotal: true,
+    });
+    expect(page.total).toBe(1);
+    expect(page.rows.map((r) => r.id)).toEqual([proc]);
+  });
+});
+
+describe("loadContentPage / activeKind", () => {
+  it("matches stories with an in-flight render for the given kind (and 'any')", async () => {
+    const tok = token();
+    const rendering = await seedStory({ tok, n: 1, updatedAt: "2026-06-04T00:00:00.000Z" });
+    await run(
+      "INSERT INTO short_renders (id, story_id, status, props, requested_at) " +
+        "VALUES (?, ?, 'rendering', '{}', '2026-06-04T00:00:00.000Z')",
+      [randomUUID(), rendering],
+    );
+    const idle = await seedStory({ tok, n: 2, updatedAt: "2026-06-03T00:00:00.000Z" });
+    await seedArticle({ tok, n: 3, updatedAt: "2026-06-05T00:00:00.000Z" });
+
+    const short = await loadContentPage({ q: tok, activeKind: "short", limit: 50, withTotal: true });
+    expect(short.total).toBe(1);
+    expect(short.rows.map((r) => r.id)).toEqual([rendering]);
+
+    const any = await loadContentPage({ q: tok, activeKind: "any", limit: 50, withTotal: true });
+    expect(any.total).toBe(1);
+    expect(any.rows.map((r) => r.id)).toEqual([rendering]);
+    expect(any.rows.some((r) => r.id === idle)).toBe(false);
   });
 });

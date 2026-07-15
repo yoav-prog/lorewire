@@ -247,11 +247,10 @@ export default async function ContentPage({
   const flaggedSummary = await getAutoPublishFlaggedSummary();
 
   // Filters + search that reach the paginated data layer (loadContentPage, via
-  // ContentList's client pager). The aggregate filters — publishedOn /
-  // publishedNotOn / jobStatus / activeKind — are NOT passed here: they're
-  // paused in Phase 1 because they'd break page boundaries and the total count.
-  // Phase 2 moves them into SQL and re-enables them. `flagged` is a real column
-  // and stays. Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  // ContentList's client pager). Phase 2 moved the aggregate filters
+  // (published-on / not-on / job-status / active-render) into SQL, so they pass
+  // through here alongside the real-column filters.
+  // Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
   const pageOpts: ContentPageOpts = {
     subKind,
     status,
@@ -260,6 +259,10 @@ export default async function ContentPage({
     updatedSince: resolvedRange?.since || undefined,
     updatedUntil: resolvedRange?.until || undefined,
     flagged: flaggedFilter,
+    publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
+    publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
+    jobStatus,
+    activeKind: activeKindFilter,
     q: sp.q?.trim() || undefined,
   };
 
@@ -520,9 +523,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Published on (paused)
+            Published on
           </span>
           {chip(
             `/admin/content${baseQs({ publishedOn: undefined })}`,
@@ -541,9 +544,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Not on (paused)
+            Not on
           </span>
           {chip(
             `/admin/content${baseQs({ publishedNotOn: undefined })}`,
@@ -562,9 +565,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Job (paused)
+            Job
           </span>
           {chip(
             `/admin/content${baseQs({ jobStatus: undefined })}`,
@@ -607,9 +610,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Active (paused)
+            Active
           </span>
           {chip(
             `/admin/content${baseQs({ active: undefined })}`,
