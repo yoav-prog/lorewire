@@ -335,3 +335,74 @@ describe("loadContentPage / activeKind", () => {
     expect(any.rows.some((r) => r.id === idle)).toBe(false);
   });
 });
+
+// --- Title-length filter (stories only) -------------------------------------
+// Plan: _plans/2026-07-15-too-long-title-filter-and-bulk-fix.md. "Too long" =
+// over TITLE_MAX_CHARS chars OR TITLE_MAX_WORDS words (8 words / 50 chars),
+// measured on the trimmed title — the SQL clause mirrors isTitleTooLong().
+
+/** Seed a story with an exact title (still carrying `tok` so `q` isolates it). */
+async function seedStoryTitle(
+  tok: string,
+  title: string,
+  updatedAt: string,
+): Promise<string> {
+  const id = randomUUID();
+  await run(
+    "INSERT INTO stories (id, slug, category, title, status, created_at, updated_at) " +
+      "VALUES (?, ?, 'Entitled', ?, 'draft', ?, ?)",
+    [id, `story-${id.slice(0, 6)}`, title, updatedAt, updatedAt],
+  );
+  return id;
+}
+
+describe("loadContentPage / titleLength filter", () => {
+  it("returns only over-cap stories (word OR char bound) and excludes articles", async () => {
+    const tok = token();
+    // Over the WORD bound: tok + 10 single-letter words = 11 words (chars ok).
+    const longWords = await seedStoryTitle(
+      tok,
+      `${tok} a b c d e f g h i j`,
+      "2026-06-10T00:00:00.000Z",
+    );
+    // Over the CHAR bound: tok(15) + space + 45 x's = 61 chars, 2 words.
+    const longChars = await seedStoryTitle(
+      tok,
+      `${tok} ${"x".repeat(45)}`,
+      "2026-06-09T00:00:00.000Z",
+    );
+    // Comfortably within both bounds — must NOT be surfaced.
+    await seedStoryTitle(tok, `${tok} short one`, "2026-06-08T00:00:00.000Z");
+    // A long-titled article must be dropped entirely (filter is stories-only).
+    const art = await seedArticle({ tok, n: 9, updatedAt: "2026-06-11T00:00:00.000Z" });
+    await run("UPDATE articles SET title = ? WHERE id = ?", [
+      `${tok} a b c d e f g h i j k`,
+      art,
+    ]);
+
+    const page = await loadContentPage({
+      q: tok,
+      titleLength: "long",
+      limit: 50,
+      withTotal: true,
+    });
+    expect(page.total).toBe(2);
+    expect(page.rows.map((r) => r.id).sort()).toEqual([longWords, longChars].sort());
+    expect(page.rows.every((r) => r.kind === "story")).toBe(true);
+    expect(page.rows.some((r) => r.id === art)).toBe(false);
+  });
+
+  it("treats a title exactly on both bounds as within-policy (not surfaced)", async () => {
+    const tok = token();
+    // Exactly 8 words (tok + 7). Kept short enough to stay under 50 chars too.
+    await seedStoryTitle(tok, `${tok} b c d e f g h`, "2026-06-07T00:00:00.000Z");
+    const page = await loadContentPage({
+      q: tok,
+      titleLength: "long",
+      limit: 50,
+      withTotal: true,
+    });
+    expect(page.total).toBe(0);
+    expect(page.rows).toEqual([]);
+  });
+});

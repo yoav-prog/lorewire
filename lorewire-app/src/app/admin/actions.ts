@@ -5307,6 +5307,133 @@ export async function bulkReclassifyContentAction(
   };
 }
 
+// ─── Bulk regenerate too-long titles ─────────────────────────────────────────
+// 2026-07-15, plan: _plans/2026-07-15-too-long-title-filter-and-bulk-fix.md.
+//
+// The bulk sibling of the per-story "Regenerate title" button
+// (regenerateStoryTitleAction). Pairs with the Content inbox's "Title: Too
+// long" filter — find the rows that render weird on the cover, select them,
+// and rewrite each title with the same branded prompt the pipeline uses,
+// bounded to the shared TITLE_MAX_CHARS / TITLE_MAX_WORDS policy.
+//
+// Synchronous per story (one inline gpt-5-nano call each), so it mirrors
+// bulkReclassifyContentAction with its own clean per-row result — NOT the
+// async-enqueue bulkRegenerateContentAction, whose "queued N" banner would
+// misreport a rewrite that has already landed. Capped at MAX_BULK_PAID_ITEMS:
+// the LLM spend is tiny but non-zero, and 50 inline calls bound the action's
+// wall-clock. Articles are skipped (the regenerator reads stories.title/body);
+// a body-less story is skipped, not failed — there's nothing to ground a
+// title on, and a re-tick shouldn't flood the failure list.
+
+export interface BulkRegenTitlesOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state: "regenerated" | "skipped" | "errored";
+  prevTitle?: string | null;
+  nextTitle?: string;
+  reason?: string;
+}
+
+export interface BulkRegenTitlesResult {
+  regeneratedCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkRegenTitlesOutcome[];
+}
+
+export async function bulkRegenerateTitlesAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkRegenTitlesResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+
+  const t0 = Date.now();
+  await auditBulkContent(session, "content.bulk_regenerate_titles", items);
+  console.info("[content bulk title-regen] start", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  const { regenerateTitleForStory } = await import("@/lib/title-regenerator");
+
+  const outcomes: BulkRegenTitlesOutcome[] = [];
+  let regeneratedCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "not-a-story",
+      });
+      skippedCount += 1;
+      continue;
+    }
+    try {
+      const result = await regenerateTitleForStory(item.id);
+      if (result.ok) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "regenerated",
+          prevTitle: result.previousTitle,
+          nextTitle: result.title,
+        });
+        regeneratedCount += 1;
+      } else if (
+        result.stage === "story-missing-body" ||
+        result.stage === "story-not-found"
+      ) {
+        // No body to ground a title on, or the row vanished mid-batch — a soft
+        // skip rather than a hard failure.
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason: result.error,
+        });
+        skippedCount += 1;
+      } else {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: result.error,
+        });
+        erroredCount += 1;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[content bulk title-regen errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+  console.info("[content bulk title-regen] done", {
+    user_id: session.userId,
+    regeneratedCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return { regeneratedCount, skippedCount, erroredCount, outcomes };
+}
+
 // ─── Bulk full pipeline & publish ────────────────────────────────────────────
 // 2026-07-02, plan: _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
 //

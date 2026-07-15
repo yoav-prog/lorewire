@@ -44,6 +44,8 @@ export type AuditAction =
   // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
   | "content.bulk_delete"
   | "content.bulk_regenerate"
+  // 2026-07-15: bulk rewrite of too-long story titles (Regenerate titles).
+  | "content.bulk_regenerate_titles"
   | "content.bulk_publish"
   | "content.bulk_complete_publish"
   | "content.bulk_refresh_assets"

@@ -3,6 +3,7 @@
 
 import "server-only";
 import { all, one, run } from "@/lib/db";
+import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 
 export type StoryStatus =
   | "draft"
@@ -2207,6 +2208,12 @@ export interface ContentPageOpts {
   /** In-flight render filter: "any" = any active render; a specific kind
    *  narrows to one source table. */
   activeKind?: ProgressKind | "any";
+  /** 2026-07-15 title-length filter (stories only). "long" = title over the
+   *  branded cap (TITLE_MAX_CHARS chars OR TITLE_MAX_WORDS words) — the rows
+   *  that render weird on the cover and can be bulk-fixed with Regenerate
+   *  titles. Drops the article half (articles aren't cover-rendered from the
+   *  story pipeline and aren't fixable by the regenerator). */
+  titleLength?: "long";
   /** Case-insensitive search over title / slug / id / status / badge. */
   q?: string;
   /** Compound "<ts>|<id>" cursor from a prior page; malformed → page one. */
@@ -2259,6 +2266,19 @@ const ARTICLE_PAGE_PROJECTION =
   "created_at, updated_at, published_at, NULL AS reddit_id, " +
   "0 AS auto_publish_when_ready, 0 AS auto_publish_attempts, " +
   "NULL AS refresh_assets_state, COALESCE(updated_at, created_at) AS sort_key";
+
+// 2026-07-15 "too long" title predicate (stories only). Portable across
+// SQLite + Postgres: char count via LENGTH, word count as (spaces + 1) on the
+// trimmed title — exact for the single-spaced ALL-CAPS titles the pipeline
+// produces, matching titleWordCount() in lib/title-policy.ts. The two
+// thresholds are module constants (not user input), so interpolating them is
+// injection-safe and keeps the clause parameter-free.
+const TOO_LONG_TITLE_CLAUSE =
+  "(title IS NOT NULL AND (LENGTH(TRIM(title)) > " +
+  TITLE_MAX_CHARS +
+  " OR (LENGTH(TRIM(title)) - LENGTH(REPLACE(TRIM(title), ' ', '')) + 1) > " +
+  TITLE_MAX_WORDS +
+  "))";
 
 // 2026-07-15 Phase 2: the aggregate story filters as portable correlated SQL.
 // Table names come from a closed enum, never user input.
@@ -2346,6 +2366,9 @@ function buildContentTableWhere(
     }
     if (opts.activeKind) {
       where.push(activeRenderClause(opts.activeKind));
+    }
+    if (opts.titleLength === "long") {
+      where.push(TOO_LONG_TITLE_CLAUSE);
     }
   } else {
     // articles: subKind maps to the `type` column; language narrows here.
@@ -2448,6 +2471,7 @@ function contentPageWants(opts: ContentPageOpts): {
     (opts.publishedOn?.length ?? 0) === 0 &&
     !opts.jobStatus &&
     !opts.activeKind &&
+    opts.titleLength !== "long" &&
     (opts.subKind === undefined || isArticleSubKind);
   return { wantStories, wantArticles };
 }
