@@ -71,11 +71,13 @@ vi.mock("@/lib/category-tags-classifier", () => ({
 // Import AFTER vi.mock so the action module picks up the mocked deps.
 import {
   bulkUpdateContentAction,
+  bulkUpdateContentByFilterAction,
   bulkDeleteContentAction,
   bulkFullPipelineAction,
   bulkReclassifyContentAction,
   bulkRegenerateContentAction,
   type BulkContentItem,
+  type BulkUpdateOp,
 } from "@/app/admin/actions";
 
 async function reset(): Promise<void> {
@@ -997,5 +999,65 @@ describe("bulkRegenerateContentAction: idempotent re-run", () => {
       a,
     ]);
     expect(rows).toHaveLength(1);
+  });
+});
+
+// --- Select-all-matching (2026-07-15 Phase 1 follow-up) ---------------------
+// bulkUpdateContentByFilterAction resolves every row matching a filter and
+// chunks the ids through bulkUpdateContentAction, so the per-item invariants
+// (publish gate, tag write) still run. Cheap ops only.
+
+describe("bulkUpdateContentByFilterAction (select-all-matching)", () => {
+  it("applies a cheap status change to every matching row, leaves others, audits", async () => {
+    const a = await seedStory({ category: "Humor", status: "draft" });
+    const b = await seedStory({ category: "Humor", status: "draft" });
+    const other = await seedStory({ category: "Drama", status: "draft" });
+    const result = await bulkUpdateContentByFilterAction(
+      { category: "Humor" },
+      { type: "status", status: "archived" },
+    );
+    expect(result.ok.map((i) => i.id).sort()).toEqual([a, b].sort());
+    const rowA = await one<{ status: string }>(
+      "SELECT status FROM stories WHERE id = ?",
+      [a],
+    );
+    const rowOther = await one<{ status: string }>(
+      "SELECT status FROM stories WHERE id = ?",
+      [other],
+    );
+    expect(rowA!.status).toBe("archived");
+    expect(rowOther!.status).toBe("draft");
+    const audit = await one<{ metadata: string }>(
+      "SELECT metadata FROM admin_audit_log WHERE action = ?",
+      ["content.bulk_by_filter"],
+    );
+    expect(audit).not.toBeNull();
+    expect(JSON.parse(audit!.metadata).count).toBe(2);
+  });
+
+  it("preserves the publish invariant: an asset-incomplete story is not published", async () => {
+    const incomplete = await seedStory({ category: "Roommate", status: "ready" });
+    const result = await bulkUpdateContentByFilterAction(
+      { category: "Roommate" },
+      { type: "status", status: "published" },
+    );
+    expect(
+      result.failed.some(
+        (f) => f.id === incomplete && f.reason.startsWith("asset-incomplete"),
+      ),
+    ).toBe(true);
+    const after = await one<{ status: string }>(
+      "SELECT status FROM stories WHERE id = ?",
+      [incomplete],
+    );
+    expect(after!.status).toBe("ready");
+  });
+
+  it("rejects non-cheap ops (status / category only)", async () => {
+    await expect(
+      bulkUpdateContentByFilterAction({}, {
+        type: "delete",
+      } as unknown as BulkUpdateOp),
+    ).rejects.toThrow(/only status/);
   });
 });

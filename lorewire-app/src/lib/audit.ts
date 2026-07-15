@@ -47,7 +47,10 @@ export type AuditAction =
   | "content.bulk_publish"
   | "content.bulk_complete_publish"
   | "content.bulk_refresh_assets"
-  | "content.bulk_full_pipeline";
+  | "content.bulk_full_pipeline"
+  // 2026-07-15 Phase 1 follow-up: select-all-matching applies a cheap status /
+  // category change to every row matching a filter (resolved server-side).
+  | "content.bulk_by_filter";
 
 // The kind of thing an action targets. Generic on purpose so any future entity
 // becomes auditable without a schema change. "content" covers a bulk story /

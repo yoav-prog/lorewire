@@ -2419,19 +2419,16 @@ function buildContentTableCount(
   return { sql: `SELECT COUNT(*) AS n FROM ${table} ${clause}`, params };
 }
 
-export async function loadContentPage(
-  opts: ContentPageOpts = {},
-): Promise<ContentPageResult> {
-  // Default 100, capped at 200 so a hand-crafted opts.limit can't ask for the
-  // whole table in one request.
-  const limit = Math.min(
-    opts.limit && opts.limit > 0 ? Math.trunc(opts.limit) : 100,
-    200,
-  );
-  const cursor = decodeContentCursor(opts.cursor);
-
-  // Same kind-exclusion logic as listContentSlim: skip a table entirely when a
-  // filter can't apply to it.
+/** Which of the two tables a filter set can match. A story-only filter
+ *  (language / article-subKind / story-only status / category / flagged /
+ *  published-on / job-status / active-render) drops the other side. Shared by
+ *  loadContentPage and listContentIdsForFilter so pagination and the
+ *  select-all-matching resolver agree exactly. `publishedNotOn` keeps articles
+ *  (vacuously not-on any platform). */
+function contentPageWants(opts: ContentPageOpts): {
+  wantStories: boolean;
+  wantArticles: boolean;
+} {
   const isArticleSubKind =
     opts.subKind && opts.subKind !== "video"
       ? ARTICLE_TYPES.includes(opts.subKind as ArticleType)
@@ -2452,6 +2449,22 @@ export async function loadContentPage(
     !opts.jobStatus &&
     !opts.activeKind &&
     (opts.subKind === undefined || isArticleSubKind);
+  return { wantStories, wantArticles };
+}
+
+export async function loadContentPage(
+  opts: ContentPageOpts = {},
+): Promise<ContentPageResult> {
+  // Default 100, capped at 200 so a hand-crafted opts.limit can't ask for the
+  // whole table in one request.
+  const limit = Math.min(
+    opts.limit && opts.limit > 0 ? Math.trunc(opts.limit) : 100,
+    200,
+  );
+  const cursor = decodeContentCursor(opts.cursor);
+
+  // Skip a table entirely when a filter can't apply to it.
+  const { wantStories, wantArticles } = contentPageWants(opts);
 
   if (!wantStories && !wantArticles) {
     return { rows: [], nextCursor: null, total: opts.withTotal ? 0 : null };
@@ -2579,6 +2592,38 @@ export async function loadContentPage(
   });
 
   return { rows, nextCursor, total };
+}
+
+/** Resolve every content id matching a filter (no pagination, newest-first per
+ *  table) up to `cap`. Backs select-all-matching: the caller chunks these ids
+ *  through the per-item bulk action so every invariant holds. Passing cap+1
+ *  lets the caller detect "too many matched" and refuse. */
+export async function listContentIdsForFilter(
+  opts: ContentPageOpts,
+  cap: number,
+): Promise<{ kind: "story" | "article"; id: string }[]> {
+  const limit = Math.max(0, Math.trunc(cap));
+  const { wantStories, wantArticles } = contentPageWants(opts);
+  const out: { kind: "story" | "article"; id: string }[] = [];
+  if (wantStories && out.length < limit) {
+    const { clause, params } = buildContentTableWhere("stories", opts, null);
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM stories ${clause} ` +
+        `ORDER BY COALESCE(updated_at, created_at) DESC, id DESC LIMIT ?`,
+      [...params, limit - out.length],
+    );
+    for (const r of rows) out.push({ kind: "story", id: r.id });
+  }
+  if (wantArticles && out.length < limit) {
+    const { clause, params } = buildContentTableWhere("articles", opts, null);
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM articles ${clause} ` +
+        `ORDER BY COALESCE(updated_at, created_at) DESC, id DESC LIMIT ?`,
+      [...params, limit - out.length],
+    );
+    for (const r of rows) out.push({ kind: "article", id: r.id });
+  }
+  return out;
 }
 
 export interface UserRow {

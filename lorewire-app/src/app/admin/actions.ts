@@ -22,6 +22,7 @@ import {
   MAX_BULK_ITEMS,
   MAX_BULK_DESTRUCTIVE_ITEMS,
   MAX_BULK_PAID_ITEMS,
+  MAX_BULK_BY_FILTER_ITEMS,
   estimateRegenCostUsd,
 } from "@/lib/bulk-safety";
 import {
@@ -62,6 +63,7 @@ import {
   unnameRevision,
   pruneRevisions,
   loadContentPage,
+  listContentIdsForFilter,
   type StoryStatus,
   type SegmentKind,
   type ArticleStatus,
@@ -3652,6 +3654,46 @@ export async function listContentPageAction(
 ): Promise<ContentPageResult> {
   await requireCapability("content.manage");
   return loadContentPage(opts);
+}
+
+// 2026-07-15 select-all-matching (cheap ops only). Resolves every row matching
+// the current filter server-side, then chunks the ids through the per-item
+// bulkUpdateContentAction so the publish gate, article-status validation, and
+// story_tag write all still run — a blanket SQL UPDATE would bypass them.
+// Capped at MAX_BULK_BY_FILTER_ITEMS; past that the operator must narrow the
+// filter. Paid / destructive ops have no by-filter path (Phase 0 danger split).
+export async function bulkUpdateContentByFilterAction(
+  filter: ContentPageOpts,
+  op: BulkUpdateOp,
+): Promise<BulkActionResult> {
+  const session = await requireCapability("content.manage");
+  if (!op || (op.type !== "status" && op.type !== "category")) {
+    throw new Error("bulk-by-filter: only status / category ops are allowed");
+  }
+  const matched = await listContentIdsForFilter(
+    filter,
+    MAX_BULK_BY_FILTER_ITEMS + 1,
+  );
+  if (matched.length > MAX_BULK_BY_FILTER_ITEMS) {
+    throw new Error(
+      `bulk-by-filter: ${MAX_BULK_BY_FILTER_ITEMS}+ rows match — narrow the filter`,
+    );
+  }
+  await auditBulkContent(session, "content.bulk_by_filter", matched, {
+    op: op.type,
+    value: op.type === "status" ? op.status : op.category,
+  });
+  const result: BulkActionResult = { ok: [], failed: [], prev: {} };
+  for (let i = 0; i < matched.length; i += MAX_BULK_ITEMS) {
+    const r = await bulkUpdateContentAction(
+      matched.slice(i, i + MAX_BULK_ITEMS),
+      op,
+    );
+    result.ok.push(...r.ok);
+    result.failed.push(...r.failed);
+    Object.assign(result.prev, r.prev);
+  }
+  return result;
 }
 
 export async function bulkUpdateContentAction(
