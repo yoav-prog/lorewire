@@ -61,10 +61,13 @@ import {
   nameRevision,
   unnameRevision,
   pruneRevisions,
+  loadContentPage,
   type StoryStatus,
   type SegmentKind,
   type ArticleStatus,
   type ArticleLanguage,
+  type ContentPageOpts,
+  type ContentPageResult,
 } from "@/lib/repo";
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
@@ -3637,6 +3640,18 @@ async function auditBulkContent(
       ...extra,
     },
   });
+}
+
+// 2026-07-15 Phase 1 content pagination. The Content client island's cursor
+// pager calls this to fetch each keyset page. Thin delegate to loadContentPage;
+// the ContentPageOpts / ContentPageResult types live in @/lib/repo because a
+// "use server" module can only export async functions.
+// Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+export async function listContentPageAction(
+  opts: ContentPageOpts,
+): Promise<ContentPageResult> {
+  await requireCapability("content.manage");
+  return loadContentPage(opts);
 }
 
 export async function bulkUpdateContentAction(

@@ -2350,7 +2350,12 @@ function buildContentTableCount(
 export async function loadContentPage(
   opts: ContentPageOpts = {},
 ): Promise<ContentPageResult> {
-  const limit = opts.limit && opts.limit > 0 ? Math.trunc(opts.limit) : 100;
+  // Default 100, capped at 200 so a hand-crafted opts.limit can't ask for the
+  // whole table in one request.
+  const limit = Math.min(
+    opts.limit && opts.limit > 0 ? Math.trunc(opts.limit) : 100,
+    200,
+  );
   const cursor = decodeContentCursor(opts.cursor);
 
   // Same kind-exclusion logic as listContentSlim: skip a table entirely when a
