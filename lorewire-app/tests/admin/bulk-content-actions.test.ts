@@ -88,6 +88,7 @@ async function reset(): Promise<void> {
   await run("DELETE FROM story_jobs WHERE 1=1", []);
   await run("DELETE FROM reddit_source WHERE 1=1", []);
   await run("DELETE FROM short_renders WHERE 1=1", []);
+  await run("DELETE FROM admin_audit_log WHERE 1=1", []);
   gcsCalls.length = 0;
 }
 
@@ -870,5 +871,131 @@ describe("bulkReclassifyContentAction", () => {
       reason: "not-found",
     });
     expect(classifyStoryTagsMock).not.toHaveBeenCalled();
+  });
+});
+
+// --- Danger-class caps (2026-07-15 safety spine) ----------------------------
+// Destructive + paid bulk ops are capped far below the cheap-op limit and
+// enforced in the handler, so a forged over-cap payload can't wipe hundreds of
+// rows or spend four figures in one call.
+// Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+
+describe("danger-class caps", () => {
+  it("rejects a delete past the destructive cap", async () => {
+    const items: BulkContentItem[] = Array.from({ length: 51 }, () => ({
+      kind: "story",
+      id: randomUUID(),
+    }));
+    await expect(bulkDeleteContentAction(items)).rejects.toThrow(/exceeds 50/);
+  });
+
+  it("rejects a regenerate past the paid cap", async () => {
+    const items: BulkContentItem[] = Array.from({ length: 51 }, () => ({
+      kind: "story",
+      id: randomUUID(),
+    }));
+    await expect(bulkRegenerateContentAction(items, "hero")).rejects.toThrow(
+      /exceeds 50/,
+    );
+  });
+
+  it("still allows a cheap status change above the danger cap", async () => {
+    // 60 rows is over the 50 danger cap but under the 200 cheap-op limit: the
+    // ghost ids come back as not-found failures, but the call itself must not
+    // throw — cheap, reversible ops keep the higher limit.
+    const items: BulkContentItem[] = Array.from({ length: 60 }, () => ({
+      kind: "story",
+      id: randomUUID(),
+    }));
+    const result = await bulkUpdateContentAction(items, {
+      type: "status",
+      status: "draft",
+    });
+    expect(result.failed).toHaveLength(60);
+  });
+});
+
+// --- Audit trail (2026-07-15) ------------------------------------------------
+// Every danger-class bulk run writes one PII-free summary row through
+// @/lib/audit BEFORE the mutation. reset() clears admin_audit_log so each
+// assertion sees only its own run.
+
+describe("bulk audit trail", () => {
+  it("records a content.bulk_delete row with the affected count + ids", async () => {
+    const a = await seedStory({});
+    const b = await seedStory({});
+    await bulkDeleteContentAction([
+      { kind: "story", id: a },
+      { kind: "story", id: b },
+    ]);
+    const rows = await all<{
+      action: string;
+      target_type: string;
+      actor_id: string;
+      metadata: string;
+    }>(
+      "SELECT action, target_type, actor_id, metadata FROM admin_audit_log WHERE action = ?",
+      ["content.bulk_delete"],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].target_type).toBe("content");
+    expect(rows[0].actor_id).toBe("test-user");
+    const meta = JSON.parse(rows[0].metadata);
+    expect(meta.count).toBe(2);
+    expect(meta.storyCount).toBe(2);
+    expect(meta.ids).toEqual([`story:${a}`, `story:${b}`]);
+  });
+
+  it("records a content.bulk_regenerate row with target + estimated cost", async () => {
+    const a = await seedStory({});
+    await bulkRegenerateContentAction([{ kind: "story", id: a }], "short");
+    const row = await one<{ metadata: string }>(
+      "SELECT metadata FROM admin_audit_log WHERE action = ?",
+      ["content.bulk_regenerate"],
+    );
+    expect(row).not.toBeNull();
+    const meta = JSON.parse(row!.metadata);
+    expect(meta.target).toBe("short");
+    expect(meta.estCostUsd).toBe(1.13);
+  });
+});
+
+// --- Idempotent paid re-run (2026-07-15) ------------------------------------
+// A second identical regenerate must not double-charge: the queue skips work
+// already in flight, so no second row is enqueued. The guard is the partial
+// unique index over (story_id, text_hash, voice_provider, voice_id) WHERE
+// status IN ('queued','processing') in enqueueVoiceRender.
+//
+// KNOWN GAP (see _plans/2026-07-15-content-pagination-and-bulk-safety.md
+// follow-ups): SQL treats NULL as distinct in a unique index, so a story with
+// no voice override (voice_provider/voice_id NULL) does NOT hit the conflict
+// and a retry double-enqueues. The ≤50 paid cap bounds the blast radius; a
+// null-safe uniqueness check is a scoped follow-up (a cross-DB queue change,
+// out of scope for the safety spine). This test pins the guard for the
+// voice-set case so a regression there is caught.
+
+describe("bulkRegenerateContentAction: idempotent re-run", () => {
+  it("does not enqueue a second voice render when one is already in flight", async () => {
+    const a = await seedStory({});
+    // A concrete voice override makes the partial unique index apply — the
+    // NULL columns in the default-voice case would each read as distinct.
+    await run(
+      "UPDATE stories SET voice_provider = 'elevenlabs', voice_id = 'test-voice' WHERE id = ?",
+      [a],
+    );
+    const first = await bulkRegenerateContentAction(
+      [{ kind: "story", id: a }],
+      "voice",
+    );
+    expect(first.ok).toHaveLength(1);
+    const second = await bulkRegenerateContentAction(
+      [{ kind: "story", id: a }],
+      "voice",
+    );
+    expect(second.ok).toHaveLength(0);
+    const rows = await all("SELECT id FROM voice_renders WHERE story_id = ?", [
+      a,
+    ]);
+    expect(rows).toHaveLength(1);
   });
 });

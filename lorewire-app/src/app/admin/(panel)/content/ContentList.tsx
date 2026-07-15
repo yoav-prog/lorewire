@@ -63,6 +63,12 @@ import type {
 } from "@/lib/repo";
 import { STATUSES, statusClass } from "@/app/admin/ui";
 import { matchesContentSearch } from "@/lib/content-search";
+import {
+  MAX_BULK_DESTRUCTIVE_ITEMS,
+  MAX_BULK_PAID_ITEMS,
+  SPEND_CONFIRM_THRESHOLD_USD,
+  estimateRegenCostUsd,
+} from "@/lib/bulk-safety";
 
 /** Active category options for the row chip + the bulk picker. Fetched
  *  from the `categories` table by the server page (the 2026-07-01 data-
@@ -312,6 +318,12 @@ export function ContentList({
   const [failures, setFailures] = useState<
     { kind: Kind; id: string; reason: string }[]
   >([]);
+  // 2026-07-15 danger-cap notice. Set when a destructive / paid bulk action is
+  // attempted on more rows than @/lib/bulk-safety allows, so the operator gets
+  // a plain message instead of a raw server "exceeds N items" error. The server
+  // enforces the same caps regardless. Plan:
+  // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  const [dangerNotice, setDangerNotice] = useState<string | null>(null);
   const [undo, setUndo] = useState<UndoState | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [query, setQuery] = useState("");
@@ -477,13 +489,35 @@ export function ContentList({
 
   // Open the confirm modal with the chosen action. Per-row actions reuse this
   // by passing a one-item array, so there's exactly one execution path.
+  // Block a destructive / paid bulk action that exceeds its server cap — with a
+  // clear message, before any confirm opens or the server is called. Returns
+  // true when blocked. Clears the notice when within cap. Mirrors the caps in
+  // @/lib/bulk-safety, which the server enforces regardless (defense in depth).
+  function overDangerCap(count: number, cap: number, verb: string): boolean {
+    if (count <= cap) {
+      setDangerNotice(null);
+      return false;
+    }
+    setDangerNotice(
+      `${verb} runs on at most ${cap} at a time — you have ${count} selected. Narrow the selection, then try again.`,
+    );
+    return true;
+  }
+
   function requestAction(
     items: BulkContentItem[],
     op: BulkUpdateOp | { type: "delete" },
   ) {
     if (items.length === 0) return;
+    if (
+      op.type === "delete" &&
+      overDangerCap(items.length, MAX_BULK_DESTRUCTIVE_ITEMS, "Delete")
+    ) {
+      return;
+    }
     setTypedConfirm("");
     setFailures([]);
+    setDangerNotice(null);
     const verb =
       op.type === "delete"
         ? "Delete"
@@ -602,6 +636,8 @@ export function ContentList({
     // side keeps the modal's "0 articles will be skipped" copy honest.
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Regenerate"))
+      return;
     console.info("[content list regen request]", {
       target,
       count: storyItems.length,
@@ -618,23 +654,30 @@ export function ContentList({
       count: items.length,
     });
     startTransition(async () => {
-      let result: BulkRegenResult;
-      try {
-        result = await bulkRegenerateContentAction(items, target);
-      } catch (err) {
-        result = {
-          target,
-          ok: [],
-          failed: items.map((it) => ({
-            ...it,
-            reason: err instanceof Error ? err.message : String(err),
-          })),
-        };
+      // Fire in batches of MAX_BULK_PAID_ITEMS so each server call stays under
+      // the paid cap while the sanctioned "Regenerate ALL published shorts"
+      // rebuild (which can far exceed it) still runs from one click + the
+      // cost/typed-count confirm. Sequential, not parallel: the server's
+      // per-story image-budget gate needs to see the running total, the same
+      // reason the action loop itself is sequential. Post-pagination
+      // "rebuild thousands" should graduate to an async job (Phase 1).
+      const result: BulkRegenResult = { target, ok: [], failed: [] };
+      for (let i = 0; i < items.length; i += MAX_BULK_PAID_ITEMS) {
+        const batch = items.slice(i, i + MAX_BULK_PAID_ITEMS);
+        try {
+          const r = await bulkRegenerateContentAction(batch, target);
+          result.ok.push(...r.ok);
+          result.failed.push(...r.failed);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          for (const it of batch) result.failed.push({ ...it, reason });
+        }
       }
       console.info("[content list regen result]", {
         target,
         ok: result.ok.length,
         failed: result.failed.length,
+        batches: Math.ceil(items.length / MAX_BULK_PAID_ITEMS),
       });
       setRegenConfirm(null);
       setRegenResult(result);
@@ -678,6 +721,10 @@ export function ContentList({
     // otherwise land in the skipped bucket with N platforms each.
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0 || platforms.length === 0) return;
+    if (
+      overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Publish to socials")
+    )
+      return;
     console.info("[content list bulk-publish request]", {
       count: storyItems.length,
       platforms,
@@ -716,6 +763,8 @@ export function ContentList({
   function requestComplete() {
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Complete & publish"))
+      return;
     setCompleteResult(null);
     setCompleteConfirm(storyItems);
   }
@@ -760,6 +809,8 @@ export function ContentList({
   function requestRefresh() {
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Refresh assets"))
+      return;
     setRefreshResult(null);
     setRefreshConfirm(storyItems);
   }
@@ -804,6 +855,8 @@ export function ContentList({
   function requestFullPipeline() {
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Full pipeline"))
+      return;
     setFullPipelineResult(null);
     setFullPipelineConfirm(storyItems);
   }
@@ -917,6 +970,20 @@ export function ContentList({
               ×
             </button>
           </span>
+        </div>
+      )}
+
+      {dangerNotice && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn/10 px-4 py-2 font-mono text-[11px] text-ink">
+          <span>{dangerNotice}</span>
+          <button
+            type="button"
+            onClick={() => setDangerNotice(null)}
+            className="text-muted transition-colors hover:text-ink"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -1860,8 +1927,9 @@ function ConfirmModal({
         {destructive && (
           <div className="mt-3 space-y-2">
             <p className="font-mono text-[11px] text-danger">
-              Hard delete is permanent. Rendered audio and video are also
-              removed from storage. Type DELETE to confirm.
+              Hard delete is permanent — there is no trash and no undo.
+              Rendered audio and video are also removed from storage. Type
+              DELETE to confirm.
             </p>
             <input
               type="text"
@@ -1929,9 +1997,21 @@ function RegenConfirmModal({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [pending, onCancel]);
+  const [typedCount, setTypedCount] = useState("");
   const meta = REGEN_TARGET_META[target];
   const previewCount = Math.min(items.length, 6);
   const overflow = items.length - previewCount;
+  // Total estimated spend (null for daily-budget-gated targets like hero /
+  // scenes). Over the threshold the operator must type the story count to
+  // commit — one click shouldn't fire a large, real-money regenerate. Plan:
+  // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  const totalCostUsd = estimateRegenCostUsd(target, items.length);
+  const totalCostText =
+    totalCostUsd != null ? `$${totalCostUsd.toFixed(2)}` : null;
+  const requiresTypedConfirm =
+    totalCostUsd != null && totalCostUsd >= SPEND_CONFIRM_THRESHOLD_USD;
+  const confirmBlocked =
+    pending || (requiresTypedConfirm && typedCount !== String(items.length));
   return (
     <div
       role="dialog"
@@ -1951,8 +2031,13 @@ function RegenConfirmModal({
           {meta.body}
         </p>
         <p className="mt-2 font-mono text-[11px] text-muted">
-          Estimate: {meta.perStoryHint} × {items.length} stor
-          {items.length === 1 ? "y" : "ies"}.
+          {meta.perStoryHint} × {items.length} stor
+          {items.length === 1 ? "y" : "ies"}
+        </p>
+        <p className="mt-1 font-mono text-[12px] font-bold text-ink">
+          {totalCostText != null
+            ? `≈ ${totalCostText} total`
+            : "Total scales with today's image budget"}
         </p>
         <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
           {items.slice(0, previewCount).map((it) => {
@@ -1968,11 +2053,30 @@ function RegenConfirmModal({
             <li className="text-muted">…and {overflow} more</li>
           )}
         </ul>
+        {requiresTypedConfirm && (
+          <div className="mt-3 space-y-2">
+            <p className="font-mono text-[11px] text-warn">
+              This spends about {totalCostText}. Type{" "}
+              <span className="text-ink">{items.length}</span> to confirm.
+            </p>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={typedCount}
+              onChange={(e) =>
+                setTypedCount(e.target.value.replace(/[^0-9]/g, ""))
+              }
+              placeholder={String(items.length)}
+              autoFocus
+              className="w-full rounded-md border border-warn/50 bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-muted focus:border-warn focus:outline-none"
+            />
+          </div>
+        )}
         <div className="mt-4 flex items-center gap-2">
           <button
             type="button"
             onClick={onRun}
-            disabled={pending}
+            disabled={confirmBlocked}
             className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {pending ? "Queueing…" : `Queue ${items.length}`}

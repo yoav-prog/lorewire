@@ -17,6 +17,13 @@ import { randomUUID } from "node:crypto";
 import { isHeroStyleId } from "@/lib/hero-styles";
 import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
+import { audit, type AuditAction } from "@/lib/audit";
+import {
+  MAX_BULK_ITEMS,
+  MAX_BULK_DESTRUCTIVE_ITEMS,
+  MAX_BULK_PAID_ITEMS,
+  estimateRegenCostUsd,
+} from "@/lib/bulk-safety";
 import {
   getUserByEmail,
   updateStory,
@@ -3508,10 +3515,9 @@ export async function countUnreadAdminNotificationsAction(): Promise<number> {
 //
 // Security note: input validation runs at the boundary (status / category
 // against the closed enums) BEFORE any DB call, so a forged client payload
-// can't land an arbitrary string in a column. Hard cap of MAX_BULK_ITEMS
-// protects against accidental "select all 200" runaway operations.
-
-const MAX_BULK_ITEMS = 200;
+// can't land an arbitrary string in a column. The cap constants (the cheap-op
+// limit plus the lower destructive / paid caps) live in @/lib/bulk-safety so
+// the Content client island enforces the exact same numbers.
 
 // Closed-set guard for bulk category ops. Reads the `categories` table —
 // the data-driven taxonomy (_plans/2026-07-01-category-taxonomy-multitag.md)
@@ -3573,15 +3579,18 @@ function isBulkContentKind(v: unknown): v is BulkContentKind {
   return v === "story" || v === "article";
 }
 
-function validateItems(items: unknown): BulkContentItem[] {
+function validateItems(
+  items: unknown,
+  maxItems: number = MAX_BULK_ITEMS,
+): BulkContentItem[] {
   if (!Array.isArray(items)) {
     throw new Error("bulk-action: items is not an array");
   }
   if (items.length === 0) {
     throw new Error("bulk-action: items is empty");
   }
-  if (items.length > MAX_BULK_ITEMS) {
-    throw new Error(`bulk-action: exceeds ${MAX_BULK_ITEMS} items`);
+  if (items.length > maxItems) {
+    throw new Error(`bulk-action: exceeds ${maxItems} items`);
   }
   const out: BulkContentItem[] = [];
   for (const raw of items) {
@@ -3599,6 +3608,35 @@ function validateItems(items: unknown): BulkContentItem[] {
     out.push({ kind, id });
   }
   return out;
+}
+
+// 2026-07-15 audit spine for danger-class bulk ops (delete + paid). Writes one
+// append-only summary row per run through @/lib/audit BEFORE the mutation, so a
+// failed audit write aborts the action (fail closed, matching the audit
+// module's contract). Metadata is PII-free: opaque `${kind}:${id}` refs only,
+// capped so one large run can't bloat the row. Plan:
+// _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+async function auditBulkContent(
+  session: { userId: string; email?: string | null },
+  action: AuditAction,
+  items: BulkContentItem[],
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const storyCount = items.filter((i) => i.kind === "story").length;
+  await audit({
+    actorId: session.userId,
+    actorEmail: session.email ?? null,
+    action,
+    targetType: "content",
+    targetId: randomUUID(),
+    metadata: {
+      count: items.length,
+      storyCount,
+      articleCount: items.length - storyCount,
+      ids: items.slice(0, 100).map((i) => `${i.kind}:${i.id}`),
+      ...extra,
+    },
+  });
 }
 
 export async function bulkUpdateContentAction(
@@ -3807,8 +3845,9 @@ export async function bulkUpdateContentAction(
 export async function bulkDeleteContentAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkActionResult> {
-  await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput, MAX_BULK_DESTRUCTIVE_ITEMS);
+  await auditBulkContent(session, "content.bulk_delete", items);
 
   console.info("[content bulk action] start", {
     type: "delete",
@@ -3935,10 +3974,17 @@ export async function bulkRegenerateContentAction(
   target: BulkRegenTarget,
 ): Promise<BulkRegenResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
   if (!BULK_REGEN_TARGETS.has(target)) {
     throw new Error("bulk-regen: invalid target");
   }
+  await auditBulkContent(session, "content.bulk_regenerate", items, {
+    target,
+    estCostUsd: estimateRegenCostUsd(
+      target,
+      items.filter((i) => i.kind === "story").length,
+    ),
+  });
 
   console.info("[content bulk regen] start", {
     target,
@@ -4209,8 +4255,9 @@ export async function bulkPublishToSocialsAction(
   platformsInput: SocialPlatform[],
 ): Promise<BulkPublishResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
   const platforms = validatePlatforms(platformsInput);
+  await auditBulkContent(session, "content.bulk_publish", items, { platforms });
 
   const t0 = Date.now();
   console.info("[content bulk-publish] start", {
@@ -4558,7 +4605,8 @@ export async function bulkCompleteAndPublishAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkCompleteAndPublishResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_complete_publish", items);
 
   const t0 = Date.now();
    
@@ -4845,7 +4893,8 @@ export async function bulkRefreshAssetsAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkRefreshAssetsResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_refresh_assets", items);
 
   const t0 = Date.now();
    
@@ -5248,7 +5297,8 @@ export async function bulkFullPipelineAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkFullPipelineResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_full_pipeline", items);
 
   const t0 = Date.now();
   console.info("[bulk-full-pipeline click]", {
