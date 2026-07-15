@@ -38,11 +38,22 @@ export type AuditAction =
   | "team.invite_create"
   | "team.invite_revoke"
   | "team.invite_accept"
-  | "team.member_remove";
+  | "team.member_remove"
+  // 2026-07-15 danger-class bulk content ops (delete + paid) — one summary row
+  // per run, written before the mutation. Plan:
+  // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  | "content.bulk_delete"
+  | "content.bulk_regenerate"
+  | "content.bulk_publish"
+  | "content.bulk_complete_publish"
+  | "content.bulk_refresh_assets"
+  | "content.bulk_full_pipeline";
 
 // The kind of thing an action targets. Generic on purpose so any future entity
-// becomes auditable without a schema change.
-export type AuditTargetType = "user" | "invite";
+// becomes auditable without a schema change. "content" covers a bulk story /
+// article run (target_id is a per-run batch id; the affected ids live in the
+// PII-free metadata).
+export type AuditTargetType = "user" | "invite" | "content";
 
 export interface AuditInput {
   /** users.id of the staff member who performed the action. */
