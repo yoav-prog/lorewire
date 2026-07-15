@@ -2195,6 +2195,18 @@ export interface ContentPageOpts {
   updatedSince?: string;
   updatedUntil?: string;
   flagged?: boolean; // stories.auto_publish_when_ready — a real column
+  // 2026-07-15 Phase 2 aggregate filters, now in SQL (stories only). Setting
+  // publishedOn / jobStatus / activeKind drops the article half of the union;
+  // publishedNotOn keeps articles (they're vacuously "not on" any platform).
+  /** AND-filter: only stories live on every listed platform. */
+  publishedOn?: SocialPlatform[];
+  /** AND-filter: only stories NOT live on every listed platform. */
+  publishedNotOn?: SocialPlatform[];
+  /** Latest story_jobs.status (by requested_at) for the story's reddit_id. */
+  jobStatus?: JobStatus;
+  /** In-flight render filter: "any" = any active render; a specific kind
+   *  narrows to one source table. */
+  activeKind?: ProgressKind | "any";
   /** Case-insensitive search over title / slug / id / status / badge. */
   q?: string;
   /** Compound "<ts>|<id>" cursor from a prior page; malformed → page one. */
@@ -2248,6 +2260,44 @@ const ARTICLE_PAGE_PROJECTION =
   "0 AS auto_publish_when_ready, 0 AS auto_publish_attempts, " +
   "NULL AS refresh_assets_state, COALESCE(updated_at, created_at) AS sort_key";
 
+// 2026-07-15 Phase 2: the aggregate story filters as portable correlated SQL.
+// Table names come from a closed enum, never user input.
+const SOCIAL_POST_TABLE: Record<SocialPlatform, string> = {
+  facebook: "facebook_posts",
+  instagram: "instagram_posts",
+  youtube: "youtube_posts",
+  tiktok: "tiktok_posts",
+};
+
+/** Correlated EXISTS clause for the active-render filter, matching the tables
+ *  loadStoryProgressByIds reads. Correlates on the outer `stories` row. */
+function activeRenderClause(kind: ProgressKind | "any"): string {
+  const short =
+    "EXISTS (SELECT 1 FROM short_renders WHERE story_id = stories.id " +
+    "AND status IN ('queued', 'rendering'))";
+  const images =
+    "EXISTS (SELECT 1 FROM image_renders WHERE owner_kind = 'story' " +
+    "AND owner_id = stories.id AND status IN ('queued', 'rendering'))";
+  const voice =
+    "EXISTS (SELECT 1 FROM voice_renders WHERE story_id = stories.id " +
+    "AND status IN ('queued', 'rendering'))";
+  const pipeline =
+    "EXISTS (SELECT 1 FROM story_jobs WHERE story_id = stories.id " +
+    "AND status IN ('queued', 'processing'))";
+  switch (kind) {
+    case "short":
+      return short;
+    case "images":
+      return images;
+    case "voice":
+      return voice;
+    case "pipeline":
+      return pipeline;
+    default: // "any"
+      return `(${short} OR ${images} OR ${voice} OR ${pipeline})`;
+  }
+}
+
 /** Shared WHERE for one table: filters + search, plus an optional keyset cursor
  *  clamp. The page SELECT and the COUNT both build off this so they filter
  *  identically; the count passes cursor=null (the total is filter-scoped, not
@@ -2274,6 +2324,28 @@ function buildContentTableWhere(
       where.push("COALESCE(auto_publish_when_ready, 0) = 1");
     } else if (opts.flagged === false) {
       where.push("COALESCE(auto_publish_when_ready, 0) = 0");
+    }
+    // Aggregate filters (Phase 2), stories only. Correlated on stories.id /
+    // stories.reddit_id inside this table's SELECT.
+    for (const p of opts.publishedOn ?? []) {
+      where.push(
+        `EXISTS (SELECT 1 FROM ${SOCIAL_POST_TABLE[p]} WHERE story_id = stories.id AND status = 'posted')`,
+      );
+    }
+    for (const p of opts.publishedNotOn ?? []) {
+      where.push(
+        `NOT EXISTS (SELECT 1 FROM ${SOCIAL_POST_TABLE[p]} WHERE story_id = stories.id AND status = 'posted')`,
+      );
+    }
+    if (opts.jobStatus) {
+      where.push(
+        "(SELECT status FROM story_jobs WHERE reddit_id = stories.reddit_id " +
+          "ORDER BY requested_at DESC LIMIT 1) = ?",
+      );
+      params.push(opts.jobStatus);
+    }
+    if (opts.activeKind) {
+      where.push(activeRenderClause(opts.activeKind));
     }
   } else {
     // articles: subKind maps to the `type` column; language narrows here.
@@ -2376,6 +2448,9 @@ export async function loadContentPage(
     !isStoryOnlyStatus &&
     !opts.category &&
     opts.flagged !== true &&
+    (opts.publishedOn?.length ?? 0) === 0 &&
+    !opts.jobStatus &&
+    !opts.activeKind &&
     (opts.subKind === undefined || isArticleSubKind);
 
   if (!wantStories && !wantArticles) {
