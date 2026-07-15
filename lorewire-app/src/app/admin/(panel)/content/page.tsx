@@ -24,6 +24,7 @@ import {
   type SocialPlatform,
 } from "@/lib/repo";
 import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
+import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 import { STATUSES } from "@/app/admin/ui";
 import { listCategories } from "@/lib/categories/repo";
 import { ContentList } from "./ContentList";
@@ -189,6 +190,9 @@ export default async function ContentPage({
     /** 2026-06-25 active-render filter. Closed-enum, see
      *  ACTIVE_KIND_VALUES. Unset = no filter. */
     active?: string;
+    /** 2026-07-15 title-length filter. "long" = title over the branded cap
+     *  (weird on the cover). Anything else / unset = no filter. */
+    titleLen?: string;
     /** 2026-07-15 Phase 1 free-text search, server-side (title/slug/id/status/
      *  badge). */
     q?: string;
@@ -220,6 +224,10 @@ export default async function ContentPage({
     sp.flagged === "1" ? true : sp.flagged === "0" ? false : undefined;
   const activeKindFilter: ProgressKind | "any" | undefined =
     isActiveKindValue(sp.active) ? sp.active : undefined;
+  // 2026-07-15 closed-value title-length filter: "long" or no filter. A
+  // hand-edited URL with any other value collapses to "no filter".
+  const titleLength: "long" | undefined =
+    sp.titleLen === "long" ? "long" : undefined;
   const updatedBucket = isDateBucket(sp.updatedBucket)
     ? sp.updatedBucket
     : undefined;
@@ -263,6 +271,7 @@ export default async function ContentPage({
     publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
     jobStatus,
     activeKind: activeKindFilter,
+    titleLength,
     q: sp.q?.trim() || undefined,
   };
 
@@ -286,6 +295,7 @@ export default async function ContentPage({
       updatedBefore: updatedBucket === "custom" ? sp.updatedBefore : undefined,
       flagged: sp.flagged,
       active: sp.active,
+      titleLen: sp.titleLen,
       ...override,
     };
     for (const [k, v] of Object.entries(merged)) {
@@ -378,6 +388,13 @@ export default async function ContentPage({
       key: "Active",
       label: ACTIVE_KIND_LABELS[activeKindFilter],
       clearHref: `/admin/content${baseQs({ active: undefined })}`,
+    });
+  }
+  if (titleLength) {
+    activeFilters.push({
+      key: "Title",
+      label: "Too long",
+      clearHref: `/admin/content${baseQs({ titleLen: undefined })}`,
     });
   }
   if (updatedBucket) {
@@ -633,6 +650,26 @@ export default async function ContentPage({
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Title
+          </span>
+          {chip(
+            `/admin/content${baseQs({ titleLen: undefined })}`,
+            "All",
+            !titleLength,
+          )}
+          {chip(
+            `/admin/content${baseQs({ titleLen: "long" })}`,
+            "Too long",
+            titleLength === "long",
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (video stories only · over {TITLE_MAX_WORDS} words / {TITLE_MAX_CHARS}{" "}
+            chars — fix with Regenerate titles)
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
             Updated
           </span>
           {chip(
@@ -691,6 +728,9 @@ export default async function ContentPage({
             )}
             {sp.active && (
               <input type="hidden" name="active" value={sp.active} />
+            )}
+            {sp.titleLen && (
+              <input type="hidden" name="titleLen" value={sp.titleLen} />
             )}
             <input type="hidden" name="updatedBucket" value="custom" />
             <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-muted">

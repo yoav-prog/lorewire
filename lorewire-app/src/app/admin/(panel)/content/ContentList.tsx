@@ -34,6 +34,7 @@ import {
   bulkUpdateContentByFilterAction,
   bulkDeleteContentAction,
   bulkRegenerateContentAction,
+  bulkRegenerateTitlesAction,
   type BulkActionResult,
   type BulkCompleteAndPublishOutcome,
   type BulkCompleteAndPublishResult,
@@ -47,6 +48,8 @@ import {
   type BulkRefreshAssetsResult,
   type BulkRegenResult,
   type BulkRegenTarget,
+  type BulkRegenTitlesOutcome,
+  type BulkRegenTitlesResult,
   type BulkStopRunsResult,
   type BulkUpdateOp,
 } from "@/app/admin/actions";
@@ -72,6 +75,7 @@ import {
   SPEND_CONFIRM_THRESHOLD_USD,
   estimateRegenCostUsd,
 } from "@/lib/bulk-safety";
+import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 
 /** Active category options for the row chip + the bulk picker. Fetched
  *  from the `categories` table by the server page (the 2026-07-01 data-
@@ -404,6 +408,15 @@ export function ContentList({
   >(null);
   const [reclassifyResult, setReclassifyResult] =
     useState<BulkReclassifyResult | null>(null);
+  // 2026-07-15 bulk "Regenerate titles": rewrite too-long story titles with
+  // the branded prompt. Pairs with the "Title: Too long" filter. Same
+  // confirm/result pattern as reclassify (per-story synchronous LLM). Plan:
+  // _plans/2026-07-15-too-long-title-filter-and-bulk-fix.md.
+  const [titleRegenConfirm, setTitleRegenConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [titleRegenResult, setTitleRegenResult] =
+    useState<BulkRegenTitlesResult | null>(null);
   // label → color hex for the row chips; misses (legacy / unclassified
   // labels) fall back to the muted chip class.
   const categoryColorByLabel = useMemo(() => {
@@ -994,6 +1007,50 @@ export function ContentList({
     });
   }
 
+  function requestTitleRegen() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Regenerate titles"))
+      return;
+    setTitleRegenResult(null);
+    setTitleRegenConfirm(storyItems);
+  }
+
+  function runTitleRegenConfirmed() {
+    if (!titleRegenConfirm) return;
+    const items = titleRegenConfirm;
+    console.info("[content list title-regen request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkRegenTitlesResult;
+      try {
+        result = await bulkRegenerateTitlesAction(items);
+      } catch (err) {
+        result = {
+          regeneratedCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list title-regen result]", {
+        regeneratedCount: result.regeneratedCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setTitleRegenConfirm(null);
+      setTitleRegenResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   // --- render ---------------------------------------------------------------
 
   return (
@@ -1106,6 +1163,14 @@ export function ContentList({
           result={reclassifyResult}
           rowByKey={rowByKey}
           onDismiss={() => setReclassifyResult(null)}
+        />
+      )}
+
+      {titleRegenResult && (
+        <TitleRegenResultBanner
+          result={titleRegenResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setTitleRegenResult(null)}
         />
       )}
 
@@ -1392,6 +1457,7 @@ export function ContentList({
           onBulkRefresh={requestRefresh}
           onFullPipeline={requestFullPipeline}
           onReclassify={requestReclassify}
+          onTitleRegen={requestTitleRegen}
           onStopRuns={runStopRuns}
           onClear={clearSelection}
         />
@@ -1459,6 +1525,16 @@ export function ContentList({
           onRun={runReclassifyConfirmed}
         />
       )}
+
+      {titleRegenConfirm && (
+        <TitleRegenConfirmModal
+          items={titleRegenConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setTitleRegenConfirm(null)}
+          onRun={runTitleRegenConfirmed}
+        />
+      )}
     </>
   );
 }
@@ -1476,6 +1552,7 @@ function BulkActionBar({
   onBulkRefresh,
   onFullPipeline,
   onReclassify,
+  onTitleRegen,
   onStopRuns,
   onClear,
 }: {
@@ -1489,6 +1566,7 @@ function BulkActionBar({
   onBulkRefresh: () => void;
   onFullPipeline: () => void;
   onReclassify: () => void;
+  onTitleRegen: () => void;
   onStopRuns: () => void;
   onClear: () => void;
 }) {
@@ -1582,6 +1660,15 @@ function BulkActionBar({
           label="Reclassify AI"
           disabled={disabled || reclassifyDisabled}
           onClick={onReclassify}
+        />
+        {/* Fix too-long titles: rewrite each selected story's title with the
+            branded prompt, bounded to the length policy. The paired action for
+            the "Title: Too long" filter. Stories-only (same gate as Reclassify
+            AI); the server skips articles in a mixed selection. */}
+        <BarButton
+          label="Regenerate titles"
+          disabled={disabled || reclassifyDisabled}
+          onClick={onTitleRegen}
         />
         <Picker
           label="Regenerate ▾"
@@ -3390,6 +3477,182 @@ function ReclassifyResultBanner({
 
 function reclassifyLabelFor(
   outcome: BulkReclassifyOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
+}
+
+function TitleRegenConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="title-regen-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="title-regen-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Regenerate {items.length}{" "}
+          {items.length === 1 ? "title" : "titles"}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          Rewrites each story&rsquo;s title with the same branded prompt the
+          pipeline uses, kept under {TITLE_MAX_WORDS} words / {TITLE_MAX_CHARS}{" "}
+          characters so it renders cleanly on the cover. The current title is
+          replaced. A story with no body is skipped (nothing to base a title
+          on).
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          One small LLM call per story — well under a cent each.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Regenerating…" : `Regenerate ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TitleRegenResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkRegenTitlesResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const regenerated = result.outcomes.filter((o) => o.state === "regenerated");
+  const skipped = result.outcomes.filter((o) => o.state === "skipped");
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const previewRegen = regenerated.slice(0, 5);
+  const overflowRegen = regenerated.length - previewRegen.length;
+  const previewSkipped = skipped.slice(0, 5);
+  const overflowSkipped = skipped.length - previewSkipped.length;
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Regenerate titles:</span> Regenerated{" "}
+          <span className="text-accent">{result.regeneratedCount}</span>
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewRegen.length > 0 && (
+        <ul className="space-y-0.5 border-t border-accent/30 pt-2">
+          {previewRegen.map((o) => (
+            <li key={`re:${o.kind}:${o.id}`}>
+              <span className="text-muted line-through">
+                {o.prevTitle ?? "—"}
+              </span>
+              <span className="text-muted"> → </span>
+              <span className="text-accent">{o.nextTitle}</span>
+            </li>
+          ))}
+          {overflowRegen > 0 && (
+            <li className="text-muted">…and {overflowRegen} more</li>
+          )}
+        </ul>
+      )}
+      {previewSkipped.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Skipped
+          </li>
+          {previewSkipped.map((o) => (
+            <li key={`skip:${o.kind}:${o.id}`}>
+              <span className="text-ink">{titleRegenLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70"> — {describeReason(o.reason ?? "—")}</span>
+            </li>
+          ))}
+          {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
+        </ul>
+      )}
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">{titleRegenLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "unknown")}
+              </span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function titleRegenLabelFor(
+  outcome: BulkRegenTitlesOutcome,
   rowByKey: Map<string, ContentRow>,
 ): string {
   const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);

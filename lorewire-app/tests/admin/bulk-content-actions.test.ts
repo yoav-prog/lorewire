@@ -68,6 +68,22 @@ vi.mock("@/lib/category-tags-classifier", () => ({
   classifyStoryTags: (input: unknown) => classifyStoryTagsMock(input),
 }));
 
+// The bulk title-regen action calls regenerateTitleForStory once per story
+// (an inline LLM call). Mock it at the module boundary so the suite stays
+// offline and each test scripts the outcome. actions.ts imports this module
+// dynamically, but vi.mock intercepts dynamic imports too. Same lazy-reference
+// pattern as classifyStoryTagsMock to dodge vi.mock hoisting's TDZ.
+type RegenTitleResult =
+  | { ok: true; title: string; previousTitle: string | null; model: string }
+  | { ok: false; error: string; stage: string };
+const regenerateTitleForStoryMock = vi.fn<
+  (storyId: string) => Promise<RegenTitleResult>
+>();
+vi.mock("@/lib/title-regenerator", () => ({
+  regenerateTitleForStory: (storyId: string) =>
+    regenerateTitleForStoryMock(storyId),
+}));
+
 // Import AFTER vi.mock so the action module picks up the mocked deps.
 import {
   bulkUpdateContentAction,
@@ -76,6 +92,7 @@ import {
   bulkFullPipelineAction,
   bulkReclassifyContentAction,
   bulkRegenerateContentAction,
+  bulkRegenerateTitlesAction,
   type BulkContentItem,
   type BulkUpdateOp,
 } from "@/app/admin/actions";
@@ -163,6 +180,7 @@ async function seedArticle(opts: {
 beforeEach(async () => {
   await reset();
   classifyStoryTagsMock.mockReset();
+  regenerateTitleForStoryMock.mockReset();
 });
 
 // --- Input validation -------------------------------------------------------
@@ -873,6 +891,108 @@ describe("bulkReclassifyContentAction", () => {
       reason: "not-found",
     });
     expect(classifyStoryTagsMock).not.toHaveBeenCalled();
+  });
+});
+
+// --- Bulk regenerate titles ---------------------------------------------------
+// Plan: _plans/2026-07-15-too-long-title-filter-and-bulk-fix.md. The
+// regenerator is mocked (regenerateTitleForStoryMock above); the action's own
+// job — filter articles, map ok/skip/fail, count, audit — runs for real.
+
+describe("bulkRegenerateTitlesAction", () => {
+  it("regenerates a story title and reports prev → next", async () => {
+    const storyId = await seedStory({
+      title: "MY SON ATE THE MIDDLES OUT OF EVERY CINNAMON ROLL THIS MORNING",
+    });
+    regenerateTitleForStoryMock.mockResolvedValue({
+      ok: true,
+      title: "THE CINNAMON ROLL THIEF",
+      previousTitle: "MY SON ATE THE MIDDLES OUT OF EVERY CINNAMON ROLL THIS MORNING",
+      model: "openai/gpt-5-nano",
+    });
+    const result = await bulkRegenerateTitlesAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.regeneratedCount).toBe(1);
+    expect(result.skippedCount).toBe(0);
+    expect(result.erroredCount).toBe(0);
+    expect(result.outcomes[0]).toMatchObject({
+      state: "regenerated",
+      nextTitle: "THE CINNAMON ROLL THIEF",
+    });
+    expect(regenerateTitleForStoryMock).toHaveBeenCalledWith(storyId);
+  });
+
+  it("skips articles (not-a-story) without calling the regenerator", async () => {
+    const articleId = await seedArticle({});
+    const result = await bulkRegenerateTitlesAction([
+      { kind: "article", id: articleId },
+    ]);
+    expect(result.skippedCount).toBe(1);
+    expect(result.regeneratedCount).toBe(0);
+    expect(result.outcomes[0]).toMatchObject({
+      state: "skipped",
+      reason: "not-a-story",
+    });
+    expect(regenerateTitleForStoryMock).not.toHaveBeenCalled();
+  });
+
+  it("treats a body-less story as a soft skip, not a failure", async () => {
+    const storyId = await seedStory({});
+    regenerateTitleForStoryMock.mockResolvedValue({
+      ok: false,
+      error: "story has no body text to base a title on",
+      stage: "story-missing-body",
+    });
+    const result = await bulkRegenerateTitlesAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.skippedCount).toBe(1);
+    expect(result.erroredCount).toBe(0);
+    expect(result.outcomes[0].state).toBe("skipped");
+  });
+
+  it("reports a hard LLM/DB failure as errored", async () => {
+    const storyId = await seedStory({});
+    regenerateTitleForStoryMock.mockResolvedValue({
+      ok: false,
+      error: "model timeout",
+      stage: "llm",
+    });
+    const result = await bulkRegenerateTitlesAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.erroredCount).toBe(1);
+    expect(result.outcomes[0]).toMatchObject({
+      state: "errored",
+      reason: "model timeout",
+    });
+  });
+
+  it("rejects a run past the paid cap", async () => {
+    const items: BulkContentItem[] = Array.from({ length: 51 }, () => ({
+      kind: "story",
+      id: randomUUID(),
+    }));
+    await expect(bulkRegenerateTitlesAction(items)).rejects.toThrow(/exceeds 50/);
+  });
+
+  it("audits content.bulk_regenerate_titles with the affected count", async () => {
+    const a = await seedStory({});
+    regenerateTitleForStoryMock.mockResolvedValue({
+      ok: true,
+      title: "SHORT TITLE",
+      previousTitle: null,
+      model: "openai/gpt-5-nano",
+    });
+    await bulkRegenerateTitlesAction([{ kind: "story", id: a }]);
+    const row = await one<{ metadata: string; target_type: string }>(
+      "SELECT metadata, target_type FROM admin_audit_log WHERE action = ?",
+      ["content.bulk_regenerate_titles"],
+    );
+    expect(row).not.toBeNull();
+    expect(row!.target_type).toBe("content");
+    expect(JSON.parse(row!.metadata).count).toBe(1);
   });
 });
 
