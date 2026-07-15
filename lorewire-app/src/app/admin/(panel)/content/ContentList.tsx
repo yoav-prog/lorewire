@@ -31,6 +31,7 @@ import {
   bulkRefreshAssetsAction,
   bulkStopRunsAction,
   bulkUpdateContentAction,
+  bulkUpdateContentByFilterAction,
   bulkDeleteContentAction,
   bulkRegenerateContentAction,
   type BulkActionResult,
@@ -157,6 +158,11 @@ interface ConfirmState {
   items: BulkContentItem[];
   op: BulkUpdateOp | { type: "delete" };
   destructive: boolean;
+  /** Select-all-matching: run the op against every row matching the current
+   *  filter (server-resolved), not just `items`. `matchingTotal` is the count
+   *  shown in the confirm. Cheap status / category ops only. */
+  byFilter?: boolean;
+  matchingTotal?: number;
 }
 
 function rowKey(kind: Kind, id: string): string {
@@ -330,6 +336,11 @@ export function ContentList({
   // enforces the same caps regardless. Plan:
   // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
   const [dangerNotice, setDangerNotice] = useState<string | null>(null);
+  // 2026-07-15 select-all-matching. When the whole loaded page is ticked and
+  // more rows match the filter, the operator can extend a CHEAP status /
+  // category op to all matching rows (server-resolved). Only meaningful while
+  // every loaded row is selected — `matchingMode` below gates on that.
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
   const [undo, setUndo] = useState<UndoState | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Search box value. Local state for typing responsiveness; a debounced effect
@@ -476,6 +487,15 @@ export function ContentList({
     return true;
   }, [rows, loadedKeySet, selected]);
 
+  // Effective select-all-matching: armed, the whole loaded page ticked, and
+  // more rows actually match. Un-ticking a row, changing the filter (new rows
+  // aren't ticked), or clearing all collapses it automatically.
+  const matchingMode =
+    selectAllMatching &&
+    allLoadedSelected &&
+    total != null &&
+    total > rows.length;
+
   function toggleOne(kind: Kind, id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -502,6 +522,7 @@ export function ContentList({
 
   function clearSelection() {
     setSelected(new Set());
+    setSelectAllMatching(false);
   }
 
   // Open the confirm modal with the chosen action. Per-row actions reuse this
@@ -524,6 +545,7 @@ export function ContentList({
   function requestAction(
     items: BulkContentItem[],
     op: BulkUpdateOp | { type: "delete" },
+    byFilter = false,
   ) {
     if (items.length === 0) return;
     if (
@@ -545,7 +567,14 @@ export function ContentList({
               ? "Unpublish"
               : `Set status to "${op.status}"`
           : `Set category to "${op.category}"`;
-    setConfirm({ verb, items, op, destructive: op.type === "delete" });
+    setConfirm({
+      verb,
+      items,
+      op,
+      destructive: op.type === "delete",
+      byFilter,
+      matchingTotal: byFilter ? (total ?? items.length) : undefined,
+    });
   }
 
   function clearUndo() {
@@ -601,7 +630,7 @@ export function ContentList({
 
   function runConfirmed() {
     if (!confirm) return;
-    const { items, op } = confirm;
+    const { items, op, byFilter } = confirm;
     console.info("[content list bulk submit]", {
       type: op.type,
       count: items.length,
@@ -611,6 +640,10 @@ export function ContentList({
       try {
         if (op.type === "delete") {
           result = await bulkDeleteContentAction(items);
+        } else if (byFilter) {
+          // Select-all-matching: apply to every row matching the filter,
+          // server-resolved. Cheap ops only (paid/destructive never set this).
+          result = await bulkUpdateContentByFilterAction(pageOpts, op);
         } else {
           result = await bulkUpdateContentAction(items, op);
         }
@@ -627,7 +660,9 @@ export function ContentList({
       }
       setFailures(result.failed);
       setConfirm(null);
-      if (op.type !== "delete" && result.ok.length > 0) {
+      // Undo replays through the per-id action (capped) — skip it for a
+      // by-filter run that could span far more rows than that.
+      if (op.type !== "delete" && !byFilter && result.ok.length > 0) {
         scheduleUndo(op, result.prev);
       }
       clearSelection();
@@ -1302,12 +1337,55 @@ export function ContentList({
         <AutoRefresh onTick={refresh} />
       )}
 
+      {allLoadedSelected && total != null && total > rows.length && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-accent/10 px-4 py-2 font-mono text-[11px] text-ink">
+          {matchingMode ? (
+            <>
+              <span>
+                All <span className="text-accent">{total}</span> matching this
+                filter selected. Cheap status / category changes apply to every
+                one; delete and paid actions still use the {rows.length} loaded.
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectAllMatching(false)}
+                className="rounded-md border border-accent px-2 py-0.5 text-accent transition-colors hover:bg-accent hover:text-bg"
+              >
+                Just these {rows.length}
+              </button>
+            </>
+          ) : (
+            <>
+              <span>
+                All {rows.length} on this page selected.{" "}
+                <span className="text-muted">
+                  {total - rows.length} more match this filter.
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectAllMatching(true)}
+                className="rounded-md border border-accent px-2 py-0.5 text-accent transition-colors hover:bg-accent hover:text-bg"
+              >
+                Select all {total} matching
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {anySelected && (
         <BulkActionBar
           counts={counts}
           categories={categories}
           disabled={pending}
-          onAction={(op) => requestAction(selectedItems, op)}
+          onAction={(op) =>
+            requestAction(
+              selectedItems,
+              op,
+              matchingMode && op.type !== "delete",
+            )
+          }
           onRegen={requestRegen}
           onBulkPublish={runBulkPublish}
           onBulkComplete={requestComplete}
@@ -1950,8 +2028,11 @@ function ConfirmModal({
           id="bulk-confirm-title"
           className="font-display text-[16px] font-bold text-ink"
         >
-          {state.verb} {state.items.length}{" "}
-          {state.items.length === 1 ? "item" : "items"}?
+          {state.verb}{" "}
+          {state.byFilter && state.matchingTotal != null
+            ? `${state.matchingTotal} matching`
+            : `${state.items.length} ${state.items.length === 1 ? "item" : "items"}`}
+          ?
         </h3>
         <p className="mt-1 font-mono text-[11px] text-muted">
           {stories} {stories === 1 ? "story" : "stories"} · {articles}{" "}
