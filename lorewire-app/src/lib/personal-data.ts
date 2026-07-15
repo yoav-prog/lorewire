@@ -109,6 +109,34 @@ export const EXPORT_SOURCES: ExportSource[] = [
     description: "Comments you reported",
     columns: ["comment_id", "reason", "status", "created_at"],
   },
+  {
+    table: "submissions",
+    column: "user_id",
+    description: "Stories you submitted",
+    // The user's own submission content plus the moderation OUTCOME (status +
+    // the statement of reasons). Drop the internal AI moderation signals
+    // (moderation_source / confidence / the judge's structured ai_signal), the
+    // render-choice cost decision, and approved_by — that last one is an
+    // admin's user id, a third party who doesn't belong in this user's export.
+    columns: [
+      "id",
+      "display_name",
+      "lang",
+      "title",
+      "body",
+      "dilemma_question",
+      "option_a_text",
+      "option_b_text",
+      "status",
+      "reject_category",
+      "reject_reason",
+      "resubmit_count",
+      "story_id",
+      "approved_at",
+      "created_at",
+      "updated_at",
+    ],
+  },
 ];
 
 export interface DataExport {
