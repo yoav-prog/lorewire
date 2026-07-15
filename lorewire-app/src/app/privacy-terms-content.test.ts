@@ -6,8 +6,9 @@
 //   - GOVERNING_LAW = "the State of Israel"  (TODO unconfirmed)
 //
 // The fix sets CONTACT_EMAIL to "contact@lorewire.com" and LEGAL_ENTITY to
-// "LoreWire". Governing law stays as Israel for now but the TODO is
-// removed. These tests fail if anyone re-introduces the wrong strings,
+// "Traffic.Club IT GmbH" (the operator, per the 2026-07 imprint / GDPR
+// alignment); the governing-law TODO is removed. These tests fail if anyone
+// re-introduces the wrong strings,
 // because the source file is read directly off disk and the assertions
 // scan for the offending text.
 
@@ -33,9 +34,9 @@ describe("privacy/page.tsx — production TODOs are resolved", () => {
     expect(src).not.toContain("info@lorewire.com");
   });
 
-  it("uses LoreWire as the legal entity", async () => {
+  it("uses Traffic.Club IT GmbH as the legal entity", async () => {
     const src = await loadFile(PRIVACY_PATH);
-    expect(src).toContain('LEGAL_ENTITY = "LoreWire"');
+    expect(src).toContain('LEGAL_ENTITY = "Traffic.Club IT GmbH"');
   });
 
   it("no longer references Flexelent as the operator", async () => {
@@ -65,9 +66,9 @@ describe("terms/page.tsx — production TODOs are resolved", () => {
     expect(src).not.toContain("info@lorewire.com");
   });
 
-  it("uses LoreWire as the legal entity", async () => {
+  it("uses Traffic.Club IT GmbH as the legal entity", async () => {
     const src = await loadFile(TERMS_PATH);
-    expect(src).toContain('LEGAL_ENTITY = "LoreWire"');
+    expect(src).toContain('LEGAL_ENTITY = "Traffic.Club IT GmbH"');
   });
 
   it("no longer references Flexelent as the operator", async () => {
