@@ -654,23 +654,30 @@ export function ContentList({
       count: items.length,
     });
     startTransition(async () => {
-      let result: BulkRegenResult;
-      try {
-        result = await bulkRegenerateContentAction(items, target);
-      } catch (err) {
-        result = {
-          target,
-          ok: [],
-          failed: items.map((it) => ({
-            ...it,
-            reason: err instanceof Error ? err.message : String(err),
-          })),
-        };
+      // Fire in batches of MAX_BULK_PAID_ITEMS so each server call stays under
+      // the paid cap while the sanctioned "Regenerate ALL published shorts"
+      // rebuild (which can far exceed it) still runs from one click + the
+      // cost/typed-count confirm. Sequential, not parallel: the server's
+      // per-story image-budget gate needs to see the running total, the same
+      // reason the action loop itself is sequential. Post-pagination
+      // "rebuild thousands" should graduate to an async job (Phase 1).
+      const result: BulkRegenResult = { target, ok: [], failed: [] };
+      for (let i = 0; i < items.length; i += MAX_BULK_PAID_ITEMS) {
+        const batch = items.slice(i, i + MAX_BULK_PAID_ITEMS);
+        try {
+          const r = await bulkRegenerateContentAction(batch, target);
+          result.ok.push(...r.ok);
+          result.failed.push(...r.failed);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          for (const it of batch) result.failed.push({ ...it, reason });
+        }
       }
       console.info("[content list regen result]", {
         target,
         ok: result.ok.length,
         failed: result.failed.length,
+        batches: Math.ceil(items.length / MAX_BULK_PAID_ITEMS),
       });
       setRegenConfirm(null);
       setRegenResult(result);

@@ -85,6 +85,11 @@ and accurate total counts require these to move into SQL.
      catastrophic click architecturally impossible.
 3. **Phase 0 (safety) ships first as its own PR**, verified in-app, before
    any pagination code lands.
+4. **The sanctioned "Regenerate ALL published shorts" bulk rebuild keeps
+   working** by chunking into batches of the paid cap (50) under one click +
+   the cost / typed-count confirm — every server call still obeys the cap, so
+   the guarantee is intact. Post-pagination "rebuild thousands" graduates to
+   an async job (Phase 1).
 
 ## Architecture (the long-term picture)
 
