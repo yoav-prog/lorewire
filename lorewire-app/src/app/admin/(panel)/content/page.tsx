@@ -12,12 +12,12 @@
 import Link from "next/link";
 import { requireCapability } from "@/lib/dal";
 import {
-  listContentSlim,
   getAutoPublishFlaggedSummary,
   CONTENT_SUBKINDS,
   ARTICLE_LANGUAGES,
   SOCIAL_PLATFORMS,
   JOB_STATUSES,
+  type ContentPageOpts,
   type ContentSubKind,
   type JobStatus,
   type ProgressKind,
@@ -27,10 +27,7 @@ import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
 import { STATUSES } from "@/app/admin/ui";
 import { listCategories } from "@/lib/categories/repo";
 import { ContentList } from "./ContentList";
-import { AutoRefresh } from "./AutoRefresh";
 import { FilterPanel, type ActiveFilterChip } from "./FilterPanel";
-
-const LIST_LIMIT = 200;
 
 // 2026-06-24 last-updated filter. Bucket chips collapse the common case
 // ("what changed today") to one click; "Custom" reveals a from/to date
@@ -192,6 +189,9 @@ export default async function ContentPage({
     /** 2026-06-25 active-render filter. Closed-enum, see
      *  ACTIVE_KIND_VALUES. Unset = no filter. */
     active?: string;
+    /** 2026-07-15 Phase 1 free-text search, server-side (title/slug/id/status/
+     *  badge). */
+    q?: string;
   }>;
 }) {
   await requireCapability("content.manage");
@@ -244,23 +244,24 @@ export default async function ContentPage({
       : updatedBucket === "custom"
         ? { since: customAfter, until: customBefore }
         : resolveBucket(updatedBucket);
-  const [rows, flaggedSummary] = await Promise.all([
-    listContentSlim({
-      subKind,
-      status,
-      language,
-      category,
-      publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
-      publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
-      jobStatus,
-      updatedSince: resolvedRange?.since || undefined,
-      updatedUntil: resolvedRange?.until || undefined,
-      flagged: flaggedFilter,
-      activeKind: activeKindFilter,
-      limit: LIST_LIMIT,
-    }),
-    getAutoPublishFlaggedSummary(),
-  ]);
+  const flaggedSummary = await getAutoPublishFlaggedSummary();
+
+  // Filters + search that reach the paginated data layer (loadContentPage, via
+  // ContentList's client pager). The aggregate filters — publishedOn /
+  // publishedNotOn / jobStatus / activeKind — are NOT passed here: they're
+  // paused in Phase 1 because they'd break page boundaries and the total count.
+  // Phase 2 moves them into SQL and re-enables them. `flagged` is a real column
+  // and stays. Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  const pageOpts: ContentPageOpts = {
+    subKind,
+    status,
+    language,
+    category,
+    updatedSince: resolvedRange?.since || undefined,
+    updatedUntil: resolvedRange?.until || undefined,
+    flagged: flaggedFilter,
+    q: sp.q?.trim() || undefined,
+  };
 
   // Filter chips share a builder so adding a new dimension (Phase 3 will add
   // author) only edits one function. Clearing a filter means dropping its key.
@@ -519,9 +520,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Published on
+            Published on (paused)
           </span>
           {chip(
             `/admin/content${baseQs({ publishedOn: undefined })}`,
@@ -540,9 +541,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Not on
+            Not on (paused)
           </span>
           {chip(
             `/admin/content${baseQs({ publishedNotOn: undefined })}`,
@@ -561,9 +562,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Job
+            Job (paused)
           </span>
           {chip(
             `/admin/content${baseQs({ jobStatus: undefined })}`,
@@ -606,9 +607,9 @@ export default async function ContentPage({
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="pointer-events-none flex flex-wrap items-center gap-2 opacity-40">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
-            Active
+            Active (paused)
           </span>
           {chip(
             `/admin/content${baseQs({ active: undefined })}`,
@@ -726,20 +727,12 @@ export default async function ContentPage({
       </FilterPanel>
 
       <ContentList
-        rows={rows}
+        pageOpts={pageOpts}
         categories={activeCategories.map((c) => ({
           label: c.label,
           color: c.color,
         }))}
       />
-
-      {rows.length >= LIST_LIMIT && (
-        <p className="font-mono text-[11px] text-muted">
-          Showing the {LIST_LIMIT} most recently updated. Filter to narrow.
-        </p>
-      )}
-
-      {rows.some((r) => r.progress != null) && <AutoRefresh />}
     </div>
   );
 }

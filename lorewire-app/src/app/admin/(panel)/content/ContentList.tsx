@@ -14,7 +14,7 @@
 // Plan: _plans/2026-06-19-content-bulk-actions.md.
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   useEffect,
   useMemo,
@@ -55,6 +55,7 @@ import {
   articleDirection,
 } from "@/lib/articles";
 import type {
+  ContentPageOpts,
   ContentRow,
   ContentSubKind,
   ProgressSnapshot,
@@ -62,7 +63,8 @@ import type {
   SocialPlatform,
 } from "@/lib/repo";
 import { STATUSES, statusClass } from "@/app/admin/ui";
-import { matchesContentSearch } from "@/lib/content-search";
+import { useContentData } from "./useContentData";
+import { AutoRefresh } from "./AutoRefresh";
 import {
   MAX_BULK_DESTRUCTIVE_ITEMS,
   MAX_BULK_PAID_ITEMS,
@@ -304,13 +306,17 @@ const REGEN_TARGET_META: Record<
 const RESTART_SHORT_MENU_VALUE = "restart-short-everything";
 
 export function ContentList({
-  rows,
+  pageOpts,
   categories,
 }: {
-  rows: ContentRow[];
+  pageOpts: ContentPageOpts;
   categories: CategoryOption[];
 }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const { rows, total, loading, loadingMore, reachedEnd, loadMore, refresh } =
+    useContentData(pageOpts);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
@@ -326,7 +332,10 @@ export function ContentList({
   const [dangerNotice, setDangerNotice] = useState<string | null>(null);
   const [undo, setUndo] = useState<UndoState | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [query, setQuery] = useState("");
+  // Search box value. Local state for typing responsiveness; a debounced effect
+  // pushes it to the URL (?q=), which re-derives pageOpts and refetches page 1
+  // server-side. Initialised from the URL so a shared / refreshed link keeps it.
+  const [searchInput, setSearchInput] = useState(pageOpts.q ?? "");
   // 2026-06-24 bulk regen. `regenConfirm` opens the cost modal; `regenResult`
   // surfaces the post-run "queued N, failed M" banner so the operator sees
   // exactly what landed without scrolling to per-story render lines.
@@ -400,25 +409,35 @@ export function ContentList({
     };
   }, []);
 
+  // Debounce the search box into the URL (?q=). router.replace keeps history
+  // clean; page.tsx reads ?q= back into pageOpts and useContentData refetches
+  // page 1 from the server. The no-op guard stops a URL echo (pageOpts.q ===
+  // searchInput after navigation) from re-pushing.
+  useEffect(() => {
+    if (searchInput === (pageOpts.q ?? "")) return;
+    const t = setTimeout(() => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (searchInput.trim()) params.set("q", searchInput.trim());
+      else params.delete("q");
+      const qs = params.toString();
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput, pageOpts.q, searchParams, pathname, router]);
+
   const rowByKey = useMemo(() => {
     const m = new Map<string, ContentRow>();
     for (const r of rows) m.set(rowKey(r.kind, r.id), r);
     return m;
   }, [rows]);
 
-  // The search bar narrows the visible row set in place. The full `rows`
-  // array still drives rowByKey so a row that's selected and then hidden
-  // by the query stays in `selected` — clearing the query restores it.
-  const filteredRows = useMemo(() => {
-    if (!query.trim()) return rows;
-    return rows.filter((r) => matchesContentSearch(r, query));
-  }, [rows, query]);
-
-  const filteredKeySet = useMemo(() => {
+  // Search + filtering are server-side now, so the loaded set IS the visible
+  // set. This keyset drives select-all-loaded.
+  const loadedKeySet = useMemo(() => {
     const s = new Set<string>();
-    for (const r of filteredRows) s.add(rowKey(r.kind, r.id));
+    for (const r of rows) s.add(rowKey(r.kind, r.id));
     return s;
-  }, [filteredRows]);
+  }, [rows]);
 
   // selectedItems is the source of truth for "what's actually actionable".
   // Stale keys (selected rows that vanished after a filter change or a
@@ -446,16 +465,16 @@ export function ContentList({
   }, [selectedItems]);
 
   const anySelected = counts.total > 0;
-  // Header checkbox tracks the *visible* set (rows after the search filter).
-  // This matches the lazy-user expectation: type to narrow, click select-all,
-  // get exactly the rows you can see.
-  const allFilteredSelected = useMemo(() => {
-    if (filteredRows.length === 0) return false;
-    for (const key of filteredKeySet) {
+  // Header checkbox tracks the loaded set (server search/filters already
+  // narrowed it). Select-all ticks every row loaded so far; Load more brings in
+  // more rows the operator can then tick.
+  const allLoadedSelected = useMemo(() => {
+    if (rows.length === 0) return false;
+    for (const key of loadedKeySet) {
       if (!selected.has(key)) return false;
     }
     return true;
-  }, [filteredRows, filteredKeySet, selected]);
+  }, [rows, loadedKeySet, selected]);
 
   function toggleOne(kind: Kind, id: string) {
     setSelected((prev) => {
@@ -471,12 +490,10 @@ export function ContentList({
   function toggleAll() {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (allFilteredSelected) {
-        // Deselect the visible set; rows hidden by the search query stay
-        // selected so they are not silently dropped.
-        for (const key of filteredKeySet) next.delete(key);
+      if (allLoadedSelected) {
+        for (const key of loadedKeySet) next.delete(key);
       } else {
-        for (const key of filteredKeySet) next.add(key);
+        for (const key of loadedKeySet) next.add(key);
       }
       console.info("[content list selection]", { count: next.size });
       return next;
@@ -1089,16 +1106,16 @@ export function ContentList({
       <div className="relative">
         <input
           type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
           placeholder="Search title, slug, category, status, id…"
           aria-label="Search content"
           className="w-full rounded-xl border border-line bg-surface px-4 py-2 pr-9 text-[13px] text-ink placeholder:text-muted focus:border-accent focus:outline-none"
         />
-        {query && (
+        {searchInput && (
           <button
             type="button"
-            onClick={() => setQuery("")}
+            onClick={() => setSearchInput("")}
             aria-label="Clear search"
             className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-0.5 font-mono text-[12px] text-muted transition-colors hover:text-ink"
           >
@@ -1108,37 +1125,45 @@ export function ContentList({
       </div>
 
       <div className="overflow-hidden rounded-xl border border-line">
-        {rows.length === 0 ? (
+        {loading && rows.length === 0 ? (
           <p className="bg-surface p-6 text-center text-[14px] text-muted">
-            No content matches this filter.
+            Loading…
           </p>
-        ) : filteredRows.length === 0 ? (
+        ) : rows.length === 0 ? (
           <p className="bg-surface p-6 text-center text-[14px] text-muted">
-            No content matches{" "}
-            <span className="font-mono text-ink">&ldquo;{query.trim()}&rdquo;</span>
-            .
+            {searchInput.trim() ? (
+              <>
+                No content matches{" "}
+                <span className="font-mono text-ink">
+                  &ldquo;{searchInput.trim()}&rdquo;
+                </span>
+                .
+              </>
+            ) : (
+              "No content matches these filters."
+            )}
           </p>
         ) : (
           <>
             <div className="flex items-center gap-3 border-b border-line bg-surface2 px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-muted">
               <input
                 type="checkbox"
-                checked={allFilteredSelected}
+                checked={allLoadedSelected}
                 onChange={toggleAll}
                 aria-label={
-                  allFilteredSelected ? "Clear selection" : "Select all"
+                  allLoadedSelected ? "Clear selection" : "Select all"
                 }
                 className="h-3.5 w-3.5 cursor-pointer accent-accent"
               />
               <span>
                 {anySelected
                   ? `${counts.total} selected`
-                  : query.trim()
-                    ? `${filteredRows.length} of ${rows.length} ${rows.length === 1 ? "item" : "items"}`
+                  : total != null && total > rows.length
+                    ? `${rows.length} of ${total} loaded`
                     : `${rows.length} ${rows.length === 1 ? "item" : "items"}`}
               </span>
             </div>
-            {filteredRows.map((r) => {
+            {rows.map((r) => {
               const key = rowKey(r.kind, r.id);
               const isSelected = selected.has(key);
               return (
@@ -1252,6 +1277,30 @@ export function ContentList({
           </>
         )}
       </div>
+
+      {rows.length > 0 && !reachedEnd && (
+        <div className="flex justify-center">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="rounded-lg border border-line px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {loadingMore
+              ? "Loading…"
+              : total != null
+                ? `Load more (${total - rows.length} more)`
+                : "Load more"}
+          </button>
+        </div>
+      )}
+
+      {/* Live-progress polling only exists while something is rendering. Driven
+          by the pager's in-place refresh(), so it updates the loaded window
+          without resetting the cursor or selection. */}
+      {rows.some((r) => r.progress != null) && (
+        <AutoRefresh onTick={refresh} />
+      )}
 
       {anySelected && (
         <BulkActionBar
