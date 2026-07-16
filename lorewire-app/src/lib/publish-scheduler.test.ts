@@ -7,9 +7,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { all, run } from "@/lib/db";
 import {
+  DAILY_DROP_SETTING_KEYS,
   PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
   buildCalendarDays,
+  dropMsForDay,
+  getDailyDropConfig,
+  isBeforeDailyDrop,
+  nextDropMs,
   cancelScheduledPublish,
   computeNextOpenSlot,
   enumerateSlotInstants,
@@ -623,5 +628,50 @@ describe("logSchedulerDecision", () => {
     expect(rows[0].decision).toBe("approved");
     expect(rows[0].tier).toBe("strong");
     expect(Number(rows[0].comments)).toBe(512);
+  });
+});
+
+describe("daily site drop", () => {
+  beforeEach(clear);
+
+  it("defaults to 09:00 Asia/Jerusalem when unset", async () => {
+    const c = await getDailyDropConfig();
+    expect(c).toMatchObject({ time: "09:00", timezone: "Asia/Jerusalem", hour: 9, minute: 0 });
+  });
+
+  it("parses a configured time + zone and normalizes HH:MM", async () => {
+    await setSetting(DAILY_DROP_SETTING_KEYS.time, "7:05");
+    await setSetting(DAILY_DROP_SETTING_KEYS.timezone, "Europe/London");
+    const c = await getDailyDropConfig();
+    expect(c).toMatchObject({ time: "07:05", timezone: "Europe/London", hour: 7, minute: 5 });
+  });
+
+  it("falls back on garbage time and invalid zone", async () => {
+    await setSetting(DAILY_DROP_SETTING_KEYS.time, "banana");
+    await setSetting(DAILY_DROP_SETTING_KEYS.timezone, "Mars/Olympus");
+    const c = await getDailyDropConfig();
+    expect(c).toMatchObject({ time: "09:00", timezone: "Asia/Jerusalem" });
+  });
+
+  it("computes the drop instant DST-safely (summer vs winter offset)", () => {
+    const cfg = { time: "09:00", timezone: "Asia/Jerusalem", hour: 9, minute: 0 };
+    // July: Israel is UTC+3 (IDT) -> 09:00 local = 06:00 UTC.
+    expect(dropMsForDay(cfg, Date.UTC(2026, 6, 15, 12, 0))).toBe(Date.UTC(2026, 6, 15, 6, 0));
+    // January: Israel is UTC+2 (IST) -> 09:00 local = 07:00 UTC.
+    expect(dropMsForDay(cfg, Date.UTC(2026, 0, 15, 12, 0))).toBe(Date.UTC(2026, 0, 15, 7, 0));
+  });
+
+  it("isBeforeDailyDrop is true before and false after the drop instant", async () => {
+    // Default 09:00 Israel (=06:00 UTC in July).
+    expect(await isBeforeDailyDrop(Date.UTC(2026, 6, 15, 5, 0))).toBe(true); // 08:00 IDT
+    expect(await isBeforeDailyDrop(Date.UTC(2026, 6, 15, 7, 0))).toBe(false); // 10:00 IDT
+  });
+
+  it("nextDropMs is today's drop before it, tomorrow's after it", () => {
+    const cfg = { time: "09:00", timezone: "Asia/Jerusalem", hour: 9, minute: 0 };
+    const beforeDrop = Date.UTC(2026, 6, 15, 5, 0); // 08:00 IDT
+    expect(nextDropMs(cfg, beforeDrop)).toBe(Date.UTC(2026, 6, 15, 6, 0)); // today 09:00 IDT
+    const afterDrop = Date.UTC(2026, 6, 15, 8, 0); // 11:00 IDT
+    expect(nextDropMs(cfg, afterDrop)).toBe(Date.UTC(2026, 6, 16, 6, 0)); // tomorrow 09:00 IDT
   });
 });

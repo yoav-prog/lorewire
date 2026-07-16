@@ -593,6 +593,44 @@ describe("runAutopilotApprove honors the global emergency stop", () => {
   });
 });
 
+describe("runAutopilotApprove honors the daily site drop", () => {
+  beforeEach(clear);
+
+  async function seedCandidate(n: number) {
+    await insertSource(`r-${n}`, { strength: "strong" });
+    await insertReviewStory(`story-${n}`, { redditId: `r-${n}` });
+    await insertJob(`job-${n}`, { redditId: `r-${n}`, storyId: `story-${n}` });
+  }
+
+  // Default drop is 09:00 Asia/Jerusalem = 06:00 UTC in July (IDT, UTC+3).
+  const BEFORE_DROP = Date.UTC(2026, 6, 2, 5, 0); // 08:00 IDT
+  const AFTER_DROP = Date.UTC(2026, 6, 2, 7, 0); // 10:00 IDT
+
+  it("holds the whole batch before the drop time, publishing nothing", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const r = await runAutopilotApprove(BEFORE_DROP);
+
+    expect(r.reason).toBe("before_drop");
+    expect(r.approved).toBe(0);
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+  });
+
+  it("publishes once the drop time has passed", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const r = await runAutopilotApprove(AFTER_DROP);
+    expect(r.reason).toBe("ok");
+    expect(r.approved).toBe(1);
+  });
+});
+
 describe("maybeAlertHighHoldRate", () => {
   beforeEach(clear);
 

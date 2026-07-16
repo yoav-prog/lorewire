@@ -47,7 +47,10 @@ export function platformSettingKey(
 export const PUBLISH_DEFAULTS = {
   dailyCap: 3,
   slots: ["09:00", "13:00", "18:00"] as readonly string[],
-  timezone: "America/New_York",
+  // 2026-07-15: default to the owner's timezone. Nothing was ever configured,
+  // so every platform silently used America/New_York; the site + the owner run
+  // on Israel time, so social slots should too. Still per-platform editable.
+  timezone: "Asia/Jerusalem",
 } as const;
 
 // ---- weekly slots ----------------------------------------------------
@@ -324,6 +327,78 @@ function tzDayBoundsMs(
     0,
   );
   return { startMs, endMs };
+}
+
+// ---- daily site drop -------------------------------------------------
+//
+// One editable time of day (in a named zone) that governs when the day's
+// ready stories go LIVE ON THE SITE via the unattended lanes. Stories render
+// overnight; the lanes hold them out of the site until the drop time passes in
+// the drop's zone, then publish them (and anything that renders later the same
+// day). Social keeps spreading across each platform's own slots — this gate is
+// only the site go-live. Reuses the DST-safe wall-clock helpers above; never
+// hand-rolls timezone math.
+
+export const DAILY_DROP_SETTING_KEYS = {
+  /** "HH:MM" wall-clock time of the drop. */
+  time: "publishing.daily_drop_time",
+  /** IANA zone the drop time is read in. */
+  timezone: "publishing.daily_drop_tz",
+} as const;
+
+export const DAILY_DROP_DEFAULTS = {
+  time: "09:00",
+  timezone: "Asia/Jerusalem",
+} as const;
+
+export interface DailyDropConfig {
+  /** Normalized "HH:MM". */
+  time: string;
+  timezone: string;
+  hour: number;
+  minute: number;
+}
+
+/** The configured daily site-drop time + zone, falling back to the defaults for
+ *  a missing/garbage time or an invalid zone (fail safe to 09:00 Israel).
+ *  Reuses the module's isValidTimezone (defined above). */
+export async function getDailyDropConfig(): Promise<DailyDropConfig> {
+  const [rawTime, rawTz] = await Promise.all([
+    getSetting(DAILY_DROP_SETTING_KEYS.time),
+    getSetting(DAILY_DROP_SETTING_KEYS.timezone),
+  ]);
+  const m = /^(\d{1,2}):(\d{2})$/.exec((rawTime ?? "").trim());
+  let hour = m ? Number(m[1]) : NaN;
+  let minute = m ? Number(m[2]) : NaN;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) hour = 9;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) minute = 0;
+  const time = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const tzRaw = (rawTz ?? "").trim();
+  const timezone = tzRaw && isValidTimezone(tzRaw) ? tzRaw : DAILY_DROP_DEFAULTS.timezone;
+  return { time, timezone, hour, minute };
+}
+
+/** UTC ms of the drop instant on the calendar day `nowMs` falls in, in the
+ *  drop's zone. DST-safe via wallClockToUtcMs. */
+export function dropMsForDay(config: DailyDropConfig, nowMs: number): number {
+  const p = partsInTz(nowMs, config.timezone);
+  return wallClockToUtcMs(config.timezone, p.year, p.month, p.day, config.hour, config.minute);
+}
+
+/** UTC ms of the NEXT drop from `nowMs`: today's if it is still ahead, else
+ *  tomorrow's (recomputed for tomorrow's calendar day so DST is exact). */
+export function nextDropMs(config: DailyDropConfig, nowMs: number): number {
+  const today = dropMsForDay(config, nowMs);
+  if (nowMs < today) return today;
+  const t = partsInTz(nowMs + 24 * 3_600_000, config.timezone);
+  return wallClockToUtcMs(config.timezone, t.year, t.month, t.day, config.hour, config.minute);
+}
+
+/** True while the current day's drop time has NOT yet passed in the drop's
+ *  zone — the unattended lanes hold the day's stories off the site until then. */
+export async function isBeforeDailyDrop(nowMs: number = Date.now()): Promise<boolean> {
+  const config = await getDailyDropConfig();
+  return nowMs < dropMsForDay(config, nowMs);
 }
 
 export interface SlotCandidate {

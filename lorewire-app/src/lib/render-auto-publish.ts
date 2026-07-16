@@ -30,6 +30,7 @@ import {
   type ApproveCandidate,
 } from "@/lib/approve-reviewed-story";
 import { AUTOPILOT_DEFAULTS, getAutopilotAlertEmail } from "@/lib/autopilot";
+import { isBeforeDailyDrop } from "@/lib/publish-scheduler";
 import { sendBrevoEmail } from "@/lib/email";
 
 // ---- settings keys -----------------------------------------------------
@@ -136,7 +137,8 @@ export type RenderAutoPublishReason =
   | "ok"
   | "disabled"
   | "no_candidates"
-  | "stopped";
+  | "stopped"
+  | "before_drop";
 
 export interface RenderAutoPublishResult {
   reason: RenderAutoPublishReason;
@@ -178,6 +180,14 @@ export async function runRenderSchedulerAutoPublish(
   if (await isUnattendedPublishingStopped()) {
     console.warn("[render-autopublish] unattended publishing stopped — skipping tick");
     return { reason: "stopped", ...EMPTY };
+  }
+
+  // Daily site drop: hold the day's ready stories off the site until the drop
+  // time passes in its zone (the site go-live window). Matches the autopilot
+  // lane so both honor the same morning drop.
+  if (await isBeforeDailyDrop(nowMs)) {
+    console.info("[render-autopublish] before the daily site drop — holding until drop time");
+    return { reason: "before_drop", ...EMPTY };
   }
 
   const candidates = await selectAutoPublishCandidates();
