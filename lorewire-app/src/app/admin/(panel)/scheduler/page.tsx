@@ -33,14 +33,19 @@ import {
   listRecentAutoPublishes,
 } from "@/lib/autopilot";
 import {
+  DAILY_DROP_SETTING_KEYS,
   PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
+  dropMsForDay,
+  getDailyDropConfig,
   getPublishCalendar,
   getSchedulerOverview,
   listHeldForReview,
   listSchedulableStories,
   listUpcomingPublishes,
+  nextDropMs,
   platformSettingKey,
+  type DailyDropConfig,
   type PlatformOverview,
 } from "@/lib/publish-scheduler";
 import { isUnattendedPublishingStopped } from "@/lib/approve-reviewed-story";
@@ -106,6 +111,22 @@ function formatSlot(iso: string | null, tz: string): string {
   }
 }
 
+// The "Next drop" line: today's drop if it is still ahead, else tomorrow's,
+// formatted in the drop's zone. Kept out of the component body so the impurity
+// of Date.now()/new Date() stays out of render — same pattern as ageLabel /
+// formatSlot above.
+function nextDropDisplay(config: DailyDropConfig): { label: string; isToday: boolean } {
+  const nowMs = Date.now();
+  const next = nextDropMs(config, nowMs);
+  const label = new Intl.DateTimeFormat("en-US", {
+    timeZone: config.timezone,
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(next));
+  return { label, isToday: next === dropMsForDay(config, nowMs) };
+}
+
 export default async function SchedulerPage() {
   await requireCapability("settings.manage");
 
@@ -128,6 +149,7 @@ export default async function SchedulerPage() {
     recentAutoPublishes,
     unattendedStopped,
     heldStories,
+    dropConfig,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -154,9 +176,11 @@ export default async function SchedulerPage() {
     listRecentAutoPublishes(10),
     isUnattendedPublishingStopped(),
     listHeldForReview(50),
+    getDailyDropConfig(),
   ]);
 
   const rendering = gate.reason === "ok";
+  const nextDrop = nextDropDisplay(dropConfig);
   const storyOptions = schedulable.map((s) => ({
     id: s.id,
     title: s.title || s.id,
@@ -216,6 +240,38 @@ export default async function SchedulerPage() {
 
       {/* ── Emergency stop ───────────────────────────────────────────── */}
       <UnattendedPublishStop initialStopped={unattendedStopped} />
+
+      {/* ── Daily site drop ──────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">Daily site drop</h2>
+        <p className="text-[13px] text-muted">
+          The time each day the day&rsquo;s ready stories go live on the site.
+          Stories render overnight and wait until this time, then publish
+          together — so the site refreshes in the morning instead of trickling
+          out all night. Social posts still spread across each platform&rsquo;s
+          own posting times below.
+        </p>
+        <p className="rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[12px] text-ink">
+          Next drop: {nextDrop.isToday ? "today" : "tomorrow"} · {nextDrop.label}{" "}
+          <span className="text-muted">({dropConfig.timezone})</span>
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SettingText
+            settingKey={DAILY_DROP_SETTING_KEYS.time}
+            label="Drop time"
+            hint="24-hour HH:MM, e.g. 09:00. When the day's stories go live on the site."
+            initial={dropConfig.time}
+            placeholder="09:00"
+          />
+          <SettingText
+            settingKey={DAILY_DROP_SETTING_KEYS.timezone}
+            label="Drop timezone"
+            hint="IANA name, e.g. Asia/Jerusalem, Europe/London, America/New_York."
+            initial={dropConfig.timezone}
+            placeholder="Asia/Jerusalem"
+          />
+        </div>
+      </section>
 
       {/* ── Rendering ────────────────────────────────────────────────── */}
       <section className="space-y-3">

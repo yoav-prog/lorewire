@@ -56,6 +56,7 @@ import {
   type ApproveBreaker,
   type ApproveCandidate,
 } from "@/lib/approve-reviewed-story";
+import { isBeforeDailyDrop } from "@/lib/publish-scheduler";
 import { sendBrevoEmail } from "@/lib/email";
 
 // The safety judge moved to its own module (2026-07-12) so the render-
@@ -95,11 +96,15 @@ export const AUTOPILOT_DEFAULTS = {
   dailyLimit: 1,
   breakerThreshold: 3,
   /** Publish-gate refusals a story gets before it is held for a human.
-   *  Below this the story stays a candidate and the next tick retries,
-   *  giving the asset-backfill crons ~8-10 minutes (2-min cadence) to
-   *  land a transiently missing thumbnail/poll. Gate refusals never
-   *  feed the breaker — one bad story must not disable autopilot. */
-  gateRefusalHoldAfter: 5,
+   *  Below this the story stays a candidate and the next tick retries.
+   *  Raised from 5 to 12 (2026-07-15): at the 2-minute tick cadence this is
+   *  ~24 minutes, enough for the Python thumbnail finisher to land the
+   *  per-platform variants. At 5 (~10 min) autopilot gave up before the
+   *  finisher ran and held asset-complete stories for no reason, while the
+   *  manual publish path (12 retries) succeeded — that gap was 8 of the
+   *  held stories. Gate refusals never feed the breaker — one bad story
+   *  must not disable autopilot. */
+  gateRefusalHoldAfter: 12,
 } as const;
 
 /** Stamped on story_jobs.requested_by for every row autopilot enqueues,
@@ -300,7 +305,8 @@ export type AutopilotApproveReason =
   | "ok"
   | "not_live"
   | "no_candidates"
-  | "stopped";
+  | "stopped"
+  | "before_drop";
 
 export interface AutopilotApproveResult {
   reason: AutopilotApproveReason;
@@ -361,6 +367,14 @@ export async function runAutopilotApprove(
   if (await isUnattendedPublishingStopped()) {
     console.warn("[autopilot approve] unattended publishing stopped — skipping tick");
     return { reason: "stopped", approved: 0, held: 0, deferred: 0, failed: 0, skipped: 0, tripped: false };
+  }
+
+  // Daily site drop: hold the day's ready stories off the site until the drop
+  // time passes in its zone. Renders happen overnight; this makes them go live
+  // together in the morning instead of trickling out at random hours.
+  if (await isBeforeDailyDrop(nowMs)) {
+    console.info("[autopilot approve] before the daily site drop — holding until drop time");
+    return { reason: "before_drop", approved: 0, held: 0, deferred: 0, failed: 0, skipped: 0, tripped: false };
   }
 
   const candidates = await selectApproveCandidates();

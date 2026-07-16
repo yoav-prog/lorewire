@@ -278,6 +278,29 @@ describe("unattended-publish emergency stop", () => {
   });
 });
 
+describe("daily site drop gate", () => {
+  beforeEach(clear);
+
+  // Default drop 09:00 Asia/Jerusalem = 06:00 UTC in July (IDT, UTC+3).
+  const BEFORE_DROP = Date.UTC(2026, 6, 12, 5, 0); // 08:00 IDT
+  const AFTER_DROP = Date.UTC(2026, 6, 12, 7, 0); // 10:00 IDT
+
+  it("holds the batch before the drop and publishes after it", async () => {
+    await setSetting(RENDER_SETTING_KEYS.autoPublish, "1");
+    await seedDripCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const before = await runRenderSchedulerAutoPublish(BEFORE_DROP);
+    expect(before.reason).toBe("before_drop");
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+
+    const after = await runRenderSchedulerAutoPublish(AFTER_DROP);
+    expect(after.reason).toBe("ok");
+    expect(after.approved).toBe(1);
+  });
+});
+
 describe("safety-judge verdict persistence", () => {
   beforeEach(clear);
 
