@@ -44,6 +44,7 @@ import {
   type PlatformOverview,
 } from "@/lib/publish-scheduler";
 import { isUnattendedPublishingStopped } from "@/lib/approve-reviewed-story";
+import { getSafetyJudgeMode, SAFETY_JUDGE_SETTING_KEYS } from "@/lib/story-safety-judge";
 import {
   SettingSelect,
   SettingSlider,
@@ -128,6 +129,7 @@ export default async function SchedulerPage() {
     recentAutoPublishes,
     unattendedStopped,
     heldStories,
+    safetyJudgeMode,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -154,6 +156,7 @@ export default async function SchedulerPage() {
     listRecentAutoPublishes(10),
     isUnattendedPublishingStopped(),
     listHeldForReview(50),
+    getSafetyJudgeMode(),
   ]);
 
   const rendering = gate.reason === "ok";
@@ -405,6 +408,37 @@ export default async function SchedulerPage() {
               }))}
             />
           </div>
+        )}
+      </section>
+
+      {/* ── Safety check ─────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">Safety check</h2>
+        <p className="text-[13px] text-muted">
+          The automatic check that screens each story before it publishes
+          without a human. Move through the steps in order: watch the new check
+          in <strong>Shadow</strong> for a few days, compare it against your own
+          calls in the held list, then switch it to <strong>Active</strong>.
+          Leave it on <strong>Current</strong> until you have watched it.
+        </p>
+        <SettingSelect
+          settingKey={SAFETY_JUDGE_SETTING_KEYS.mode}
+          label="Which safety check decides"
+          hint="Current: the original check (holds most stories today). Shadow: keep using the original, but log what the new check would decide so you can compare. Active: let the new, less strict check decide."
+          initial={safetyJudgeMode}
+          options={[
+            { id: "legacy", label: "Current (original check)" },
+            { id: "shadow", label: "Shadow (log the new check, do not act on it)" },
+            { id: "active", label: "Active (new check decides)" },
+          ]}
+        />
+        {safetyJudgeMode === "active" && (
+          <p className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-[12px] text-accent">
+            The new, less strict check is live. It publishes ordinary drama and
+            holds only named risks. Watch the held list and &ldquo;Published by
+            autopilot&rdquo; closely, and use the emergency stop above if
+            anything goes out that should not.
+          </p>
         )}
       </section>
 
