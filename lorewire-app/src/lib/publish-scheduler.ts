@@ -891,6 +891,12 @@ export interface SchedulerDecisionInput {
   ageHours?: number | null;
   subreddit?: string | null;
   decidedBy?: string | null;
+  // Safety-judge verdict, persisted so every unattended hold is explainable
+  // (2026-07-15). NULL at the human gate, which runs no judge.
+  judgeDecision?: "publish" | "hold" | null;
+  judgeCategory?: string | null;
+  judgeReason?: string | null;
+  judgeConfidence?: number | null;
 }
 
 /**
@@ -905,8 +911,9 @@ export async function logSchedulerDecision(
     await run(
       `INSERT INTO scheduler_decisions
          (id, story_id, reddit_id, decision, tier, comments, age_hours,
-          subreddit, decided_by, decided_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          subreddit, decided_by, decided_at,
+          judge_decision, judge_category, judge_reason, judge_confidence)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         randomUUID(),
         input.storyId,
@@ -918,6 +925,10 @@ export async function logSchedulerDecision(
         input.subreddit ?? null,
         input.decidedBy ?? null,
         new Date(nowMs).toISOString(),
+        input.judgeDecision ?? null,
+        input.judgeCategory ?? null,
+        input.judgeReason ?? null,
+        input.judgeConfidence ?? null,
       ],
     );
   } catch (e) {
@@ -928,6 +939,65 @@ export async function logSchedulerDecision(
       err: e instanceof Error ? e.message : String(e),
     });
   }
+}
+
+// ---- held-for-review reads -------------------------------------------
+
+export interface HeldStory {
+  storyId: string;
+  title: string | null;
+  /** The judge's taxonomy bucket (real_person, sexual, ...) or 'not_a_story'
+   *  for a degenerate hold; may be a fail-closed marker (judge_unavailable). */
+  category: string | null;
+  /** The judge's one-line explanation for the hold. */
+  reason: string | null;
+  /** 0..1, or null for a degenerate/fail-closed hold with no score. */
+  confidence: number | null;
+  /** When the story was held (ISO). */
+  heldAt: string;
+}
+
+/**
+ * Stories an unattended lane held that are STILL waiting in review, each with
+ * the safety-judge verdict that held them, newest hold first. Powers the admin
+ * "held & why" list + one-click "publish anyway". Uses the latest auto_held row
+ * per story (a story can be re-screened across ticks); the correlated MAX
+ * subquery is portable across the SQLite/Postgres pair (no bare-column GROUP BY,
+ * which Postgres rejects). A story that has since published or been rejected is
+ * excluded by the status = 'review' join.
+ */
+export async function listHeldForReview(limit = 50): Promise<HeldStory[]> {
+  const rows = await all<{
+    story_id: string;
+    title: string | null;
+    judge_category: string | null;
+    judge_reason: string | null;
+    judge_confidence: number | string | null;
+    decided_at: string;
+  }>(
+    `SELECT d.story_id, s.title, d.judge_category, d.judge_reason,
+            d.judge_confidence, d.decided_at
+       FROM scheduler_decisions d
+       JOIN stories s ON s.id = d.story_id
+      WHERE s.status = 'review'
+        AND d.decision = 'auto_held'
+        AND d.decided_at = (
+          SELECT MAX(d2.decided_at) FROM scheduler_decisions d2
+           WHERE d2.story_id = d.story_id AND d2.decision = 'auto_held'
+        )
+      ORDER BY d.decided_at DESC
+      LIMIT ?`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    storyId: r.story_id,
+    title: r.title,
+    category: r.judge_category,
+    reason: r.judge_reason,
+    confidence:
+      r.judge_confidence === null ? null : Number(r.judge_confidence),
+    heldAt: r.decided_at,
+  }));
 }
 
 // ---- admin overview reads --------------------------------------------

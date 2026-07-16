@@ -34,10 +34,12 @@ import {
   getAutopilotDailyLimit,
   getAutopilotMinStrength,
   getAutopilotMode,
+  maybeAlertHighHoldRate,
   runAutopilotApprove,
   runAutopilotPull,
   screenStoryForAutopilot,
 } from "./autopilot";
+import { UNATTENDED_PUBLISH_SETTING_KEYS } from "@/lib/approve-reviewed-story";
 
 const NOW = Date.UTC(2026, 6, 2, 12, 0);
 const NOW_ISO = new Date(NOW).toISOString();
@@ -562,5 +564,107 @@ describe("runAutopilotApprove", () => {
       [AUTOPILOT_SETTING_KEYS.consecutiveFailures],
     );
     expect(raw[0].value).toBe("0");
+  });
+});
+
+describe("runAutopilotApprove honors the global emergency stop", () => {
+  beforeEach(clear);
+
+  async function seedCandidate(n: number) {
+    await insertSource(`r-${n}`, { strength: "strong" });
+    await insertReviewStory(`story-${n}`, { redditId: `r-${n}` });
+    await insertJob(`job-${n}`, { redditId: `r-${n}`, storyId: `story-${n}` });
+  }
+
+  it("skips the tick and publishes nothing while stopped", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting(UNATTENDED_PUBLISH_SETTING_KEYS.stop, "1");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const r = await runAutopilotApprove(NOW);
+
+    expect(r.reason).toBe("stopped");
+    expect(r.approved).toBe(0);
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+    const decisions = await all("SELECT id FROM scheduler_decisions", []);
+    expect(decisions).toEqual([]);
+  });
+});
+
+describe("maybeAlertHighHoldRate", () => {
+  beforeEach(clear);
+
+  async function insertDecision(n: number, decision: string, decidedAt = NOW_ISO) {
+    await run(
+      "INSERT INTO scheduler_decisions (id, story_id, decision, decided_at) VALUES (?, ?, ?, ?)",
+      [`d-${n}`, `story-${n}`, decision, decidedAt],
+    );
+  }
+
+  it("stays quiet below the minimum sample", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    await insertDecision(1, "auto_held");
+    await insertDecision(2, "auto_held");
+
+    const r = await maybeAlertHighHoldRate(NOW);
+
+    expect(r.rate).toBeNull();
+    expect(r.alerted).toBe(false);
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet when the hold rate is healthy", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    await insertDecision(0, "auto_held");
+    for (let n = 1; n <= 9; n++) await insertDecision(n, "auto_approved");
+
+    const r = await maybeAlertHighHoldRate(NOW);
+
+    expect(r.total).toBe(10);
+    expect(r.rate).toBeCloseTo(0.1);
+    expect(r.alerted).toBe(false);
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+  });
+
+  it("alerts once and emails when the hold rate is high, then throttles", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    for (let n = 0; n < 8; n++) await insertDecision(n, "auto_held");
+    await insertDecision(8, "auto_approved");
+    await insertDecision(9, "auto_approved");
+
+    const first = await maybeAlertHighHoldRate(NOW);
+    expect(first.rate).toBeCloseTo(0.8);
+    expect(first.alerted).toBe(true);
+    expect(vi.mocked(sendBrevoEmail)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendBrevoEmail).mock.calls[0][0].to).toBe("admin@example.com");
+
+    // A second run in the same window must not re-alert (throttle).
+    const second = await maybeAlertHighHoldRate(NOW);
+    expect(second.alerted).toBe(false);
+    expect(vi.mocked(sendBrevoEmail)).toHaveBeenCalledTimes(1);
+  });
+
+  it("still counts as an alert (throttle) even with no email configured", async () => {
+    for (let n = 0; n < 8; n++) await insertDecision(n, "auto_held");
+    await insertDecision(8, "auto_approved");
+    await insertDecision(9, "auto_approved");
+
+    const r = await maybeAlertHighHoldRate(NOW);
+    expect(r.alerted).toBe(true); // logged the alert
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+  });
+
+  it("ignores decisions older than the 24h window", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    // All holds, but two days ago — outside the window, so no sample.
+    const old = new Date(NOW - 48 * 3_600_000).toISOString();
+    for (let n = 0; n < 8; n++) await insertDecision(n, "auto_held", old);
+
+    const r = await maybeAlertHighHoldRate(NOW);
+    expect(r.total).toBe(0);
+    expect(r.rate).toBeNull();
+    expect(r.alerted).toBe(false);
   });
 });

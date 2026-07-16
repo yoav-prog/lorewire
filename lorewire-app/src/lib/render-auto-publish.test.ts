@@ -29,6 +29,8 @@ import {
   RENDER_SETTING_KEYS,
   getRenderAutoPublish,
 } from "@/lib/render-scheduler";
+import { UNATTENDED_PUBLISH_SETTING_KEYS } from "@/lib/approve-reviewed-story";
+import { listHeldForReview } from "@/lib/publish-scheduler";
 import {
   RENDER_AUTOPUBLISH_SETTING_KEYS,
   getRenderAutoPublishStatus,
@@ -95,6 +97,18 @@ function judgeSays(decision: "publish" | "hold", confidence = 0.95) {
   vi.mocked(chatCompletion).mockResolvedValue({
     ok: true,
     content: JSON.stringify({ decision, category: "clean", reason: "r", confidence }),
+  } as Awaited<ReturnType<typeof chatCompletion>>);
+}
+
+function judgeVerdict(v: {
+  decision: "publish" | "hold";
+  category: string;
+  reason: string;
+  confidence: number;
+}) {
+  vi.mocked(chatCompletion).mockResolvedValue({
+    ok: true,
+    content: JSON.stringify(v),
   } as Awaited<ReturnType<typeof chatCompletion>>);
 }
 
@@ -223,5 +237,119 @@ describe("runRenderSchedulerAutoPublish", () => {
       [RENDER_AUTOPUBLISH_SETTING_KEYS.consecutiveFailures],
     );
     expect(failures).toEqual([]); // never written — refusals bypass the breaker
+  });
+});
+
+describe("unattended-publish emergency stop", () => {
+  beforeEach(clear);
+
+  it("skips the whole batch and writes no decision while stopped", async () => {
+    await setSetting(RENDER_SETTING_KEYS.autoPublish, "1");
+    await setSetting(UNATTENDED_PUBLISH_SETTING_KEYS.stop, "1");
+    await seedDripCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const r = await runRenderSchedulerAutoPublish(NOW);
+
+    expect(r.reason).toBe("stopped");
+    expect(r.approved).toBe(0);
+    // Nothing was screened or published, and no decision row was written —
+    // the story simply waits for the stop to release.
+    expect(vi.mocked(chatCompletion)).not.toHaveBeenCalled();
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+    const decisions = await all("SELECT id FROM scheduler_decisions", []);
+    expect(decisions).toEqual([]);
+  });
+
+  it("resumes publishing once the stop is released", async () => {
+    await setSetting(RENDER_SETTING_KEYS.autoPublish, "1");
+    await setSetting(UNATTENDED_PUBLISH_SETTING_KEYS.stop, "1");
+    await seedDripCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    expect((await runRenderSchedulerAutoPublish(NOW)).reason).toBe("stopped");
+
+    await setSetting(UNATTENDED_PUBLISH_SETTING_KEYS.stop, "0");
+    const r = await runRenderSchedulerAutoPublish(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.approved).toBe(1);
+  });
+});
+
+describe("safety-judge verdict persistence", () => {
+  beforeEach(clear);
+
+  it("stores the judge verdict on a hold so it is explainable", async () => {
+    await setSetting(RENDER_SETTING_KEYS.autoPublish, "1");
+    await seedDripCandidate(1);
+    judgeVerdict({
+      decision: "hold",
+      category: "real_person",
+      reason: "names a findable person with a damaging claim",
+      confidence: 0.88,
+    });
+
+    const r = await runRenderSchedulerAutoPublish(NOW);
+    expect(r.held).toBe(1);
+
+    const [row] = await all<{
+      decision: string;
+      judge_decision: string | null;
+      judge_category: string | null;
+      judge_reason: string | null;
+      judge_confidence: number | null;
+    }>(
+      `SELECT decision, judge_decision, judge_category, judge_reason, judge_confidence
+         FROM scheduler_decisions`,
+      [],
+    );
+    expect(row.decision).toBe("auto_held");
+    expect(row.judge_decision).toBe("hold");
+    expect(row.judge_category).toBe("real_person");
+    expect(row.judge_reason).toBe("names a findable person with a damaging claim");
+    expect(Number(row.judge_confidence)).toBeCloseTo(0.88);
+  });
+
+  it("stores the verdict on an approve too", async () => {
+    await setSetting(RENDER_SETTING_KEYS.autoPublish, "1");
+    await seedDripCandidate(1);
+    judgeVerdict({ decision: "publish", category: "clean", reason: "ordinary drama", confidence: 0.97 });
+    publishSucceeds();
+
+    await runRenderSchedulerAutoPublish(NOW);
+
+    const [row] = await all<{ decision: string; judge_decision: string | null }>(
+      "SELECT decision, judge_decision FROM scheduler_decisions",
+      [],
+    );
+    expect(row.decision).toBe("auto_approved");
+    expect(row.judge_decision).toBe("publish");
+  });
+
+  it("listHeldForReview surfaces held stories with their reason, newest first", async () => {
+    await setSetting(RENDER_SETTING_KEYS.autoPublish, "1");
+    await seedDripCandidate(1);
+    judgeVerdict({
+      decision: "hold",
+      category: "sexual",
+      reason: "explicit",
+      confidence: 0.9,
+    });
+    await runRenderSchedulerAutoPublish(NOW);
+
+    const held = await listHeldForReview(50);
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({
+      storyId: "story-1",
+      category: "sexual",
+      reason: "explicit",
+      confidence: 0.9,
+    });
+
+    // Once the story leaves review (published), it drops off the held list.
+    await run("UPDATE stories SET status = 'published' WHERE id = ?", ["story-1"]);
+    expect(await listHeldForReview(50)).toHaveLength(0);
   });
 });
