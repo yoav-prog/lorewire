@@ -192,4 +192,19 @@ describe("runJudgeVersion", () => {
     expect(r.safe).toBe(false);
     expect(vi.mocked(chatCompletion).mock.calls[0][0].modelId).toBe(LEGACY_MODEL);
   });
+
+  // Regression guard: gpt-5.4-mini 400s on reasoning_effort "minimal" and
+  // fail-closes to holding everything. v2 must send a tier the model accepts.
+  it("v2 uses a reasoning tier gpt-5.4-mini accepts, not 'minimal'", async () => {
+    judgeAlways({ decision: "publish", category: "clean", reason: "ok", confidence: 0.9 });
+    await runJudgeVersion("v2", STORY);
+    const call = vi.mocked(chatCompletion).mock.calls[0][0];
+    expect(call.reasoningEffort).toBe("low");
+  });
+
+  it("legacy keeps 'minimal' (gpt-5-nano accepts it)", async () => {
+    judgeAlways({ decision: "publish", category: "clean", reason: "ok", confidence: 0.9 });
+    await runJudgeVersion("legacy", STORY);
+    expect(vi.mocked(chatCompletion).mock.calls[0][0].reasoningEffort).toBe("minimal");
+  });
 });

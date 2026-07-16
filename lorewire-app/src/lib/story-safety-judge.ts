@@ -34,6 +34,13 @@ import { getSetting } from "@/lib/repo";
 // autopilot with no validation is the exact risk the plan guards against.
 const JUDGE_MODEL_LEGACY = "openai/gpt-5-nano";
 const JUDGE_MODEL_V2 = "openai/gpt-5.4-mini";
+// Reasoning effort is per-model: gpt-5-nano accepts "minimal", but
+// gpt-5.4-mini rejects it (400 — it only takes none/low/medium/high/xhigh),
+// so v2 uses the nearest supported tier, "low". Getting this wrong 400s every
+// call and fail-closes to holding everything — the exact bug v2 fixes — so it
+// is verified by the backtest harness, not assumed.
+const JUDGE_REASONING_LEGACY = "minimal" as const;
+const JUDGE_REASONING_V2 = "low" as const;
 const JUDGE_MAX_TOKENS = 1200;
 const JUDGE_BODY_MAX_CHARS = 8000;
 const PUBLISH_MIN_CONFIDENCE = 0.7;
@@ -252,7 +259,7 @@ export async function runJudgeVersion(
       { role: "user", content: userMsg },
     ],
     jsonSchema: JUDGE_SCHEMA,
-    reasoningEffort: "minimal",
+    reasoningEffort: version === "v2" ? JUDGE_REASONING_V2 : JUDGE_REASONING_LEGACY,
     omitTemperature: true,
     maxCompletionTokens: JUDGE_MAX_TOKENS,
   });

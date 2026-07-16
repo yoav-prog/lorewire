@@ -113,20 +113,27 @@ async function loadEnvKey(name) {
   return null;
 }
 
-// Pull the live v2 prompt + model out of the TS source so this never drifts.
+// Pull the live v2 prompt + model + reasoning tier out of the TS source so this
+// never drifts. The reasoning tier matters: gpt-5.4-mini 400s on "minimal", so
+// the harness must send whatever the lib actually sends.
 async function loadJudgeFromSource() {
   const src = await readFile(JUDGE_SRC, "utf8");
   const promptM = src.match(/const JUDGE_SYSTEM_V2 = `([\s\S]*?)`;/);
   const modelM = src.match(/const JUDGE_MODEL_V2 = "([^"]+)";/);
-  if (!promptM || !modelM) {
+  const reasoningM = src.match(/const JUDGE_REASONING_V2 = "([^"]+)"/);
+  if (!promptM || !modelM || !reasoningM) {
     throw new Error(
-      "could not extract JUDGE_SYSTEM_V2 / JUDGE_MODEL_V2 from story-safety-judge.ts — did the markers move?",
+      "could not extract JUDGE_SYSTEM_V2 / JUDGE_MODEL_V2 / JUDGE_REASONING_V2 from story-safety-judge.ts — did the markers move?",
     );
   }
-  return { system: promptM[1], modelId: modelM[1].replace(/^openai\//, "") };
+  return {
+    system: promptM[1],
+    modelId: modelM[1].replace(/^openai\//, ""),
+    reasoning: reasoningM[1],
+  };
 }
 
-async function judge(apiKey, model, system, story) {
+async function judge(apiKey, model, system, reasoning, story) {
   const body = (story.body ?? "")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
@@ -145,7 +152,7 @@ async function judge(apiKey, model, system, story) {
         { role: "user", content: userMsg },
       ],
       max_completion_tokens: JUDGE_MAX_TOKENS,
-      reasoning_effort: "minimal",
+      reasoning_effort: reasoning,
       response_format: { type: "json_schema", json_schema: SCHEMA },
     }),
   });
@@ -185,19 +192,21 @@ async function main() {
     console.error("Missing OPENAI_API_KEY (env or .env.local).");
     process.exit(2);
   }
-  const { system, modelId } = await loadJudgeFromSource();
+  const { system, modelId, reasoning } = await loadJudgeFromSource();
 
   let cases = [...SAFE_FIXTURES, ...BAD_FIXTURES];
   if (args.goldset) cases = [...(await loadGoldset(args.goldset)), ...BAD_FIXTURES];
   cases = cases.slice(0, args.limit);
 
-  console.log(`\nSafety judge v2 backtest — model ${modelId}, ${cases.length} cases\n`);
+  console.log(
+    `\nSafety judge v2 backtest — model ${modelId} (reasoning ${reasoning}), ${cases.length} cases\n`,
+  );
 
   const results = [];
   for (const c of cases) {
     let verdict;
     try {
-      verdict = await judge(apiKey, modelId, system, c);
+      verdict = await judge(apiKey, modelId, system, reasoning, c);
     } catch (e) {
       console.error(`  ERROR on ${c.id}: ${e.message}`);
       // A judge error counts as a hold (fail closed), matching the lib.
