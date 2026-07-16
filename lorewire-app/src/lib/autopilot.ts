@@ -52,6 +52,7 @@ import {
 import { type RedditSourceStrength } from "@/lib/reddit-source";
 import {
   approveReviewedStory,
+  isUnattendedPublishingStopped,
   type ApproveBreaker,
   type ApproveCandidate,
 } from "@/lib/approve-reviewed-story";
@@ -295,7 +296,11 @@ export async function runAutopilotPull(
 
 // ---- the approve tick --------------------------------------------------
 
-export type AutopilotApproveReason = "ok" | "not_live" | "no_candidates";
+export type AutopilotApproveReason =
+  | "ok"
+  | "not_live"
+  | "no_candidates"
+  | "stopped";
 
 export interface AutopilotApproveResult {
   reason: AutopilotApproveReason;
@@ -350,6 +355,12 @@ export async function runAutopilotApprove(
   const mode = await getAutopilotMode();
   if (mode !== "live" && mode !== "autonomous") {
     return { reason: "not_live", approved: 0, held: 0, deferred: 0, failed: 0, skipped: 0, tripped: false };
+  }
+
+  // Global emergency stop: nothing publishes unattended while it is engaged.
+  if (await isUnattendedPublishingStopped()) {
+    console.warn("[autopilot approve] unattended publishing stopped — skipping tick");
+    return { reason: "stopped", approved: 0, held: 0, deferred: 0, failed: 0, skipped: 0, tripped: false };
   }
 
   const candidates = await selectApproveCandidates();
@@ -458,6 +469,114 @@ async function recordAutopilotFailure(
     });
   }
   return true;
+}
+
+// ---- hold-rate alert ---------------------------------------------------
+//
+// The judge silently held ~100% of stories for weeks and nobody noticed,
+// because a hold has no consequence an admin trips over (2026-07-15). This
+// watches the last 24h of decisions and, when the hold rate crosses a
+// threshold on a meaningful sample, logs a loud line + emails the alert
+// address so a miscalibrated judge is visible within a day, not weeks.
+// Throttled to one alert per ~day so a persistently bad rate does not spam.
+
+const HOLD_ALERT_LAST_KEY = "publishing.hold_alert_last";
+const HOLD_RATE_ALERT = {
+  /** Fraction of decided stories held that triggers an alert. */
+  threshold: 0.3,
+  /** Minimum terminal decisions in the window before the rate means anything. */
+  minSample: 5,
+  /** At most one alert per this window (log-only counts). */
+  minIntervalMs: 20 * 3_600_000,
+  /** How far back the rate is measured. */
+  windowMs: 24 * 3_600_000,
+} as const;
+
+export interface HoldRateAlertResult {
+  /** held / (held + approved) over the window, or null below the min sample. */
+  rate: number | null;
+  held: number;
+  approved: number;
+  total: number;
+  alerted: boolean;
+}
+
+/**
+ * Measure the last-24h hold rate and alert if it is high on a real sample.
+ * Terminal decisions only (auto_held + auto_approved); the transient
+ * auto_gate_refused rows are excluded so asset-timing noise does not skew the
+ * signal. Returns what it saw so a caller (or test) can assert on it.
+ */
+export async function maybeAlertHighHoldRate(
+  nowMs: number = Date.now(),
+): Promise<HoldRateAlertResult> {
+  const sinceIso = new Date(nowMs - HOLD_RATE_ALERT.windowMs).toISOString();
+  const row = await one<{ held: number | string; approved: number | string }>(
+    `SELECT
+       SUM(CASE WHEN decision = 'auto_held' THEN 1 ELSE 0 END) AS held,
+       SUM(CASE WHEN decision = 'auto_approved' THEN 1 ELSE 0 END) AS approved
+     FROM scheduler_decisions
+     WHERE decided_at >= ?`,
+    [sinceIso],
+  );
+  const held = Number(row?.held ?? 0);
+  const approved = Number(row?.approved ?? 0);
+  const total = held + approved;
+
+  if (total < HOLD_RATE_ALERT.minSample) {
+    console.info("[autopilot hold-rate] below min sample", { held, approved, total });
+    return { rate: null, held, approved, total, alerted: false };
+  }
+
+  const rate = held / total;
+  console.info("[autopilot hold-rate]", {
+    held,
+    approved,
+    total,
+    rate: Number(rate.toFixed(3)),
+  });
+  if (rate <= HOLD_RATE_ALERT.threshold) {
+    return { rate, held, approved, total, alerted: false };
+  }
+
+  // Throttle: at most one alert per window, whether or not an email goes out.
+  const lastRaw = await getSetting(HOLD_ALERT_LAST_KEY);
+  const lastMs = lastRaw ? Date.parse(lastRaw) : NaN;
+  if (Number.isFinite(lastMs) && nowMs - lastMs < HOLD_RATE_ALERT.minIntervalMs) {
+    return { rate, held, approved, total, alerted: false };
+  }
+  await setSetting(HOLD_ALERT_LAST_KEY, new Date(nowMs).toISOString());
+
+  const pct = Math.round(rate * 100);
+  const alertEmail = await getAutopilotAlertEmail();
+  console.warn("[autopilot hold-rate] HIGH hold rate", {
+    held,
+    total,
+    pct,
+    willEmail: Boolean(alertEmail),
+  });
+  if (alertEmail) {
+    const text =
+      `Lorewire held ${held} of ${total} stories (${pct}%) from unattended ` +
+      `publishing in the last 24 hours — above the ${Math.round(
+        HOLD_RATE_ALERT.threshold * 100,
+      )}% alert threshold.\n\n` +
+      `A high hold rate usually means the safety judge is miscalibrated (holding ` +
+      `safe stories), not that the content got worse. Check the "held & why" list ` +
+      `at /admin/scheduler and publish anything held by mistake.`;
+    const sent = await sendBrevoEmail({
+      to: alertEmail,
+      subject: `Lorewire: ${pct}% of stories held from auto-publish`,
+      html: `<p>${text.replace(/\n/g, "<br/>")}</p>`,
+      text,
+    });
+    console.info("[autopilot hold-rate] alert email", {
+      to: alertEmail,
+      ok: sent.ok,
+      error: sent.error ?? null,
+    });
+  }
+  return { rate, held, approved, total, alerted: true };
 }
 
 // ---- recent auto-publishes ----------------------------------------------

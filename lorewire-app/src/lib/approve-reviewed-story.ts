@@ -19,10 +19,36 @@
 import "server-only";
 
 import { one } from "@/lib/db";
+import { getSetting, setSetting } from "@/lib/repo";
 import { getRedditSource } from "@/lib/reddit-source";
 import { publishStoryIfReady } from "@/lib/auto-publish";
 import { logSchedulerDecision, scheduleStoryPublish } from "@/lib/publish-scheduler";
 import { screenStoryForAutopilot } from "@/lib/story-safety-judge";
+
+// ---- unattended-publish kill switch -----------------------------------
+//
+// A single global stop for ALL unattended publishing, independent of
+// autopilot.mode and render.auto_publish. When engaged, every lane skips
+// its whole batch — nothing goes live on the site or to social without a
+// human. It lives on the shared approve step so the guard is mechanical:
+// no lane (present or future) can publish while it is engaged, even if it
+// forgets to check at its own entry (rule 13, defense in depth). Default
+// OFF, so adding it changes nothing until an admin flips it.
+
+export const UNATTENDED_PUBLISH_SETTING_KEYS = {
+  stop: "publishing.unattended_stop",
+} as const;
+
+/** True when unattended publishing is stopped. Only "1" engages it; any
+ *  other value (including unset) reads as running. */
+export async function isUnattendedPublishingStopped(): Promise<boolean> {
+  return (await getSetting(UNATTENDED_PUBLISH_SETTING_KEYS.stop))?.trim() === "1";
+}
+
+/** Engage or release the global unattended-publish stop. */
+export async function setUnattendedPublishingStopped(stopped: boolean): Promise<void> {
+  await setSetting(UNATTENDED_PUBLISH_SETTING_KEYS.stop, stopped ? "1" : "0");
+}
 
 export interface ApproveCandidate {
   id: string;
@@ -89,6 +115,16 @@ export async function approveReviewedStory(
 ): Promise<ApproveStoryResult> {
   const { decidedBy, gateRefusalHoldAfter, breaker, logLabel, nowMs } = opts;
 
+  // Global stop: mechanical last line so no lane can publish unattended while
+  // an admin has hit the emergency stop. Skipped (not held): the story stays a
+  // candidate and resumes on the next tick once the stop is released. Checked
+  // before the judge so a stopped state spends no screening calls. The lanes
+  // also short-circuit at their entry (one log line per tick); this guarantees
+  // the invariant even if a future lane forgets to.
+  if (await isUnattendedPublishingStopped()) {
+    return { outcome: "skipped", tripped: false };
+  }
+
   const source = story.reddit_id ? await getRedditSource(story.reddit_id) : null;
   const decisionSignals = {
     redditId: story.reddit_id ?? null,
@@ -108,9 +144,19 @@ export async function approveReviewedStory(
     category: screen.category,
     confidence: screen.confidence,
   });
+  // The judge verdict, persisted on every decision row this story produces so
+  // a hold is explainable in the admin "held & why" list. judgeDecision mirrors
+  // `safe`; category + confidence carry the nuance (e.g. category 'clean' at
+  // confidence 0.6 shows a story the confidence gate held, not a real risk).
+  const judgeSignals = {
+    judgeDecision: screen.safe ? ("publish" as const) : ("hold" as const),
+    judgeCategory: screen.category,
+    judgeReason: screen.reason,
+    judgeConfidence: screen.confidence,
+  };
   if (!screen.safe) {
     await logSchedulerDecision(
-      { storyId: story.id, decision: "auto_held", ...decisionSignals },
+      { storyId: story.id, decision: "auto_held", ...decisionSignals, ...judgeSignals },
       nowMs,
     );
     return { outcome: "held", tripped: false };
@@ -120,7 +166,7 @@ export async function approveReviewedStory(
     // Cannot publish through the gate without a source link; leave it for a
     // human rather than failing forever.
     await logSchedulerDecision(
-      { storyId: story.id, decision: "auto_held", ...decisionSignals },
+      { storyId: story.id, decision: "auto_held", ...decisionSignals, ...judgeSignals },
       nowMs,
     );
     return { outcome: "held", tripped: false };
@@ -138,13 +184,13 @@ export async function approveReviewedStory(
       // which also removes it from the candidate set.
       const refusals = (await countGateRefusals(story.id)) + 1;
       await logSchedulerDecision(
-        { storyId: story.id, decision: "auto_gate_refused", ...decisionSignals },
+        { storyId: story.id, decision: "auto_gate_refused", ...decisionSignals, ...judgeSignals },
         nowMs,
       );
       const holdNow = refusals >= gateRefusalHoldAfter;
       if (holdNow) {
         await logSchedulerDecision(
-          { storyId: story.id, decision: "auto_held", ...decisionSignals },
+          { storyId: story.id, decision: "auto_held", ...decisionSignals, ...judgeSignals },
           nowMs,
         );
       }
@@ -163,7 +209,7 @@ export async function approveReviewedStory(
     });
     await breaker.resetFailures();
     await logSchedulerDecision(
-      { storyId: story.id, decision: "auto_approved", ...decisionSignals },
+      { storyId: story.id, decision: "auto_approved", ...decisionSignals, ...judgeSignals },
       nowMs,
     );
     console.info(`[${logLabel} approve] published`, {

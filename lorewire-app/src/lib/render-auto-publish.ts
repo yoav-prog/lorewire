@@ -25,6 +25,7 @@ import {
 } from "@/lib/render-scheduler";
 import {
   approveReviewedStory,
+  isUnattendedPublishingStopped,
   type ApproveBreaker,
   type ApproveCandidate,
 } from "@/lib/approve-reviewed-story";
@@ -131,7 +132,11 @@ async function recordRenderAutoPublishFailure(
 
 // ---- the tick ----------------------------------------------------------
 
-export type RenderAutoPublishReason = "ok" | "disabled" | "no_candidates";
+export type RenderAutoPublishReason =
+  | "ok"
+  | "disabled"
+  | "no_candidates"
+  | "stopped";
 
 export interface RenderAutoPublishResult {
   reason: RenderAutoPublishReason;
@@ -168,6 +173,12 @@ export async function runRenderSchedulerAutoPublish(
 ): Promise<RenderAutoPublishResult> {
   const enabled = await getRenderAutoPublish();
   if (!enabled) return { reason: "disabled", ...EMPTY };
+
+  // Global emergency stop: nothing publishes unattended while it is engaged.
+  if (await isUnattendedPublishingStopped()) {
+    console.warn("[render-autopublish] unattended publishing stopped — skipping tick");
+    return { reason: "stopped", ...EMPTY };
+  }
 
   const candidates = await selectAutoPublishCandidates();
   if (candidates.length === 0) return { reason: "no_candidates", ...EMPTY };

@@ -31,6 +31,7 @@ import {
   resetRenderAutoPublishFailures,
 } from "@/lib/render-auto-publish";
 import { retractStory, type RetractResult } from "@/lib/retract-story";
+import { setUnattendedPublishingStopped } from "@/lib/approve-reviewed-story";
 import {
   PUBLISH_PLATFORMS,
   cancelScheduledPublish,
@@ -338,6 +339,23 @@ export async function setRenderAutoPublishEnabledAction(
     enabled,
     actorId: session.userId,
   });
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+/**
+ * Engage or release the global unattended-publish emergency stop. Independent
+ * of autopilot.mode and render.auto_publish: while engaged, every unattended
+ * lane skips its whole batch and nothing goes live without a human, but the
+ * lanes' own settings are left untouched so releasing it resumes exactly where
+ * things were. The per-story manual Approve is unaffected.
+ */
+export async function setUnattendedPublishStopAction(
+  stopped: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  await setUnattendedPublishingStopped(stopped);
+  console.info("[scheduler unattended_stop]", { stopped, actorId: session.userId });
   revalidatePath("/admin/scheduler");
   return { ok: true };
 }

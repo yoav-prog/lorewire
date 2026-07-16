@@ -1519,6 +1519,17 @@ export const SCHEDULER_DECISIONS: Table = {
     { name: "subreddit", type: "TEXT" },
     { name: "decided_by", type: "TEXT" },
     { name: "decided_at", type: "TEXT" },
+    // 2026-07-15 safety-judge observability. The unattended-publish lanes
+    // used to store only decision = 'auto_held' and DISCARD the judge's
+    // verdict, so every hold looked identical and a 100%-false-positive
+    // judge stayed invisible for weeks. These carry the verdict onto the
+    // decision row so every hold is explainable ("held & why"). NULL for
+    // the human gate (approve/reject) and for degenerate holds without a
+    // confidence. ensureSchema's ADD COLUMN path backfills them additively.
+    { name: "judge_decision", type: "TEXT" },
+    { name: "judge_category", type: "TEXT" },
+    { name: "judge_reason", type: "TEXT" },
+    { name: "judge_confidence", type: "REAL" },
   ],
 };
 

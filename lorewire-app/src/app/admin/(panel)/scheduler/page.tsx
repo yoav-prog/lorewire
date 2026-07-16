@@ -37,11 +37,13 @@ import {
   PUBLISH_ENABLED_KEY,
   getPublishCalendar,
   getSchedulerOverview,
+  listHeldForReview,
   listSchedulableStories,
   listUpcomingPublishes,
   platformSettingKey,
   type PlatformOverview,
 } from "@/lib/publish-scheduler";
+import { isUnattendedPublishingStopped } from "@/lib/approve-reviewed-story";
 import {
   SettingSelect,
   SettingSlider,
@@ -52,6 +54,8 @@ import { AutopilotModeSelect } from "./_components/AutopilotModeSelect";
 import { RenderAutoPublishToggle } from "./_components/RenderAutoPublishToggle";
 import { RunNowButton } from "./_components/RunNowButton";
 import { RecentAutoPublishes } from "./_components/RecentAutoPublishes";
+import { UnattendedPublishStop } from "./_components/UnattendedPublishStop";
+import { HeldStories } from "./_components/HeldStories";
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
 import { ReviewActions } from "./_components/ReviewActions";
@@ -122,6 +126,8 @@ export default async function SchedulerPage() {
     calendars,
     autopilot,
     recentAutoPublishes,
+    unattendedStopped,
+    heldStories,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -146,6 +152,8 @@ export default async function SchedulerPage() {
     getPublishCalendar(7),
     getAutopilotStatus(),
     listRecentAutoPublishes(10),
+    isUnattendedPublishingStopped(),
+    listHeldForReview(50),
   ]);
 
   const rendering = gate.reason === "ok";
@@ -205,6 +213,9 @@ export default async function SchedulerPage() {
           </p>
         </div>
       </section>
+
+      {/* ── Emergency stop ───────────────────────────────────────────── */}
+      <UnattendedPublishStop initialStopped={unattendedStopped} />
 
       {/* ── Rendering ────────────────────────────────────────────────── */}
       <section className="space-y-3">
@@ -395,6 +406,31 @@ export default async function SchedulerPage() {
             />
           </div>
         )}
+      </section>
+
+      {/* ── Held & why ───────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">
+          Held by the safety check{" "}
+          <span className="font-mono text-[13px] text-muted">
+            ({heldStories.length})
+          </span>
+        </h2>
+        <p className="text-[13px] text-muted">
+          Stories an automatic lane held for you, with the reason it held them.
+          If a hold looks wrong, publish it here in one click. A steady stream
+          of clean-looking holds means the safety check is too strict.
+        </p>
+        <HeldStories
+          items={heldStories.map((h) => ({
+            storyId: h.storyId,
+            title: h.title || h.storyId,
+            category: h.category,
+            reason: h.reason,
+            confidence: h.confidence,
+            ageLabel: ageLabel(h.heldAt),
+          }))}
+        />
       </section>
 
       {/* ── Review queue (the human gate) ────────────────────────────── */}
