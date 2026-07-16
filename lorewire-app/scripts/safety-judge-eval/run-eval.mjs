@@ -74,6 +74,21 @@ const SCHEMA = {
   },
 };
 
+// Mirrors detectDegenerateStory in story-safety-judge.ts: the real pipeline
+// holds these deterministically BEFORE the LLM judge (a "NO STORY FOUND"
+// generation or a sub-250-char body is not a story to publish). Applying it
+// here keeps the harness faithful — a degenerate item in the goldset is an
+// owner mis-publish, not a judge false positive, so it must not count against
+// the calibration bar.
+const DEGENERATE_MIN_BODY_CHARS = 250;
+const DEGENERATE_TITLE_RE = /\bNO STORY\b/i;
+function degenerateReason(story) {
+  const text = (story.body ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  if (text.length < DEGENERATE_MIN_BODY_CHARS) return `body ${text.length} chars — too short`;
+  if (DEGENERATE_TITLE_RE.test(story.title ?? "")) return "title declares no story";
+  return null;
+}
+
 function parseArgs(argv) {
   const args = { goldset: null, limit: Infinity };
   for (const a of argv.slice(2)) {
@@ -198,12 +213,23 @@ async function main() {
   if (args.goldset) cases = [...(await loadGoldset(args.goldset)), ...BAD_FIXTURES];
   cases = cases.slice(0, args.limit);
 
+  // Split off degenerate items (held deterministically by the real pipeline)
+  // so they are not judged or counted against the calibration bar.
+  const degenerate = [];
+  const toJudge = [];
+  for (const c of cases) {
+    const dr = degenerateReason(c);
+    if (dr) degenerate.push({ ...c, dr });
+    else toJudge.push(c);
+  }
+
   console.log(
-    `\nSafety judge v2 backtest — model ${modelId} (reasoning ${reasoning}), ${cases.length} cases\n`,
+    `\nSafety judge v2 backtest — model ${modelId} (reasoning ${reasoning}), ` +
+      `${toJudge.length} judged + ${degenerate.length} degenerate (held deterministically)\n`,
   );
 
   const results = [];
-  for (const c of cases) {
+  for (const c of toJudge) {
     let verdict;
     try {
       verdict = await judge(apiKey, modelId, system, reasoning, c);
@@ -229,6 +255,10 @@ async function main() {
   console.log(`Danger cases: ${score.badCount}   missed:      ${score.missedBad.length}`);
   if (score.falseHolds.length) console.log(`  false holds: ${score.falseHolds.join(", ")}`);
   if (score.missedBad.length) console.log(`  MISSED bad:  ${score.missedBad.join(", ")}`);
+  if (degenerate.length) {
+    console.log(`Degenerate:   ${degenerate.length}   (held deterministically, excluded from the bar)`);
+    for (const d of degenerate) console.log(`  ${d.id} — ${d.dr}`);
+  }
   console.log("-".repeat(60));
   console.log(score.pass ? "PASS — clears the bar.\n" : "FAIL — does not clear the bar.\n");
   process.exit(score.pass ? 0 : 1);

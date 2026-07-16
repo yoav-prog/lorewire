@@ -49,6 +49,18 @@ AND s.status = 'published';   -- the ones you later published by hand
 
 Save the result as `held-66.json` and run with `--goldset=./held-66.json`.
 
+## Interpreting the result
+
+Degenerate goldset items ("NO STORY FOUND", sub-250-char bodies) are held by the
+deterministic guard and excluded from the bar — they are owner mis-publishes,
+not safe stories. A tiny number of remaining holds on the goldset may be
+**defensible** rather than bugs: a story centered on serious harm to a child, for
+example, is exactly what the safety net should hold for a human glance before it
+auto-posts to four brand platforms. Read the `false holds` list and judge each;
+do not blindly loosen the child-safety or danger categories to force the number
+to zero. The owner can always "Publish anyway" from the held list for a specific
+story he disagrees with.
+
 ## Then what
 
 Only after a run passes with the real goldset should the safety-check mode be
