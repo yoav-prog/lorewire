@@ -158,13 +158,14 @@ async function projectCatalogRows(
   return { stories, durationsHealed };
 }
 
-// ─── Browse: full published catalog, cursor-paginated ────────────────────────
-// Browse must show EVERY published story, not the 200-row window loadLiveCatalog
-// caps for the homepage rails. It pages the same catalog with a compound keyset
-// cursor so a growing catalog scrolls without a ceiling and without the
-// skip/duplicate bug a single-column cursor hits when stories share a timestamp.
-// Public gate mirrors loadLiveCatalog exactly. Plan:
-// _plans/2026-07-14-browse-pagination.md.
+// ─── Browse/Search: full published catalog, cursor-paginated ─────────────────
+// Browse and Search must show EVERY published story, not the 200-row window
+// loadLiveCatalog caps for the homepage rails. They page the same catalog with
+// a compound keyset cursor so a growing catalog scrolls without a ceiling and
+// without the skip/duplicate bug a single-column cursor hits when stories share
+// a timestamp. Public gate mirrors loadLiveCatalog exactly. Plans:
+// _plans/2026-07-14-browse-pagination.md (Browse),
+// _plans/2026-07-19-search-full-catalog.md (Search query pushdown).
 
 // Public gate: same status / slug / noindex rule as loadLiveCatalog, PLUS a
 // media requirement. Browse used to render `catalog.array.filter(isPublishedStory)`
@@ -185,6 +186,10 @@ export interface BrowsePageOpts {
   /** Restrict to these exact `stories.category` labels (the chip filter).
    *  Empty / absent → the whole catalog. */
   categories?: string[];
+  /** Case-insensitive substring match on title OR category label (the public
+   *  search box). LIKE wildcards in the input match literally. Empty / absent
+   *  → no text filter. */
+  query?: string;
   /** Compute the total row count (respecting `categories`). Pass only on the
    *  first page — the client caches it for the header across pages. */
   withTotal?: boolean;
@@ -226,6 +231,17 @@ export async function loadBrowsePage(
   if (categories.length > 0) {
     where.push(`category IN (${categories.map(() => "?").join(", ")})`);
     filterParams.push(...categories);
+  }
+  // Text query: bound as a parameter (never interpolated), LIKE wildcards
+  // escaped so "100%" matches the literal string instead of scanning. LOWER +
+  // LIKE + ESCAPE run identically on SQLite and Postgres.
+  const query = (opts.query ?? "").trim().toLowerCase();
+  if (query !== "") {
+    const like = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    where.push(
+      "(LOWER(title) LIKE ? ESCAPE '\\' OR LOWER(category) LIKE ? ESCAPE '\\')",
+    );
+    filterParams.push(like, like);
   }
   // Total is counted over the filtered set BEFORE the cursor clause is added,
   // so the header shows the whole count, not just the tail after the cursor.
@@ -272,6 +288,7 @@ export async function loadBrowsePage(
   console.info("[browse page load]", {
     limit,
     categories,
+    query,
     has_cursor: decoded !== null,
     count: stories.length,
     has_more: hasMore,

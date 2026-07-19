@@ -1,13 +1,15 @@
-// loadBrowsePage powers the desktop Browse grid's cursor pagination. Before it
+// loadBrowsePage powers the Browse + Search grids' cursor pagination. Before it
 // existed, Browse read the shared 200-row homepage catalog and silently capped
-// at ~201 titles once production passed 200 stories. These tests pin the four
+// at ~201 titles once production passed 200 stories. These tests pin the five
 // things that fix demands: it pages the WHOLE eligible catalog, its compound
 // keyset cursor neither skips nor duplicates rows that share a timestamp, the
-// category filter restricts both the page and the total, and the public gate
-// matches loadLiveCatalog (plus a hero/video media requirement).
+// category filter restricts both the page and the total, the text query (the
+// Search box) matches title/category with wildcards escaped, and the public
+// gate matches loadLiveCatalog (plus a hero/video media requirement).
 //
 // Seeds the empty test SQLite the same way homepage-data-duration.test.ts does.
-// Plan: _plans/2026-07-14-browse-pagination.md.
+// Plans: _plans/2026-07-14-browse-pagination.md,
+// _plans/2026-07-19-search-full-catalog.md.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { run } from "@/lib/db";
@@ -28,6 +30,7 @@ async function reset(): Promise<void> {
 }
 
 interface SeedOpts {
+  title?: string;
   category?: string;
   status?: string;
   publishedAt?: string;
@@ -50,7 +53,7 @@ async function seedStory(id: string, seq: number, opts: SeedOpts = {}): Promise<
     [
       id,
       opts.slug === undefined ? `slug-${id}` : opts.slug,
-      `Title ${id}`,
+      opts.title ?? `Title ${id}`,
       opts.category ?? "Drama",
       "synopsis",
       opts.status ?? "published",
@@ -137,6 +140,78 @@ describe("loadBrowsePage category filter", () => {
     });
     expect(multi.total).toBe(2);
     expect(multi.stories.map((s) => s.id).sort()).toEqual(["h1", "n1"]);
+  });
+});
+
+// The text query powers Search on both shells (mobile Search doubles as the
+// catalog browser). Server-side WHERE so a match beyond any loaded page is
+// found. Plan: _plans/2026-07-19-search-full-catalog.md.
+describe("loadBrowsePage text query", () => {
+  it("matches title and category case-insensitively and counts the filtered total", async () => {
+    await seedStory("pkg", 0, { title: "The Wrong Package", category: "Neighbor Wars" });
+    await seedStory("bite", 1, { title: "The Back Door Bite", category: "Neighbor Wars" });
+    await seedStory("boss", 2, { title: "Overtime Forever", category: "Bad Bosses" });
+    const { loadBrowsePage } = await import("@/lib/homepage-data");
+
+    const byTitle = await loadBrowsePage({ limit: 50, query: "PACKAGE", withTotal: true });
+    expect(byTitle.total).toBe(1);
+    expect(byTitle.stories.map((s) => s.id)).toEqual(["pkg"]);
+
+    const byCategory = await loadBrowsePage({ limit: 50, query: "neighbor", withTotal: true });
+    expect(byCategory.total).toBe(2);
+    expect(byCategory.stories.map((s) => s.id).sort()).toEqual(["bite", "pkg"]);
+
+    const noMatch = await loadBrowsePage({ limit: 50, query: "zebra", withTotal: true });
+    expect(noMatch.total).toBe(0);
+    expect(noMatch.stories).toEqual([]);
+
+    // Blank / whitespace query = no text filter.
+    const blank = await loadBrowsePage({ limit: 50, query: "   ", withTotal: true });
+    expect(blank.total).toBe(3);
+  });
+
+  it("treats LIKE wildcards in the query literally", async () => {
+    await seedStory("pct", 0, { title: "The 100% Refund" });
+    await seedStory("plain", 1, { title: "The 1000 Refund" });
+    await seedStory("under", 2, { title: "snake_case story" });
+    const { loadBrowsePage } = await import("@/lib/homepage-data");
+
+    // "100%" must not act as "100 followed by anything".
+    const pct = await loadBrowsePage({ limit: 50, query: "100%", withTotal: true });
+    expect(pct.total).toBe(1);
+    expect(pct.stories.map((s) => s.id)).toEqual(["pct"]);
+
+    // "_" must not act as "any single character".
+    const underscore = await loadBrowsePage({ limit: 50, query: "_", withTotal: true });
+    expect(underscore.total).toBe(1);
+    expect(underscore.stories.map((s) => s.id)).toEqual(["under"]);
+  });
+
+  it("composes with the category filter and the cursor", async () => {
+    await seedStory("m1", 0, { title: "Fence Fight", category: "Neighbor Wars" });
+    await seedStory("m2", 1, { title: "Fence War", category: "Neighbor Wars" });
+    await seedStory("m3", 2, { title: "Fence Truce", category: "Neighbor Wars" });
+    await seedStory("other", 3, { title: "Fence Feelings", category: "Drama" });
+    const { loadBrowsePage } = await import("@/lib/homepage-data");
+
+    const p1 = await loadBrowsePage({
+      limit: 2,
+      query: "fence",
+      categories: ["Neighbor Wars"],
+      withTotal: true,
+    });
+    expect(p1.total).toBe(3); // Drama match excluded by the category filter
+    expect(p1.stories.map((s) => s.id)).toEqual(["m3", "m2"]); // newest first
+    expect(p1.nextCursor).not.toBeNull();
+
+    const p2 = await loadBrowsePage({
+      limit: 2,
+      query: "fence",
+      categories: ["Neighbor Wars"],
+      beforeCursor: p1.nextCursor,
+    });
+    expect(p2.stories.map((s) => s.id)).toEqual(["m1"]);
+    expect(p2.nextCursor).toBeNull();
   });
 });
 

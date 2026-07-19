@@ -420,7 +420,8 @@ export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   return loadLiveCatalog(limit);
 }
 
-// Public client entry for the Browse grid's cursor pagination. Thin "use server"
+// Public client entry for the Browse + Search grids' cursor pagination (Search
+// also pushes its text query down through BrowsePageOpts). Thin "use server"
 // wrapper over loadBrowsePage (@/lib/homepage-data) so the query logic stays in a
 // server-only lib the tests can import directly, mirroring getLiveCatalog /
 // loadLiveCatalog. A "use server" module may only export async functions, so the
