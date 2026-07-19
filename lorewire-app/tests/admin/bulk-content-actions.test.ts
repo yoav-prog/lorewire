@@ -93,6 +93,7 @@ import {
   bulkReclassifyContentAction,
   bulkRegenerateContentAction,
   bulkRegenerateTitlesAction,
+  bulkRestartPipelineForceAction,
   type BulkContentItem,
   type BulkUpdateOp,
 } from "@/app/admin/actions";
@@ -641,6 +642,132 @@ describe("bulkRegenerateContentAction: pipeline target", () => {
     );
     expect(result.ok).toHaveLength(0);
     expect(result.failed[0].reason).toBe("not-enqueued");
+  });
+
+  // 2026-07-19 self-heal: the restart button now passes allowUsed, so an
+  // already-shipped story (source at 'used') re-runs from the same click
+  // instead of dead-ending on "reddit source is used or skipped".
+  it("re-runs an already-shipped story whose source is 'used'", async () => {
+    const storyId = await seedStory({ status: "published" });
+    const story = await one<{ reddit_id: string }>(
+      "SELECT reddit_id FROM stories WHERE id = ?",
+      [storyId],
+    );
+    await run(
+      "INSERT INTO reddit_source (reddit_id, full_text, status, first_synced, last_synced) " +
+        "VALUES (?, 'seed body', 'used', '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z')",
+      [story!.reddit_id],
+    );
+    const result = await bulkRegenerateContentAction(
+      [{ kind: "story", id: storyId }],
+      "pipeline",
+    );
+    expect(result.ok).toHaveLength(1);
+    expect(result.failed).toHaveLength(0);
+    const jobs = await all<{ reddit_id: string }>(
+      "SELECT reddit_id FROM story_jobs",
+      [],
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].reddit_id).toBe(story!.reddit_id);
+  });
+
+  // A 'skipped' source is the operator's own "no" — it stays refused, but now
+  // with a precise reason the banner turns into a "Re-run anyway" button.
+  it("maps a 'skipped' source to reason 'reddit-source-skipped'", async () => {
+    const storyId = await seedStory({});
+    const story = await one<{ reddit_id: string }>(
+      "SELECT reddit_id FROM stories WHERE id = ?",
+      [storyId],
+    );
+    await run(
+      "INSERT INTO reddit_source (reddit_id, full_text, status, first_synced, last_synced) " +
+        "VALUES (?, 'seed body', 'skipped', '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z')",
+      [story!.reddit_id],
+    );
+    const result = await bulkRegenerateContentAction(
+      [{ kind: "story", id: storyId }],
+      "pipeline",
+    );
+    expect(result.ok).toHaveLength(0);
+    expect(result.failed[0].reason).toBe("reddit-source-skipped");
+    // Not enqueued — the source is untouched until the operator overrides.
+    expect(await all("SELECT id FROM story_jobs", [])).toHaveLength(0);
+  });
+});
+
+// --- Restart pipeline (force / "Re-run anyway") -------------------------------
+// Plan: _plans/2026-07-19-restart-pipeline-self-heal.md. The override for a
+// skipped source: flips it back to 'imported' and enqueues.
+
+describe("bulkRestartPipelineForceAction", () => {
+  async function seedSkipped(): Promise<{ storyId: string; redditId: string }> {
+    const storyId = await seedStory({});
+    const story = await one<{ reddit_id: string }>(
+      "SELECT reddit_id FROM stories WHERE id = ?",
+      [storyId],
+    );
+    const redditId = story!.reddit_id;
+    await run(
+      "INSERT INTO reddit_source (reddit_id, full_text, status, first_synced, last_synced) " +
+        "VALUES (?, 'seed body', 'skipped', '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z')",
+      [redditId],
+    );
+    return { storyId, redditId };
+  }
+
+  it("un-skips a skipped source and enqueues the job", async () => {
+    const { storyId, redditId } = await seedSkipped();
+    const result = await bulkRestartPipelineForceAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.ok).toHaveLength(1);
+    expect(result.failed).toHaveLength(0);
+    // Source flipped off 'skipped' so the enqueue could take it.
+    const source = await one<{ status: string }>(
+      "SELECT status FROM reddit_source WHERE reddit_id = ?",
+      [redditId],
+    );
+    expect(source!.status).toBe("queued");
+    const jobs = await all<{ reddit_id: string; status: string }>(
+      "SELECT reddit_id, status FROM story_jobs",
+      [],
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].reddit_id).toBe(redditId);
+    expect(jobs[0].status).toBe("queued");
+  });
+
+  it("skips articles (not-a-story) and stories with no reddit source", async () => {
+    const articleId = await seedArticle({});
+    const manualSeedId = randomUUID();
+    await run(
+      "INSERT INTO stories (id, slug, title, status, body, created_at, updated_at) " +
+        "VALUES (?, ?, 'Manual seed', 'published', 'body', '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z')",
+      [manualSeedId, `story-${manualSeedId.slice(0, 6)}`],
+    );
+    const result = await bulkRestartPipelineForceAction([
+      { kind: "article", id: articleId },
+      { kind: "story", id: manualSeedId },
+    ]);
+    expect(result.ok).toHaveLength(0);
+    const reasons = result.failed.map((f) => f.reason).sort();
+    expect(reasons).toEqual(["no-reddit-source", "not-a-story"]);
+  });
+
+  it("reports pipeline-already-running without a second enqueue", async () => {
+    const { storyId, redditId } = await seedSkipped();
+    await run(
+      "INSERT INTO story_jobs (id, reddit_id, status, requested_at) VALUES (?, ?, 'processing', '2026-07-19T00:00:00.000Z')",
+      [randomUUID(), redditId],
+    );
+    const result = await bulkRestartPipelineForceAction([
+      { kind: "story", id: storyId },
+    ]);
+    expect(result.ok).toHaveLength(0);
+    expect(result.failed[0].reason).toBe("pipeline-already-running");
+    // Only the pre-existing processing job — no duplicate enqueue.
+    expect(await all("SELECT id FROM story_jobs", [])).toHaveLength(1);
   });
 });
 

@@ -4150,20 +4150,29 @@ export async function bulkRegenerateContentAction(
           continue;
         }
         const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+        // 2026-07-19 self-heal: allowUsed so an already-shipped story (source
+        // at status 'used') re-runs from this one button instead of forcing
+        // the operator to hunt for the near-identical "Full pipeline &
+        // publish". The confirm modal carries the "goes offline" warning.
+        // With allowUsed, the only status the enqueue now refuses is 'skipped'
+        // — the operator's own "no" — which gets its own reason + a one-click
+        // "Re-run anyway" override in the result banner.
         const r = await bulkEnqueueStoryJobs([redditId], {
           with_media: true,
           requested_by: session.email,
+          allowUsed: true,
         });
         if (r.enqueued === 0) {
-          // bulkEnqueueStoryJobs has its own gates: source row in the wrong
-          // status (already used/skipped), or an active job already running.
-          // Map the most likely cause to a single short reason — the per-row
-          // failure list shows the count so the operator can re-check.
+          // bulkEnqueueStoryJobs has its own gates: an active job already
+          // running, or a source status it won't accept (with allowUsed on,
+          // that's 'skipped' or a stuck 'processing' zombie). Map the most
+          // likely cause to a single short reason — the result banner turns
+          // 'reddit-source-skipped' into an explicit override button.
           const reason =
             r.skipped_active > 0
               ? "pipeline-already-running"
               : r.skipped_status > 0
-                ? "reddit-source-locked"
+                ? "reddit-source-skipped"
                 : "not-enqueued";
           failed.push({ ...item, reason });
           continue;
@@ -4226,6 +4235,95 @@ export async function bulkRegenerateContentAction(
     failed: failed.length,
   });
   return { target, ok, failed };
+}
+
+// ─── Restart pipeline (force / self-heal) ───────────────────────────────────
+// 2026-07-19, plan: _plans/2026-07-19-restart-pipeline-self-heal.md.
+//
+// The "Re-run anyway" override behind the `reddit-source-skipped` failure in
+// the Restart-entire-pipeline result banner. A `skipped` source is the
+// operator's own past "no", so the normal restart button leaves it alone; this
+// action is the explicit un-skip-and-run for the moment they change their mind
+// (or a stuck 'processing' source that never produced a job needs kicking).
+//
+// It flips a `skipped`/`processing` source back to `imported` and enqueues.
+// A `used` source is left as-is — allowUsed accepts it directly, so we never
+// null a live story's story_id link. Same paid cap + audit as the other bulk
+// paid actions; the enqueue itself still skips anything already in flight.
+
+export async function bulkRestartPipelineForceAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkRegenResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_restart_pipeline_force", items);
+
+  console.info("[content restart-force] start", { count: items.length });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+
+  const { getRedditSource, setRedditSourceStatus } = await import(
+    "@/lib/reddit-source"
+  );
+  const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+
+  for (const item of items) {
+    if (item.kind === "article") {
+      failed.push({ ...item, reason: "not-a-story" });
+      continue;
+    }
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        failed.push({ ...item, reason: "not-found" });
+        continue;
+      }
+      const redditId = story.reddit_id;
+      if (!redditId) {
+        failed.push({ ...item, reason: "no-reddit-source" });
+        continue;
+      }
+      const source = await getRedditSource(redditId);
+      if (!source) {
+        failed.push({ ...item, reason: "not-enqueued" });
+        continue;
+      }
+      // Normalize the operator's prior "no" (or a stranded 'processing' row
+      // with no live job) back to a runnable state. 'used' is intentionally
+      // untouched — allowUsed lets the enqueue take it without dropping the
+      // story_id link a live story still needs.
+      if (source.status === "skipped" || source.status === "processing") {
+        await setRedditSourceStatus(redditId, "imported", { story_id: null });
+      }
+      const r = await bulkEnqueueStoryJobs([redditId], {
+        with_media: true,
+        requested_by: session.email,
+        allowUsed: true,
+      });
+      if (r.enqueued === 0) {
+        const reason =
+          r.skipped_active > 0 ? "pipeline-already-running" : "not-enqueued";
+        failed.push({ ...item, reason });
+        continue;
+      }
+      revalidatePath("/admin/reddit-sources");
+      ok.push(item);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content restart-force] failed", { id: item.id, error: reason });
+    }
+  }
+
+  revalidatePath("/admin/content");
+  console.info("[content restart-force] done", {
+    ok: ok.length,
+    failed: failed.length,
+  });
+  // Reuse the regen result shape so the client renders it through the same
+  // RegenResultBanner; 'pipeline' is the only meaningful target here.
+  return { target: "pipeline", ok, failed };
 }
 
 // ─── Bulk publish to socials ────────────────────────────────────────────────

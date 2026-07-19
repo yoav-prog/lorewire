@@ -50,6 +50,9 @@ export type AuditAction =
   | "content.bulk_complete_publish"
   | "content.bulk_refresh_assets"
   | "content.bulk_full_pipeline"
+  // 2026-07-19 self-heal: "Re-run anyway" un-skips a refused source and
+  // restarts its pipeline. Plan: _plans/2026-07-19-restart-pipeline-self-heal.md.
+  | "content.bulk_restart_pipeline_force"
   // 2026-07-15 Phase 1 follow-up: select-all-matching applies a cheap status /
   // category change to every row matching a filter (resolved server-side).
   | "content.bulk_by_filter";

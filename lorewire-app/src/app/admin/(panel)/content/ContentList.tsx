@@ -35,6 +35,8 @@ import {
   bulkDeleteContentAction,
   bulkRegenerateContentAction,
   bulkRegenerateTitlesAction,
+  bulkRestartPipelineForceAction,
+  type BulkActionFailure,
   type BulkActionResult,
   type BulkCompleteAndPublishOutcome,
   type BulkCompleteAndPublishResult,
@@ -207,6 +209,8 @@ function describeReason(reason: string): string {
       return "pipeline already running for this story";
     case "reddit-source-locked":
       return "reddit source is used or skipped — pipeline cannot re-run";
+    case "reddit-source-skipped":
+      return "you skipped this source — hit Re-run anyway to override";
     case "not-enqueued":
       return "could not enqueue (no matching reddit source)";
     default:
@@ -295,7 +299,7 @@ const REGEN_TARGET_META: Record<
     label: "Restart entire pipeline (article + media)",
     verb: "Restart the entire pipeline",
     perStoryHint: "≈ $0.50 per story (LLM + TTS + images + assembly)",
-    body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Only stories with an unused reddit_source can be re-run; already-shipped and pre-pipeline manual seeds are skipped — use Full pipeline & publish for those.",
+    body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Already-shipped stories re-run too — they drop off the public site while they rewrite (~30-60s) and reappear when done. Sources you previously skipped are left alone; use Re-run anyway on those. Pre-pipeline manual seeds (no reddit source) can't be re-run this way.",
   },
   // 2026-06-28 short re-render target. Re-runs the full shorts pipeline so
   // the LLM is called against the CURRENT shorts_narration prompt — the only
@@ -751,6 +755,31 @@ export function ContentList({
     });
   }
 
+  // 2026-07-19 "Re-run anyway" — the override behind a reddit-source-skipped
+  // failure in the pipeline restart banner. Un-skips + re-enqueues exactly the
+  // refused rows through the force action, then replaces the banner with the
+  // fresh result so the operator sees whether the override took.
+  function runRestartForce(failedItems: BulkActionFailure[]) {
+    const items: BulkContentItem[] = failedItems.map((f) => ({
+      kind: f.kind,
+      id: f.id,
+    }));
+    if (items.length === 0) return;
+    console.info("[content list restart-force request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      const result = await bulkRestartPipelineForceAction(items);
+      console.info("[content list restart-force result]", {
+        ok: result.ok.length,
+        failed: result.failed.length,
+      });
+      setRegenResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
   // 2026-07-03 STOP RUNS. window.confirm (not the typed-confirm modal)
   // because stopping is recoverable — anything cancelled can simply be
   // re-queued; the copy still says spend already incurred is gone.
@@ -1115,6 +1144,8 @@ export function ContentList({
         <RegenResultBanner
           result={regenResult}
           rowByKey={rowByKey}
+          pending={pending}
+          onRerunSkipped={runRestartForce}
           onDismiss={() => setRegenResult(null)}
         />
       )}
@@ -2229,6 +2260,14 @@ function RegenConfirmModal({
     totalCostUsd != null && totalCostUsd >= SPEND_CONFIRM_THRESHOLD_USD;
   const confirmBlocked =
     pending || (requiresTypedConfirm && typedCount !== String(items.length));
+  // A pipeline restart on a live story pulls it off the public site while it
+  // rewrites. Surface that count up front so it's a decision, not a surprise.
+  const liveCount =
+    target === "pipeline"
+      ? items.filter(
+          (it) => rowByKey.get(`${it.kind}:${it.id}`)?.status === "published",
+        ).length
+      : 0;
   return (
     <div
       role="dialog"
@@ -2256,6 +2295,12 @@ function RegenConfirmModal({
             ? `≈ ${totalCostText} total`
             : "Total scales with today's image budget"}
         </p>
+        {liveCount > 0 && (
+          <p className="mt-2 font-mono text-[11px] text-warn">
+            {liveCount} of these {liveCount === 1 ? "is" : "are"} live and will
+            drop off the site while {liveCount === 1 ? "it rewrites" : "they rewrite"}.
+          </p>
+        )}
         <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
           {items.slice(0, previewCount).map((it) => {
             const r = rowByKey.get(`${it.kind}:${it.id}`);
@@ -2315,15 +2360,25 @@ function RegenConfirmModal({
 function RegenResultBanner({
   result,
   rowByKey,
+  pending,
+  onRerunSkipped,
   onDismiss,
 }: {
   result: BulkRegenResult;
   rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onRerunSkipped: (failed: BulkActionFailure[]) => void;
   onDismiss: () => void;
 }) {
   const meta = REGEN_TARGET_META[result.target];
   const previewFailures = result.failed.slice(0, 6);
   const overflow = result.failed.length - previewFailures.length;
+  // Rows the restart refused because the operator had skipped them. These get
+  // an explicit one-click override — the "nothing should stop me" affordance.
+  const skippedFailures =
+    result.target === "pipeline"
+      ? result.failed.filter((f) => f.reason === "reddit-source-skipped")
+      : [];
   return (
     <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
       <div className="flex items-center justify-between gap-3">
@@ -2357,6 +2412,18 @@ function RegenResultBanner({
           })}
           {overflow > 0 && <li>…and {overflow} more</li>}
         </ul>
+      )}
+      {skippedFailures.length > 0 && (
+        <button
+          type="button"
+          onClick={() => onRerunSkipped(skippedFailures)}
+          disabled={pending}
+          className="w-full rounded-md border border-warn/50 bg-warn/10 px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-warn transition-colors hover:bg-warn/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending
+            ? "Re-running…"
+            : `Re-run anyway (${skippedFailures.length} skipped)`}
+        </button>
       )}
     </div>
   );
