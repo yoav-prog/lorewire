@@ -31,7 +31,11 @@ import {
   resetRenderAutoPublishFailures,
 } from "@/lib/render-auto-publish";
 import { retractStory, type RetractResult } from "@/lib/retract-story";
-import { setUnattendedPublishingStopped } from "@/lib/approve-reviewed-story";
+import {
+  isUnattendedPublishingStopped,
+  setUnattendedPublishingStopped,
+} from "@/lib/approve-reviewed-story";
+import { rescreenHeldBacklog } from "@/lib/rescreen-held-backlog";
 import {
   PUBLISH_PLATFORMS,
   cancelScheduledPublish,
@@ -358,6 +362,60 @@ export async function setUnattendedPublishStopAction(
   console.info("[scheduler unattended_stop]", { stopped, actorId: session.userId });
   revalidatePath("/admin/scheduler");
   return { ok: true };
+}
+
+export interface RescreenBacklogActionResult {
+  ok: boolean;
+  error?: string;
+  processed?: number;
+  published?: number;
+  stillHeld?: number;
+  deferred?: number;
+  failed?: number;
+  remaining?: number;
+}
+
+/**
+ * Re-screen a batch of the held backlog with the current safety judge and
+ * publish the stories it now clears — the catch-up for holds the old judge
+ * made before it was recalibrated. Bounded per call; the UI clicks again while
+ * stories remain. Refuses while the emergency stop is engaged (this publishes
+ * without a per-story human look, so it honours the same stop the lanes do),
+ * returning a clear message instead of silently skipping every story.
+ */
+export async function rescreenHeldBacklogAction(
+  limit?: number,
+): Promise<RescreenBacklogActionResult> {
+  const session = await requireCapability("content.manage");
+  if (await isUnattendedPublishingStopped()) {
+    return {
+      ok: false,
+      error:
+        "The emergency stop is engaged. Release it above before re-screening — this publishes stories.",
+    };
+  }
+
+  const r = await rescreenHeldBacklog({ limit });
+  console.info("[scheduler rescreen_backlog]", {
+    actorId: session.userId,
+    processed: r.processed,
+    published: r.published,
+    stillHeld: r.stillHeld,
+    deferred: r.deferred,
+    failed: r.failed,
+    remaining: r.remaining,
+  });
+  revalidatePath("/admin/scheduler");
+  revalidatePath("/admin");
+  return {
+    ok: true,
+    processed: r.processed,
+    published: r.published,
+    stillHeld: r.stillHeld,
+    deferred: r.deferred,
+    failed: r.failed,
+    remaining: r.remaining,
+  };
 }
 
 export interface RunAutopilotNowResult {

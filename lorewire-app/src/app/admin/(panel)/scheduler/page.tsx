@@ -49,6 +49,7 @@ import {
   type PlatformOverview,
 } from "@/lib/publish-scheduler";
 import { isUnattendedPublishingStopped } from "@/lib/approve-reviewed-story";
+import { countRescreenBacklog } from "@/lib/rescreen-held-backlog";
 import { getSafetyJudgeMode, SAFETY_JUDGE_SETTING_KEYS } from "@/lib/story-safety-judge";
 import {
   SettingSelect,
@@ -62,12 +63,19 @@ import { RunNowButton } from "./_components/RunNowButton";
 import { RecentAutoPublishes } from "./_components/RecentAutoPublishes";
 import { UnattendedPublishStop } from "./_components/UnattendedPublishStop";
 import { HeldStories } from "./_components/HeldStories";
+import { RescreenBacklog } from "./_components/RescreenBacklog";
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
 import { ReviewActions } from "./_components/ReviewActions";
 import { CalendarPreview } from "./_components/CalendarPreview";
 import { SchedulePostForm } from "./_components/SchedulePostForm";
 import { UpcomingPosts } from "./_components/UpcomingPosts";
+
+// The "Re-screen backlog" server action screens a batch of held stories through
+// the LLM judge (one call each), so its worst case runs far past the platform
+// default. Match the unattended lanes' ceiling; a page-level maxDuration governs
+// every Server Action on this page (Next route segment config).
+export const maxDuration = 300;
 
 interface ReviewRow {
   id: string;
@@ -150,6 +158,7 @@ export default async function SchedulerPage() {
     recentAutoPublishes,
     unattendedStopped,
     heldStories,
+    heldBacklog,
     safetyJudgeMode,
     dropConfig,
   ] = await Promise.all([
@@ -178,6 +187,7 @@ export default async function SchedulerPage() {
     listRecentAutoPublishes(10),
     isUnattendedPublishingStopped(),
     listHeldForReview(50),
+    countRescreenBacklog(),
     getSafetyJudgeMode(),
     getDailyDropConfig(),
   ]);
@@ -511,6 +521,7 @@ export default async function SchedulerPage() {
           If a hold looks wrong, publish it here in one click. A steady stream
           of clean-looking holds means the safety check is too strict.
         </p>
+        <RescreenBacklog backlog={heldBacklog} />
         <HeldStories
           items={heldStories.map((h) => ({
             storyId: h.storyId,
