@@ -4627,7 +4627,7 @@ export interface BulkCompleteAndPublishOutcome {
     | "skipped"
     | "errored";
   missing: string[];
-  enqueued: Array<"pipeline" | "hero" | "scenes" | "voice">;
+  enqueued: Array<"pipeline" | "hero_thumbnail" | "scenes" | "voice">;
   /** Set when state === "skipped" or "errored". */
   reason?: string;
 }
@@ -4650,13 +4650,10 @@ const MISSING_BLOCKS_PIPELINE: ReadonlySet<string> = new Set([
   "voiceover",
   "scene_images",
 ]);
-const MISSING_BLOCKS_HERO: ReadonlySet<string> = new Set([
-  "hero_image",
-  "hero_image_landscape",
-  "thumbnail_image",
-  "thumbnail_image_landscape",
-  "thumbnail_image_square",
-]);
+// Which blocking hero/thumbnail gate means "run the finisher" lives in
+// asset-completeness.ts (HERO_THUMBNAIL_BLOCKING_GATES) so this action and the
+// auto-publish cron share one definition. Imported lazily alongside
+// evaluateAssetCompleteness below.
 
 export async function bulkCompleteAndPublishAction(
   itemsInput: BulkContentItem[],
@@ -4674,9 +4671,8 @@ export async function bulkCompleteAndPublishAction(
 
   // Lazy imports keep the action surface light when nothing is in flight,
   // matching bulkRegenerateContentAction's pattern.
-  const { evaluateAssetCompleteness } = await import(
-    "@/lib/asset-completeness"
-  );
+  const { evaluateAssetCompleteness, HERO_THUMBNAIL_BLOCKING_GATES } =
+    await import("@/lib/asset-completeness");
   const { enqueueVoiceRender: _enqueueVoice } = await import(
     "@/lib/voice-render-queue"
   );
@@ -4730,7 +4726,8 @@ export async function bulkCompleteAndPublishAction(
         continue;
       }
 
-      const enqueued: Array<"pipeline" | "hero" | "scenes" | "voice"> = [];
+      const enqueued: Array<"pipeline" | "hero_thumbnail" | "scenes" | "voice"> =
+        [];
 
       if (completeness.ready) {
         // Already complete. Flag for the cron's next tick.
@@ -4750,9 +4747,14 @@ export async function bulkCompleteAndPublishAction(
       const needsPipeline = [...missingSet].some((m) =>
         MISSING_BLOCKS_PIPELINE.has(m),
       );
+      // Only spend the (5-call) hero+thumbnail finisher when a BLOCKING image
+      // gate is the holdup — hero_image or thumbnail_image. Keyed off
+      // `blocking`, not `missing`, so an advisory-only landscape/square miss
+      // (which never blocks publish) doesn't trigger a paid regen on its own;
+      // the finisher refreshes those variants for free when it does run.
       const needsHero =
         !needsPipeline &&
-        [...missingSet].some((m) => MISSING_BLOCKS_HERO.has(m));
+        completeness.blocking.some((m) => HERO_THUMBNAIL_BLOCKING_GATES.has(m));
 
       if (needsPipeline) {
         const story = await getStoryRow(item.id);
@@ -4815,7 +4817,15 @@ export async function bulkCompleteAndPublishAction(
           asset: "pipeline",
         });
       } else if (needsHero) {
-        const pre = await canEnqueueImageRegen("hero");
+        // The 5-variant hero+thumbnail finisher, NOT plain "hero". A missing
+        // card thumbnail (thumbnail_image) is a blocking gate, and "hero"
+        // only ever writes hero_image/hero_image_landscape — so the old code
+        // enqueued a regen that could never clear the gate and the story sat
+        // stuck until the cron gave up. This asset writes all five variants
+        // atomically from the short's character. The short render is
+        // guaranteed present here (a missing short would have made
+        // needsPipeline true), so the finisher's seed exists.
+        const pre = await canEnqueueImageRegen("hero_thumbnail_from_short");
         if (!pre.ok) {
           outcomes.push({
             kind: item.kind,
@@ -4831,15 +4841,15 @@ export async function bulkCompleteAndPublishAction(
         await enqueueImageRegen({
           ownerKind: "story",
           ownerId: item.id,
-          asset: "hero",
+          asset: "hero_thumbnail_from_short",
           promptHash: null,
           requestedBy: session.userId,
         });
-        enqueued.push("hero");
-         
+        enqueued.push("hero_thumbnail");
+
         console.info("[bulk-complete-publish enqueue]", {
           story_id: item.id,
-          asset: "hero",
+          asset: "hero_thumbnail_from_short",
         });
       }
       // Else: only poll (or nothing currently enqueueable) is missing.

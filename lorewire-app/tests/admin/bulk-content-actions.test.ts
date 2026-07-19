@@ -86,6 +86,7 @@ vi.mock("@/lib/title-regenerator", () => ({
 
 // Import AFTER vi.mock so the action module picks up the mocked deps.
 import {
+  bulkCompleteAndPublishAction,
   bulkUpdateContentAction,
   bulkUpdateContentByFilterAction,
   bulkDeleteContentAction,
@@ -756,6 +757,72 @@ describe("bulkFullPipelineAction", () => {
     expect(reasons).toEqual(
       ["articles have no story pipeline", "no-reddit-source"].sort(),
     );
+  });
+});
+
+// --- Complete & publish: hero/thumbnail self-heal ----------------------------
+// Plan: _plans/2026-07-19-asset-incomplete-thumbnail-heal.md. A story whose
+// only blocking gap is the card thumbnail (thumbnail_image) must enqueue the
+// 5-variant finisher (hero_thumbnail_from_short) — NOT plain "hero", which
+// only writes hero_image and could never clear the gate.
+
+describe("bulkCompleteAndPublishAction: thumbnail self-heal", () => {
+  // Seeds a story that passes every gate EXCEPT thumbnail_image: body + hero +
+  // done short + video_url + enabled poll present, thumbnail_image NULL. So
+  // completeness.blocking === ["thumbnail_image"] and needsHero fires.
+  async function seedThumbnailMissStory(): Promise<string> {
+    const storyId = await seedStory({
+      status: "ready",
+      videoUrl: "https://example.com/short.mp4",
+    });
+    await run(
+      "UPDATE stories SET hero_image = ?, hero_image_landscape = ?, " +
+        "thumbnail_image = NULL WHERE id = ?",
+      ["https://example.com/hero.png", "https://example.com/hero-l.png", storyId],
+    );
+    await run(
+      "INSERT INTO short_renders (id, story_id, status, output_url, props, requested_at) " +
+        "VALUES (?, ?, 'done', 'https://example.com/short.mp4', '{}', '2026-07-19T00:00:00.000Z')",
+      [`${storyId}-short`, storyId],
+    );
+    await run(
+      "INSERT INTO polls (id, story_id, article_id, question, option_a_text, option_b_text, " +
+        "enabled, category, created_at, updated_at) " +
+        "VALUES (?, ?, NULL, 'Who is right?', 'A', 'B', 1, 'Drama', " +
+        "'2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z')",
+      [`${storyId}-poll`, storyId],
+    );
+    return storyId;
+  }
+
+  it("enqueues the hero+thumbnail finisher, not a bare hero regen", async () => {
+    const storyId = await seedThumbnailMissStory();
+    const result = await bulkCompleteAndPublishAction([
+      { kind: "story", id: storyId },
+    ]);
+
+    expect(result.flaggedCount).toBe(1);
+    expect(result.erroredCount).toBe(0);
+    const outcome = result.outcomes[0];
+    expect(outcome.state).toBe("missing_assets_enqueued");
+    expect(outcome.enqueued).toContain("hero_thumbnail");
+
+    // The queue row is the 5-variant finisher — the only asset that writes
+    // thumbnail_image. A bare "hero" row here would be the regression.
+    const renders = await all<{ asset: string; status: string }>(
+      "SELECT asset, status FROM image_renders WHERE owner_id = ?",
+      [storyId],
+    );
+    expect(renders).toHaveLength(1);
+    expect(renders[0].asset).toBe("hero_thumbnail_from_short");
+    expect(renders[0].status).toBe("queued");
+
+    // Story flagged so the cron publishes it once the finisher lands.
+    const story = await one<{ auto_publish_when_ready: number }>(
+      "SELECT auto_publish_when_ready FROM stories WHERE id = ?",
+      [storyId],
+    );
+    expect(story!.auto_publish_when_ready).toBe(1);
   });
 });
 
