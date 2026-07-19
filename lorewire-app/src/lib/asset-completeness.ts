@@ -104,6 +104,20 @@ const ADVISORY_GATES: ReadonlySet<AssetGate> = new Set([
   "thumbnail_image_square",
 ]);
 
+// The BLOCKING image gates the hero+thumbnail finisher (Python asset
+// "hero_thumbnail_from_short") produces. When one of these is why a story
+// won't publish, re-running that finisher is the fix — it writes all five
+// hero/thumbnail variants atomically, so the advisory landscape/square gates
+// heal as a side effect. Shared by the Complete-&-publish action and the
+// auto-publish cron so both agree on "this is a hero/thumbnail problem" and
+// enqueue the SAME asset (2026-07-19: the old path enqueued plain "hero",
+// which never wrote thumbnail_image, so a missing card thumbnail could never
+// self-heal). Plan: _plans/2026-07-19-asset-incomplete-thumbnail-heal.md.
+export const HERO_THUMBNAIL_BLOCKING_GATES: ReadonlySet<AssetGate> = new Set([
+  "hero_image",
+  "thumbnail_image",
+]);
+
 export interface AssetCompleteness {
   /** True when no BLOCKING gate is missing (advisory gates may be). */
   ready: boolean;
