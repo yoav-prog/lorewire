@@ -3649,11 +3649,45 @@ async function auditBulkContent(
 // the ContentPageOpts / ContentPageResult types live in @/lib/repo because a
 // "use server" module can only export async functions.
 // Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+//
+// 2026-07-21 the page's publish blockers ride along: every story the operator
+// could still publish (not published, not archived) gets the asset gate's
+// `blocking` list stamped onto publish_blockers so the row can show "missing:
+// poll" without a click. Lives here, not in loadContentPage — the repo can't
+// import the gate (cycle via polls.ts). Batched: 3 queries per page, not per
+// story. Plan: _plans/2026-07-21-content-row-publish-blockers.md.
 export async function listContentPageAction(
   opts: ContentPageOpts,
 ): Promise<ContentPageResult> {
   await requireCapability("content.manage");
-  return loadContentPage(opts);
+  const page = await loadContentPage(opts);
+  const candidateIds = page.rows
+    .filter(
+      (r) =>
+        r.kind === "story" &&
+        r.status !== "published" &&
+        r.status !== "archived",
+    )
+    .map((r) => r.id);
+  if (candidateIds.length > 0) {
+    const { evaluateAssetCompletenessForStories } = await import(
+      "@/lib/asset-completeness"
+    );
+    const gates = await evaluateAssetCompletenessForStories(candidateIds);
+    let withBlockers = 0;
+    for (const row of page.rows) {
+      if (row.kind !== "story") continue;
+      const completeness = gates.get(row.id);
+      if (!completeness) continue;
+      row.publish_blockers = completeness.blocking;
+      if (completeness.blocking.length > 0) withBlockers += 1;
+    }
+    console.info("[content publish-blockers] page", {
+      candidates: candidateIds.length,
+      withBlockers,
+    });
+  }
+  return page;
 }
 
 // 2026-07-15 select-all-matching (cheap ops only). Resolves every row matching

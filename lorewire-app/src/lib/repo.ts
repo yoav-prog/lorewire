@@ -2,6 +2,9 @@
 // authorization and shape stay consistent (see the Next data-security guide).
 
 import "server-only";
+// Type-only on purpose: a value import would close the module cycle
+// asset-completeness → polls → repo.
+import type { AssetGate } from "@/lib/asset-completeness";
 import { all, one, run } from "@/lib/db";
 import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 
@@ -1607,6 +1610,14 @@ export interface ContentRow {
    *  refreshing. 'voice_pending' / 'short_pending' / 'hero_pending'
    *  per the cron at /api/refresh_assets. Articles always NULL. */
   refresh_state: string | null;
+  /** 2026-07-21 what stops Publish for this row, straight from the
+   *  asset gate's `blocking` list ([] = would publish clean). NULL =
+   *  not evaluated: articles, already-published/archived stories, and
+   *  every path except listContentPageAction — the repo can't compute
+   *  it itself (importing the gate would close the cycle
+   *  asset-completeness → polls → repo), so the action layer fills it
+   *  in. Plan: _plans/2026-07-21-content-row-publish-blockers.md. */
+  publish_blockers: AssetGate[] | null;
 }
 
 /** 2026-06-24 Content inbox: latest story_jobs row status per story.
@@ -2054,6 +2065,7 @@ export async function listContentSlim(
       flagged_attempts: s.auto_publish_attempts ?? 0,
       progress: progressByStory.get(s.id) ?? null,
       refresh_state: s.refresh_assets_state ?? null,
+      publish_blockers: null,
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -2074,6 +2086,7 @@ export async function listContentSlim(
       flagged_attempts: 0,
       progress: null,
       refresh_state: null,
+      publish_blockers: null,
     })),
   ];
 
@@ -2569,6 +2582,7 @@ export async function loadContentPage(
           flagged_attempts: r.auto_publish_attempts ?? 0,
           progress: progressByStory.get(r.id) ?? null,
           refresh_state: r.refresh_assets_state ?? null,
+          publish_blockers: null,
         }
       : {
           kind: "article",
@@ -2589,6 +2603,7 @@ export async function loadContentPage(
           flagged_attempts: 0,
           progress: null,
           refresh_state: null,
+          publish_blockers: null,
         },
   );
 

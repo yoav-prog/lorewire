@@ -1384,6 +1384,11 @@ export function ContentList({
                   {r.kind === "story" && r.refresh_state && (
                     <RefreshingPill state={r.refresh_state} />
                   )}
+                  {r.kind === "story" &&
+                    r.publish_blockers != null &&
+                    r.publish_blockers.length > 0 && (
+                      <PublishBlockersPill gates={r.publish_blockers} />
+                    )}
                   {r.kind === "story" && r.progress && (
                     <ProgressPill snapshot={r.progress} />
                   )}
@@ -2555,6 +2560,56 @@ function formatProgressTooltip(snapshot: ProgressSnapshot): string {
   if (snapshot.phase) parts.push(`phase: ${snapshot.phase}`);
   if (snapshot.count != null) parts.push(`${snapshot.count} job(s)`);
   return parts.join(" · ");
+}
+
+// --- Per-row publish-blockers pill ------------------------------------------
+// 2026-07-21. Renders only for stories whose Publish would be rejected
+// right now — publish_blockers is the asset gate's `blocking` list,
+// stamped per page by listContentPageAction. The chip shows up to three
+// short labels; the tooltip carries the full list plus the fix hint, so
+// the operator knows what's missing without clicking into the story.
+// Codes not in the maps (a future gate) fall back to the raw code — the
+// chip degrades to jargon rather than hiding a blocker.
+// Plan: _plans/2026-07-21-content-row-publish-blockers.md.
+
+const BLOCKER_CHIP_LABEL: Record<string, string> = {
+  body: "body",
+  hero_image: "hero",
+  thumbnail_image: "thumb",
+  short_render: "short",
+  video_url: "video",
+  voiceover: "voice",
+  scene_images: "scenes",
+  poll: "poll",
+};
+
+const BLOCKER_FULL_LABEL: Record<string, string> = {
+  body: "article body",
+  hero_image: "hero image",
+  thumbnail_image: "card thumbnail",
+  short_render: "finished short video",
+  video_url: "playable video URL",
+  voiceover: "voiceover",
+  scene_images: "scene images",
+  poll: "enabled poll",
+};
+
+const BLOCKER_CHIP_MAX = 3;
+
+function PublishBlockersPill({ gates }: { gates: string[] }) {
+  const shown = gates.slice(0, BLOCKER_CHIP_MAX);
+  const overflow = gates.length - shown.length;
+  const label = shown.map((g) => BLOCKER_CHIP_LABEL[g] ?? g).join(" · ");
+  const full = gates.map((g) => BLOCKER_FULL_LABEL[g] ?? g).join(", ");
+  return (
+    <span
+      title={`Publish is blocked — still missing: ${full}. Select the row and run Complete & publish to backfill and ship automatically.`}
+      className="mr-2 shrink-0 self-center rounded-full border border-warn/40 bg-warn/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-warn"
+    >
+      missing: {label}
+      {overflow > 0 ? ` +${overflow}` : ""}
+    </span>
+  );
 }
 
 // --- Per-row published-on icon strip ----------------------------------------
