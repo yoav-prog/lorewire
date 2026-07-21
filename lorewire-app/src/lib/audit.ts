@@ -38,11 +38,30 @@ export type AuditAction =
   | "team.invite_create"
   | "team.invite_revoke"
   | "team.invite_accept"
-  | "team.member_remove";
+  | "team.member_remove"
+  // 2026-07-15 danger-class bulk content ops (delete + paid) — one summary row
+  // per run, written before the mutation. Plan:
+  // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  | "content.bulk_delete"
+  | "content.bulk_regenerate"
+  // 2026-07-15: bulk rewrite of too-long story titles (Regenerate titles).
+  | "content.bulk_regenerate_titles"
+  | "content.bulk_publish"
+  | "content.bulk_complete_publish"
+  | "content.bulk_refresh_assets"
+  | "content.bulk_full_pipeline"
+  // 2026-07-19 self-heal: "Re-run anyway" un-skips a refused source and
+  // restarts its pipeline. Plan: _plans/2026-07-19-restart-pipeline-self-heal.md.
+  | "content.bulk_restart_pipeline_force"
+  // 2026-07-15 Phase 1 follow-up: select-all-matching applies a cheap status /
+  // category change to every row matching a filter (resolved server-side).
+  | "content.bulk_by_filter";
 
 // The kind of thing an action targets. Generic on purpose so any future entity
-// becomes auditable without a schema change.
-export type AuditTargetType = "user" | "invite";
+// becomes auditable without a schema change. "content" covers a bulk story /
+// article run (target_id is a per-run batch id; the affected ids live in the
+// PII-free metadata).
+export type AuditTargetType = "user" | "invite" | "content";
 
 export interface AuditInput {
   /** users.id of the staff member who performed the action. */

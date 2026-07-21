@@ -1,9 +1,10 @@
 "use client";
 
-// Autopilot mode picker: three explicit choices instead of a toggle,
-// because "shadow" is the whole point of the trust ramp. Calls the
-// dedicated action (not the generic setting save) so a deliberate mode
-// change also resets the circuit breaker. Optimistic with rollback.
+// Autopilot mode picker: four explicit choices instead of a toggle,
+// because the trust ramp (off -> shadow -> live -> autonomous) is the
+// whole point. Calls the dedicated action (not the generic setting save)
+// so a deliberate mode change also resets the circuit breaker. Optimistic
+// with rollback.
 
 import { useState, useTransition } from "react";
 import { setAutopilotModeAction } from "@/app/admin/scheduler-actions";
@@ -23,7 +24,12 @@ const MODES: { id: AutopilotMode; label: string; hint: string }[] = [
   {
     id: "live",
     label: "Live",
-    hint: "Publishes end-to-end with no click from you. A safety check screens every story; doubtful ones still wait for you.",
+    hint: "Publishes end-to-end with no click from you, but only while your review queue is empty. A safety check screens every story; doubtful ones still wait for you.",
+  },
+  {
+    id: "autonomous",
+    label: "Autonomous",
+    hint: "Fully hands-off. Runs continuously and publishes up to your daily limit even while stories wait in your review queue. The safety check still screens every story; doubtful ones still wait for you. Everything else is unattended.",
   },
 ];
 

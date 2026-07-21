@@ -24,6 +24,7 @@ import {
   getStaleHours,
   resolveRenderGate,
 } from "@/lib/render-scheduler";
+import { getRenderAutoPublishStatus } from "@/lib/render-auto-publish";
 import { getBudgetSummary, formatCents } from "@/lib/story-jobs-budget";
 import {
   AUTOPILOT_DEFAULTS,
@@ -32,15 +33,24 @@ import {
   listRecentAutoPublishes,
 } from "@/lib/autopilot";
 import {
+  DAILY_DROP_SETTING_KEYS,
   PUBLISH_DEFAULTS,
   PUBLISH_ENABLED_KEY,
+  dropMsForDay,
+  getDailyDropConfig,
   getPublishCalendar,
   getSchedulerOverview,
+  listHeldForReview,
   listSchedulableStories,
   listUpcomingPublishes,
+  nextDropMs,
   platformSettingKey,
+  type DailyDropConfig,
   type PlatformOverview,
 } from "@/lib/publish-scheduler";
+import { isUnattendedPublishingStopped } from "@/lib/approve-reviewed-story";
+import { countRescreenBacklog } from "@/lib/rescreen-held-backlog";
+import { getSafetyJudgeMode, SAFETY_JUDGE_SETTING_KEYS } from "@/lib/story-safety-judge";
 import {
   SettingSelect,
   SettingSlider,
@@ -48,13 +58,24 @@ import {
   SettingToggle,
 } from "@/app/admin/(panel)/settings/_components/SettingControls";
 import { AutopilotModeSelect } from "./_components/AutopilotModeSelect";
+import { RenderAutoPublishToggle } from "./_components/RenderAutoPublishToggle";
+import { RunNowButton } from "./_components/RunNowButton";
 import { RecentAutoPublishes } from "./_components/RecentAutoPublishes";
+import { UnattendedPublishStop } from "./_components/UnattendedPublishStop";
+import { HeldStories } from "./_components/HeldStories";
+import { RescreenBacklog } from "./_components/RescreenBacklog";
 import { PlatformEnableToggle } from "./_components/PlatformEnableToggle";
 import { SlotsEditor } from "./_components/SlotsEditor";
 import { ReviewActions } from "./_components/ReviewActions";
 import { CalendarPreview } from "./_components/CalendarPreview";
 import { SchedulePostForm } from "./_components/SchedulePostForm";
 import { UpcomingPosts } from "./_components/UpcomingPosts";
+
+// The "Re-screen backlog" server action screens a batch of held stories through
+// the LLM judge (one call each), so its worst case runs far past the platform
+// default. Match the unattended lanes' ceiling; a page-level maxDuration governs
+// every Server Action on this page (Next route segment config).
+export const maxDuration = 300;
 
 interface ReviewRow {
   id: string;
@@ -99,6 +120,22 @@ function formatSlot(iso: string | null, tz: string): string {
   }
 }
 
+// The "Next drop" line: today's drop if it is still ahead, else tomorrow's,
+// formatted in the drop's zone. Kept out of the component body so the impurity
+// of Date.now()/new Date() stays out of render — same pattern as ageLabel /
+// formatSlot above.
+function nextDropDisplay(config: DailyDropConfig): { label: string; isToday: boolean } {
+  const nowMs = Date.now();
+  const next = nextDropMs(config, nowMs);
+  const label = new Intl.DateTimeFormat("en-US", {
+    timeZone: config.timezone,
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(next));
+  return { label, isToday: next === dropMsForDay(config, nowMs) };
+}
+
 export default async function SchedulerPage() {
   await requireCapability("settings.manage");
 
@@ -111,6 +148,7 @@ export default async function SchedulerPage() {
     staleHours,
     ttlDays,
     eligibility,
+    renderAutoPublish,
     overview,
     reviewRows,
     upcoming,
@@ -118,6 +156,11 @@ export default async function SchedulerPage() {
     calendars,
     autopilot,
     recentAutoPublishes,
+    unattendedStopped,
+    heldStories,
+    heldBacklog,
+    safetyJudgeMode,
+    dropConfig,
   ] = await Promise.all([
     resolveRenderGate(),
     getBudgetSummary(),
@@ -127,6 +170,7 @@ export default async function SchedulerPage() {
     getStaleHours(),
     getFreshnessTtlDays(),
     getEligibilityMinStrength(),
+    getRenderAutoPublishStatus(),
     getSchedulerOverview(),
     all<ReviewRow>(
       `SELECT id, title, category, updated_at,
@@ -141,9 +185,15 @@ export default async function SchedulerPage() {
     getPublishCalendar(7),
     getAutopilotStatus(),
     listRecentAutoPublishes(10),
+    isUnattendedPublishingStopped(),
+    listHeldForReview(50),
+    countRescreenBacklog(),
+    getSafetyJudgeMode(),
+    getDailyDropConfig(),
   ]);
 
   const rendering = gate.reason === "ok";
+  const nextDrop = nextDropDisplay(dropConfig);
   const storyOptions = schedulable.map((s) => ({
     id: s.id,
     title: s.title || s.id,
@@ -201,6 +251,41 @@ export default async function SchedulerPage() {
         </div>
       </section>
 
+      {/* ── Emergency stop ───────────────────────────────────────────── */}
+      <UnattendedPublishStop initialStopped={unattendedStopped} />
+
+      {/* ── Daily site drop ──────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">Daily site drop</h2>
+        <p className="text-[13px] text-muted">
+          The time each day the day&rsquo;s ready stories go live on the site.
+          Stories render overnight and wait until this time, then publish
+          together — so the site refreshes in the morning instead of trickling
+          out all night. Social posts still spread across each platform&rsquo;s
+          own posting times below.
+        </p>
+        <p className="rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[12px] text-ink">
+          Next drop: {nextDrop.isToday ? "today" : "tomorrow"} · {nextDrop.label}{" "}
+          <span className="text-muted">({dropConfig.timezone})</span>
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SettingText
+            settingKey={DAILY_DROP_SETTING_KEYS.time}
+            label="Drop time"
+            hint="24-hour HH:MM, e.g. 09:00. When the day's stories go live on the site."
+            initial={dropConfig.time}
+            placeholder="09:00"
+          />
+          <SettingText
+            settingKey={DAILY_DROP_SETTING_KEYS.timezone}
+            label="Drop timezone"
+            hint="IANA name, e.g. Asia/Jerusalem, Europe/London, America/New_York."
+            initial={dropConfig.timezone}
+            placeholder="Asia/Jerusalem"
+          />
+        </div>
+      </section>
+
       {/* ── Rendering ────────────────────────────────────────────────── */}
       <section className="space-y-3">
         <h2 className="font-display text-lg text-ink">Rendering</h2>
@@ -231,6 +316,32 @@ export default async function SchedulerPage() {
             { id: "none", label: "All sources" },
           ]}
         />
+        <div className="rounded-xl border border-line bg-surface p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold text-ink">
+                Auto-publish when ready
+              </div>
+              <p className="mt-1 text-[12px] text-muted">
+                Publish scheduler-rendered stories automatically once their
+                assets are complete and they pass the AI safety check, with no
+                approval click. The safety check is the only gate before a story
+                goes live on the site and enabled social platforms. Only touches
+                stories the scheduler rendered, never ones you are reviewing by
+                hand. Off by default.
+              </p>
+            </div>
+            <RenderAutoPublishToggle initialOn={renderAutoPublish.enabled} />
+          </div>
+        </div>
+        {renderAutoPublish.trippedAt && (
+          <p className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-[12px] text-accent">
+            Auto-publish switched itself off on{" "}
+            {new Date(renderAutoPublish.trippedAt).toLocaleString("en-US")} after
+            repeated publish failures. Check the newest stories, then turn it
+            back on to start fresh.
+          </p>
+        )}
         <details className="rounded-xl border border-line bg-surface">
           <summary className="cursor-pointer px-4 py-3 text-[13px] font-semibold text-ink">
             Advanced backpressure
@@ -274,9 +385,10 @@ export default async function SchedulerPage() {
       <section className="space-y-3">
         <h2 className="font-display text-lg text-ink">Autopilot</h2>
         <p className="text-[13px] text-muted">
-          When nothing is waiting for you below, autopilot pulls the strongest
-          Reddit sources — strong tier only — renders them, and (in Live)
-          publishes them without a click. Your track record on strong sources:
+          Autopilot pulls Reddit sources at or above the strength you set below,
+          renders them, and (in Live and Autonomous) publishes them without a
+          click. Live waits until your review queue is empty; Autonomous runs
+          continuously and does not wait. Your track record on strong sources:
           approved {autopilot.strongApproved}, rejected {autopilot.strongRejected}.
         </p>
         {autopilot.trippedAt && (
@@ -290,13 +402,32 @@ export default async function SchedulerPage() {
         <div className="rounded-xl border border-line bg-surface p-4">
           <AutopilotModeSelect initialMode={autopilot.mode} />
           {autopilot.mode !== "off" && (
-            <p className="mt-3 font-mono text-[12px] text-muted">
-              {autopilot.usedToday}/{autopilot.dailyLimit} pulled today ·{" "}
-              {autopilot.autoApproved} auto-published all-time ·{" "}
-              {autopilot.autoHeld} held for you
-            </p>
+            <>
+              <p className="mt-3 font-mono text-[12px] text-muted">
+                {autopilot.usedToday}/{autopilot.dailyLimit} pulled today ·{" "}
+                {autopilot.autoApproved} auto-published all-time ·{" "}
+                {autopilot.autoHeld} held for you
+              </p>
+              <div className="mt-3 border-t border-line pt-3">
+                <RunNowButton />
+                <p className="mt-1.5 text-[11px] text-muted">
+                  Fires one tick immediately instead of waiting for the
+                  2-minute cron. Pulling renders takes a few minutes; the
+                  publish happens on a later tick once a story is ready.
+                </p>
+              </div>
+            </>
           )}
         </div>
+        {autopilot.mode === "autonomous" && (
+          <p className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-[12px] text-accent">
+            Autonomous is fully unattended: it publishes to the site and every
+            enabled social platform without waiting for your review, up to your
+            daily limit. Only the automated safety check stands between a
+            rendered story and going live. Keep the alert email set and check
+            &ldquo;Published by autopilot&rdquo; below regularly.
+          </p>
+        )}
         {autopilot.mode !== "off" && (
           <>
             <SettingSlider
@@ -308,6 +439,17 @@ export default async function SchedulerPage() {
               max={20}
               step={1}
               unit="/day"
+            />
+            <SettingSelect
+              settingKey={AUTOPILOT_SETTING_KEYS.minStrength}
+              label="Which sources autopilot may use"
+              hint="Wider tiers give more volume but lower average source quality. The safety check screens every story regardless of tier. 'All' includes weak and uncategorized sources."
+              initial={autopilot.minStrength}
+              options={[
+                { id: "strong", label: "Strong only" },
+                { id: "medium", label: "Strong + Medium" },
+                { id: "none", label: "All sources" },
+              ]}
             />
             <SettingText
               settingKey={AUTOPILOT_SETTING_KEYS.alertEmail}
@@ -333,6 +475,63 @@ export default async function SchedulerPage() {
             />
           </div>
         )}
+      </section>
+
+      {/* ── Safety check ─────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">Safety check</h2>
+        <p className="text-[13px] text-muted">
+          The automatic check that screens each story before it publishes
+          without a human. Move through the steps in order: watch the new check
+          in <strong>Shadow</strong> for a few days, compare it against your own
+          calls in the held list, then switch it to <strong>Active</strong>.
+          Leave it on <strong>Current</strong> until you have watched it.
+        </p>
+        <SettingSelect
+          settingKey={SAFETY_JUDGE_SETTING_KEYS.mode}
+          label="Which safety check decides"
+          hint="Current: the original check (holds most stories today). Shadow: keep using the original, but log what the new check would decide so you can compare. Active: let the new, less strict check decide."
+          initial={safetyJudgeMode}
+          options={[
+            { id: "legacy", label: "Current (original check)" },
+            { id: "shadow", label: "Shadow (log the new check, do not act on it)" },
+            { id: "active", label: "Active (new check decides)" },
+          ]}
+        />
+        {safetyJudgeMode === "active" && (
+          <p className="rounded-lg border border-accent bg-accent/10 px-3 py-2 text-[12px] text-accent">
+            The new, less strict check is live. It publishes ordinary drama and
+            holds only named risks. Watch the held list and &ldquo;Published by
+            autopilot&rdquo; closely, and use the emergency stop above if
+            anything goes out that should not.
+          </p>
+        )}
+      </section>
+
+      {/* ── Held & why ───────────────────────────────────────────────── */}
+      <section className="space-y-3">
+        <h2 className="font-display text-lg text-ink">
+          Held by the safety check{" "}
+          <span className="font-mono text-[13px] text-muted">
+            ({heldStories.length})
+          </span>
+        </h2>
+        <p className="text-[13px] text-muted">
+          Stories an automatic lane held for you, with the reason it held them.
+          If a hold looks wrong, publish it here in one click. A steady stream
+          of clean-looking holds means the safety check is too strict.
+        </p>
+        <RescreenBacklog backlog={heldBacklog} />
+        <HeldStories
+          items={heldStories.map((h) => ({
+            storyId: h.storyId,
+            title: h.title || h.storyId,
+            category: h.category,
+            reason: h.reason,
+            confidence: h.confidence,
+            ageLabel: ageLabel(h.heldAt),
+          }))}
+        />
       </section>
 
       {/* ── Review queue (the human gate) ────────────────────────────── */}

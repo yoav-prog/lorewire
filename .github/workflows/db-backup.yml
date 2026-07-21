@@ -1,0 +1,90 @@
+name: Nightly DB backup
+
+on:
+  schedule:
+    # 03:30 UTC, after the day's content activity has settled.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: db-backup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  R2_BUCKET: lorewire-backups
+  # aws cli >= 2.23 sends CRC32 request checksums by default, which R2
+  # rejects on some operations; scope checksums back to required-only.
+  AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+  AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check required secrets
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BACKUP_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_ACCESS_KEY_ID }}
+          R2_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}
+        run: |
+          missing=0
+          for name in BACKUP_DATABASE_URL R2_ACCOUNT_ID R2_BACKUP_ACCESS_KEY_ID R2_BACKUP_SECRET_ACCESS_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::[backup preflight] missing repository secret: $name"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-client-17
+          pg_dump --version
+
+      - name: Dump database
+        env:
+          BACKUP_DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: |
+          STAMP="$(date -u +%F)"
+          FILE="lorewire-${STAMP}.dump"
+          echo "STAMP=${STAMP}" >> "$GITHUB_ENV"
+          echo "FILE=${FILE}" >> "$GITHUB_ENV"
+          pg_dump --format=custom --no-owner --no-privileges \
+            --file="$FILE" "$BACKUP_DATABASE_URL"
+          echo "[backup dump] wrote $FILE ($(stat -c%s "$FILE") bytes)"
+
+      - name: Verify dump integrity
+        run: |
+          SIZE="$(stat -c%s "$FILE")"
+          ENTRIES="$(pg_restore --list "$FILE" | wc -l)"
+          echo "[backup verify] size=${SIZE} bytes, archive entries=${ENTRIES}"
+          if [ "$SIZE" -lt 262144 ]; then
+            echo "::error::[backup verify] dump is ${SIZE} bytes (< 256 KB) - refusing to upload a suspiciously small backup"
+            exit 1
+          fi
+          if [ "$ENTRIES" -lt 50 ]; then
+            echo "::error::[backup verify] archive lists only ${ENTRIES} entries - expected a 53-table schema to list far more"
+            exit 1
+          fi
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+        run: |
+          aws s3 cp "$FILE" "s3://${R2_BUCKET}/daily/${FILE}" --endpoint-url "$R2_ENDPOINT"
+          echo "[backup upload] daily/${FILE} uploaded"
+          if [ "$(date -u +%d)" = "01" ]; then
+            aws s3 cp "$FILE" "s3://${R2_BUCKET}/monthly/${FILE}" --endpoint-url "$R2_ENDPOINT"
+            echo "[backup upload] monthly/${FILE} uploaded (first of month)"
+          fi

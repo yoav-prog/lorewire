@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setSetting } from "@/lib/repo";
 import { run } from "@/lib/db";
 import {
+  fallbackBrandAsset,
   getSiteSeo,
   resolveSiteOrigin,
   safeTitleTemplate,
@@ -32,7 +33,11 @@ describe("getSiteSeo defaults", () => {
     );
     expect(seo.themeColor).toBe("#0A0A0C");
     expect(seo.twitterCardType).toBe("summary_large_image");
-    expect(seo.organizationSameAs).toEqual([]);
+    // Ships the canonical YouTube channel as the sameAs floor so the
+    // Organization JSON-LD links the brand to at least one profile.
+    expect(seo.organizationSameAs).toEqual([
+      "https://www.youtube.com/@LoreWireHQ",
+    ]);
     expect(seo.sitemapMaxAgeDays).toBe(0);
   });
 });
@@ -116,6 +121,31 @@ describe("safeTitleTemplate", () => {
     // Defensive: malformed admin input shouldn't swallow page titles.
     expect(safeTitleTemplate("no placeholder", "Brand")).toBe("%s · Brand");
     expect(safeTitleTemplate("", "Brand")).toBe("%s · Brand");
+  });
+});
+
+describe("fallbackBrandAsset", () => {
+  it("prefers the explicit admin URL", () => {
+    expect(
+      fallbackBrandAsset(
+        "https://cdn.example/custom.png",
+        "https://www.lorewire.com",
+        "/og.png",
+      ),
+    ).toBe("https://cdn.example/custom.png");
+  });
+
+  it("falls back to the built-in /public asset on the site origin", () => {
+    expect(fallbackBrandAsset("", "https://www.lorewire.com", "/og.png")).toBe(
+      "https://www.lorewire.com/og.png",
+    );
+    expect(
+      fallbackBrandAsset("", "https://www.lorewire.com", "/logo.png"),
+    ).toBe("https://www.lorewire.com/logo.png");
+  });
+
+  it("returns undefined with no origin (OG/JSON-LD need absolute URLs)", () => {
+    expect(fallbackBrandAsset("", "", "/og.png")).toBeUndefined();
   });
 });
 

@@ -126,8 +126,9 @@ describe("buildGroups", () => {
     // capability-gated), Comments (2026-06-22, gated under content.manage), the
     // Live runs aggregator (2026-06-28, nested under Reddit Sources), the
     // one-time Migrate + Compress media tools (2026-06-22), the category
-    // Reclassify tool (2026-07-01, after Homepage), and the failure
-    // Notifications inbox (2026-07-02, right after Overview). Each insertion
+    // Reclassify tool (2026-07-01, after Homepage), the failure
+    // Notifications inbox (2026-07-02, right after Overview), and the site
+    // Analytics dashboard (2026-07-05, right after Content). Each insertion
     // sits between Content and the trailing Settings / Migrate / Compress block.
     // With no caps passed, every item shows. This test pins membership + order.
     for (const dev of [false, true]) {
@@ -137,6 +138,7 @@ describe("buildGroups", () => {
         "Overview",
         "Notifications",
         "Content",
+        "Analytics",
         "Reddit Sources",
         "Live runs",
         "Scheduler",

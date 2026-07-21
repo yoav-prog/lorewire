@@ -116,6 +116,22 @@ describe("bulkEnqueueStoryJobs", () => {
     expect(result.enqueued_ids).toEqual(["imported-row"]);
   });
 
+  it("with allowUsed, re-enqueues a 'used' source but still blocks 'skipped'", async () => {
+    await seedSource("used-row", "used");
+    await seedSource("skipped-row", "skipped");
+    await seedSource("imported-row", "imported");
+
+    const result = await bulkEnqueueStoryJobs(
+      ["used-row", "skipped-row", "imported-row"],
+      { allowUsed: true },
+    );
+
+    // 'used' now runs; 'skipped' (the operator's "no") stays refused.
+    expect(result.enqueued).toBe(2);
+    expect(result.skipped_status).toBe(1);
+    expect(result.enqueued_ids.sort()).toEqual(["imported-row", "used-row"]);
+  });
+
   it("counts not-found ids separately from skipped", async () => {
     await seedSource("a", "imported");
     const result = await bulkEnqueueStoryJobs(["a", "ghost"]);

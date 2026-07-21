@@ -1,6 +1,8 @@
 // Tests for Autopilot: the pull gates (mode, queue-empty, daily limit,
-// headroom, STRONG-only selection), the approve tick (safety hold, the
-// human-approve path reuse, idempotent skip), and the circuit breaker.
+// headroom, min-strength selection, autonomous mode), the approve tick
+// (safety hold, the human-approve path reuse, idempotent skip, the
+// gate-refusal defer/hold ladder), the degenerate-story guard, and the
+// circuit breaker.
 // publishStoryIfReady, the LLM judge, and the alert email are mocked;
 // everything else runs against the real store like the other scheduler
 // tests.
@@ -28,15 +30,24 @@ import {
   AUTOPILOT_SETTING_KEYS,
   countAutopilotPullsToday,
   countHumanReviewDepth,
+  detectDegenerateStory,
   getAutopilotDailyLimit,
+  getAutopilotMinStrength,
   getAutopilotMode,
+  maybeAlertHighHoldRate,
   runAutopilotApprove,
   runAutopilotPull,
   screenStoryForAutopilot,
 } from "./autopilot";
+import { UNATTENDED_PUBLISH_SETTING_KEYS } from "@/lib/approve-reviewed-story";
 
 const NOW = Date.UTC(2026, 6, 2, 12, 0);
 const NOW_ISO = new Date(NOW).toISOString();
+
+// Story-length body so fixtures clear the degenerate-generation guard
+// (real LoreWire bodies are article-length; the guard holds anything
+// under 250 stripped chars).
+const STORY_BODY = `<p>${"A roommate borrowed the car without asking and returned it with a dent. ".repeat(8).trim()}</p>`;
 
 async function clear() {
   await run("DELETE FROM stories", []);
@@ -77,7 +88,7 @@ async function insertReviewStory(
   await run(
     "INSERT INTO stories (id, reddit_id, title, body, status, created_at, updated_at) " +
       "VALUES (?, ?, ?, ?, 'review', ?, ?)",
-    [id, opts.redditId ?? null, opts.title ?? "T", opts.body ?? "<p>Body</p>", NOW_ISO, NOW_ISO],
+    [id, opts.redditId ?? null, opts.title ?? "T", opts.body ?? STORY_BODY, NOW_ISO, NOW_ISO],
   );
 }
 
@@ -115,10 +126,12 @@ function publishSucceeds() {
 describe("setting readers", () => {
   beforeEach(clear);
 
-  it("mode defaults off; unknown values read as off", async () => {
+  it("mode defaults off; parses autonomous; unknown values read as off", async () => {
     expect(await getAutopilotMode()).toBe("off");
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
     expect(await getAutopilotMode()).toBe("shadow");
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    expect(await getAutopilotMode()).toBe("autonomous");
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "banana");
     expect(await getAutopilotMode()).toBe("off");
   });
@@ -129,6 +142,16 @@ describe("setting readers", () => {
     expect(await getAutopilotDailyLimit()).toBe(AUTOPILOT_DEFAULTS.dailyLimit);
     await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
     expect(await getAutopilotDailyLimit()).toBe(5);
+  });
+
+  it("min_strength defaults to none (all); parses medium/strong; rejects nonsense", async () => {
+    expect(await getAutopilotMinStrength()).toBe("none");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "medium");
+    expect(await getAutopilotMinStrength()).toBe("medium");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "strong");
+    expect(await getAutopilotMinStrength()).toBe("strong");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "banana");
+    expect(await getAutopilotMinStrength()).toBe("none");
   });
 });
 
@@ -196,9 +219,10 @@ describe("runAutopilotPull", () => {
     expect(r.reason).toBe("no_headroom");
   });
 
-  it("pulls STRONG sources only, tagged as autopilot", async () => {
+  it("honours a strong floor, pulling only strong sources, tagged as autopilot", async () => {
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
     await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "strong");
     await insertSource("strong-1", { strength: "strong" });
     await insertSource("medium-1", { strength: "medium", comments: 9999 });
     const r = await runAutopilotPull(NOW);
@@ -213,11 +237,99 @@ describe("runAutopilotPull", () => {
     expect(jobs[0].requested_by).toBe(AUTOPILOT_REQUESTED_BY);
   });
 
-  it("reports no_candidates when no strong sources exist", async () => {
+  it("reports no_candidates when nothing meets an explicit strong floor", async () => {
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "strong");
     await insertSource("medium-1", { strength: "medium" });
     const r = await runAutopilotPull(NOW);
     expect(r.reason).toBe("no_candidates");
+  });
+
+  it("default tier (none) pulls an unrated source that a strong floor would skip", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // No min_strength set -> default "none". An unrated source (the bulk of
+    // a real pool) is now eligible; under the old "strong" default it was not.
+    await insertSource("unrated-1", { strength: "none" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
+  });
+
+  it("min_strength widens the pool: medium is eligible when set to medium", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "medium");
+    await insertSource("medium-1", { strength: "medium" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
+    const jobs = await all<{ reddit_id: string }>(
+      "SELECT reddit_id FROM story_jobs",
+      [],
+    );
+    expect(jobs[0].reddit_id).toBe("medium-1");
+  });
+
+  it("autonomous pulls past a non-empty human review queue", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // A manual (non-autopilot) story sits in review — this blocks shadow/live
+    // with reason 'queue_not_empty' but must NOT block autonomous.
+    await insertReviewStory("human-1");
+    await insertSource("s1", { strength: "strong" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
+  });
+
+  it("autonomous headroom ignores a manual backlog over the cap", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting("render.review_queue_cap", "1");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // Two manual review items — total review (2) exceeds the cap (1), which
+    // would trip 'no_headroom' in live. Autonomous scopes headroom to its
+    // OWN footprint (zero here), so it still pulls.
+    await insertReviewStory("human-1");
+    await insertReviewStory("human-2");
+    await insertSource("s1", { strength: "strong" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(1);
+  });
+
+  it("autonomous still respects its OWN review cap (held/in-review footprint)", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting("render.review_queue_cap", "1");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "5");
+    // An autopilot-owned story already in review fills autopilot's own cap.
+    await insertReviewStory("auto-1");
+    await insertJob("j1", { storyId: "auto-1" });
+    await insertSource("s1", { strength: "strong" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("no_headroom");
+  });
+
+  // The owner's exact ask (2026-07-08): fully hands-off, 10/day, all
+  // sources, publishing past whatever sits in the manual review queue.
+  it("owner scenario: autonomous + all tiers + 10/day pulls the whole pool past a manual backlog", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting(AUTOPILOT_SETTING_KEYS.dailyLimit, "10");
+    await setSetting(AUTOPILOT_SETTING_KEYS.minStrength, "none"); // all tiers
+    await insertReviewStory("human-backlog"); // would block live/shadow
+    await insertSource("strong-1", { strength: "strong" });
+    await insertSource("strong-2", { strength: "strong" });
+    await insertSource("medium-1", { strength: "medium" });
+    await insertSource("weak-1", { strength: "none" });
+    const r = await runAutopilotPull(NOW);
+    expect(r.reason).toBe("ok");
+    expect(r.enqueued).toBe(4); // every eligible source, all tiers
+    const jobs = await all<{ requested_by: string }>(
+      "SELECT requested_by FROM story_jobs",
+      [],
+    );
+    expect(jobs).toHaveLength(4);
+    expect(jobs.every((j) => j.requested_by === AUTOPILOT_REQUESTED_BY)).toBe(true);
   });
 });
 
@@ -226,20 +338,70 @@ describe("screenStoryForAutopilot", () => {
 
   it("passes a confident publish verdict", async () => {
     judgeSays("publish", 0.9);
-    const r = await screenStoryForAutopilot({ id: "s", title: "T", body: "<p>B</p>" });
+    const r = await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY });
     expect(r.safe).toBe(true);
   });
 
   it("holds on a hold verdict, low confidence, or judge outage", async () => {
     judgeSays("hold", 0.9);
-    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: "B" })).safe).toBe(false);
+    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY })).safe).toBe(false);
     judgeSays("publish", 0.4);
-    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: "B" })).safe).toBe(false);
+    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY })).safe).toBe(false);
     vi.mocked(chatCompletion).mockResolvedValue({
       ok: false,
       error: "down",
     } as Awaited<ReturnType<typeof chatCompletion>>);
-    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: "B" })).safe).toBe(false);
+    expect((await screenStoryForAutopilot({ id: "s", title: "T", body: STORY_BODY })).safe).toBe(false);
+  });
+});
+
+describe("degenerate-story guard", () => {
+  beforeEach(clear);
+
+  it("detectDegenerateStory flags a too-short body and a NO STORY title", () => {
+    // The 2026-07-09 production artifacts, verbatim shapes.
+    expect(
+      detectDegenerateStory({
+        title: "NO STORY FOUND",
+        body: "No story text was provided in the source, so there are no events, characters, outcomes, or quotes to retell.",
+      }),
+    ).toMatch(/too short/);
+    expect(
+      detectDegenerateStory({
+        title: "NO STORY, ONLY INSTRUCTIONS",
+        body: STORY_BODY, // long meta-body — the title is the tell
+      }),
+    ).toMatch(/no story/);
+    expect(detectDegenerateStory({ title: null, body: null })).toMatch(/too short/);
+    expect(detectDegenerateStory({ title: "T", body: STORY_BODY })).toBeNull();
+  });
+
+  it("screens a degenerate story as unsafe without spending a judge call", async () => {
+    const r = await screenStoryForAutopilot({
+      id: "s",
+      title: "NO STORY FOUND",
+      body: "No story text was provided.",
+    });
+    expect(r.safe).toBe(false);
+    expect(r.category).toBe("not_a_story");
+    expect(vi.mocked(chatCompletion)).not.toHaveBeenCalled();
+  });
+
+  it("approve tick holds a degenerate story: no publish, no judge, out of future ticks", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await insertSource("r-1", { strength: "strong" });
+    await insertReviewStory("story-1", {
+      redditId: "r-1",
+      title: "NO STORY FOUND",
+      body: "No story text was provided.",
+    });
+    await insertJob("job-1", { redditId: "r-1", storyId: "story-1" });
+    const first = await runAutopilotApprove(NOW);
+    expect(first.held).toBe(1);
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+    expect(vi.mocked(chatCompletion)).not.toHaveBeenCalled();
+    const second = await runAutopilotApprove(NOW);
+    expect(second.reason).toBe("no_candidates");
   });
 });
 
@@ -252,12 +414,22 @@ describe("runAutopilotApprove", () => {
     await insertJob(`job-${n}`, { redditId: `r-${n}`, storyId: `story-${n}` });
   }
 
-  it("does nothing outside live mode", async () => {
+  it("does nothing in shadow/off mode", async () => {
     await setSetting(AUTOPILOT_SETTING_KEYS.mode, "shadow");
     await seedCandidate(1);
     const r = await runAutopilotApprove(NOW);
     expect(r.reason).toBe("not_live");
     expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+  });
+
+  it("publishes in autonomous mode too", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+    const r = await runAutopilotApprove(NOW);
+    expect(r.approved).toBe(1);
+    expect(vi.mocked(publishStoryIfReady)).toHaveBeenCalledWith("r-1");
   });
 
   it("publishes a safe story through the human-approve path and logs it", async () => {
@@ -308,16 +480,70 @@ describe("runAutopilotApprove", () => {
     expect(r.failed).toBe(0);
   });
 
-  it("trips the breaker after consecutive failures: mode off + alert email", async () => {
-    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
+  it("defers a gate refusal without touching the breaker; the next tick retries it", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
     await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
-    for (let n = 1; n <= 3; n++) await seedCandidate(n);
+    await seedCandidate(1);
     judgeSays("publish");
     vi.mocked(publishStoryIfReady).mockResolvedValue({
       ok: false,
       reason: "not_ready",
-      missing: ["short"],
+      missing: ["thumbnail_image"],
     });
+    const r = await runAutopilotApprove(NOW);
+    expect(r.deferred).toBe(1);
+    expect(r.failed).toBe(0);
+    expect(r.tripped).toBe(false);
+    expect(await getAutopilotMode()).toBe("autonomous");
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+    const failures = await all<{ value: string }>(
+      "SELECT value FROM settings WHERE key = ?",
+      [AUTOPILOT_SETTING_KEYS.consecutiveFailures],
+    );
+    expect(failures).toEqual([]); // never written — refusals bypass the breaker
+    // Still a candidate: the next tick tries the gate again.
+    const again = await runAutopilotApprove(NOW);
+    expect(again.deferred).toBe(1);
+  });
+
+  it("holds a story for a human after the gate-refusal threshold, without tripping", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    vi.mocked(publishStoryIfReady).mockResolvedValue({
+      ok: false,
+      reason: "not_ready",
+      missing: ["thumbnail_image"],
+    });
+    for (let tick = 1; tick < AUTOPILOT_DEFAULTS.gateRefusalHoldAfter; tick++) {
+      const r = await runAutopilotApprove(NOW);
+      expect(r.deferred).toBe(1);
+      expect(r.held).toBe(0);
+    }
+    const final = await runAutopilotApprove(NOW);
+    expect(final.held).toBe(1);
+    expect(final.deferred).toBe(0);
+    expect(final.tripped).toBe(false);
+    expect(await getAutopilotMode()).toBe("autonomous");
+    const decisions = await all<{ decision: string }>(
+      "SELECT decision FROM scheduler_decisions WHERE story_id = 'story-1' ORDER BY decided_at",
+      [],
+    );
+    expect(
+      decisions.filter((d) => d.decision === "auto_gate_refused"),
+    ).toHaveLength(AUTOPILOT_DEFAULTS.gateRefusalHoldAfter);
+    expect(decisions.filter((d) => d.decision === "auto_held")).toHaveLength(1);
+    // The hold removes it from every future tick.
+    const after = await runAutopilotApprove(NOW);
+    expect(after.reason).toBe("no_candidates");
+  });
+
+  it("trips the breaker after consecutive publish EXCEPTIONS: mode off + alert email", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "live");
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    for (let n = 1; n <= 3; n++) await seedCandidate(n);
+    judgeSays("publish");
+    vi.mocked(publishStoryIfReady).mockRejectedValue(new Error("db connection lost"));
     const r = await runAutopilotApprove(NOW);
     expect(r.failed).toBe(AUTOPILOT_DEFAULTS.breakerThreshold);
     expect(r.tripped).toBe(true);
@@ -338,5 +564,145 @@ describe("runAutopilotApprove", () => {
       [AUTOPILOT_SETTING_KEYS.consecutiveFailures],
     );
     expect(raw[0].value).toBe("0");
+  });
+});
+
+describe("runAutopilotApprove honors the global emergency stop", () => {
+  beforeEach(clear);
+
+  async function seedCandidate(n: number) {
+    await insertSource(`r-${n}`, { strength: "strong" });
+    await insertReviewStory(`story-${n}`, { redditId: `r-${n}` });
+    await insertJob(`job-${n}`, { redditId: `r-${n}`, storyId: `story-${n}` });
+  }
+
+  it("skips the tick and publishes nothing while stopped", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await setSetting(UNATTENDED_PUBLISH_SETTING_KEYS.stop, "1");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const r = await runAutopilotApprove(NOW);
+
+    expect(r.reason).toBe("stopped");
+    expect(r.approved).toBe(0);
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+    const decisions = await all("SELECT id FROM scheduler_decisions", []);
+    expect(decisions).toEqual([]);
+  });
+});
+
+describe("runAutopilotApprove honors the daily site drop", () => {
+  beforeEach(clear);
+
+  async function seedCandidate(n: number) {
+    await insertSource(`r-${n}`, { strength: "strong" });
+    await insertReviewStory(`story-${n}`, { redditId: `r-${n}` });
+    await insertJob(`job-${n}`, { redditId: `r-${n}`, storyId: `story-${n}` });
+  }
+
+  // Default drop is 09:00 Asia/Jerusalem = 06:00 UTC in July (IDT, UTC+3).
+  const BEFORE_DROP = Date.UTC(2026, 6, 2, 5, 0); // 08:00 IDT
+  const AFTER_DROP = Date.UTC(2026, 6, 2, 7, 0); // 10:00 IDT
+
+  it("holds the whole batch before the drop time, publishing nothing", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const r = await runAutopilotApprove(BEFORE_DROP);
+
+    expect(r.reason).toBe("before_drop");
+    expect(r.approved).toBe(0);
+    expect(vi.mocked(publishStoryIfReady)).not.toHaveBeenCalled();
+  });
+
+  it("publishes once the drop time has passed", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.mode, "autonomous");
+    await seedCandidate(1);
+    judgeSays("publish");
+    publishSucceeds();
+
+    const r = await runAutopilotApprove(AFTER_DROP);
+    expect(r.reason).toBe("ok");
+    expect(r.approved).toBe(1);
+  });
+});
+
+describe("maybeAlertHighHoldRate", () => {
+  beforeEach(clear);
+
+  async function insertDecision(n: number, decision: string, decidedAt = NOW_ISO) {
+    await run(
+      "INSERT INTO scheduler_decisions (id, story_id, decision, decided_at) VALUES (?, ?, ?, ?)",
+      [`d-${n}`, `story-${n}`, decision, decidedAt],
+    );
+  }
+
+  it("stays quiet below the minimum sample", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    await insertDecision(1, "auto_held");
+    await insertDecision(2, "auto_held");
+
+    const r = await maybeAlertHighHoldRate(NOW);
+
+    expect(r.rate).toBeNull();
+    expect(r.alerted).toBe(false);
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet when the hold rate is healthy", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    await insertDecision(0, "auto_held");
+    for (let n = 1; n <= 9; n++) await insertDecision(n, "auto_approved");
+
+    const r = await maybeAlertHighHoldRate(NOW);
+
+    expect(r.total).toBe(10);
+    expect(r.rate).toBeCloseTo(0.1);
+    expect(r.alerted).toBe(false);
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+  });
+
+  it("alerts once and emails when the hold rate is high, then throttles", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    for (let n = 0; n < 8; n++) await insertDecision(n, "auto_held");
+    await insertDecision(8, "auto_approved");
+    await insertDecision(9, "auto_approved");
+
+    const first = await maybeAlertHighHoldRate(NOW);
+    expect(first.rate).toBeCloseTo(0.8);
+    expect(first.alerted).toBe(true);
+    expect(vi.mocked(sendBrevoEmail)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendBrevoEmail).mock.calls[0][0].to).toBe("admin@example.com");
+
+    // A second run in the same window must not re-alert (throttle).
+    const second = await maybeAlertHighHoldRate(NOW);
+    expect(second.alerted).toBe(false);
+    expect(vi.mocked(sendBrevoEmail)).toHaveBeenCalledTimes(1);
+  });
+
+  it("still counts as an alert (throttle) even with no email configured", async () => {
+    for (let n = 0; n < 8; n++) await insertDecision(n, "auto_held");
+    await insertDecision(8, "auto_approved");
+    await insertDecision(9, "auto_approved");
+
+    const r = await maybeAlertHighHoldRate(NOW);
+    expect(r.alerted).toBe(true); // logged the alert
+    expect(vi.mocked(sendBrevoEmail)).not.toHaveBeenCalled();
+  });
+
+  it("ignores decisions older than the 24h window", async () => {
+    await setSetting(AUTOPILOT_SETTING_KEYS.alertEmail, "admin@example.com");
+    // All holds, but two days ago — outside the window, so no sample.
+    const old = new Date(NOW - 48 * 3_600_000).toISOString();
+    for (let n = 0; n < 8; n++) await insertDecision(n, "auto_held", old);
+
+    const r = await maybeAlertHighHoldRate(NOW);
+    expect(r.total).toBe(0);
+    expect(r.rate).toBeNull();
+    expect(r.alerted).toBe(false);
   });
 });
