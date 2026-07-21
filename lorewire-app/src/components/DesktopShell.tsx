@@ -8,10 +8,15 @@ import {
 } from "@/lib/stories";
 import { categoryVisual } from "@/lib/categories/visuals";
 import {
+  CATEGORY_ORDER,
   CategoryFilterChips,
-  filterStoriesByCategory,
   useCategoryFilter,
 } from "@/components/CategoryFilterChips";
+import {
+  useBrowseData,
+  useDebouncedValue,
+  useLoadMoreSentinel,
+} from "@/components/browse/useBrowseData";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import WiresDesktop from "@/components/wires/WiresDesktop";
 // Stories rail + viewer intentionally NOT mounted on desktop — final
@@ -49,6 +54,7 @@ import {
   POLL_RAIL_TITLES,
   filterIdsByNotVoted,
   filterIdsByPublished,
+  liveRowToStory,
   pickHeroAtIndex,
   resolveHeroPool,
   resolveRailIds,
@@ -2215,85 +2221,174 @@ function GridPage({
   );
 }
 
-// Browse advertises the public catalog of real stories. The bare
-// STORIES array carries 16 sample placeholders the design was built
-// against; only entries with actual produced content (videoUrl /
-// heroImage / audioUrl / body) belong in the grid. Source is the
-// merged catalog so freshly-published live rows surface even before
-// src/data/published.ts is rebaked. Wraps GridPage so the URL-backed
-// category filter (?cat=Drama,Humor) can drive the visible set without
-// turning GridPage into a Browse-specific component.
+// Browse advertises the full public catalog of real stories. Unlike the
+// homepage rails (which read the shared 200-row in-memory catalog), Browse pages
+// the WHOLE published catalog through listBrowseStories so it never caps — the
+// old GridPage-over-catalog.array version silently stopped at ~201 titles once
+// production passed 200 stories. The URL-backed category filter (?cat=…) drives a
+// server-side WHERE so pagination counts the filtered set, and an
+// IntersectionObserver sentinel appends pages as the user scrolls. Rows loaded
+// here are lifted to the shell (onStoriesLoaded) so a story beyond the rails'
+// catalog window still opens its detail modal. Plan:
+// _plans/2026-07-14-browse-pagination.md.
+const BROWSE_PAGE_SIZE = 60;
 function BrowsePage({
-  catalog,
   onOpen,
-  resolveStory,
+  onStoriesLoaded,
 }: {
-  catalog: MergedCatalog;
   onOpen: OpenFn;
-  resolveStory: (id: string) => Story | null;
+  onStoriesLoaded: (stories: Story[]) => void;
 }) {
   const { selected, toggle, clear } = useCategoryFilter();
-  const published = catalog.array.filter(isPublishedStory);
-  const visible = filterStoriesByCategory(published, selected);
-  // eslint-disable-next-line no-console -- rule 14
+  // Stable, sorted category list (CATEGORY_ORDER order) so the pager's refetch
+  // dep is deterministic regardless of chip-click order.
+  const categories = useMemo(
+    () => CATEGORY_ORDER.filter((c) => selected.has(c)),
+    [selected],
+  );
+  const { stories: liveRows, total, loading, loadingMore, reachedEnd, loadMore } =
+    useBrowseData(BROWSE_PAGE_SIZE, categories);
+  const stories = useMemo(() => liveRows.map(liveRowToStory), [liveRows]);
+  // Lift the resolved stories up so the shell can open one that isn't in the
+  // rails' 200-row catalog (resolveStory would otherwise miss it).
+  useEffect(() => {
+    onStoriesLoaded(stories);
+  }, [stories, onStoriesLoaded]);
+
+  const sentinelRef = useLoadMoreSentinel(loadMore);
+
+  const loadedCount = stories.length;
+  const totalLabel = total ?? loadedCount;
   console.info("[browse render]", {
-    total_catalog: catalog.array.length,
-    published_count: published.length,
-    selected: Array.from(selected),
-    visible_count: visible.length,
+    loaded: loadedCount,
+    total,
+    categories,
+    reached_end: reachedEnd,
   });
-  const ids = visible.map((s) => s.id);
   const sub =
     selected.size === 0
-      ? `All true stories · ${published.length} titles`
-      : `${visible.length} of ${published.length} titles · ${Array.from(selected).join(", ")}`;
-  return (
-    <GridPage
-      title="Browse"
-      sub={sub}
-      ids={ids}
-      onOpen={onOpen}
-      resolveStory={resolveStory}
-      belowHeader={
-        <CategoryFilterChips
-          selected={selected}
-          onToggle={toggle}
-          onClear={clear}
-          variant="desktop"
-        />
-      }
-      emptyMessage="No stories in this category yet."
-    />
-  );
-}
-
-// Search lists only stories the pipeline has actually produced real
-// content for (hero, short render, narration, or article body). The
-// bare STORIES catalog includes 16 sample placeholders; without this
-// gate the public listings would advertise stories that open into empty
-// shells. The merged catalog (live DB rows + sample STORIES) is the
-// input so freshly-published shorts that haven't been baked back into
-// src/data/published.ts still surface.
-function SearchPage({ onOpen, query, catalog }: { onOpen: OpenFn; query: string; catalog: MergedCatalog }) {
-  const published = catalog.array.filter(isPublishedStory);
-  const q = query.trim().toLowerCase();
-  const res = q
-    ? published.filter((s) => (s.title + s.cat).toLowerCase().includes(q))
-    : published;
+      ? `All true stories · ${totalLabel} titles`
+      : `${loadedCount} of ${totalLabel} titles · ${categories.join(", ")}`;
+  // Slide context = the grid exactly as loaded so the modal's prev/next covers
+  // every card fetched so far; recomputed each render so a click after scrolling
+  // carries the grown id list.
+  const slide = { ids: stories.map((s) => s.id), label: "Browse" };
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
-      <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query ? `Results for "${query}"` : `Browse all · ${published.length} stories`}</p>
-      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none mb-9">{query || "Search"}</h1>
-      <div className="grid grid-cols-5 gap-5">
-        {res.map((s) => (
+      <div className="flex items-end justify-between gap-6">
+        <div>
+          <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">
+            Browse
+          </h1>
+          <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">
+            {sub}
+          </p>
+        </div>
+      </div>
+      <CategoryFilterChips
+        selected={selected}
+        onToggle={toggle}
+        onClear={clear}
+        variant="desktop"
+      />
+      <div className="grid grid-cols-5 gap-5 mt-9">
+        {stories.map((s) => (
           <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-            {/* Slide context = the query-filtered result set, so prev/next
-                in the modal covers exactly the grid the user clicked. */}
-            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: res.map((r) => r.id), label: "Search" })} w={"100%"} h={"100%"} />
+            <PosterCard
+              story={s}
+              onOpen={(sid, t) => onOpen(sid, t, slide)}
+              w={"100%"}
+              h={"100%"}
+            />
           </div>
         ))}
       </div>
-      {res.length === 0 && <p className="font-body text-muted mt-12">No stories match &ldquo;{query}&rdquo;.</p>}
+      {loading && loadedCount === 0 && (
+        <p className="font-body text-muted mt-12">Loading stories…</p>
+      )}
+      {!loading && loadedCount === 0 && (
+        <p className="font-body text-muted mt-12">
+          No stories in this category yet.
+        </p>
+      )}
+      {/* Sentinel drives infinite scroll; kept below the grid with a little
+          height so the observer has a real box to watch. */}
+      <div ref={sentinelRef} className="h-10" aria-hidden />
+      {loadingMore && (
+        <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted text-center mt-2">
+          Loading more…
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Search pages the same full-catalog source as Browse, with the query pushed
+// down as a server-side WHERE (title OR category, case-insensitive) so a match
+// beyond the homepage catalog's 200-row window still surfaces — the old
+// client-side filter over catalog.array silently capped at ~201 titles. The
+// header box drives `query` per keystroke; the pager sees the 250ms-debounced
+// value so typing doesn't fire a round trip per key. Loaded rows are lifted to
+// the shell (onStoriesLoaded) so a result outside the rails' window still
+// opens its detail modal. Plan: _plans/2026-07-19-search-full-catalog.md.
+const NO_CATEGORIES: string[] = [];
+function SearchPage({
+  onOpen,
+  query,
+  onStoriesLoaded,
+}: {
+  onOpen: OpenFn;
+  query: string;
+  onStoriesLoaded: (stories: Story[]) => void;
+}) {
+  const debouncedQuery = useDebouncedValue(query.trim(), 250);
+  const { stories: liveRows, total, loading, loadingMore, reachedEnd, loadMore } =
+    useBrowseData(BROWSE_PAGE_SIZE, NO_CATEGORIES, debouncedQuery);
+  const stories = useMemo(() => liveRows.map(liveRowToStory), [liveRows]);
+  useEffect(() => {
+    onStoriesLoaded(stories);
+  }, [stories, onStoriesLoaded]);
+  const sentinelRef = useLoadMoreSentinel(loadMore);
+
+  const totalLabel = total ?? stories.length;
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[search render]", {
+    shell: "desktop",
+    query: debouncedQuery,
+    loaded: stories.length,
+    total,
+    reached_end: reachedEnd,
+  });
+  // Slide context = the results exactly as loaded, so prev/next in the modal
+  // covers every card fetched so far.
+  const slide = { ids: stories.map((s) => s.id), label: "Search" };
+  return (
+    <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
+      <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query ? `Results for "${query}"` : `Browse all · ${totalLabel} stories`}</p>
+      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none mb-9">{query || "Search"}</h1>
+      <div className="grid grid-cols-5 gap-5">
+        {stories.map((s) => (
+          <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
+            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, slide)} w={"100%"} h={"100%"} />
+          </div>
+        ))}
+      </div>
+      {loading && stories.length === 0 && (
+        <p className="font-body text-muted mt-12">Loading stories…</p>
+      )}
+      {!loading && stories.length === 0 && (
+        <p className="font-body text-muted mt-12">
+          {query ? <>No stories match &ldquo;{query}&rdquo;.</> : "Nothing here yet."}
+        </p>
+      )}
+      {/* Sentinel drives infinite scroll; kept below the grid with a little
+          height so the observer has a real box to watch. */}
+      <div ref={sentinelRef} className="h-10" aria-hidden />
+      {loadingMore && (
+        <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted text-center mt-2">
+          Loading more…
+        </p>
+      )}
     </div>
   );
 }
@@ -2373,6 +2468,25 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     recordView(id);
   };
   const close = () => setActive(null);
+  // Browse and Search page the whole catalog beyond the rails' 200-row window,
+  // so a clicked card can be a story resolveStory (rails catalog + static
+  // STORIES) doesn't know. Both grids report their loaded rows here and the
+  // modal resolution below falls back to this map so those stories still open.
+  // Held in state (read during render) — it only grows on a page append, a
+  // handful of times across a full scroll, so the extra shell renders are cheap.
+  const [pagedAdditions, setPagedAdditions] = useState<Map<string, Story>>(
+    () => new Map(),
+  );
+  const handlePagedStories = useCallback((stories: Story[]) => {
+    setPagedAdditions((prev) => {
+      // Only churn the map (and re-render) when a genuinely new id arrives.
+      const additions = stories.filter((s) => !prev.has(s.id));
+      if (additions.length === 0) return prev;
+      const next = new Map(prev);
+      for (const s of additions) next.set(s.id, s);
+      return next;
+    });
+  }, []);
   // "Play Something" picks a random playable story and opens it on the
   // Watch tab — same affordance as the hero's Play button, so the modal's
   // existing autoplay path kicks in. Excludes the current hero so the
@@ -2440,7 +2554,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
       {view === "Browse" && (
-        <BrowsePage catalog={catalog} onOpen={open} resolveStory={resolveStory} />
+        <BrowsePage onOpen={open} onStoriesLoaded={handlePagedStories} />
       )}
       {view === "Today's Verdicts" && (() => {
         // Same published-only gate as Browse. New & Hot promises "fresh
@@ -2473,16 +2587,17 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           }
         />
       )}
-      {view === "Search" && <SearchPage onOpen={open} query={query} catalog={catalog} />}
+      {view === "Search" && <SearchPage onOpen={open} query={query} onStoriesLoaded={handlePagedStories} />}
 
       <SiteFooter />
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Wires feed (not in STORIES) still open the modal.
-        // Stale id -> render nothing; close button still works because
-        // `active` is set.
-        const s = resolveStory(active.id);
+        // through the Wires feed (not in STORIES) still open the modal. The
+        // pagedAdditions fallback covers stories paged in on Browse/Search
+        // beyond the rails' 200-row catalog window. Stale id -> render nothing;
+        // close button still works because `active` is set.
+        const s = resolveStory(active.id) ?? pagedAdditions.get(active.id) ?? null;
         return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} catalog={catalog} slide={active.slide} /> : null;
       })()}
     </div>

@@ -45,6 +45,8 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -66,7 +68,24 @@ if not LOG.handlers:
 # function runtime is ~5 minutes. Multiple rows would push past Vercel's
 # 800s ceiling without gaining anything — shorts are produced one per
 # story job, so there's no batching win.
+#
+# DEADLINE_S is ENFORCED (2026-07-05): run_finisher_for_job runs on a
+# worker thread and a hang past this budget requeues/fails the row while
+# this function can still write. Before, a hung i2i call rode into
+# Vercel's 800s SIGKILL, which bypasses every except path and left
+# finisher_status='running' forever (story 1kg8vng, 4 hours).
 DEADLINE_S = 770
+
+# Reap window for dead 'running' claims (crashed/killed functions that
+# never reached a terminal write). Kept well above the 800s function
+# ceiling so a slow-but-live finisher is never requeued out from under
+# itself — same reasoning as RENDERING_STALE_S in drain_short_renders.
+FINISHER_STALE_S = 1800
+
+# Floor on the per-row budget so a slow reap/claim phase can't shrink the
+# timeout to zero and requeue a row that never got a chance to run.
+# Tests patch this down to exercise the timeout path quickly.
+MIN_BUDGET_S = 30.0
 
 
 def _log(event: str, **fields) -> None:
@@ -86,9 +105,17 @@ def _is_authorized(authorization_header: str | None) -> bool:
 
 def run_drain() -> dict:
     """Pure-Python entry point — split out so tests can call it without
-    faking an HTTP request. Tries to claim and process ONE finisher
-    job. Returns a JSON-serializable summary the handler echoes back."""
+    faking an HTTP request. Reaps dead 'running' claims, then tries to
+    claim and process ONE finisher job under the DEADLINE_S budget.
+    Returns a JSON-serializable summary the handler echoes back."""
     start = time.monotonic()
+
+    # Crash recovery BEFORE the claim, mirroring drain_short_renders: a
+    # revived row goes back to 'pending' and can be re-claimed on this
+    # same tick.
+    reaped = store.reap_stale_finisher_jobs(FINISHER_STALE_S)
+    if reaped:
+        _log("reaped", count=reaped)
 
     if store.count_pending_finisher_jobs() == 0:
         _log("idle")
@@ -108,19 +135,51 @@ def run_drain() -> dict:
         reddit_id=claimed.get("reddit_id"),
         story_id=claimed.get("story_id"),
     )
+    # The i2i chain runs on a worker thread so a hang can't ride into
+    # Vercel's 800s SIGKILL with the row still 'running'. On timeout we
+    # settle the row NOW, while this function can still write; the orphan
+    # thread keeps running until the instance freezes, and
+    # set_finisher_status is conditional on 'running' so its late
+    # terminal write cannot clobber what the timeout path writes here.
+    budget_s = max(MIN_BUDGET_S, DEADLINE_S - (time.monotonic() - start))
+    executor = ThreadPoolExecutor(max_workers=1)
     try:
-        story_jobs_worker.run_finisher_for_job(claimed)
-    except Exception as exc:  # noqa: BLE001 — top-level safety
-        # `run_finisher_for_job` already catches per-call errors and
-        # flips finisher_status to 'failed'. This guard only catches
-        # something truly unexpected (e.g., an import error) so the
-        # cron returns a 500 rather than swallowing silently.
-        _log("fatal", job_id=claimed["id"], error=str(exc))
+        future = executor.submit(story_jobs_worker.run_finisher_for_job, claimed)
         try:
-            store.set_finisher_status(claimed["id"], "failed")
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            pass
-        raise
+            future.result(timeout=budget_s)
+        except FuturesTimeoutError:
+            outcome = store.requeue_or_fail_timed_out_finisher(claimed["id"])
+            elapsed = round(time.monotonic() - start, 2)
+            _log(
+                "timeout",
+                job_id=claimed["id"],
+                story_id=claimed.get("story_id"),
+                budget_s=round(budget_s, 2),
+                elapsed_s=elapsed,
+                outcome=outcome,
+            )
+            remaining = store.count_pending_finisher_jobs()
+            return {
+                "drained": 0,
+                "remaining": remaining,
+                "timed_out": True,
+                "outcome": outcome,
+                "elapsed_s": elapsed,
+            }
+        except Exception as exc:  # noqa: BLE001 — top-level safety
+            # `run_finisher_for_job` already catches per-call errors and
+            # flips finisher_status to 'failed'. This guard only catches
+            # something truly unexpected (e.g., an import error) so the
+            # cron returns a 500 rather than swallowing silently.
+            _log("fatal", job_id=claimed["id"], error=str(exc))
+            try:
+                store.set_finisher_status(claimed["id"], "failed")
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+            raise
+    finally:
+        # wait=False: never block the response on a hung worker thread.
+        executor.shutdown(wait=False)
 
     elapsed = round(time.monotonic() - start, 2)
     remaining = store.count_pending_finisher_jobs()

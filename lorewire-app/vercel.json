@@ -92,6 +92,10 @@
     {
       "path": "/api/autopilot_tick",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/render_auto_publish",
+      "schedule": "*/2 * * * *"
     }
   ],
   "functions": {
@@ -153,6 +157,9 @@
       "maxDuration": 300
     },
     "src/app/api/autopilot_tick/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/render_auto_publish/route.ts": {
       "maxDuration": 300
     }
   }

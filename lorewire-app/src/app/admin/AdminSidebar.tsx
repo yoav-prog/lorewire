@@ -92,6 +92,18 @@ const STATIC_GROUPS: SidebarGroup[] = [
         capability: "content.manage",
       },
       {
+        // 2026-07-05 site analytics: first-party engagement dashboards
+        // (story_events, polls, publishing) with per-story drilldowns at
+        // /admin/analytics/[storyId] — the prefix match keeps the entry
+        // lit on those too. Read-only, so content.manage matches the
+        // page's requireCapability gate. Plan:
+        // _plans/2026-07-05-admin-analytics.md.
+        href: "/admin/analytics",
+        label: "Analytics",
+        activePrefixes: ["/admin/analytics"],
+        capability: "content.manage",
+      },
+      {
         // Reddit candidate pool — the import / review / publish upstream
         // for stories. See _plans/2026-06-14-reddit-db-sync.md. The
         // notPrefixes carve-out keeps /admin/reddit-sources/live from

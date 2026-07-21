@@ -16,7 +16,11 @@
 
 import "server-only";
 import { NextResponse, type NextRequest } from "next/server";
-import { runAutopilotApprove, runAutopilotPull } from "@/lib/autopilot";
+import {
+  maybeAlertHighHoldRate,
+  runAutopilotApprove,
+  runAutopilotPull,
+} from "@/lib/autopilot";
 
 function namespacedLog(event: string, fields: Record<string, unknown>): void {
   // eslint-disable-next-line no-console -- rule 14: namespaced observability
@@ -54,12 +58,24 @@ async function serve(req: NextRequest): Promise<NextResponse> {
     reason: approve.reason,
     approved: approve.approved,
     held: approve.held,
+    deferred: approve.deferred,
     failed: approve.failed,
     skipped: approve.skipped,
     tripped: approve.tripped,
   });
 
-  return NextResponse.json({ pull, approve });
+  // Watch the hold rate across both unattended lanes; a miscalibrated judge
+  // that holds everything is otherwise invisible. Best-effort — its own
+  // throttle keeps it to one alert per day.
+  const holdRate = await maybeAlertHighHoldRate();
+  namespacedLog("hold_rate", {
+    rate: holdRate.rate,
+    held: holdRate.held,
+    total: holdRate.total,
+    alerted: holdRate.alerted,
+  });
+
+  return NextResponse.json({ pull, approve, holdRate });
 }
 
 // Vercel cron calls GET; POST is a manual kick from the admin UI / tests.
