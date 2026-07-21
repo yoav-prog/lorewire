@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { Capability } from "@/lib/authz";
 import SidebarLiveBadge from "./SidebarLiveBadge";
+import SidebarNotificationsBadge from "./SidebarNotificationsBadge";
 import SidebarSubmissionsBadge from "./SidebarSubmissionsBadge";
 
 // Studio sidebar. Three primary destinations: Overview, Content, Settings.
@@ -63,6 +64,18 @@ const STATIC_GROUPS: SidebarGroup[] = [
     items: [
       { href: "/admin", label: "Overview", exact: true },
       {
+        // 2026-07-02 failure inbox: everything that needed a human and
+        // could not complete (auto-publish give-ups, blocked full-
+        // pipeline rows). The badge shows the unread count so a failure
+        // is glanceable from any admin screen. Plan:
+        // _plans/2026-07-02-never-publish-without-video.md.
+        href: "/admin/notifications",
+        label: "Notifications",
+        activePrefixes: ["/admin/notifications"],
+        capability: "content.manage",
+        slot: <SidebarNotificationsBadge />,
+      },
+      {
         href: "/admin/content",
         label: "Content",
         // Canonical mixed feed. Active for the unified URL plus the legacy
@@ -76,6 +89,18 @@ const STATIC_GROUPS: SidebarGroup[] = [
           "/admin/videos",
           "/admin/stories",
         ],
+        capability: "content.manage",
+      },
+      {
+        // 2026-07-05 site analytics: first-party engagement dashboards
+        // (story_events, polls, publishing) with per-story drilldowns at
+        // /admin/analytics/[storyId] — the prefix match keeps the entry
+        // lit on those too. Read-only, so content.manage matches the
+        // page's requireCapability gate. Plan:
+        // _plans/2026-07-05-admin-analytics.md.
+        href: "/admin/analytics",
+        label: "Analytics",
+        activePrefixes: ["/admin/analytics"],
         capability: "content.manage",
       },
       {
@@ -103,12 +128,34 @@ const STATIC_GROUPS: SidebarGroup[] = [
         slot: <SidebarLiveBadge />,
       },
       {
+        // 2026-07-01 render + publish schedulers: auto-render the strongest
+        // Reddit sources, the human approval gate, and per-platform scheduled
+        // publishing. Gated on settings.manage (config-heavy); the approve /
+        // reject actions re-check content.manage. Plan:
+        // _plans/2026-07-01-render-and-publish-schedulers.md.
+        href: "/admin/scheduler",
+        label: "Scheduler",
+        activePrefixes: ["/admin/scheduler"],
+        capability: "settings.manage",
+      },
+      {
         // Homepage curation: which stories appear on each rail. Live
         // edits land on the next homepage load. Plan:
         // _plans/2026-06-16-homepage-curation.md.
         href: "/admin/curation",
         label: "Homepage",
         activePrefixes: ["/admin/curation"],
+        capability: "content.manage",
+      },
+      {
+        // Category reclassification: preview (dry-run) how the multi-tag
+        // classifier would tag the whole story library, then apply the
+        // reviewed tags (a separate, gated step). content.manage to match
+        // the page's requireCapability gate. Plan:
+        // _plans/2026-07-01-category-taxonomy-multitag.md.
+        href: "/admin/reclassify",
+        label: "Reclassify",
+        activePrefixes: ["/admin/reclassify"],
         capability: "content.manage",
       },
       {

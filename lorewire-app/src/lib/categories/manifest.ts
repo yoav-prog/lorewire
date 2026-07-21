@@ -17,8 +17,6 @@
 // admin-managed table + the ~17 granular tags land in PR2+; PR1 only
 // collapses today's six lists into this manifest with no behavior change.
 
-import type { HomepageSurface } from "@/lib/homepage-curation-shared";
-
 // Ordered category labels. `as const` preserves the literal union so
 // `Cat` and `(typeof CATEGORIES)[number]` stay exact at every call site.
 // Order matches the historical admin/ui.ts `CATEGORIES` order.
@@ -44,10 +42,11 @@ export interface CategoryDef {
   color: string;
   /** Card glyph. */
   glyph: string;
-  /** Homepage curation surface key for this category's rail. Typed
-   *  against the real surface union so a bad surface fails the build
-   *  instead of silently rendering an empty rail at runtime. */
-  railSurface: HomepageSurface;
+  /** Legacy: the homepage curation surface key for this category's rail.
+   *  The live rails now come from the granular set (homepage-rails.ts reads
+   *  GRANULAR_CATEGORIES); these six are kept only for the drift/parity test,
+   *  so the type is a plain string. */
+  railSurface: string;
   /** Public rail header. */
   railTitle: string;
   /** Subreddits the pipeline's fast-path classifier maps to this
@@ -153,7 +152,7 @@ export const CATEGORY_RAIL_ORDER: readonly Cat[] = [
 ];
 
 export interface CategoryRailEntry {
-  surface: HomepageSurface;
+  surface: string;
   title: string;
   cat: Cat;
 }

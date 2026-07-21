@@ -26,6 +26,7 @@ import type {
   PollSide,
   WirePollData,
 } from "@/lib/polls-shared";
+import { markVotedStory } from "@/lib/voted-stories";
 
 export interface WirePollPanelProps {
   /** The story id the poll belongs to. Threaded through to the vote flow
@@ -100,6 +101,10 @@ export function WirePollPanel({
           totalVotes: data.result.totalVotes,
         });
         onVoted?.(side, data.result);
+        // Reactive vote overlay (lib/voted-stories) so vote-gated surfaces
+        // react this session without a refresh. Idempotent; mirrors
+        // PollWidget.
+        markVotedStory(storyId);
         // Top 10 ranking signal (mirrors PollWidget). Dynamic import keeps
         // the server-action module out of the panel's initial bundle.
         if (data.inserted) {

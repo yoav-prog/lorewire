@@ -741,6 +741,93 @@ class ThumbnailPromptCharacterRefTests(unittest.TestCase):
         self.assertIn("(i2i)", i2i)
 
 
+class ThumbnailPromptBakeTitleTests(unittest.TestCase):
+    """Locks down the bake_title switch (2026-07-03).
+
+    Heroes render clean because the site overlays its own HTML title and
+    baked typography underneath it doubled up on the homepage billboard.
+    Thumbnails keep the baked-title treatment for the social cards. The
+    default (True) must keep every legacy caller byte-compatible.
+    """
+
+    TITLE = "SECRET CHILD SHOCK"
+    CATEGORY = "Dating Disasters"
+    BODY = "On a routine blind date, a man is blindsided by a secret child."
+
+    def _clean(self, aspect: str, **kwargs) -> str:
+        return stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, aspect, False,
+            bake_title=False, **kwargs,
+        )
+
+    def test_default_keeps_baked_title_instruction(self):
+        out = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "16:9", False,
+        )
+        self.assertIn(f'Render the title "{self.TITLE}" prominently', out)
+        self.assertIn("title baked into the lower-third band", out)
+
+    def test_clean_mode_forbids_all_text_in_every_aspect(self):
+        for aspect in ("3:4", "16:9", "1:1"):
+            out = self._clean(aspect)
+            self.assertIn("Do NOT render any text in the artwork", out)
+            self.assertNotIn("Render the title", out)
+            self.assertNotIn("baked into", out)
+            self.assertIn("No watermarks, no signatures, no text of any kind", out)
+
+    def test_clean_mode_applies_to_i2i_and_hybrid_variants_too(self):
+        i2i = self._clean("3:4", character_base_url="https://gcs/base.png")
+        hybrid = self._clean(
+            "16:9",
+            character_base_url="https://gcs/base.png",
+            scene_image_url="https://gcs/scene.png",
+        )
+        for out in (i2i, hybrid):
+            self.assertIn("Do NOT render any text in the artwork", out)
+            self.assertNotIn("Render the title", out)
+        # Identity instructions survive the switch.
+        self.assertIn("Redraw the EXACT same character", i2i)
+        self.assertIn("SECOND reference image", hybrid)
+
+    def test_clean_landscape_reserves_overlay_negative_space(self):
+        # The homepage billboard overlays its HTML title on the left, so
+        # the clean 16:9 composition must ask for quiet space there.
+        out = self._clean("16:9")
+        self.assertIn("negative space on the left", out)
+
+    def test_dry_run_marks_clean_variant(self):
+        baked = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", True,
+        )
+        clean = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", True,
+            bake_title=False,
+        )
+        self.assertNotIn("no-title", baked)
+        self.assertIn("no-title", clean)
+
+    def test_include_story_context_false_drops_the_body_excerpt(self):
+        # 2026-07-04 moderation fallback: kie deterministically flags
+        # some story excerpts (minors + charged phrasing), so the
+        # fallback prompt must carry NO story text in any of the three
+        # prompt modes — while keeping the title treatment intact.
+        for kwargs in (
+            {},
+            {"character_base_url": "https://gcs/base.png"},
+            {
+                "character_base_url": "https://gcs/base.png",
+                "scene_image_url": "https://gcs/scene.png",
+            },
+        ):
+            out = stages.make_thumbnail_prompt(
+                self.TITLE, self.CATEGORY, self.BODY, "3:4", False,
+                include_story_context=False, **kwargs,
+            )
+            self.assertNotIn("from the story", out)
+            self.assertNotIn("blind date", out)
+            self.assertIn(f'Render the title "{self.TITLE}"', out)
+
+
 class BuildArticlePromptTests(unittest.TestCase):
     """The article prompt mirrors the short's _clarity_block.
     See _plans/2026-06-28-content-clarity-bar.md.
@@ -891,6 +978,23 @@ class ClassifyCategoryTests(unittest.TestCase):
         out = stages.classify_category(self.TITLE, self.BODY, "Drama")
         self.assertEqual(out, "Humor")
 
+    def test_token_cap_leaves_room_for_reasoning(self):
+        # gpt-5-nano spends hidden reasoning tokens from max_completion_tokens
+        # before emitting any content; a starved cap returns '' and the
+        # classifier falls back every time. The original cap of 20 could
+        # never work. Pin a floor so the starvation can't regress.
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+        seen = {}
+
+        def fake_chat(_prompt, max_tokens, model=None):  # noqa: ARG001
+            seen["max_tokens"] = max_tokens
+            return "Humor"
+
+        pipeline_llm.chat = fake_chat
+        stages.classify_category(self.TITLE, self.BODY, "Drama")
+        self.assertGreaterEqual(seen["max_tokens"], 1000)
+
 
 class ClassifyStoryTagsTests(unittest.TestCase):
     """Multi-tag classifier (_plans/2026-07-01-category-taxonomy-multitag.md).
@@ -980,6 +1084,25 @@ class ClassifyStoryTagsTests(unittest.TestCase):
     def test_empty_when_llm_raises(self):
         self._patch_llm(RuntimeError("LLM HTTP 500: boom"))
         self.assertEqual(self._classify(), [])
+
+    def test_token_cap_leaves_room_for_reasoning(self):
+        # gpt-5-nano spends hidden reasoning tokens from max_completion_tokens
+        # before emitting any content; a starved cap returns '' and every
+        # story keeps the subreddit-map fallback. That is exactly what
+        # happened at cap 200 once the active-category prompt grew
+        # (2026-07-03: every new story landed as "Drama"). Pin a floor so the
+        # starvation can't regress.
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+        seen = {}
+
+        def fake_chat(_prompt, max_tokens, model=None):  # noqa: ARG001
+            seen["max_tokens"] = max_tokens
+            return '[{"slug":"workplace","confidence":0.8}]'
+
+        pipeline_llm.chat = fake_chat
+        self._classify()
+        self.assertGreaterEqual(seen["max_tokens"], 1000)
 
 
 if __name__ == "__main__":

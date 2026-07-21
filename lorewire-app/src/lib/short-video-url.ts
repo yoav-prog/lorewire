@@ -26,3 +26,18 @@ export const SHORT_VIDEO_URL_LIKE = `%${SHORT_VIDEO_PATH}%`;
 export function isShortVideoUrl(url: string | null | undefined): boolean {
   return typeof url === "string" && SHORT_VIDEO_PATH_RE.test(url);
 }
+
+/** Append `?v={epochSeconds}` to a short video URL so caches treat each
+ *  re-render as a fresh asset. The renderer overwrites the SAME R2 object
+ *  key on every re-render and R2 serves with a one-year immutable
+ *  Cache-Control, so a byte-identical URL keeps playing the OLD MP4 from
+ *  browser/edge caches after a restart (bug observed 2026-07-03 on
+ *  1pu6a9n and others: new short done for hours, old video still
+ *  playing). Mirror of pipeline/media.py `_cache_bust` for hero art;
+ *  the matchers above already tolerate the query suffix. Idempotent: a
+ *  URL already carrying `v=` is returned unchanged. */
+export function bustShortVideoUrl(url: string): string {
+  if (!url || /[?&]v=/.test(url)) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}v=${Math.floor(Date.now() / 1000)}`;
+}

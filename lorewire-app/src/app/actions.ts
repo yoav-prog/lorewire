@@ -17,12 +17,16 @@ import { getPublishedStoryBySlug } from "@/lib/stories-public";
 import { all, one, run } from "@/lib/db";
 import { type HomepageSurface } from "@/lib/homepage-curation";
 import {
+  loadBrowsePage,
   loadHomepageCuration,
   loadHomepagePolls,
   loadLiveCatalog,
+  type BrowsePageOpts,
+  type BrowsePageResult,
 } from "@/lib/homepage-data";
 import {
   getWirePollsForStories,
+  listVotedStoryIdsByCookie,
   resolvePublicFloor,
   type HomepagePollRails,
   type PollRailKind,
@@ -31,6 +35,12 @@ import {
 import { readVoteToken } from "@/lib/poll-cookie";
 import { isShortVideoUrl, SHORT_VIDEO_URL_LIKE } from "@/lib/short-video-url";
 import { resolveMediaUrl } from "@/lib/media-url";
+import type { IntroWindow } from "@/lib/intro-window";
+import {
+  resolveIntroWindowForStory,
+  resolveIntroWindowsForStories,
+  type IntroWindowStoryRow,
+} from "@/lib/intro-window-resolve";
 import { randomUUID } from "node:crypto";
 import { currentUser } from "@/lib/dal";
 import { getOrIssueAnonToken, readAnonToken } from "@/lib/anon";
@@ -73,6 +83,12 @@ export interface LiveStoryMediaResult {
    *  Drives the 9:16 aspect on the article images so the doodle scenes
    *  don't render letter-boxed inside a 16:9 frame. */
   is_short: boolean;
+  /** Where the brand intro sits in the video (server-resolved via
+   *  lib/intro-window-resolve). Drives the WATCH-tab player's "Skip intro"
+   *  button + the always-skip pref. Null when there is no intro or the
+   *  position can't be determined confidently — the player then never
+   *  skips. Plan: _plans/2026-07-04-skip-intro.md. */
+  intro_window: IntroWindow | null;
   /** True when the story exists in the DB and is publicly readable.
    *  False when the id doesn't match any published row (e.g. the
    *  catalog still has a legacy sample story that isn't in the DB).
@@ -180,11 +196,15 @@ export async function getLiveStoryMedia(
     audio_url: null,
     alignment: [],
     is_short: false,
+    intro_window: null,
     found: false,
   };
   if (!idOrSlug || typeof idOrSlug !== "string") return empty;
 
   // Try by id first — handles new pipeline UUIDs and legacy ids ("envelope").
+  // The trailing columns (short_config, the segment columns, video_config)
+  // are the Skip Intro resolver's inputs — consumed server-side below,
+  // never returned to the client.
   let row = await one<{
     id: string;
     slug: string | null;
@@ -193,8 +213,16 @@ export async function getLiveStoryMedia(
     body: string | null;
     audio_url: string | null;
     alignment: string | null;
+    short_config: string | null;
+    intro_segment_id: string | null;
+    outro_segment_id: string | null;
+    skip_intro: number | null;
+    skip_outro: number | null;
+    video_config: string | null;
   }>(
-    "SELECT id, slug, video_url, images, body, audio_url, alignment FROM stories " +
+    "SELECT id, slug, video_url, images, body, audio_url, alignment, " +
+      "short_config, intro_segment_id, outro_segment_id, skip_intro, " +
+      "skip_outro, video_config FROM stories " +
       "WHERE id = ? AND status = 'published' AND published_at IS NOT NULL",
     [idOrSlug],
   );
@@ -211,6 +239,12 @@ export async function getLiveStoryMedia(
         body: bySlug.body,
         audio_url: bySlug.audio_url,
         alignment: bySlug.alignment,
+        short_config: bySlug.short_config,
+        intro_segment_id: bySlug.intro_segment_id,
+        outro_segment_id: bySlug.outro_segment_id,
+        skip_intro: bySlug.skip_intro,
+        skip_outro: bySlug.skip_outro,
+        video_config: bySlug.video_config,
       };
     }
   }
@@ -219,15 +253,26 @@ export async function getLiveStoryMedia(
   const isShort = isShortVideoUrl(row.video_url);
   // When the applied video is a short, replace the long-form image list
   // with the short's doodle scene frames so the article reads as the
-  // 9:16 doodle visual story instead of mixing styles.
+  // 9:16 doodle visual story instead of mixing styles. The same render
+  // props feed the Skip Intro window below.
+  const renderPropsJson = isShort
+    ? await latestDoneShortPropsForStory(row.id)
+    : null;
   let images: string[];
   if (isShort) {
-    const propsJson = await latestDoneShortPropsForStory(row.id);
-    const shortImages = parseShortFrameUrls(propsJson);
+    const shortImages = parseShortFrameUrls(renderPropsJson);
     images = shortImages.length > 0 ? shortImages : parseStoryImageList(row.images);
   } else {
     images = parseStoryImageList(row.images);
   }
+
+  // Skip Intro: where the brand intro sits in the video the WATCH tab
+  // plays. Passing the already-fetched render props (null for long-form,
+  // which never has short_renders rows) saves the resolver its own read;
+  // long-form derives its aspect internally.
+  const introWindow = row.video_url
+    ? await resolveIntroWindowForStory(row, { renderPropsJson })
+    : null;
 
   // Long-form audio + alignment come straight off the stories row — these
   // are what the voice_renders_worker writes when the admin clicks
@@ -247,6 +292,7 @@ export async function getLiveStoryMedia(
     audio_url: resolveMediaUrl(row.audio_url),
     alignment: parseStoryAlignment(row.alignment),
     is_short: isShort,
+    intro_window: introWindow,
     found: true,
   };
 }
@@ -327,6 +373,9 @@ export interface LiveCatalogStory {
   /** Python pipeline writes 1 when the hero artwork already has the
    *  title baked in so the CSS title overlay doesn't double up. */
   hero_has_baked_title: number | null;
+  /** 3:4 thumbnail variant (always title-baked); the rail poster cards
+   *  prefer it over the clean hero artwork. */
+  thumbnail_image: string | null;
   video_url: string | null;
   published_at: string | null;
   created_at: string | null;
@@ -345,6 +394,17 @@ export interface WireStory extends LiveCatalogStory {
   like_count: number;
   viewer_liked: boolean;
   poll: WirePollData | null;
+  /** Primary granular category slug (story_tags.is_primary), or null when the
+   *  story isn't tagged yet. Drives the card's category chip and matches the
+   *  category filter's taxonomy; the card falls back to the legacy `category`
+   *  label when this is null. */
+  category_slug: string | null;
+  /** Where the brand intro sits in this wire's MP4 (server-resolved via
+   *  lib/intro-window-resolve). Drives the card's "Skip intro" button and
+   *  the always-skip pref. Null when the row has no intro or the position
+   *  can't be determined confidently — the card then never skips. Plan:
+   *  _plans/2026-07-04-skip-intro.md. */
+  intro_window: IntroWindow | null;
 }
 
 export interface LiveCatalogResult {
@@ -358,6 +418,20 @@ export interface LiveCatalogResult {
 // render. Plan: _plans/2026-06-18-homepage-no-flash-ssr.md.
 export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   return loadLiveCatalog(limit);
+}
+
+// Public client entry for the Browse + Search grids' cursor pagination (Search
+// also pushes its text query down through BrowsePageOpts). Thin "use server"
+// wrapper over loadBrowsePage (@/lib/homepage-data) so the query logic stays in a
+// server-only lib the tests can import directly, mirroring getLiveCatalog /
+// loadLiveCatalog. A "use server" module may only export async functions, so the
+// BrowsePageOpts / BrowsePageResult types are NOT re-exported here — callers that
+// need them import from @/lib/homepage-data, and the client hook reads the return
+// value structurally. Plan: _plans/2026-07-14-browse-pagination.md.
+export async function listBrowseStories(
+  opts: BrowsePageOpts = {},
+): Promise<BrowsePageResult> {
+  return loadBrowsePage(opts);
 }
 
 // ─── Wires feed: published shorts, cursor-paginated ──────────────────────────
@@ -375,6 +449,17 @@ export interface ListShortsOpts {
   /** Cursor: return shorts published strictly BEFORE this timestamp. Pass the
    *  previous page's `nextCursor`; omit for the first page. */
   beforePublishedAt?: string | null;
+  /** When true, exclude wires this viewer has already voted on (attributed by
+   *  the vote cookie, the same source the homepage "You Didn't Vote Yet" rail
+   *  uses). Drives the Wires feed's default "unvoted only" mode. The filter is
+   *  applied in SQL so pagination counts unvoted wires, not all published ones.
+   *  Absent cookie / no votes → no filtering (nothing to hide). Defaults off so
+   *  every other caller keeps the full feed. */
+  onlyUnvoted?: boolean;
+  /** When set, restrict to wires tagged with ANY of these granular category
+   *  slugs (story_tags.category_slug). Filtered in SQL via an EXISTS subquery so
+   *  pagination counts the filtered result. Empty / absent → no restriction. */
+  categorySlugs?: string[];
 }
 
 export interface ListShortsResult {
@@ -404,6 +489,33 @@ export async function listPublishedShorts(
     "video_url LIKE ?",
   ];
   const params: unknown[] = [SHORT_VIDEO_URL_LIKE];
+  // Only-unvoted mode (the Wires feed's default): drop wires this viewer has
+  // already voted on. Done in SQL — BEFORE the cursor clause so `where` and
+  // `params` stay in lockstep — so the LIMIT + over-fetch count unvoted wires
+  // rather than all published ones (a client-side filter would starve the feed
+  // when most wires are voted). Reuses the same cookie-attributed vote read as
+  // the homepage "You Didn't Vote Yet" rail, so both surfaces agree on what
+  // "voted" means. Absent cookie / no votes → no exclusion.
+  if (opts.onlyUnvoted) {
+    const votedIds = await listVotedStoryIdsByCookie(await readVoteToken());
+    if (votedIds.length > 0) {
+      where.push(`id NOT IN (${votedIds.map(() => "?").join(", ")})`);
+      params.push(...votedIds);
+    }
+  }
+  // Category filter: restrict to wires carrying ANY of the selected granular
+  // tags. EXISTS (not JOIN) so a multi-tagged wire yields ONE row and the LIMIT
+  // counts filtered wires correctly. Reads story_tags — the same taxonomy the
+  // /c/<slug> landing pages filter on, so the feed agrees with them.
+  const catSlugs = (opts.categorySlugs ?? []).filter(Boolean);
+  if (catSlugs.length > 0) {
+    where.push(
+      `EXISTS (SELECT 1 FROM story_tags t WHERE t.story_id = stories.id AND t.category_slug IN (${catSlugs
+        .map(() => "?")
+        .join(", ")}))`,
+    );
+    params.push(...catSlugs);
+  }
   if (opts.beforePublishedAt) {
     where.push("COALESCE(published_at, updated_at, created_at) < ?");
     params.push(opts.beforePublishedAt);
@@ -411,11 +523,18 @@ export async function listPublishedShorts(
   const clause = `WHERE ${where.join(" AND ")}`;
   // Over-fetch by one so we know whether a further page exists without a second
   // COUNT round-trip. id is the deterministic tiebreak so the sort is stable
-  // across equal published_at values.
-  const rows = await all<LiveCatalogStory>(
+  // across equal published_at values. The projection is LiveCatalogStory plus
+  // the Skip Intro resolver's inputs (short_config, the segment columns) —
+  // those extra columns are consumed server-side by
+  // resolveIntroWindowsForStories and NEVER reach the client; the public rows
+  // are rebuilt field-by-field below so a private column can't leak through a
+  // spread.
+  const rows = await all<LiveCatalogStory & IntroWindowStoryRow>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
-      "hero_image_landscape, hero_has_baked_title, video_url, " +
-      "published_at, created_at FROM stories " +
+      "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
+      "video_url, published_at, created_at, short_config, " +
+      "intro_segment_id, outro_segment_id, skip_intro, skip_outro, " +
+      "video_config FROM stories " +
       `${clause} ` +
       "ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC " +
       `LIMIT ${limit + 1}`,
@@ -425,17 +544,32 @@ export async function listPublishedShorts(
   const page = hasMore ? rows.slice(0, limit) : rows;
   // Belt and braces: the SQL LIKE already filters, but re-assert the exact
   // suffix in JS so a URL that merely contains the substring mid-path can't
-  // slip a non-short into the feed (the regex anchors it to the end). Filter on
-  // the STORED value to stay aligned with the SQL LIKE, then resolve the
-  // survivors' media onto the delivery base for the client (passthrough when
-  // MEDIA_PUBLIC_BASE is unset; suffix is preserved either way).
-  const shorts = page
-    .filter((s) => isShortVideoUrl(s.video_url))
-    .map((s) => ({
-      ...s,
+  // slip a non-short into the feed (the regex anchors it to the end). Filter
+  // on the STORED value to stay aligned with the SQL LIKE.
+  const withVideo = page.filter((s) => isShortVideoUrl(s.video_url));
+  // Resolve each wire's Skip Intro window off the RAW rows (the resolver
+  // reads props/short_config and the stored video_url), then rebuild the
+  // public projection with the survivors' media resolved onto the delivery
+  // base (passthrough when MEDIA_PUBLIC_BASE is unset; suffix is preserved
+  // either way).
+  const introWindows = await resolveIntroWindowsForStories(withVideo);
+  const shorts = withVideo.map(
+    (s): LiveCatalogStory => ({
+      id: s.id,
+      slug: s.slug,
+      title: s.title,
+      category: s.category,
+      summary: s.summary,
+      duration: s.duration,
       hero_image: resolveMediaUrl(s.hero_image),
+      hero_image_landscape: resolveMediaUrl(s.hero_image_landscape),
+      hero_has_baked_title: s.hero_has_baked_title,
+      thumbnail_image: resolveMediaUrl(s.thumbnail_image),
       video_url: resolveMediaUrl(s.video_url),
-    }));
+      published_at: s.published_at,
+      created_at: s.created_at,
+    }),
+  );
   // Cursor matches the SQL COALESCE order so a row with NULL published_at
   // still produces a usable next-page key (uses created_at instead).
   const last = page[page.length - 1];
@@ -451,7 +585,15 @@ export async function listPublishedShorts(
   // `poll: null` — the card hides both surfaces in that case. Plan:
   // _plans/2026-06-25-wires-poll-wrapper.md.
   const withPolls = await attachWirePollState(withLikes);
-  return { ok: true, shorts: withPolls, nextCursor };
+  // Attach each wire's primary granular category slug so the card chip speaks
+  // the same taxonomy as the category filter.
+  const withCategory = await attachPrimaryCategorySlug(withPolls);
+  // Slot in the Skip Intro windows resolved off the raw rows above.
+  const withIntroWindows = withCategory.map((s) => ({
+    ...s,
+    intro_window: introWindows.get(s.id) ?? null,
+  }));
+  return { ok: true, shorts: withIntroWindows, nextCursor };
 }
 
 /** Batch-resolve the per-wire poll bundle and slot it onto each row.
@@ -541,7 +683,43 @@ async function attachLikeState(rows: LiveCatalogStory[]): Promise<WireStory[]> {
     like_count: countById.get(r.id) ?? 0,
     viewer_liked: likedByViewer.has(r.id),
     poll: null,
+    // Filled by attachPrimaryCategorySlug after the poll pass; initialised here
+    // so the chained transforms satisfy the WireStory shape (mirrors `poll`).
+    category_slug: null,
+    // Filled by the caller's final intro-window pass (mirrors `poll`).
+    intro_window: null,
   }));
+}
+
+/** Attach each wire's PRIMARY granular category slug (story_tags.is_primary=1)
+ *  in one batch query. Powers the card's category chip and keeps it aligned with
+ *  the category filter's taxonomy. Untagged stories keep `category_slug: null`
+ *  (the card falls back to the legacy `category` label). Best-effort: a failed
+ *  read logs and leaves the slugs null rather than crashing the public feed. */
+async function attachPrimaryCategorySlug(
+  shorts: WireStory[],
+): Promise<WireStory[]> {
+  if (shorts.length === 0) return shorts;
+  try {
+    const ids = shorts.map((s) => s.id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = await all<{ story_id: string; category_slug: string }>(
+      "SELECT story_id, category_slug FROM story_tags " +
+        `WHERE is_primary = 1 AND story_id IN (${placeholders})`,
+      ids,
+    );
+    const slugById = new Map(rows.map((r) => [r.story_id, r.category_slug]));
+    return shorts.map((s) => ({
+      ...s,
+      category_slug: slugById.get(s.id) ?? null,
+    }));
+  } catch (err) {
+    console.warn("[wires primary category resolve err]", {
+      story_count: shorts.length,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return shorts;
+  }
 }
 
 export interface ToggleLikeResult {

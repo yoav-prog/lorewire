@@ -13,7 +13,9 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { getPublishedStoryBySlug } from "@/lib/stories-public";
-import { getSiteSeo, buildPageTitle } from "@/lib/site-seo";
+import { getSiteSeo, resolveSiteOrigin } from "@/lib/site-seo";
+import { serializeJsonLd } from "@/lib/jsonld";
+import { buildStoryJsonLd } from "@/lib/story-jsonld";
 import { getSetting } from "@/lib/repo";
 import { parseShortConfig } from "@/lib/short-config";
 import { OG_POSTER_HEIGHT, OG_POSTER_WIDTH } from "@/lib/short-poster";
@@ -34,7 +36,9 @@ import {
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
 import { getSubmissionAttribution } from "@/lib/submissions";
+import { resolveIntroWindowForStory } from "@/lib/intro-window-resolve";
 import { SubmissionReportLink } from "./SubmissionReportLink";
+import StoryVideo from "./StoryVideo";
 
 // Phase 4 of _plans/2026-06-12-video-aspect-ratio.md: resolve the
 // rendered aspect for a story so the reader's <video> container CSS
@@ -68,10 +72,18 @@ interface Params {
   slug: string;
 }
 
-function resolveOrigin(siteUrlSetting: string): string {
-  return (
-    siteUrlSetting || process.env.NEXT_PUBLIC_SITE_ORIGIN || ""
-  ).replace(/\/$/, "");
+// "2026-07-03T23:14:16Z" -> "July 3, 2026" for the visible byline row.
+// Same en-US long-date shape ContributorCard uses. Null/garbage -> null
+// so the row simply omits the date instead of printing "Invalid Date".
+function formatPublishDate(iso: string | null): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  return new Date(t).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
 }
 
 export async function generateMetadata({
@@ -83,14 +95,15 @@ export async function generateMetadata({
   const story = await getPublishedStoryBySlug(slug);
   const seo = await getSiteSeo();
   if (!story) {
-    return {
-      title: buildPageTitle("Not found", seo.titleTemplate, seo.siteName),
-    };
+    // Bare page title — the root layout's title.template appends the
+    // brand exactly once. Pre-branding here doubled it ("· LoreWire ·
+    // LoreWire") because Next applies the parent template to child
+    // page titles (see node_modules/next/dist/docs generate-metadata).
+    return { title: "Not found" };
   }
-  const origin = resolveOrigin(seo.siteUrl);
+  const origin = resolveSiteOrigin(seo.siteUrl);
   const canonical = `${origin}/v/${story.slug}`;
   const pageTitle = story.title ?? "Story";
-  const title = buildPageTitle(pageTitle, seo.titleTemplate, seo.siteName);
   const description =
     story.summary ?? seo.defaultMetaDescription;
   const heroImage = story.hero_image ?? seo.defaultOgImage ?? undefined;
@@ -122,36 +135,44 @@ export async function generateMetadata({
       // malformed short_config — fall through to hero chain
     }
   }
-  const ogImage = ogPosterUrl ?? heroImage;
+  // Share-card fallback when there is no designed OG poster: the titled
+  // 16:9 thumbnail. Heroes render clean (no baked text) since 2026-07-03,
+  // so a hero-based share card would carry no title at all. The PORTRAIT
+  // thumbnail is deliberately NOT in this chain — crawlers center-crop to
+  // ~1.91:1, which cuts off exactly the lower-third band the title lives
+  // in. The clean hero stays as the last resort before the site default.
+  const thumbLandscape = story.thumbnail_image_landscape ?? undefined;
+  const ogImage = ogPosterUrl ?? thumbLandscape ?? heroImage;
   // og:image:width / og:image:height are non-negotiable per the
   // crawler-doc audit: WhatsApp silently drops the preview on first
   // share without them; Facebook benefits too (synchronous render).
-  // Set ONLY when we have a designed poster; the legacy hero fallback
-  // has unknown dimensions so we let the crawler sniff bytes.
+  // Set ONLY when we have a designed poster; the thumbnail / hero
+  // fallbacks have unknown dimensions so we let the crawler sniff bytes.
   const ogImageWidth = ogPosterUrl ? OG_POSTER_WIDTH : undefined;
   const ogImageHeight = ogPosterUrl ? OG_POSTER_HEIGHT : undefined;
-  // Force summary_large_image when the poster is present so Twitter
-  // renders the 1200×630 designed landscape correctly. Without the
-  // override, Twitter would respect seo.twitterCardType (often
-  // "summary" by default), which renders as a small square thumb.
-  const twitterCardType = ogPosterUrl
+  // Force summary_large_image when a wide image is present (designed
+  // poster or the 16:9 thumbnail) so Twitter renders the landscape
+  // correctly. Without the override, Twitter would respect
+  // seo.twitterCardType (often "summary" by default), which renders as
+  // a small square thumb.
+  const twitterCardType = (ogPosterUrl ?? thumbLandscape)
     ? "summary_large_image"
     : seo.twitterCardType;
   // twitter:image explicit removes Twitterbot's array-order ambiguity
   // — verified via the crawler-doc audit: Twitter looks for
   // twitter:image first, falls back to og:image, so an explicit
   // setting is the surest way to control what X picks.
-  const twitterImage = ogPosterUrl ?? heroImage;
+  const twitterImage = ogPosterUrl ?? thumbLandscape ?? heroImage;
 
   return {
-    title,
+    title: pageTitle,
     description,
     alternates: { canonical },
     robots: noindex
       ? { index: false, follow: false }
       : { index: true, follow: true },
     openGraph: {
-      title,
+      title: pageTitle,
       description,
       type: videoUrl ? "video.other" : "article",
       url: canonical,
@@ -162,7 +183,7 @@ export async function generateMetadata({
               url: ogImage,
               width: ogImageWidth,
               height: ogImageHeight,
-              alt: `Lorewire: ${pageTitle}`,
+              alt: `${seo.siteName}: ${pageTitle}`,
             },
           ]
         : undefined,
@@ -179,7 +200,7 @@ export async function generateMetadata({
     },
     twitter: {
       card: twitterCardType,
-      title,
+      title: pageTitle,
       description,
       images: twitterImage ? [twitterImage] : undefined,
       site: seo.twitterHandle || undefined,
@@ -204,6 +225,14 @@ export default async function StoryReader({
 
   const videoAspect = await resolveStoryAspect(story.video_config);
   const videoCssRatio = aspectDims(videoAspect).cssRatio;
+
+  // Skip Intro: where the brand intro sits in this story's MP4 (explicit on
+  // props for new renders, derived for older ones). Null → the player shows
+  // no button and never auto-seeks. The aspect matters only for legacy
+  // long-form videos; shorts resolve at 9:16 regardless.
+  const introWindow = story.video_url
+    ? await resolveIntroWindowForStory(story, { aspect: videoAspect })
+    : null;
 
   // User-submitted stories carry no Reddit source; instead we attribute them to
   // the submitter, linking to their public contributor profile (unless they've
@@ -245,6 +274,21 @@ export default async function StoryReader({
     ? await resolveFollowUp(story.id, story.category)
     : null;
 
+  // Article (+ VideoObject when a short exists) JSON-LD — what makes the
+  // shorts eligible for video rich results and gives AI answer engines
+  // structured facts. noindex stories get none: no point feeding engines
+  // a page they are told not to index.
+  // Plan: _plans/2026-07-05-seo-structured-data.md.
+  const seo = await getSiteSeo();
+  const jsonLdBlocks =
+    story.noindex === 1
+      ? []
+      : buildStoryJsonLd({
+          story,
+          canonicalUrl: `${resolveSiteOrigin(seo.siteUrl)}/v/${story.slug}`,
+          siteName: seo.siteName,
+        });
+
   console.info("[story reader] render", {
     id: story.id,
     slug: story.slug,
@@ -254,6 +298,8 @@ export default async function StoryReader({
     bodyLen: story.body?.length ?? 0,
     has_poll: hasLivePoll,
     poll_already_voted: Boolean(initialVotedSide),
+    intro_window: introWindow,
+    jsonld_blocks: jsonLdBlocks.length,
   });
 
   // Body is plain text from the Reddit pipeline; render as paragraphs so
@@ -263,13 +309,35 @@ export default async function StoryReader({
     .map((p) => p.trim())
     .filter(Boolean);
 
+  const publishedDate = formatPublishDate(story.published_at);
+
   return (
     <main className="mx-auto max-w-[760px] px-5 py-10">
       <article className="space-y-6">
+        {/* JSON-LD lives next to the article so view-source confirms the
+            markup — same placement the article reader uses. */}
+        {jsonLdBlocks.length > 0 && (
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{
+              __html: serializeJsonLd(jsonLdBlocks),
+            }}
+          />
+        )}
+
         <header className="space-y-3">
-          {story.category && (
-            <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-muted">
-              {story.category}
+          {(story.category || publishedDate) && (
+            <p className="flex flex-wrap items-center gap-2 font-mono text-[11px] uppercase tracking-[0.2em] text-muted">
+              {story.category && <span>{story.category}</span>}
+              {story.category && publishedDate && <span>·</span>}
+              {/* Visible publish date: E-E-A-T signal that matches the
+                  datePublished in the JSON-LD, so the page and the
+                  schema agree. */}
+              {publishedDate && (
+                <time dateTime={story.published_at ?? undefined}>
+                  Published {publishedDate}
+                </time>
+              )}
             </p>
           )}
           <h1 className="font-display text-[34px] font-extrabold leading-tight tracking-tightest text-ink">
@@ -283,18 +351,13 @@ export default async function StoryReader({
         </header>
 
         {story.video_url ? (
-          <div className="overflow-hidden rounded-2xl border border-line bg-bg">
-            {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-            <video
-              src={story.video_url}
-              controls
-              playsInline
-              preload="metadata"
-              poster={story.hero_image ?? undefined}
-              className="block w-full"
-              style={{ aspectRatio: videoCssRatio }}
-            />
-          </div>
+          <StoryVideo
+            storyId={story.id}
+            src={story.video_url}
+            poster={story.hero_image}
+            cssRatio={videoCssRatio}
+            introWindow={introWindow}
+          />
         ) : story.hero_image ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img

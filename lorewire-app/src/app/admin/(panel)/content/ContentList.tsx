@@ -14,27 +14,46 @@
 // Plan: _plans/2026-06-19-content-bulk-actions.md.
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+  type CSSProperties,
+} from "react";
 import {
   bulkCompleteAndPublishAction,
+  bulkFullPipelineAction,
   bulkPublishToSocialsAction,
+  bulkReclassifyContentAction,
   bulkRefreshAssetsAction,
+  bulkStopRunsAction,
   bulkUpdateContentAction,
+  bulkUpdateContentByFilterAction,
   bulkDeleteContentAction,
-  bulkReclassifyStoriesAction,
   bulkRegenerateContentAction,
+  bulkRegenerateTitlesAction,
+  bulkRestartPipelineForceAction,
+  type BulkActionFailure,
   type BulkActionResult,
   type BulkCompleteAndPublishOutcome,
   type BulkCompleteAndPublishResult,
   type BulkContentItem,
+  type BulkFullPipelineOutcome,
+  type BulkFullPipelineResult,
   type BulkPublishResult,
+  type BulkReclassifyOutcome,
+  type BulkReclassifyResult,
   type BulkRefreshAssetsOutcome,
   type BulkRefreshAssetsResult,
   type BulkRegenResult,
   type BulkRegenTarget,
+  type BulkRegenTitlesOutcome,
+  type BulkRegenTitlesResult,
+  type BulkStopRunsResult,
   type BulkUpdateOp,
-  type ReclassifyResult,
 } from "@/app/admin/actions";
 import {
   ARTICLE_LANGUAGE_LABELS,
@@ -42,14 +61,33 @@ import {
   articleDirection,
 } from "@/lib/articles";
 import type {
+  ContentPageOpts,
   ContentRow,
   ContentSubKind,
   ProgressSnapshot,
   PublishedOn,
   SocialPlatform,
 } from "@/lib/repo";
-import { CATEGORIES, STATUSES, statusClass } from "@/app/admin/ui";
-import { matchesContentSearch } from "@/lib/content-search";
+import { STATUSES, statusClass } from "@/app/admin/ui";
+import { useContentData } from "./useContentData";
+import { AutoRefresh } from "./AutoRefresh";
+import {
+  MAX_BULK_DESTRUCTIVE_ITEMS,
+  MAX_BULK_PAID_ITEMS,
+  SPEND_CONFIRM_THRESHOLD_USD,
+  estimateRegenCostUsd,
+} from "@/lib/bulk-safety";
+import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
+
+/** Active category options for the row chip + the bulk picker. Fetched
+ *  from the `categories` table by the server page (the 2026-07-01 data-
+ *  driven taxonomy) and passed down — the old hardcoded six-item manifest
+ *  no longer matches what the classifier writes. */
+export interface CategoryOption {
+  label: string;
+  /** Hex like "#C06234", or null for rows seeded without a color. */
+  color: string | null;
+}
 
 const SUBKIND_LABELS: Record<ContentSubKind, string> = {
   video: "Video story",
@@ -73,26 +111,21 @@ function statusesFor(kinds: { stories: number; articles: number }): readonly str
 
 const UNDO_TIMEOUT_MS = 10_000;
 
-// Per-category chip tint, matched to the --color-cat-* design tokens.
-// Explicit strings (not dynamic Tailwind class generation) so the purge
-// step keeps the classes in the production bundle. Same mapping the
-// CategoryChipGroup in the story editor uses — keeping the two surfaces
-// visually consistent.
-type CategoryName = (typeof CATEGORIES)[number];
-const CATEGORY_CHIP_CLASS: Record<CategoryName, string> = {
-  Drama: "border-cat-drama/40 bg-cat-drama/15 text-cat-drama",
-  Entitled: "border-cat-entitled/40 bg-cat-entitled/15 text-cat-entitled",
-  Humor: "border-cat-humor/40 bg-cat-humor/15 text-cat-humor",
-  Wholesome: "border-cat-wholesome/40 bg-cat-wholesome/15 text-cat-wholesome",
-  Dating: "border-cat-dating/40 bg-cat-dating/15 text-cat-dating",
-  Roommate: "border-cat-roommate/40 bg-cat-roommate/15 text-cat-roommate",
-};
-function categoryChipClass(category: string | null | undefined): string {
-  if (!category) return "border-line bg-bg text-muted";
-  return (
-    CATEGORY_CHIP_CLASS[category as CategoryName] ??
-    "border-line bg-bg text-muted"
-  );
+// Per-category chip tint. Categories are DB rows now (admin-editable
+// hex per row), so the tint is an inline style derived from the hex —
+// static Tailwind classes can't exist for runtime-created categories
+// (they'd be purged at build). "66"/"26" are the 40%/15% alpha suffixes
+// the old --color-cat-* classes used.
+const CATEGORY_CHIP_FALLBACK_CLASS = "border-line bg-bg text-muted";
+function categoryChipStyle(
+  color: string | null | undefined,
+): CSSProperties | undefined {
+  if (!color) return undefined;
+  return {
+    borderColor: `${color}66`,
+    backgroundColor: `${color}26`,
+    color,
+  };
 }
 
 // 2026-06-24 latest pipeline-job state per row. Explicit class strings (no
@@ -131,6 +164,11 @@ interface ConfirmState {
   items: BulkContentItem[];
   op: BulkUpdateOp | { type: "delete" };
   destructive: boolean;
+  /** Select-all-matching: run the op against every row matching the current
+   *  filter (server-resolved), not just `items`. `matchingTotal` is the count
+   *  shown in the confirm. Cheap status / category ops only. */
+  byFilter?: boolean;
+  matchingTotal?: number;
 }
 
 function rowKey(kind: Kind, id: string): string {
@@ -171,6 +209,8 @@ function describeReason(reason: string): string {
       return "pipeline already running for this story";
     case "reddit-source-locked":
       return "reddit source is used or skipped — pipeline cannot re-run";
+    case "reddit-source-skipped":
+      return "you skipped this source — hit Re-run anyway to override";
     case "not-enqueued":
       return "could not enqueue (no matching reddit source)";
     default:
@@ -236,11 +276,17 @@ const REGEN_TARGET_META: Record<
     perStoryHint: "~1 i2i call per story",
     body: "Queues a hero re-render per story. Each story passes through the daily image-budget gate, so spend pauses once today's cap is reached.",
   },
+  hero_thumbnail: {
+    label: "Hero + thumbnails (from short)",
+    verb: "Regenerate hero + thumbnails",
+    perStoryHint: "5 i2i calls per story (~$0.25)",
+    body: "Rebuilds the full poster set per story from the short's character + a picker-chosen scene: the clean hero (portrait + landscape) AND the three title-baked thumbnails. Use this when the hero and the card thumbnail stopped matching. Each story passes through the daily image-budget gate.",
+  },
   scenes: {
-    label: "All scene images",
+    label: "Scene images (article illustrations)",
     verb: "Regenerate all scene images",
     perStoryHint: "~30 i2i calls per story (varies by duration)",
-    body: "Queues a per-scene rebuild for each story. Largest bulk op. Each story passes through the daily image-budget gate.",
+    body: "Queues a per-scene rebuild for each story's stories.images set — the inline article illustrations. Largest bulk op. Each story passes through the daily image-budget gate.",
   },
   voice: {
     label: "Voiceover",
@@ -250,25 +296,41 @@ const REGEN_TARGET_META: Record<
     body: "Queues a TTS re-synthesis per story using each story's voice override (provider + voice id). Already-in-flight stories are skipped, not double-charged.",
   },
   pipeline: {
-    label: "Restart entire pipeline",
+    label: "Restart entire pipeline (article + media)",
     verb: "Restart the entire pipeline",
     perStoryHint: "≈ $0.50 per story (LLM + TTS + images + assembly)",
-    body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Only stories with a reddit_source can be re-run; pre-pipeline manual seeds are skipped.",
+    body: "Re-runs the Python story_jobs pipeline from script onward. Replaces script, voice, scenes, hero, short, article. Already-shipped stories re-run too — they drop off the public site while they rewrite (~30-60s) and reappear when done. Sources you previously skipped are left alone; use Re-run anyway on those. Pre-pipeline manual seeds (no reddit source) can't be re-run this way.",
   },
   // 2026-06-28 short re-render target. Re-runs the full shorts pipeline so
   // the LLM is called against the CURRENT shorts_narration prompt — the only
-  // way the latest brand-voice rules (clarity bar + POV + hook charge) reach
+  // way the latest rules (hook-first structure + clarity bar + POV) reach
   // an existing short's script. See _plans/2026-06-28-bulk-regen-shorts.md.
   short: {
-    label: "Short video (to latest voice)",
+    label: "Short video (hook-first rebuild)",
     verb: "Regenerate short video",
     perStoryHint: "≈ $1.13 per story (LLM + ~22 images + voice + render)",
-    body: "Re-runs the full short pipeline using the current brand voice rules: fresh script (third-person narrator, hook names the loss directly), fresh scene art, fresh narration, fresh MP4. Replaces the existing MP4 when done. In-flight renders are skipped.",
+    body: "Re-runs the full short pipeline on the current hook-first flow — hook first, then intro, story, outro — with the locked brand voice rules: fresh script (third-person narrator, hook names the loss directly), fresh scene art, fresh narration, fresh MP4. Replaces the existing MP4 when done. Hero + thumbnails are NOT touched — pick Restart short + hero + thumbnails for that. In-flight renders are skipped.",
   },
 };
 
-export function ContentList({ rows }: { rows: ContentRow[] }) {
+// The Regenerate menu also offers the refresh-assets chain (voice → short →
+// hero + 5 thumbnails, /api/refresh_assets cron) under a name that says what
+// it does. It is not a BulkRegenTarget — the picker routes it to the
+// existing bulk Refresh assets flow, which has its own confirm + banner.
+const RESTART_SHORT_MENU_VALUE = "restart-short-everything";
+
+export function ContentList({
+  pageOpts,
+  categories,
+}: {
+  pageOpts: ContentPageOpts;
+  categories: CategoryOption[];
+}) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const { rows, total, loading, loadingMore, reachedEnd, loadMore, refresh } =
+    useContentData(pageOpts);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
@@ -276,16 +338,23 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   const [failures, setFailures] = useState<
     { kind: Kind; id: string; reason: string }[]
   >([]);
+  // 2026-07-15 danger-cap notice. Set when a destructive / paid bulk action is
+  // attempted on more rows than @/lib/bulk-safety allows, so the operator gets
+  // a plain message instead of a raw server "exceeds N items" error. The server
+  // enforces the same caps regardless. Plan:
+  // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  const [dangerNotice, setDangerNotice] = useState<string | null>(null);
+  // 2026-07-15 select-all-matching. When the whole loaded page is ticked and
+  // more rows match the filter, the operator can extend a CHEAP status /
+  // category op to all matching rows (server-resolved). Only meaningful while
+  // every loaded row is selected — `matchingMode` below gates on that.
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
   const [undo, setUndo] = useState<UndoState | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [query, setQuery] = useState("");
-  // 2026-06-21 reclassify result banner. Null = no banner; the banner
-  // renders the last LLM-classify run's counts and a button to clear it.
-  // Plan: _plans/2026-06-21-category-classifier-and-pills.md.
-  const [reclassifyResult, setReclassifyResult] = useState<
-    ReclassifyResult | null
-  >(null);
-  const [reclassifyConfirmOpen, setReclassifyConfirmOpen] = useState(false);
+  // Search box value. Local state for typing responsiveness; a debounced effect
+  // pushes it to the URL (?q=), which re-derives pageOpts and refetches page 1
+  // server-side. Initialised from the URL so a shared / refreshed link keeps it.
+  const [searchInput, setSearchInput] = useState(pageOpts.q ?? "");
   // 2026-06-24 bulk regen. `regenConfirm` opens the cost modal; `regenResult`
   // surfaces the post-run "queued N, failed M" banner so the operator sees
   // exactly what landed without scrolling to per-story render lines.
@@ -322,6 +391,43 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   >(null);
   const [refreshResult, setRefreshResult] =
     useState<BulkRefreshAssetsResult | null>(null);
+  // 2026-07-02 bulk full pipeline & publish. Same confirm/result pattern
+  // as the other bulk flows. Plan:
+  // _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
+  const [fullPipelineConfirm, setFullPipelineConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [fullPipelineResult, setFullPipelineResult] =
+    useState<BulkFullPipelineResult | null>(null);
+  // 2026-07-03 STOP RUNS: cancel everything in flight for the selected
+  // rows. Result banner shows per-kind cancel counts. Plan:
+  // _plans/2026-07-03-unified-live-runs-and-stop.md.
+  const [stopRunsResult, setStopRunsResult] =
+    useState<BulkStopRunsResult | null>(null);
+  // 2026-07-05 bulk AI reclassify: re-run the multi-tag classifier on the
+  // selection. Same confirm/result pattern as the other bulk flows. Plan:
+  // _plans/2026-07-05-bulk-ai-reclassify.md.
+  const [reclassifyConfirm, setReclassifyConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [reclassifyResult, setReclassifyResult] =
+    useState<BulkReclassifyResult | null>(null);
+  // 2026-07-15 bulk "Regenerate titles": rewrite too-long story titles with
+  // the branded prompt. Pairs with the "Title: Too long" filter. Same
+  // confirm/result pattern as reclassify (per-story synchronous LLM). Plan:
+  // _plans/2026-07-15-too-long-title-filter-and-bulk-fix.md.
+  const [titleRegenConfirm, setTitleRegenConfirm] = useState<
+    BulkContentItem[] | null
+  >(null);
+  const [titleRegenResult, setTitleRegenResult] =
+    useState<BulkRegenTitlesResult | null>(null);
+  // label → color hex for the row chips; misses (legacy / unclassified
+  // labels) fall back to the muted chip class.
+  const categoryColorByLabel = useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const c of categories) m.set(c.label, c.color);
+    return m;
+  }, [categories]);
 
   // Cancel any pending undo timer when the component unmounts so a navigation
   // away doesn't leak a stale setState.
@@ -331,25 +437,35 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     };
   }, []);
 
+  // Debounce the search box into the URL (?q=). router.replace keeps history
+  // clean; page.tsx reads ?q= back into pageOpts and useContentData refetches
+  // page 1 from the server. The no-op guard stops a URL echo (pageOpts.q ===
+  // searchInput after navigation) from re-pushing.
+  useEffect(() => {
+    if (searchInput === (pageOpts.q ?? "")) return;
+    const t = setTimeout(() => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (searchInput.trim()) params.set("q", searchInput.trim());
+      else params.delete("q");
+      const qs = params.toString();
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput, pageOpts.q, searchParams, pathname, router]);
+
   const rowByKey = useMemo(() => {
     const m = new Map<string, ContentRow>();
     for (const r of rows) m.set(rowKey(r.kind, r.id), r);
     return m;
   }, [rows]);
 
-  // The search bar narrows the visible row set in place. The full `rows`
-  // array still drives rowByKey so a row that's selected and then hidden
-  // by the query stays in `selected` — clearing the query restores it.
-  const filteredRows = useMemo(() => {
-    if (!query.trim()) return rows;
-    return rows.filter((r) => matchesContentSearch(r, query));
-  }, [rows, query]);
-
-  const filteredKeySet = useMemo(() => {
+  // Search + filtering are server-side now, so the loaded set IS the visible
+  // set. This keyset drives select-all-loaded.
+  const loadedKeySet = useMemo(() => {
     const s = new Set<string>();
-    for (const r of filteredRows) s.add(rowKey(r.kind, r.id));
+    for (const r of rows) s.add(rowKey(r.kind, r.id));
     return s;
-  }, [filteredRows]);
+  }, [rows]);
 
   // selectedItems is the source of truth for "what's actually actionable".
   // Stale keys (selected rows that vanished after a filter change or a
@@ -377,16 +493,25 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   }, [selectedItems]);
 
   const anySelected = counts.total > 0;
-  // Header checkbox tracks the *visible* set (rows after the search filter).
-  // This matches the lazy-user expectation: type to narrow, click select-all,
-  // get exactly the rows you can see.
-  const allFilteredSelected = useMemo(() => {
-    if (filteredRows.length === 0) return false;
-    for (const key of filteredKeySet) {
+  // Header checkbox tracks the loaded set (server search/filters already
+  // narrowed it). Select-all ticks every row loaded so far; Load more brings in
+  // more rows the operator can then tick.
+  const allLoadedSelected = useMemo(() => {
+    if (rows.length === 0) return false;
+    for (const key of loadedKeySet) {
       if (!selected.has(key)) return false;
     }
     return true;
-  }, [filteredRows, filteredKeySet, selected]);
+  }, [rows, loadedKeySet, selected]);
+
+  // Effective select-all-matching: armed, the whole loaded page ticked, and
+  // more rows actually match. Un-ticking a row, changing the filter (new rows
+  // aren't ticked), or clearing all collapses it automatically.
+  const matchingMode =
+    selectAllMatching &&
+    allLoadedSelected &&
+    total != null &&
+    total > rows.length;
 
   function toggleOne(kind: Kind, id: string) {
     setSelected((prev) => {
@@ -402,12 +527,10 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   function toggleAll() {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (allFilteredSelected) {
-        // Deselect the visible set; rows hidden by the search query stay
-        // selected so they are not silently dropped.
-        for (const key of filteredKeySet) next.delete(key);
+      if (allLoadedSelected) {
+        for (const key of loadedKeySet) next.delete(key);
       } else {
-        for (const key of filteredKeySet) next.add(key);
+        for (const key of loadedKeySet) next.add(key);
       }
       console.info("[content list selection]", { count: next.size });
       return next;
@@ -416,17 +539,41 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
 
   function clearSelection() {
     setSelected(new Set());
+    setSelectAllMatching(false);
   }
 
   // Open the confirm modal with the chosen action. Per-row actions reuse this
   // by passing a one-item array, so there's exactly one execution path.
+  // Block a destructive / paid bulk action that exceeds its server cap — with a
+  // clear message, before any confirm opens or the server is called. Returns
+  // true when blocked. Clears the notice when within cap. Mirrors the caps in
+  // @/lib/bulk-safety, which the server enforces regardless (defense in depth).
+  function overDangerCap(count: number, cap: number, verb: string): boolean {
+    if (count <= cap) {
+      setDangerNotice(null);
+      return false;
+    }
+    setDangerNotice(
+      `${verb} runs on at most ${cap} at a time — you have ${count} selected. Narrow the selection, then try again.`,
+    );
+    return true;
+  }
+
   function requestAction(
     items: BulkContentItem[],
     op: BulkUpdateOp | { type: "delete" },
+    byFilter = false,
   ) {
     if (items.length === 0) return;
+    if (
+      op.type === "delete" &&
+      overDangerCap(items.length, MAX_BULK_DESTRUCTIVE_ITEMS, "Delete")
+    ) {
+      return;
+    }
     setTypedConfirm("");
     setFailures([]);
+    setDangerNotice(null);
     const verb =
       op.type === "delete"
         ? "Delete"
@@ -437,7 +584,14 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
               ? "Unpublish"
               : `Set status to "${op.status}"`
           : `Set category to "${op.category}"`;
-    setConfirm({ verb, items, op, destructive: op.type === "delete" });
+    setConfirm({
+      verb,
+      items,
+      op,
+      destructive: op.type === "delete",
+      byFilter,
+      matchingTotal: byFilter ? (total ?? items.length) : undefined,
+    });
   }
 
   function clearUndo() {
@@ -493,7 +647,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
 
   function runConfirmed() {
     if (!confirm) return;
-    const { items, op } = confirm;
+    const { items, op, byFilter } = confirm;
     console.info("[content list bulk submit]", {
       type: op.type,
       count: items.length,
@@ -503,6 +657,10 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
       try {
         if (op.type === "delete") {
           result = await bulkDeleteContentAction(items);
+        } else if (byFilter) {
+          // Select-all-matching: apply to every row matching the filter,
+          // server-resolved. Cheap ops only (paid/destructive never set this).
+          result = await bulkUpdateContentByFilterAction(pageOpts, op);
         } else {
           result = await bulkUpdateContentAction(items, op);
         }
@@ -519,25 +677,15 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
       }
       setFailures(result.failed);
       setConfirm(null);
-      if (op.type !== "delete" && result.ok.length > 0) {
+      // Undo replays through the per-id action (capped) — skip it for a
+      // by-filter run that could span far more rows than that.
+      if (op.type !== "delete" && !byFilter && result.ok.length > 0) {
         scheduleUndo(op, result.prev);
       }
       clearSelection();
       router.refresh();
     });
   }
-
-  // 2026-06-21: count the rows currently visible that are eligible for the
-  // LLM reclassify backfill (NULL or "Drama" categories). Used to label
-  // the button and the confirm dialog with a concrete number.
-  const reclassifyEligibleCount = useMemo(() => {
-    let n = 0;
-    for (const r of rows) {
-      if (r.kind !== "story") continue;
-      if (r.badge === null || r.badge === "Drama") n += 1;
-    }
-    return n;
-  }, [rows]);
 
   // 2026-06-28: rows eligible for the "Regenerate all published shorts"
   // one-click — published stories. ContentRow doesn't carry video_url, so
@@ -557,6 +705,8 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     // side keeps the modal's "0 articles will be skipped" copy honest.
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Regenerate"))
+      return;
     console.info("[content list regen request]", {
       target,
       count: storyItems.length,
@@ -573,26 +723,87 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
       count: items.length,
     });
     startTransition(async () => {
-      let result: BulkRegenResult;
-      try {
-        result = await bulkRegenerateContentAction(items, target);
-      } catch (err) {
-        result = {
-          target,
-          ok: [],
-          failed: items.map((it) => ({
-            ...it,
-            reason: err instanceof Error ? err.message : String(err),
-          })),
-        };
+      // Fire in batches of MAX_BULK_PAID_ITEMS so each server call stays under
+      // the paid cap while the sanctioned "Regenerate ALL published shorts"
+      // rebuild (which can far exceed it) still runs from one click + the
+      // cost/typed-count confirm. Sequential, not parallel: the server's
+      // per-story image-budget gate needs to see the running total, the same
+      // reason the action loop itself is sequential. Post-pagination
+      // "rebuild thousands" should graduate to an async job (Phase 1).
+      const result: BulkRegenResult = { target, ok: [], failed: [] };
+      for (let i = 0; i < items.length; i += MAX_BULK_PAID_ITEMS) {
+        const batch = items.slice(i, i + MAX_BULK_PAID_ITEMS);
+        try {
+          const r = await bulkRegenerateContentAction(batch, target);
+          result.ok.push(...r.ok);
+          result.failed.push(...r.failed);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          for (const it of batch) result.failed.push({ ...it, reason });
+        }
       }
       console.info("[content list regen result]", {
         target,
         ok: result.ok.length,
         failed: result.failed.length,
+        batches: Math.ceil(items.length / MAX_BULK_PAID_ITEMS),
       });
       setRegenConfirm(null);
       setRegenResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
+  // 2026-07-19 "Re-run anyway" — the override behind a reddit-source-skipped
+  // failure in the pipeline restart banner. Un-skips + re-enqueues exactly the
+  // refused rows through the force action, then replaces the banner with the
+  // fresh result so the operator sees whether the override took.
+  function runRestartForce(failedItems: BulkActionFailure[]) {
+    const items: BulkContentItem[] = failedItems.map((f) => ({
+      kind: f.kind,
+      id: f.id,
+    }));
+    if (items.length === 0) return;
+    console.info("[content list restart-force request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      const result = await bulkRestartPipelineForceAction(items);
+      console.info("[content list restart-force result]", {
+        ok: result.ok.length,
+        failed: result.failed.length,
+      });
+      setRegenResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
+  // 2026-07-03 STOP RUNS. window.confirm (not the typed-confirm modal)
+  // because stopping is recoverable — anything cancelled can simply be
+  // re-queued; the copy still says spend already incurred is gone.
+  function runStopRuns() {
+    if (selectedItems.length === 0) return;
+    const ok = window.confirm(
+      `Stop all runs for ${selectedItems.length} selected item${selectedItems.length === 1 ? "" : "s"}?\n\n` +
+        "Queued and in-flight work settles as cancelled: image renders, voiceovers, shorts, pipeline jobs, pending hero+thumbnail finishers, and refresh chains. Spend already incurred is non-refundable.",
+    );
+    if (!ok) return;
+    console.info("[content list stop-runs request]", {
+      count: selectedItems.length,
+    });
+    setStopRunsResult(null);
+    startTransition(async () => {
+      try {
+        const result = await bulkStopRunsAction(selectedItems);
+        console.info("[content list stop-runs result]", result.counts);
+        setStopRunsResult(result);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error("[content list stop-runs failed]", { error: reason });
+        setFailures([{ ...selectedItems[0], reason }]);
+      }
       clearSelection();
       router.refresh();
     });
@@ -604,6 +815,10 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     // otherwise land in the skipped bucket with N platforms each.
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0 || platforms.length === 0) return;
+    if (
+      overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Publish to socials")
+    )
+      return;
     console.info("[content list bulk-publish request]", {
       count: storyItems.length,
       platforms,
@@ -642,6 +857,8 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   function requestComplete() {
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Complete & publish"))
+      return;
     setCompleteResult(null);
     setCompleteConfirm(storyItems);
   }
@@ -686,6 +903,8 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
   function requestRefresh() {
     const storyItems = selectedItems.filter((i) => i.kind === "story");
     if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Refresh assets"))
+      return;
     setRefreshResult(null);
     setRefreshConfirm(storyItems);
   }
@@ -727,38 +946,137 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
     });
   }
 
-  function runReclassify() {
-    console.info("[content list reclassify submit]");
-    setReclassifyConfirmOpen(false);
+  function requestFullPipeline() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Full pipeline"))
+      return;
+    setFullPipelineResult(null);
+    setFullPipelineConfirm(storyItems);
+  }
+
+  function runFullPipelineConfirmed() {
+    if (!fullPipelineConfirm) return;
+    const items = fullPipelineConfirm;
+    console.info("[content list full-pipeline request]", {
+      count: items.length,
+    });
     startTransition(async () => {
+      let result: BulkFullPipelineResult;
       try {
-        const result = await bulkReclassifyStoriesAction();
-        console.info("[content list reclassify result]", {
-          scanned: result.scanned,
-          reclassified: result.reclassified,
-          unchanged: result.unchanged,
-          failed: result.failed.length,
-        });
-        setReclassifyResult(result);
-        router.refresh();
+        result = await bulkFullPipelineAction(items);
       } catch (err) {
-        console.error("[content list reclassify failed]", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        setReclassifyResult({
-          scanned: 0,
-          reclassified: 0,
-          unchanged: 0,
-          failed: [
-            {
-              id: "—",
-              title: "—",
-              reason: err instanceof Error ? err.message : String(err),
-            },
-          ],
-          changes: [],
-        });
+        result = {
+          startedCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
       }
+      console.info("[content list full-pipeline result]", {
+        startedCount: result.startedCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setFullPipelineConfirm(null);
+      setFullPipelineResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
+  function requestReclassify() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    setReclassifyResult(null);
+    setReclassifyConfirm(storyItems);
+  }
+
+  function runReclassifyConfirmed() {
+    if (!reclassifyConfirm) return;
+    const items = reclassifyConfirm;
+    console.info("[content list reclassify-ai request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkReclassifyResult;
+      try {
+        result = await bulkReclassifyContentAction(items);
+      } catch (err) {
+        result = {
+          retaggedCount: 0,
+          unchangedCount: 0,
+          needsReviewCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list reclassify-ai result]", {
+        retaggedCount: result.retaggedCount,
+        unchangedCount: result.unchangedCount,
+        needsReviewCount: result.needsReviewCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setReclassifyConfirm(null);
+      setReclassifyResult(result);
+      clearSelection();
+      router.refresh();
+    });
+  }
+
+  function requestTitleRegen() {
+    const storyItems = selectedItems.filter((i) => i.kind === "story");
+    if (storyItems.length === 0) return;
+    if (overDangerCap(storyItems.length, MAX_BULK_PAID_ITEMS, "Regenerate titles"))
+      return;
+    setTitleRegenResult(null);
+    setTitleRegenConfirm(storyItems);
+  }
+
+  function runTitleRegenConfirmed() {
+    if (!titleRegenConfirm) return;
+    const items = titleRegenConfirm;
+    console.info("[content list title-regen request]", {
+      count: items.length,
+    });
+    startTransition(async () => {
+      let result: BulkRegenTitlesResult;
+      try {
+        result = await bulkRegenerateTitlesAction(items);
+      } catch (err) {
+        result = {
+          regeneratedCount: 0,
+          skippedCount: 0,
+          erroredCount: items.length,
+          outcomes: items.map((it) => ({
+            kind: it.kind,
+            id: it.id,
+            state: "errored" as const,
+            reason: err instanceof Error ? err.message : String(err),
+          })),
+        };
+      }
+      console.info("[content list title-regen result]", {
+        regeneratedCount: result.regeneratedCount,
+        skippedCount: result.skippedCount,
+        erroredCount: result.erroredCount,
+      });
+      setTitleRegenConfirm(null);
+      setTitleRegenResult(result);
+      clearSelection();
+      router.refresh();
     });
   }
 
@@ -793,6 +1111,20 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         </div>
       )}
 
+      {dangerNotice && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-warn/40 bg-warn/10 px-4 py-2 font-mono text-[11px] text-ink">
+          <span>{dangerNotice}</span>
+          <button
+            type="button"
+            onClick={() => setDangerNotice(null)}
+            className="text-muted transition-colors hover:text-ink"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {failures.length > 0 && (
         <ul className="space-y-1 rounded-xl border border-danger/40 bg-danger/10 p-3 font-mono text-[11px] text-danger">
           {failures.map((f, i) => {
@@ -808,17 +1140,12 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         </ul>
       )}
 
-      {reclassifyResult && (
-        <ReclassifyResultBanner
-          result={reclassifyResult}
-          onDismiss={() => setReclassifyResult(null)}
-        />
-      )}
-
       {regenResult && (
         <RegenResultBanner
           result={regenResult}
           rowByKey={rowByKey}
+          pending={pending}
+          onRerunSkipped={runRestartForce}
           onDismiss={() => setRegenResult(null)}
         />
       )}
@@ -847,12 +1174,43 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         />
       )}
 
+      {fullPipelineResult && (
+        <FullPipelineResultBanner
+          result={fullPipelineResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setFullPipelineResult(null)}
+        />
+      )}
+
+      {stopRunsResult && (
+        <StopRunsResultBanner
+          result={stopRunsResult}
+          onDismiss={() => setStopRunsResult(null)}
+        />
+      )}
+
+      {reclassifyResult && (
+        <ReclassifyResultBanner
+          result={reclassifyResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setReclassifyResult(null)}
+        />
+      )}
+
+      {titleRegenResult && (
+        <TitleRegenResultBanner
+          result={titleRegenResult}
+          rowByKey={rowByKey}
+          onDismiss={() => setTitleRegenResult(null)}
+        />
+      )}
+
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-2">
         <span className="font-mono text-[11px] text-muted">
-          <span className="text-ink">{publishedShortsItems.length}</span> publish
-          {publishedShortsItems.length === 1 ? "ed story" : "ed stories"} on the
-          latest voice rules?
-          {publishedShortsItems.length === 0 ? " Nothing to refresh." : ""}
+          Rebuild <span className="text-ink">{publishedShortsItems.length}</span>{" "}
+          published {publishedShortsItems.length === 1 ? "short" : "shorts"} on
+          the current hook-first flow (hook → intro → story → outro)?
+          {publishedShortsItems.length === 0 ? " Nothing to rebuild." : ""}
         </span>
         <button
           type="button"
@@ -867,7 +1225,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
             setRegenConfirm({ target: "short", items: publishedShortsItems });
           }}
           disabled={pending || publishedShortsItems.length === 0}
-          title="Re-render every published story's short using the current brand voice rules (third-person narrator, hook names the loss directly). Cost is surfaced before commit."
+          title="Re-render every published story's short on the current hook-first flow (hook → intro → story → outro) with the locked brand voice rules. Cost is surfaced before commit."
           className="rounded-md border border-accent/50 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-40"
         >
           {pending
@@ -876,46 +1234,19 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-2">
-        <span className="font-mono text-[11px] text-muted">
-          <span className="text-ink">{reclassifyEligibleCount}</span> stor
-          {reclassifyEligibleCount === 1 ? "y" : "ies"} tagged Drama or
-          uncategorized.
-          {reclassifyEligibleCount === 0 ? " Backlog is clean." : ""}
-        </span>
-        <button
-          type="button"
-          onClick={() => setReclassifyConfirmOpen(true)}
-          disabled={pending || reclassifyEligibleCount === 0}
-          title="Run the LLM classifier on every story tagged Drama or uncategorized. Manually-set non-Drama categories are not touched."
-          className="rounded-md border border-accent/50 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-accent transition-colors hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {pending ? "Working…" : "Reclassify Drama + uncategorized"}
-        </button>
-      </div>
-
-      {reclassifyConfirmOpen && (
-        <ReclassifyConfirmModal
-          eligibleCount={reclassifyEligibleCount}
-          pending={pending}
-          onCancel={() => setReclassifyConfirmOpen(false)}
-          onRun={runReclassify}
-        />
-      )}
-
       <div className="relative">
         <input
           type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
           placeholder="Search title, slug, category, status, id…"
           aria-label="Search content"
           className="w-full rounded-xl border border-line bg-surface px-4 py-2 pr-9 text-[13px] text-ink placeholder:text-muted focus:border-accent focus:outline-none"
         />
-        {query && (
+        {searchInput && (
           <button
             type="button"
-            onClick={() => setQuery("")}
+            onClick={() => setSearchInput("")}
             aria-label="Clear search"
             className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md px-2 py-0.5 font-mono text-[12px] text-muted transition-colors hover:text-ink"
           >
@@ -925,37 +1256,45 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
       </div>
 
       <div className="overflow-hidden rounded-xl border border-line">
-        {rows.length === 0 ? (
+        {loading && rows.length === 0 ? (
           <p className="bg-surface p-6 text-center text-[14px] text-muted">
-            No content matches this filter.
+            Loading…
           </p>
-        ) : filteredRows.length === 0 ? (
+        ) : rows.length === 0 ? (
           <p className="bg-surface p-6 text-center text-[14px] text-muted">
-            No content matches{" "}
-            <span className="font-mono text-ink">&ldquo;{query.trim()}&rdquo;</span>
-            .
+            {searchInput.trim() ? (
+              <>
+                No content matches{" "}
+                <span className="font-mono text-ink">
+                  &ldquo;{searchInput.trim()}&rdquo;
+                </span>
+                .
+              </>
+            ) : (
+              "No content matches these filters."
+            )}
           </p>
         ) : (
           <>
             <div className="flex items-center gap-3 border-b border-line bg-surface2 px-4 py-2 font-mono text-[10px] uppercase tracking-wider text-muted">
               <input
                 type="checkbox"
-                checked={allFilteredSelected}
+                checked={allLoadedSelected}
                 onChange={toggleAll}
                 aria-label={
-                  allFilteredSelected ? "Clear selection" : "Select all"
+                  allLoadedSelected ? "Clear selection" : "Select all"
                 }
                 className="h-3.5 w-3.5 cursor-pointer accent-accent"
               />
               <span>
                 {anySelected
                   ? `${counts.total} selected`
-                  : query.trim()
-                    ? `${filteredRows.length} of ${rows.length} ${rows.length === 1 ? "item" : "items"}`
+                  : total != null && total > rows.length
+                    ? `${rows.length} of ${total} loaded`
                     : `${rows.length} ${rows.length === 1 ? "item" : "items"}`}
               </span>
             </div>
-            {filteredRows.map((r) => {
+            {rows.map((r) => {
               const key = rowKey(r.kind, r.id);
               const isSelected = selected.has(key);
               return (
@@ -1015,6 +1354,8 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   {r.kind === "story" && (
                     <RowCategoryChip
                       currentCategory={r.badge}
+                      categories={categories}
+                      colorByLabel={categoryColorByLabel}
                       disabled={pending}
                       onPick={(category) =>
                         requestAction([{ kind: "story", id: r.id }], {
@@ -1043,6 +1384,11 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   {r.kind === "story" && r.refresh_state && (
                     <RefreshingPill state={r.refresh_state} />
                   )}
+                  {r.kind === "story" &&
+                    r.publish_blockers != null &&
+                    r.publish_blockers.length > 0 && (
+                      <PublishBlockersPill gates={r.publish_blockers} />
+                    )}
                   {r.kind === "story" && r.progress && (
                     <ProgressPill snapshot={r.progress} />
                   )}
@@ -1055,6 +1401,7 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
                   </span>
                   <RowMenu
                     row={r}
+                    categories={categories}
                     disabled={pending}
                     onAction={(op) =>
                       requestAction([{ kind: r.kind, id: r.id }], op)
@@ -1067,15 +1414,87 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
         )}
       </div>
 
+      {rows.length > 0 && !reachedEnd && (
+        <div className="flex justify-center">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="rounded-lg border border-line px-4 py-2 font-mono text-[11px] uppercase tracking-wider text-ink transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {loadingMore
+              ? "Loading…"
+              : total != null
+                ? `Load more (${total - rows.length} more)`
+                : "Load more"}
+          </button>
+        </div>
+      )}
+
+      {/* Live-progress polling only exists while something is rendering. Driven
+          by the pager's in-place refresh(), so it updates the loaded window
+          without resetting the cursor or selection. */}
+      {rows.some((r) => r.progress != null) && (
+        <AutoRefresh onTick={refresh} />
+      )}
+
+      {allLoadedSelected && total != null && total > rows.length && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-accent/40 bg-accent/10 px-4 py-2 font-mono text-[11px] text-ink">
+          {matchingMode ? (
+            <>
+              <span>
+                All <span className="text-accent">{total}</span> matching this
+                filter selected. Cheap status / category changes apply to every
+                one; delete and paid actions still use the {rows.length} loaded.
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectAllMatching(false)}
+                className="rounded-md border border-accent px-2 py-0.5 text-accent transition-colors hover:bg-accent hover:text-bg"
+              >
+                Just these {rows.length}
+              </button>
+            </>
+          ) : (
+            <>
+              <span>
+                All {rows.length} on this page selected.{" "}
+                <span className="text-muted">
+                  {total - rows.length} more match this filter.
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectAllMatching(true)}
+                className="rounded-md border border-accent px-2 py-0.5 text-accent transition-colors hover:bg-accent hover:text-bg"
+              >
+                Select all {total} matching
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {anySelected && (
         <BulkActionBar
           counts={counts}
+          categories={categories}
           disabled={pending}
-          onAction={(op) => requestAction(selectedItems, op)}
+          onAction={(op) =>
+            requestAction(
+              selectedItems,
+              op,
+              matchingMode && op.type !== "delete",
+            )
+          }
           onRegen={requestRegen}
           onBulkPublish={runBulkPublish}
           onBulkComplete={requestComplete}
           onBulkRefresh={requestRefresh}
+          onFullPipeline={requestFullPipeline}
+          onReclassify={requestReclassify}
+          onTitleRegen={requestTitleRegen}
+          onStopRuns={runStopRuns}
           onClear={clearSelection}
         />
       )}
@@ -1122,6 +1541,36 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
           onRun={runRefreshConfirmed}
         />
       )}
+
+      {fullPipelineConfirm && (
+        <FullPipelineConfirmModal
+          items={fullPipelineConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setFullPipelineConfirm(null)}
+          onRun={runFullPipelineConfirmed}
+        />
+      )}
+
+      {reclassifyConfirm && (
+        <ReclassifyConfirmModal
+          items={reclassifyConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setReclassifyConfirm(null)}
+          onRun={runReclassifyConfirmed}
+        />
+      )}
+
+      {titleRegenConfirm && (
+        <TitleRegenConfirmModal
+          items={titleRegenConfirm}
+          rowByKey={rowByKey}
+          pending={pending}
+          onCancel={() => setTitleRegenConfirm(null)}
+          onRun={runTitleRegenConfirmed}
+        />
+      )}
     </>
   );
 }
@@ -1130,31 +1579,44 @@ export function ContentList({ rows }: { rows: ContentRow[] }) {
 
 function BulkActionBar({
   counts,
+  categories,
   disabled,
   onAction,
   onRegen,
   onBulkPublish,
   onBulkComplete,
   onBulkRefresh,
+  onFullPipeline,
+  onReclassify,
+  onTitleRegen,
+  onStopRuns,
   onClear,
 }: {
   counts: { total: number; stories: number; articles: number };
+  categories: CategoryOption[];
   disabled: boolean;
   onAction: (op: BulkUpdateOp | { type: "delete" }) => void;
   onRegen: (target: BulkRegenTarget) => void;
   onBulkPublish: (platforms: SocialPlatform[]) => void;
   onBulkComplete: () => void;
   onBulkRefresh: () => void;
+  onFullPipeline: () => void;
+  onReclassify: () => void;
+  onTitleRegen: () => void;
+  onStopRuns: () => void;
   onClear: () => void;
 }) {
   const categoryDisabled = counts.articles > 0;
+  // AI reclassify only touches stories; mixed selections stay clickable and
+  // the server skips articles, matching the Regenerate menu's semantics.
+  const reclassifyDisabled = counts.stories === 0;
   // Regen targets fan out to story-pipeline primitives — articles are not
   // pipeline citizens, so the menu is dark when the selection is articles-
   // only. Mixed selections light up but the server filters to stories.
   const regenDisabled = counts.stories === 0;
   const bulkPublishDisabled = counts.stories === 0;
   const completeDisabled = counts.stories === 0;
-  const refreshDisabled = counts.stories === 0;
+  const fullPipelineDisabled = counts.stories === 0;
   return (
     <div className="sticky bottom-4 z-10 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface2 px-4 py-3 shadow-2xl">
       <span className="font-mono text-[11px] uppercase tracking-wider text-ink">
@@ -1176,16 +1638,16 @@ function BulkActionBar({
           disabled={disabled || completeDisabled}
           onClick={onBulkComplete}
         />
-        {/* Refresh assets: voice + short + hero + thumbnails regenerated
-            in place. Preserves story_id / URL / SEO / comments. For the
-            case where a story is already published with stale media
-            (old voice, hero not aligned to short character) and
-            "Restart entire pipeline" refuses because reddit_source is
-            'used'. */}
+        {/* Full pipeline: rebuild EVERYTHING from the reddit source —
+            article, voice, hook-first short, hero + thumbnails — then
+            auto-publish to the site + every social when the fresh set is
+            ready. The expensive sibling of Complete & publish (which only
+            fills in what's missing). */}
         <BarButton
-          label="Refresh assets"
-          disabled={disabled || refreshDisabled}
-          onClick={onBulkRefresh}
+          label="Full pipeline"
+          accent
+          disabled={disabled || fullPipelineDisabled}
+          onClick={onFullPipeline}
         />
         <BulkPublishPicker
           disabled={disabled || bulkPublishDisabled}
@@ -1224,8 +1686,25 @@ function BulkActionBar({
           disabledHint={
             categoryDisabled ? "Category applies to video stories only" : null
           }
-          options={CATEGORIES.map((c) => ({ value: c, label: c }))}
+          options={categories.map((c) => ({ value: c.label, label: c.label }))}
           onPick={(value) => onAction({ type: "category", category: value })}
+        />
+        {/* The AI sibling of the manual Category picker: re-runs the
+            multi-tag classifier on the selection and writes tags + label.
+            Low-confidence stories are left untouched for a manual pick. */}
+        <BarButton
+          label="Reclassify AI"
+          disabled={disabled || reclassifyDisabled}
+          onClick={onReclassify}
+        />
+        {/* Fix too-long titles: rewrite each selected story's title with the
+            branded prompt, bounded to the length policy. The paired action for
+            the "Title: Too long" filter. Stories-only (same gate as Reclassify
+            AI); the server skips articles in a mixed selection. */}
+        <BarButton
+          label="Regenerate titles"
+          disabled={disabled || reclassifyDisabled}
+          onClick={onTitleRegen}
         />
         <Picker
           label="Regenerate ▾"
@@ -1236,13 +1715,33 @@ function BulkActionBar({
               ? "Regenerate targets only apply to video stories"
               : null
           }
-          options={(Object.keys(REGEN_TARGET_META) as BulkRegenTarget[]).map(
-            (t) => ({
-              value: t,
-              label: REGEN_TARGET_META[t].label,
-            }),
-          )}
-          onPick={(value) => onRegen(value as BulkRegenTarget)}
+          options={[
+            ...(Object.keys(REGEN_TARGET_META) as BulkRegenTarget[]).map(
+              (t) => ({
+                value: t,
+                label: REGEN_TARGET_META[t].label,
+              }),
+            ),
+            // The refresh-assets chain, surfaced where the operator looks
+            // for "rebuild the short". Routes to its own confirm flow.
+            {
+              value: RESTART_SHORT_MENU_VALUE,
+              label: "Restart short + hero + thumbnails",
+            },
+          ]}
+          onPick={(value) => {
+            if (value === RESTART_SHORT_MENU_VALUE) onBulkRefresh();
+            else onRegen(value as BulkRegenTarget);
+          }}
+        />
+        {/* STOP RUNS: cancel everything in flight for the selection
+            (images, voice, shorts, pipeline jobs, pending finishers,
+            refresh chains). Sits between the run-starting controls and
+            Delete because it is their undo-ish counterpart. */}
+        <BarButton
+          label="Stop runs"
+          disabled={disabled}
+          onClick={onStopRuns}
         />
         <BarButton
           label="Delete"
@@ -1341,7 +1840,7 @@ function Picker({
       </button>
       {open && (
         <ul
-          className={`absolute right-0 z-20 ${menuPos} min-w-[180px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl`}
+          className={`absolute right-0 z-20 ${menuPos} max-h-80 min-w-[180px] overflow-auto rounded-md border border-line bg-surface shadow-2xl`}
         >
           {options.map((o) => (
             <li key={o.value}>
@@ -1367,10 +1866,12 @@ function Picker({
 
 function RowMenu({
   row,
+  categories,
   disabled,
   onAction,
 }: {
   row: ContentRow;
+  categories: CategoryOption[];
   disabled: boolean;
   onAction: (op: BulkUpdateOp | { type: "delete" }) => void;
 }) {
@@ -1407,7 +1908,7 @@ function RowMenu({
         ⋯
       </button>
       {open && (
-        <ul className="absolute right-3 top-full z-20 mt-1 min-w-[180px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
+        <ul className="absolute right-3 top-full z-20 mt-1 max-h-96 min-w-[180px] overflow-auto rounded-md border border-line bg-surface shadow-2xl">
           <RowMenuItem
             label={isPublished ? "Unpublish" : "Publish"}
             onClick={() => {
@@ -1432,7 +1933,10 @@ function RowMenu({
           {isStory && (
             <RowMenuPicker
               label="Set category →"
-              options={CATEGORIES.map((c) => ({ value: c, label: c }))}
+              options={categories.map((c) => ({
+                value: c.label,
+                label: c.label,
+              }))}
               onPick={(value) => {
                 setOpen(false);
                 onAction({ type: "category", category: value });
@@ -1507,15 +2011,20 @@ function RowMenuPicker({
 
 // 2026-06-21 inline category chip for the story rows. Visible at all
 // times so the current category is glanceable, and clickable to open a
-// 6-option dropdown that calls the existing single-item bulk-update
-// path. Articles don't render this — they have no writable category
-// column. Plan: _plans/2026-06-21-category-classifier-and-pills.md.
+// dropdown of the ACTIVE categories (DB-driven since the 2026-07-01
+// taxonomy arc) that calls the existing single-item bulk-update path.
+// Articles don't render this — they have no writable category column.
+// Plan: _plans/2026-06-21-category-classifier-and-pills.md.
 function RowCategoryChip({
   currentCategory,
+  categories,
+  colorByLabel,
   disabled,
   onPick,
 }: {
   currentCategory: string | null;
+  categories: CategoryOption[];
+  colorByLabel: Map<string, string | null>;
   disabled: boolean;
   onPick: (category: string) => void;
 }) {
@@ -1537,6 +2046,9 @@ function RowCategoryChip({
     };
   }, [open]);
   const label = currentCategory ?? "uncategorized";
+  const currentStyle = currentCategory
+    ? categoryChipStyle(colorByLabel.get(currentCategory))
+    : undefined;
   return (
     <div ref={wrap} className="relative mr-2 flex shrink-0 items-center">
       <button
@@ -1545,33 +2057,39 @@ function RowCategoryChip({
         disabled={disabled}
         aria-label={`Change category (currently ${label})`}
         title="Change category"
-        className={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ${categoryChipClass(
-          currentCategory,
-        )}`}
+        style={currentStyle}
+        className={`shrink-0 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ${
+          currentStyle ? "" : CATEGORY_CHIP_FALLBACK_CLASS
+        }`}
       >
         {label}
       </button>
       {open && (
-        <ul className="absolute right-0 top-full z-20 mt-1 min-w-[140px] overflow-hidden rounded-md border border-line bg-surface shadow-2xl">
-          {CATEGORIES.map((c) => (
-            <li key={c}>
+        <ul className="absolute right-0 top-full z-20 mt-1 max-h-72 min-w-[200px] overflow-auto rounded-md border border-line bg-surface shadow-2xl">
+          {categories.map((c) => (
+            <li key={c.label}>
               <button
                 type="button"
                 onClick={() => {
                   setOpen(false);
-                  if (c === currentCategory) return;
-                  onPick(c);
+                  if (c.label === currentCategory) return;
+                  onPick(c.label);
                 }}
                 className={`flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[11px] transition-colors hover:bg-surface2 ${
-                  c === currentCategory ? "text-muted" : "text-ink"
+                  c.label === currentCategory ? "text-muted" : "text-ink"
                 }`}
               >
                 <span
                   aria-hidden
-                  className={`inline-block h-2 w-2 rounded-full border ${categoryChipClass(c)}`}
+                  style={
+                    c.color ? { backgroundColor: c.color } : undefined
+                  }
+                  className={`inline-block h-2 w-2 rounded-full ${
+                    c.color ? "" : "border border-line"
+                  }`}
                 />
-                {c}
-                {c === currentCategory ? (
+                {c.label}
+                {c.label === currentCategory ? (
                   <span className="ml-auto text-muted">current</span>
                 ) : null}
               </button>
@@ -1633,8 +2151,11 @@ function ConfirmModal({
           id="bulk-confirm-title"
           className="font-display text-[16px] font-bold text-ink"
         >
-          {state.verb} {state.items.length}{" "}
-          {state.items.length === 1 ? "item" : "items"}?
+          {state.verb}{" "}
+          {state.byFilter && state.matchingTotal != null
+            ? `${state.matchingTotal} matching`
+            : `${state.items.length} ${state.items.length === 1 ? "item" : "items"}`}
+          ?
         </h3>
         <p className="mt-1 font-mono text-[11px] text-muted">
           {stories} {stories === 1 ? "story" : "stories"} · {articles}{" "}
@@ -1659,8 +2180,9 @@ function ConfirmModal({
         {destructive && (
           <div className="mt-3 space-y-2">
             <p className="font-mono text-[11px] text-danger">
-              Hard delete is permanent. Rendered audio and video are also
-              removed from storage. Type DELETE to confirm.
+              Hard delete is permanent — there is no trash and no undo.
+              Rendered audio and video are also removed from storage. Type
+              DELETE to confirm.
             </p>
             <input
               type="text"
@@ -1701,140 +2223,8 @@ function ConfirmModal({
   );
 }
 
-// --- Reclassify confirm modal + result banner -------------------------------
-// 2026-06-21. Same modal shape as ConfirmModal but scoped to the LLM
-// reclassify backfill. Body explains exactly what the action will do so
-// a lazy-user (rule 10) doesn't have to reverse-engineer the verb.
-// Plan: _plans/2026-06-21-category-classifier-and-pills.md.
-
-function ReclassifyConfirmModal({
-  eligibleCount,
-  pending,
-  onCancel,
-  onRun,
-}: {
-  eligibleCount: number;
-  pending: boolean;
-  onCancel: () => void;
-  onRun: () => void;
-}) {
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape" && !pending) onCancel();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [pending, onCancel]);
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="reclassify-confirm-title"
-      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
-    >
-      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
-        <h3
-          id="reclassify-confirm-title"
-          className="font-display text-[16px] font-bold text-ink"
-        >
-          Reclassify {eligibleCount} stor{eligibleCount === 1 ? "y" : "ies"}?
-        </h3>
-        <p className="mt-2 text-[13px] text-muted">
-          The LLM will read each story&apos;s title + article body and pick
-          one of Drama / Entitled / Humor / Wholesome / Dating / Roommate.
-          Only stories tagged{" "}
-          <span className="text-ink font-semibold">Drama</span> or
-          <span className="text-ink font-semibold"> uncategorized</span> are
-          scanned. Manually-set non-Drama categories stay untouched.
-        </p>
-        <p className="mt-2 font-mono text-[11px] text-muted">
-          One small LLM call per story. Capped at 200 per run.
-        </p>
-        <div className="mt-4 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onRun}
-            disabled={pending || eligibleCount === 0}
-            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {pending ? "Working…" : "Reclassify"}
-          </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={pending}
-            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ReclassifyResultBanner({
-  result,
-  onDismiss,
-}: {
-  result: ReclassifyResult;
-  onDismiss: () => void;
-}) {
-  const previewChanges = result.changes.slice(0, 6);
-  const overflow = result.changes.length - previewChanges.length;
-  return (
-    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
-      <div className="flex items-center justify-between gap-3">
-        <span>
-          Scanned {result.scanned} · Reclassified{" "}
-          <span className="text-accent">{result.reclassified}</span> · Unchanged{" "}
-          {result.unchanged}
-          {result.failed.length > 0
-            ? ` · Failed ${result.failed.length}`
-            : ""}
-        </span>
-        <button
-          type="button"
-          onClick={onDismiss}
-          className="text-muted transition-colors hover:text-ink"
-          aria-label="Dismiss"
-        >
-          ×
-        </button>
-      </div>
-      {previewChanges.length > 0 && (
-        <ul className="space-y-0.5 border-t border-accent/20 pt-2 text-muted">
-          {previewChanges.map((c) => (
-            <li key={c.id}>
-              <span className="text-ink">{c.title}</span>
-              <span className="opacity-70">
-                {" "}
-                — {c.prev ?? "uncategorized"} → {c.next}
-              </span>
-            </li>
-          ))}
-          {overflow > 0 && <li>…and {overflow} more</li>}
-        </ul>
-      )}
-      {result.failed.length > 0 && (
-        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
-          {result.failed.slice(0, 5).map((f) => (
-            <li key={f.id}>
-              <span className="text-ink">{f.title}</span>
-              <span className="opacity-70"> — {f.reason}</span>
-            </li>
-          ))}
-          {result.failed.length > 5 && (
-            <li>…and {result.failed.length - 5} more</li>
-          )}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 // --- Bulk regen confirm modal + result banner -------------------------------
-// 2026-06-24. Same modal shape as ConfirmModal / ReclassifyConfirmModal. The
+// 2026-06-24. Same modal shape as ConfirmModal. The
 // body is target-specific (cost hint + plain-English explanation of what
 // will be queued) so a 30-story click is not a surprise.
 
@@ -1860,9 +2250,29 @@ function RegenConfirmModal({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [pending, onCancel]);
+  const [typedCount, setTypedCount] = useState("");
   const meta = REGEN_TARGET_META[target];
   const previewCount = Math.min(items.length, 6);
   const overflow = items.length - previewCount;
+  // Total estimated spend (null for daily-budget-gated targets like hero /
+  // scenes). Over the threshold the operator must type the story count to
+  // commit — one click shouldn't fire a large, real-money regenerate. Plan:
+  // _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  const totalCostUsd = estimateRegenCostUsd(target, items.length);
+  const totalCostText =
+    totalCostUsd != null ? `$${totalCostUsd.toFixed(2)}` : null;
+  const requiresTypedConfirm =
+    totalCostUsd != null && totalCostUsd >= SPEND_CONFIRM_THRESHOLD_USD;
+  const confirmBlocked =
+    pending || (requiresTypedConfirm && typedCount !== String(items.length));
+  // A pipeline restart on a live story pulls it off the public site while it
+  // rewrites. Surface that count up front so it's a decision, not a surprise.
+  const liveCount =
+    target === "pipeline"
+      ? items.filter(
+          (it) => rowByKey.get(`${it.kind}:${it.id}`)?.status === "published",
+        ).length
+      : 0;
   return (
     <div
       role="dialog"
@@ -1882,9 +2292,20 @@ function RegenConfirmModal({
           {meta.body}
         </p>
         <p className="mt-2 font-mono text-[11px] text-muted">
-          Estimate: {meta.perStoryHint} × {items.length} stor
-          {items.length === 1 ? "y" : "ies"}.
+          {meta.perStoryHint} × {items.length} stor
+          {items.length === 1 ? "y" : "ies"}
         </p>
+        <p className="mt-1 font-mono text-[12px] font-bold text-ink">
+          {totalCostText != null
+            ? `≈ ${totalCostText} total`
+            : "Total scales with today's image budget"}
+        </p>
+        {liveCount > 0 && (
+          <p className="mt-2 font-mono text-[11px] text-warn">
+            {liveCount} of these {liveCount === 1 ? "is" : "are"} live and will
+            drop off the site while {liveCount === 1 ? "it rewrites" : "they rewrite"}.
+          </p>
+        )}
         <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
           {items.slice(0, previewCount).map((it) => {
             const r = rowByKey.get(`${it.kind}:${it.id}`);
@@ -1899,11 +2320,30 @@ function RegenConfirmModal({
             <li className="text-muted">…and {overflow} more</li>
           )}
         </ul>
+        {requiresTypedConfirm && (
+          <div className="mt-3 space-y-2">
+            <p className="font-mono text-[11px] text-warn">
+              This spends about {totalCostText}. Type{" "}
+              <span className="text-ink">{items.length}</span> to confirm.
+            </p>
+            <input
+              type="text"
+              inputMode="numeric"
+              value={typedCount}
+              onChange={(e) =>
+                setTypedCount(e.target.value.replace(/[^0-9]/g, ""))
+              }
+              placeholder={String(items.length)}
+              autoFocus
+              className="w-full rounded-md border border-warn/50 bg-bg px-3 py-2 font-mono text-[12px] text-ink placeholder:text-muted focus:border-warn focus:outline-none"
+            />
+          </div>
+        )}
         <div className="mt-4 flex items-center gap-2">
           <button
             type="button"
             onClick={onRun}
-            disabled={pending}
+            disabled={confirmBlocked}
             className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {pending ? "Queueing…" : `Queue ${items.length}`}
@@ -1925,15 +2365,25 @@ function RegenConfirmModal({
 function RegenResultBanner({
   result,
   rowByKey,
+  pending,
+  onRerunSkipped,
   onDismiss,
 }: {
   result: BulkRegenResult;
   rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onRerunSkipped: (failed: BulkActionFailure[]) => void;
   onDismiss: () => void;
 }) {
   const meta = REGEN_TARGET_META[result.target];
   const previewFailures = result.failed.slice(0, 6);
   const overflow = result.failed.length - previewFailures.length;
+  // Rows the restart refused because the operator had skipped them. These get
+  // an explicit one-click override — the "nothing should stop me" affordance.
+  const skippedFailures =
+    result.target === "pipeline"
+      ? result.failed.filter((f) => f.reason === "reddit-source-skipped")
+      : [];
   return (
     <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
       <div className="flex items-center justify-between gap-3">
@@ -1968,6 +2418,62 @@ function RegenResultBanner({
           {overflow > 0 && <li>…and {overflow} more</li>}
         </ul>
       )}
+      {skippedFailures.length > 0 && (
+        <button
+          type="button"
+          onClick={() => onRerunSkipped(skippedFailures)}
+          disabled={pending}
+          className="w-full rounded-md border border-warn/50 bg-warn/10 px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-warn transition-colors hover:bg-warn/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {pending
+            ? "Re-running…"
+            : `Re-run anyway (${skippedFailures.length} skipped)`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// 2026-07-03 STOP RUNS result banner. Counts-only (no per-row failure
+// list): the action is a broad sweep and its per-kind cancel counts are
+// the useful signal; a story with nothing in flight simply contributes
+// zeros. Plan: _plans/2026-07-03-unified-live-runs-and-stop.md.
+function StopRunsResultBanner({
+  result,
+  onDismiss,
+}: {
+  result: BulkStopRunsResult;
+  onDismiss: () => void;
+}) {
+  const c = result.counts;
+  const parts = [
+    c.images > 0 ? `${c.images} image${c.images === 1 ? "" : "s"}` : null,
+    c.voices > 0 ? `${c.voices} voice` : null,
+    c.shorts > 0 ? `${c.shorts} short${c.shorts === 1 ? "" : "s"}` : null,
+    c.jobs > 0 ? `${c.jobs} pipeline job${c.jobs === 1 ? "" : "s"}` : null,
+    c.finishers > 0 ? `${c.finishers} finisher${c.finishers === 1 ? "" : "s"}` : null,
+    c.refreshes > 0 ? `${c.refreshes} refresh chain${c.refreshes === 1 ? "" : "s"}` : null,
+  ].filter(Boolean);
+  const scope =
+    result.articles > 0
+      ? `${result.stories} stories · ${result.articles} articles`
+      : `${result.stories} stor${result.stories === 1 ? "y" : "ies"}`;
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <span>
+        <span className="text-muted">Stop runs ({scope}):</span>{" "}
+        {parts.length > 0
+          ? `cancelled ${parts.join(", ")}`
+          : "nothing was in flight"}
+      </span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="text-muted transition-colors hover:text-ink"
+        aria-label="Dismiss"
+      >
+        ×
+      </button>
     </div>
   );
 }
@@ -2054,6 +2560,56 @@ function formatProgressTooltip(snapshot: ProgressSnapshot): string {
   if (snapshot.phase) parts.push(`phase: ${snapshot.phase}`);
   if (snapshot.count != null) parts.push(`${snapshot.count} job(s)`);
   return parts.join(" · ");
+}
+
+// --- Per-row publish-blockers pill ------------------------------------------
+// 2026-07-21. Renders only for stories whose Publish would be rejected
+// right now — publish_blockers is the asset gate's `blocking` list,
+// stamped per page by listContentPageAction. The chip shows up to three
+// short labels; the tooltip carries the full list plus the fix hint, so
+// the operator knows what's missing without clicking into the story.
+// Codes not in the maps (a future gate) fall back to the raw code — the
+// chip degrades to jargon rather than hiding a blocker.
+// Plan: _plans/2026-07-21-content-row-publish-blockers.md.
+
+const BLOCKER_CHIP_LABEL: Record<string, string> = {
+  body: "body",
+  hero_image: "hero",
+  thumbnail_image: "thumb",
+  short_render: "short",
+  video_url: "video",
+  voiceover: "voice",
+  scene_images: "scenes",
+  poll: "poll",
+};
+
+const BLOCKER_FULL_LABEL: Record<string, string> = {
+  body: "article body",
+  hero_image: "hero image",
+  thumbnail_image: "card thumbnail",
+  short_render: "finished short video",
+  video_url: "playable video URL",
+  voiceover: "voiceover",
+  scene_images: "scene images",
+  poll: "enabled poll",
+};
+
+const BLOCKER_CHIP_MAX = 3;
+
+function PublishBlockersPill({ gates }: { gates: string[] }) {
+  const shown = gates.slice(0, BLOCKER_CHIP_MAX);
+  const overflow = gates.length - shown.length;
+  const label = shown.map((g) => BLOCKER_CHIP_LABEL[g] ?? g).join(" · ");
+  const full = gates.map((g) => BLOCKER_FULL_LABEL[g] ?? g).join(", ");
+  return (
+    <span
+      title={`Publish is blocked — still missing: ${full}. Select the row and run Complete & publish to backfill and ship automatically.`}
+      className="mr-2 shrink-0 self-center rounded-full border border-warn/40 bg-warn/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-warn"
+    >
+      missing: {label}
+      {overflow > 0 ? ` +${overflow}` : ""}
+    </span>
+  );
 }
 
 // --- Per-row published-on icon strip ----------------------------------------
@@ -2672,4 +3228,555 @@ function RefreshingPill({ state }: { state: string }) {
       refresh · {label}
     </span>
   );
+}
+
+// --- Full pipeline confirm modal + result banner -----------------------------
+// 2026-07-02. Same modal/banner pattern as the other bulk flows. The
+// action rebuilds article + voice + hook-first short + hero + thumbnails
+// from the reddit source and flags the story so the auto-publish cron
+// ships it to the site + all socials once every fresh asset is ready.
+// Plan: _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
+
+function FullPipelineConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="full-pipeline-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="full-pipeline-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Run the full pipeline for {items.length}{" "}
+          {items.length === 1 ? "story" : "stories"}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          Rebuilds EVERYTHING from the reddit source: fresh article, fresh
+          voice, fresh hook-first short (hook → intro → story → outro),
+          fresh hero + 5 thumbnails. When the full set is ready, the
+          auto-publish cron ships each story to the site and every social
+          platform. Platforms that already have the story are skipped, so
+          nothing double-posts.
+        </p>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          A story that is currently live leaves the public site while it
+          rebuilds (typically 15–30 min) and republishes automatically.
+          Story id, URL, and comments are preserved. Stories without a
+          reddit source are skipped — use Restart short + hero + thumbnails
+          for those.
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          Worst case: ≈ $1.50 per story (article LLM + short + hero +
+          thumbnails) · ≈ ${(items.length * 1.5).toFixed(2)} total.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Starting…" : `Rebuild & publish ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FullPipelineResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkFullPipelineResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const skipped = result.outcomes.filter((o) => o.state === "skipped");
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  const previewSkipped = skipped.slice(0, 5);
+  const overflowSkipped = skipped.length - previewSkipped.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Full pipeline:</span> Started{" "}
+          <span className="text-accent">{result.startedCount}</span>
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+          <span className="ml-1 text-muted">
+            (watch the row pills — each story republishes on its own once
+            everything fresh is ready)
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">
+                {fullPipelineLabelFor(o, rowByKey)}
+              </span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "unknown")}
+              </span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+      {previewSkipped.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Skipped
+          </li>
+          {previewSkipped.map((o) => (
+            <li key={`skip:${o.kind}:${o.id}`}>
+              <span className="text-ink">
+                {fullPipelineLabelFor(o, rowByKey)}
+              </span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "—")}
+              </span>
+            </li>
+          ))}
+          {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function fullPipelineLabelFor(
+  outcome: BulkFullPipelineOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
+}
+
+function ReclassifyConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reclassify-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="reclassify-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Reclassify {items.length}{" "}
+          {items.length === 1 ? "story" : "stories"} with AI?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          Runs the category classifier on each story and applies the result:
+          category label + tags, first tag primary. A story the model is not
+          confident about (below 60%) is left exactly as it is and listed for
+          a manual pick via its row chip. Uses the Writing (LLM) model from
+          the Models page.
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          One small LLM call per story — well under a cent each.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Classifying…" : `Reclassify ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReclassifyResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkReclassifyResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const retagged = result.outcomes.filter((o) => o.state === "retagged");
+  const needsReview = result.outcomes.filter(
+    (o) => o.state === "needs_review",
+  );
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const previewRetagged = retagged.slice(0, 5);
+  const overflowRetagged = retagged.length - previewRetagged.length;
+  const previewReview = needsReview.slice(0, 5);
+  const overflowReview = needsReview.length - previewReview.length;
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Reclassify AI:</span> Retagged{" "}
+          <span className="text-accent">{result.retaggedCount}</span>
+          {result.unchangedCount > 0
+            ? ` · Already right ${result.unchangedCount}`
+            : ""}
+          {result.needsReviewCount > 0
+            ? ` · Needs a manual pick ${result.needsReviewCount}`
+            : ""}
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewRetagged.length > 0 && (
+        <ul className="space-y-0.5 border-t border-accent/30 pt-2">
+          {previewRetagged.map((o) => (
+            <li key={`re:${o.kind}:${o.id}`}>
+              <span className="text-ink">{reclassifyLabelFor(o, rowByKey)}</span>
+              <span className="text-muted">
+                {" "}
+                — {o.prevCategory ?? "uncategorized"} →{" "}
+              </span>
+              <span className="text-accent">{o.nextCategory}</span>
+              {typeof o.confidence === "number" && (
+                <span className="text-muted">
+                  {" "}
+                  ({Math.round(o.confidence * 100)}%)
+                </span>
+              )}
+            </li>
+          ))}
+          {overflowRetagged > 0 && (
+            <li className="text-muted">…and {overflowRetagged} more</li>
+          )}
+        </ul>
+      )}
+      {previewReview.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Needs a manual pick
+          </li>
+          {previewReview.map((o) => (
+            <li key={`rev:${o.kind}:${o.id}`}>
+              <span className="text-ink">{reclassifyLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70"> — {o.reason ?? "—"}</span>
+            </li>
+          ))}
+          {overflowReview > 0 && <li>…and {overflowReview} more</li>}
+        </ul>
+      )}
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">{reclassifyLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "unknown")}
+              </span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function reclassifyLabelFor(
+  outcome: BulkReclassifyOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
+}
+
+function TitleRegenConfirmModal({
+  items,
+  rowByKey,
+  pending,
+  onCancel,
+  onRun,
+}: {
+  items: BulkContentItem[];
+  rowByKey: Map<string, ContentRow>;
+  pending: boolean;
+  onCancel: () => void;
+  onRun: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !pending) onCancel();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [pending, onCancel]);
+  const previewCount = Math.min(items.length, 6);
+  const overflow = items.length - previewCount;
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="title-regen-confirm-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-bg/80 p-6"
+    >
+      <div className="w-full max-w-md rounded-xl border border-line bg-surface p-5 shadow-2xl">
+        <h3
+          id="title-regen-confirm-title"
+          className="font-display text-[16px] font-bold text-ink"
+        >
+          Regenerate {items.length}{" "}
+          {items.length === 1 ? "title" : "titles"}?
+        </h3>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted">
+          Rewrites each story&rsquo;s title with the same branded prompt the
+          pipeline uses, kept under {TITLE_MAX_WORDS} words / {TITLE_MAX_CHARS}{" "}
+          characters so it renders cleanly on the cover. The current title is
+          replaced. A story with no body is skipped (nothing to base a title
+          on).
+        </p>
+        <p className="mt-2 font-mono text-[11px] text-muted">
+          One small LLM call per story — well under a cent each.
+        </p>
+        <ul className="mt-3 max-h-40 space-y-1 overflow-auto rounded-md border border-line bg-bg p-3 font-mono text-[11px] text-muted">
+          {items.slice(0, previewCount).map((it) => {
+            const r = rowByKey.get(`${it.kind}:${it.id}`);
+            const label = r?.title ?? r?.slug ?? it.id.slice(0, 8);
+            return (
+              <li key={`${it.kind}:${it.id}`} className="truncate text-ink">
+                {label}
+              </li>
+            );
+          })}
+          {overflow > 0 && (
+            <li className="text-muted">…and {overflow} more</li>
+          )}
+        </ul>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRun}
+            disabled={pending}
+            className="flex-1 rounded-md bg-accent px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {pending ? "Regenerating…" : `Regenerate ${items.length}`}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={pending}
+            className="rounded-md border border-line px-3 py-2 font-mono text-[11px] uppercase tracking-wider text-muted transition-colors hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TitleRegenResultBanner({
+  result,
+  rowByKey,
+  onDismiss,
+}: {
+  result: BulkRegenTitlesResult;
+  rowByKey: Map<string, ContentRow>;
+  onDismiss: () => void;
+}) {
+  const regenerated = result.outcomes.filter((o) => o.state === "regenerated");
+  const skipped = result.outcomes.filter((o) => o.state === "skipped");
+  const errored = result.outcomes.filter((o) => o.state === "errored");
+  const previewRegen = regenerated.slice(0, 5);
+  const overflowRegen = regenerated.length - previewRegen.length;
+  const previewSkipped = skipped.slice(0, 5);
+  const overflowSkipped = skipped.length - previewSkipped.length;
+  const previewErrored = errored.slice(0, 5);
+  const overflowErrored = errored.length - previewErrored.length;
+  return (
+    <div className="space-y-2 rounded-xl border border-accent/40 bg-accent/10 p-3 font-mono text-[11px] text-ink">
+      <div className="flex items-center justify-between gap-3">
+        <span>
+          <span className="text-muted">Regenerate titles:</span> Regenerated{" "}
+          <span className="text-accent">{result.regeneratedCount}</span>
+          {result.skippedCount > 0 ? ` · Skipped ${result.skippedCount}` : ""}
+          {result.erroredCount > 0 ? ` · Errored ${result.erroredCount}` : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-muted transition-colors hover:text-ink"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      {previewRegen.length > 0 && (
+        <ul className="space-y-0.5 border-t border-accent/30 pt-2">
+          {previewRegen.map((o) => (
+            <li key={`re:${o.kind}:${o.id}`}>
+              <span className="text-muted line-through">
+                {o.prevTitle ?? "—"}
+              </span>
+              <span className="text-muted"> → </span>
+              <span className="text-accent">{o.nextTitle}</span>
+            </li>
+          ))}
+          {overflowRegen > 0 && (
+            <li className="text-muted">…and {overflowRegen} more</li>
+          )}
+        </ul>
+      )}
+      {previewSkipped.length > 0 && (
+        <ul className="space-y-0.5 border-t border-muted/30 pt-2 text-muted">
+          <li className="font-semibold uppercase tracking-wider text-[10px]">
+            Skipped
+          </li>
+          {previewSkipped.map((o) => (
+            <li key={`skip:${o.kind}:${o.id}`}>
+              <span className="text-ink">{titleRegenLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70"> — {describeReason(o.reason ?? "—")}</span>
+            </li>
+          ))}
+          {overflowSkipped > 0 && <li>…and {overflowSkipped} more</li>}
+        </ul>
+      )}
+      {previewErrored.length > 0 && (
+        <ul className="space-y-0.5 border-t border-danger/30 pt-2 text-danger">
+          {previewErrored.map((o) => (
+            <li key={`err:${o.kind}:${o.id}`}>
+              <span className="text-ink">{titleRegenLabelFor(o, rowByKey)}</span>
+              <span className="opacity-70">
+                {" "}
+                — {describeReason(o.reason ?? "unknown")}
+              </span>
+            </li>
+          ))}
+          {overflowErrored > 0 && <li>…and {overflowErrored} more</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function titleRegenLabelFor(
+  outcome: BulkRegenTitlesOutcome,
+  rowByKey: Map<string, ContentRow>,
+): string {
+  const r = rowByKey.get(`${outcome.kind}:${outcome.id}`);
+  return r?.title ?? r?.slug ?? outcome.id.slice(0, 8);
 }

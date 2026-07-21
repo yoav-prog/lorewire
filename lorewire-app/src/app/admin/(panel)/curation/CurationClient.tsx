@@ -24,6 +24,7 @@ import {
   type CurationServerRenderRow,
 } from "./actions";
 import { saveSettingAction } from "@/app/admin/actions";
+import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
 import {
   HOMEPAGE_SURFACES,
   SURFACE_CAPACITY,
@@ -52,12 +53,11 @@ const RAILS: RailSpec[] = [
   { surface: "top10", title: "TOP 10 Today", hint: "Numbered rail. Exactly 10 picks, ordered." },
   { surface: "continue", title: "You Didn't Vote Yet", hint: "Reframed Continue Watching: surfaces watched-but-not-voted stories per viewer. Admin curation overrides this surface entirely (legacy editor-pick path)." },
   { surface: "new_row", title: "New on LoreWire", hint: "Fresh-this-week strip; cross-category." },
-  { surface: "entitled_row", title: "Audacity: Entitled People", hint: "Category rail · Entitled." },
-  { surface: "humor_row", title: "Humor & Awkward Moments", hint: "Category rail · Humor." },
-  { surface: "wholesome_row", title: "Wholesome Wins", hint: "Category rail · Wholesome." },
-  { surface: "dating_row", title: "Dating Disasters", hint: "Category rail · Dating." },
-  { surface: "roommate_row", title: "Roommate Files", hint: "Category rail · Roommate." },
-  { surface: "drama_row", title: "Pure Drama", hint: "Category rail · Drama." },
+  ...GRANULAR_CATEGORIES.filter((c) => c.isRail).map((c) => ({
+    surface: (c.slug as HomepageSurface),
+    title: c.railTitle ?? c.label,
+    hint: `Category rail · ${c.label}.`,
+  })),
 ];
 
 // Defensive sanity check at module load: every HomepageSurface must

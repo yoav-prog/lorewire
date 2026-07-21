@@ -45,15 +45,19 @@ async function makeStory(
       : `https://www.reddit.com/r/aita/comments/${id}/`;
   const body =
     "body" in overrides ? overrides.body : "Real body content, not a dry-run.";
+  // video_url satisfies the publish-time media invariant
+  // (_plans/2026-07-02-never-publish-without-video.md) so these tests
+  // keep exercising ONLY the fixture guard.
   await run(
-    "INSERT INTO stories (id, reddit_id, title, body, source_url, status, created_at, updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO stories (id, reddit_id, title, body, source_url, video_url, status, created_at, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     [
       id,
       redditId,
       "Publish guard fixture",
       body,
       sourceUrl,
+      "https://example.com/short.mp4",
       "review" satisfies StoryStatus,
       now,
       now,

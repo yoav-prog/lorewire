@@ -58,7 +58,7 @@ describe("addToSurface", () => {
 
   it("allows the same story across DIFFERENT surfaces", async () => {
     const a = await addToSurface("top10", "story-a");
-    const b = await addToSurface("entitled_row", "story-a");
+    const b = await addToSurface("entitled-people", "story-a");
     expect(a.ok).toBe(true);
     expect(b.ok).toBe(true);
   });
@@ -88,10 +88,10 @@ describe("addToSurface", () => {
 
   it("allows uncapped surfaces past 10 entries", async () => {
     for (let i = 0; i < 14; i++) {
-      const r = await addToSurface("entitled_row", `story-${i}`);
+      const r = await addToSurface("entitled-people", `story-${i}`);
       expect(r.ok).toBe(true);
     }
-    const list = await listSurface("entitled_row");
+    const list = await listSurface("entitled-people");
     expect(list).toHaveLength(14);
   });
 });
@@ -155,54 +155,54 @@ describe("removeFromSurface", () => {
 describe("moveInSurface", () => {
   async function seed(ids: string[]): Promise<void> {
     for (const id of ids) {
-      const r = await addToSurface("entitled_row", id);
+      const r = await addToSurface("entitled-people", id);
       if (!r.ok) throw new Error(`seed: ${r.error}`);
     }
   }
 
   it("swaps a story up by one slot", async () => {
     await seed(["a", "b", "c", "d"]);
-    const r = await moveInSurface("entitled_row", "c", "up");
+    const r = await moveInSurface("entitled-people", "c", "up");
     expect(r.ok).toBe(true);
-    const after = await listSurface("entitled_row");
+    const after = await listSurface("entitled-people");
     expect(after.map((x) => x.story_id)).toEqual(["a", "c", "b", "d"]);
     expect(after.map((x) => x.position)).toEqual([0, 1, 2, 3]);
   });
 
   it("swaps a story down by one slot", async () => {
     await seed(["a", "b", "c", "d"]);
-    const r = await moveInSurface("entitled_row", "b", "down");
+    const r = await moveInSurface("entitled-people", "b", "down");
     expect(r.ok).toBe(true);
-    const after = await listSurface("entitled_row");
+    const after = await listSurface("entitled-people");
     expect(after.map((x) => x.story_id)).toEqual(["a", "c", "b", "d"]);
   });
 
   it("is a silent no-op when moving up at the head", async () => {
     await seed(["a", "b", "c"]);
-    const r = await moveInSurface("entitled_row", "a", "up");
+    const r = await moveInSurface("entitled-people", "a", "up");
     expect(r.ok).toBe(true);
-    const after = await listSurface("entitled_row");
+    const after = await listSurface("entitled-people");
     expect(after.map((x) => x.story_id)).toEqual(["a", "b", "c"]);
   });
 
   it("is a silent no-op when moving down at the tail", async () => {
     await seed(["a", "b", "c"]);
-    const r = await moveInSurface("entitled_row", "c", "down");
+    const r = await moveInSurface("entitled-people", "c", "down");
     expect(r.ok).toBe(true);
-    const after = await listSurface("entitled_row");
+    const after = await listSurface("entitled-people");
     expect(after.map((x) => x.story_id)).toEqual(["a", "b", "c"]);
   });
 
   it("errors on an unknown story", async () => {
     await seed(["a"]);
-    const r = await moveInSurface("entitled_row", "ghost", "up");
+    const r = await moveInSurface("entitled-people", "ghost", "up");
     expect(r.ok).toBe(false);
   });
 
   it("rejects invalid directions", async () => {
     await seed(["a", "b"]);
     const r = await moveInSurface(
-      "entitled_row",
+      "entitled-people",
       "a",
       "sideways" as "up" | "down",
     );
@@ -214,10 +214,10 @@ describe("moveInSurface", () => {
     // position swap; the helper parks one row at -1 first. Chain three
     // swaps to make sure the parking position is always released.
     await seed(["a", "b", "c", "d"]);
-    await moveInSurface("entitled_row", "d", "up"); // a, b, d, c
-    await moveInSurface("entitled_row", "d", "up"); // a, d, b, c
-    await moveInSurface("entitled_row", "d", "up"); // d, a, b, c
-    const after = await listSurface("entitled_row");
+    await moveInSurface("entitled-people", "d", "up"); // a, b, d, c
+    await moveInSurface("entitled-people", "d", "up"); // a, d, b, c
+    await moveInSurface("entitled-people", "d", "up"); // d, a, b, c
+    const after = await listSurface("entitled-people");
     expect(after.map((x) => x.story_id)).toEqual(["d", "a", "b", "c"]);
     expect(after.map((x) => x.position)).toEqual([0, 1, 2, 3]);
   });
@@ -227,13 +227,13 @@ describe("listAllCuration", () => {
   it("groups rows by surface in position order", async () => {
     await addToSurface("top10", "t1");
     await addToSurface("top10", "t2");
-    await addToSurface("entitled_row", "e1");
+    await addToSurface("entitled-people", "e1");
     await addToSurface("hero", "h1");
     const all = await listAllCuration();
     expect(all.top10.map((x) => x.story_id)).toEqual(["t1", "t2"]);
-    expect(all.entitled_row.map((x) => x.story_id)).toEqual(["e1"]);
+    expect(all["entitled-people"].map((x) => x.story_id)).toEqual(["e1"]);
     expect(all.hero.map((x) => x.story_id)).toEqual(["h1"]);
-    expect(all.humor_row).toEqual([]);
+    expect(all["family-feuds"]).toEqual([]);
   });
 
   it("returns an empty object for each known surface when the table is empty", async () => {
@@ -254,11 +254,11 @@ describe("SURFACE_CAPACITY contract", () => {
   it("category rows + new_row + continue are uncapped", () => {
     expect(SURFACE_CAPACITY.continue).toBeNull();
     expect(SURFACE_CAPACITY.new_row).toBeNull();
-    expect(SURFACE_CAPACITY.entitled_row).toBeNull();
-    expect(SURFACE_CAPACITY.humor_row).toBeNull();
-    expect(SURFACE_CAPACITY.wholesome_row).toBeNull();
-    expect(SURFACE_CAPACITY.dating_row).toBeNull();
-    expect(SURFACE_CAPACITY.roommate_row).toBeNull();
-    expect(SURFACE_CAPACITY.drama_row).toBeNull();
+    expect(SURFACE_CAPACITY["entitled-people"]).toBeNull();
+    expect(SURFACE_CAPACITY["family-feuds"]).toBeNull();
+    expect(SURFACE_CAPACITY["wholesome-wins"]).toBeNull();
+    expect(SURFACE_CAPACITY["dating-disasters"]).toBeNull();
+    expect(SURFACE_CAPACITY["workplace"]).toBeNull();
+    expect(SURFACE_CAPACITY["revenge-karma"]).toBeNull();
   });
 });

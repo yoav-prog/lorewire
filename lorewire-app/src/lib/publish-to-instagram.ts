@@ -25,7 +25,7 @@ import { ensureOgPoster, ensureShortPoster } from "@/lib/short-poster";
 // --- Types -----------------------------------------------------------------
 
 export type InstagramPostStatus = "pending" | "posted" | "failed" | "deleted";
-export type InstagramPostTrigger = "auto" | "manual";
+export type InstagramPostTrigger = "auto" | "manual" | "scheduled";
 
 export interface InstagramPostRow {
   id: string;
@@ -625,6 +625,12 @@ export async function publishShortToInstagram(
       });
       return { status: "skipped", reason: "auto-publish toggle off" };
     }
+  }
+  // A 'scheduled' publish comes from the Publish Scheduler: it bypasses the
+  // auto_publish toggle (the schedule IS the intent) but still honors
+  // story-level dedup, so a re-dispatch or a manual+scheduled overlap
+  // cannot double-post.
+  if (args.trigger !== "manual") {
     const active = await existingActiveRowsForStory(args.storyId);
     if (active > 0) {
       log("skipped", {

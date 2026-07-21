@@ -603,11 +603,12 @@ _MP3_SAMPLES_PER_FRAME = {
 
 
 def audio_duration_ms(path) -> int:
-    """Real duration of a synthesized MP3 in milliseconds, summed from the MPEG
-    frame headers. Pure stdlib so it runs in the Vercel Python drain (no
-    ffprobe). Handles MPEG-1/2/2.5 across all three layers, so it is correct for
-    every TTS provider we use. Returns 0 on any failure so callers fall back to
-    their caption-derived duration cleanly.
+    """Real duration of a synthesized MP3 file in milliseconds, summed from the
+    MPEG frame headers (see `mp3_duration_ms` for the byte-level walk). Pure
+    stdlib so it runs in the Vercel Python drain (no ffprobe). Handles
+    MPEG-1/2/2.5 across all three layers, so it is correct for every TTS
+    provider we use. Returns 0 on any failure so callers fall back to their
+    caption-derived duration cleanly.
 
     Shorts use this as the FLOOR for the composition length: the rendered body
     must be at least as long as the narration, or the concatenated outro clips
@@ -618,6 +619,18 @@ def audio_duration_ms(path) -> int:
             data = fh.read()
     except OSError:
         return 0
+    return mp3_duration_ms(data)
+
+
+def mp3_duration_ms(data: bytes) -> int:
+    """Duration of an MP3 bytestream in milliseconds, summed frame by frame.
+
+    This is the ground-truth clock for the hook-first two-clip splice
+    (_plans/2026-07-02-hook-clip-measured-boundary.md): frame counting is
+    exact and additive, so duration(concat(a, b)) == duration(a) + duration(b)
+    byte-for-byte — the property the measured hook boundary rests on. Returns
+    0 on unparseable input.
+    """
     total_seconds = 0.0
     i = 0
     n = len(data)
@@ -652,6 +665,151 @@ def audio_duration_ms(path) -> int:
         total_seconds += _MP3_SAMPLES_PER_FRAME[(version, layer)] / sample_rate
         i += frame_size
     return int(round(total_seconds * 1000))
+
+
+# --- MP3 bytestream splicing (hook-first two-clip narration) -------------------
+#
+# The hook-first splice needs `voice.mp3 = hook_clip + silence + rest_clip`
+# built WITHOUT ffmpeg (the Vercel drain constraint, same as the duration
+# probes above). Raw MPEG frame streams from the same synth endpoint share
+# version/layer/sample-rate, so byte concatenation is a valid stream once the
+# container noise is stripped: ID3v2/ID3v1 tags and Xing/Info/VBRI header
+# frames embedded mid-stream make decoders error or misreport duration
+# (verified empirically, 2026-07-02). Per
+# _plans/2026-07-02-hook-clip-measured-boundary.md.
+
+def mp3_stream_params(data: bytes) -> dict | None:
+    """Version/layer/sample-rate/channel-count of the first real MPEG frame.
+
+    Returns ``{"version", "layer", "sample_rate", "channels"}`` or None when
+    no valid frame header is found. `channels` collapses the four channel-mode
+    values to a count (mono=1, everything else=2): decoders track mode changes
+    between stereo flavors frame-to-frame, but a mono/stereo mix mid-stream is
+    not a valid splice, so the count is what concat compatibility checks need.
+    """
+    i = _first_frame_offset(data)
+    if i is None:
+        return None
+    version = _MPEG_VERSION.get((data[i + 1] >> 3) & 0b11)
+    layer = _MPEG_LAYER.get((data[i + 1] >> 1) & 0b11)
+    if version is None or layer is None:
+        return None
+    sample_rate = _MP3_SAMPLE_RATES[version][(data[i + 2] >> 2) & 0b11]
+    if not sample_rate:
+        return None
+    mode = (data[i + 3] >> 6) & 0b11
+    return {
+        "version": version,
+        "layer": layer,
+        "sample_rate": sample_rate,
+        "channels": 1 if mode == 0b11 else 2,
+    }
+
+
+def strip_mp3_container_tags(data: bytes) -> bytes:
+    """Strip ID3v2 header, ID3v1 trailer, and a leading Xing/Info/VBRI frame.
+
+    Returns a bare MPEG frame stream, safe to place mid-stream in a byte
+    concat. Only the FIRST frame is inspected for a VBR header (that is the
+    only place encoders put one), so a real audio frame can never be dropped
+    by accident. Unparseable input is returned unchanged — the caller's
+    param check rejects it before any splice.
+    """
+    # ID3v2: "ID3" + version(2) + flags(1) + syncsafe size(4), then the tag.
+    if len(data) > 10 and data[:3] == b"ID3":
+        size = (
+            ((data[6] & 0x7F) << 21)
+            | ((data[7] & 0x7F) << 14)
+            | ((data[8] & 0x7F) << 7)
+            | (data[9] & 0x7F)
+        )
+        data = data[10 + size:]
+    # ID3v1: fixed 128-byte trailer starting "TAG".
+    if len(data) >= 128 and data[-128:-125] == b"TAG":
+        data = data[:-128]
+    without_vbr = _drop_leading_vbr_frame(data)
+    return without_vbr if without_vbr is not None else data
+
+
+def concat_mp3_streams(clips: list[bytes]) -> bytes:
+    """Byte-concatenate MP3 clips from the same synth format into one stream.
+
+    Every clip is tag-stripped first; the first clip's stream params are the
+    reference and any mismatch (different provider format, corrupt stream)
+    raises ValueError so the caller can fall back to single-clip synthesis
+    LOUDLY instead of shipping a glitchy seam. The result's frame-counted
+    duration is exactly the sum of the parts' — the measured-boundary
+    invariant the hook-first splice cuts against.
+    """
+    if not clips:
+        raise ValueError("concat_mp3_streams: no clips")
+    stripped = [strip_mp3_container_tags(c) for c in clips]
+    reference = mp3_stream_params(stripped[0])
+    if reference is None:
+        raise ValueError("concat_mp3_streams: clip 0 has no parseable MPEG frame")
+    for n, clip in enumerate(stripped[1:], start=1):
+        params = mp3_stream_params(clip)
+        if params is None:
+            raise ValueError(f"concat_mp3_streams: clip {n} has no parseable MPEG frame")
+        if params != reference:
+            raise ValueError(
+                f"concat_mp3_streams: clip {n} format {params} != clip 0 format {reference}"
+            )
+    return b"".join(stripped)
+
+
+def _first_frame_offset(data: bytes) -> int | None:
+    """Offset of the first byte pair that looks like an MPEG frame sync."""
+    i = 0
+    n = len(data)
+    while i < n - 4:
+        if data[i] == 0xFF and (data[i + 1] & 0xE0) == 0xE0:
+            return i
+        i += 1
+    return None
+
+
+def _drop_leading_vbr_frame(data: bytes) -> bytes | None:
+    """Drop the first frame when it is a Xing/Info/VBRI header frame.
+
+    VBR headers describe the ORIGINAL stream (frame count, total bytes); left
+    inside a concatenated file they lie to any decoder that trusts them. The
+    tag sits at a version/mode-dependent offset past the side info (Xing/Info)
+    or at a fixed 32-byte offset (VBRI), so both exact positions are checked.
+    Returns None when the first frame can't be parsed.
+    """
+    i = _first_frame_offset(data)
+    if i is None:
+        return None
+    version = _MPEG_VERSION.get((data[i + 1] >> 3) & 0b11)
+    layer = _MPEG_LAYER.get((data[i + 1] >> 1) & 0b11)
+    if version is None or layer is None:
+        return None
+    vgroup = "1" if version == "1" else "2"
+    bitrate_kbps = _MP3_BITRATES.get((vgroup, layer), [None] * 16)[(data[i + 2] >> 4) & 0x0F]
+    sample_rate = _MP3_SAMPLE_RATES[version][(data[i + 2] >> 2) & 0b11]
+    if not bitrate_kbps or not sample_rate:
+        return None
+    padding = (data[i + 2] >> 1) & 0x01
+    if layer == 1:
+        frame_size = (12 * bitrate_kbps * 1000 // sample_rate + padding) * 4
+    else:
+        coeff = 72 if (layer == 3 and version != "1") else 144
+        frame_size = coeff * bitrate_kbps * 1000 // sample_rate + padding
+    if frame_size <= 0 or i + frame_size > len(data):
+        return None
+    # CRC-protected frames (protection bit 0) carry 2 extra bytes before the
+    # side info; Layer III side-info size depends on version + channel count.
+    crc = 2 if (data[i + 1] & 0x01) == 0 else 0
+    mono = ((data[i + 3] >> 6) & 0b11) == 0b11
+    side_info = (17 if mono else 32) if version == "1" else (9 if mono else 17)
+    xing_at = i + 4 + crc + side_info
+    if data[xing_at:xing_at + 4] in (b"Xing", b"Info"):
+        return data[:i] + data[i + frame_size:]
+    vbri_at = i + 4 + 32
+    if data[vbri_at:vbri_at + 4] == b"VBRI":
+        return data[:i] + data[i + frame_size:]
+    return data
 
 
 def _parse_google_duration(value) -> float:

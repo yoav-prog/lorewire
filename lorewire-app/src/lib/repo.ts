@@ -2,7 +2,11 @@
 // authorization and shape stay consistent (see the Next data-security guide).
 
 import "server-only";
+// Type-only on purpose: a value import would close the module cycle
+// asset-completeness → polls → repo.
+import type { AssetGate } from "@/lib/asset-completeness";
 import { all, one, run } from "@/lib/db";
+import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 
 export type StoryStatus =
   | "draft"
@@ -96,10 +100,19 @@ export interface StoryRow {
   refresh_assets_state: string | null;
   refresh_assets_started_at: string | null;
   refresh_assets_attempts: number | null;
+  // Python-finisher artwork variants (2026-06-25 columns, surfaced here
+  // 2026-07-03): the 16:9 hero, the baked-title flag, and the three
+  // title-baked thumbnails. The public reader reads the landscape
+  // thumbnail as the og:image fallback now that heroes render clean.
+  hero_image_landscape: string | null;
+  hero_has_baked_title: number | null;
+  thumbnail_image: string | null;
+  thumbnail_image_landscape: string | null;
+  thumbnail_image_square: string | null;
 }
 
 const COLS =
-  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts";
+  "id, reddit_id, slug, category, title, summary, body, teleprompter, status, source_url, hero_image, images, audio_url, video_url, duration, alignment, intro_segment_id, outro_segment_id, skip_intro, skip_outro, video_config, short_config, tokens, cost_cents, created_at, updated_at, published_at, payload, noindex, props, character_image, character_image_mouth_removed, pipeline_cache, voice_provider, voice_id, hero_style_id, auto_publish_when_ready, auto_publish_attempts, refresh_assets_state, refresh_assets_started_at, refresh_assets_attempts, hero_image_landscape, hero_has_baked_title, thumbnail_image, thumbnail_image_landscape, thumbnail_image_square";
 
 // Slim projection for list views (dashboard recent, /admin/stories). Drops the
 // large text columns (body, teleprompter, payload, summary, images, alignment)
@@ -465,6 +478,18 @@ export async function createStory(input: CreateStoryInput): Promise<void> {
 // Reddit thread — which contradicts "every story is from Reddit".
 // Throwing here means the admin's publish click reports the failure
 // instead of silently shipping a dummy row.
+//
+// The flip to 'published' additionally requires a non-empty video_url —
+// the last line of defense behind evaluateAssetCompleteness's gate. On
+// 2026-07-02 two stories went live with finished renders in storage but
+// a NULL video_url, so the public Watch tab had nothing to play. Any
+// pipeline/Reddit path that reaches this write without a playable video
+// is a bug upstream, and failing closed here is the point.
+// Submission-origin stories are exempt: the poll-only approval mode
+// publishes them as text polls with no render spend BY DESIGN
+// (lib/submission-promote.ts, plan 2026-06-29-user-submitted-stories.md),
+// the same early-return that already exempts them from the fixture
+// guard. Plan: _plans/2026-07-02-never-publish-without-video.md.
 const FIXTURE_PLACEHOLDER_IDS = new Set([
   "envelope",
   "example",
@@ -475,14 +500,18 @@ const FIXTURE_PLACEHOLDER_IDS = new Set([
 ]);
 const FIXTURE_DRY_RUN_BODY_MARKER = "[DRY RUN ARTICLE]";
 
-async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
+async function assertStoryReadyForPublicStatus(
+  id: string,
+  targetStatus: StoryStatus,
+): Promise<void> {
   const row = await one<{
     reddit_id: string | null;
     submission_id: string | null;
     source_url: string | null;
     body: string | null;
+    video_url: string | null;
   }>(
-    "SELECT reddit_id, submission_id, source_url, body FROM stories WHERE id = ?",
+    "SELECT reddit_id, submission_id, source_url, body, video_url FROM stories WHERE id = ?",
     [id],
   );
   if (!row) {
@@ -491,8 +520,10 @@ async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
     );
   }
   // User-submission origin: vetted by moderation + human approval, not a Reddit
-  // dry-run fixture. The guard below targets fixture Reddit rows and does not
-  // apply here. Plan: 2026-06-29-user-submitted-stories.md (Phase 3).
+  // dry-run fixture, and legitimately publishable WITHOUT a video (the
+  // poll-only approval mode). Neither the fixture guard nor the media
+  // invariant below applies. Plan: 2026-06-29-user-submitted-stories.md
+  // (Phase 3) + 2026-07-02-never-publish-without-video.md.
   if (row.submission_id) return;
   const redditId = row.reddit_id?.toLowerCase() ?? "";
   if (!redditId || FIXTURE_PLACEHOLDER_IDS.has(redditId)) {
@@ -511,12 +542,23 @@ async function assertStoryReadyForPublicStatus(id: string): Promise<void> {
       `[stories repo] cannot publish story id=${id}: body is a dry-run fixture`,
     );
   }
+  // Publish-time media invariant. Last of the checks so the more
+  // specific fixture errors above keep their messages. 'ready' is
+  // exempt: a story may be reviewed-ready while its render is queued.
+  if (
+    targetStatus === "published" &&
+    (!row.video_url || row.video_url.trim() === "")
+  ) {
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: video_url is empty — render the short and apply it before publishing`,
+    );
+  }
 }
 
 export async function setStatus(id: string, status: StoryStatus): Promise<void> {
   const now = new Date().toISOString();
   if (status === "ready" || status === "published") {
-    await assertStoryReadyForPublicStatus(id);
+    await assertStoryReadyForPublicStatus(id, status);
   }
   if (status === "published") {
     await run(
@@ -1568,6 +1610,14 @@ export interface ContentRow {
    *  refreshing. 'voice_pending' / 'short_pending' / 'hero_pending'
    *  per the cron at /api/refresh_assets. Articles always NULL. */
   refresh_state: string | null;
+  /** 2026-07-21 what stops Publish for this row, straight from the
+   *  asset gate's `blocking` list ([] = would publish clean). NULL =
+   *  not evaluated: articles, already-published/archived stories, and
+   *  every path except listContentPageAction — the repo can't compute
+   *  it itself (importing the gate would close the cycle
+   *  asset-completeness → polls → repo), so the action layer fills it
+   *  in. Plan: _plans/2026-07-21-content-row-publish-blockers.md. */
+  publish_blockers: AssetGate[] | null;
 }
 
 /** 2026-06-24 Content inbox: latest story_jobs row status per story.
@@ -2015,6 +2065,7 @@ export async function listContentSlim(
       flagged_attempts: s.auto_publish_attempts ?? 0,
       progress: progressByStory.get(s.id) ?? null,
       refresh_state: s.refresh_assets_state ?? null,
+      publish_blockers: null,
     })),
     ...articles.map<ContentRow>((a) => ({
       kind: "article",
@@ -2035,6 +2086,7 @@ export async function listContentSlim(
       flagged_attempts: 0,
       progress: null,
       refresh_state: null,
+      publish_blockers: null,
     })),
   ];
 
@@ -2105,6 +2157,511 @@ export async function listContentSlim(
     updatedSince: opts.updatedSince ?? null,
     updatedUntil: opts.updatedUntil ?? null,
   });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Content inbox pagination (2026-07-15, Phase 1 —
+// _plans/2026-07-15-content-pagination-and-bulk-safety.md).
+//
+// Server-driven, keyset-paginated replacement for the 200-row listContentSlim
+// cap. Mirrors the Browse house pattern (homepage-data.ts loadBrowsePage):
+// compound keyset on (COALESCE(updated_at, created_at), id) DESC, over-fetch by
+// one, an opaque "<ts>|<id>" cursor that degrades to page-one on garbage, and a
+// COUNT(*) total on the first page. The twist over Browse is TWO tables merged
+// via UNION ALL — each side is filtered + cursor-clamped + capped internally,
+// then the outer query merges the top page.
+//
+// P1 scope: real-column filters only (kind / status / category / language /
+// updated range / flagged) + case-insensitive text search. The three AGGREGATE
+// filters (published-on, job-status, active-render) are NOT accepted here — they
+// are computed post-fetch and would break page boundaries and the total count.
+// Phase 2 moves them into SQL (EXISTS / latest-row) and restores them.
+
+/** Columns each table projects into the merged, keyset-ordered union. Both
+ *  SELECTs list these in the same order; the non-applicable side supplies a
+ *  literal NULL / 0 so the shapes line up. `sort_key` is the keyset value. */
+interface ContentPageMergedRow {
+  id: string;
+  kind: "story" | "article";
+  title: string | null;
+  slug: string | null;
+  status: string | null;
+  badge: string | null; // category (story) / type (article)
+  subkind: string; // 'video' (story) / article type
+  language: string | null;
+  hero_image: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  published_at: string | null;
+  reddit_id: string | null;
+  auto_publish_when_ready: number;
+  auto_publish_attempts: number;
+  refresh_assets_state: string | null;
+  sort_key: string | null;
+}
+
+export interface ContentPageOpts {
+  subKind?: ContentSubKind;
+  status?: string;
+  language?: string; // narrows to articles
+  category?: string; // narrows to stories
+  updatedSince?: string;
+  updatedUntil?: string;
+  flagged?: boolean; // stories.auto_publish_when_ready — a real column
+  // 2026-07-15 Phase 2 aggregate filters, now in SQL (stories only). Setting
+  // publishedOn / jobStatus / activeKind drops the article half of the union;
+  // publishedNotOn keeps articles (they're vacuously "not on" any platform).
+  /** AND-filter: only stories live on every listed platform. */
+  publishedOn?: SocialPlatform[];
+  /** AND-filter: only stories NOT live on every listed platform. */
+  publishedNotOn?: SocialPlatform[];
+  /** Latest story_jobs.status (by requested_at) for the story's reddit_id. */
+  jobStatus?: JobStatus;
+  /** In-flight render filter: "any" = any active render; a specific kind
+   *  narrows to one source table. */
+  activeKind?: ProgressKind | "any";
+  /** 2026-07-15 title-length filter (stories only). "long" = title over the
+   *  branded cap (TITLE_MAX_CHARS chars OR TITLE_MAX_WORDS words) — the rows
+   *  that render weird on the cover and can be bulk-fixed with Regenerate
+   *  titles. Drops the article half (articles aren't cover-rendered from the
+   *  story pipeline and aren't fixable by the regenerator). */
+  titleLength?: "long";
+  /** Case-insensitive search over title / slug / id / status / badge. */
+  q?: string;
+  /** Compound "<ts>|<id>" cursor from a prior page; malformed → page one. */
+  cursor?: string;
+  /** Rows per page. Default 100. */
+  limit?: number;
+  /** Compute the total matching count (first page only). */
+  withTotal?: boolean;
+}
+
+export interface ContentPageResult {
+  rows: ContentRow[];
+  /** Cursor for the next page, or null when the last page was returned. */
+  nextCursor: string | null;
+  /** Total matching rows (only when withTotal was requested, else null). */
+  total: number | null;
+}
+
+/** ISO-8601 TEXT timestamps sort lexicographically, so the cursor is just the
+ *  literal "<sort_key>|<id>". A null sort_key encodes as an empty ts. */
+function encodeContentCursor(sortKey: string | null, id: string): string {
+  return `${sortKey ?? ""}|${id}`;
+}
+
+/** Split on the FIRST "|" (ids may not contain one; timestamps never do).
+ *  Any malformed cursor returns null so the caller degrades to page one
+ *  instead of throwing on a hand-edited value. */
+function decodeContentCursor(
+  cursor: string | undefined,
+): { ts: string; id: string } | null {
+  if (!cursor) return null;
+  const idx = cursor.indexOf("|");
+  if (idx < 0) return null;
+  const id = cursor.slice(idx + 1);
+  if (!id) return null;
+  return { ts: cursor.slice(0, idx), id };
+}
+
+const STORY_PAGE_PROJECTION =
+  "id, 'story' AS kind, title, slug, status, category AS badge, " +
+  "'video' AS subkind, NULL AS language, NULL AS hero_image, " +
+  "created_at, updated_at, NULL AS published_at, reddit_id, " +
+  "COALESCE(auto_publish_when_ready, 0) AS auto_publish_when_ready, " +
+  "COALESCE(auto_publish_attempts, 0) AS auto_publish_attempts, " +
+  "refresh_assets_state, COALESCE(updated_at, created_at) AS sort_key";
+
+const ARTICLE_PAGE_PROJECTION =
+  "id, 'article' AS kind, title, slug, status, type AS badge, " +
+  "type AS subkind, language, hero_image, " +
+  "created_at, updated_at, published_at, NULL AS reddit_id, " +
+  "0 AS auto_publish_when_ready, 0 AS auto_publish_attempts, " +
+  "NULL AS refresh_assets_state, COALESCE(updated_at, created_at) AS sort_key";
+
+// 2026-07-15 "too long" title predicate (stories only). Portable across
+// SQLite + Postgres: char count via LENGTH, word count as (spaces + 1) on the
+// trimmed title — exact for the single-spaced ALL-CAPS titles the pipeline
+// produces, matching titleWordCount() in lib/title-policy.ts. The two
+// thresholds are module constants (not user input), so interpolating them is
+// injection-safe and keeps the clause parameter-free.
+const TOO_LONG_TITLE_CLAUSE =
+  "(title IS NOT NULL AND (LENGTH(TRIM(title)) > " +
+  TITLE_MAX_CHARS +
+  " OR (LENGTH(TRIM(title)) - LENGTH(REPLACE(TRIM(title), ' ', '')) + 1) > " +
+  TITLE_MAX_WORDS +
+  "))";
+
+// 2026-07-15 Phase 2: the aggregate story filters as portable correlated SQL.
+// Table names come from a closed enum, never user input.
+const SOCIAL_POST_TABLE: Record<SocialPlatform, string> = {
+  facebook: "facebook_posts",
+  instagram: "instagram_posts",
+  youtube: "youtube_posts",
+  tiktok: "tiktok_posts",
+};
+
+/** Correlated EXISTS clause for the active-render filter, matching the tables
+ *  loadStoryProgressByIds reads. Correlates on the outer `stories` row. */
+function activeRenderClause(kind: ProgressKind | "any"): string {
+  const short =
+    "EXISTS (SELECT 1 FROM short_renders WHERE story_id = stories.id " +
+    "AND status IN ('queued', 'rendering'))";
+  const images =
+    "EXISTS (SELECT 1 FROM image_renders WHERE owner_kind = 'story' " +
+    "AND owner_id = stories.id AND status IN ('queued', 'rendering'))";
+  const voice =
+    "EXISTS (SELECT 1 FROM voice_renders WHERE story_id = stories.id " +
+    "AND status IN ('queued', 'rendering'))";
+  const pipeline =
+    "EXISTS (SELECT 1 FROM story_jobs WHERE story_id = stories.id " +
+    "AND status IN ('queued', 'processing'))";
+  switch (kind) {
+    case "short":
+      return short;
+    case "images":
+      return images;
+    case "voice":
+      return voice;
+    case "pipeline":
+      return pipeline;
+    default: // "any"
+      return `(${short} OR ${images} OR ${voice} OR ${pipeline})`;
+  }
+}
+
+/** Shared WHERE for one table: filters + search, plus an optional keyset cursor
+ *  clamp. The page SELECT and the COUNT both build off this so they filter
+ *  identically; the count passes cursor=null (the total is filter-scoped, not
+ *  page-scoped). */
+function buildContentTableWhere(
+  table: "stories" | "articles",
+  opts: ContentPageOpts,
+  cursor: { ts: string; id: string } | null,
+): { clause: string; params: unknown[] } {
+  const isStory = table === "stories";
+  const where: string[] = [];
+  const params: unknown[] = [];
+
+  if (opts.status) {
+    where.push("status = ?");
+    params.push(opts.status);
+  }
+  if (isStory) {
+    if (opts.category) {
+      where.push("category = ?");
+      params.push(opts.category);
+    }
+    if (opts.flagged === true) {
+      where.push("COALESCE(auto_publish_when_ready, 0) = 1");
+    } else if (opts.flagged === false) {
+      where.push("COALESCE(auto_publish_when_ready, 0) = 0");
+    }
+    // Aggregate filters (Phase 2), stories only. Correlated on stories.id /
+    // stories.reddit_id inside this table's SELECT.
+    for (const p of opts.publishedOn ?? []) {
+      where.push(
+        `EXISTS (SELECT 1 FROM ${SOCIAL_POST_TABLE[p]} WHERE story_id = stories.id AND status = 'posted')`,
+      );
+    }
+    for (const p of opts.publishedNotOn ?? []) {
+      where.push(
+        `NOT EXISTS (SELECT 1 FROM ${SOCIAL_POST_TABLE[p]} WHERE story_id = stories.id AND status = 'posted')`,
+      );
+    }
+    if (opts.jobStatus) {
+      where.push(
+        "(SELECT status FROM story_jobs WHERE reddit_id = stories.reddit_id " +
+          "ORDER BY requested_at DESC LIMIT 1) = ?",
+      );
+      params.push(opts.jobStatus);
+    }
+    if (opts.activeKind) {
+      where.push(activeRenderClause(opts.activeKind));
+    }
+    if (opts.titleLength === "long") {
+      where.push(TOO_LONG_TITLE_CLAUSE);
+    }
+  } else {
+    // articles: subKind maps to the `type` column; language narrows here.
+    if (opts.subKind && opts.subKind !== "video") {
+      where.push("type = ?");
+      params.push(opts.subKind);
+    }
+    if (opts.language) {
+      where.push("language = ?");
+      params.push(opts.language);
+    }
+  }
+  if (opts.updatedSince) {
+    where.push("COALESCE(updated_at, created_at) >= ?");
+    params.push(opts.updatedSince);
+  }
+  if (opts.updatedUntil) {
+    where.push("COALESCE(updated_at, created_at) < ?");
+    params.push(opts.updatedUntil);
+  }
+  const q = opts.q?.trim().toLowerCase();
+  if (q) {
+    // Portable case-insensitive contains (LOWER + LIKE, no Postgres-only
+    // ILIKE), matching the audit.ts idiom. badge = category (story) / type
+    // (article).
+    const badgeCol = isStory ? "category" : "type";
+    where.push(
+      "(LOWER(COALESCE(title, '')) LIKE ? OR LOWER(COALESCE(slug, '')) LIKE ? " +
+        "OR LOWER(id) LIKE ? OR LOWER(COALESCE(status, '')) LIKE ? " +
+        `OR LOWER(COALESCE(${badgeCol}, '')) LIKE ?)`,
+    );
+    const like = `%${q}%`;
+    params.push(like, like, like, like, like);
+  }
+  if (cursor) {
+    where.push(
+      "(COALESCE(updated_at, created_at) < ? OR " +
+        "(COALESCE(updated_at, created_at) = ? AND id < ?))",
+    );
+    params.push(cursor.ts, cursor.ts, cursor.id);
+  }
+
+  return { clause: where.length ? `WHERE ${where.join(" AND ")}` : "", params };
+}
+
+/** One table's inner keyset SELECT: shared WHERE + projection + own ORDER/LIMIT
+ *  (each side returns its own top innerLimit; the outer query merges them). */
+function buildContentTableSelect(
+  table: "stories" | "articles",
+  opts: ContentPageOpts,
+  cursor: { ts: string; id: string } | null,
+  innerLimit: number,
+): { sql: string; params: unknown[] } {
+  const { clause, params } = buildContentTableWhere(table, opts, cursor);
+  const projection =
+    table === "stories" ? STORY_PAGE_PROJECTION : ARTICLE_PAGE_PROJECTION;
+  return {
+    sql:
+      `SELECT ${projection} FROM ${table} ${clause} ` +
+      `ORDER BY COALESCE(updated_at, created_at) DESC, id DESC LIMIT ?`,
+    params: [...params, innerLimit],
+  };
+}
+
+/** One table's COUNT over the same filters + search (no cursor clamp). */
+function buildContentTableCount(
+  table: "stories" | "articles",
+  opts: ContentPageOpts,
+): { sql: string; params: unknown[] } {
+  const { clause, params } = buildContentTableWhere(table, opts, null);
+  return { sql: `SELECT COUNT(*) AS n FROM ${table} ${clause}`, params };
+}
+
+/** Which of the two tables a filter set can match. A story-only filter
+ *  (language / article-subKind / story-only status / category / flagged /
+ *  published-on / job-status / active-render) drops the other side. Shared by
+ *  loadContentPage and listContentIdsForFilter so pagination and the
+ *  select-all-matching resolver agree exactly. `publishedNotOn` keeps articles
+ *  (vacuously not-on any platform). */
+function contentPageWants(opts: ContentPageOpts): {
+  wantStories: boolean;
+  wantArticles: boolean;
+} {
+  const isArticleSubKind =
+    opts.subKind && opts.subKind !== "video"
+      ? ARTICLE_TYPES.includes(opts.subKind as ArticleType)
+      : false;
+  const isStoryOnlyStatus =
+    opts.status === "scripted" ||
+    opts.status === "rendering" ||
+    opts.status === "ready";
+  const wantStories =
+    !opts.language &&
+    !isArticleSubKind &&
+    (opts.subKind === undefined || opts.subKind === "video");
+  const wantArticles =
+    !isStoryOnlyStatus &&
+    !opts.category &&
+    opts.flagged !== true &&
+    (opts.publishedOn?.length ?? 0) === 0 &&
+    !opts.jobStatus &&
+    !opts.activeKind &&
+    opts.titleLength !== "long" &&
+    (opts.subKind === undefined || isArticleSubKind);
+  return { wantStories, wantArticles };
+}
+
+export async function loadContentPage(
+  opts: ContentPageOpts = {},
+): Promise<ContentPageResult> {
+  // Default 100, capped at 200 so a hand-crafted opts.limit can't ask for the
+  // whole table in one request.
+  const limit = Math.min(
+    opts.limit && opts.limit > 0 ? Math.trunc(opts.limit) : 100,
+    200,
+  );
+  const cursor = decodeContentCursor(opts.cursor);
+
+  // Skip a table entirely when a filter can't apply to it.
+  const { wantStories, wantArticles } = contentPageWants(opts);
+
+  if (!wantStories && !wantArticles) {
+    return { rows: [], nextCursor: null, total: opts.withTotal ? 0 : null };
+  }
+
+  // Over-fetch by one to detect a next page. Each side returns up to limit+1 of
+  // its own top rows; the outer merge then keeps the global top limit+1.
+  const innerLimit = limit + 1;
+  const selects: { sql: string; params: unknown[] }[] = [];
+  if (wantStories) {
+    selects.push(buildContentTableSelect("stories", opts, cursor, innerLimit));
+  }
+  if (wantArticles) {
+    selects.push(buildContentTableSelect("articles", opts, cursor, innerLimit));
+  }
+
+  let merged: ContentPageMergedRow[];
+  if (selects.length === 1) {
+    merged = await all<ContentPageMergedRow>(selects[0].sql, selects[0].params);
+  } else {
+    // Each branch is wrapped as a derived table so its own ORDER BY / LIMIT is
+    // legal inside the UNION — SQLite rejects a parenthesised compound operand
+    // that carries ORDER BY / LIMIT directly. The outer query merges + re-sorts
+    // the two capped streams and takes the global top page.
+    const sql =
+      `SELECT * FROM ( ` +
+      `SELECT * FROM (${selects[0].sql}) AS s ` +
+      `UNION ALL ` +
+      `SELECT * FROM (${selects[1].sql}) AS a ` +
+      `) AS merged ORDER BY sort_key DESC, id DESC LIMIT ?`;
+    merged = await all<ContentPageMergedRow>(sql, [
+      ...selects[0].params,
+      ...selects[1].params,
+      innerLimit,
+    ]);
+  }
+
+  const hasMore = merged.length > limit;
+  const pageRows = hasMore ? merged.slice(0, limit) : merged;
+  const last = pageRows[pageRows.length - 1];
+  const nextCursor =
+    hasMore && last ? encodeContentCursor(last.sort_key, last.id) : null;
+
+  // Enrich the page's stories exactly as listContentSlim does, scoped to this
+  // page's ids. Articles get defaults.
+  const storyIds = pageRows.filter((r) => r.kind === "story").map((r) => r.id);
+  const [publishedOnByStory, progressByStory] = await Promise.all([
+    loadPublishedOnByStoryIds(storyIds),
+    loadStoryProgressByIds(storyIds),
+  ]);
+  const redditIds = pageRows
+    .filter((r) => r.kind === "story")
+    .map((r) => r.reddit_id)
+    .filter((r): r is string => typeof r === "string" && r.length > 0);
+  const jobStatusByReddit = await loadLatestJobStatusByReddit(redditIds);
+
+  const rows: ContentRow[] = pageRows.map<ContentRow>((r) =>
+    r.kind === "story"
+      ? {
+          kind: "story",
+          subKind: "video",
+          id: r.id,
+          title: r.title,
+          slug: r.slug,
+          status: r.status,
+          badge: r.badge,
+          language: null,
+          hero_image: null,
+          updated_at: r.updated_at,
+          created_at: r.created_at,
+          published_at: null,
+          published_on:
+            publishedOnByStory.get(r.id) ?? { ...DEFAULT_PUBLISHED_ON },
+          job_status: r.reddit_id
+            ? (jobStatusByReddit.get(r.reddit_id) ?? null)
+            : null,
+          flagged: r.auto_publish_when_ready === 1,
+          flagged_attempts: r.auto_publish_attempts ?? 0,
+          progress: progressByStory.get(r.id) ?? null,
+          refresh_state: r.refresh_assets_state ?? null,
+          publish_blockers: null,
+        }
+      : {
+          kind: "article",
+          subKind: (r.subkind as ArticleType | null) ?? "feature",
+          id: r.id,
+          title: r.title,
+          slug: r.slug,
+          status: r.status,
+          badge: r.badge,
+          language: r.language,
+          hero_image: r.hero_image,
+          updated_at: r.updated_at,
+          created_at: r.created_at,
+          published_at: r.published_at,
+          published_on: { ...DEFAULT_PUBLISHED_ON },
+          job_status: null,
+          flagged: false,
+          flagged_attempts: 0,
+          progress: null,
+          refresh_state: null,
+          publish_blockers: null,
+        },
+  );
+
+  let total: number | null = null;
+  if (opts.withTotal) {
+    const counts = await Promise.all(
+      [
+        wantStories ? buildContentTableCount("stories", opts) : null,
+        wantArticles ? buildContentTableCount("articles", opts) : null,
+      ]
+        .filter((c): c is { sql: string; params: unknown[] } => c !== null)
+        .map((c) => one<{ n: number }>(c.sql, c.params)),
+    );
+    total = counts.reduce((sum, row) => sum + Number(row?.n ?? 0), 0);
+  }
+
+  console.info("[content repo] page", {
+    count: rows.length,
+    hasMore,
+    total,
+    subKind: opts.subKind ?? null,
+    status: opts.status ?? null,
+    q: opts.q ? "set" : null,
+    paged: cursor ? "next" : "first",
+  });
+
+  return { rows, nextCursor, total };
+}
+
+/** Resolve every content id matching a filter (no pagination, newest-first per
+ *  table) up to `cap`. Backs select-all-matching: the caller chunks these ids
+ *  through the per-item bulk action so every invariant holds. Passing cap+1
+ *  lets the caller detect "too many matched" and refuse. */
+export async function listContentIdsForFilter(
+  opts: ContentPageOpts,
+  cap: number,
+): Promise<{ kind: "story" | "article"; id: string }[]> {
+  const limit = Math.max(0, Math.trunc(cap));
+  const { wantStories, wantArticles } = contentPageWants(opts);
+  const out: { kind: "story" | "article"; id: string }[] = [];
+  if (wantStories && out.length < limit) {
+    const { clause, params } = buildContentTableWhere("stories", opts, null);
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM stories ${clause} ` +
+        `ORDER BY COALESCE(updated_at, created_at) DESC, id DESC LIMIT ?`,
+      [...params, limit - out.length],
+    );
+    for (const r of rows) out.push({ kind: "story", id: r.id });
+  }
+  if (wantArticles && out.length < limit) {
+    const { clause, params } = buildContentTableWhere("articles", opts, null);
+    const rows = await all<{ id: string }>(
+      `SELECT id FROM articles ${clause} ` +
+        `ORDER BY COALESCE(updated_at, created_at) DESC, id DESC LIMIT ?`,
+      [...params, limit - out.length],
+    );
+    for (const r of rows) out.push({ kind: "article", id: r.id });
+  }
   return out;
 }
 

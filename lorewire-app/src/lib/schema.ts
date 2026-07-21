@@ -137,6 +137,13 @@ export const STORIES: Table = {
     { name: "thumbnail_image", type: "TEXT" },
     { name: "thumbnail_image_landscape", type: "TEXT" },
     { name: "thumbnail_image_square", type: "TEXT" },
+    // 1 when the hero artwork bakes the title into the image itself so
+    // the UI suppresses its CSS title overlay. Written by the Python
+    // cinematic hero path (pipeline/store.py declares the same column
+    // via ALTER); co-declared here — like the four variants above — so
+    // TS-only environments (tests, fresh DBs) can SELECT it in the
+    // homepage/wires projections without the Python boot having run.
+    { name: "hero_has_baked_title", type: "INTEGER" },
     // 2026-06-25 bulk complete-and-publish
     // (_plans/2026-06-25-bulk-complete-and-publish.md). Flag the
     // /api/auto_complete_publish cron watches. 1 = enqueue social
@@ -673,6 +680,14 @@ export const STORY_JOBS: Table = {
     // Splitting this stage off keeps every Vercel function under the
     // 800s ceiling.
     { name: "finisher_status", type: "TEXT" },
+    // 2026-07-05 finisher crash recovery (_plans/2026-07-05-finisher-
+    // stale-running-recovery.md). claimed_at is stamped by the Python
+    // claim so reap_stale_finisher_jobs can spot a 'running' row whose
+    // function died; attempts counts reaper/timeout revives. This
+    // ADD COLUMN path emits no DEFAULT, so read attempts with
+    // COALESCE(attempts, 0) — same convention as SHORT_RENDERS.attempts.
+    { name: "finisher_claimed_at", type: "TEXT" },
+    { name: "finisher_attempts", type: "INTEGER" },
   ],
 };
 
@@ -1444,6 +1459,80 @@ export const STORY_EVENTS: Table = {
   ],
 };
 
+// 2026-07-01 Publish Scheduler (_plans/2026-07-01-render-and-publish-
+// schedulers.md). The scheduling queue that sits in front of the existing
+// per-platform publishers. When a human approves a reviewed story, one
+// row per enabled platform is inserted with a `scheduled_for` UTC instant
+// (the next open slot for that platform). The per-minute dispatch cron
+// claims due rows, flips `state` to 'publishing' (the idempotency key),
+// and calls the existing publish-to-<platform> function; on success the
+// row goes to 'published'. State is per-row, so a story can be published
+// on one platform while still scheduled on another (partial-publish is a
+// normal outcome, not an error).
+//   - `platform`: 'youtube' | 'facebook' | 'instagram' | 'tiktok'.
+//   - `scheduled_for`: UTC ISO instant, resolved per-day from the
+//     platform's wall-clock slots so DST is always correct.
+//   - `slot_local` / `timezone`: the "HH:MM" slot and IANA zone the
+//     instant came from, kept for display and forensics only.
+//   - `state`: 'scheduled' → 'publishing' → 'published' | 'failed' |
+//     'cancelled'.
+// The partial unique index in POST_TABLE_DDL keeps a story from being
+// double-scheduled on the same platform.
+export const SCHEDULED_PUBLISHES: Table = {
+  name: "scheduled_publishes",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "render_id", type: "TEXT" },
+    { name: "platform", type: "TEXT" },
+    { name: "scheduled_for", type: "TEXT" },
+    { name: "slot_local", type: "TEXT" },
+    { name: "timezone", type: "TEXT" },
+    { name: "state", type: "TEXT" },
+    { name: "external_post_id", type: "TEXT" },
+    { name: "error_message", type: "TEXT" },
+    { name: "attempts", type: "INTEGER" },
+    { name: "approved_by", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "dispatched_at", type: "TEXT" },
+    { name: "posted_at", type: "TEXT" },
+  ],
+};
+
+// 2026-07-01 Publish Scheduler: write-only decision log. Every approve or
+// reject at the human gate appends one row capturing the source signals
+// (tier, engagement, age, subreddit) next to the human's verdict. This is
+// the cheap instrumentation the council kept from the "self-tuning
+// flywheel" idea: it makes "does strict-tier priority match human taste,
+// and would weighted scoring help" a query we can answer later, at near
+// zero cost now. Nothing reads it in v1.
+export const SCHEDULER_DECISIONS: Table = {
+  name: "scheduler_decisions",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "story_id", type: "TEXT" },
+    { name: "reddit_id", type: "TEXT" },
+    { name: "decision", type: "TEXT" },
+    { name: "tier", type: "TEXT" },
+    { name: "comments", type: "INTEGER" },
+    { name: "age_hours", type: "REAL" },
+    { name: "subreddit", type: "TEXT" },
+    { name: "decided_by", type: "TEXT" },
+    { name: "decided_at", type: "TEXT" },
+    // 2026-07-15 safety-judge observability. The unattended-publish lanes
+    // used to store only decision = 'auto_held' and DISCARD the judge's
+    // verdict, so every hold looked identical and a 100%-false-positive
+    // judge stayed invisible for weeks. These carry the verdict onto the
+    // decision row so every hold is explainable ("held & why"). NULL for
+    // the human gate (approve/reject) and for degenerate holds without a
+    // confidence. ensureSchema's ADD COLUMN path backfills them additively.
+    { name: "judge_decision", type: "TEXT" },
+    { name: "judge_category", type: "TEXT" },
+    { name: "judge_reason", type: "TEXT" },
+    { name: "judge_confidence", type: "REAL" },
+  ],
+};
+
 // 2026-07-01 data-driven category taxonomy
 // (_plans/2026-07-01-category-taxonomy-multitag.md, PR2). `categories` is the
 // admin-managed registry that replaces the hardcoded six-item enum. `slug` is
@@ -1491,6 +1580,35 @@ export const STORY_TAGS: Table = {
     { name: "source", type: "TEXT" },
     { name: "confidence", type: "REAL" },
     { name: "created_at", type: "TEXT" },
+  ],
+};
+
+// 2026-07-02 admin notifications inbox
+// (_plans/2026-07-02-never-publish-without-video.md). Append-only feed of
+// failures the operator must see — written by the auto-publish drains when
+// a story could NOT go live (attempt cap reached / gate blocked), read by
+// the /admin/notifications page + the sidebar unread badge. `severity` is
+// 'error' | 'warning'; `source` names the writing subsystem
+// ('auto-publish' | 'full-pipeline'); `subject_kind`/`subject_id` link the
+// row to the thing that failed (today always 'story'). `detail` is a JSON
+// blob of writer-specific context (missing gates, attempt counts).
+// `dedupe_key`: a writer that retries (cron ticks) reuses one key so the
+// inbox gets ONE unread row per stuck subject, not one per tick; rows the
+// operator already read don't suppress a fresh occurrence. `read_at` NULL =
+// unread. TS-owned table — the Python pipeline neither reads nor writes it.
+export const ADMIN_NOTIFICATIONS: Table = {
+  name: "admin_notifications",
+  columns: [
+    { name: "id", type: "TEXT", pk: true },
+    { name: "created_at", type: "TEXT" },
+    { name: "severity", type: "TEXT" },
+    { name: "source", type: "TEXT" },
+    { name: "subject_kind", type: "TEXT" },
+    { name: "subject_id", type: "TEXT" },
+    { name: "title", type: "TEXT" },
+    { name: "detail", type: "TEXT" },
+    { name: "dedupe_key", type: "TEXT" },
+    { name: "read_at", type: "TEXT" },
   ],
 };
 
@@ -1543,6 +1661,9 @@ export const TABLES: Table[] = [
   FACEBOOK_STORIES,
   YOUTUBE_POSTS,
   TIKTOK_POSTS,
+  SCHEDULED_PUBLISHES,
+  SCHEDULER_DECISIONS,
+  ADMIN_NOTIFICATIONS,
 ];
 
 // CREATE TABLE that parses identically on SQLite and Postgres.
@@ -1839,4 +1960,31 @@ export const POST_TABLE_DDL: string[] = [
     "ON submission_reports(status, created_at)",
   "CREATE INDEX IF NOT EXISTS idx_submission_reports_ipua " +
     "ON submission_reports(ip_ua_hash, created_at)",
+  // 2026-07-01 Publish Scheduler. At most one active scheduled_publishes
+  // row per (story, platform): approving a story twice, or a race between
+  // two approve clicks, must not double-post. lib/publish-scheduler.ts
+  // inserts with ON CONFLICT (story_id, platform) DO NOTHING against this
+  // partial unique index, so on Postgres the index MUST exist or the
+  // insert throws "no unique or exclusion constraint matching the ON
+  // CONFLICT specification". 'failed'/'cancelled' rows are excluded so a
+  // story can be rescheduled after a terminal failure.
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_publishes_one_active " +
+    "ON scheduled_publishes(story_id, platform) " +
+    "WHERE state IN ('scheduled', 'publishing', 'published')",
+  // Dispatch cron read shape: claim rows due now, oldest first.
+  "CREATE INDEX IF NOT EXISTS idx_scheduled_publishes_due " +
+    "ON scheduled_publishes(state, scheduled_for)",
+  // Per-platform "today" counters (daily cap check + admin status line)
+  // filter by platform and scheduled_for range.
+  "CREATE INDEX IF NOT EXISTS idx_scheduled_publishes_platform_time " +
+    "ON scheduled_publishes(platform, scheduled_for)",
+  // 2026-07-02 admin notifications. Two hot reads: the sidebar badge
+  // counts unread rows on a 15s poll across every admin screen, and the
+  // writer's dedupe check looks up an unread row by dedupe_key. Both are
+  // partial on the (small) unread set. TS-owned table — not mirrored in
+  // pipeline/store.py.
+  "CREATE INDEX IF NOT EXISTS idx_admin_notifications_unread " +
+    "ON admin_notifications(created_at) WHERE read_at IS NULL",
+  "CREATE INDEX IF NOT EXISTS idx_admin_notifications_dedupe " +
+    "ON admin_notifications(dedupe_key) WHERE read_at IS NULL",
 ];

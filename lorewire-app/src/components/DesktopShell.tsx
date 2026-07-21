@@ -2,16 +2,21 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CAT,
   STORIES,
   isPublishedStory,
   type Story,
 } from "@/lib/stories";
+import { categoryVisual } from "@/lib/categories/visuals";
 import {
+  CATEGORY_ORDER,
   CategoryFilterChips,
-  filterStoriesByCategory,
   useCategoryFilter,
 } from "@/components/CategoryFilterChips";
+import {
+  useBrowseData,
+  useDebouncedValue,
+  useLoadMoreSentinel,
+} from "@/components/browse/useBrowseData";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import WiresDesktop from "@/components/wires/WiresDesktop";
 // Stories rail + viewer intentionally NOT mounted on desktop — final
@@ -22,6 +27,14 @@ import WiresDesktop from "@/components/wires/WiresDesktop";
 import { alignScriptToWords } from "@/lib/script-graft";
 import { formatDurationMs } from "@/lib/duration";
 import {
+  isSlideKeyExempt,
+  isSlideSwipeExempt,
+  resolveSwipeDirection,
+  slidePosition,
+  slideTarget,
+  type SlideContext,
+} from "@/lib/slide-context";
+import {
   placeArticleImages,
   splitArticleParagraphs,
 } from "@/lib/article-image-positions";
@@ -31,6 +44,8 @@ import {
 } from "@/app/actions";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
+import SkipIntroButton from "@/components/SkipIntroButton";
+import { useSkipIntro } from "@/components/useSkipIntro";
 import { CommentsTab } from "@/components/CommentsTab";
 import { JumpToComments } from "@/components/JumpToComments";
 import {
@@ -39,6 +54,7 @@ import {
   POLL_RAIL_TITLES,
   filterIdsByNotVoted,
   filterIdsByPublished,
+  liveRowToStory,
   pickHeroAtIndex,
   resolveHeroPool,
   resolveRailIds,
@@ -61,8 +77,10 @@ import {
   readShuffleRecents,
 } from "@/lib/play-shuffle";
 import { PollRailCard } from "@/components/PollRail";
+import { StoryLink } from "@/components/StoryLink";
 import { renderHeroVerdictBadge } from "@/lib/polls-shared";
 import { PollWidget } from "@/components/PollWidget";
+import PosterMeta from "@/components/PosterMeta";
 import {
   BackToTop,
   InlineJumpToPoll,
@@ -75,6 +93,7 @@ import {
   useSavedStories,
   useStoryRatings,
 } from "@/lib/engagement-store";
+import { useVotedStories } from "@/lib/voted-stories";
 import RatingStars, { RatingBadge } from "@/components/RatingStars";
 import SignInChip from "@/components/SignInChip";
 import SiteFooter from "@/components/SiteFooter";
@@ -92,10 +111,14 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   audio_url: null,
   alignment: [],
   is_short: false,
+  intro_window: null,
   found: false,
 };
 
-type OpenFn = (id: string, tab?: string) => void;
+// The optional slide context is the ordered story list of the surface the
+// open came from — the detail modal slides prev/next within it (wrap-around).
+// See _plans/2026-07-04-slide-between-row-stories.md.
+type OpenFn = (id: string, tab?: string, slide?: SlideContext) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
 type IconCmp = (p: IconProps) => React.ReactElement;
 
@@ -149,22 +172,31 @@ const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /
 // pass `rounded` explicitly (Search result tiles still opt out
 // with `rounded={0}`).
 function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig = false }: { story: Story; rounded?: number; showTitle?: boolean; kicker?: boolean; vig?: boolean }) {
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const [imageOk, setImageOk] = useState(true);
-  const showImage = !!story.heroImage && imageOk;
-  // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
-  // thumbnails) so the same words don't stack on top of themselves.
-  const renderCssTitle = showTitle && !story.heroHasBakedTitle;
+  // Cards prefer the 3:4 thumbnail (always carries the baked cinematic
+  // title) over the hero, which renders clean since 2026-07-03 — a card
+  // showing the clean hero would have no title in the artwork at all.
+  // Stories that pre-date the finisher fall back to the hero.
+  const artSrc = story.thumbnailImage || story.heroImage;
+  const artIsThumbnail = !!story.thumbnailImage;
+  const showImage = !!artSrc && imageOk;
+  // Suppress the CSS title when the shown artwork has it baked in —
+  // thumbnails always do; heroes only when flagged (legacy cinematic).
+  const artHasBakedTitle = showImage && (artIsThumbnail || !!story.heroHasBakedTitle);
+  const renderCssTitle = showTitle && !artHasBakedTitle;
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded, background: c }}>
       {showImage && (
         <img
-          src={story.heroImage}
-          alt=""
+          src={artSrc}
+          // Content image: thumbnails bake the title into the pixels, so
+          // the alt is the only text form of it for image search + AT.
+          alt={story.title}
           className="absolute inset-0 w-full h-full object-cover"
           onError={() => {
             setImageOk(false);
-            console.warn("[lorewire poster err]", { storyId: story.id, src: story.heroImage });
+            console.warn("[lorewire poster err]", { storyId: story.id, src: artSrc });
           }}
         />
       )}
@@ -178,10 +210,7 @@ function PosterArt({ story, rounded = 12, showTitle = true, kicker = true, vig =
           contrast for non-baked CSS titles. Callers can opt back in with
           vig={true} if a specific surface needs the deeper darkening. */}
       {vig && <div className="absolute inset-0 poster-vig"></div>}
-      {kicker && <div className="absolute left-3 top-3"><span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.34)" }}>{story.cat}</span></div>}
-      {story.dur && (
-        <div className="absolute right-2.5 top-2.5 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
-      )}
+      <PosterMeta cat={kicker ? story.cat : undefined} dur={story.dur} />
       {renderCssTitle && (
         <div className="absolute left-3.5 right-3.5 bottom-5">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 23, color: "#F5F3EF" }}>{story.title}</h3>
@@ -393,7 +422,7 @@ function Hero({
 
   const story = pool[Math.min(activeIndex, pool.length - 1)];
   if (!story) return null;
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const heroSrc = story.heroImageLandscape || story.heroImage;
   const isLandscape = !!story.heroImageLandscape;
   const showHero = !!heroSrc && heroImageOk;
@@ -421,7 +450,11 @@ function Hero({
           {showHero && (
             <img
               src={heroSrc}
-              alt=""
+              alt={story.title}
+              // Desktop LCP element — eager + high priority so the browser
+              // doesn't queue it behind the rail thumbnails.
+              loading="eager"
+              fetchPriority="high"
               className="absolute inset-0 w-full h-full object-cover"
               // Landscape variant fits naturally; portrait fallback needs
               // object-position to keep characters' faces visible.
@@ -524,8 +557,8 @@ function Hero({
                   locked to Archivo Black. Fraunces serif uppercase at
                   button sizes reads odd; bold sans CTAs against
                   serif headlines = classic magazine pairing. */}
-              <button onClick={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</button>
-              <button onClick={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</button>
+              <StoryLink story={story} onActivate={() => onOpen(story.id, "Watch")} className="flex items-center bg-ink text-bg font-bold uppercase tracking-tight text-[16px] rounded-[10px] px-8 py-3.5 hover:bg-white transition active:scale-[.98]" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>Watch &amp; Vote</StoryLink>
+              <StoryLink story={story} onActivate={() => onOpen(story.id, "Read")} className="flex items-center gap-2.5 font-body font-semibold text-[15px] text-ink rounded-[10px] px-6 py-3.5 transition active:scale-[.98]" style={{ background: "rgba(255,255,255,.14)" }}><InfoI size={20} /> Read the article</StoryLink>
               <button onClick={onShuffle} className="flex items-center gap-2.5 font-mono text-[12px] uppercase tracking-[.18em] text-ink/85 rounded-[10px] px-5 py-3.5 border border-line hover:border-ink/40 transition active:scale-[.98]"><ShuffleI size={17} /> Surprise me</button>
             </div>
           </div>
@@ -600,7 +633,7 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
   // 180ms ease-out matches the spec; group-focus-visible mirrors the
   // hover so keyboard navigation gets the same affordance.
   return (
-    <button onClick={() => onOpen(story.id)} className="group relative shrink-0" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
+    <StoryLink story={story} onActivate={() => onOpen(story.id)} aria-label={story.title} className="group relative shrink-0" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
       <div className="relative" style={{ height: h, boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}>
         {/* showTitle={false} across every rail: every cinematic hero
             already has the title baked into the artwork, so the white
@@ -636,7 +669,7 @@ function PosterCard({ story, onOpen, w = 196, h = 284, progress, landscape, vote
         className="absolute left-1 right-1 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
         style={{ transitionDuration: "180ms" }}
       />
-    </button>
+    </StoryLink>
   );
 }
 
@@ -680,11 +713,11 @@ function Top10Row({
   // suppressed because the title is baked into the artwork.
   return (
     <div className="grid grid-cols-10 gap-2 w-full">
-      {ids.slice(0, 10).map((id, i) => {
+      {ids.slice(0, 10).map((id, i, visible) => {
         const s = resolveStory(id);
         if (!s) return null;
         return (
-          <button key={id} onClick={() => onOpen(id)} className="group relative min-w-0">
+          <StoryLink key={id} story={s} onActivate={() => onOpen(id, undefined, { ids: visible, label: "Top 10 Today" })} aria-label={s.title} className="group relative min-w-0">
             <div
               className="relative w-full"
               style={{ aspectRatio: "164 / 236", boxShadow: "0 8px 26px rgba(0,0,0,.4)", borderRadius: 12 }}
@@ -709,7 +742,7 @@ function Top10Row({
               className="absolute left-0 right-0 -bottom-2 h-[2px] bg-accent origin-left scale-x-0 transition-transform ease-out group-hover:scale-x-100 group-focus-visible:scale-x-100 pointer-events-none rounded-full"
               style={{ transitionDuration: "180ms" }}
             />
-          </button>
+          </StoryLink>
         );
       })}
     </div>
@@ -769,7 +802,7 @@ function WatchDoodle({
   // toggle. preservesPitch keeps voices intelligible at 0.75x.
   // Plan: _plans/2026-06-25-slow-mode-playback.md (Layer 2 follow-up — this
   // surface was missed in the original PR #105 scope).
-  const { slow, toggleSlow } = useWirePrefs();
+  const { slow, toggleSlow, skipIntro } = useWirePrefs();
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -784,6 +817,23 @@ function WatchDoodle({
     console.info("[detail watch playback rate]", { storyId: story.id, rate, slow });
   }, [slow, story.id, videoUrl]);
 
+  // Skip Intro: liveMedia carries the server-resolved intro window; the
+  // shared hook decides when the button shows and when the always-skip
+  // pref auto-seeks. Same behavior as WireCard + the /v reader player.
+  // Plan: _plans/2026-07-04-skip-intro.md.
+  const {
+    showSkip: showSkipIntro,
+    skipNow: skipIntroNow,
+    handleTimeUpdate: skipIntroOnTime,
+    handleLoadedMetadata: skipIntroOnMeta,
+    notifyManualSeek: skipIntroOnManualSeek,
+  } = useSkipIntro({
+    introWindow: liveMedia.intro_window,
+    autoSkip: skipIntro,
+    logNs: "detail skip-intro",
+    id: story.id,
+  });
+
   if (videoUrl) {
     return (
       <div ref={sectionRef}>
@@ -791,7 +841,10 @@ function WatchDoodle({
           <video
             ref={videoRef}
             src={videoUrl}
-            poster={story.heroImage}
+            // Pre-play poster: the title-baked thumbnail (what the
+            // cards show), falling back to the clean hero for stories
+            // that pre-date the finisher.
+            poster={story.thumbnailImage || story.heroImage}
             controls
             preload="metadata"
             playsInline
@@ -801,11 +854,26 @@ function WatchDoodle({
               if (Number.isFinite(d) && d > 0) {
                 onDurationMeasured?.(Math.round(d * 1000));
               }
+              skipIntroOnMeta(e.currentTarget);
             }}
             onPlay={playEvents.onPlay}
-            onTimeUpdate={playEvents.onTimeUpdate}
+            onTimeUpdate={(e) => {
+              skipIntroOnTime(e.currentTarget);
+              playEvents.onTimeUpdate(e);
+            }}
+            // Native controls own seeking here; our own skip's target sits
+            // OUTSIDE the window, so it never suppresses itself.
+            onSeeking={(e) =>
+              skipIntroOnManualSeek(e.currentTarget.currentTime * 1000)
+            }
             onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
+          {/* Above the native control bar, Netflix placement. */}
+          {showSkipIntro && (
+            <div className="absolute bottom-16 right-3 z-10">
+              <SkipIntroButton onClick={() => skipIntroNow(videoRef.current)} />
+            </div>
+          )}
           {/* Slow-mode pill — top-right of the video frame, matching the
               WireCard chrome cluster. Native HTML5 controls live at the
               bottom of the video so this pill never collides with them. */}
@@ -1413,7 +1481,7 @@ function FakeReadAlong() {
 // Header block for the detail modal. Renders the hero image when the story has
 // one, falling back to the gradient + glyph the design ships with otherwise.
 function DetailModalHero({ story }: { story: Story }) {
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const [heroOk, setHeroOk] = useState(true);
   // Modal header is widescreen too; use landscape when available.
   const heroSrc = story.heroImageLandscape || story.heroImage;
@@ -1440,7 +1508,7 @@ function DetailModalHero({ story }: { story: Story }) {
   );
 }
 
-function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog }) {
+function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog, slide }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog; slide?: SlideContext }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the text Play button in the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll
@@ -1471,6 +1539,20 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
   // `story` lets the server lazy-autodraft a poll on first open for
   // stories published before the autodraft hooks landed.
   const { view: pollView } = useStoryPoll(story.id, story);
+  // Row slide navigation (_plans/2026-07-04-slide-between-row-stories.md):
+  // where this story sits inside the list it was opened from. Null hides
+  // every slide affordance (deep links, single-item lists, id not in the
+  // snapshot). goSlide stashes the direction in pendingSlideDir so the
+  // prev-props block below can turn it into the entrance animation for the
+  // incoming story — a story swap from More Like This (no slide) animates
+  // nothing. State rather than a ref because the render-time prev-props
+  // pattern may only read/write state (react-hooks/refs).
+  const pos = slidePosition(slide, story.id);
+  const [pendingSlideDir, setPendingSlideDir] = useState<-1 | 1 | null>(null);
+  const [slideDir, setSlideDir] = useState<-1 | 1 | null>(null);
+  const scrimRef = useRef<HTMLDivElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+
   // Reset the tab whenever the parent swaps in a different story or initialTab
   // — React 19's set-state-in-effect rule rejects the old useEffect pattern.
   // The sanctioned alternative is to track the previous prop values during
@@ -1478,6 +1560,13 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
   const [prevStoryId, setPrevStoryId] = useState(story.id);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (prevStoryId !== story.id || prevInitialTab !== initialTab) {
+    if (prevStoryId !== story.id) {
+      // Consume the pending slide direction (null for non-slide swaps, e.g.
+      // a More Like This click) so the keyed content blocks animate only
+      // real slides, and only in the direction the user moved.
+      setSlideDir(pendingSlideDir);
+      setPendingSlideDir(null);
+    }
     setPrevStoryId(story.id);
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
@@ -1485,11 +1574,90 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
     // the new story's stored dur until its <video> reports metadata.
     setMeasuredDurationMs(null);
   }
+
+  // A slide swaps the story in place; without this the new story keeps the
+  // old scroll offset and can open mid-article. Also runs on first mount,
+  // where scrolling an already-at-top scrim is a no-op.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    scrimRef.current?.scrollTo({ top: 0 });
+  }, [story.id]);
+
+  const goSlide = (dir: -1 | 1) => {
+    const target = slideTarget(slide, story.id, dir);
+    if (!target || !slide || !pos) return;
+    setPendingSlideDir(dir);
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[slide nav]", {
+      shell: "desktop",
+      label: slide.label,
+      from: story.id,
+      to: target,
+      dir,
+      index: pos.index,
+      total: pos.total,
+    });
+    // Keep the user's current tab while flipping (reading -> keep reading)
+    // and carry the same context so the chain continues from the new story.
+    onOpen(target, tab, slide);
+  };
+  // The keydown listener below is mount-once (keyed on onClose, like the
+  // old Escape-only version); the ref keeps it reading the CURRENT story
+  // position instead of the one captured when the listener bound. Synced
+  // in a dep-less effect (runs after every render) because writing a ref
+  // during render is off-limits (react-hooks/refs).
+  const goSlideRef = useRef(goSlide);
+  useEffect(() => {
+    goSlideRef.current = goSlide;
+  });
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { onClose(); return; }
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      // Text fields, selects, and the video player own their arrow keys
+      // (caret movement, seeking) — never hijack those.
+      if (isSlideKeyExempt(e.target)) return;
+      goSlideRef.current(e.key === "ArrowLeft" ? -1 : 1);
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Touch parity for tablet-width desktop layouts: swipe left/right on the
+  // modal card slides within the row. Same classification the mobile
+  // TitleSheet uses; gestures starting inside a horizontal scroller, the
+  // video player, or an input are exempt. Listen-only — never
+  // preventDefault — so vertical scrolling stays native.
+  const slideTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const onSlideTouchStart = (e: React.TouchEvent) => {
+    if (!pos || isSlideSwipeExempt(e.target, cardRef.current)) {
+      slideTouchStart.current = null;
+      return;
+    }
+    const t = e.touches[0];
+    slideTouchStart.current = { x: t.clientX, y: t.clientY };
+  };
+  const onSlideTouchEnd = (e: React.TouchEvent) => {
+    const start = slideTouchStart.current;
+    slideTouchStart.current = null;
+    if (!start || !pos) return;
+    const t = e.changedTouches[0];
+    const dir = resolveSwipeDirection(t.clientX - start.x, t.clientY - start.y);
+    if (dir) goSlide(dir);
+  };
+
+  // Rule-14 breadcrumb for "the arrows are missing": a context arrived but
+  // isn't slidable, so the affordances hid on purpose.
+  useEffect(() => {
+    if (!slide || slidePosition(slide, story.id)) return;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[slide nav hidden]", {
+      shell: "desktop",
+      label: slide.label,
+      id: story.id,
+      reason: slide.ids.includes(story.id) ? "single_item" : "id_not_in_context",
+    });
+  }, [slide, story.id]);
 
   // Comment count for the tab badge. Light fetch (count + kill-switch only)
   // so the "COMMENTS (N)" tab label shows the count the moment the modal
@@ -1574,7 +1742,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
   const myRating = getRating(story.id) ?? 0;
   const [rateOpen, setRateOpen] = useState(false);
 
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   // "More Like This" mirrors Search / browse rails: only stories the pipeline
   // has actually produced content for. The old STORIES-based list let empty
   // sample placeholders into the rail, so cards opened to nothing. Pull from
@@ -1583,12 +1751,38 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
   let more = published.filter((s) => s.cat === story.cat && s.id !== story.id);
   if (more.length < 6) more = more.concat(published.filter((s) => s.id !== story.id && !more.includes(s)));
   more = more.slice(0, 6);
+  // Keyed by story id so a slide animates the incoming story in from the
+  // side the user moved toward. Applied to both top-level blocks (hero +
+  // body) rather than one wrapper so the modal's existing structure stays
+  // put; the two animate in lockstep. Keying also remounts the tab content
+  // for the new story, which is the clean state anyway.
+  const slideAnimClass = slideDir === 1 ? " slide-nav-next" : slideDir === -1 ? " slide-nav-prev" : "";
   return (
-    <div className="fixed inset-0 z-[60] overflow-y-auto scrim-in" style={{ background: "rgba(0,0,0,.82)" }} onClick={onClose}>
+    <div ref={scrimRef} className="fixed inset-0 z-[60] overflow-y-auto scrim-in" style={{ background: "rgba(0,0,0,.82)" }} onClick={onClose}>
       {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
+      {/* Row slide chevrons live on the scrim at the viewport edges so they
+          never cover story content. stopPropagation keeps a chevron click
+          from falling through to the scrim's close handler. Hidden when
+          there's nothing to slide to. */}
+      {pos && (
+        <>
+          <button onClick={(e) => { e.stopPropagation(); goSlide(-1); }} aria-label="Previous story" className="fixed left-5 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full flex items-center justify-center text-ink transition z-10" style={{ background: "rgba(255,255,255,.1)" }} onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,.22)"; }} onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,.1)"; }}>
+            <ChevL size={26} />
+          </button>
+          <button onClick={(e) => { e.stopPropagation(); goSlide(1); }} aria-label="Next story" className="fixed right-5 top-1/2 -translate-y-1/2 w-12 h-12 rounded-full flex items-center justify-center text-ink transition z-10" style={{ background: "rgba(255,255,255,.1)" }} onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,.22)"; }} onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,.1)"; }}>
+            <ChevR size={26} />
+          </button>
+        </>
+      )}
       <div className="min-h-full flex items-start justify-center py-10 px-4">
-        <div id="article-top" className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden scroll-mt-0" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()}>
-          <div className="relative h-[400px]">
+        <div id="article-top" ref={cardRef} className="modal-in relative w-full max-w-[920px] rounded-[14px] overflow-hidden scroll-mt-0" style={{ background: "#15141A", boxShadow: "0 40px 120px rgba(0,0,0,.7)" }} onClick={(e) => e.stopPropagation()} onTouchStart={onSlideTouchStart} onTouchEnd={onSlideTouchEnd}>
+          {/* Static classes stay in a plain quoted string: Tailwind's
+              scanner reads raw source tokens, and a template literal that
+              glues `${` onto a class name (h-[400px]${...}) makes the class
+              an invalid candidate — it silently vanishes from the built
+              CSS. This took down the sheet header in production on
+              2026-07-04. */}
+          <div key={`hdr-${story.id}`} className={"relative h-[400px]" + slideAnimClass}>
             <DetailModalHero story={story} />
 
             <div className="absolute inset-x-0 bottom-0 h-2/3" style={{ background: "linear-gradient(0deg,#15141A 4%, rgba(21,20,26,0) 100%)" }}></div>
@@ -1597,8 +1791,16 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
             <div className="absolute left-10 right-10 bottom-7">
               <h1 className="font-display font-black uppercase tracking-tightest leading-[.9] text-ink ink-shadow" style={{ fontSize: 54 }}>{story.title}</h1>
             </div>
+            {/* Position chip naming the row being flipped through
+                ("3 / 10 · Top 10 Today"). Pairs with the scrim chevrons
+                and the ←/→ keys. */}
+            {pos && slide && (
+              <div className="absolute top-5 left-1/2 -translate-x-1/2 font-mono text-[11px] uppercase tracking-wider rounded px-2.5 py-1 whitespace-nowrap z-10" style={{ background: "rgba(0,0,0,.5)", color: "rgba(245,243,239,.9)" }}>
+                {pos.index + 1} / {pos.total} &middot; {slide.label}
+              </div>
+            )}
           </div>
-          <div className="px-10 pb-12">
+          <div key={`body-${story.id}`} className={"px-10 pb-12" + slideAnimClass}>
             <div className="flex items-start gap-8 pt-6">
               <div className="flex-1">
                 {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
@@ -1695,8 +1897,11 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
             <section className="mt-12">
               <h2 className="font-display font-bold uppercase tracking-tightest text-[17px] text-ink mb-4">More Like This</h2>
               <div className="grid grid-cols-3 gap-4">
+                {/* Opening from here re-anchors the slide context to THIS
+                    rail — the user is browsing this shelf now, not the one
+                    they came from. */}
                 {more.map((s) => (
-                  <button key={s.id} onClick={() => onOpen(s.id)} className="rounded-[10px] overflow-hidden text-left hover:scale-[1.03] transition" style={{ background: "#211F29" }}>
+                  <button key={s.id} onClick={() => onOpen(s.id, undefined, { ids: more.map((m) => m.id), label: "More Like This" })} className="rounded-[10px] overflow-hidden text-left hover:scale-[1.03] transition" style={{ background: "#211F29" }}>
                     <div style={{ height: 150 }}><PosterArt story={s} showTitle={false} rounded={0} /></div>
                     <div className="p-3.5">
                       <div className="flex items-center justify-between mb-1.5">
@@ -1705,7 +1910,7 @@ function DetailModal({ story, initialTab, initialCommentId, onClose, onOpen, inL
                         ) : (
                           <span />
                         )}
-                        <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ background: CAT[s.cat], color: "#fff" }}>{s.cat}</span>
+                        <span className="font-mono text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded" style={{ background: categoryVisual(s.cat).color, color: "#fff" }}>{s.cat}</span>
                       </div>
                       <h3 className="font-display font-bold uppercase tracking-tightest text-ink text-[15px] leading-[.98]">{s.title}</h3>
                       <p className="font-body text-[12.5px] text-muted leading-snug mt-1.5 line-clamp-2">{s.syn}</p>
@@ -1813,9 +2018,15 @@ function HomePage({
   // 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md.
   // Build the voted-story-id Set once per render so the filter does
   // O(1) lookups instead of rebuilding the Set per call.
+  //
+  // 2026-07-01: union the SSR seed (votes from prior sessions, resolved
+  // server-side by cookie) with the in-session vote overlay
+  // (lib/voted-stories) so casting a vote drops the story from the
+  // "You Didn't Vote Yet" rail immediately, without a page refresh.
+  const { voted: sessionVoted } = useVotedStories();
   const votedSet = useMemo(
-    () => new Set(votedStoryIds),
-    [votedStoryIds],
+    () => new Set([...votedStoryIds, ...sessionVoted]),
+    [votedStoryIds, sessionVoted],
   );
 
   // Each rail flows through filterIdsByPublished AFTER resolveRailIds so
@@ -1873,7 +2084,7 @@ function HomePage({
             {continueIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} />;
+              return <PosterCard key={id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: continueIds, label: "You Didn't Vote Yet" })} />;
             })}
           </Rail>
         )}
@@ -1904,9 +2115,10 @@ function HomePage({
           // the floor to 0 to disable; Math.max(1, ...) preserves the
           // legacy `> 0` gate when the floor is off.
           if (items.length < Math.max(1, coldStartFloor)) return null;
+          const railSlide = { ids: items.map((s) => s.id), label: rail.title };
           return (
             <Rail key={rail.surface} title={rail.title}>
-              {items.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[s.id]} />)}
+              {items.map((s) => <PosterCard key={s.id} story={s} onOpen={(sid, t) => onOpen(sid, t, railSlide)} voteCount={posterVoteCounts[s.id]} />)}
             </Rail>
           );
         })}
@@ -1936,7 +2148,7 @@ function HomePage({
             {newRowIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[id]} />;
+              return <PosterCard key={id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: newRowIds, label: "New on LoreWire" })} voteCount={posterVoteCounts[id]} />;
             })}
           </Rail>
         )}
@@ -1977,6 +2189,11 @@ function GridPage({
   // catalog, and byId throws on unknown ids. Unresolved ids are skipped
   // cleanly so a stale My List entry can't crash the page.
   const items = ids.map(resolveStory).filter((s): s is Story => s !== null);
+  // Slide context = the grid exactly as rendered (post-resolve, so Browse's
+  // filtered set and Saved's insertion order both flip in visual order),
+  // labeled with the page title. One wiring covers Browse / Today's
+  // Verdicts / Saved.
+  const slide = { ids: items.map((s) => s.id), label: title };
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
       <div className="flex items-end justify-between gap-6">
@@ -1995,7 +2212,7 @@ function GridPage({
       <div className="grid grid-cols-5 gap-5 mt-9">
         {items.map((s) => (
           <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-            <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, slide)} w={"100%"} h={"100%"} />
           </div>
         ))}
       </div>
@@ -2004,83 +2221,174 @@ function GridPage({
   );
 }
 
-// Browse advertises the public catalog of real stories. The bare
-// STORIES array carries 16 sample placeholders the design was built
-// against; only entries with actual produced content (videoUrl /
-// heroImage / audioUrl / body) belong in the grid. Source is the
-// merged catalog so freshly-published live rows surface even before
-// src/data/published.ts is rebaked. Wraps GridPage so the URL-backed
-// category filter (?cat=Drama,Humor) can drive the visible set without
-// turning GridPage into a Browse-specific component.
+// Browse advertises the full public catalog of real stories. Unlike the
+// homepage rails (which read the shared 200-row in-memory catalog), Browse pages
+// the WHOLE published catalog through listBrowseStories so it never caps — the
+// old GridPage-over-catalog.array version silently stopped at ~201 titles once
+// production passed 200 stories. The URL-backed category filter (?cat=…) drives a
+// server-side WHERE so pagination counts the filtered set, and an
+// IntersectionObserver sentinel appends pages as the user scrolls. Rows loaded
+// here are lifted to the shell (onStoriesLoaded) so a story beyond the rails'
+// catalog window still opens its detail modal. Plan:
+// _plans/2026-07-14-browse-pagination.md.
+const BROWSE_PAGE_SIZE = 60;
 function BrowsePage({
-  catalog,
   onOpen,
-  resolveStory,
+  onStoriesLoaded,
 }: {
-  catalog: MergedCatalog;
   onOpen: OpenFn;
-  resolveStory: (id: string) => Story | null;
+  onStoriesLoaded: (stories: Story[]) => void;
 }) {
   const { selected, toggle, clear } = useCategoryFilter();
-  const published = catalog.array.filter(isPublishedStory);
-  const visible = filterStoriesByCategory(published, selected);
-  // eslint-disable-next-line no-console -- rule 14
+  // Stable, sorted category list (CATEGORY_ORDER order) so the pager's refetch
+  // dep is deterministic regardless of chip-click order.
+  const categories = useMemo(
+    () => CATEGORY_ORDER.filter((c) => selected.has(c)),
+    [selected],
+  );
+  const { stories: liveRows, total, loading, loadingMore, reachedEnd, loadMore } =
+    useBrowseData(BROWSE_PAGE_SIZE, categories);
+  const stories = useMemo(() => liveRows.map(liveRowToStory), [liveRows]);
+  // Lift the resolved stories up so the shell can open one that isn't in the
+  // rails' 200-row catalog (resolveStory would otherwise miss it).
+  useEffect(() => {
+    onStoriesLoaded(stories);
+  }, [stories, onStoriesLoaded]);
+
+  const sentinelRef = useLoadMoreSentinel(loadMore);
+
+  const loadedCount = stories.length;
+  const totalLabel = total ?? loadedCount;
   console.info("[browse render]", {
-    total_catalog: catalog.array.length,
-    published_count: published.length,
-    selected: Array.from(selected),
-    visible_count: visible.length,
+    loaded: loadedCount,
+    total,
+    categories,
+    reached_end: reachedEnd,
   });
-  const ids = visible.map((s) => s.id);
   const sub =
     selected.size === 0
-      ? `All true stories · ${published.length} titles`
-      : `${visible.length} of ${published.length} titles · ${Array.from(selected).join(", ")}`;
-  return (
-    <GridPage
-      title="Browse"
-      sub={sub}
-      ids={ids}
-      onOpen={onOpen}
-      resolveStory={resolveStory}
-      belowHeader={
-        <CategoryFilterChips
-          selected={selected}
-          onToggle={toggle}
-          onClear={clear}
-          variant="desktop"
-        />
-      }
-      emptyMessage="No stories in this category yet."
-    />
-  );
-}
-
-// Search lists only stories the pipeline has actually produced real
-// content for (hero, short render, narration, or article body). The
-// bare STORIES catalog includes 16 sample placeholders; without this
-// gate the public listings would advertise stories that open into empty
-// shells. The merged catalog (live DB rows + sample STORIES) is the
-// input so freshly-published shorts that haven't been baked back into
-// src/data/published.ts still surface.
-function SearchPage({ onOpen, query, catalog }: { onOpen: OpenFn; query: string; catalog: MergedCatalog }) {
-  const published = catalog.array.filter(isPublishedStory);
-  const q = query.trim().toLowerCase();
-  const res = q
-    ? published.filter((s) => (s.title + s.cat).toLowerCase().includes(q))
-    : published;
+      ? `All true stories · ${totalLabel} titles`
+      : `${loadedCount} of ${totalLabel} titles · ${categories.join(", ")}`;
+  // Slide context = the grid exactly as loaded so the modal's prev/next covers
+  // every card fetched so far; recomputed each render so a click after scrolling
+  // carries the grown id list.
+  const slide = { ids: stories.map((s) => s.id), label: "Browse" };
   return (
     <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
-      <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query ? `Results for "${query}"` : `Browse all · ${published.length} stories`}</p>
-      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none mb-9">{query || "Search"}</h1>
-      <div className="grid grid-cols-5 gap-5">
-        {res.map((s) => (
+      <div className="flex items-end justify-between gap-6">
+        <div>
+          <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none">
+            Browse
+          </h1>
+          <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mt-3">
+            {sub}
+          </p>
+        </div>
+      </div>
+      <CategoryFilterChips
+        selected={selected}
+        onToggle={toggle}
+        onClear={clear}
+        variant="desktop"
+      />
+      <div className="grid grid-cols-5 gap-5 mt-9">
+        {stories.map((s) => (
           <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-            <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+            <PosterCard
+              story={s}
+              onOpen={(sid, t) => onOpen(sid, t, slide)}
+              w={"100%"}
+              h={"100%"}
+            />
           </div>
         ))}
       </div>
-      {res.length === 0 && <p className="font-body text-muted mt-12">No stories match &ldquo;{query}&rdquo;.</p>}
+      {loading && loadedCount === 0 && (
+        <p className="font-body text-muted mt-12">Loading stories…</p>
+      )}
+      {!loading && loadedCount === 0 && (
+        <p className="font-body text-muted mt-12">
+          No stories in this category yet.
+        </p>
+      )}
+      {/* Sentinel drives infinite scroll; kept below the grid with a little
+          height so the observer has a real box to watch. */}
+      <div ref={sentinelRef} className="h-10" aria-hidden />
+      {loadingMore && (
+        <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted text-center mt-2">
+          Loading more…
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Search pages the same full-catalog source as Browse, with the query pushed
+// down as a server-side WHERE (title OR category, case-insensitive) so a match
+// beyond the homepage catalog's 200-row window still surfaces — the old
+// client-side filter over catalog.array silently capped at ~201 titles. The
+// header box drives `query` per keystroke; the pager sees the 250ms-debounced
+// value so typing doesn't fire a round trip per key. Loaded rows are lifted to
+// the shell (onStoriesLoaded) so a result outside the rails' window still
+// opens its detail modal. Plan: _plans/2026-07-19-search-full-catalog.md.
+const NO_CATEGORIES: string[] = [];
+function SearchPage({
+  onOpen,
+  query,
+  onStoriesLoaded,
+}: {
+  onOpen: OpenFn;
+  query: string;
+  onStoriesLoaded: (stories: Story[]) => void;
+}) {
+  const debouncedQuery = useDebouncedValue(query.trim(), 250);
+  const { stories: liveRows, total, loading, loadingMore, reachedEnd, loadMore } =
+    useBrowseData(BROWSE_PAGE_SIZE, NO_CATEGORIES, debouncedQuery);
+  const stories = useMemo(() => liveRows.map(liveRowToStory), [liveRows]);
+  useEffect(() => {
+    onStoriesLoaded(stories);
+  }, [stories, onStoriesLoaded]);
+  const sentinelRef = useLoadMoreSentinel(loadMore);
+
+  const totalLabel = total ?? stories.length;
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[search render]", {
+    shell: "desktop",
+    query: debouncedQuery,
+    loaded: stories.length,
+    total,
+    reached_end: reachedEnd,
+  });
+  // Slide context = the results exactly as loaded, so prev/next in the modal
+  // covers every card fetched so far.
+  const slide = { ids: stories.map((s) => s.id), label: "Search" };
+  return (
+    <div className="pt-[110px] pb-24 max-w-[1600px] mx-auto px-10">
+      <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted mb-2">{query ? `Results for "${query}"` : `Browse all · ${totalLabel} stories`}</p>
+      <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[40px] leading-none mb-9">{query || "Search"}</h1>
+      <div className="grid grid-cols-5 gap-5">
+        {stories.map((s) => (
+          <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
+            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, slide)} w={"100%"} h={"100%"} />
+          </div>
+        ))}
+      </div>
+      {loading && stories.length === 0 && (
+        <p className="font-body text-muted mt-12">Loading stories…</p>
+      )}
+      {!loading && stories.length === 0 && (
+        <p className="font-body text-muted mt-12">
+          {query ? <>No stories match &ldquo;{query}&rdquo;.</> : "Nothing here yet."}
+        </p>
+      )}
+      {/* Sentinel drives infinite scroll; kept below the grid with a little
+          height so the observer has a real box to watch. */}
+      <div ref={sentinelRef} className="h-10" aria-hidden />
+      {loadingMore && (
+        <p className="font-mono text-[11px] uppercase tracking-[.2em] text-muted text-center mt-2">
+          Loading more…
+        </p>
+      )}
     </div>
   );
 }
@@ -2088,7 +2396,7 @@ function SearchPage({ onOpen, query, catalog }: { onOpen: OpenFn; query: string;
 /* ----------------------------- DESKTOP SHELL ----------------------------- */
 export default function DesktopShell({ initial }: { initial: HomepageInitial }) {
   const [view, setView] = useState("Home");
-  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string } | null>(null);
+  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string; slide?: SlideContext } | null>(null);
 
   // Deep-link landing: `/?story=X&tab=Y&c=Z` opens the DetailModal at
   // story X on tab Y (default Watch), and Z (when present) becomes the
@@ -2155,11 +2463,30 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
     return () => { document.body.style.overflow = ""; };
   }, [active, view]);
 
-  const open: OpenFn = (id, t) => {
-    setActive({ id, tab: t });
+  const open: OpenFn = (id, t, slide) => {
+    setActive({ id, tab: t, slide });
     recordView(id);
   };
   const close = () => setActive(null);
+  // Browse and Search page the whole catalog beyond the rails' 200-row window,
+  // so a clicked card can be a story resolveStory (rails catalog + static
+  // STORIES) doesn't know. Both grids report their loaded rows here and the
+  // modal resolution below falls back to this map so those stories still open.
+  // Held in state (read during render) — it only grows on a page append, a
+  // handful of times across a full scroll, so the extra shell renders are cheap.
+  const [pagedAdditions, setPagedAdditions] = useState<Map<string, Story>>(
+    () => new Map(),
+  );
+  const handlePagedStories = useCallback((stories: Story[]) => {
+    setPagedAdditions((prev) => {
+      // Only churn the map (and re-render) when a genuinely new id arrives.
+      const additions = stories.filter((s) => !prev.has(s.id));
+      if (additions.length === 0) return prev;
+      const next = new Map(prev);
+      for (const s of additions) next.set(s.id, s);
+      return next;
+    });
+  }, []);
   // "Play Something" picks a random playable story and opens it on the
   // Watch tab — same affordance as the hero's Play button, so the modal's
   // existing autoplay path kicks in. Excludes the current hero so the
@@ -2227,7 +2554,7 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
       )}
       {view === "Wires" && <WiresDesktop onOpenInfo={open} paused={!!active} />}
       {view === "Browse" && (
-        <BrowsePage catalog={catalog} onOpen={open} resolveStory={resolveStory} />
+        <BrowsePage onOpen={open} onStoriesLoaded={handlePagedStories} />
       )}
       {view === "Today's Verdicts" && (() => {
         // Same published-only gate as Browse. New & Hot promises "fresh
@@ -2260,17 +2587,18 @@ export default function DesktopShell({ initial }: { initial: HomepageInitial }) 
           }
         />
       )}
-      {view === "Search" && <SearchPage onOpen={open} query={query} catalog={catalog} />}
+      {view === "Search" && <SearchPage onOpen={open} query={query} onStoriesLoaded={handlePagedStories} />}
 
       <SiteFooter />
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Wires feed (not in STORIES) still open the modal.
-        // Stale id -> render nothing; close button still works because
-        // `active` is set.
-        const s = resolveStory(active.id);
-        return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} catalog={catalog} /> : null;
+        // through the Wires feed (not in STORIES) still open the modal. The
+        // pagedAdditions fallback covers stories paged in on Browse/Search
+        // beyond the rails' 200-row catalog window. Stale id -> render nothing;
+        // close button still works because `active` is set.
+        const s = resolveStory(active.id) ?? pagedAdditions.get(active.id) ?? null;
+        return s ? <DetailModal story={s} initialTab={active.tab} initialCommentId={active.commentId} onClose={close} onOpen={open} inList={list.includes(active.id)} toggleList={toggleList} session={initial.session} seededModalComments={initial.seededModalComments} catalog={catalog} slide={active.slide} /> : null;
       })()}
     </div>
   );

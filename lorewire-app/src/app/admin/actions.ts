@@ -14,9 +14,17 @@ import {
 } from "@/lib/rate-limit";
 import { verifyMfaForLogin } from "@/lib/users";
 import { randomUUID } from "node:crypto";
-import { CATEGORIES } from "@/app/admin/ui";
+import { isHeroStyleId } from "@/lib/hero-styles";
 import { requireCapability, ensureSeedAdmin, currentUser } from "@/lib/dal";
 import { createSession, deleteSession } from "@/lib/session";
+import { audit, type AuditAction } from "@/lib/audit";
+import {
+  MAX_BULK_ITEMS,
+  MAX_BULK_DESTRUCTIVE_ITEMS,
+  MAX_BULK_PAID_ITEMS,
+  MAX_BULK_BY_FILTER_ITEMS,
+  estimateRegenCostUsd,
+} from "@/lib/bulk-safety";
 import {
   getUserByEmail,
   updateStory,
@@ -54,10 +62,14 @@ import {
   nameRevision,
   unnameRevision,
   pruneRevisions,
+  loadContentPage,
+  listContentIdsForFilter,
   type StoryStatus,
   type SegmentKind,
   type ArticleStatus,
   type ArticleLanguage,
+  type ContentPageOpts,
+  type ContentPageResult,
 } from "@/lib/repo";
 import { verifyPassword } from "@/lib/passwords";
 import { selectModel, type Stage } from "@/lib/models";
@@ -200,15 +212,42 @@ export async function saveStory(formData: FormData): Promise<void> {
   await requireCapability("content.manage");
   const id = String(formData.get("id") ?? "");
   if (!id) return;
+  const current = await getStoryRow(id);
+  if (!current) return;
+  // Category: closed-set check against the DB-driven taxonomy (the same
+  // label -> slug map the bulk category op validates with), so a forged
+  // form value can't land an arbitrary string in stories.category. An
+  // unchanged or unknown value leaves both the column and the story's
+  // tags alone.
+  const category = String(formData.get("category") ?? "").trim();
+  const labelToSlug =
+    category && category !== (current.category ?? "")
+      ? await loadCategoryLabelToSlug()
+      : null;
+  const categorySlug = labelToSlug?.get(category) ?? null;
   await updateStory(id, {
     title: String(formData.get("title") ?? ""),
-    category: String(formData.get("category") ?? ""),
+    ...(categorySlug ? { category } : {}),
     duration: String(formData.get("duration") ?? ""),
     source_url: String(formData.get("source_url") ?? ""),
     summary: String(formData.get("summary") ?? ""),
     body: String(formData.get("body") ?? ""),
     teleprompter: String(formData.get("teleprompter") ?? ""),
   });
+  if (categorySlug) {
+    // Write the primary story_tag too — skipping it would let
+    // syncStoryPrimaryCategory (db.ts boot chain) revert the label from
+    // the old primary tag on the next boot. Same pairing the bulk
+    // category op uses.
+    const { setPrimaryStoryTag } = await import("@/lib/categories/repo");
+    await setPrimaryStoryTag(id, categorySlug, "admin");
+    console.info("[stories action] category", {
+      id,
+      prev: current.category,
+      next: category,
+      slug: categorySlug,
+    });
+  }
   // 2026-06-18 polls plan extension: every story should have a poll.
   // Try to autodraft now that the admin has just saved (body may
   // have meaningful content). Service is idempotent — skips when an
@@ -257,7 +296,7 @@ export async function changeStatus(formData: FormData): Promise<void> {
       );
       const completeness = await evaluateAssetCompleteness(id);
       if (!completeness.ready) {
-        const reason = encodeURIComponent(completeness.missing.join(" | "));
+        const reason = encodeURIComponent(completeness.blocking.join(" | "));
         console.warn("[stories action] publish-blocked", {
           id,
           missing: completeness.missing,
@@ -673,29 +712,14 @@ export async function enqueueImageRegenAction(opts: {
     };
   }
 
-  // 2026-06-25: when the operator explicitly clicks "Generate hero +
-  // thumbnail from short" on a story that already has variants, the
-  // Python finisher's resume optimization (pipeline/media.py:1711)
-  // emits `variant_resumed ... already persisted — skipping i2i` and
-  // silently keeps the OLD URLs. That logic is correct for the
-  // crash-recovery case (cron reclaimed a mid-flight row, don't
-  // re-bill kie for what already landed) but wrong for the
-  // operator-clicked-regen case. NULL the 5 columns here so the
-  // finisher sees no persisted URLs and treats every variant as a
-  // fresh i2i call. Same workaround the /api/refresh_assets cron
-  // uses in advanceShortPending.
-  if (ownerKind === "story" && asset === "hero_thumbnail_from_short") {
-    await run(
-      "UPDATE stories SET hero_image = NULL, hero_image_landscape = NULL, " +
-        "thumbnail_image = NULL, thumbnail_image_landscape = NULL, " +
-        "thumbnail_image_square = NULL WHERE id = ?",
-      [ownerId],
-    );
-    console.info("[image regen action] cleared hero+thumbnail variants", {
-      owner_id: ownerId,
-      reason: "operator regen, bypass finisher resume-skip",
-    });
-  }
+  // 2026-07-03: the hero_thumbnail_from_short path no longer NULLs the
+  // 5 variant columns before enqueueing (the 2026-06-25 workaround for
+  // the finisher's resume skip). The skip now keys on the render row's
+  // own `image_saved` events instead of the story columns, so a fresh
+  // regen always redraws all five — and the old artwork stays visible
+  // on the public surfaces until each new variant lands, instead of a
+  // blank poster window (or a permanent blank when every kie call
+  // fails).
 
   const fresh = await enqueueImageRegen({
     ownerKind,
@@ -926,13 +950,10 @@ const SETTING_VALUE_VALIDATORS: Record<
   // plus the empty string which the resolver reads as "fall through".
   // Per rule 13: closed-enum validation here is the safety net
   // against a tampered client poisoning the prompt downstream.
+  // hero.category_default.<cat> keys are validated by prefix in
+  // saveSettingAction — the category set is DB-driven now, so a static
+  // per-key entry list would go stale the moment a category is added.
   "hero.global_style_id": makeHeroStyleIdValidator(),
-  "hero.category_default.entitled": makeHeroStyleIdValidator(),
-  "hero.category_default.drama": makeHeroStyleIdValidator(),
-  "hero.category_default.humor": makeHeroStyleIdValidator(),
-  "hero.category_default.wholesome": makeHeroStyleIdValidator(),
-  "hero.category_default.dating": makeHeroStyleIdValidator(),
-  "hero.category_default.roommate": makeHeroStyleIdValidator(),
   // 2026-06-17 outro tail-pad fix. Bounded so a typo can't produce a
   // half-hour silent gap; matches the Python-side clamp in
   // pipeline/segments.py:resolve_outro_lead_in_sec.
@@ -985,30 +1006,14 @@ export async function saveStoryHeroStyleAction(
   revalidatePath(`/admin/stories/${storyId}`);
 }
 
-/** Per-category settings keys for the hero style registry resolution chain.
- *  Lowercased category names match what the resolver in
- *  `pipeline/stages.py:resolve_hero_style` reads. Centralised so the
- *  picker UI + the validator + the per-category read loop all agree on
- *  one source of truth. */
-const HERO_CATEGORY_DEFAULT_KEYS = [
-  "hero.category_default.entitled",
-  "hero.category_default.drama",
-  "hero.category_default.humor",
-  "hero.category_default.wholesome",
-  "hero.category_default.dating",
-  "hero.category_default.roommate",
-] as const;
 
 /** Validator factory for hero style id settings. Accepts an empty
  *  string (= "clear this layer") or a known style id; rejects
  *  everything else so a tampered client can't poison the prompt
- *  downstream. Lazily imports the registry so the action file stays
- *  cheap to load. */
+ *  downstream. */
 function makeHeroStyleIdValidator() {
   return (raw: string): string | null => {
     if (raw === "") return "";
-    // eslint-disable-next-line @typescript-eslint/no-require-imports -- closed-enum lookup, no need for the whole module
-    const { isHeroStyleId } = require("@/lib/hero-styles") as typeof import("@/lib/hero-styles");
     return isHeroStyleId(raw) ? raw : null;
   };
 }
@@ -1016,8 +1021,9 @@ function makeHeroStyleIdValidator() {
 export interface HeroStyleSettingsSnapshot {
   /** Empty string when unset. The picker treats empty as "Auto-pick / use default". */
   globalStyleId: string;
-  /** Per-category default lookups keyed by the lowercased Cat name. Empty
-   *  string when unset. */
+  /** Per-category default lookups keyed by the lowercased category label
+   *  (the same derivation heroCategoryDefaultKey uses). Empty string when
+   *  unset. Covers the ACTIVE DB categories. */
   categoryDefaults: Record<string, string>;
   /** Each style's pre-generated preview URL, keyed by style id. Null
    *  means step 3 hasn't run for that style yet — the picker shows a
@@ -1026,24 +1032,30 @@ export interface HeroStyleSettingsSnapshot {
 }
 
 /** Read everything the hero style picker needs in one round trip — the
- *  global default, every per-category default, and every pre-generated
- *  thumbnail URL. Callers (the settings page; the per-story edit page
- *  in step 5) render off the snapshot without re-querying. */
+ *  global default, every per-category default (for the active DB
+ *  category set), and every pre-generated thumbnail URL. Callers (the
+ *  settings page; the per-story edit page in step 5) render off the
+ *  snapshot without re-querying. */
 export async function loadHeroStyleSettings(): Promise<HeroStyleSettingsSnapshot> {
   await requireCapability("content.manage");
   const { HERO_STYLES } = await import("@/lib/hero-styles");
+  const { listCategories } = await import("@/lib/categories/repo");
+  const { heroCategoryDefaultKey } = await import("@/lib/category-settings");
   const styleIds = HERO_STYLES.map((s) => s.id);
+  const categoryKeys = (await listCategories()).map((c) =>
+    heroCategoryDefaultKey(c.label),
+  );
 
   const [globalStyleId, ...categoryValues] = await Promise.all([
     getSetting("hero.global_style_id"),
-    ...HERO_CATEGORY_DEFAULT_KEYS.map((k) => getSetting(k)),
+    ...categoryKeys.map((k) => getSetting(k)),
   ]);
   const thumbnailValues = await Promise.all(
     styleIds.map((id) => getSetting(`hero.thumbnail.${id}`)),
   );
 
   const categoryDefaults: Record<string, string> = {};
-  HERO_CATEGORY_DEFAULT_KEYS.forEach((key, idx) => {
+  categoryKeys.forEach((key, idx) => {
     const cat = key.replace("hero.category_default.", "");
     categoryDefaults[cat] = (categoryValues[idx] ?? "") || "";
   });
@@ -1066,7 +1078,14 @@ export async function saveSettingAction(formData: FormData): Promise<void> {
   const key = String(formData.get("key") ?? "");
   if (!key) return;
   const rawValue = String(formData.get("value") ?? "");
-  const validator = SETTING_VALUE_VALIDATORS[key];
+  // Prefix match for the per-category hero defaults: the category set is
+  // DB-driven, so the style-id validator applies to every
+  // hero.category_default.* key rather than a fixed six-entry list.
+  const validator =
+    SETTING_VALUE_VALIDATORS[key] ??
+    (key.startsWith("hero.category_default.")
+      ? makeHeroStyleIdValidator()
+      : undefined);
   const value = validator ? validator(rawValue) : rawValue;
   if (value === null) {
     console.warn(
@@ -1139,7 +1158,9 @@ export async function setCategoryVoiceoverAction(
   await requireCapability("content.manage");
   const category = String(formData.get("category") ?? "").trim();
   const id = String(formData.get("id") ?? "").trim();
-  if (!CATEGORIES.includes(category as (typeof CATEGORIES)[number])) return;
+  // Same DB-driven closed set the bulk category op validates against.
+  const known = await loadCategoryLabelToSlug();
+  if (!known.has(category)) return;
   await setCategoryVoiceoverId(category, id);
   console.info("[voiceover action] set category", { category, id });
   revalidatePath("/admin/voiceovers");
@@ -3047,7 +3068,7 @@ export async function publishReviewedStoryAction(
   );
   const completeness = await evaluateAssetCompleteness(story!.id);
   if (!completeness.ready) {
-    const reason = encodeURIComponent(completeness.missing.join(" | "));
+    const reason = encodeURIComponent(completeness.blocking.join(" | "));
     console.warn("[reddit-review publish-blocked]", {
       reddit_id: redditId,
       missing: completeness.missing,
@@ -3343,6 +3364,95 @@ export async function stopAllActiveLiveRunsAction(): Promise<StopAllLiveRunsActi
   return { ok: true, scanned: active.length, stopped };
 }
 
+// 2026-07-03 unified live runs (_plans/2026-07-03-unified-live-runs-and-stop.md).
+// The live page shows EVERY run kind, not just pipeline story jobs:
+// image renders, voice renders, short renders, hero+thumbnail finishers,
+// and refresh-assets chains, in one normalized snapshot next to the
+// pipeline event cards. Filters/search run client-side on the snapshot.
+
+export interface AllRunsSnapshot {
+  /** Pipeline story jobs with their event streams (the existing cards). */
+  jobs: Awaited<
+    ReturnType<typeof import("@/lib/story-jobs-live").listActiveJobsWithEvents>
+  >;
+  /** Everything else, normalized (lib/runs.ts). */
+  runs: import("@/lib/runs").UnifiedRun[];
+}
+
+export async function listAllRunsAction(): Promise<AllRunsSnapshot> {
+  await requireCapability("content.manage");
+  const { listActiveJobsWithEvents } = await import("@/lib/story-jobs-live");
+  const { listUnifiedRuns } = await import("@/lib/runs");
+  const [jobs, runs] = await Promise.all([
+    listActiveJobsWithEvents(),
+    listUnifiedRuns(),
+  ]);
+  const perKind: Record<string, number> = {};
+  for (const r of runs) perKind[r.kind] = (perKind[r.kind] ?? 0) + 1;
+  console.info("[runs list]", { pipeline: jobs.length, ...perKind });
+  return { jobs, runs };
+}
+
+// Per-run Stop for the non-pipeline kinds (pipeline rows keep
+// stopLiveRunAction, which settles every stage of the job). `changed`
+// is false when the row was already settled — the client surfaces that
+// as "nothing to stop" instead of an error.
+export async function stopUnifiedRunAction(
+  kind: import("@/lib/runs").UnifiedRunKind,
+  id: string,
+): Promise<{ ok: boolean; changed: boolean }> {
+  const session = await requireCapability("content.manage");
+  if (!id) return { ok: false, changed: false };
+  const { stopUnifiedRun } = await import("@/lib/runs");
+  const changed = await stopUnifiedRun(
+    kind,
+    id,
+    "Stopped by operator from Live Runs",
+  );
+  console.info("[runs stop]", { kind, id, changed, user_id: session.userId });
+  return { ok: true, changed };
+}
+
+// Bulk STOP RUNS from /admin/content: cancels everything in flight for
+// the selected rows. Stories get the full treatment (images, voice,
+// shorts, pipeline jobs, pending finishers, refresh chains); articles
+// only ever have image renders, so that's all there is to stop.
+export interface BulkStopRunsResult {
+  stories: number;
+  articles: number;
+  counts: import("@/lib/runs").StopRunsCounts;
+}
+
+export async function bulkStopRunsAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkStopRunsResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+  const reason = "Stopped by operator (bulk stop runs)";
+  const storyIds = items.filter((i) => i.kind === "story").map((i) => i.id);
+  const articleIds = items
+    .filter((i) => i.kind === "article")
+    .map((i) => i.id);
+  console.info("[content bulk stop] start", {
+    stories: storyIds.length,
+    articles: articleIds.length,
+    user_id: session.userId,
+  });
+  const { stopRunsForStories } = await import("@/lib/runs");
+  const counts = await stopRunsForStories(storyIds, reason);
+  for (const id of articleIds) {
+    const { cancelled } = await cancelAllImageRendersForOwner(
+      "article",
+      id,
+      reason,
+    );
+    counts.images += cancelled.length;
+  }
+  console.info("[content bulk stop] done", counts);
+  revalidatePath("/admin/content");
+  return { stories: storyIds.length, articles: articleIds.length, counts };
+}
+
 // 2026-06-28 sidebar live-runs badge. Polled at a lower cadence (~15s)
 // across every admin page so the count is visible without staying on
 // the live page. Returns a single integer; never a row payload.
@@ -3363,6 +3473,20 @@ export async function countSubmissionQueueAction(): Promise<number> {
   const { countSubmissionQueue } = await import("@/lib/submissions");
   const count = await countSubmissionQueue();
   console.info("[sidebar submissions badge action] count", { count });
+  return count;
+}
+
+// 2026-07-02 sidebar notifications badge. Same shape as the two badges
+// above: a single integer, polled across admin pages so an unread
+// failure notification is glanceable from anywhere in the studio.
+// Plan: _plans/2026-07-02-never-publish-without-video.md.
+export async function countUnreadAdminNotificationsAction(): Promise<number> {
+  await requireCapability("content.manage");
+  const { countUnreadAdminNotifications } = await import(
+    "@/lib/admin-notifications"
+  );
+  const count = await countUnreadAdminNotifications();
+  console.info("[sidebar notifications badge action] count", { count });
   return count;
 }
 
@@ -3396,15 +3520,21 @@ export async function countSubmissionQueueAction(): Promise<number> {
 //
 // Security note: input validation runs at the boundary (status / category
 // against the closed enums) BEFORE any DB call, so a forged client payload
-// can't land an arbitrary string in a column. Hard cap of MAX_BULK_ITEMS
-// protects against accidental "select all 200" runaway operations.
+// can't land an arbitrary string in a column. The cap constants (the cheap-op
+// limit plus the lower destructive / paid caps) live in @/lib/bulk-safety so
+// the Content client island enforces the exact same numbers.
 
-const MAX_BULK_ITEMS = 200;
-
-// Closed-set guard for bulk category ops. Derived from the shared
-// category list (admin/ui.ts -> @/lib/categories/manifest) so it can't
-// drift from the categories the picker actually offers.
-const STORY_CATEGORIES = new Set<string>(CATEGORIES);
+// Closed-set guard for bulk category ops. Reads the `categories` table —
+// the data-driven taxonomy (_plans/2026-07-01-category-taxonomy-multitag.md)
+// — so admin-added categories validate without a deploy. Legacy rows
+// (status='legacy') are deliberately included: the Undo banner replays the
+// story's PREVIOUS category, which can still be a legacy label. Returns a
+// label -> slug map so the write path can also set the primary story_tag.
+async function loadCategoryLabelToSlug(): Promise<Map<string, string>> {
+  const { listCategories } = await import("@/lib/categories/repo");
+  const rows = await listCategories({ includeArchived: true });
+  return new Map(rows.map((c) => [c.label, c.slug]));
+}
 
 const STORY_STATUSES = new Set<StoryStatus>([
   "draft",
@@ -3454,15 +3584,18 @@ function isBulkContentKind(v: unknown): v is BulkContentKind {
   return v === "story" || v === "article";
 }
 
-function validateItems(items: unknown): BulkContentItem[] {
+function validateItems(
+  items: unknown,
+  maxItems: number = MAX_BULK_ITEMS,
+): BulkContentItem[] {
   if (!Array.isArray(items)) {
     throw new Error("bulk-action: items is not an array");
   }
   if (items.length === 0) {
     throw new Error("bulk-action: items is empty");
   }
-  if (items.length > MAX_BULK_ITEMS) {
-    throw new Error(`bulk-action: exceeds ${MAX_BULK_ITEMS} items`);
+  if (items.length > maxItems) {
+    throw new Error(`bulk-action: exceeds ${maxItems} items`);
   }
   const out: BulkContentItem[] = [];
   for (const raw of items) {
@@ -3482,6 +3615,121 @@ function validateItems(items: unknown): BulkContentItem[] {
   return out;
 }
 
+// 2026-07-15 audit spine for danger-class bulk ops (delete + paid). Writes one
+// append-only summary row per run through @/lib/audit BEFORE the mutation, so a
+// failed audit write aborts the action (fail closed, matching the audit
+// module's contract). Metadata is PII-free: opaque `${kind}:${id}` refs only,
+// capped so one large run can't bloat the row. Plan:
+// _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+async function auditBulkContent(
+  session: { userId: string; email?: string | null },
+  action: AuditAction,
+  items: BulkContentItem[],
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const storyCount = items.filter((i) => i.kind === "story").length;
+  await audit({
+    actorId: session.userId,
+    actorEmail: session.email ?? null,
+    action,
+    targetType: "content",
+    targetId: randomUUID(),
+    metadata: {
+      count: items.length,
+      storyCount,
+      articleCount: items.length - storyCount,
+      ids: items.slice(0, 100).map((i) => `${i.kind}:${i.id}`),
+      ...extra,
+    },
+  });
+}
+
+// 2026-07-15 Phase 1 content pagination. The Content client island's cursor
+// pager calls this to fetch each keyset page. Thin delegate to loadContentPage;
+// the ContentPageOpts / ContentPageResult types live in @/lib/repo because a
+// "use server" module can only export async functions.
+// Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+//
+// 2026-07-21 the page's publish blockers ride along: every story the operator
+// could still publish (not published, not archived) gets the asset gate's
+// `blocking` list stamped onto publish_blockers so the row can show "missing:
+// poll" without a click. Lives here, not in loadContentPage — the repo can't
+// import the gate (cycle via polls.ts). Batched: 3 queries per page, not per
+// story. Plan: _plans/2026-07-21-content-row-publish-blockers.md.
+export async function listContentPageAction(
+  opts: ContentPageOpts,
+): Promise<ContentPageResult> {
+  await requireCapability("content.manage");
+  const page = await loadContentPage(opts);
+  const candidateIds = page.rows
+    .filter(
+      (r) =>
+        r.kind === "story" &&
+        r.status !== "published" &&
+        r.status !== "archived",
+    )
+    .map((r) => r.id);
+  if (candidateIds.length > 0) {
+    const { evaluateAssetCompletenessForStories } = await import(
+      "@/lib/asset-completeness"
+    );
+    const gates = await evaluateAssetCompletenessForStories(candidateIds);
+    let withBlockers = 0;
+    for (const row of page.rows) {
+      if (row.kind !== "story") continue;
+      const completeness = gates.get(row.id);
+      if (!completeness) continue;
+      row.publish_blockers = completeness.blocking;
+      if (completeness.blocking.length > 0) withBlockers += 1;
+    }
+    console.info("[content publish-blockers] page", {
+      candidates: candidateIds.length,
+      withBlockers,
+    });
+  }
+  return page;
+}
+
+// 2026-07-15 select-all-matching (cheap ops only). Resolves every row matching
+// the current filter server-side, then chunks the ids through the per-item
+// bulkUpdateContentAction so the publish gate, article-status validation, and
+// story_tag write all still run — a blanket SQL UPDATE would bypass them.
+// Capped at MAX_BULK_BY_FILTER_ITEMS; past that the operator must narrow the
+// filter. Paid / destructive ops have no by-filter path (Phase 0 danger split).
+export async function bulkUpdateContentByFilterAction(
+  filter: ContentPageOpts,
+  op: BulkUpdateOp,
+): Promise<BulkActionResult> {
+  const session = await requireCapability("content.manage");
+  if (!op || (op.type !== "status" && op.type !== "category")) {
+    throw new Error("bulk-by-filter: only status / category ops are allowed");
+  }
+  const matched = await listContentIdsForFilter(
+    filter,
+    MAX_BULK_BY_FILTER_ITEMS + 1,
+  );
+  if (matched.length > MAX_BULK_BY_FILTER_ITEMS) {
+    throw new Error(
+      `bulk-by-filter: ${MAX_BULK_BY_FILTER_ITEMS}+ rows match — narrow the filter`,
+    );
+  }
+  await auditBulkContent(session, "content.bulk_by_filter", matched, {
+    op: op.type,
+    value: op.type === "status" ? op.status : op.category,
+  });
+  const result: BulkActionResult = { ok: [], failed: [], prev: {} };
+  for (let i = 0; i < matched.length; i += MAX_BULK_ITEMS) {
+    const r = await bulkUpdateContentAction(
+      matched.slice(i, i + MAX_BULK_ITEMS),
+      op,
+    );
+    result.ok.push(...r.ok);
+    result.failed.push(...r.failed);
+    Object.assign(result.prev, r.prev);
+  }
+  return result;
+}
+
 export async function bulkUpdateContentAction(
   itemsInput: BulkContentItem[],
   op: BulkUpdateOp,
@@ -3491,6 +3739,9 @@ export async function bulkUpdateContentAction(
   if (!op || typeof op !== "object" || typeof op.type !== "string") {
     throw new Error("bulk-action: invalid op");
   }
+  // Populated only for category ops; the write loop reuses it to resolve
+  // the label to its slug for the primary story_tag write.
+  let categoryLabelToSlug: Map<string, string> | null = null;
   if (op.type === "status") {
     // Closed-enum check: status string must be in at least one of the two
     // kind-specific sets. Per-item validation below narrows further so a
@@ -3502,7 +3753,8 @@ export async function bulkUpdateContentAction(
       throw new Error("bulk-action: invalid status");
     }
   } else if (op.type === "category") {
-    if (!STORY_CATEGORIES.has(op.category)) {
+    categoryLabelToSlug = await loadCategoryLabelToSlug();
+    if (!categoryLabelToSlug.has(op.category)) {
       throw new Error("bulk-action: invalid category");
     }
   } else {
@@ -3546,7 +3798,7 @@ export async function bulkUpdateContentAction(
             if (!completeness.ready) {
               failed.push({
                 ...item,
-                reason: `asset-incomplete: ${completeness.missing.join(",")}`,
+                reason: `asset-incomplete: ${completeness.blocking.join(",")}`,
               });
               continue;
             }
@@ -3581,9 +3833,26 @@ export async function bulkUpdateContentAction(
           }
           prev[`${item.kind}:${item.id}`] = prevStatus;
         } else {
-          // category — story only
+          // category — story only. Write BOTH the denormalized label
+          // (stories.category, what every read path renders today) and the
+          // primary story_tag (the taxonomy's source of truth). Skipping
+          // the tag write would let syncStoryPrimaryCategory revert the
+          // label from the old primary tag on the next boot.
           const prevCategory = story.category;
           await setStoryCategory(item.id, op.category);
+          const slug = categoryLabelToSlug?.get(op.category);
+          if (slug) {
+            const { setPrimaryStoryTag } = await import(
+              "@/lib/categories/repo"
+            );
+            await setPrimaryStoryTag(item.id, slug, "admin");
+          }
+          console.info("[content bulk action] category", {
+            id: item.id,
+            prev: prevCategory,
+            next: op.category,
+            slug: slug ?? null,
+          });
           prev[`${item.kind}:${item.id}`] = prevCategory;
         }
       } else {
@@ -3667,8 +3936,9 @@ export async function bulkUpdateContentAction(
 export async function bulkDeleteContentAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkActionResult> {
-  await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput, MAX_BULK_DESTRUCTIVE_ITEMS);
+  await auditBulkContent(session, "content.bulk_delete", items);
 
   console.info("[content bulk action] start", {
     type: "delete",
@@ -3750,33 +4020,6 @@ export async function bulkDeleteContentAction(
   return { ok, failed, prev: {} };
 }
 
-// --- Bulk LLM reclassify (2026-06-21) ---------------------------------------
-// Plan: _plans/2026-06-21-category-classifier-and-pills.md.
-//
-// Thin auth + revalidate wrapper around `reclassifyDramaAndNullStories`.
-// The actual SQL + classifier loop lives in `lib/reclassify-stories.ts`
-// so it stays unit-testable without the "use server" gate.
-
-export type {
-  ReclassifyChange,
-  ReclassifyFailure,
-  ReclassifyResult,
-} from "@/lib/reclassify-stories";
-
-export async function bulkReclassifyStoriesAction() {
-  await requireCapability("content.manage");
-  const { reclassifyDramaAndNullStories } = await import(
-    "@/lib/reclassify-stories"
-  );
-  const result = await reclassifyDramaAndNullStories({ limit: MAX_BULK_ITEMS });
-  // Refresh the admin list and the public homepage. The live catalog
-  // reads category from the DB on every render, so the public site picks
-  // up the new tags on the next request.
-  revalidatePath("/admin/content");
-  revalidatePath("/");
-  return result;
-}
-
 // --- Bulk regenerate (2026-06-24) -------------------------------------------
 // Inbox-level fan-out of the per-story regen buttons that already live on the
 // story editor. Lets the operator tick N rows and re-run hero / scenes /
@@ -3796,6 +4039,7 @@ export async function bulkReclassifyStoriesAction() {
 
 export type BulkRegenTarget =
   | "hero"
+  | "hero_thumbnail"
   | "scenes"
   | "voice"
   | "pipeline"
@@ -3803,6 +4047,7 @@ export type BulkRegenTarget =
 
 const BULK_REGEN_TARGETS: ReadonlySet<BulkRegenTarget> = new Set([
   "hero",
+  "hero_thumbnail",
   "scenes",
   "voice",
   "pipeline",
@@ -3820,10 +4065,17 @@ export async function bulkRegenerateContentAction(
   target: BulkRegenTarget,
 ): Promise<BulkRegenResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
   if (!BULK_REGEN_TARGETS.has(target)) {
     throw new Error("bulk-regen: invalid target");
   }
+  await auditBulkContent(session, "content.bulk_regenerate", items, {
+    target,
+    estCostUsd: estimateRegenCostUsd(
+      target,
+      items.filter((i) => i.kind === "story").length,
+    ),
+  });
 
   console.info("[content bulk regen] start", {
     target,
@@ -3860,6 +4112,25 @@ export async function bulkRegenerateContentAction(
           ownerKind: "story",
           ownerId: item.id,
           asset: "hero",
+          promptHash: null,
+          requestedBy: session.userId,
+        });
+        revalidateOwnerPanels("story", item.id);
+      } else if (target === "hero_thumbnail") {
+        // 2026-07-03: the full finisher set in one go — clean hero
+        // (portrait + landscape) AND the three title-baked thumbnails,
+        // all i2i'd from the short's character + a picker-chosen scene.
+        // Same queue asset the per-story "Generate hero + thumbnail
+        // from short" button enqueues; five paid calls per story.
+        const pre = await canEnqueueImageRegen("hero_thumbnail_from_short");
+        if (!pre.ok) {
+          failed.push({ ...item, reason: "daily-budget-exceeded" });
+          continue;
+        }
+        await enqueueImageRegen({
+          ownerKind: "story",
+          ownerId: item.id,
+          asset: "hero_thumbnail_from_short",
           promptHash: null,
           requestedBy: session.userId,
         });
@@ -3913,20 +4184,29 @@ export async function bulkRegenerateContentAction(
           continue;
         }
         const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+        // 2026-07-19 self-heal: allowUsed so an already-shipped story (source
+        // at status 'used') re-runs from this one button instead of forcing
+        // the operator to hunt for the near-identical "Full pipeline &
+        // publish". The confirm modal carries the "goes offline" warning.
+        // With allowUsed, the only status the enqueue now refuses is 'skipped'
+        // — the operator's own "no" — which gets its own reason + a one-click
+        // "Re-run anyway" override in the result banner.
         const r = await bulkEnqueueStoryJobs([redditId], {
           with_media: true,
           requested_by: session.email,
+          allowUsed: true,
         });
         if (r.enqueued === 0) {
-          // bulkEnqueueStoryJobs has its own gates: source row in the wrong
-          // status (already used/skipped), or an active job already running.
-          // Map the most likely cause to a single short reason — the per-row
-          // failure list shows the count so the operator can re-check.
+          // bulkEnqueueStoryJobs has its own gates: an active job already
+          // running, or a source status it won't accept (with allowUsed on,
+          // that's 'skipped' or a stuck 'processing' zombie). Map the most
+          // likely cause to a single short reason — the result banner turns
+          // 'reddit-source-skipped' into an explicit override button.
           const reason =
             r.skipped_active > 0
               ? "pipeline-already-running"
               : r.skipped_status > 0
-                ? "reddit-source-locked"
+                ? "reddit-source-skipped"
                 : "not-enqueued";
           failed.push({ ...item, reason });
           continue;
@@ -3989,6 +4269,95 @@ export async function bulkRegenerateContentAction(
     failed: failed.length,
   });
   return { target, ok, failed };
+}
+
+// ─── Restart pipeline (force / self-heal) ───────────────────────────────────
+// 2026-07-19, plan: _plans/2026-07-19-restart-pipeline-self-heal.md.
+//
+// The "Re-run anyway" override behind the `reddit-source-skipped` failure in
+// the Restart-entire-pipeline result banner. A `skipped` source is the
+// operator's own past "no", so the normal restart button leaves it alone; this
+// action is the explicit un-skip-and-run for the moment they change their mind
+// (or a stuck 'processing' source that never produced a job needs kicking).
+//
+// It flips a `skipped`/`processing` source back to `imported` and enqueues.
+// A `used` source is left as-is — allowUsed accepts it directly, so we never
+// null a live story's story_id link. Same paid cap + audit as the other bulk
+// paid actions; the enqueue itself still skips anything already in flight.
+
+export async function bulkRestartPipelineForceAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkRegenResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_restart_pipeline_force", items);
+
+  console.info("[content restart-force] start", { count: items.length });
+
+  const ok: BulkContentItem[] = [];
+  const failed: BulkActionFailure[] = [];
+
+  const { getRedditSource, setRedditSourceStatus } = await import(
+    "@/lib/reddit-source"
+  );
+  const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+
+  for (const item of items) {
+    if (item.kind === "article") {
+      failed.push({ ...item, reason: "not-a-story" });
+      continue;
+    }
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        failed.push({ ...item, reason: "not-found" });
+        continue;
+      }
+      const redditId = story.reddit_id;
+      if (!redditId) {
+        failed.push({ ...item, reason: "no-reddit-source" });
+        continue;
+      }
+      const source = await getRedditSource(redditId);
+      if (!source) {
+        failed.push({ ...item, reason: "not-enqueued" });
+        continue;
+      }
+      // Normalize the operator's prior "no" (or a stranded 'processing' row
+      // with no live job) back to a runnable state. 'used' is intentionally
+      // untouched — allowUsed lets the enqueue take it without dropping the
+      // story_id link a live story still needs.
+      if (source.status === "skipped" || source.status === "processing") {
+        await setRedditSourceStatus(redditId, "imported", { story_id: null });
+      }
+      const r = await bulkEnqueueStoryJobs([redditId], {
+        with_media: true,
+        requested_by: session.email,
+        allowUsed: true,
+      });
+      if (r.enqueued === 0) {
+        const reason =
+          r.skipped_active > 0 ? "pipeline-already-running" : "not-enqueued";
+        failed.push({ ...item, reason });
+        continue;
+      }
+      revalidatePath("/admin/reddit-sources");
+      ok.push(item);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      failed.push({ ...item, reason });
+      console.error("[content restart-force] failed", { id: item.id, error: reason });
+    }
+  }
+
+  revalidatePath("/admin/content");
+  console.info("[content restart-force] done", {
+    ok: ok.length,
+    failed: failed.length,
+  });
+  // Reuse the regen result shape so the client renders it through the same
+  // RegenResultBanner; 'pipeline' is the only meaningful target here.
+  return { target: "pipeline", ok, failed };
 }
 
 // ─── Bulk publish to socials ────────────────────────────────────────────────
@@ -4075,8 +4444,9 @@ export async function bulkPublishToSocialsAction(
   platformsInput: SocialPlatform[],
 ): Promise<BulkPublishResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
   const platforms = validatePlatforms(platformsInput);
+  await auditBulkContent(session, "content.bulk_publish", items, { platforms });
 
   const t0 = Date.now();
   console.info("[content bulk-publish] start", {
@@ -4389,7 +4759,7 @@ export interface BulkCompleteAndPublishOutcome {
     | "skipped"
     | "errored";
   missing: string[];
-  enqueued: Array<"pipeline" | "hero" | "scenes" | "voice">;
+  enqueued: Array<"pipeline" | "hero_thumbnail" | "scenes" | "voice">;
   /** Set when state === "skipped" or "errored". */
   reason?: string;
 }
@@ -4412,19 +4782,17 @@ const MISSING_BLOCKS_PIPELINE: ReadonlySet<string> = new Set([
   "voiceover",
   "scene_images",
 ]);
-const MISSING_BLOCKS_HERO: ReadonlySet<string> = new Set([
-  "hero_image",
-  "hero_image_landscape",
-  "thumbnail_image",
-  "thumbnail_image_landscape",
-  "thumbnail_image_square",
-]);
+// Which blocking hero/thumbnail gate means "run the finisher" lives in
+// asset-completeness.ts (HERO_THUMBNAIL_BLOCKING_GATES) so this action and the
+// auto-publish cron share one definition. Imported lazily alongside
+// evaluateAssetCompleteness below.
 
 export async function bulkCompleteAndPublishAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkCompleteAndPublishResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_complete_publish", items);
 
   const t0 = Date.now();
    
@@ -4435,9 +4803,8 @@ export async function bulkCompleteAndPublishAction(
 
   // Lazy imports keep the action surface light when nothing is in flight,
   // matching bulkRegenerateContentAction's pattern.
-  const { evaluateAssetCompleteness } = await import(
-    "@/lib/asset-completeness"
-  );
+  const { evaluateAssetCompleteness, HERO_THUMBNAIL_BLOCKING_GATES } =
+    await import("@/lib/asset-completeness");
   const { enqueueVoiceRender: _enqueueVoice } = await import(
     "@/lib/voice-render-queue"
   );
@@ -4491,7 +4858,8 @@ export async function bulkCompleteAndPublishAction(
         continue;
       }
 
-      const enqueued: Array<"pipeline" | "hero" | "scenes" | "voice"> = [];
+      const enqueued: Array<"pipeline" | "hero_thumbnail" | "scenes" | "voice"> =
+        [];
 
       if (completeness.ready) {
         // Already complete. Flag for the cron's next tick.
@@ -4511,9 +4879,14 @@ export async function bulkCompleteAndPublishAction(
       const needsPipeline = [...missingSet].some((m) =>
         MISSING_BLOCKS_PIPELINE.has(m),
       );
+      // Only spend the (5-call) hero+thumbnail finisher when a BLOCKING image
+      // gate is the holdup — hero_image or thumbnail_image. Keyed off
+      // `blocking`, not `missing`, so an advisory-only landscape/square miss
+      // (which never blocks publish) doesn't trigger a paid regen on its own;
+      // the finisher refreshes those variants for free when it does run.
       const needsHero =
         !needsPipeline &&
-        [...missingSet].some((m) => MISSING_BLOCKS_HERO.has(m));
+        completeness.blocking.some((m) => HERO_THUMBNAIL_BLOCKING_GATES.has(m));
 
       if (needsPipeline) {
         const story = await getStoryRow(item.id);
@@ -4576,7 +4949,15 @@ export async function bulkCompleteAndPublishAction(
           asset: "pipeline",
         });
       } else if (needsHero) {
-        const pre = await canEnqueueImageRegen("hero");
+        // The 5-variant hero+thumbnail finisher, NOT plain "hero". A missing
+        // card thumbnail (thumbnail_image) is a blocking gate, and "hero"
+        // only ever writes hero_image/hero_image_landscape — so the old code
+        // enqueued a regen that could never clear the gate and the story sat
+        // stuck until the cron gave up. This asset writes all five variants
+        // atomically from the short's character. The short render is
+        // guaranteed present here (a missing short would have made
+        // needsPipeline true), so the finisher's seed exists.
+        const pre = await canEnqueueImageRegen("hero_thumbnail_from_short");
         if (!pre.ok) {
           outcomes.push({
             kind: item.kind,
@@ -4592,15 +4973,15 @@ export async function bulkCompleteAndPublishAction(
         await enqueueImageRegen({
           ownerKind: "story",
           ownerId: item.id,
-          asset: "hero",
+          asset: "hero_thumbnail_from_short",
           promptHash: null,
           requestedBy: session.userId,
         });
-        enqueued.push("hero");
-         
+        enqueued.push("hero_thumbnail");
+
         console.info("[bulk-complete-publish enqueue]", {
           story_id: item.id,
-          asset: "hero",
+          asset: "hero_thumbnail_from_short",
         });
       }
       // Else: only poll (or nothing currently enqueueable) is missing.
@@ -4711,7 +5092,8 @@ export async function bulkRefreshAssetsAction(
   itemsInput: BulkContentItem[],
 ): Promise<BulkRefreshAssetsResult> {
   const session = await requireCapability("content.manage");
-  const items = validateItems(itemsInput);
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_refresh_assets", items);
 
   const t0 = Date.now();
    
@@ -4874,5 +5256,500 @@ export async function bulkRefreshAssetsAction(
     erroredCount,
     outcomes,
   };
+}
+
+// ─── Bulk AI reclassify ──────────────────────────────────────────────────────
+// 2026-07-05, plan: _plans/2026-07-05-bulk-ai-reclassify.md.
+//
+// Re-runs the multi-tag LLM classifier on a hand-picked selection — the
+// surgical sibling of the whole-library /admin/reclassify tool. Per story it
+// writes BOTH story_tags (source "llm", first tag primary) and the
+// denormalized stories.category label: category-only writes get reverted by
+// syncStoryPrimaryCategory on the next boot, tag-only writes leave the
+// visible chip stale until one.
+//
+// Same review-queue semantics as /admin/reclassify: an empty classify or a
+// primary below DEFAULT_CONFIDENCE_FLOOR writes NOTHING and reports
+// needs_review, so a hesitant model can never overwrite a human's manual
+// retag with a coin flip.
+
+export interface BulkReclassifyOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state: "retagged" | "unchanged" | "needs_review" | "skipped" | "errored";
+  prevCategory?: string | null;
+  nextCategory?: string;
+  /** Applied tag slugs, primary first. Present on retagged/unchanged. */
+  tags?: string[];
+  /** Primary tag confidence 0..1. Present on retagged/unchanged. */
+  confidence?: number;
+  reason?: string;
+}
+
+export interface BulkReclassifyResult {
+  retaggedCount: number;
+  unchangedCount: number;
+  needsReviewCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkReclassifyOutcome[];
+}
+
+export async function bulkReclassifyContentAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkReclassifyResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput);
+
+  const t0 = Date.now();
+  console.info("[bulk-reclassify click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  const { listCategories, setStoryTags } = await import(
+    "@/lib/categories/repo"
+  );
+  const { classifyStoryTags } = await import("@/lib/category-tags-classifier");
+  const { DEFAULT_CONFIDENCE_FLOOR } = await import("@/lib/reclassify-tags");
+
+  const active = await listCategories();
+  const categories = active.map((c) => ({
+    slug: c.slug,
+    label: c.label,
+    description: c.description,
+  }));
+  const labelBySlug = new Map(active.map((c) => [c.slug, c.label]));
+
+  const outcomes: BulkReclassifyOutcome[] = [];
+  let retaggedCount = 0;
+  let unchangedCount = 0;
+  let needsReviewCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "articles have no story category",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "not-found",
+        });
+        erroredCount += 1;
+        continue;
+      }
+
+      const raw = await classifyStoryTags({
+        title: story.title,
+        body: story.body,
+        categories,
+      });
+      // Closed-set re-check against the CURRENT active slugs (mirrors
+      // applyReclassifyTagsAction) — the classifier validates too, but the
+      // active set can change between its read and this write.
+      const tags = raw.filter((t) => labelBySlug.has(t.slug));
+      const primary = tags[0];
+      if (!primary) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "needs_review",
+          prevCategory: story.category,
+          reason: "classifier returned no usable tags — pick one via the row chip",
+        });
+        needsReviewCount += 1;
+        continue;
+      }
+      if (primary.confidence < DEFAULT_CONFIDENCE_FLOOR) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "needs_review",
+          prevCategory: story.category,
+          reason: `low confidence (${Math.round(primary.confidence * 100)}%) — pick one via the row chip`,
+        });
+        needsReviewCount += 1;
+        continue;
+      }
+
+      // labelBySlug.has(primary.slug) held above, so the label exists.
+      const nextCategory = labelBySlug.get(primary.slug) as string;
+      await setStoryTags(item.id, tags, "llm");
+      await setStoryCategory(item.id, nextCategory);
+
+      const state = nextCategory === story.category ? "unchanged" : "retagged";
+      console.info("[bulk-reclassify item]", {
+        story_id: item.id,
+        state,
+        prev: story.category,
+        next: nextCategory,
+        tags: tags.map((t) => t.slug),
+        confidence: primary.confidence,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state,
+        prevCategory: story.category,
+        nextCategory,
+        tags: tags.map((t) => t.slug),
+        confidence: primary.confidence,
+      });
+      if (state === "retagged") retaggedCount += 1;
+      else unchangedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[bulk-reclassify errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+  console.info("[bulk-reclassify result]", {
+    user_id: session.userId,
+    retaggedCount,
+    unchangedCount,
+    needsReviewCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return {
+    retaggedCount,
+    unchangedCount,
+    needsReviewCount,
+    skippedCount,
+    erroredCount,
+    outcomes,
+  };
+}
+
+// ─── Bulk regenerate too-long titles ─────────────────────────────────────────
+// 2026-07-15, plan: _plans/2026-07-15-too-long-title-filter-and-bulk-fix.md.
+//
+// The bulk sibling of the per-story "Regenerate title" button
+// (regenerateStoryTitleAction). Pairs with the Content inbox's "Title: Too
+// long" filter — find the rows that render weird on the cover, select them,
+// and rewrite each title with the same branded prompt the pipeline uses,
+// bounded to the shared TITLE_MAX_CHARS / TITLE_MAX_WORDS policy.
+//
+// Synchronous per story (one inline gpt-5-nano call each), so it mirrors
+// bulkReclassifyContentAction with its own clean per-row result — NOT the
+// async-enqueue bulkRegenerateContentAction, whose "queued N" banner would
+// misreport a rewrite that has already landed. Capped at MAX_BULK_PAID_ITEMS:
+// the LLM spend is tiny but non-zero, and 50 inline calls bound the action's
+// wall-clock. Articles are skipped (the regenerator reads stories.title/body);
+// a body-less story is skipped, not failed — there's nothing to ground a
+// title on, and a re-tick shouldn't flood the failure list.
+
+export interface BulkRegenTitlesOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state: "regenerated" | "skipped" | "errored";
+  prevTitle?: string | null;
+  nextTitle?: string;
+  reason?: string;
+}
+
+export interface BulkRegenTitlesResult {
+  regeneratedCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkRegenTitlesOutcome[];
+}
+
+export async function bulkRegenerateTitlesAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkRegenTitlesResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+
+  const t0 = Date.now();
+  await auditBulkContent(session, "content.bulk_regenerate_titles", items);
+  console.info("[content bulk title-regen] start", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  const { regenerateTitleForStory } = await import("@/lib/title-regenerator");
+
+  const outcomes: BulkRegenTitlesOutcome[] = [];
+  let regeneratedCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "not-a-story",
+      });
+      skippedCount += 1;
+      continue;
+    }
+    try {
+      const result = await regenerateTitleForStory(item.id);
+      if (result.ok) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "regenerated",
+          prevTitle: result.previousTitle,
+          nextTitle: result.title,
+        });
+        regeneratedCount += 1;
+      } else if (
+        result.stage === "story-missing-body" ||
+        result.stage === "story-not-found"
+      ) {
+        // No body to ground a title on, or the row vanished mid-batch — a soft
+        // skip rather than a hard failure.
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason: result.error,
+        });
+        skippedCount += 1;
+      } else {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: result.error,
+        });
+        erroredCount += 1;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[content bulk title-regen errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+  console.info("[content bulk title-regen] done", {
+    user_id: session.userId,
+    regeneratedCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return { regeneratedCount, skippedCount, erroredCount, outcomes };
+}
+
+// ─── Bulk full pipeline & publish ────────────────────────────────────────────
+// 2026-07-02, plan: _plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md.
+//
+// The "rebuild absolutely everything, then ship it everywhere" gesture:
+// re-runs the Python story_jobs pipeline (article + voice), which then
+// force-enqueues a fresh hook-first short and the hero+thumbnail finisher,
+// and flags the story for the auto_complete_publish cron so it publishes
+// to the site + all social surfaces the moment every fresh asset is ready.
+//
+// Three preparations make the re-run genuinely FRESH instead of resumed:
+//   1. bulkEnqueueStoryJobs({ allowUsed: true }) — published stories'
+//      reddit sources sit at status='used', which the default gate refuses.
+//   2. The story's settled short_renders rows are cancelled + stripped of
+//      props. The Python enqueue_short_render coalesces on a DONE row
+//      (only error/cancelled reset), so without this the worker's
+//      end-of-job force-enqueue would keep the OLD short.
+//   3. The 5 hero/thumbnail columns are NULLed — the finisher resumes
+//      ("variant_resumed … skipping i2i") when they're set.
+//
+// fullPipeline is forced to 0 on the job so the site-only full-pipeline
+// lane can't publish ahead of the flag lane (whose query excludes
+// published rows — the socials would never fire).
+//
+// Lifecycle: enqueue → worker rewrites article+voice (status flips to
+// 'review', story leaves the public site) → worker force-enqueues the
+// short (fresh generation, new body) → finisher regenerates hero + 5
+// thumbnails → auto_complete_publish cron publishes site + socials
+// (per-platform dedup skips surfaces that already have the story).
+
+export interface BulkFullPipelineOutcome {
+  kind: BulkContentKind;
+  id: string;
+  state: "started" | "skipped" | "errored";
+  reason?: string;
+}
+
+export interface BulkFullPipelineResult {
+  startedCount: number;
+  skippedCount: number;
+  erroredCount: number;
+  outcomes: BulkFullPipelineOutcome[];
+}
+
+export async function bulkFullPipelineAction(
+  itemsInput: BulkContentItem[],
+): Promise<BulkFullPipelineResult> {
+  const session = await requireCapability("content.manage");
+  const items = validateItems(itemsInput, MAX_BULK_PAID_ITEMS);
+  await auditBulkContent(session, "content.bulk_full_pipeline", items);
+
+  const t0 = Date.now();
+  console.info("[bulk-full-pipeline click]", {
+    user_id: session.userId,
+    count: items.length,
+  });
+
+  const { bulkEnqueueStoryJobs } = await import("@/lib/story-jobs");
+
+  const outcomes: BulkFullPipelineOutcome[] = [];
+  let startedCount = 0;
+  let skippedCount = 0;
+  let erroredCount = 0;
+
+  for (const item of items) {
+    if (item.kind !== "story") {
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "skipped",
+        reason: "articles have no story pipeline",
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    try {
+      const story = await getStoryRow(item.id);
+      if (!story) {
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "errored",
+          reason: "not-found",
+        });
+        erroredCount += 1;
+        continue;
+      }
+      if (!story.reddit_id) {
+        // The article body can only be regenerated from the reddit
+        // source. Manual seeds should use "Restart short + hero +
+        // thumbnails" (the refresh-assets chain) instead.
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason: "no-reddit-source",
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      const r = await bulkEnqueueStoryJobs([story.reddit_id], {
+        with_media: true,
+        requested_by: session.email,
+        allowUsed: true,
+        fullPipeline: false,
+      });
+      if (r.enqueued === 0) {
+        const reason =
+          r.skipped_active > 0
+            ? "pipeline-already-running"
+            : r.skipped_status > 0
+              ? "reddit-source-locked"
+              : "not-enqueued";
+        outcomes.push({
+          kind: item.kind,
+          id: item.id,
+          state: "skipped",
+          reason,
+        });
+        skippedCount += 1;
+        continue;
+      }
+
+      // The job is in. Clear the resumable state so every downstream
+      // stage regenerates instead of coalescing on the old assets.
+      // Ordering (after the enqueue) matters: a refused enqueue must
+      // not have already stripped a live story's media pointers.
+      await run(
+        "UPDATE short_renders SET status = 'cancelled', props = NULL " +
+          "WHERE story_id = ? AND status IN ('done', 'error', 'cancelled')",
+        [item.id],
+      );
+      await run(
+        "UPDATE stories SET hero_image = NULL, hero_image_landscape = NULL, " +
+          "thumbnail_image = NULL, thumbnail_image_landscape = NULL, " +
+          "thumbnail_image_square = NULL WHERE id = ?",
+        [item.id],
+      );
+      await flagStoryForAutoPublish(item.id);
+
+      console.info("[bulk-full-pipeline started]", {
+        story_id: item.id,
+        reddit_id: story.reddit_id,
+        job_ids: r.enqueued_ids,
+      });
+      outcomes.push({ kind: item.kind, id: item.id, state: "started" });
+      startedCount += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[bulk-full-pipeline errored]", {
+        story_id: item.id,
+        error: message,
+      });
+      outcomes.push({
+        kind: item.kind,
+        id: item.id,
+        state: "errored",
+        reason: message,
+      });
+      erroredCount += 1;
+    }
+  }
+
+  revalidatePath("/admin/content");
+
+  console.info("[bulk-full-pipeline result]", {
+    user_id: session.userId,
+    startedCount,
+    skippedCount,
+    erroredCount,
+    latency_ms: Date.now() - t0,
+  });
+
+  return { startedCount, skippedCount, erroredCount, outcomes };
 }
 

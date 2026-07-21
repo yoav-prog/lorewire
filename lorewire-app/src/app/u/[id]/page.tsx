@@ -12,7 +12,6 @@ import type { Metadata } from "next";
 
 import { ContributorCard } from "@/components/ContributorCard";
 import { getPublicProfile } from "@/lib/contributions";
-import { buildPageTitle, getSiteSeo } from "@/lib/site-seo";
 import { readUserSession } from "@/lib/user-session";
 
 interface Params {
@@ -29,13 +28,9 @@ export async function generateMetadata({
   const { id } = await params;
   const profile = await getPublicProfile(id);
   if (!profile) return { title: "Profile", robots: { index: false } };
-  const seo = await getSiteSeo();
   return {
-    title: buildPageTitle(
-      `${profile.name} · ${profile.stats.rank.name}`,
-      seo.titleTemplate,
-      seo.siteName,
-    ),
+    // Bare title — the root layout's title.template appends the brand.
+    title: `${profile.name} · ${profile.stats.rank.name}`,
     // A thin, personal page — keep it out of search results.
     robots: { index: false },
   };

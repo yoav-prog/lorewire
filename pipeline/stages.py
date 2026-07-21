@@ -61,8 +61,8 @@ STORY_CATEGORIES = (
 
 # Rough subreddit -> LoreWire category. Editorial, so the admin can re-tag.
 # Used as the fast-path / fallback when the LLM classifier fails. The
-# classifier (`classify_category`) runs after the article body is written
-# and overrides this when it returns a confident match.
+# classifier (`classify_story_tags`, called by the story-jobs worker after
+# the article body is written) overrides this when it returns tags.
 SUBREDDIT_CATEGORY = {
     "amitheasshole": "Entitled",
     "entitledparents": "Entitled",
@@ -76,6 +76,15 @@ SUBREDDIT_CATEGORY = {
     "mademesmile": "Wholesome",
     "humansbeingbros": "Wholesome",
 }
+
+# gpt-5-nano is a reasoning model: its hidden reasoning tokens are spent from
+# max_completion_tokens BEFORE any visible output, and a starved cap returns
+# EMPTY content rather than truncated JSON. At the original cap of 200 every
+# classify came back '' once the active-category prompt grew (2026-07-03), so
+# every new story silently kept the subreddit-map fallback, usually "Drama".
+# 2000 is headroom, not spend: the model bills only the tokens it actually
+# uses (~500/call including reasoning).
+CLASSIFIER_MAX_COMPLETION_TOKENS = 2000
 
 
 def classify_category(
@@ -115,7 +124,9 @@ def classify_category(
         f"Story:\n{snippet}"
     )
     try:
-        raw = llm.chat(prompt, 20, model="openai/gpt-5-nano").strip()
+        raw = llm.chat(
+            prompt, CLASSIFIER_MAX_COMPLETION_TOKENS, model="openai/gpt-5-nano"
+        ).strip()
     except Exception as e:  # noqa: BLE001 — classifier is a quality lift, not load-bearing.
         print(f"[classify_category] llm failed, using fallback: {e}")
         return fallback_category
@@ -178,7 +189,7 @@ def classify_story_tags(
         f"Story:\n{snippet}"
     )
     try:
-        raw = llm.chat(prompt, 200, model="openai/gpt-5-nano")
+        raw = llm.chat(prompt, CLASSIFIER_MAX_COMPLETION_TOKENS, model="openai/gpt-5-nano")
     except Exception as e:  # noqa: BLE001 — classifier is a quality lift, not load-bearing.
         print(f"[classify_story_tags] llm failed: {e}")
         return []
@@ -655,16 +666,26 @@ def make_thumbnail_prompt(
     character_base_url: str | None = None,
     scene_image_url: str | None = None,
     style: HeroStyle | None = None,
+    bake_title: bool = True,
+    include_story_context: bool = True,
 ) -> str:
-    """Build a cinematic title-baked thumbnail prompt for hero / poster art.
+    """Build a cinematic thumbnail/hero prompt for poster art.
 
     Each prompt names the scene briefly (from the article's opening lines),
-    appends the category's visual identity, and instructs the image model to
-    render the title prominently inside the composition (gpt-image-2 handles
-    short bold text well; longer titles wrap or get abbreviated). Three
-    aspect ratios are supported: '3:4' for portrait posters / mobile
-    billboards, '16:9' for desktop hero strips, and '1:1' for the
-    Instagram-square thumbnail variant.
+    appends the category's visual identity, and (when `bake_title` is on)
+    instructs the image model to render the title prominently inside the
+    composition (gpt-image-2 handles short bold text well; longer titles
+    wrap or get abbreviated). Three aspect ratios are supported: '3:4' for
+    portrait posters / mobile billboards, '16:9' for desktop hero strips,
+    and '1:1' for the Instagram-square thumbnail variant.
+
+    `bake_title` (2026-07-03): True keeps the click-stopping baked-title
+    treatment the social THUMBNAIL variants want. False produces clean
+    artwork with an explicit no-text instruction and negative space for
+    an overlay - the HERO variants use it because the site renders its
+    own HTML title on top of the hero, and a baked title underneath it
+    doubled up (and read as AI-made typography). Default True so legacy
+    callers keep byte-identical prompts.
 
     When `character_base_url` is supplied the prompt switches to a
     character-faithful redraw: the caller MUST also pass
@@ -703,35 +724,97 @@ def make_thumbnail_prompt(
         style.system_prompt_band if style is not None
         else CATEGORY_THUMBNAIL_STYLES.get(category, CATEGORY_THUMBNAIL_STYLES["Drama"])
     )
-    if aspect_ratio == "3:4":
-        orientation = (
-            "Vertical streaming-thumbnail composition, character focal point "
-            "centered, title baked into the upper or lower band"
-        )
-    elif aspect_ratio == "1:1":
-        orientation = (
-            "Square Instagram-thumbnail composition, character focal point "
-            "centered with breathing room on both sides, title baked into "
-            "the lower band"
-        )
+    if bake_title:
+        if aspect_ratio == "3:4":
+            orientation = (
+                "Vertical streaming-thumbnail composition, character focal point "
+                "centered, title baked into the upper or lower band"
+            )
+        elif aspect_ratio == "1:1":
+            orientation = (
+                "Square Instagram-thumbnail composition, character focal point "
+                "centered with breathing room on both sides, title baked into "
+                "the lower band"
+            )
+        else:
+            orientation = (
+                "Wide cinematic banner composition, character focal point off-center "
+                "to leave room for the title, title baked into the lower-third band"
+            )
     else:
-        orientation = (
-            "Wide cinematic banner composition, character focal point off-center "
-            "to leave room for the title, title baked into the lower-third band"
-        )
+        # Clean-hero compositions: same framing intent, but the quiet zone
+        # is left EMPTY for the site's own HTML title overlay instead of
+        # baked typography.
+        if aspect_ratio == "3:4":
+            orientation = (
+                "Vertical streaming-poster composition, character focal point "
+                "centered, with a calmer, less detailed lower band left open "
+                "for overlay text the site adds separately"
+            )
+        elif aspect_ratio == "1:1":
+            orientation = (
+                "Square poster composition, character focal point centered "
+                "with breathing room on both sides"
+            )
+        else:
+            orientation = (
+                "Wide cinematic banner composition, character focal point "
+                "off-center to the right, leaving calmer negative space on "
+                "the left for overlay text the site adds separately"
+            )
     if dry_run:
         flags = []
         if character_base_url:
             flags.append("i2i")
         if scene_image_url:
             flags.append("scene-ref")
+        if not bake_title:
+            flags.append("no-title")
         suffix = f" ({'+'.join(flags)})" if flags else ""
         style_marker = f" [{style.id}]" if style is not None else ""
         return f"[DRY] {title} cinematic {category} thumbnail at {aspect_ratio}{suffix}{style_marker}"
 
     # Take just the first couple of sentences of the article as the scene cue
     # so the model gets context without re-rendering the whole body each call.
+    # `include_story_context=False` (2026-07-03) drops the sentence entirely:
+    # kie's content moderation deterministically flags some story excerpts
+    # (minors + charged phrasing in family-drama bodies), and the scene
+    # reference image already carries the composition — the moderation
+    # fallback in media.py rebuilds the prompt this way and retries once.
     opening = " ".join(body.split()[:60])
+    scene_context = (
+        f"Scene context from the story: {opening} "
+        if include_story_context
+        else ""
+    )
+    composition_context = (
+        f"Composition focused on this scene from the story: {opening} "
+        if include_story_context
+        else ""
+    )
+
+    # The shared tail of every variant: how to treat the title, then the
+    # composition cue and the finish. Baked mode keeps the historical wording
+    # verbatim; clean mode forbids ALL in-artwork text so the hero can't fight
+    # the HTML title the site overlays.
+    if bake_title:
+        title_treatment = (
+            f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
+            f"bold typography (white or near-white characters with a strong dark "
+            f"shadow or outline against the background so the words stay clearly "
+            f"legible even at small thumbnail sizes), integrated into the "
+            f"composition (not floating on a separate layer). {orientation}. "
+            f"High-resolution magazine-cover finish. No watermarks, no signatures, "
+            f"no extra text beyond the title."
+        )
+    else:
+        title_treatment = (
+            f"Do NOT render any text in the artwork: no title, no lettering, "
+            f"no captions, no signage words, no typography of any kind - the "
+            f"site overlays its own title in HTML on top of this image. "
+            f"{orientation}. High-resolution magazine-cover finish. "
+            f"No watermarks, no signatures, no text of any kind."
+        )
 
     if character_base_url and scene_image_url:
         # Hybrid mode: two reference images. First = the character (identity
@@ -746,14 +829,8 @@ def make_thumbnail_prompt(
             f"mood, lighting, and dramatic moment. Reimagined as a cinematic "
             f"editorial poster for a short documentary titled \"{title}\". "
             f"{style_band} "
-            f"Scene context from the story: {opening} "
-            f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
-            f"bold typography (white or near-white characters with a strong dark "
-            f"shadow or outline against the background so the words stay clearly "
-            f"legible even at small thumbnail sizes), integrated into the "
-            f"composition (not floating on a separate layer). {orientation}. "
-            f"High-resolution magazine-cover finish. No watermarks, no signatures, "
-            f"no extra text beyond the title."
+            f"{scene_context}"
+            f"{title_treatment}"
         )
 
     if character_base_url:
@@ -767,27 +844,15 @@ def make_thumbnail_prompt(
             f"face, gender, build, hair, clothing, age — but reimagined as a "
             f"cinematic editorial poster for a short documentary titled "
             f"\"{title}\". {style_band} "
-            f"Composition focused on this scene from the story: {opening} "
-            f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
-            f"bold typography (white or near-white characters with a strong dark "
-            f"shadow or outline against the background so the words stay clearly "
-            f"legible even at small thumbnail sizes), integrated into the "
-            f"composition (not floating on a separate layer). {orientation}. "
-            f"High-resolution magazine-cover finish. No watermarks, no signatures, "
-            f"no extra text beyond the title."
+            f"{composition_context}"
+            f"{title_treatment}"
         )
 
     return (
         f"Cinematic editorial poster for a short documentary titled \"{title}\". "
         f"{style_band} "
-        f"Composition focused on this scene from the story: {opening} "
-        f"Render the title \"{title}\" prominently in BRIGHT, HIGH-CONTRAST "
-        f"bold typography (white or near-white characters with a strong dark "
-        f"shadow or outline against the background so the words stay clearly "
-        f"legible even at small thumbnail sizes), integrated into the "
-        f"composition (not floating on a separate layer). {orientation}. "
-        f"High-resolution magazine-cover finish. No watermarks, no signatures, "
-        f"no extra text beyond the title."
+        f"{composition_context}"
+        f"{title_treatment}"
     )
 
 

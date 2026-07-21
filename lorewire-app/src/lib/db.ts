@@ -174,7 +174,50 @@ async function ensureSchema(d: Driver): Promise<Driver> {
     // Best-effort: leaves some stories without a primary tag; self-heals on
     // a later boot once the categories seed has landed.
   }
+  try {
+    await syncStoryPrimaryCategoryImpl(d);
+  } catch {
+    // Best-effort: leaves stories.category on its previous value; self-heals
+    // on a later boot. The homepage reads stories.category, so this is what
+    // flips the visible taxonomy to the applied 18-set.
+  }
+  try {
+    await bustShortVideoUrlsImpl(d);
+  } catch {
+    // Best-effort: affected stories keep serving the cached old MP4 until a
+    // later boot stamps them; new renders are busted at the write point
+    // (finishShortRender / pipeline store.finish_short_render) regardless.
+  }
   return d;
+}
+
+// 2026-07-03 one-shot self-heal: stamp `?v={epoch}` onto pre-existing short
+// video URLs. The renderer overwrites the SAME R2 object key per story and
+// R2 serves with a one-year immutable Cache-Control, so a restarted short
+// kept playing the OLD MP4 from caches (observed on 1pu6a9n: new render done
+// for hours, old video still served). New completions are busted at the
+// write point; this heals every row written before that fix. Idempotent:
+// the suffix-anchored LIKE (no trailing %) only matches URLs WITHOUT a
+// query string, so stamped rows never match again.
+async function bustShortVideoUrlsImpl(d: Driver): Promise<void> {
+  const stamp = `?v=${Math.floor(Date.now() / 1000)}`;
+  await d.run(
+    "UPDATE short_renders SET output_url = output_url || ? " +
+      "WHERE output_url LIKE '%-short/video.mp4'",
+    [stamp],
+  );
+  await d.run(
+    "UPDATE stories SET video_url = video_url || ? " +
+      "WHERE video_url LIKE '%-short/video.mp4'",
+    [stamp],
+  );
+}
+
+/** Public, idempotent wrapper for manual re-runs + tests. Resolves the
+ *  driver through db() (post-schema), so it must NOT be called from inside
+ *  the schema chain — ensureSchema uses the *Impl with the raw driver. */
+export async function bustShortVideoUrls(): Promise<void> {
+  await bustShortVideoUrlsImpl(await db());
 }
 
 // One-shot, idempotent seed for the per-aspect active intro/outro pointers
@@ -375,6 +418,30 @@ async function seedGranularCategoriesImpl(d: Driver): Promise<void> {
 
 export async function seedGranularCategories(): Promise<void> {
   await seedGranularCategoriesImpl(await db());
+}
+
+// 2026-07-01 PR5 read-path flip: keep stories.category in sync with the
+// PRIMARY story_tag's category label, so the homepage/browse (which read the
+// denormalized label) reflect the applied 18-category taxonomy. This is the
+// denormalized cache the plan describes — story_tags is the source of truth.
+// Guarded + self-healing: only updates rows whose label differs, so after the
+// first flip subsequent boots are a no-op, and a later re-tag re-syncs.
+async function syncStoryPrimaryCategoryImpl(d: Driver): Promise<void> {
+  await d.run(
+    "UPDATE stories SET category = (" +
+      "SELECT c.label FROM story_tags t JOIN categories c ON c.slug = t.category_slug " +
+      "WHERE t.story_id = stories.id AND t.is_primary = 1" +
+      ") WHERE EXISTS (" +
+      "SELECT 1 FROM story_tags t2 JOIN categories c2 ON c2.slug = t2.category_slug " +
+      "WHERE t2.story_id = stories.id AND t2.is_primary = 1 " +
+      "AND c2.label != COALESCE(stories.category, '')" +
+      ")",
+    [],
+  );
+}
+
+export async function syncStoryPrimaryCategory(): Promise<void> {
+  await syncStoryPrimaryCategoryImpl(await db());
 }
 
 export function db(): Promise<Driver> {

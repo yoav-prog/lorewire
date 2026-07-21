@@ -37,6 +37,13 @@ def _patches(extra: dict | None = None) -> dict:
         "get_selected": mock.patch.object(
             media.models, "get_selected", return_value="kie/gpt-image-2",
         ),
+        # No completed short by default, so asset='hero' deterministically
+        # takes the text-only fallback the HeroRegenTests exercise. The
+        # HeroDispatchTests override the private helpers directly to pin
+        # the preference order.
+        "latest_short": mock.patch.object(
+            media.store, "latest_short_render_for_story", return_value=None,
+        ),
     }
     if extra:
         patches.update(extra)
@@ -50,6 +57,138 @@ def _apply(patches: dict, stack: unittest.TestCase):
         started[name] = p.start()
         stack.addCleanup(p.stop)
     return started
+
+
+class ModerationFallbackTests(unittest.TestCase):
+    """2026-07-04: kie's content moderation deterministically flags some
+    story excerpts inside the image prompt (story 1m4fjwq: all five
+    finisher variants failed with "flagged as sensitive"). The fallback
+    retries ONCE with the story text stripped; every other failure kind
+    passes through untouched."""
+
+    MOD_ERROR = Exception(
+        "kie task 4a1461 failed: The input or output was flagged as "
+        "sensitive. Please try again."
+    )
+
+    def setUp(self):
+        # The error stash is a module global; reset around each test so
+        # a stale "moderation" kind can't leak into other suites (the
+        # finisher tests return mocked Nones and would otherwise trigger
+        # phantom fallbacks).
+        self.addCleanup(
+            lambda: media._LAST_KIE_ERROR.update({"msg": None, "kind": None})
+        )
+        media._LAST_KIE_ERROR.update({"msg": None, "kind": None})
+
+    def test_moderation_error_sets_kind_and_skips_identical_retry(self):
+        calls = []
+        def flag(*a, **k):
+            calls.append(a[0])
+            raise self.MOD_ERROR
+        with mock.patch.object(media.images, "generate", side_effect=flag):
+            url = media._generate_with_retry("prompt A", "test label")
+        self.assertIsNone(url)
+        # One call, not two — the identical retry can only re-flag.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(media.last_kie_error_kind(), "moderation")
+
+    def test_fallback_retries_once_without_story_context(self):
+        seen = []
+        def flag_then_pass(prompt, **k):
+            seen.append(prompt)
+            if len(seen) == 1:
+                raise self.MOD_ERROR
+            return "https://kie/safe.png"
+        with mock.patch.object(
+            media.images, "generate", side_effect=flag_then_pass,
+        ):
+            url = media._generate_with_moderation_fallback(
+                "prompt WITH story text",
+                "prompt WITHOUT story text",
+                "test label",
+            )
+        self.assertEqual(url, "https://kie/safe.png")
+        self.assertEqual(
+            seen, ["prompt WITH story text", "prompt WITHOUT story text"],
+        )
+
+    def test_generic_failure_does_not_trigger_the_fallback(self):
+        seen = []
+        def always_fail(prompt, **k):
+            seen.append(prompt)
+            raise Exception("transient network wobble")
+        with mock.patch.object(
+            media.images, "generate", side_effect=always_fail,
+        ):
+            url = media._generate_with_moderation_fallback(
+                "prompt WITH story text",
+                "prompt WITHOUT story text",
+                "test label",
+            )
+        self.assertIsNone(url)
+        # Two attempts of the SAME prompt (the normal retry), never the
+        # softened twin — a reworded prompt can't fix a network error.
+        self.assertEqual(
+            seen, ["prompt WITH story text", "prompt WITH story text"],
+        )
+
+
+class HeroDispatchTests(unittest.TestCase):
+    """2026-07-03: asset='hero' prefers the short-character i2i path so a
+    hero regen keeps the SAME protagonist as the Watch tab and the
+    thumbnails (the bulk "Hero image" action used to route straight to
+    the text-only path, which invents a fresh face in a registry style
+    every run — modal heroes stopped matching the cards). Text-only is
+    the fallback ONLY for setup failures (no completed short)."""
+
+    def test_hero_prefers_the_short_character_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _apply(_patches({
+                "from_short": mock.patch.object(
+                    media, "_regen_hero_from_short",
+                    return_value=("https://x/hero.png?v=1", 10),
+                ),
+                "text_only": mock.patch.object(media, "_regen_hero"),
+            }), self)
+            url, cents = media.regen_one("abc123", "hero", Path(tmp))
+        self.assertEqual(url, "https://x/hero.png?v=1")
+        self.assertEqual(cents, 10)
+        mocks["from_short"].assert_called_once()
+        mocks["text_only"].assert_not_called()
+
+    def test_hero_falls_back_to_text_only_without_a_short(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _apply(_patches({
+                "from_short": mock.patch.object(
+                    media, "_regen_hero_from_short",
+                    side_effect=ValueError("no completed short render"),
+                ),
+                "text_only": mock.patch.object(
+                    media, "_regen_hero",
+                    return_value=("https://x/hero.png?v=2", 10),
+                ),
+            }), self)
+            url, _ = media.regen_one("abc123", "hero", Path(tmp))
+        self.assertEqual(url, "https://x/hero.png?v=2")
+        mocks["from_short"].assert_called_once()
+        mocks["text_only"].assert_called_once()
+
+    def test_hero_kie_failure_does_not_fall_back(self):
+        # A RuntimeError (kie failed after retries) must surface to the
+        # queue as a failed render — silently switching to the text-only
+        # path would bill a second set of kie calls and hide the outage.
+        with tempfile.TemporaryDirectory() as tmp:
+            mocks = _apply(_patches({
+                "from_short": mock.patch.object(
+                    media, "_regen_hero_from_short",
+                    side_effect=RuntimeError("kie portrait (i2i) failed"),
+                ),
+                "text_only": mock.patch.object(media, "_regen_hero"),
+            }), self)
+            with self.assertRaises(RuntimeError):
+                media.regen_one("abc123", "hero", Path(tmp))
+        mocks["text_only"].assert_not_called()
 
 
 class HeroRegenTests(unittest.TestCase):
@@ -122,6 +261,36 @@ class HeroRegenTests(unittest.TestCase):
                 portrait_call.args[2], "/generated/abc123/hero.png",
             )
             mocks["update_hero"].assert_called_with("abc123", url)
+
+    def test_landscape_failure_clears_the_stale_landscape(self):
+        """2026-07-03 stale-pair guard: when the portrait lands but the
+        landscape call fails, the OLD landscape must be cleared — the
+        hero surfaces prefer 16:9 with a portrait fallback, so keeping
+        it pairs the fresh protagonist with a previous run's artwork
+        (the mismatched billboard/modal Yoav reported)."""
+        results = iter(["https://kie/portrait.png", None])
+        with tempfile.TemporaryDirectory() as tmp:
+            patches = _patches({
+                "update_hero": mock.patch.object(media.store, "update_story_hero"),
+                "update_hero_landscape": mock.patch.object(
+                    media.store, "update_story_hero_landscape",
+                ),
+                "make_thumb": mock.patch.object(
+                    media.stages, "make_thumbnail_prompt",
+                    return_value="cinematic prompt",
+                ),
+                "generate_with_retry": mock.patch.object(
+                    media, "_generate_with_retry",
+                    side_effect=lambda *a, **k: next(results),
+                ),
+            })
+            mocks = _apply(patches, self)
+            url, cents = media.regen_one("abc123", "hero", Path(tmp))
+        # Portrait landed and was written; only 1 image billed.
+        mocks["update_hero"].assert_called_once()
+        self.assertEqual(cents, 5)
+        # The stale landscape is cleared, not left in place.
+        mocks["update_hero_landscape"].assert_called_once_with("abc123", None)
 
     def test_hero_url_has_cache_bust_query_param(self):
         """2026-06-27: hero/thumbnail filenames are stable per story so

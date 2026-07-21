@@ -2,17 +2,22 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CAT,
   STORIES,
   isPublishedStory,
   PILLS,
   type Story,
 } from "@/lib/stories";
+import { categoryVisual } from "@/lib/categories/visuals";
 import {
+  CATEGORY_ORDER,
   CategoryFilterChips,
-  filterStoriesByCategory,
   useCategoryFilter,
 } from "@/components/CategoryFilterChips";
+import {
+  useBrowseData,
+  useDebouncedValue,
+  useLoadMoreSentinel,
+} from "@/components/browse/useBrowseData";
 import {
   ALL_PILL,
   CATEGORY_RAILS,
@@ -21,6 +26,7 @@ import {
   filterIdsByNotVoted,
   filterIdsByPillCat,
   filterIdsByPublished,
+  liveRowToStory,
   pickHeroAtIndex,
   resolveHeroPool,
   resolveRailIds,
@@ -44,6 +50,7 @@ import {
 import { usePrefersReducedMotion } from "@/lib/use-prefers-reduced-motion";
 import { PollRailCard } from "@/components/PollRail";
 import { PollWidget } from "@/components/PollWidget";
+import PosterMeta from "@/components/PosterMeta";
 import { renderHeroVerdictBadge } from "@/lib/polls-shared";
 import {
   BackToTop,
@@ -61,15 +68,25 @@ import {
 } from "@/components/stories/stories-playlist";
 import { useStoriesUrlState } from "@/components/stories/use-stories-url-state";
 import { useViewedWires } from "@/components/stories/use-viewed-wires";
+import Ccm19Bridge from "@/components/Ccm19Bridge";
 import CookieConsent from "@/components/CookieConsent";
 import CrossDeviceNudge from "@/components/CrossDeviceNudge";
+import { CCM19_ENABLED } from "@/lib/ccm19";
 import SignInChip from "@/components/SignInChip";
 import SiteFooter from "@/components/SiteFooter";
+import { StoryLink } from "@/components/StoryLink";
 import { CommentsTab } from "@/components/CommentsTab";
 import { JumpToComments } from "@/components/JumpToComments";
 import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import { formatDurationMs } from "@/lib/duration";
+import {
+  isSlideSwipeExempt,
+  resolveSwipeDirection,
+  slidePosition,
+  slideTarget,
+  type SlideContext,
+} from "@/lib/slide-context";
 import {
   placeArticleImages,
   splitArticleParagraphs,
@@ -80,12 +97,15 @@ import {
 } from "@/app/actions";
 import { storyShareUrl } from "@/lib/share";
 import ShareSheet from "@/components/ShareSheet";
+import SkipIntroButton from "@/components/SkipIntroButton";
+import { useSkipIntro } from "@/components/useSkipIntro";
 import {
   useContinueReading,
   useRecentlyViewed,
   useSavedStories,
   useStoryRatings,
 } from "@/lib/engagement-store";
+import { useVotedStories } from "@/lib/voted-stories";
 import RatingStars, { RatingBadge } from "@/components/RatingStars";
 
 // Mirror DesktopShell's NO_LIVE_MEDIA seed: until the live fetch resolves
@@ -99,10 +119,14 @@ const NO_LIVE_MEDIA: LiveStoryMediaResult = {
   audio_url: null,
   alignment: [],
   is_short: false,
+  intro_window: null,
   found: false,
 };
 
-type OpenFn = (id: string, tab?: string) => void;
+// The optional slide context is the ordered story list of the surface the
+// open came from — the detail sheet slides prev/next within it (wrap-around).
+// See _plans/2026-07-04-slide-between-row-stories.md.
+type OpenFn = (id: string, tab?: string, slide?: SlideContext) => void;
 type IconProps = { size?: number; fill?: string; stroke?: number };
 type IconCmp = (p: IconProps) => React.ReactElement;
 
@@ -137,29 +161,40 @@ const PlusI: IconCmp = (p) => <Ico {...p} d={<path d="M12 5v14M5 12h14" />} />;
 const StarI: IconCmp = (p) => <Ico {...p} d={<path d="M12 4.5l2.2 4.6 5 .6-3.7 3.4 1 4.9L12 16.1 7.5 18.5l1-4.9L4.8 10.2l5-.6z" />} />;
 const ShareI: IconCmp = (p) => <Ico {...p} d={<><circle cx="6" cy="12" r="2.3" /><circle cx="17" cy="6" r="2.3" /><circle cx="17" cy="18" r="2.3" /><path d="M8 11l7-4M8 13l7 4" /></>} />;
 const ChevDown: IconCmp = (p) => <Ico {...p} d={<path d="m6 9 6 6 6-6" />} />;
+const ChevL: IconCmp = (p) => <Ico {...p} d={<path d="m15 6-6 6 6 6" />} />;
+const ChevR: IconCmp = (p) => <Ico {...p} d={<path d="m9 6 6 6-6 6" />} />;
 const ShuffleI: IconCmp = (p) => <Ico {...p} d={<><path d="M4 7h3l9 10h4M4 17h3l3-3.3M16 7h4M14 13.5l2 3.5" /><path d="m18 5 2 2-2 2M18 15l2 2-2 2" /></>} />;
 const InfoI: IconCmp = (p) => <Ico {...p} d={<><circle cx="12" cy="12" r="8.4" /><path d="M12 11v5M12 8h.01" /></>} />;
 const WiresI: IconCmp = (p) => <Ico {...p} d={<><rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.5" /><path d="m10 8.4 5 3.6-5 3.6z" /></>} />;
 
 /* ----------------------------- POSTER ART ----------------------------- */
 function PosterArt({ story, rounded = true, showTitle = true, vig = false }: { story: Story; rounded?: boolean; showTitle?: boolean; vig?: boolean }) {
-  // Suppress CSS title when the artwork has it baked in (Wave 2 cinematic
-  // thumbnails) — otherwise the typography stacks on top of itself.
-  const renderCssTitle = showTitle && !story.heroHasBakedTitle;
-  const c = CAT[story.cat];
-  // Heroes that 404 fall back to the gradient automatically.
+  const c = categoryVisual(story.cat).color;
+  // Artwork that 404s falls back to the gradient automatically.
   const [imageOk, setImageOk] = useState(true);
-  const showImage = !!story.heroImage && imageOk;
+  // Cards prefer the 3:4 thumbnail (always carries the baked cinematic
+  // title) over the hero, which renders clean since 2026-07-03 — a card
+  // showing the clean hero would have no title in the artwork at all.
+  // Stories that pre-date the finisher fall back to the hero.
+  const artSrc = story.thumbnailImage || story.heroImage;
+  const artIsThumbnail = !!story.thumbnailImage;
+  const showImage = !!artSrc && imageOk;
+  // Suppress the CSS title when the shown artwork has it baked in —
+  // thumbnails always do; heroes only when flagged (legacy cinematic).
+  const artHasBakedTitle = showImage && (artIsThumbnail || !!story.heroHasBakedTitle);
+  const renderCssTitle = showTitle && !artHasBakedTitle;
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: rounded ? 12 : 0, background: c }}>
       {showImage && (
         <img
-          src={story.heroImage}
-          alt=""
+          src={artSrc}
+          // Content image: thumbnails bake the title into the pixels, so
+          // the alt is the only text form of it for image search + AT.
+          alt={story.title}
           className="absolute inset-0 w-full h-full object-cover"
           onError={() => {
             setImageOk(false);
-            console.warn("[lorewire poster err]", { storyId: story.id, src: story.heroImage });
+            console.warn("[lorewire poster err]", { storyId: story.id, src: artSrc });
           }}
         />
       )}
@@ -175,12 +210,7 @@ function PosterArt({ story, rounded = true, showTitle = true, vig = false }: { s
           (.55 opacity at the bottom) still provides enough contrast
           for non-baked CSS titles. */}
       {vig && <div className="absolute inset-0 poster-vig"></div>}
-      <div className="absolute left-2.5 top-2.5">
-        <span className="font-mono text-[9px] uppercase tracking-[.18em] px-1.5 py-0.5 rounded" style={{ color: "#fff", background: "rgba(0,0,0,.32)" }}>{story.cat}</span>
-      </div>
-      {story.dur && (
-        <div className="absolute right-2 top-2 font-mono text-[10px] tracking-wide px-1.5 py-0.5 rounded" style={{ background: "rgba(0,0,0,.5)", color: "#F5F3EF" }}>{story.dur}</div>
-      )}
+      <PosterMeta cat={story.cat} dur={story.dur} />
       {renderCssTitle && (
         <div className="absolute left-3 right-3 bottom-3">
           <h3 className="font-display font-extrabold uppercase tracking-tightest leading-[.92] ink-shadow" style={{ fontSize: story.title.length > 16 ? 19 : 22, color: "#F5F3EF" }}>{story.title}</h3>
@@ -322,7 +352,7 @@ function Billboard({
 
   const story = pool[Math.min(activeIndex, pool.length - 1)];
   if (!story) return null;
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   const heroSrc = story.heroImage;
   const showHero = !!heroSrc && heroOk;
   const hasRotation = pool.length > 1;
@@ -405,7 +435,11 @@ function Billboard({
           {showHero && (
             <img
               src={heroSrc}
-              alt=""
+              alt={story.title}
+              // Mobile LCP element — eager + high priority so the browser
+              // doesn't queue it behind rail thumbnails (PSI LCP was 7.7s).
+              loading="eager"
+              fetchPriority="high"
               className="absolute inset-0 w-full h-full object-cover select-none pointer-events-none"
               draggable={false}
               onError={() => {
@@ -508,12 +542,12 @@ function Billboard({
               for editorial display at large sizes; uppercase serif at
               ~15px button size reads odd. Bold sans CTAs against serif
               headlines = classic magazine pairing. */}
-          <button onClick={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
+          <StoryLink story={story} onActivate={() => onOpen(story.id, "Watch")} className="flex-1 flex items-center justify-center bg-ink text-bg font-bold uppercase tracking-tight text-[15px] rounded-[10px] py-3 active:scale-[.98] transition" style={{ fontFamily: "var(--font-archivo), Arial, sans-serif" }}>
             Watch &amp; Vote
-          </button>
-          <button onClick={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
+          </StoryLink>
+          <StoryLink story={story} onActivate={() => onOpen(story.id, "Read")} className="flex items-center justify-center gap-2 px-4 py-3 rounded-[10px] font-body font-semibold text-[14px] text-ink" style={{ background: "rgba(255,255,255,.13)" }}>
             <InfoI size={18} /> Read the article
-          </button>
+          </StoryLink>
         </div>
         <button onClick={onShuffle} className="mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-[10px] border border-line font-mono text-[11px] uppercase tracking-[.2em] text-ink/80 active:scale-[.98] transition">
           <ShuffleI size={15} /> Surprise me
@@ -586,7 +620,7 @@ function Billboard({
 function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { story: Story; onOpen: OpenFn; w?: number | string; h?: number | string; progress?: number; voteCount?: number }) {
   const { getRating } = useStoryRatings();
   return (
-    <button onClick={() => onOpen(story.id)} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
+    <StoryLink story={story} onActivate={() => onOpen(story.id)} aria-label={story.title} className="relative shrink-0 active:scale-[.97] transition" style={{ width: w, height: typeof h === "string" ? h : undefined }}>
       {/* showTitle={false} across every rail (mobile parity with
           desktop PosterCard): the baked title in the artwork carries
           the rail; the white CSS overlay was just doubling up. */}
@@ -610,7 +644,7 @@ function PosterCard({ story, onOpen, w = 132, h = 192, progress, voteCount }: { 
           <div className="h-full rounded-full bg-accent" style={{ width: `${progress}%` }}></div>
         </div>
       )}
-    </button>
+    </StoryLink>
   );
 }
 
@@ -744,9 +778,15 @@ function Home({
   // 2026-06-26 slice C of _plans/2026-06-26-homepage-redesign-v1.md.
   // Build the voted-story-id Set once per render so each filter pass
   // does O(1) lookups instead of rebuilding the Set per call.
+  //
+  // 2026-07-01: union the SSR seed (votes from prior sessions, resolved
+  // server-side by cookie) with the in-session vote overlay
+  // (lib/voted-stories) so casting a vote drops the story from the
+  // "You Didn't Vote Yet" rail immediately, without a page refresh.
+  const { voted: sessionVoted } = useVotedStories();
   const votedSet = useMemo(
-    () => new Set(votedStoryIds),
-    [votedStoryIds],
+    () => new Set([...votedStoryIds, ...sessionVoted]),
+    [votedStoryIds, sessionVoted],
   );
 
   // 2026-06-21 pill filter (_plans/2026-06-21-category-classifier-and-pills.md).
@@ -834,7 +874,7 @@ function Home({
               // PosterCard (132x192) instead of the legacy landscape
               // w=150 h=96 crop, which was clipping the baked-in
               // titles off the top and bottom of the artwork.
-              return <PosterCard key={id} story={s} onOpen={onOpen} />;
+              return <PosterCard key={id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: continueIds, label: "You Didn't Vote Yet" })} />;
             })}
           </div>
         </section>
@@ -849,11 +889,11 @@ function Home({
               scrollable (no grid-cols-10 fit constraint) so cells stay
               at the standard 132x192 portrait size. */}
           <div className="flex gap-2 px-4 overflow-x-auto noscroll pb-1">
-            {top10Ids.slice(0, 10).map((id, i) => {
+            {top10Ids.slice(0, 10).map((id, i, visible) => {
               const s = resolveStory(id);
               if (!s) return null;
               return (
-                <button key={id} onClick={() => onOpen(id)} className="relative shrink-0 active:scale-[.97] transition">
+                <StoryLink key={id} story={s} onActivate={() => onOpen(id, undefined, { ids: visible, label: "Top 10 Today" })} aria-label={s.title} className="relative shrink-0 active:scale-[.97] transition">
                   <div className="relative w-[132px] h-[192px]">
                     <PosterArt story={s} showTitle={false} />
                     <span
@@ -870,7 +910,7 @@ function Home({
                       {i + 1}
                     </span>
                   </div>
-                </button>
+                </StoryLink>
               );
             })}
           </div>
@@ -902,12 +942,13 @@ function Home({
         // half-built rail (1-3 posters) doesn't read as broken. Admin
         // can set the floor to 0 to disable (legacy `> 0` gate).
         if (items.length < Math.max(1, coldStartFloor)) return null;
+        const railSlide = { ids: items.map((s) => s.id), label: rail.title };
         return (
           <section key={rail.surface} className="mt-7">
             <RailHead>{rail.title}</RailHead>
             <div className={railClass}>
               {items.map((s) => (
-                <PosterCard key={s.id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[s.id]} />
+                <PosterCard key={s.id} story={s} onOpen={(sid, t) => onOpen(sid, t, railSlide)} voteCount={posterVoteCounts[s.id]} />
               ))}
             </div>
           </section>
@@ -953,7 +994,7 @@ function Home({
             {newRowIds.map((id) => {
               const s = resolveStory(id);
               if (!s) return null;
-              return <PosterCard key={id} story={s} onOpen={onOpen} voteCount={posterVoteCounts[id]} />;
+              return <PosterCard key={id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: newRowIds, label: "New on LoreWire" })} voteCount={posterVoteCounts[id]} />;
             })}
           </div>
         </section>
@@ -1043,7 +1084,7 @@ function WatchDoodle({
   // toggle. preservesPitch keeps voices intelligible at 0.75x.
   // Plan: _plans/2026-06-25-slow-mode-playback.md (Layer 2 follow-up — this
   // surface was missed in the original PR #105 scope).
-  const { slow, toggleSlow } = useWirePrefs();
+  const { slow, toggleSlow, skipIntro } = useWirePrefs();
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -1058,6 +1099,23 @@ function WatchDoodle({
     console.info("[detail watch playback rate]", { storyId: story.id, rate, slow });
   }, [slow, story.id, videoUrl]);
 
+  // Skip Intro: liveMedia carries the server-resolved intro window; the
+  // shared hook decides when the button shows and when the always-skip
+  // pref auto-seeks. Same behavior as WireCard + the /v reader player.
+  // Plan: _plans/2026-07-04-skip-intro.md.
+  const {
+    showSkip: showSkipIntro,
+    skipNow: skipIntroNow,
+    handleTimeUpdate: skipIntroOnTime,
+    handleLoadedMetadata: skipIntroOnMeta,
+    notifyManualSeek: skipIntroOnManualSeek,
+  } = useSkipIntro({
+    introWindow: liveMedia.intro_window,
+    autoSkip: skipIntro,
+    logNs: "detail skip-intro",
+    id: story.id,
+  });
+
   if (videoUrl) {
     return (
       <div ref={sectionRef} className="px-4 pt-4 pb-2">
@@ -1065,7 +1123,10 @@ function WatchDoodle({
           <video
             ref={videoRef}
             src={videoUrl}
-            poster={story.heroImage}
+            // Pre-play poster: the title-baked thumbnail (what the
+            // cards show), falling back to the clean hero for stories
+            // that pre-date the finisher.
+            poster={story.thumbnailImage || story.heroImage}
             controls
             preload="metadata"
             playsInline
@@ -1075,11 +1136,26 @@ function WatchDoodle({
               if (Number.isFinite(d) && d > 0) {
                 onDurationMeasured?.(Math.round(d * 1000));
               }
+              skipIntroOnMeta(e.currentTarget);
             }}
             onPlay={playEvents.onPlay}
-            onTimeUpdate={playEvents.onTimeUpdate}
+            onTimeUpdate={(e) => {
+              skipIntroOnTime(e.currentTarget);
+              playEvents.onTimeUpdate(e);
+            }}
+            // Native controls own seeking here; our own skip's target sits
+            // OUTSIDE the window, so it never suppresses itself.
+            onSeeking={(e) =>
+              skipIntroOnManualSeek(e.currentTarget.currentTime * 1000)
+            }
             onError={() => console.warn("[lorewire video err]", { storyId: story.id, src: videoUrl })}
           />
+          {/* Above the native control bar, Netflix placement. */}
+          {showSkipIntro && (
+            <div className="absolute bottom-16 right-3 z-10">
+              <SkipIntroButton onClick={() => skipIntroNow(videoRef.current)} />
+            </div>
+          )}
           {/* Slow-mode pill — top-right of the video frame, matching the
               WireCard chrome cluster. Native HTML5 controls live at the
               bottom of the video so this pill never collides with them. */}
@@ -1827,7 +1903,7 @@ function FakeReadAlong() {
 }
 
 /* ----------------------------- TITLE SHEET ----------------------------- */
-function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog }) {
+function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inList, toggleList, session, seededModalComments, catalog, slide }: { story: Story; initialTab?: string; initialCommentId?: string; onClose: () => void; onOpen: OpenFn; inList: boolean; toggleList: (id: string) => void; session: HomepageInitial["session"]; seededModalComments: HomepageInitial["seededModalComments"]; catalog: MergedCatalog; slide?: SlideContext }) {
   const [tab, setTab] = useState(initialTab || "Watch");
   // Both PLAY affordances (the hero circle and the big white button under the
   // meta row) flip this to true. WatchDoodle's effect consumes it: scroll the
@@ -1856,6 +1932,19 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   // `story` lets the server lazy-autodraft on first open when no poll
   // exists yet (every-story-has-a-poll invariant).
   const { view: pollView } = useStoryPoll(story.id, story);
+  // Row slide navigation (_plans/2026-07-04-slide-between-row-stories.md):
+  // where this story sits inside the list it was opened from. Null hides
+  // every slide affordance (deep links, single-item lists, id not in the
+  // snapshot). goSlide stashes the direction in pendingSlideDir so the
+  // prev-props block below can turn it into the entrance animation for the
+  // incoming story — a story swap from More Like This (no slide) animates
+  // nothing. State rather than a ref because the render-time prev-props
+  // pattern may only read/write state (react-hooks/refs).
+  const pos = slidePosition(slide, story.id);
+  const [pendingSlideDir, setPendingSlideDir] = useState<-1 | 1 | null>(null);
+  const [slideDir, setSlideDir] = useState<-1 | 1 | null>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
+
   // Reset the tab whenever the parent swaps in a different story or hands us
   // a new initialTab. React 19's set-state-in-effect rule rejects the old
   // useEffect pattern; the sanctioned alternative is to track the previous
@@ -1863,6 +1952,13 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   const [prevStoryId, setPrevStoryId] = useState(story.id);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (prevStoryId !== story.id || prevInitialTab !== initialTab) {
+    if (prevStoryId !== story.id) {
+      // Consume the pending slide direction (null for non-slide swaps, e.g.
+      // a More Like This tap) so the keyed content wrapper animates only
+      // real slides, and only in the direction the user moved.
+      setSlideDir(pendingSlideDir);
+      setPendingSlideDir(null);
+    }
     setPrevStoryId(story.id);
     setPrevInitialTab(initialTab);
     setTab(initialTab || "Watch");
@@ -1870,6 +1966,69 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
     // the new story's stored dur until its <video> reports metadata.
     setMeasuredDurationMs(null);
   }
+
+  // A slide swaps the story in place; without this the new story keeps the
+  // old scroll offset and can open mid-article. Also runs on first mount,
+  // where scrolling an already-at-top sheet is a no-op.
+  useEffect(() => {
+    sheetRef.current?.scrollTo({ top: 0 });
+  }, [story.id]);
+
+  const goSlide = (dir: -1 | 1) => {
+    const target = slideTarget(slide, story.id, dir);
+    if (!target || !slide || !pos) return;
+    setPendingSlideDir(dir);
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[slide nav]", {
+      shell: "mobile",
+      label: slide.label,
+      from: story.id,
+      to: target,
+      dir,
+      index: pos.index,
+      total: pos.total,
+    });
+    // Keep the user's current tab while flipping (reading -> keep reading)
+    // and carry the same context so the chain continues from the new story.
+    onOpen(target, tab, slide);
+  };
+
+  // Swipe left/right anywhere on the sheet slides within the row. Same
+  // touchstart/touchend classification the Billboard uses; gestures that
+  // start inside a horizontal scroller (tab strip, More Like This rail,
+  // gallery), the video player, or an input are exempt so their own
+  // interactions keep working. Listen-only — never preventDefault — so
+  // vertical scrolling stays native.
+  const slideTouchStart = useRef<{ x: number; y: number } | null>(null);
+  const onSlideTouchStart = (e: React.TouchEvent) => {
+    if (!pos || isSlideSwipeExempt(e.target, sheetRef.current)) {
+      slideTouchStart.current = null;
+      return;
+    }
+    const t = e.touches[0];
+    slideTouchStart.current = { x: t.clientX, y: t.clientY };
+  };
+  const onSlideTouchEnd = (e: React.TouchEvent) => {
+    const start = slideTouchStart.current;
+    slideTouchStart.current = null;
+    if (!start || !pos) return;
+    const t = e.changedTouches[0];
+    const dir = resolveSwipeDirection(t.clientX - start.x, t.clientY - start.y);
+    if (dir) goSlide(dir);
+  };
+
+  // Rule-14 breadcrumb for "the arrows are missing": a context arrived but
+  // isn't slidable, so the affordances hid on purpose.
+  useEffect(() => {
+    if (!slide || slidePosition(slide, story.id)) return;
+    // eslint-disable-next-line no-console -- rule 14
+    console.info("[slide nav hidden]", {
+      shell: "mobile",
+      label: slide.label,
+      id: story.id,
+      reason: slide.ids.includes(story.id) ? "single_item" : "id_not_in_context",
+    });
+  }, [slide, story.id]);
 
   // Comment count for the tab badge. Fetched lightly (count + kill-switch
   // only, never the full thread) so the badge appears the moment the sheet
@@ -1948,7 +2107,7 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   const myRating = getRating(story.id) ?? 0;
   const [rateOpen, setRateOpen] = useState(false);
 
-  const c = CAT[story.cat];
+  const c = categoryVisual(story.cat).color;
   // "More Like This" must only surface stories the pipeline has actually
   // produced content for — same bar as Search / New / homepage rails. The
   // old STORIES-based list pulled in empty sample placeholders and showed
@@ -1966,10 +2125,21 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
   const headerHeroSrc = story.heroImageLandscape || story.heroImage;
   const isHeaderLandscape = !!story.heroImageLandscape;
   const showHeaderHero = !!headerHeroSrc && headerHeroOk;
+  // Keyed by story id so a slide animates the incoming story in from the
+  // side the user moved toward. Applied to both top-level blocks (header +
+  // body) rather than one wrapper so the sheet's existing structure stays
+  // put; the two animate in lockstep. Keying also remounts the tab content
+  // for the new story, which is the clean state anyway.
+  const slideAnimClass = slideDir === 1 ? " slide-nav-next" : slideDir === -1 ? " slide-nav-prev" : "";
   return (
-    <div id="article-top" className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }}>
+    <div id="article-top" ref={sheetRef} className="screen sheet-in z-40 noscroll scroll-mt-0" style={{ background: "#0A0A0C" }} onTouchStart={onSlideTouchStart} onTouchEnd={onSlideTouchEnd}>
       {shareOpen && <ShareSheet url={shareUrl} title={story.title} onClose={() => setShareOpen(false)} />}
-      <div className="relative h-[300px]">
+      {/* Static classes stay in a plain quoted string: Tailwind's scanner
+          reads raw source tokens, and a template literal that glues `${`
+          onto a class name (h-[300px]${...}) makes the class an invalid
+          candidate — it silently vanishes from the built CSS. This took
+          down the sheet header in production on 2026-07-04. */}
+      <div key={`hdr-${story.id}`} className={"relative h-[300px]" + slideAnimClass}>
         <div className="absolute inset-0" style={{ background: c }}>
           {showHeaderHero && (
             <img
@@ -1994,9 +2164,29 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
         <button onClick={onPlayClick} aria-label="Play" className="absolute left-1/2 top-[120px] -translate-x-1/2 w-16 h-16 rounded-full flex items-center justify-center text-bg active:scale-95 transition" style={{ background: "#F5F3EF", boxShadow: "0 10px 30px rgba(0,0,0,.4)" }}>
           <PlayI size={28} />
         </button>
+        {/* Row slide affordances: chevrons at the header edges (the swipe
+            gesture works sheet-wide, the chevrons make it discoverable)
+            plus a position chip naming the row. All hidden when there's
+            nothing to slide to. */}
+        {pos && slide && (
+          <>
+            <button onClick={() => goSlide(-1)} aria-label="Previous story" className="absolute left-3 top-[132px] w-9 h-9 rounded-full flex items-center justify-center text-ink active:scale-95 transition z-10" style={{ background: "rgba(0,0,0,.4)" }}>
+              <ChevL size={20} />
+            </button>
+            <button onClick={() => goSlide(1)} aria-label="Next story" className="absolute right-3 top-[132px] w-9 h-9 rounded-full flex items-center justify-center text-ink active:scale-95 transition z-10" style={{ background: "rgba(0,0,0,.4)" }}>
+              <ChevR size={20} />
+            </button>
+            {/* Top of the header, centered on the close button's row — the
+                header's BOTTOM is where the -mt-6 title overlaps, so a chip
+                anchored there sat on top of the title text. */}
+            <div className="absolute top-6 left-1/2 -translate-x-1/2 font-mono text-[10px] uppercase tracking-wider rounded px-2 py-0.5 whitespace-nowrap z-10" style={{ background: "rgba(0,0,0,.45)", color: "rgba(245,243,239,.9)" }}>
+              {pos.index + 1} / {pos.total} &middot; {slide.label}
+            </div>
+          </>
+        )}
       </div>
 
-      <div className="px-4 -mt-6 relative pb-28">
+      <div key={`body-${story.id}`} className={"px-4 -mt-6 relative pb-28" + slideAnimClass}>
         <h1 className="font-display font-black uppercase tracking-tightest leading-[.92] text-ink ink-shadow" style={{ fontSize: 34 }}>{story.title}</h1>
 
         {/* 2026-06-26 slice H follow-up: removed "{match}% Match"
@@ -2122,7 +2312,10 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
         <section className="mt-8 -mx-4">
           <RailHead>More Like This</RailHead>
           <div className="flex gap-3 px-4 overflow-x-auto noscroll pb-1">
-            {more.map((s) => <PosterCard key={s.id} story={s} onOpen={onOpen} w={120} h={174} />)}
+            {/* Opening from here re-anchors the slide context to THIS rail —
+                the user is browsing this shelf now, not the one they came
+                from. */}
+            {more.map((s) => <PosterCard key={s.id} story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: more.map((m) => m.id), label: "More Like This" })} w={120} h={174} />)}
           </div>
         </section>
       </div>
@@ -2131,28 +2324,58 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
 }
 
 /* ----------------------------- SEARCH ----------------------------- */
-// Mirrors DesktopShell's SearchPage + Browse page: only stories the
-// pipeline has actually produced content for (hero, short render,
-// narration, or article body) belong in the public listing. Reads off
-// the merged live + sample catalog so freshly-published live rows
-// surface without waiting for src/data/published.ts to be rebaked.
-//
-// Mobile has no dedicated Browse tab — Search is the catalog browser
-// when the query box is empty, so the URL-backed category filter
-// (?cat=Drama,Humor) lives here too. The chip row is hidden once a
-// text query is active to keep the screen focused on results.
-function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog }) {
+// Mobile has no dedicated Browse tab — Search is the catalog browser when the
+// query box is empty, so it pages the WHOLE published catalog through the same
+// pager desktop Browse uses instead of reading the shared in-memory catalog
+// (which loadLiveCatalog caps at 200 rows — the old version silently stopped
+// at ~201 titles once production passed 200 stories). The URL-backed category
+// chips (?cat=Drama,Humor) and the text query both push down as server-side
+// WHEREs, so a match beyond any loaded page is still found; the chip row is
+// hidden once a text query is active to keep the screen focused on results.
+// Loaded rows are lifted to the shell (onStoriesLoaded) so a tapped story
+// beyond the rails' catalog window still opens its TitleSheet. Plan:
+// _plans/2026-07-19-search-full-catalog.md.
+const SEARCH_PAGE_SIZE = 60;
+function Search({
+  onOpen,
+  onStoriesLoaded,
+}: {
+  onOpen: OpenFn;
+  onStoriesLoaded: (stories: Story[]) => void;
+}) {
   const [q, setQ] = useState("");
   const { selected, toggle, clear } = useCategoryFilter();
-  const published = catalog.array.filter(isPublishedStory);
-  const categoryFiltered = filterStoriesByCategory(published, selected);
-  const query = q.trim().toLowerCase();
-  const res = query
-    ? categoryFiltered.filter((s) => (s.title + s.cat).toLowerCase().includes(query))
-    : categoryFiltered;
-  const emptyCopy = query
+  // Stable, sorted category list (CATEGORY_ORDER order) so the pager's refetch
+  // dep is deterministic regardless of chip-click order.
+  const categories = useMemo(
+    () => CATEGORY_ORDER.filter((c) => selected.has(c)),
+    [selected],
+  );
+  const debouncedQ = useDebouncedValue(q.trim(), 250);
+  const { stories: liveRows, total, loading, loadingMore, reachedEnd, loadMore } =
+    useBrowseData(SEARCH_PAGE_SIZE, categories, debouncedQ);
+  const stories = useMemo(() => liveRows.map(liveRowToStory), [liveRows]);
+  useEffect(() => {
+    onStoriesLoaded(stories);
+  }, [stories, onStoriesLoaded]);
+  const sentinelRef = useLoadMoreSentinel(loadMore);
+
+  const totalLabel = total ?? stories.length;
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[search render]", {
+    shell: "mobile",
+    query: debouncedQ,
+    categories,
+    loaded: stories.length,
+    total,
+    reached_end: reachedEnd,
+  });
+  const emptyCopy = debouncedQ
     ? `No stories match “${q}”.`
     : "No stories in this category yet.";
+  // Slide context = the results exactly as loaded, so prev/next in the sheet
+  // covers every card fetched so far, never the whole catalog.
+  const slide = { ids: stories.map((s) => s.id), label: "Search" };
   return (
     <div className="pt-14 px-4 pb-28">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-3">Search</h1>
@@ -2170,8 +2393,8 @@ function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog })
           />
           <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-4 mb-3">
             {selected.size === 0
-              ? `Browse all · ${published.length} stories`
-              : `${res.length} of ${published.length} · ${Array.from(selected).join(", ")}`}
+              ? `Browse all · ${totalLabel} stories`
+              : `${stories.length} of ${totalLabel} · ${categories.join(", ")}`}
           </p>
         </>
       )}
@@ -2179,13 +2402,26 @@ function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog })
           (pipeline/media.py line 524) so the baked title at the bottom
           of every poster isn't cropped by object-cover. */}
       <div className="grid grid-cols-2 gap-3">
-        {res.map((s) => (
+        {stories.map((s) => (
           <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-            <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, slide)} w={"100%"} h={"100%"} />
           </div>
         ))}
       </div>
-      {res.length === 0 && <p className="font-body text-muted text-center mt-10">{emptyCopy}</p>}
+      {loading && stories.length === 0 && (
+        <p className="font-body text-muted text-center mt-10">Loading stories…</p>
+      )}
+      {!loading && stories.length === 0 && (
+        <p className="font-body text-muted text-center mt-10">{emptyCopy}</p>
+      )}
+      {/* Sentinel drives infinite scroll; kept below the grid with a little
+          height so the observer has a real box to watch. */}
+      <div ref={sentinelRef} className="h-10" aria-hidden />
+      {loadingMore && (
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted text-center mt-2">
+          Loading more…
+        </p>
+      )}
     </div>
   );
 }
@@ -2211,11 +2447,11 @@ function NewScreen({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog
       ) : (
         <div className="flex flex-col gap-3">
           {list.map((s) => (
-            <button key={s.id} onClick={() => onOpen(s.id)} className="flex gap-3 items-stretch text-left active:scale-[.99] transition">
+            <button key={s.id} onClick={() => onOpen(s.id, undefined, { ids: list.map((x) => x.id), label: "New & Hot" })} className="flex gap-3 items-stretch text-left active:scale-[.99] transition">
               <div className="w-[110px] h-[68px] shrink-0"><PosterArt story={s} showTitle={false} /></div>
               <div className="flex-1 min-w-0 py-0.5">
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span className="font-mono text-[9px] uppercase tracking-[.16em] px-1.5 py-0.5 rounded" style={{ background: CAT[s.cat], color: "#fff" }}>{s.cat}</span>
+                  <span className="font-mono text-[9px] uppercase tracking-[.16em] px-1.5 py-0.5 rounded" style={{ background: categoryVisual(s.cat).color, color: "#fff" }}>{s.cat}</span>
                   {s.dur && (
                     <span className="font-mono text-[10px] text-muted">{s.dur}</span>
                   )}
@@ -2294,7 +2530,7 @@ function MyList({
         <div className="grid grid-cols-2 gap-3">
           {items.map((s) => (
             <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-              <PosterCard story={s} onOpen={onOpen} w={"100%"} h={"100%"} />
+              <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: items.map((x) => x.id), label: "My List" })} w={"100%"} h={"100%"} />
             </div>
           ))}
         </div>
@@ -2333,7 +2569,7 @@ function TabBar({ tab, setTab }: { tab: string; setTab: (t: string) => void }) {
 function MobileShell({ initial }: { initial: HomepageInitial }) {
   const [tab, setTab] = useState("Home");
   const [pill, setPill] = useState("All");
-  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string } | null>(null);
+  const [active, setActive] = useState<{ id: string; tab?: string; commentId?: string; slide?: SlideContext } | null>(null);
 
   // Deep-link landing: `/?story=X&tab=Y&c=Z` opens the modal at story X
   // on tab Y (default Watch), and Z (when present) becomes the focused
@@ -2413,11 +2649,30 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
   );
   const { openWireId, openWire, closeWire } = useStoriesUrlState();
 
-  const open: OpenFn = (id, t) => {
-    setActive({ id, tab: t });
+  const open: OpenFn = (id, t, slide) => {
+    setActive({ id, tab: t, slide });
     recordView(id);
   };
   const close = () => setActive(null);
+  // Search pages the whole catalog beyond the rails' 200-row window, so a
+  // tapped card can be a story resolveStory (rails catalog + static STORIES)
+  // doesn't know. Search reports its loaded rows here and the sheet resolution
+  // below falls back to this map so those stories still open. Held in state
+  // (read during render) — it only grows on a page append, a handful of times
+  // across a full scroll, so the extra shell renders are cheap.
+  const [pagedAdditions, setPagedAdditions] = useState<Map<string, Story>>(
+    () => new Map(),
+  );
+  const handlePagedStories = useCallback((stories: Story[]) => {
+    setPagedAdditions((prev) => {
+      // Only churn the map (and re-render) when a genuinely new id arrives.
+      const additions = stories.filter((s) => !prev.has(s.id));
+      if (additions.length === 0) return prev;
+      const next = new Map(prev);
+      for (const s of additions) next.set(s.id, s);
+      return next;
+    });
+  }, []);
   // "Play Something" picks a random playable story and opens it on the
   // Watch tab — same affordance as the hero's Play button, so the modal's
   // existing autoplay path kicks in. Excludes the current hero so the
@@ -2492,7 +2747,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             posterVoteCounts={initial.posterVoteCounts}
           />
         )}
-        {tab === "Search" && <Search onOpen={open} catalog={catalog} />}
+        {tab === "Search" && <Search onOpen={open} onStoriesLoaded={handlePagedStories} />}
         {tab === "Today's" && <NewScreen onOpen={open} catalog={catalog} />}
         {tab === "Saved" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
@@ -2504,10 +2759,11 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Wires feed (not in STORIES) still open the sheet.
-        // Stale id -> render nothing; close button still works because
-        // `active` is set.
-        const s = resolveStory(active.id);
+        // through the Wires feed (not in STORIES) still open the sheet. The
+        // pagedAdditions fallback covers stories paged in on Search beyond
+        // the rails' 200-row catalog window. Stale id -> render nothing;
+        // close button still works because `active` is set.
+        const s = resolveStory(active.id) ?? pagedAdditions.get(active.id) ?? null;
         return s ? (
           <TitleSheet
             story={s}
@@ -2520,6 +2776,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             session={initial.session}
             seededModalComments={initial.seededModalComments}
             catalog={catalog}
+            slide={active.slide}
           />
         ) : null;
       })()}
@@ -2552,15 +2809,17 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
 // call so the first paint already shows the correct hero + rails. See
 // _plans/2026-06-18-homepage-no-flash-ssr.md.
 export default function AppShell({ initial }: { initial: HomepageInitial }) {
-  // CookieConsent + CrossDeviceNudge both mount at the shell level so
-  // they're shared across the mobile and desktop adapters — one banner,
-  // one nudge, one decision, one source of truth. Both are fixed-position
-  // so they float over whichever subview is rendered. The banner's own
-  // visibility logic handles SSR (renders nothing) and the grandfather
-  // branch (silent accept for existing users with prior persisted state).
-  // The nudge's own visibility logic handles the first-save trigger,
-  // 7-day snooze, and signed-in skip. Plan:
-  // _plans/2026-06-19-anonymous-first-auth.md.
+  // The consent surface + CrossDeviceNudge both mount at the shell level
+  // so they're shared across the mobile and desktop adapters — one banner,
+  // one nudge, one decision, one source of truth. With CCM19 enabled
+  // (NEXT_PUBLIC_CCM19_SRC set) the CCM19 widget is the banner and
+  // Ccm19Bridge syncs its choices into lw_consent; otherwise the
+  // first-party CookieConsent banner runs, whose visibility logic handles
+  // SSR (renders nothing) and the grandfather branch (silent accept for
+  // existing users with prior persisted state). The nudge's own
+  // visibility logic handles the first-save trigger, 7-day snooze, and
+  // signed-in skip. Plans: _plans/2026-06-19-anonymous-first-auth.md,
+  // _plans/2026-07-02-gdpr-ccm19-consent.md.
   return (
     <>
       <div className="lg:hidden">
@@ -2569,7 +2828,7 @@ export default function AppShell({ initial }: { initial: HomepageInitial }) {
       <div className="hidden lg:block">
         <DesktopShell initial={initial} />
       </div>
-      <CookieConsent />
+      {CCM19_ENABLED ? <Ccm19Bridge /> : <CookieConsent />}
       <CrossDeviceNudge session={initial.session} />
     </>
   );

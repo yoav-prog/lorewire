@@ -12,6 +12,7 @@ import { one, run } from "@/lib/db";
 import {
   finishShortRender,
   mergeAssembledDurationIntoProps,
+  mergeIntroWindowIntoProps,
 } from "@/lib/short-render-queue";
 
 async function reset(): Promise<void> {
@@ -107,7 +108,12 @@ describe("finishShortRender duration merge", () => {
     await finishShortRender("r-1", "https://gcs/bucket/short.mp4", 44_000);
     const row = await readRow("r-1");
     expect(row?.status).toBe("done");
-    expect(row?.output_url).toBe("https://gcs/bucket/short.mp4");
+    // 2026-07-03: the stored URL carries a `?v={epoch}` cache-bust — the
+    // renderer overwrites the same object key per story, so a verbatim
+    // URL kept serving the OLD MP4 from caches after a restart.
+    expect(row?.output_url).toMatch(
+      /^https:\/\/gcs\/bucket\/short\.mp4\?v=\d+$/,
+    );
     expect(row?.finished_at).not.toBeNull();
     const parsed = JSON.parse(row?.props ?? "{}") as Record<string, unknown>;
     expect(parsed.assembled_duration_ms).toBe(44_000);
@@ -166,5 +172,104 @@ describe("finishShortRender duration merge", () => {
     const row = await readRow("r-4");
     const parsed = JSON.parse(row?.props ?? "{}") as Record<string, unknown>;
     expect(parsed).toEqual({ assembled_duration_ms: 44_000 });
+  });
+});
+
+// _plans/2026-07-04-skip-intro.md — the dispatcher persists the Skip Intro
+// window onto short_renders.props at finish so the players' resolver reads
+// it straight off the story's latest done render.
+describe("mergeIntroWindowIntoProps", () => {
+  it("adds the window onto an existing props blob without disturbing other fields", () => {
+    const merged = mergeIntroWindowIntoProps(
+      JSON.stringify({ duration_ms: 35_000 }),
+      { start_ms: 3200, end_ms: 9650 },
+    );
+    expect(JSON.parse(merged ?? "{}")).toEqual({
+      duration_ms: 35_000,
+      intro_start_ms: 3200,
+      intro_end_ms: 9650,
+    });
+  });
+
+  it("DELETES stale intro keys when the render spliced no intro", () => {
+    const merged = mergeIntroWindowIntoProps(
+      JSON.stringify({ duration_ms: 35_000, intro_start_ms: 1, intro_end_ms: 2 }),
+      null,
+    );
+    expect(JSON.parse(merged ?? "{}")).toEqual({ duration_ms: 35_000 });
+  });
+
+  it("keeps a NULL props row NULL when there is no window to record", () => {
+    expect(mergeIntroWindowIntoProps(null, null)).toBeNull();
+  });
+
+  it("records a valid window even on NULL / malformed props", () => {
+    const w = { start_ms: 0, end_ms: 4000 };
+    expect(JSON.parse(mergeIntroWindowIntoProps(null, w) ?? "{}")).toEqual({
+      intro_start_ms: 0,
+      intro_end_ms: 4000,
+    });
+    expect(JSON.parse(mergeIntroWindowIntoProps("{not json", w) ?? "{}")).toEqual({
+      intro_start_ms: 0,
+      intro_end_ms: 4000,
+    });
+  });
+});
+
+describe("finishShortRender intro-window merge", () => {
+  it("persists the window beside assembled_duration_ms", async () => {
+    await seedRendering({
+      id: "r-iw-1",
+      storyId: "s-iw-1",
+      props: JSON.stringify({ duration_ms: 35_000, hook_end_ms: 3000 }),
+    });
+    await finishShortRender("r-iw-1", "https://gcs/bucket/short.mp4", 44_000, {
+      start_ms: 3200,
+      end_ms: 9650,
+    });
+    const parsed = JSON.parse(
+      (await readRow("r-iw-1"))?.props ?? "{}",
+    ) as Record<string, unknown>;
+    expect(parsed.assembled_duration_ms).toBe(44_000);
+    expect(parsed.intro_start_ms).toBe(3200);
+    expect(parsed.intro_end_ms).toBe(9650);
+    expect(parsed.hook_end_ms).toBe(3000);
+  });
+
+  it("persists the window even when the probe returned no duration", async () => {
+    await seedRendering({
+      id: "r-iw-2",
+      storyId: "s-iw-2",
+      props: JSON.stringify({ duration_ms: 35_000 }),
+    });
+    await finishShortRender("r-iw-2", "https://gcs/bucket/short.mp4", null, {
+      start_ms: 0,
+      end_ms: 4000,
+    });
+    const parsed = JSON.parse(
+      (await readRow("r-iw-2"))?.props ?? "{}",
+    ) as Record<string, unknown>;
+    expect(parsed.intro_start_ms).toBe(0);
+    expect(parsed.intro_end_ms).toBe(4000);
+    expect("assembled_duration_ms" in parsed).toBe(false);
+  });
+
+  it("clears a stale window when this render spliced no intro", async () => {
+    await seedRendering({
+      id: "r-iw-3",
+      storyId: "s-iw-3",
+      props: JSON.stringify({
+        duration_ms: 35_000,
+        intro_start_ms: 1,
+        intro_end_ms: 2,
+      }),
+    });
+    await finishShortRender("r-iw-3", "https://gcs/bucket/short.mp4", 44_000, null);
+    const parsed = JSON.parse(
+      (await readRow("r-iw-3"))?.props ?? "{}",
+    ) as Record<string, unknown>;
+    expect("intro_start_ms" in parsed).toBe(false);
+    expect("intro_end_ms" in parsed).toBe(false);
+    expect(parsed.assembled_duration_ms).toBe(44_000);
   });
 });

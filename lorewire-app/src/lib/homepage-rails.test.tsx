@@ -67,9 +67,9 @@ describe("liveRowToStory", () => {
     expect(s.title).toBe("ABC");
   });
 
-  it("coerces unknown categories to Drama", () => {
+  it("keeps an unknown category as-is (no Drama fallback)", () => {
     const s = liveRowToStory(liveRow({ category: "Politics" }));
-    expect(s.cat).toBe("Drama");
+    expect(s.cat).toBe("Politics");
   });
 
   it("parses year from published_at first, created_at second", () => {
@@ -265,12 +265,14 @@ const SEED_CURATION: HomepageCuration = {
   top10: ["seed-top-1", "seed-top-2"],
   continue: [],
   new_row: [],
-  entitled_row: [],
-  humor_row: [],
-  wholesome_row: [],
-  dating_row: [],
-  roommate_row: [],
-  drama_row: [],
+  "entitled-people": [],
+  "family-feuds": [],
+  "cheating-betrayal": [],
+  "wedding-drama": [],
+  workplace: [],
+  "dating-disasters": [],
+  "revenge-karma": [],
+  "wholesome-wins": [],
 };
 
 const SEED_BEHAVIOR: HomepageCurationBehavior = {
@@ -382,11 +384,11 @@ describe("fallbackIdsForSurface (merged catalog)", () => {
     const merged = mergeStaticAndLive([
       liveRow({
         id: "live-humor",
-        category: "Humor",
+        category: "Revenge & Karma",
         hero_image: "https://cdn.test/live-humor.jpg",
       }),
     ]);
-    const ids = fallbackIdsForSurface("humor_row", merged.array);
+    const ids = fallbackIdsForSurface("revenge-karma", merged.array);
     expect(ids).toContain("live-humor");
   });
 
@@ -408,9 +410,9 @@ describe("fallbackIdsForSurface (merged catalog)", () => {
     // the rail layer would drop it later for being unpublished and the
     // user would see fewer items than the cap promised.
     const merged = mergeStaticAndLive([
-      liveRow({ id: "no-art", category: "Drama", hero_image: null, video_url: null }),
+      liveRow({ id: "no-art", category: "Revenge & Karma", hero_image: null, video_url: null }),
     ]);
-    const ids = fallbackIdsForSurface("drama_row", merged.array);
+    const ids = fallbackIdsForSurface("revenge-karma", merged.array);
     expect(ids).not.toContain("no-art");
   });
 });
