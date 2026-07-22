@@ -47,7 +47,12 @@ jobs:
           sudo apt-get install -y -qq postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y -qq postgresql-client-17
-          pg_dump --version
+          # The runner ships PG16 too, and Ubuntu's pg_dump wrapper resolves
+          # to the older 16.x by default - which refuses to dump a 17.x
+          # server. Put the versioned 17 binaries first on PATH for every
+          # later step so pg_dump and pg_restore are both 17.x.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
 
       - name: Dump database
         env:
