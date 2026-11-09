@@ -18,7 +18,7 @@ function makeStory(overrides: Partial<Story> = {}): Story {
     match: 90,
     year: 2026,
     glyph: "/",
-    tags: ["True Story"],
+    tags: ["True stories from the internet"],
     syn: "",
     ...overrides,
   };
@@ -65,7 +65,7 @@ describe("isPublishedStory", () => {
 
   it("ignores tags / synopsis / glyph — those are present on every placeholder", () => {
     const placeholder = makeStory({
-      tags: ["True Story", "Office"],
+      tags: ["True stories from the internet", "Office"],
       syn: "a vivid synopsis",
       glyph: "$",
     });

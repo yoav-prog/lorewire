@@ -4,14 +4,12 @@ Dry run (no keys, offline, stub transforms on a fixture):
     python -m pipeline.run --dry-run
     python -m pipeline.run --dry-run --media         # exercise media wiring too
 
-Real rewrite of the fixture post (needs an LLM key in .env, no scrape):
+Real clean-room generation from the fixture post (needs an LLM key in .env):
     python -m pipeline.run --fixture
     python -m pipeline.run --fixture --media         # + real images + voice
     python -m pipeline.run --fixture --media --video # + render the doodle MP4
 
-Full real run (needs scrape + LLM keys):
-    python -m pipeline.run --subreddit AmItheAsshole --limit 5
-    python -m pipeline.run --subreddit AmItheAsshole --limit 1 --media --video
+Production stories come from the reddit_source queue (pipeline.story_jobs_worker).
 """
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ import datetime
 import json
 from pathlib import Path
 
-from pipeline import llm, media, stages, store, video
+from pipeline import clean_room, llm, media, stages, store, video
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,7 +27,6 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="LoreWire content pipeline")
     ap.add_argument("--dry-run", action="store_true", help="offline, stub transforms, no keys")
     ap.add_argument("--fixture", action="store_true", help="fixture input but REAL LLM rewrite (needs an LLM key)")
-    ap.add_argument("--subreddit", default="AmItheAsshole")
     ap.add_argument("--limit", type=int, default=3)
     ap.add_argument(
         "--media",
@@ -42,44 +39,44 @@ def main() -> None:
         help="render the doodle short MP4 via Remotion. Requires --media in the same run.",
     )
     args = ap.parse_args()
+    if not (args.dry_run or args.fixture):
+        ap.error("choose --dry-run or --fixture")
     if args.video and not args.media:
         ap.error("--video requires --media in the same run (no rerender flag yet)")
 
     dry = args.dry_run
-    use_fixture = args.dry_run or args.fixture
-    mode = "DRY RUN (stub)" if dry else ("FIXTURE + real LLM" if args.fixture else "REAL RUN")
+    mode = "DRY RUN (stub)" if dry else "FIXTURE + real LLM"
     media_note = " + MEDIA" if args.media else ""
     print(f"LoreWire pipeline: {mode}{media_note}")
 
     store.init()
-    posts = stages.scrape(args.subreddit, args.limit, use_fixture)
+    posts = stages.load_fixture_posts(args.limit)
 
     processed = 0
     for post in posts:
         before = llm.totals["total_tokens"]
-        idea = stages.make_idea(post, dry)
-        research = stages.research(idea, post, dry)
-        body = stages.write_article(idea, research, dry)
-        # Branded title + synopsis replace the raw Reddit headline so the live
-        # site doesn't show "AITA for ..." or a 160-char post excerpt. The
-        # original headline survives via reddit_id for debugging / audits.
-        branded_title, branded_syn = stages.make_title_and_synopsis(idea, body, dry)
+        story_id = store.story_id_for_reddit_source(post["id"]) or store.new_story_id()
+        clean = clean_room.generate(post, story_id, dry)
+        idea, body = clean.idea, clean.body
+        branded_title, branded_syn = clean.title, clean.synopsis
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         row = {
-            "id": idea["reddit_id"],
-            "reddit_id": idea["reddit_id"],
-            "slug": idea["reddit_id"],
+            "id": story_id,
+            "reddit_id": post["id"],
+            "slug": story_id,
             "category": idea["category"],
             "title": branded_title or idea["headline"],
-            "summary": branded_syn or post.get("selftext", "")[:160],
+            "summary": branded_syn or body[:160],
             "body": body,
             # Fresh articles land in the review queue, not live.
             "status": "draft" if dry else "review",
-            "source_url": post.get("url", ""),
+            "source_url": "",
+            "content_origin": store.CONTENT_ORIGIN_ORIGINAL,
+            "compliance_status": clean.report["status"],
             "tokens": llm.totals["total_tokens"] - before,
             "created_at": now,
             "updated_at": now,
-            "payload": {"idea": idea, "research": research},
+            "payload": {"idea": idea},
         }
         if args.media:
             media_cols = media.generate_media(
@@ -124,6 +121,16 @@ def main() -> None:
                 )
                 row.update(video_cols)
         store.upsert_story(row)
+        store.save_story_source(
+            story_id=story_id,
+            source_kind="reddit",
+            source_ref=post["id"],
+            source_title=post.get("title", ""),
+            source_text=post.get("selftext", ""),
+            source_url=post.get("url", ""),
+            premise=clean.premise["premise"],
+            compliance_report=clean.report,
+        )
         processed += 1
         if not dry:
             print(f"\n--- {idea['headline']} ---\n{body}\n")

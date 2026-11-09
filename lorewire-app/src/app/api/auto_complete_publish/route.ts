@@ -29,8 +29,17 @@ import { NextResponse, type NextRequest } from "next/server";
 import { revalidatePath } from "next/cache";
 import { all, one, run } from "@/lib/db";
 import { getStory, getSetting, setStatus, type SocialPlatform } from "@/lib/repo";
-import { evaluateAssetCompleteness } from "@/lib/asset-completeness";
+import {
+  evaluateAssetCompleteness,
+  HERO_THUMBNAIL_BLOCKING_GATES,
+  type AssetCompleteness,
+} from "@/lib/asset-completeness";
 import { autoDraftPollForSubject } from "@/lib/poll-autodraft";
+import {
+  canEnqueueImageRegen,
+  enqueueImageRegen,
+  latestRenderForAsset,
+} from "@/lib/image-render-queue";
 import {
   applyLatestDoneShortToStory,
   latestDoneShortRenderForStory,
@@ -258,6 +267,17 @@ async function serve(req: NextRequest): Promise<NextResponse> {
             message: e instanceof Error ? e.message : String(e),
           });
         }
+      }
+
+      // Hero/thumbnail backstop: if a blocking image gate is still the
+      // holdup, make sure the 5-variant finisher is (or gets) enqueued. This
+      // is what turns a thumbnail that dropped AFTER the Complete-&-publish
+      // click into a real self-heal instead of a 24-minute wait that gives
+      // up. Guarded so it enqueues at most one finisher at a time — the image
+      // queue is NOT idempotent, so an unguarded re-enqueue would spend five
+      // kie calls every tick. Plan: _plans/2026-07-19-asset-incomplete-thumbnail-heal.md.
+      if (!completeness.ready) {
+        await maybeHealHeroThumbnail(row.id, completeness);
       }
 
       if (!completeness.ready) {
@@ -604,6 +624,69 @@ async function resolveArticleUrl(storyId: string): Promise<string> {
   return article
     ? `${origin}/articles/${article.language}/${article.slug}`
     : origin;
+}
+
+/** Ensure the hero+thumbnail finisher is working on a story whose ONLY
+ *  remaining blocking gate is a hero/thumbnail image. Enqueues the
+ *  5-variant `hero_thumbnail_from_short` asset at most once at a time:
+ *  the image queue is not idempotent, so we skip when a render for that
+ *  asset is already queued/generating, when the daily image budget is
+ *  spent, or when there's no completed short to seed the character from.
+ *  Idempotent per tick — the cron keeps ticking (subject to the attempts
+ *  cap) until the render lands and the gate passes. */
+async function maybeHealHeroThumbnail(
+  storyId: string,
+  completeness: AssetCompleteness,
+): Promise<void> {
+  const needsFinisher = completeness.blocking.some((g) =>
+    HERO_THUMBNAIL_BLOCKING_GATES.has(g),
+  );
+  if (!needsFinisher) return;
+
+  // Already in flight — let it finish rather than stacking a second $0.25 run.
+  const latest = await latestRenderForAsset(
+    "story",
+    storyId,
+    "hero_thumbnail_from_short",
+  );
+  if (latest && (latest.status === "queued" || latest.status === "generating")) {
+    namespacedLog("hero_thumb_heal_inflight", {
+      story_id: storyId,
+      render_id: latest.id,
+      status: latest.status,
+    });
+    return;
+  }
+
+  // The finisher i2i's from the short's persisted character; without a done
+  // short there's nothing to seed from and it would just raise.
+  const short = await latestDoneShortRenderForStory(storyId);
+  if (!short || short.status !== "done" || !short.output_url) {
+    namespacedLog("hero_thumb_heal_no_short", { story_id: storyId });
+    return;
+  }
+
+  const budget = await canEnqueueImageRegen("hero_thumbnail_from_short");
+  if (!budget.ok) {
+    namespacedLog("hero_thumb_heal_budget", {
+      story_id: storyId,
+      spent_cents: budget.budget.spentCents,
+      cap_cents: budget.budget.capCents,
+    });
+    return;
+  }
+
+  await enqueueImageRegen({
+    ownerKind: "story",
+    ownerId: storyId,
+    asset: "hero_thumbnail_from_short",
+    promptHash: null,
+    requestedBy: "auto-complete-publish-cron",
+  });
+  namespacedLog("hero_thumb_heal_enqueued", {
+    story_id: storyId,
+    blocking: completeness.blocking,
+  });
 }
 
 async function incrementAttempts(storyId: string): Promise<number> {

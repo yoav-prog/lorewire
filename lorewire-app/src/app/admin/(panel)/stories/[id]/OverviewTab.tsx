@@ -14,6 +14,7 @@ import { saveStory } from "@/app/admin/actions";
 import { listCategories } from "@/lib/categories/repo";
 import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StoryAspectControl } from "./StoryAspectControl";
+import { OriginalityPanel } from "./OriginalityPanel";
 import type { VideoAspect } from "@/lib/aspect";
 
 const FIELD =
@@ -37,6 +38,8 @@ export async function OverviewTab({
   return (
     <form action={saveStory} className="space-y-4">
       <input type="hidden" name="id" value={story.id} />
+
+      <OriginalityPanel storyId={story.id} />
 
       <div>
         <label className={LABEL}>Title</label>

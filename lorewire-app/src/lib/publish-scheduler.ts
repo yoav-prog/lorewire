@@ -47,7 +47,10 @@ export function platformSettingKey(
 export const PUBLISH_DEFAULTS = {
   dailyCap: 3,
   slots: ["09:00", "13:00", "18:00"] as readonly string[],
-  timezone: "America/New_York",
+  // 2026-07-15: default to the owner's timezone. Nothing was ever configured,
+  // so every platform silently used America/New_York; the site + the owner run
+  // on Israel time, so social slots should too. Still per-platform editable.
+  timezone: "Asia/Jerusalem",
 } as const;
 
 // ---- weekly slots ----------------------------------------------------
@@ -324,6 +327,78 @@ function tzDayBoundsMs(
     0,
   );
   return { startMs, endMs };
+}
+
+// ---- daily site drop -------------------------------------------------
+//
+// One editable time of day (in a named zone) that governs when the day's
+// ready stories go LIVE ON THE SITE via the unattended lanes. Stories render
+// overnight; the lanes hold them out of the site until the drop time passes in
+// the drop's zone, then publish them (and anything that renders later the same
+// day). Social keeps spreading across each platform's own slots — this gate is
+// only the site go-live. Reuses the DST-safe wall-clock helpers above; never
+// hand-rolls timezone math.
+
+export const DAILY_DROP_SETTING_KEYS = {
+  /** "HH:MM" wall-clock time of the drop. */
+  time: "publishing.daily_drop_time",
+  /** IANA zone the drop time is read in. */
+  timezone: "publishing.daily_drop_tz",
+} as const;
+
+export const DAILY_DROP_DEFAULTS = {
+  time: "09:00",
+  timezone: "Asia/Jerusalem",
+} as const;
+
+export interface DailyDropConfig {
+  /** Normalized "HH:MM". */
+  time: string;
+  timezone: string;
+  hour: number;
+  minute: number;
+}
+
+/** The configured daily site-drop time + zone, falling back to the defaults for
+ *  a missing/garbage time or an invalid zone (fail safe to 09:00 Israel).
+ *  Reuses the module's isValidTimezone (defined above). */
+export async function getDailyDropConfig(): Promise<DailyDropConfig> {
+  const [rawTime, rawTz] = await Promise.all([
+    getSetting(DAILY_DROP_SETTING_KEYS.time),
+    getSetting(DAILY_DROP_SETTING_KEYS.timezone),
+  ]);
+  const m = /^(\d{1,2}):(\d{2})$/.exec((rawTime ?? "").trim());
+  let hour = m ? Number(m[1]) : NaN;
+  let minute = m ? Number(m[2]) : NaN;
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) hour = 9;
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) minute = 0;
+  const time = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  const tzRaw = (rawTz ?? "").trim();
+  const timezone = tzRaw && isValidTimezone(tzRaw) ? tzRaw : DAILY_DROP_DEFAULTS.timezone;
+  return { time, timezone, hour, minute };
+}
+
+/** UTC ms of the drop instant on the calendar day `nowMs` falls in, in the
+ *  drop's zone. DST-safe via wallClockToUtcMs. */
+export function dropMsForDay(config: DailyDropConfig, nowMs: number): number {
+  const p = partsInTz(nowMs, config.timezone);
+  return wallClockToUtcMs(config.timezone, p.year, p.month, p.day, config.hour, config.minute);
+}
+
+/** UTC ms of the NEXT drop from `nowMs`: today's if it is still ahead, else
+ *  tomorrow's (recomputed for tomorrow's calendar day so DST is exact). */
+export function nextDropMs(config: DailyDropConfig, nowMs: number): number {
+  const today = dropMsForDay(config, nowMs);
+  if (nowMs < today) return today;
+  const t = partsInTz(nowMs + 24 * 3_600_000, config.timezone);
+  return wallClockToUtcMs(config.timezone, t.year, t.month, t.day, config.hour, config.minute);
+}
+
+/** True while the current day's drop time has NOT yet passed in the drop's
+ *  zone — the unattended lanes hold the day's stories off the site until then. */
+export async function isBeforeDailyDrop(nowMs: number = Date.now()): Promise<boolean> {
+  const config = await getDailyDropConfig();
+  return nowMs < dropMsForDay(config, nowMs);
 }
 
 export interface SlotCandidate {
@@ -880,12 +955,23 @@ export async function getPublishCalendar(
 export interface SchedulerDecisionInput {
   storyId: string;
   redditId?: string | null;
-  decision: "approved" | "rejected" | "auto_approved" | "auto_held";
+  decision:
+    | "approved"
+    | "rejected"
+    | "auto_approved"
+    | "auto_held"
+    | "auto_gate_refused";
   tier?: string | null;
   comments?: number | null;
   ageHours?: number | null;
   subreddit?: string | null;
   decidedBy?: string | null;
+  // Safety-judge verdict, persisted so every unattended hold is explainable
+  // (2026-07-15). NULL at the human gate, which runs no judge.
+  judgeDecision?: "publish" | "hold" | null;
+  judgeCategory?: string | null;
+  judgeReason?: string | null;
+  judgeConfidence?: number | null;
 }
 
 /**
@@ -900,8 +986,9 @@ export async function logSchedulerDecision(
     await run(
       `INSERT INTO scheduler_decisions
          (id, story_id, reddit_id, decision, tier, comments, age_hours,
-          subreddit, decided_by, decided_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          subreddit, decided_by, decided_at,
+          judge_decision, judge_category, judge_reason, judge_confidence)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         randomUUID(),
         input.storyId,
@@ -913,6 +1000,10 @@ export async function logSchedulerDecision(
         input.subreddit ?? null,
         input.decidedBy ?? null,
         new Date(nowMs).toISOString(),
+        input.judgeDecision ?? null,
+        input.judgeCategory ?? null,
+        input.judgeReason ?? null,
+        input.judgeConfidence ?? null,
       ],
     );
   } catch (e) {
@@ -923,6 +1014,65 @@ export async function logSchedulerDecision(
       err: e instanceof Error ? e.message : String(e),
     });
   }
+}
+
+// ---- held-for-review reads -------------------------------------------
+
+export interface HeldStory {
+  storyId: string;
+  title: string | null;
+  /** The judge's taxonomy bucket (real_person, sexual, ...) or 'not_a_story'
+   *  for a degenerate hold; may be a fail-closed marker (judge_unavailable). */
+  category: string | null;
+  /** The judge's one-line explanation for the hold. */
+  reason: string | null;
+  /** 0..1, or null for a degenerate/fail-closed hold with no score. */
+  confidence: number | null;
+  /** When the story was held (ISO). */
+  heldAt: string;
+}
+
+/**
+ * Stories an unattended lane held that are STILL waiting in review, each with
+ * the safety-judge verdict that held them, newest hold first. Powers the admin
+ * "held & why" list + one-click "publish anyway". Uses the latest auto_held row
+ * per story (a story can be re-screened across ticks); the correlated MAX
+ * subquery is portable across the SQLite/Postgres pair (no bare-column GROUP BY,
+ * which Postgres rejects). A story that has since published or been rejected is
+ * excluded by the status = 'review' join.
+ */
+export async function listHeldForReview(limit = 50): Promise<HeldStory[]> {
+  const rows = await all<{
+    story_id: string;
+    title: string | null;
+    judge_category: string | null;
+    judge_reason: string | null;
+    judge_confidence: number | string | null;
+    decided_at: string;
+  }>(
+    `SELECT d.story_id, s.title, d.judge_category, d.judge_reason,
+            d.judge_confidence, d.decided_at
+       FROM scheduler_decisions d
+       JOIN stories s ON s.id = d.story_id
+      WHERE s.status = 'review'
+        AND d.decision = 'auto_held'
+        AND d.decided_at = (
+          SELECT MAX(d2.decided_at) FROM scheduler_decisions d2
+           WHERE d2.story_id = d.story_id AND d2.decision = 'auto_held'
+        )
+      ORDER BY d.decided_at DESC
+      LIMIT ?`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    storyId: r.story_id,
+    title: r.title,
+    category: r.judge_category,
+    reason: r.judge_reason,
+    confidence:
+      r.judge_confidence === null ? null : Number(r.judge_confidence),
+    heldAt: r.decided_at,
+  }));
 }
 
 // ---- admin overview reads --------------------------------------------

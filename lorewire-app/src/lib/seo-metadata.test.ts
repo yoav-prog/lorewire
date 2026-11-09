@@ -27,19 +27,19 @@ const FIXTURE: SeoMetadata = {
   youtube: {
     title: "He Found $5,000 In A Wallet",
     description:
-      "Mike sat down on the bus and felt something hard. It was a wallet stuffed with $5,000 — and a photograph that changed everything. Watch the full story.\n\n#Shorts #InternetStories #TrueStory #DramaShorts #Reddit",
+      "Mike sat down on the bus and felt something hard. It was a wallet stuffed with $5,000 — and a photograph that changed everything. Watch the full story.\n\n#Shorts #InternetStories #DramaShorts",
     tags: [
       "lost wallet",
       "moral dilemma",
       "honest stranger",
       "good samaritan",
       "found money",
-      "reddit storytime",
+      "bus storytime",
     ],
   },
   tiktok: {
     caption:
-      "wait til you hear what he did with the wallet 💀 #Shorts #LostWalletStory #MoralDilemma #RedditStorytime",
+      "wait til you hear what he did with the wallet 💀 #Shorts #LostWalletStory #MoralDilemma #Storytime",
   },
   facebook: {
     caption:
@@ -47,7 +47,7 @@ const FIXTURE: SeoMetadata = {
   },
   instagram: {
     caption:
-      "Mike found $5,000 in a wallet on the bus seat. The photo inside changed his entire decision. #Shorts #InternetStories #TrueStory",
+      "Mike found $5,000 in a wallet on the bus seat. The photo inside changed his entire decision. #Shorts #InternetStories",
   },
 };
 

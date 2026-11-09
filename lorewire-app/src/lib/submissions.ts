@@ -379,6 +379,14 @@ export interface CreateSubmissionArgs {
 /** Create a new submission. A 'submit' is cap-checked and lands in
  *  'pending_review' (Phase 1 has no text-check/render yet); a 'draft' is saved
  *  uncapped. Writes the opening submission_events row. */
+/** Stamp the author's "I wrote this" confirmation (CONTENT_POLICY.md). */
+export async function recordOwnWorkConfirmation(id: string): Promise<void> {
+  await run("UPDATE submissions SET own_work_confirmed_at = ? WHERE id = ?", [
+    new Date().toISOString(),
+    id,
+  ]);
+}
+
 export async function createSubmission(
   args: CreateSubmissionArgs,
 ): Promise<SubmissionRow> {

@@ -21,9 +21,21 @@ import { publishStoryIfReady } from "@/lib/auto-publish";
 import {
   AUTOPILOT_SETTING_KEYS,
   resetAutopilotFailures,
+  runAutopilotApprove,
+  runAutopilotPull,
   type AutopilotMode,
 } from "@/lib/autopilot";
+import { RENDER_SETTING_KEYS } from "@/lib/render-scheduler";
+import {
+  RENDER_AUTOPUBLISH_SETTING_KEYS,
+  resetRenderAutoPublishFailures,
+} from "@/lib/render-auto-publish";
 import { retractStory, type RetractResult } from "@/lib/retract-story";
+import {
+  isUnattendedPublishingStopped,
+  setUnattendedPublishingStopped,
+} from "@/lib/approve-reviewed-story";
+import { rescreenHeldBacklog } from "@/lib/rescreen-held-backlog";
 import {
   PUBLISH_PLATFORMS,
   cancelScheduledPublish,
@@ -287,16 +299,21 @@ export async function schedulerRetractStoryAction(
 }
 
 /**
- * Switch autopilot between off / shadow / live. Any deliberate mode
- * change also resets the circuit breaker (failure counter + trip stamp):
- * an admin turning it back on has seen the trip banner and is making a
- * fresh start, not resuming a failing run.
+ * Switch autopilot between off / shadow / live / autonomous. Any
+ * deliberate mode change also resets the circuit breaker (failure counter
+ * + trip stamp): an admin turning it back on has seen the trip banner and
+ * is making a fresh start, not resuming a failing run.
  */
 export async function setAutopilotModeAction(
   mode: AutopilotMode,
 ): Promise<{ ok: boolean; error?: string }> {
   const session = await requireCapability("settings.manage");
-  if (mode !== "off" && mode !== "shadow" && mode !== "live") {
+  if (
+    mode !== "off" &&
+    mode !== "shadow" &&
+    mode !== "live" &&
+    mode !== "autonomous"
+  ) {
     return { ok: false, error: "unknown mode" };
   }
   await setSetting(AUTOPILOT_SETTING_KEYS.mode, mode);
@@ -305,6 +322,158 @@ export async function setAutopilotModeAction(
   console.info("[scheduler autopilot_mode]", { mode, actorId: session.userId });
   revalidatePath("/admin/scheduler");
   return { ok: true };
+}
+
+/**
+ * Turn render-scheduler auto-publish on/off. Enabling it also clears any
+ * prior circuit-breaker trip (failure counter + trip stamp): an admin turning
+ * it back on has seen the trip banner and is making a fresh start, not
+ * resuming a failing run. Mirrors setAutopilotModeAction's reset semantics.
+ */
+export async function setRenderAutoPublishEnabledAction(
+  enabled: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  await setSetting(RENDER_SETTING_KEYS.autoPublish, enabled ? "1" : "0");
+  if (enabled) {
+    await resetRenderAutoPublishFailures();
+    await setSetting(RENDER_AUTOPUBLISH_SETTING_KEYS.trippedAt, "");
+  }
+  console.info("[scheduler render_auto_publish]", {
+    enabled,
+    actorId: session.userId,
+  });
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+/**
+ * Engage or release the global unattended-publish emergency stop. Independent
+ * of autopilot.mode and render.auto_publish: while engaged, every unattended
+ * lane skips its whole batch and nothing goes live without a human, but the
+ * lanes' own settings are left untouched so releasing it resumes exactly where
+ * things were. The per-story manual Approve is unaffected.
+ */
+export async function setUnattendedPublishStopAction(
+  stopped: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  await setUnattendedPublishingStopped(stopped);
+  console.info("[scheduler unattended_stop]", { stopped, actorId: session.userId });
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+export interface RescreenBacklogActionResult {
+  ok: boolean;
+  error?: string;
+  processed?: number;
+  published?: number;
+  stillHeld?: number;
+  deferred?: number;
+  failed?: number;
+  remaining?: number;
+}
+
+/**
+ * Re-screen a batch of the held backlog with the current safety judge and
+ * publish the stories it now clears — the catch-up for holds the old judge
+ * made before it was recalibrated. Bounded per call; the UI clicks again while
+ * stories remain. Refuses while the emergency stop is engaged (this publishes
+ * without a per-story human look, so it honours the same stop the lanes do),
+ * returning a clear message instead of silently skipping every story.
+ */
+export async function rescreenHeldBacklogAction(
+  limit?: number,
+): Promise<RescreenBacklogActionResult> {
+  const session = await requireCapability("content.manage");
+  if (await isUnattendedPublishingStopped()) {
+    return {
+      ok: false,
+      error:
+        "The emergency stop is engaged. Release it above before re-screening — this publishes stories.",
+    };
+  }
+
+  const r = await rescreenHeldBacklog({ limit });
+  console.info("[scheduler rescreen_backlog]", {
+    actorId: session.userId,
+    processed: r.processed,
+    published: r.published,
+    stillHeld: r.stillHeld,
+    deferred: r.deferred,
+    failed: r.failed,
+    remaining: r.remaining,
+  });
+  revalidatePath("/admin/scheduler");
+  revalidatePath("/admin");
+  return {
+    ok: true,
+    processed: r.processed,
+    published: r.published,
+    stillHeld: r.stillHeld,
+    deferred: r.deferred,
+    failed: r.failed,
+    remaining: r.remaining,
+  };
+}
+
+export interface RunAutopilotNowResult {
+  ok: boolean;
+  error?: string;
+  pull?: { reason: string; enqueued: number };
+  approve?: {
+    reason: string;
+    approved: number;
+    held: number;
+    deferred: number;
+    failed: number;
+    skipped: number;
+    tripped: boolean;
+  };
+}
+
+/**
+ * Run one autopilot tick immediately from the admin: one pull then one
+ * approve — the exact pair the /api/autopilot_tick cron runs. Lets an
+ * admin kick autopilot without waiting for the 2-minute cadence, and
+ * makes it usable in local dev / preview deploys where Vercel crons do
+ * not fire. Admin-gated (settings.manage); no CRON_SECRET involved since
+ * it calls the tick functions directly rather than self-POSTing the route.
+ *
+ * The pull only ENQUEUES renders, so a fresh pull publishes nothing this
+ * tick — the approve step publishes autopilot stories that already
+ * finished rendering and passed the safety judge. All the same gates
+ * (mode, budget, headroom, judge, breaker) still apply.
+ */
+export async function runAutopilotTickNowAction(): Promise<RunAutopilotNowResult> {
+  const session = await requireCapability("settings.manage");
+  const pull = await runAutopilotPull();
+  const approve = await runAutopilotApprove();
+  console.info("[scheduler autopilot_run_now]", {
+    actorId: session.userId,
+    pull_reason: pull.reason,
+    enqueued: pull.enqueued,
+    approved: approve.approved,
+    held: approve.held,
+    deferred: approve.deferred,
+    failed: approve.failed,
+    tripped: approve.tripped,
+  });
+  revalidatePath("/admin/scheduler");
+  return {
+    ok: true,
+    pull: { reason: pull.reason, enqueued: pull.enqueued },
+    approve: {
+      reason: approve.reason,
+      approved: approve.approved,
+      held: approve.held,
+      deferred: approve.deferred,
+      failed: approve.failed,
+      skipped: approve.skipped,
+      tripped: approve.tripped,
+    },
+  };
 }
 
 /**

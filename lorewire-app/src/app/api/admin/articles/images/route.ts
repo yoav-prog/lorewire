@@ -17,69 +17,21 @@ import { randomBytes } from "node:crypto";
 import { requireCapability } from "@/lib/dal";
 import { getArticle } from "@/lib/repo";
 import { uploadBuffer } from "@/lib/gcs";
+import {
+  IMAGE_EXT_BY_MIME,
+  MAX_IMAGE_BYTES,
+  detectImageMime,
+} from "@/lib/admin-image-upload";
 
-// 4 MB image cap. Vercel Functions reject request bodies over ~4.5 MB; we
-// leave room for the multipart envelope so a genuine 4 MB image still fits.
-// For anything larger, the editor would need to switch to the resumable
-// browser->GCS flow the segments uploader uses — out of scope for Phase 2.
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
-
+// Body/gallery images accept GIF on top of the raster trio — animated GIFs
+// are legitimate editorial content, unlike the OG/logo slots where the
+// social crawlers can't render them.
 const ACCEPTED_MIME = new Set([
   "image/jpeg",
   "image/png",
   "image/webp",
   "image/gif",
 ]);
-
-const EXT_BY_MIME: Record<string, string> = {
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/webp": ".webp",
-  "image/gif": ".gif",
-};
-
-// Magic-byte sniffing — the browser-supplied MIME and filename are advisory;
-// a hostile (or just confused) client can rename a payload to .png. We
-// validate the first few bytes against the four formats we accept.
-function detectImageMime(bytes: Uint8Array): string | null {
-  if (bytes.length < 12) return null;
-  // JPEG: FF D8 FF
-  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image/jpeg";
-  }
-  // PNG: 89 50 4E 47 0D 0A 1A 0A
-  if (
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47
-  ) {
-    return "image/png";
-  }
-  // WEBP: RIFF....WEBP
-  if (
-    bytes[0] === 0x52 &&
-    bytes[1] === 0x49 &&
-    bytes[2] === 0x46 &&
-    bytes[3] === 0x46 &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50
-  ) {
-    return "image/webp";
-  }
-  // GIF: 47 49 46 38 (followed by 37 or 39)
-  if (
-    bytes[0] === 0x47 &&
-    bytes[1] === 0x49 &&
-    bytes[2] === 0x46 &&
-    bytes[3] === 0x38
-  ) {
-    return "image/gif";
-  }
-  return null;
-}
 
 function badRequest(error: string): NextResponse {
   return NextResponse.json({ error }, { status: 400 });
@@ -125,7 +77,7 @@ export async function POST(req: Request): Promise<NextResponse> {
   const detectedMime = detectImageMime(bytes);
   if (!detectedMime) return badRequest("not-an-image");
 
-  const ext = EXT_BY_MIME[detectedMime];
+  const ext = IMAGE_EXT_BY_MIME[detectedMime];
   const imageId = randomBytes(6).toString("hex");
   const key = `articles/${articleId}/img-${imageId}${ext}`;
 

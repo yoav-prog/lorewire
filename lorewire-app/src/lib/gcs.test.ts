@@ -16,14 +16,33 @@
 // maybeCompressImageBuffer), the Node mirror of pipeline/gcs.py: the pass-through
 // for non-images, the .webp key swap, and the graceful fallback when bytes do
 // not decode.
+//
+// Plus uploadBuffer's `compress` opt-out (the R2 write is mocked): brand/OG
+// assets must reach storage in their original format because the LinkedIn and
+// WhatsApp crawlers don't render WebP og:image — see
+// _plans/2026-07-05-admin-image-upload-to-r2.md.
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
+import { putR2Object } from "@/lib/r2";
 import {
   maybeCompressImageBuffer,
   parseGcsUrl,
   swapKeyExtToWebp,
+  uploadBuffer,
 } from "@/lib/gcs";
+
+// Force the R2 media path (no network) so uploadBuffer's compression branch
+// can be observed through the putR2Object call it makes.
+vi.mock("@/lib/r2", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/r2")>();
+  return {
+    ...real,
+    isR2MediaActive: () => true,
+    mediaBucket: () => "lw-media-test",
+    putR2Object: vi.fn(async () => {}),
+  };
+});
 
 describe("parseGcsUrl", () => {
   it("parses a plain bucket+key URL", () => {
@@ -139,5 +158,55 @@ describe("maybeCompressImageBuffer", () => {
       key: "articles/abc/broken.png",
       contentType: "image/png",
     });
+  });
+});
+
+describe("uploadBuffer compress opt-out", () => {
+  const prevBase = process.env.MEDIA_PUBLIC_BASE;
+
+  beforeEach(() => {
+    process.env.MEDIA_PUBLIC_BASE = "https://media.test";
+    vi.mocked(putR2Object).mockClear();
+  });
+
+  afterAll(() => {
+    process.env.MEDIA_PUBLIC_BASE = prevBase;
+  });
+
+  async function tinyPng(): Promise<Buffer> {
+    return sharp({
+      create: {
+        width: 8,
+        height: 8,
+        channels: 3,
+        background: { r: 10, g: 20, b: 30 },
+      },
+    })
+      .png()
+      .toBuffer();
+  }
+
+  it("stores the original PNG bytes and key when compress is false", async () => {
+    const png = await tinyPng();
+    const url = await uploadBuffer(png, "site/seo/og-default-abc.png", "image/png", {
+      compress: false,
+    });
+
+    expect(url).toBe("https://media.test/site/seo/og-default-abc.png");
+    const [bucket, key, body, opts] = vi.mocked(putR2Object).mock.calls[0];
+    expect(bucket).toBe("lw-media-test");
+    expect(key).toBe("site/seo/og-default-abc.png");
+    expect(Buffer.from(body as Uint8Array)).toEqual(png);
+    expect(opts.contentType).toBe("image/png");
+  });
+
+  it("still re-encodes to WebP by default", async () => {
+    const png = await tinyPng();
+    const url = await uploadBuffer(png, "articles/abc/img-1.png", "image/png");
+
+    expect(url).toBe("https://media.test/articles/abc/img-1.webp");
+    const [, key, , opts] = vi.mocked(putR2Object).mock.calls[0];
+    expect(key).toBe("articles/abc/img-1.webp");
+    expect(opts.contentType).toBe("image/webp");
   });
 });

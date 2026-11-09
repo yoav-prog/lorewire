@@ -40,16 +40,32 @@ def chat(prompt: str, max_tokens: int = 2000, model: str | None = None) -> str:
     generator) that don't need the full article-rewrite model's budget.
     """
     key, base, model = _resolve(model)
-    body = json.dumps(
+    data = _post_json(
+        key,
+        base,
+        "chat/completions",
         {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "max_completion_tokens": max_tokens,
-        }
-    ).encode("utf-8")
+        },
+    )
+    return data["choices"][0]["message"]["content"].strip()
+
+
+def embed(texts: list[str], model: str = "openai/text-embedding-3-small") -> list[list[float]]:
+    """Embedding vectors for `texts`, in input order."""
+    key, base, resolved = _resolve(model)
+    data = _post_json(key, base, "embeddings", {"model": resolved, "input": texts})
+    ordered = sorted(data["data"], key=lambda item: item["index"])
+    return [item["embedding"] for item in ordered]
+
+
+def _post_json(key: str, base: str, path: str, payload: dict) -> dict:
+    """POST to the provider with retries and record token usage."""
     req = urllib.request.Request(
-        f"{base.rstrip('/')}/chat/completions",
-        data=body,
+        f"{base.rstrip('/')}/{path}",
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         method="POST",
     )
@@ -80,4 +96,4 @@ def chat(prompt: str, max_tokens: int = 2000, model: str | None = None) -> str:
     totals["prompt_tokens"] += usage.get("prompt_tokens", 0)
     totals["completion_tokens"] += usage.get("completion_tokens", 0)
     totals["total_tokens"] += usage.get("total_tokens", 0)
-    return data["choices"][0]["message"]["content"].strip()
+    return data

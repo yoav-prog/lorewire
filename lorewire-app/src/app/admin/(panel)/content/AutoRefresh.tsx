@@ -1,43 +1,43 @@
 "use client";
 
-// 2026-06-25 Content list auto-refresh. Mounted by /admin/content when
-// there's at least one row with an in-flight render (progress != null),
-// so the operator can watch a short / image / voice render tick up
-// without manual page reloads. Uses router.refresh() rather than a
-// full reload so React state (search box value, selection, scroll
-// position) survives the cycle.
+// 2026-06-25 Content list auto-refresh. Mounted by ContentList when there's at
+// least one loaded row with an in-flight render (progress != null), so the
+// operator can watch a short / image / voice render tick up without manual
+// reloads. 2026-07-15 (Phase 1): the list is now client-paginated, so a
+// router.refresh() no longer re-fetches it — instead this calls `onTick`, the
+// pager's in-place refresh(), which re-fetches the loaded window without
+// resetting the cursor, selection, or scroll.
 //
 // Stops the timer:
 //   - on tab background (visibilitychange to hidden) — no point
 //     refreshing what nobody's watching, and it avoids a thundering
 //     herd if the operator leaves the page open overnight
-//   - on unmount (route change / progress-clears-on-next-tick remount
-//     with the prop omitted)
+//   - on unmount (progress-clears-on-next-tick remount with the parent
+//     omitting the component)
 //
-// The interval lives on the client. The decision of WHETHER to mount
-// at all is server-side, based on whether any visible row has
-// progress != null. So a no-active-render page is a zero-cost
+// Whether to mount at all is decided by ContentList, based on whether any
+// loaded row has progress != null — a no-active-render list is a zero-cost
 // no-op (component never renders).
 
 import { useEffect } from "react";
-import { useRouter } from "next/navigation";
 
 const REFRESH_MS = 20_000;
 
 export function AutoRefresh({
+  onTick,
   intervalMs = REFRESH_MS,
 }: {
+  /** Called on each interval — the pager's in-place refresh(). */
+  onTick: () => void;
   intervalMs?: number;
 }) {
-  const router = useRouter();
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
     function start() {
       if (timer != null) return;
       timer = setInterval(() => {
-         
         console.info("[content list auto-refresh tick]");
-        router.refresh();
+        onTick();
       }, intervalMs);
     }
     function stop() {
@@ -55,6 +55,6 @@ export function AutoRefresh({
       stop();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [intervalMs, router]);
+  }, [intervalMs, onTick]);
   return null;
 }

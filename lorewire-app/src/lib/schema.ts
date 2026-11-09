@@ -110,6 +110,12 @@ export const STORIES: Table = {
     // story's category whitelist. Admin override always wins; settings
     // changes never overwrite an existing row.
     { name: "hero_style_id", type: "TEXT" },
+    // 2026-11-09 content originality (CONTENT_POLICY.md). 'original' marks a
+    // clean-room story; NULL is older content the publish gate grandfathers.
+    // compliance_status is 'pass' or 'fail' from generation. The full report
+    // can quote the source, so it lives in story_sources. Mirrors store.py.
+    { name: "content_origin", type: "TEXT" },
+    { name: "compliance_status", type: "TEXT" },
     // 2026-06-24 LLM-generated SEO metadata
     // (_plans/2026-06-24-llm-seo-metadata.md). Per-platform titles /
     // descriptions / captions / hashtags / tags generated once per
@@ -680,6 +686,14 @@ export const STORY_JOBS: Table = {
     // Splitting this stage off keeps every Vercel function under the
     // 800s ceiling.
     { name: "finisher_status", type: "TEXT" },
+    // 2026-07-05 finisher crash recovery (_plans/2026-07-05-finisher-
+    // stale-running-recovery.md). claimed_at is stamped by the Python
+    // claim so reap_stale_finisher_jobs can spot a 'running' row whose
+    // function died; attempts counts reaper/timeout revives. This
+    // ADD COLUMN path emits no DEFAULT, so read attempts with
+    // COALESCE(attempts, 0) — same convention as SHORT_RENDERS.attempts.
+    { name: "finisher_claimed_at", type: "TEXT" },
+    { name: "finisher_attempts", type: "INTEGER" },
   ],
 };
 
@@ -1130,6 +1144,8 @@ export const SUBMISSIONS: Table = {
     // 'video' (approve + render) | 'poll_only' (publish the text poll, no render)
     // — the approver's cost release valve, set at approval time (Phase 3).
     { name: "render_choice", type: "TEXT" },
+    // When the author confirmed the story is their own (CONTENT_POLICY.md).
+    { name: "own_work_confirmed_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
     { name: "updated_at", type: "TEXT" },
   ],
@@ -1511,6 +1527,17 @@ export const SCHEDULER_DECISIONS: Table = {
     { name: "subreddit", type: "TEXT" },
     { name: "decided_by", type: "TEXT" },
     { name: "decided_at", type: "TEXT" },
+    // 2026-07-15 safety-judge observability. The unattended-publish lanes
+    // used to store only decision = 'auto_held' and DISCARD the judge's
+    // verdict, so every hold looked identical and a 100%-false-positive
+    // judge stayed invisible for weeks. These carry the verdict onto the
+    // decision row so every hold is explainable ("held & why"). NULL for
+    // the human gate (approve/reject) and for degenerate holds without a
+    // confidence. ensureSchema's ADD COLUMN path backfills them additively.
+    { name: "judge_decision", type: "TEXT" },
+    { name: "judge_category", type: "TEXT" },
+    { name: "judge_reason", type: "TEXT" },
+    { name: "judge_confidence", type: "REAL" },
   ],
 };
 
@@ -1593,8 +1620,27 @@ export const ADMIN_NOTIFICATIONS: Table = {
   ],
 };
 
+// What a clean-room story was derived from, plus its full compliance report.
+// Internal only: public queries must never read this table. Mirrors store.py.
+export const STORY_SOURCES: Table = {
+  name: "story_sources",
+  columns: [
+    { name: "story_id", type: "TEXT", pk: true },
+    { name: "source_kind", type: "TEXT" },
+    { name: "source_ref", type: "TEXT" },
+    { name: "source_title", type: "TEXT" },
+    { name: "source_text", type: "TEXT" },
+    { name: "source_url", type: "TEXT" },
+    { name: "premise", type: "TEXT" },
+    { name: "compliance_report", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
+  STORY_SOURCES,
   SETTINGS,
   USERS,
   USER_SAVES,
