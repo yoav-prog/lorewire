@@ -40,6 +40,7 @@ interface StubResponse {
   status: number;
   body: unknown; // serialized to JSON unless `bodyText` is set
   bodyText?: string;
+  arrayBuffer?: Uint8Array; // returned by arrayBuffer() (poster-bytes path)
 }
 
 function makeFetchStub(responses: StubResponse[]): {
@@ -57,12 +58,22 @@ function makeFetchStub(responses: StubResponse[]): {
     const next = queue.shift();
     if (!next) throw new Error(`stub fetch exhausted at ${url}`);
     const text = next.bodyText ?? JSON.stringify(next.body);
-    const resp: FbFetchResponse = {
+    const ab = next.arrayBuffer ?? new TextEncoder().encode(text);
+    // arrayBuffer() lets the shared fetchPosterBytes helper (used by the
+    // post-publish cover step) read image bytes off the stub. It isn't on
+    // FbFetchResponse, so cast pragmatically — same shape the real undici
+    // response exposes and the helper reads via a Response cast.
+    const resp = {
       ok: next.ok,
       status: next.status,
       json: async () => JSON.parse(text),
       text: async () => text,
-    };
+      arrayBuffer: async () =>
+        ab.buffer.slice(
+          ab.byteOffset,
+          ab.byteOffset + ab.byteLength,
+        ) as ArrayBuffer,
+    } as unknown as FbFetchResponse;
     return resp;
   };
   return { fetch, calls };
@@ -458,15 +469,15 @@ describe("deleteLatestPostedRowForStory", () => {
   });
 });
 
-// _plans/2026-06-28-explicit-thumbnail-uploads.md.
+// _plans/2026-07-01-facebook-reel-thumbnail.md.
 //
-// When the story carries a scene-1 URL in short_config AND the setting
-// is on (default), postVideo switches to multipart and attaches the
-// image as the `thumb` part. When either side is missing OR the
-// thumbnail fetch fails, it falls back to the url-encoded path so the
-// publish itself never fails on a cover-only problem.
+// Facebook ignores the /videos `thumb` for file_url uploads and turns
+// our vertical shorts into Reels (no cover param on /video_reels), so
+// the cover is set AFTER publish via POST /{video-id}/thumbnails. It's
+// best-effort: any failure logs but never reverts the 'posted' row, and
+// it's skipped when the setting is off or no poster URL resolves.
 
-describe("publishShortToFacebook — custom thumbnail upload", () => {
+describe("publishShortToFacebook — post-publish custom cover", () => {
   beforeEach(async () => {
     process.env.FB_PAGE_ACCESS_TOKEN = "test-token-secret";
     process.env.FB_PAGE_ID = "911708085365160";
@@ -496,30 +507,14 @@ describe("publishShortToFacebook — custom thumbnail upload", () => {
     await run(`DELETE FROM stories WHERE id = ?`, [STORY]);
   });
 
-  it("fetches scene-1 + attaches it as multipart thumb on the /videos POST", async () => {
-    // 1: GET thumbnail bytes from GCS. 2: POST /videos with multipart.
-    const { fetch, calls } = makeFetchStub([
-      {
-        ok: true,
-        status: 200,
-        body: { id: "fb_video_cover_42" },
-      },
-    ]);
-    // The fetch stub above only services the /videos POST; the
-    // thumbnail GET hits a separate URL so the stub returns one entry
-    // per call. Re-make with the right queue:
-    const responses = [
-      // GET thumb bytes
-      {
-        ok: true,
-        status: 200,
-        body: null,
-        bodyText: "PNGBYTES",
-      },
-      // POST /videos with multipart
+  it("sets the cover via POST /{video-id}/thumbnails after a successful publish", async () => {
+    // 0: url-encoded /videos publish. 1: GET poster bytes. 2: POST the
+    // video's /thumbnails edge with the cover.
+    const stub = makeFetchStub([
       { ok: true, status: 200, body: { id: "fb_video_cover_42" } },
-    ];
-    const stub = makeFetchStub(responses);
+      { ok: true, status: 200, body: null, bodyText: "PNGBYTES" },
+      { ok: true, status: 200, body: { success: true } },
+    ]);
     const result = await publishShortToFacebook(
       {
         storyId: STORY,
@@ -533,26 +528,55 @@ describe("publishShortToFacebook — custom thumbnail upload", () => {
     expect(result.status).toBe("posted");
     if (result.status !== "posted") return;
     expect(result.row.external_post_id).toBe("fb_video_cover_42");
-    expect(stub.calls).toHaveLength(2);
-    // Call 0: thumbnail bytes fetch
-    expect(stub.calls[0].url).toBe("https://media.lorewire.com/x/frame-00.png");
-    expect(stub.calls[0].method).toBe("GET");
-    // Call 1: multipart POST to /videos. The body is a FormData when
-    // multipart fires; the stub serializes it as `[object FormData]`
-    // when toString'd, which is fine for the call-count assertion.
-    expect(stub.calls[1].url).toContain("/911708085365160/videos");
-    expect(stub.calls[1].method).toBe("POST");
-    // Suppress the unused noop binding warning.
-    void fetch;
-    void calls;
+    expect(stub.calls).toHaveLength(3);
+    // Call 0: url-encoded /videos publish (no multipart thumb anymore).
+    expect(stub.calls[0].url).toContain("/911708085365160/videos");
+    expect(stub.calls[0].method).toBe("POST");
+    expect(stub.calls[0].body).toContain("file_url=");
+    // Call 1: poster bytes fetch.
+    expect(stub.calls[1].url).toBe("https://media.lorewire.com/x/frame-00.png");
+    expect(stub.calls[1].method).toBe("GET");
+    // Call 2: multipart POST to the video's /thumbnails edge (FormData
+    // body serializes to undefined in the stub; URL + method carry the
+    // assertion).
+    expect(stub.calls[2].url).toContain("/fb_video_cover_42/thumbnails");
+    expect(stub.calls[2].method).toBe("POST");
   });
 
-  it("falls back to url-encoded when the thumbnail GCS fetch fails", async () => {
+  it("stays 'posted' when the /thumbnails edge rejects the cover (e.g. Reels 403)", async () => {
     const stub = makeFetchStub([
-      // GET thumb → 404
+      { ok: true, status: 200, body: { id: "fb_video_403" } },
+      { ok: true, status: 200, body: null, bodyText: "PNGBYTES" },
+      {
+        ok: false,
+        status: 403,
+        body: { error: { code: 200, message: "no cover permission" } },
+      },
+    ]);
+    const result = await publishShortToFacebook(
+      {
+        storyId: STORY,
+        renderId: RENDER,
+        videoUrl: VIDEO_URL,
+        trigger: "auto",
+        context: CTX,
+      },
+      { fetch: stub.fetch },
+    );
+    // A cover-only failure must never revert the live publish.
+    expect(result.status).toBe("posted");
+    if (result.status !== "posted") return;
+    expect(result.row.external_post_id).toBe("fb_video_403");
+    expect(stub.calls).toHaveLength(3);
+    expect(stub.calls[2].url).toContain("/fb_video_403/thumbnails");
+  });
+
+  it("stays 'posted' and skips the /thumbnails POST when poster bytes are unavailable", async () => {
+    const stub = makeFetchStub([
+      // 0: url-encoded /videos publish → ok
+      { ok: true, status: 200, body: { id: "fb_video_nobytes" } },
+      // 1: GET poster bytes → 404, so fetchPosterBytes returns null
       { ok: false, status: 404, body: { error: "not found" } },
-      // POST /videos url-encoded (the fallback path) → ok
-      { ok: true, status: 200, body: { id: "fb_video_fallback" } },
     ]);
     const result = await publishShortToFacebook(
       {
@@ -566,11 +590,12 @@ describe("publishShortToFacebook — custom thumbnail upload", () => {
     );
     expect(result.status).toBe("posted");
     if (result.status !== "posted") return;
-    expect(result.row.external_post_id).toBe("fb_video_fallback");
+    expect(result.row.external_post_id).toBe("fb_video_nobytes");
+    // Publish + the failed bytes GET only; no /thumbnails POST fires.
     expect(stub.calls).toHaveLength(2);
-    // The fallback POST is url-encoded (a string body containing
-    // file_url= + access_token=), NOT multipart.
-    expect(stub.calls[1].body).toContain("file_url=");
+    expect(stub.calls[0].url).toContain("/videos");
+    expect(stub.calls[0].body).toContain("file_url=");
+    expect(stub.calls[1].method).toBe("GET");
   });
 
   it("skips the thumbnail fetch when the setting is off", async () => {

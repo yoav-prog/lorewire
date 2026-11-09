@@ -1,0 +1,497 @@
+"use server";
+
+// Server actions for the scheduler admin surface: the human approval gate
+// (approve / reject a reviewed story) and the per-platform publish toggle
+// (which auto-disables the legacy instant-publish toggle to prevent
+// double-posting).
+//
+// Approve reuses publishStoryIfReady (the shared gate that flips a story
+// review -> published, autocurates, and revalidates) and then queues the
+// social posts through the Publish Scheduler. It deliberately does NOT
+// post to socials inline; the dispatch cron fires each platform at its
+// scheduled slot.
+//
+// Plan: _plans/2026-07-01-render-and-publish-schedulers.md.
+
+import { revalidatePath } from "next/cache";
+import { requireCapability } from "@/lib/dal";
+import { getStory, setStatus, setSetting } from "@/lib/repo";
+import { getRedditSource } from "@/lib/reddit-source";
+import { publishStoryIfReady } from "@/lib/auto-publish";
+import {
+  AUTOPILOT_SETTING_KEYS,
+  resetAutopilotFailures,
+  runAutopilotApprove,
+  runAutopilotPull,
+  type AutopilotMode,
+} from "@/lib/autopilot";
+import { RENDER_SETTING_KEYS } from "@/lib/render-scheduler";
+import {
+  RENDER_AUTOPUBLISH_SETTING_KEYS,
+  resetRenderAutoPublishFailures,
+} from "@/lib/render-auto-publish";
+import { retractStory, type RetractResult } from "@/lib/retract-story";
+import {
+  isUnattendedPublishingStopped,
+  setUnattendedPublishingStopped,
+} from "@/lib/approve-reviewed-story";
+import { rescreenHeldBacklog } from "@/lib/rescreen-held-backlog";
+import {
+  PUBLISH_PLATFORMS,
+  cancelScheduledPublish,
+  logSchedulerDecision,
+  platformSettingKey,
+  scheduleStoryPublish,
+  scheduleStoryPublishAt,
+  type ExplicitScheduleResult,
+  type PlatformScheduleOutcome,
+  type PublishPlatform,
+} from "@/lib/publish-scheduler";
+
+// Hours a story has sat since its last touch, used as the review-age
+// signal on the decision log. Not exported (only async actions may be).
+function ageHoursSince(iso: string | null): number | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, (Date.now() - t) / 3_600_000);
+}
+
+interface ApproveResult {
+  ok: boolean;
+  error?: string;
+  missing?: string[];
+  publishEnabled?: boolean;
+  scheduled?: number;
+  outcomes?: PlatformScheduleOutcome[];
+}
+
+/**
+ * Approve a reviewed story: run the publish gate, flip it to published,
+ * and queue its social posts across every enabled platform at their next
+ * open slots. The story leaves the review queue immediately; the posts
+ * go out on schedule.
+ */
+export async function schedulerApproveStoryAction(
+  storyId: string,
+): Promise<ApproveResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story_not_found" };
+  if (!story.reddit_id) {
+    return {
+      ok: false,
+      error: "not a Reddit-origin story; publish it from the normal flow",
+    };
+  }
+
+  // Gate + flip review -> published + autocurate + revalidate. Reuses the
+  // exact path the auto-publish cron and manual review-publish use, so an
+  // asset-incomplete story cannot be approved onto the public site.
+  const published = await publishStoryIfReady(story.reddit_id);
+  if (!published.ok) {
+    return {
+      ok: false,
+      error: published.reason,
+      missing: published.reason === "not_ready" ? published.missing : undefined,
+    };
+  }
+
+  // Queue the social posts. Idempotent per (story, platform).
+  const scheduled = await scheduleStoryPublish(storyId, {
+    approvedBy: session.userId,
+  });
+
+  const source = await getRedditSource(story.reddit_id);
+  await logSchedulerDecision({
+    storyId,
+    redditId: story.reddit_id,
+    decision: "approved",
+    tier: source?.strength ?? null,
+    comments: source?.comments ?? null,
+    subreddit: source?.subreddit ?? null,
+    ageHours: ageHoursSince(story.updated_at),
+    decidedBy: session.userId,
+  });
+
+  console.info("[scheduler approve]", {
+    storyId,
+    actorId: session.userId,
+    publishEnabled: scheduled.publishEnabled,
+    scheduled: scheduled.scheduled,
+  });
+
+  revalidatePath("/admin/scheduler");
+  revalidatePath(`/admin/stories/${storyId}`);
+  revalidatePath("/admin");
+  return {
+    ok: true,
+    publishEnabled: scheduled.publishEnabled,
+    scheduled: scheduled.scheduled,
+    outcomes: scheduled.outcomes,
+  };
+}
+
+/**
+ * Reject a reviewed story: send it back to draft (re-editable) and record
+ * the verdict. Never publishes or schedules anything.
+ */
+export async function schedulerRejectStoryAction(
+  storyId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) return { ok: false, error: "missing story id" };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story_not_found" };
+
+  await setStatus(storyId, "draft");
+
+  const source = story.reddit_id ? await getRedditSource(story.reddit_id) : null;
+  await logSchedulerDecision({
+    storyId,
+    redditId: story.reddit_id ?? null,
+    decision: "rejected",
+    tier: source?.strength ?? null,
+    comments: source?.comments ?? null,
+    subreddit: source?.subreddit ?? null,
+    ageHours: ageHoursSince(story.updated_at),
+    decidedBy: session.userId,
+  });
+
+  console.info("[scheduler reject]", { storyId, actorId: session.userId });
+  revalidatePath("/admin/scheduler");
+  revalidatePath(`/admin/stories/${storyId}`);
+  return { ok: true };
+}
+
+export interface ScheduleAtPlatformResult {
+  platform: string;
+  status: ExplicitScheduleResult["status"];
+  scheduledForIso?: string;
+  capExceeded?: boolean;
+}
+
+interface ScheduleAtResult {
+  ok: boolean;
+  error?: string;
+  /** Per-platform outcome, in the order requested. */
+  results?: ScheduleAtPlatformResult[];
+}
+
+/**
+ * Queue one story to post at an explicit date/time on one or more
+ * platforms, entered as each platform's local wall clock
+ * ("YYYY-MM-DDTHH:MM" from a datetime-local input). Bypasses
+ * next-open-slot math; still one active row per (story, platform), and
+ * each platform reports its own outcome.
+ */
+export async function schedulerScheduleAtAction(input: {
+  storyId: string;
+  platforms: string[];
+  whenLocal: string;
+}): Promise<ScheduleAtResult> {
+  const session = await requireCapability("content.manage");
+  const { storyId, platforms, whenLocal } = input;
+  if (!storyId) return { ok: false, error: "missing story id" };
+  if (!Array.isArray(platforms) || platforms.length === 0) {
+    return { ok: false, error: "pick at least one platform" };
+  }
+  for (const platform of platforms) {
+    if (!(PUBLISH_PLATFORMS as readonly string[]).includes(platform)) {
+      return { ok: false, error: "unknown platform" };
+    }
+  }
+
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(whenLocal ?? "");
+  if (!m) return { ok: false, error: "pick a date and time" };
+  const when = {
+    year: Number(m[1]),
+    month: Number(m[2]),
+    day: Number(m[3]),
+    hour: Number(m[4]),
+    minute: Number(m[5]),
+  };
+
+  const story = await getStory(storyId);
+  if (!story) return { ok: false, error: "story_not_found" };
+
+  const results: ScheduleAtPlatformResult[] = [];
+  for (const platform of platforms) {
+    const result = await scheduleStoryPublishAt(
+      storyId,
+      platform as PublishPlatform,
+      when,
+      { approvedBy: session.userId },
+    );
+    results.push({
+      platform,
+      status: result.status,
+      scheduledForIso: result.scheduledForIso,
+      capExceeded: result.capExceeded,
+    });
+  }
+
+  console.info("[scheduler schedule_at]", {
+    storyId,
+    whenLocal,
+    actorId: session.userId,
+    results: results.map((r) => `${r.platform}:${r.status}`),
+  });
+
+  if (results.some((r) => r.status === "scheduled")) {
+    revalidatePath("/admin/scheduler");
+  }
+  return { ok: true, results };
+}
+
+/**
+ * Cancel a queued post before the dispatcher claims it. Rows already
+ * publishing or posted stay put.
+ */
+export async function schedulerCancelPublishAction(
+  id: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("content.manage");
+  if (!id) return { ok: false, error: "missing id" };
+
+  const cancelled = await cancelScheduledPublish(id);
+  console.info("[scheduler cancel]", { id, actorId: session.userId, cancelled });
+  if (!cancelled) {
+    return { ok: false, error: "too late — this post already went out or is publishing" };
+  }
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+/**
+ * Recall a story everywhere: cancel queued posts, pull it off the site,
+ * delete the platform posts that APIs allow deleting (TikTok reports
+ * back for manual removal). Destructive; the UI confirms before calling.
+ */
+export async function schedulerRetractStoryAction(
+  storyId: string,
+): Promise<RetractResult> {
+  const session = await requireCapability("content.manage");
+  if (!storyId) {
+    return {
+      ok: false,
+      error: "missing story id",
+      cancelledQueued: 0,
+      archived: false,
+      platforms: [],
+    };
+  }
+  const result = await retractStory(storyId);
+  console.info("[scheduler retract]", {
+    storyId,
+    actorId: session.userId,
+    ok: result.ok,
+    cancelledQueued: result.cancelledQueued,
+    archived: result.archived,
+    platforms: result.platforms.map((p) => `${p.platform}:${p.status}`),
+  });
+  revalidatePath("/admin/scheduler");
+  revalidatePath(`/admin/stories/${storyId}`);
+  return result;
+}
+
+/**
+ * Switch autopilot between off / shadow / live / autonomous. Any
+ * deliberate mode change also resets the circuit breaker (failure counter
+ * + trip stamp): an admin turning it back on has seen the trip banner and
+ * is making a fresh start, not resuming a failing run.
+ */
+export async function setAutopilotModeAction(
+  mode: AutopilotMode,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  if (
+    mode !== "off" &&
+    mode !== "shadow" &&
+    mode !== "live" &&
+    mode !== "autonomous"
+  ) {
+    return { ok: false, error: "unknown mode" };
+  }
+  await setSetting(AUTOPILOT_SETTING_KEYS.mode, mode);
+  await resetAutopilotFailures();
+  await setSetting(AUTOPILOT_SETTING_KEYS.trippedAt, "");
+  console.info("[scheduler autopilot_mode]", { mode, actorId: session.userId });
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+/**
+ * Turn render-scheduler auto-publish on/off. Enabling it also clears any
+ * prior circuit-breaker trip (failure counter + trip stamp): an admin turning
+ * it back on has seen the trip banner and is making a fresh start, not
+ * resuming a failing run. Mirrors setAutopilotModeAction's reset semantics.
+ */
+export async function setRenderAutoPublishEnabledAction(
+  enabled: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  await setSetting(RENDER_SETTING_KEYS.autoPublish, enabled ? "1" : "0");
+  if (enabled) {
+    await resetRenderAutoPublishFailures();
+    await setSetting(RENDER_AUTOPUBLISH_SETTING_KEYS.trippedAt, "");
+  }
+  console.info("[scheduler render_auto_publish]", {
+    enabled,
+    actorId: session.userId,
+  });
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+/**
+ * Engage or release the global unattended-publish emergency stop. Independent
+ * of autopilot.mode and render.auto_publish: while engaged, every unattended
+ * lane skips its whole batch and nothing goes live without a human, but the
+ * lanes' own settings are left untouched so releasing it resumes exactly where
+ * things were. The per-story manual Approve is unaffected.
+ */
+export async function setUnattendedPublishStopAction(
+  stopped: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const session = await requireCapability("settings.manage");
+  await setUnattendedPublishingStopped(stopped);
+  console.info("[scheduler unattended_stop]", { stopped, actorId: session.userId });
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}
+
+export interface RescreenBacklogActionResult {
+  ok: boolean;
+  error?: string;
+  processed?: number;
+  published?: number;
+  stillHeld?: number;
+  deferred?: number;
+  failed?: number;
+  remaining?: number;
+}
+
+/**
+ * Re-screen a batch of the held backlog with the current safety judge and
+ * publish the stories it now clears — the catch-up for holds the old judge
+ * made before it was recalibrated. Bounded per call; the UI clicks again while
+ * stories remain. Refuses while the emergency stop is engaged (this publishes
+ * without a per-story human look, so it honours the same stop the lanes do),
+ * returning a clear message instead of silently skipping every story.
+ */
+export async function rescreenHeldBacklogAction(
+  limit?: number,
+): Promise<RescreenBacklogActionResult> {
+  const session = await requireCapability("content.manage");
+  if (await isUnattendedPublishingStopped()) {
+    return {
+      ok: false,
+      error:
+        "The emergency stop is engaged. Release it above before re-screening — this publishes stories.",
+    };
+  }
+
+  const r = await rescreenHeldBacklog({ limit });
+  console.info("[scheduler rescreen_backlog]", {
+    actorId: session.userId,
+    processed: r.processed,
+    published: r.published,
+    stillHeld: r.stillHeld,
+    deferred: r.deferred,
+    failed: r.failed,
+    remaining: r.remaining,
+  });
+  revalidatePath("/admin/scheduler");
+  revalidatePath("/admin");
+  return {
+    ok: true,
+    processed: r.processed,
+    published: r.published,
+    stillHeld: r.stillHeld,
+    deferred: r.deferred,
+    failed: r.failed,
+    remaining: r.remaining,
+  };
+}
+
+export interface RunAutopilotNowResult {
+  ok: boolean;
+  error?: string;
+  pull?: { reason: string; enqueued: number };
+  approve?: {
+    reason: string;
+    approved: number;
+    held: number;
+    deferred: number;
+    failed: number;
+    skipped: number;
+    tripped: boolean;
+  };
+}
+
+/**
+ * Run one autopilot tick immediately from the admin: one pull then one
+ * approve — the exact pair the /api/autopilot_tick cron runs. Lets an
+ * admin kick autopilot without waiting for the 2-minute cadence, and
+ * makes it usable in local dev / preview deploys where Vercel crons do
+ * not fire. Admin-gated (settings.manage); no CRON_SECRET involved since
+ * it calls the tick functions directly rather than self-POSTing the route.
+ *
+ * The pull only ENQUEUES renders, so a fresh pull publishes nothing this
+ * tick — the approve step publishes autopilot stories that already
+ * finished rendering and passed the safety judge. All the same gates
+ * (mode, budget, headroom, judge, breaker) still apply.
+ */
+export async function runAutopilotTickNowAction(): Promise<RunAutopilotNowResult> {
+  const session = await requireCapability("settings.manage");
+  const pull = await runAutopilotPull();
+  const approve = await runAutopilotApprove();
+  console.info("[scheduler autopilot_run_now]", {
+    actorId: session.userId,
+    pull_reason: pull.reason,
+    enqueued: pull.enqueued,
+    approved: approve.approved,
+    held: approve.held,
+    deferred: approve.deferred,
+    failed: approve.failed,
+    tripped: approve.tripped,
+  });
+  revalidatePath("/admin/scheduler");
+  return {
+    ok: true,
+    pull: { reason: pull.reason, enqueued: pull.enqueued },
+    approve: {
+      reason: approve.reason,
+      approved: approve.approved,
+      held: approve.held,
+      deferred: approve.deferred,
+      failed: approve.failed,
+      skipped: approve.skipped,
+      tripped: approve.tripped,
+    },
+  };
+}
+
+/**
+ * Turn the Publish Scheduler on/off for one platform. Enabling it also
+ * switches OFF that platform's legacy instant-publish toggle
+ * (publisher.<platform>.auto_publish), because the scheduler and the
+ * render-time auto-publish must not both fire or the same short posts
+ * twice. This is the "auto-disable legacy toggle" the admin chose.
+ */
+export async function setPlatformSchedulerEnabledAction(
+  platform: PublishPlatform,
+  enabled: boolean,
+): Promise<{ ok: boolean }> {
+  await requireCapability("settings.manage");
+  await setSetting(platformSettingKey(platform, "enabled"), enabled ? "1" : "0");
+  if (enabled) {
+    await setSetting(`publisher.${platform}.auto_publish`, "0");
+  }
+  revalidatePath("/admin/scheduler");
+  return { ok: true };
+}

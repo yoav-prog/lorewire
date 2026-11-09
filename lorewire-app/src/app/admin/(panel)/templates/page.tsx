@@ -8,7 +8,7 @@ import {
   type FieldDef,
   type SectionDef,
 } from "./TemplateFieldGrid";
-import { CATEGORY_LABELS } from "@/lib/categories/manifest";
+import { listCategories } from "@/lib/categories/repo";
 
 // Wave 3 Phase 2: the global template from Phase 1 is now the bottom of a
 // three-tier scope chain (per-story > per-category > global > defaults). The
@@ -30,9 +30,12 @@ import { CATEGORY_LABELS } from "@/lib/categories/manifest";
 // Override/Inherit toggle for non-global tiers. The form's hidden-input
 // contract is unchanged so saveCaptionTemplateAction keeps working.
 
-// Caption-template category scopes, from the shared manifest so this
-// picker can't drift from the category set (see @/lib/categories/manifest).
-const CATEGORIES = CATEGORY_LABELS;
+// Caption-template category scopes iterate the ACTIVE DB categories
+// (fetched in the page, threaded into ScopeSwitcher) — the pipeline's
+// resolve_caption_template_for() walks `caption.cat.<label>` with the
+// story's granular label, so tabs for the retired legacy six would edit
+// keys no current story resolves. Plan:
+// _plans/2026-07-02-per-category-settings-granular.md.
 
 const DEFAULTS: Record<string, string> = {
   "position_y": "0.68",
@@ -298,6 +301,10 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
         }))
       : [];
 
+  // Active category labels for the scope tabs (see the note above
+  // the DEFAULTS map).
+  const categoryLabels = (await listCategories()).map((c) => c.label);
+
   // Explicit override values at THIS scope (empty = inherits). Also pull what
   // each field would inherit so the placeholder shows the effective value.
   // The aspect dimension changes BOTH: the values come from the per-aspect
@@ -345,6 +352,7 @@ export default async function TemplatesPage({ searchParams }: PageProps) {
         cat={cat}
         story={story}
         stories={stories}
+        categories={categoryLabels}
         currentAspect={aspectChoice}
       />
 
@@ -434,12 +442,15 @@ function ScopeSwitcher({
   cat,
   story,
   stories,
+  categories,
   currentAspect,
 }: {
   current: string;
   cat?: string;
   story?: string;
   stories: { id: string; title: string }[];
+  /** Active category labels from the DB, in admin/display order. */
+  categories: string[];
   /** Phase 5 caveat fix: switching scope should keep whichever aspect
    *  tier the admin is editing. Without this the aspect tab silently
    *  resets to "Aspect-agnostic" every time the admin moves between
@@ -454,9 +465,9 @@ function ScopeSwitcher({
     <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface p-3">
       <ScopeTab href={globalHref} active={current === "global"} label="Global" />
       <span className="text-line">|</span>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-[11px] uppercase tracking-wider text-muted">Category:</span>
-        {CATEGORIES.map((c) => (
+        {categories.map((c) => (
           <ScopeTab
             key={c}
             href={`/admin/templates?scope=cat&cat=${encodeURIComponent(c)}${aspectQs}`}

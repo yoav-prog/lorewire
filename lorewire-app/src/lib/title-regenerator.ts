@@ -20,11 +20,13 @@ import "server-only";
 import { z } from "zod";
 import { chatCompletion, type ChatMessage } from "@/lib/llm";
 import { getStory, updateStory } from "@/lib/repo";
+import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 
 // --- Length policy (must agree with pipeline/stages.py) -------------------
-
-export const TITLE_MAX_CHARS = 50;
-export const TITLE_MAX_WORDS = 8;
+// The caps live in lib/title-policy.ts now (one source of truth for the
+// generator mirror, the "too long" filter, and the bulk fix). Re-exported
+// here so existing importers of this module keep resolving them.
+export { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 
 // Pinned model — matches the Python pipeline (`openai/gpt-5-nano`) so the
 // voice stays identical across the worker path and the admin-recovery

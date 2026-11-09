@@ -217,7 +217,7 @@ def _pov_block() -> str:
         "'I/me/my' into third person.\n"
         "  - Use 'she', 'he', or 'they' depending on what the source "
         "establishes about the person. When gender is not established, "
-        "default to 'they' or a role-noun ('the coworker', 'the poster', "
+        "default to 'they' or a role-noun ('the coworker', 'the neighbor', "
         "'the office admin', 'the wife'). NEVER guess a gender.\n"
         "  - The CTA / poll handoff (beat 5) is the ONLY place the narrator "
         "may speak to the viewer directly ('Would you do the same?', "
@@ -293,7 +293,7 @@ def _poll_block() -> str:
         f"inside the option labels.\n"
         f"  - Question: ≤{POLL_QUESTION_MAX_CHARS} chars. Plain English. Ends in '?'.\n"
         f"  - Option A label: ≤{POLL_OPTION_MAX_CHARS} chars. A role / name / position "
-        "the viewer can identify with ('The poster', 'The brother', 'Refund').\n"
+        "the viewer can identify with ('The neighbor', 'The brother', 'Refund').\n"
         f"  - Option B label: ≤{POLL_OPTION_MAX_CHARS} chars. The opposing side, "
         "phrased symmetrically with A.\n"
     )

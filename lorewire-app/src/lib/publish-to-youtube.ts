@@ -41,7 +41,7 @@ import { fetchPosterBytes } from "@/lib/poster-bytes";
 // --- Types -----------------------------------------------------------------
 
 export type YouTubePostStatus = "pending" | "posted" | "failed" | "deleted";
-export type YouTubePostTrigger = "auto" | "manual";
+export type YouTubePostTrigger = "auto" | "manual" | "scheduled";
 
 export interface YouTubePostRow {
   id: string;
@@ -183,10 +183,10 @@ LoreWire turns the weirdest, most-argued-about stories on the internet into one-
 🔔 Subscribe for new shorts: https://www.youtube.com/@LoreWireHQ
 🌐 lorewire.com
 
-#Shorts #InternetStories #TrueStory #{{category}}Shorts #Reddit`;
+#Shorts #InternetStories #{{category}}Shorts`;
 
 export const DEFAULT_TAGS_BASE =
-  "true stories, internet stories, lorewire, short stories, storytime";
+  "internet stories, lorewire, short stories, storytime";
 
 /** Per-category tag defaults. Empty entries inherit only the base set.
  *  Capitalisation matches the story.category column (Drama, Entitled,
@@ -1059,6 +1059,12 @@ export async function publishShortToYouTube(
       });
       return { status: "skipped", reason: "auto-publish toggle off" };
     }
+  }
+  // A 'scheduled' publish comes from the Publish Scheduler: it bypasses the
+  // auto_publish toggle (the schedule IS the intent) but still honors
+  // story-level dedup, so a re-dispatch or a manual+scheduled overlap
+  // cannot double-post.
+  if (args.trigger !== "manual") {
     const active = await existingActiveRowsForStory(args.storyId);
     if (active > 0) {
       log("skipped", {

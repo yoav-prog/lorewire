@@ -22,11 +22,15 @@ import {
 } from "@/components/wires/useWirePrefs";
 
 const SLOW_KEY = "lw.wires.slow.v1";
+const HIDE_VOTED_KEY = "lw.wires.hide_voted.v1";
+const SKIP_INTRO_KEY = "lw.wires.skip_intro.v1";
 const ALL_KEYS = [
   "lw.wires.autoplay.v1",
   "lw.wires.muted.v1",
   "lw.wires.advance.v1",
   SLOW_KEY,
+  HIDE_VOTED_KEY,
+  SKIP_INTRO_KEY,
 ];
 
 function setConsent(accepted: boolean): void {
@@ -106,6 +110,10 @@ describe("useWirePrefs", () => {
     expect(h.current.autoplay).toBe(true);
     expect(h.current.muted).toBe(true);
     expect(h.current.advance).toBe(true);
+    // hideVoted defaults ON — the Wires feed opens on unvoted wires.
+    expect(h.current.hideVoted).toBe(true);
+    // skipIntro defaults OFF — skipping the brand intro is opt-in.
+    expect(h.current.skipIntro).toBe(false);
     h.unmount();
   });
 
@@ -156,6 +164,90 @@ describe("useWirePrefs", () => {
     // A second component mounting sees the persisted value, not the default.
     const second = mountHook();
     expect(second.current.slow).toBe(true);
+    first.unmount();
+    second.unmount();
+  });
+});
+
+describe("useWirePrefs — hideVoted (Wires unvoted-only filter)", () => {
+  it("toggleHideVoted flips the value in-memory even without consent", () => {
+    const h = mountHook();
+    expect(h.current.hideVoted).toBe(true);
+    act(() => {
+      h.current.toggleHideVoted();
+    });
+    expect(h.current.hideVoted).toBe(false);
+    // No consent → nothing written to disk.
+    expect(window.localStorage.getItem(HIDE_VOTED_KEY)).toBeNull();
+    h.unmount();
+  });
+
+  it("setHideVoted(false) writes '0' to localStorage when consent is accepted", () => {
+    setConsent(true);
+    const h = mountHook();
+    act(() => {
+      h.current.setHideVoted(false);
+    });
+    expect(h.current.hideVoted).toBe(false);
+    expect(window.localStorage.getItem(HIDE_VOTED_KEY)).toBe("0");
+    h.unmount();
+  });
+
+  it("toggleHideVoted round-trips through localStorage across hook instances", () => {
+    setConsent(true);
+    const first = mountHook();
+    const before = first.current.hideVoted;
+    act(() => {
+      first.current.toggleHideVoted();
+    });
+    expect(first.current.hideVoted).toBe(!before);
+    // A second component mounting shares the persisted (module-singleton) value.
+    const second = mountHook();
+    expect(second.current.hideVoted).toBe(!before);
+    first.unmount();
+    second.unmount();
+  });
+});
+
+describe("useWirePrefs — skipIntro (Always skip intro)", () => {
+  // _plans/2026-07-04-skip-intro.md — one store drives the Wires cards AND
+  // the story-page player.
+  it("toggleSkipIntro flips the value in-memory even without consent", () => {
+    const h = mountHook();
+    expect(h.current.skipIntro).toBe(false);
+    act(() => {
+      h.current.toggleSkipIntro();
+    });
+    expect(h.current.skipIntro).toBe(true);
+    // No consent → nothing written to disk.
+    expect(window.localStorage.getItem(SKIP_INTRO_KEY)).toBeNull();
+    h.unmount();
+  });
+
+  it("setSkipIntro(true) writes '1' to localStorage when consent is accepted", () => {
+    setConsent(true);
+    const h = mountHook();
+    act(() => {
+      h.current.setSkipIntro(true);
+    });
+    expect(h.current.skipIntro).toBe(true);
+    expect(window.localStorage.getItem(SKIP_INTRO_KEY)).toBe("1");
+    h.unmount();
+  });
+
+  it("toggleSkipIntro round-trips through localStorage across hook instances", () => {
+    setConsent(true);
+    const first = mountHook();
+    // The stores are module singletons, so earlier tests' in-memory flips
+    // carry over — capture the current value instead of assuming the default.
+    const before = first.current.skipIntro;
+    act(() => {
+      first.current.toggleSkipIntro();
+    });
+    expect(first.current.skipIntro).toBe(!before);
+    // A second component mounting shares the persisted (module-singleton) value.
+    const second = mountHook();
+    expect(second.current.skipIntro).toBe(!before);
     first.unmount();
     second.unmount();
   });

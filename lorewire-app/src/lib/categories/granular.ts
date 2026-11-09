@@ -191,4 +191,14 @@ export const GRANULAR_CATEGORIES: readonly GranularCategory[] = [
     description:
       "Doing exactly what was demanded, knowing it will backfire on the person who demanded it.",
   },
+  {
+    slug: "creepy",
+    label: "Creepy",
+    glyph: "|",
+    color: "#4E4A5E",
+    isRail: false,
+    railTitle: null,
+    description:
+      "Creepy, unsettling, or unexplained stories: mysteries, strange discoveries, eerie encounters, and things that don't add up. Not interpersonal conflict.",
+  },
 ];

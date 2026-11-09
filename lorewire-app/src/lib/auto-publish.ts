@@ -12,11 +12,16 @@
 // an asset-incomplete story to the public site. Last legacy publish
 // path to be tightened — closes the gap THE STOVETOP MYSTERY exposed.
 //
-// Self-heal for the common transient miss: when "poll" is the ONLY
-// missing gate, retry autoDraftPollForSubject inline. The poll
-// autodraft on save sometimes loses to the publish-cron race; a
-// single retry here turns "publish failed" into "publish succeeded"
-// for the dominant transient case without touching any other path.
+// Self-heal for the common transient misses:
+//   - "video_url" missing but a done short render exists: apply the
+//     render onto the story row (applyLatestDoneShortToStory) and
+//     re-evaluate. Closes the 2026-07-02 publish-without-video class
+//     (_plans/2026-07-02-never-publish-without-video.md).
+//   - "poll" is the ONLY remaining missing gate: retry
+//     autoDraftPollForSubject inline. The poll autodraft on save
+//     sometimes loses to the publish-cron race; a single retry here
+//     turns "publish failed" into "publish succeeded" for the dominant
+//     transient case without touching any other path.
 //
 // Plan: _plans/2026-06-24-reddit-source-full-pipeline-toggle.md +
 // _plans/2026-06-25-bulk-complete-and-publish.md follow-up.
@@ -28,6 +33,7 @@ import { getRedditSource } from "@/lib/reddit-source";
 import { evaluateAssetCompleteness } from "@/lib/asset-completeness";
 import { autoCurateOnPublish } from "@/lib/publish-auto-curate";
 import { autoDraftPollForSubject } from "@/lib/poll-autodraft";
+import { applyLatestDoneShortToStory } from "@/lib/short-render-queue";
 
 export type PublishStoryResult =
   | { ok: true; storyId: string }
@@ -58,6 +64,31 @@ export async function publishStoryIfReady(
   }
 
   let completeness = await evaluateAssetCompleteness(story.id);
+
+  // Self-heal the "render done, copy missed" gap first: the video
+  // exists in storage but stories.video_url never received it. Apply
+  // the latest done render and re-evaluate — this MUST come before the
+  // poll heal so a story missing both can clear video_url here and
+  // then qualify for the poll-only retry below.
+  if (!completeness.ready && completeness.missing.includes("video_url")) {
+    try {
+      const applied = await applyLatestDoneShortToStory(story.id);
+      console.info("[auto-publish video_url_heal]", {
+        story_id: story.id,
+        applied,
+      });
+      if (applied) {
+        completeness = await evaluateAssetCompleteness(story.id);
+      }
+    } catch (e) {
+      // Heal failed; fall through with the original missing list so
+      // the drain records video_url as the blocker.
+      console.error("[auto-publish video_url_heal_error]", {
+        story_id: story.id,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
 
   // Self-heal for the dominant transient: if "poll" is the ONLY
   // missing gate, retry autodraft and re-evaluate once. Same trick

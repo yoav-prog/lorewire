@@ -12,10 +12,12 @@
 // double-posts. Then clear the flag.
 //
 // Not-ready rows: increment auto_publish_attempts. If the per-story
-// cap is reached, clear the flag + log the give-up so the operator
-// sees the stuck story in observability. The cap prevents a
-// permanently-broken asset (an exhausted external API key, a
-// silently-failing render lane) from piling up infinite cron work.
+// cap is reached, clear the flag, log the give-up, and write an
+// admin notification (lib/admin-notifications) so the operator sees
+// the stuck story in the Notifications inbox — not just in Vercel
+// logs. The cap prevents a permanently-broken asset (an exhausted
+// external API key, a silently-failing render lane) from piling up
+// infinite cron work.
 //
 // Auth: CRON_SECRET Bearer, same pattern as
 // auto_publish_full_pipeline + every retry_* cron in the project.
@@ -27,9 +29,22 @@ import { NextResponse, type NextRequest } from "next/server";
 import { revalidatePath } from "next/cache";
 import { all, one, run } from "@/lib/db";
 import { getStory, getSetting, setStatus, type SocialPlatform } from "@/lib/repo";
-import { evaluateAssetCompleteness } from "@/lib/asset-completeness";
+import {
+  evaluateAssetCompleteness,
+  HERO_THUMBNAIL_BLOCKING_GATES,
+  type AssetCompleteness,
+} from "@/lib/asset-completeness";
 import { autoDraftPollForSubject } from "@/lib/poll-autodraft";
-import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
+import {
+  canEnqueueImageRegen,
+  enqueueImageRegen,
+  latestRenderForAsset,
+} from "@/lib/image-render-queue";
+import {
+  applyLatestDoneShortToStory,
+  latestDoneShortRenderForStory,
+} from "@/lib/short-render-queue";
+import { notifyAdmin } from "@/lib/admin-notifications";
 import { ensureSeoMetadataForStory } from "@/lib/seo-metadata";
 import { autoCurateOnPublish } from "@/lib/publish-auto-curate";
 import { publishShortToFacebook } from "@/lib/publish-to-facebook";
@@ -138,12 +153,67 @@ async function serve(req: NextRequest): Promise<NextResponse> {
 
   for (const row of flagged) {
     try {
+      // A queued/processing story_jobs run is actively REWRITING this
+      // story (article, voice, then a forced short + finisher). The
+      // completeness gate can't see that — right after the worker's
+      // upsert the OLD assets still look complete — so publishing here
+      // would ship stale media. Skip without burning an attempt: the
+      // retry budget should start when the pipeline lands, not while
+      // it runs. Added with the bulk Full-pipeline action
+      // (_plans/2026-07-02-content-admin-cleanup-and-full-pipeline.md).
+      if (row.reddit_id) {
+        const activeJob = await one<{ id: string; status: string }>(
+          `SELECT id, status FROM story_jobs
+           WHERE reddit_id = ? AND status IN ('queued', 'processing')
+           LIMIT 1`,
+          [row.reddit_id],
+        );
+        if (activeJob) {
+          namespacedLog("pipeline_running", {
+            story_id: row.id,
+            job_id: activeJob.id,
+            job_status: activeJob.status,
+          });
+          stillWaiting += 1;
+          continue;
+        }
+      }
+
       let completeness = await evaluateAssetCompleteness(row.id);
       namespacedLog("gate", {
         story_id: row.id,
         ready: completeness.ready,
         missing: completeness.missing,
       });
+
+      // Self-heal the "render done, copy missed" gap: the short
+      // finished (video exists in storage) but stories.video_url never
+      // received its output_url — the 2026-07-02 incident shipped two
+      // stories to production this way. Apply the latest done render
+      // and re-run the gate. Plan:
+      // _plans/2026-07-02-never-publish-without-video.md.
+      if (
+        !completeness.ready &&
+        completeness.missing.includes("video_url")
+      ) {
+        try {
+          const applied = await applyLatestDoneShortToStory(row.id);
+          namespacedLog("video_url_heal", { story_id: row.id, applied });
+          if (applied) {
+            completeness = await evaluateAssetCompleteness(row.id);
+            namespacedLog("gate_after_video_url_heal", {
+              story_id: row.id,
+              ready: completeness.ready,
+              missing: completeness.missing,
+            });
+          }
+        } catch (e) {
+          namespacedLog("video_url_heal_error", {
+            story_id: row.id,
+            message: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
 
       // Already-published shouldn't happen given the WHERE clause
       // above, but the gate's belt-and-suspenders check guards
@@ -199,6 +269,17 @@ async function serve(req: NextRequest): Promise<NextResponse> {
         }
       }
 
+      // Hero/thumbnail backstop: if a blocking image gate is still the
+      // holdup, make sure the 5-variant finisher is (or gets) enqueued. This
+      // is what turns a thumbnail that dropped AFTER the Complete-&-publish
+      // click into a real self-heal instead of a 24-minute wait that gives
+      // up. Guarded so it enqueues at most one finisher at a time — the image
+      // queue is NOT idempotent, so an unguarded re-enqueue would spend five
+      // kie calls every tick. Plan: _plans/2026-07-19-asset-incomplete-thumbnail-heal.md.
+      if (!completeness.ready) {
+        await maybeHealHeroThumbnail(row.id, completeness);
+      }
+
       if (!completeness.ready) {
         const attempts = await incrementAttempts(row.id);
         if (maxAttempts > 0 && attempts >= maxAttempts) {
@@ -208,6 +289,20 @@ async function serve(req: NextRequest): Promise<NextResponse> {
             story_id: row.id,
             attempts,
             last_missing: completeness.missing,
+          });
+          // The give-up clears the flag and resets the counter, so the
+          // failure evidence vanishes from the queue tables. Persist it
+          // where the operator will see it — the admin Notifications
+          // inbox. notifyAdmin never throws; a notification failure
+          // must not break the drain.
+          await notifyAdmin({
+            severity: "error",
+            source: "auto-publish",
+            subjectKind: "story",
+            subjectId: row.id,
+            title: `Story did not publish — gave up after ${attempts} attempts`,
+            detail: { missing: completeness.missing, attempts },
+            dedupeKey: `auto-publish-giveup:${row.id}`,
           });
         } else {
           stillWaiting += 1;
@@ -529,6 +624,69 @@ async function resolveArticleUrl(storyId: string): Promise<string> {
   return article
     ? `${origin}/articles/${article.language}/${article.slug}`
     : origin;
+}
+
+/** Ensure the hero+thumbnail finisher is working on a story whose ONLY
+ *  remaining blocking gate is a hero/thumbnail image. Enqueues the
+ *  5-variant `hero_thumbnail_from_short` asset at most once at a time:
+ *  the image queue is not idempotent, so we skip when a render for that
+ *  asset is already queued/generating, when the daily image budget is
+ *  spent, or when there's no completed short to seed the character from.
+ *  Idempotent per tick — the cron keeps ticking (subject to the attempts
+ *  cap) until the render lands and the gate passes. */
+async function maybeHealHeroThumbnail(
+  storyId: string,
+  completeness: AssetCompleteness,
+): Promise<void> {
+  const needsFinisher = completeness.blocking.some((g) =>
+    HERO_THUMBNAIL_BLOCKING_GATES.has(g),
+  );
+  if (!needsFinisher) return;
+
+  // Already in flight — let it finish rather than stacking a second $0.25 run.
+  const latest = await latestRenderForAsset(
+    "story",
+    storyId,
+    "hero_thumbnail_from_short",
+  );
+  if (latest && (latest.status === "queued" || latest.status === "generating")) {
+    namespacedLog("hero_thumb_heal_inflight", {
+      story_id: storyId,
+      render_id: latest.id,
+      status: latest.status,
+    });
+    return;
+  }
+
+  // The finisher i2i's from the short's persisted character; without a done
+  // short there's nothing to seed from and it would just raise.
+  const short = await latestDoneShortRenderForStory(storyId);
+  if (!short || short.status !== "done" || !short.output_url) {
+    namespacedLog("hero_thumb_heal_no_short", { story_id: storyId });
+    return;
+  }
+
+  const budget = await canEnqueueImageRegen("hero_thumbnail_from_short");
+  if (!budget.ok) {
+    namespacedLog("hero_thumb_heal_budget", {
+      story_id: storyId,
+      spent_cents: budget.budget.spentCents,
+      cap_cents: budget.budget.capCents,
+    });
+    return;
+  }
+
+  await enqueueImageRegen({
+    ownerKind: "story",
+    ownerId: storyId,
+    asset: "hero_thumbnail_from_short",
+    promptHash: null,
+    requestedBy: "auto-complete-publish-cron",
+  });
+  namespacedLog("hero_thumb_heal_enqueued", {
+    story_id: storyId,
+    blocking: completeness.blocking,
+  });
 }
 
 async function incrementAttempts(storyId: string): Promise<number> {

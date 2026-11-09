@@ -48,16 +48,35 @@ export interface BulkEnqueueResult {
 // Reddit source statuses that may be promoted into the pipeline. 'imported'
 // is the natural case; 'queued' too (an admin re-clicks after a worker
 // crashed and reset the row). 'used' and 'skipped' are deliberately
-// excluded — re-processing a used row is a separate explicit affordance,
-// and skipped is the user's "no" answer.
+// excluded — re-processing a used row is a separate explicit affordance
+// (opts.allowUsed, used by the bulk Full-pipeline action), and skipped is
+// the user's "no" answer.
 const ALLOWED_SOURCE_STATUSES: ReadonlySet<string> = new Set([
   "imported",
   "queued",
 ]);
 
+const ALLOWED_SOURCE_STATUSES_WITH_USED: ReadonlySet<string> = new Set([
+  ...ALLOWED_SOURCE_STATUSES,
+  "used",
+]);
+
 export async function bulkEnqueueStoryJobs(
   redditIds: string[],
-  opts: { with_media?: boolean; requested_by?: string | null } = {},
+  opts: {
+    with_media?: boolean;
+    requested_by?: string | null;
+    /** Also accept sources at status 'used' — the explicit re-run
+     *  affordance for stories that already shipped. 'skipped' stays
+     *  excluded (it's the operator's "no" answer). */
+    allowUsed?: boolean;
+    /** When set, overrides the source row's full_pipeline flag on the
+     *  inserted job. The bulk Full-pipeline action passes false so the
+     *  site publish flows through the auto_publish_when_ready lane
+     *  (which also posts the socials) instead of the site-only
+     *  full-pipeline lane racing ahead of it. */
+    fullPipeline?: boolean;
+  } = {},
 ): Promise<BulkEnqueueResult> {
   const result: BulkEnqueueResult = {
     enqueued: 0,
@@ -70,6 +89,9 @@ export async function bulkEnqueueStoryJobs(
 
   const withMedia = opts.with_media === false ? 0 : 1;
   const requestedBy = opts.requested_by ?? null;
+  const allowedStatuses = opts.allowUsed
+    ? ALLOWED_SOURCE_STATUSES_WITH_USED
+    : ALLOWED_SOURCE_STATUSES;
   const now = new Date().toISOString();
 
   // One snapshot read for the candidate rows + one for in-flight jobs, both
@@ -89,7 +111,7 @@ export async function bulkEnqueueStoryJobs(
       result.not_found++;
       continue;
     }
-    if (!ALLOWED_SOURCE_STATUSES.has(src.status)) {
+    if (!allowedStatuses.has(src.status)) {
       result.skipped_status++;
       continue;
     }
@@ -112,8 +134,14 @@ export async function bulkEnqueueStoryJobs(
       // 2026-06-24 propagate Full Pipeline opt-in from the source row.
       // The worker reads this flag when finishing the job; the cron
       // drain reads it again as a safety check before flipping the
-      // story to published.
-      full_pipeline: src.full_pipeline,
+      // story to published. opts.fullPipeline overrides when set —
+      // see the option's doc comment.
+      full_pipeline:
+        opts.fullPipeline === undefined
+          ? src.full_pipeline
+          : opts.fullPipeline
+            ? 1
+            : 0,
       auto_publish_status: null,
     });
     // Only flip reddit_source.status when the row was 'imported'; a row

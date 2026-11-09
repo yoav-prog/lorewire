@@ -25,7 +25,7 @@ import { fetchPosterBytes } from "@/lib/poster-bytes";
 // --- Types -----------------------------------------------------------------
 
 export type FacebookPostStatus = "pending" | "posted" | "failed" | "deleted";
-export type FacebookPostTrigger = "auto" | "manual";
+export type FacebookPostTrigger = "auto" | "manual" | "scheduled";
 
 export interface FacebookPostRow {
   id: string;
@@ -96,13 +96,13 @@ export type FbFetchLike = (
     method?: string;
     headers?: Record<string, string>;
     /** undici fetch accepts string, FormData, Uint8Array, etc. for the
-     *  body. We widen this from `string` (the original shape) to
-     *  `BodyInit` so the postVideo path can attach a multipart payload
-     *  carrying the optional `thumb` image. The default fetch wrapper
-     *  passes the body straight through to undici, which handles every
-     *  BodyInit variant. Test stubs that only assert URL+method are
-     *  unaffected — they can still accept a string body via the union.
-     *  Per _plans/2026-06-28-explicit-thumbnail-uploads.md. */
+     *  body. We widen this from `string` to `BodyInit` so
+     *  setVideoThumbnail can attach a multipart payload carrying the
+     *  cover image as the `source` part. The default fetch wrapper passes
+     *  the body straight through to undici, which handles every BodyInit
+     *  variant. Test stubs that only assert URL+method are unaffected —
+     *  they can still accept a string body via the union.
+     *  Per _plans/2026-07-01-facebook-reel-thumbnail.md. */
     body?: BodyInit;
   },
 ) => Promise<FbFetchResponse>;
@@ -120,12 +120,14 @@ export interface PublishDeps {
  *  here — single source of truth, no drift. */
 export const SETTING_AUTO_PUBLISH = "publisher.facebook.auto_publish";
 export const SETTING_CAPTION_TEMPLATE = "publisher.facebook.caption_template";
-/** Toggle for the custom-thumbnail upload step (PR following
- *  _plans/2026-06-28-explicit-thumbnail-uploads.md). When ON (default),
- *  postVideo switches to a multipart body and attaches the story's
- *  scene-1 image as the `thumb` part so FB shows it as the post cover
- *  instead of FB's auto-picked frame. Admin can flip off if the
- *  multipart path becomes flaky or the thumbnails look wrong. */
+/** Toggle for the custom-cover step. When ON (default), after a
+ *  successful publish we call POST /{video-id}/thumbnails
+ *  (is_preferred=true) with the story's poster to override Facebook's
+ *  auto-picked Reel cover. The older /videos `thumb` upload was dropped:
+ *  Facebook ignores `thumb` for file_url (hosted) uploads and turns our
+ *  vertical shorts into Reels, whose cover it doesn't expose on the
+ *  publish call. Admin can flip off if the thumbnails edge 403s or the
+ *  covers look wrong. Per _plans/2026-07-01-facebook-reel-thumbnail.md. */
 export const SETTING_UPLOAD_CUSTOM_THUMBNAIL =
   "publisher.facebook.upload_custom_thumbnail";
 
@@ -314,39 +316,71 @@ function normalizeFbError(
   };
 }
 
-/** Fetch the cover image bytes and wrap them as a Blob for the FB
- *  multipart `thumb` upload. Returns null on any failure — caller
- *  falls back to the url-encoded path and FB picks the cover
- *  automatically.
+/** Best-effort custom cover for a just-published Page video/Reel via
+ *  POST /{video-id}/thumbnails (is_preferred=true). This is the ONLY
+ *  Facebook API lever for a custom cover on our content: FB ignores the
+ *  `thumb` field on the /videos upload when the video arrives via
+ *  file_url (hosted pull), and it auto-converts our vertical shorts to
+ *  Reels, whose /video_reels publish call exposes no cover parameter at
+ *  all (verified against the v25 Graph API reference, 2026-07-01).
+ *
+ *  Effect on Reels is NOT guaranteed by Meta's docs — the in-feed player
+ *  may still show a frame — so this NEVER blocks or fails the publish;
+ *  the video is already live when we get here.
  *
  *  Bytes come from `fetchPosterBytes`, which prefers R2 direct (S3,
- *  signed) in production to bypass the Cloudflare WAF that returns
- *  403 on Vercel's serverless egress for R2 custom-domain URLs.
- *  Tests / dev / GCS-only deploys fall through to the public-URL GET
- *  via the caller's fetchImpl. Per fix/publisher-bytes-via-r2-direct
- *  and the 2026-06-30 19:40 production incident. */
-async function fetchThumbnailBlob(
-  thumbnailUrl: string,
-  fetchImpl: FbFetchLike,
-): Promise<{ blob: Blob; mime: string } | null> {
-  const fetched = await fetchPosterBytes(thumbnailUrl, (url, init) =>
-    fetchImpl(url, init),
+ *  signed) in production to bypass the Cloudflare WAF that 403s Vercel's
+ *  serverless egress for R2 custom-domain URLs; dev / tests fall through
+ *  to the public-URL GET via the caller's fetchImpl. Same source the YT
+ *  thumbnail path uses. */
+async function setVideoThumbnail(args: {
+  videoId: string;
+  thumbnailUrl: string;
+  fetchImpl: FbFetchLike;
+}): Promise<{ ok: true } | { ok: false; reason: string; status?: number }> {
+  const token = process.env.FB_PAGE_ACCESS_TOKEN ?? "";
+  const fetched = await fetchPosterBytes(args.thumbnailUrl, (url, init) =>
+    args.fetchImpl(url, init),
   );
   if (!fetched) {
-    // fetchPosterBytes already logged the reason in the `[poster bytes
-    // ...]` namespace; emit a `[publish facebook thumb_fetch_failed]`
-    // line too so the FB-specific publish log still tells the whole
-    // story when grepped on its own.
-    log("thumb_fetch_failed", {
-      thumb_url_host: hostOf(thumbnailUrl),
-      reason: "fetchPosterBytes returned null (see [poster bytes ...] logs)",
-    });
-    return null;
+    return {
+      ok: false,
+      reason:
+        "thumbnail bytes unavailable (see [poster bytes ...] logs for the exact failure mode)",
+    };
   }
-  return {
-    blob: new Blob([fetched.bytes as BlobPart], { type: fetched.mime }),
-    mime: fetched.mime,
-  };
+  const form = new FormData();
+  form.append("access_token", token);
+  form.append("is_preferred", "true");
+  const ext = fetched.mime.split("/")[1] || "png";
+  form.append(
+    "source",
+    new Blob([fetched.bytes as BlobPart], { type: fetched.mime }),
+    `cover.${ext}`,
+  );
+  const url = `${GRAPH_BASE}/${encodeURIComponent(args.videoId)}/thumbnails`;
+  let resp: FbFetchResponse;
+  try {
+    // undici sets the multipart boundary automatically; do NOT preset
+    // Content-Type or the boundary header will be wrong.
+    resp = await args.fetchImpl(url, {
+      method: "POST",
+      headers: {},
+      body: form,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    return { ok: false, reason: `thumbnails POST failed: ${msg.slice(0, 300)}` };
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    return {
+      ok: false,
+      reason: `thumbnails HTTP ${resp.status}: ${text.slice(0, 200)}`,
+      status: resp.status,
+    };
+  }
+  return { ok: true };
 }
 
 async function postVideo(
@@ -354,65 +388,31 @@ async function postVideo(
   videoUrl: string,
   caption: string,
   fetchImpl: FbFetchLike,
-  thumbnailUrl: string | null = null,
 ): Promise<
   | { ok: true; externalPostId: string }
   | { ok: false; error: NormalizedFbError }
 > {
   const token = process.env.FB_PAGE_ACCESS_TOKEN ?? "";
-  // When a thumbnail URL is supplied, attempt the multipart path: same
-  // endpoint, same fields, plus a `thumb` Blob carrying the cover. If
-  // the thumbnail fetch fails (network, 404, zero bytes), fall through
-  // to the url-encoded path — better to publish without a cover than
-  // not publish at all. Per
-  // _plans/2026-06-28-explicit-thumbnail-uploads.md.
-  let body: BodyInit;
-  let headers: Record<string, string>;
-  let thumbAttached = false;
-  if (thumbnailUrl) {
-    const fetched = await fetchThumbnailBlob(thumbnailUrl, fetchImpl);
-    if (fetched) {
-      const form = new FormData();
-      form.append("access_token", token);
-      form.append("file_url", videoUrl);
-      form.append("description", caption);
-      // The Graph API thumb param accepts a multipart file. We send the
-      // blob with a filename so FB infers the format from the mime.
-      const ext = fetched.mime.split("/")[1] || "png";
-      form.append("thumb", fetched.blob, `cover.${ext}`);
-      body = form;
-      // undici sets the multipart boundary automatically; do NOT preset
-      // Content-Type here or the boundary header will be wrong.
-      headers = {};
-      thumbAttached = true;
-    } else {
-      // Fetch failed — fall through to the url-encoded path.
-      body = new URLSearchParams({
-        access_token: token,
-        file_url: videoUrl,
-        description: caption,
-      }).toString();
-      headers = { "Content-Type": "application/x-www-form-urlencoded" };
-    }
-  } else {
-    body = new URLSearchParams({
-      access_token: token,
-      file_url: videoUrl,
-      description: caption,
-    }).toString();
-    headers = { "Content-Type": "application/x-www-form-urlencoded" };
-  }
+  // Hosted (file_url) upload, url-encoded body. We do NOT attach a
+  // `thumb` here: Facebook ignores it for file_url uploads and turns our
+  // vertical shorts into Reels anyway. The cover is set after publish via
+  // setVideoThumbnail (POST /{video-id}/thumbnails). Per
+  // _plans/2026-07-01-facebook-reel-thumbnail.md.
+  const body = new URLSearchParams({
+    access_token: token,
+    file_url: videoUrl,
+    description: caption,
+  }).toString();
   log("attempt_video", {
     page_id_present: pageId.length > 0,
     video_url_host: hostOf(videoUrl),
-    thumb_attached: thumbAttached,
   });
   const url = `${GRAPH_VIDEO_BASE}/${encodeURIComponent(pageId)}/videos`;
   let resp: FbFetchResponse;
   try {
     resp = await fetchImpl(url, {
       method: "POST",
-      headers,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
   } catch (e) {
@@ -444,6 +444,50 @@ async function postVideo(
     };
   }
   return { ok: true, externalPostId: data.id };
+}
+
+/** Best-effort cover attempt after a successful publish. Gated by the
+ *  upload_custom_thumbnail setting + a resolved poster URL. Logs the
+ *  outcome under `custom_thumbnail_{ok,failed,skipped}` (matching the YT
+ *  publisher's events); never throws, never touches the 'posted' row.
+ *  Shared by the fresh-publish and retry paths. */
+async function maybeSetVideoThumbnail(
+  row: FacebookPostRow,
+  videoId: string,
+  enabled: boolean,
+  thumbnailUrl: string | null,
+  fetchImpl: FbFetchLike,
+): Promise<void> {
+  if (!enabled || !thumbnailUrl) {
+    log("custom_thumbnail_skipped", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      external_post_id: videoId,
+      reason: !enabled
+        ? "upload_custom_thumbnail setting off"
+        : "no thumbnail URL resolved (story missing short_config / poster)",
+    });
+    return;
+  }
+  const started = Date.now();
+  const res = await setVideoThumbnail({ videoId, thumbnailUrl, fetchImpl });
+  if (res.ok) {
+    log("custom_thumbnail_ok", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      external_post_id: videoId,
+      latency_ms: Date.now() - started,
+    });
+  } else {
+    log("custom_thumbnail_failed", {
+      story_id: row.story_id,
+      render_id: row.render_id,
+      external_post_id: videoId,
+      reason: res.reason,
+      http_status: res.status,
+      latency_ms: Date.now() - started,
+    });
+  }
 }
 
 /** Delete a previously-posted Page post via DELETE /{video-id}. Used by
@@ -539,6 +583,12 @@ export async function publishShortToFacebook(
       });
       return { status: "skipped", reason: "auto-publish toggle off" };
     }
+  }
+  // A 'scheduled' publish comes from the Publish Scheduler: it bypasses the
+  // auto_publish toggle (the schedule IS the intent) but still honors
+  // story-level dedup, so a re-dispatch or a manual+scheduled overlap
+  // cannot double-post.
+  if (args.trigger !== "manual") {
     const active = await existingActiveRowsForStory(args.storyId);
     if (active > 0) {
       log("skipped", {
@@ -588,14 +638,13 @@ export async function publishShortToFacebook(
     ...tokenFingerprint(),
   });
 
-  // Resolve the per-story cover for FB's thumb param. Skipped when the
-  // setting is off, the story has no short_config, or scene-1 is
-  // missing — postVideo falls through to the url-encoded path and FB
-  // auto-picks the cover. Per
-  // _plans/2026-06-28-explicit-thumbnail-uploads.md.
-  // Phase 2 (per _plans/2026-06-28-phase-2-social-poster-render.md)
-  // prefers the deliberate poster from ensureShortPoster; falls back
-  // to PR #137's scene-1 URL when the poster path returns null.
+  // Resolve the per-story cover for the post-publish thumbnails edge
+  // (maybeSetVideoThumbnail below). Skipped when the setting is off; a
+  // null URL just means the cover step no-ops and FB keeps its auto Reel
+  // cover. Phase 2 (per _plans/2026-06-28-phase-2-social-poster-render.md)
+  // prefers the deliberate poster from ensureShortPoster; falls back to
+  // PR #137's scene-1 URL when the poster path returns null. Per
+  // _plans/2026-07-01-facebook-reel-thumbnail.md.
   const uploadCustomThumbnail =
     ((await getSetting(SETTING_UPLOAD_CUSTOM_THUMBNAIL)) ?? "1") !== "0";
   let thumbnailUrl: string | null = null;
@@ -620,13 +669,7 @@ export async function publishShortToFacebook(
   }
 
   const started = now.valueOf();
-  const result = await postVideo(
-    pageId,
-    args.videoUrl,
-    caption,
-    fetchImpl,
-    thumbnailUrl,
-  );
+  const result = await postVideo(pageId, args.videoUrl, caption, fetchImpl);
   const latency = Date.now() - started;
 
   if (result.ok) {
@@ -639,6 +682,13 @@ export async function publishShortToFacebook(
       external_post_id: result.externalPostId,
       latency_ms: latency,
     });
+    await maybeSetVideoThumbnail(
+      row,
+      result.externalPostId,
+      uploadCustomThumbnail,
+      thumbnailUrl,
+      fetchImpl,
+    );
     const fresh = await getRow(row.id);
     if (!fresh) throw new Error("publish-to-facebook: posted row vanished");
     return { status: "posted", row: fresh };
@@ -727,7 +777,6 @@ export async function attemptFacebookPublishForRow(
     row.video_url,
     row.caption,
     fetchImpl,
-    thumbnailUrl,
   );
   const latency = Date.now() - started;
   if (result.ok) {
@@ -740,6 +789,13 @@ export async function attemptFacebookPublishForRow(
       external_post_id: result.externalPostId,
       latency_ms: latency,
     });
+    await maybeSetVideoThumbnail(
+      row,
+      result.externalPostId,
+      uploadCustomThumbnail,
+      thumbnailUrl,
+      fetchImpl,
+    );
     const fresh = await getRow(row.id);
     return { status: "posted", row: fresh ?? row };
   }

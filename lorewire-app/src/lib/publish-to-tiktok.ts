@@ -38,7 +38,7 @@ import { loadSeoMetadata } from "@/lib/seo-metadata";
 // --- Types -----------------------------------------------------------------
 
 export type TikTokPostStatus = "pending" | "posted" | "failed" | "deleted";
-export type TikTokPostTrigger = "auto" | "manual";
+export type TikTokPostTrigger = "auto" | "manual" | "scheduled";
 export type TikTokPostMode = "inbox" | "direct";
 
 export interface TikTokPostRow {
@@ -153,7 +153,7 @@ export const DEFAULT_CAPTION_TEMPLATE = `{{hook}}
 
 The full story → {{article_url}}
 
-#Shorts #TrueStory #InternetStories #{{category}}Stories #Reddit`;
+#Shorts #InternetStories #{{category}}Stories`;
 
 /** The default caption template already inlines hashtags, so the
  *  base hashtag list is empty by default — admin can add a global
@@ -853,6 +853,12 @@ export async function publishShortToTikTok(
       });
       return { status: "skipped", reason: "auto-publish toggle off" };
     }
+  }
+  // A 'scheduled' publish comes from the Publish Scheduler: it bypasses the
+  // auto_publish toggle (the schedule IS the intent) but still honors
+  // story-level dedup, so a re-dispatch or a manual+scheduled overlap
+  // cannot double-post.
+  if (args.trigger !== "manual") {
     const active = await existingActiveRowsForStory(args.storyId);
     if (active > 0) {
       log("skipped", {

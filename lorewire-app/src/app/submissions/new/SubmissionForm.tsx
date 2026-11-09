@@ -37,6 +37,7 @@ export default function SubmissionForm({
   const [question, setQuestion] = useState(initial?.question ?? "");
   const [optionA, setOptionA] = useState(initial?.optionA ?? "");
   const [optionB, setOptionB] = useState(initial?.optionB ?? "");
+  const [ownWork, setOwnWork] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,6 +58,7 @@ export default function SubmissionForm({
           optionA,
           optionB,
           lang: "en",
+          ownWork,
         }),
       });
       const data = (await res.json().catch(() => null)) as
@@ -158,6 +160,18 @@ export default function SubmissionForm({
           />
         </label>
       </div>
+
+      <label className="flex items-start gap-2 text-sm text-ink">
+        <input
+          type="checkbox"
+          required
+          checked={ownWork}
+          onChange={(e) => setOwnWork(e.target.checked)}
+          disabled={busy}
+          className="mt-0.5"
+        />
+        <span>I wrote this myself. It isn&apos;t copied from anywhere else.</span>
+      </label>
 
       {error && <p className="text-sm text-danger">{error}</p>}
 

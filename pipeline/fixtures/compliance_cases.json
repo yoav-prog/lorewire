@@ -1,0 +1,161 @@
+[
+  {
+    "name": "clean original story passes",
+    "story": {"title": "THE LUNCHBOX TREATY", "summary": "A shared fridge turns into a tiny cold war.", "body": "Priya drew a border down the middle shelf with blue tape."},
+    "source_title": "My coworker keeps eating my food",
+    "source_text": "I told Karen that the yogurt was mine and she just laughed at me for a while.",
+    "source_url": "https://www.reddit.com/r/AmItheAsshole/comments/abc123/x/",
+    "expected": []
+  },
+  {
+    "name": "six shared words fail",
+    "story": {"body": "Later she just laughed at me for a while and left."},
+    "source_text": "I told her and she just laughed at me for a while.",
+    "expected": ["verbatim"]
+  },
+  {
+    "name": "five shared words pass",
+    "story": {"body": "Later she just laughed at me and left the building."},
+    "source_text": "I told her and she just laughed at me for a while.",
+    "expected": []
+  },
+  {
+    "name": "overlap ignores case and punctuation",
+    "story": {"body": "SHE, JUST -- LAUGHED: at me; for a while!"},
+    "source_text": "I told her and she just laughed at me for a while.",
+    "expected": ["verbatim"]
+  },
+  {
+    "name": "apostrophes normalize away",
+    "story": {"body": "Honestly i dont think that was fair to anybody here."},
+    "source_text": "Honestly, I don't think that was fair to anybody at all.",
+    "expected": ["verbatim"]
+  },
+  {
+    "name": "overlap does not span two fields",
+    "story": {"title": "she just laughed", "summary": "at me for a while"},
+    "source_text": "I told her and she just laughed at me for a while.",
+    "expected": []
+  },
+  {
+    "name": "quoted string in the source fails",
+    "story": {"body": "The sign on the door said touch this again in red."},
+    "source_text": "She left a sign that read \"touch this again\" on the door of my room.",
+    "expected": ["quote"]
+  },
+  {
+    "name": "curly quoted string in the source fails",
+    "story": {"body": "The sign on the door said touch this again in red."},
+    "source_text": "She left a sign that read “touch this again” on the door of my room.",
+    "expected": ["quote"]
+  },
+  {
+    "name": "one word quote is ignored",
+    "story": {"body": "He said fine and walked away from the table."},
+    "source_text": "She replied \"fine\" to everything I sent to her that week.",
+    "expected": []
+  },
+  {
+    "name": "username fails",
+    "story": {"body": "A message arrived from u/throwaway_991 that night."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["identifying"]
+  },
+  {
+    "name": "handle fails",
+    "story": {"body": "She tagged @danny_b in the group photo."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["identifying"]
+  },
+  {
+    "name": "email address is not a handle",
+    "story": {"body": "The notice came from desk@office.example this morning."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": []
+  },
+  {
+    "name": "source name in the story fails",
+    "story": {"body": "Then Karen opened the fridge."},
+    "source_text": "I told Karen about it.",
+    "expected": ["identifying"]
+  },
+  {
+    "name": "source place in the story fails",
+    "story": {"body": "They moved to Tulsa that spring."},
+    "source_text": "We both live near Tulsa now.",
+    "expected": ["identifying"]
+  },
+  {
+    "name": "source name in an all caps title fails",
+    "story": {"title": "KAREN AND THE FRIDGE"},
+    "source_text": "I told Karen about it.",
+    "expected": ["identifying"]
+  },
+  {
+    "name": "lowercase word matching a source name passes",
+    "story": {"body": "She made a mark on the calendar."},
+    "source_text": "I told Mark about it.",
+    "expected": []
+  },
+  {
+    "name": "word starting a source sentence is not a name",
+    "story": {"body": "Nobody spoke. Yesterday felt far away."},
+    "source_text": "Yesterday it rained. Nobody came.",
+    "expected": []
+  },
+  {
+    "name": "weekday in the source is not a name",
+    "story": {"body": "It all fell apart on Friday."},
+    "source_text": "It happened last Friday at my place.",
+    "expected": []
+  },
+  {
+    "name": "true story label fails",
+    "story": {"summary": "A true story about a fridge."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["labeling"]
+  },
+  {
+    "name": "true stories hashtag fails",
+    "story": {"metadata": "#Shorts #TrueStories"},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["labeling"]
+  },
+  {
+    "name": "naming reddit fails",
+    "story": {"body": "It was all over Reddit by noon."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["labeling"]
+  },
+  {
+    "name": "naming a subreddit fails",
+    "story": {"body": "Someone shared it to r/pettyrevenge."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["labeling"]
+  },
+  {
+    "name": "source url fails",
+    "story": {"metadata": "See https://example.test/thread/42 for more"},
+    "source_text": "Nothing relevant here at all.",
+    "source_url": "https://example.test/thread/42",
+    "expected": ["labeling"]
+  },
+  {
+    "name": "reference to the original poster fails",
+    "story": {"body": "The original poster never replied."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["labeling"]
+  },
+  {
+    "name": "uppercase OP fails but lowercase op passes",
+    "story": {"body": "OP left the room after the op ended."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": ["labeling"]
+  },
+  {
+    "name": "true alone is not a label",
+    "story": {"body": "It was true that the story of the fridge grew."},
+    "source_text": "Nothing relevant here at all.",
+    "expected": []
+  }
+]

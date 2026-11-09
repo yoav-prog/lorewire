@@ -82,6 +82,7 @@ function makeStory(): WireStory {
     hero_image: null,
     hero_image_landscape: null,
     hero_has_baked_title: 0,
+    thumbnail_image: null,
     video_url: "https://example.invalid/v.mp4",
     published_at: null,
     created_at: null,
@@ -92,6 +93,24 @@ function makeStory(): WireStory {
     // here keeps the WireCard render path identical to a wire without
     // a poll, which is what these tests actually exercise.
     poll: null,
+    category_slug: null,
+    // No intro window on the base fixture; the Skip Intro tests below
+    // override it explicitly.
+    intro_window: null,
+  };
+}
+
+// Pre-vote poll bundle for the immersive-mode surface tests. The full poll
+// state machine is covered by WirePollPanel.test.tsx; here the poll only
+// needs to exist so the pill + sheet render.
+function makeWirePoll(): NonNullable<WireStory["poll"]> {
+  return {
+    pollId: "poll-1",
+    question: "Was that smart pushback, or too far?",
+    optionA: "Smart Pushback",
+    optionB: "Too Far",
+    initialResult: null,
+    initialVotedSide: null,
   };
 }
 
@@ -104,6 +123,7 @@ function defaultProps(overrides: Partial<WireCardProps> = {}): WireCardProps {
     autoplay: true,
     advance: true,
     slow: false,
+    skipIntro: false,
     reducedMotion: false,
     paused: false,
     eager: true,
@@ -112,6 +132,7 @@ function defaultProps(overrides: Partial<WireCardProps> = {}): WireCardProps {
     onToggleAutoplay: () => undefined,
     onToggleAdvance: () => undefined,
     onToggleSlow: () => undefined,
+    onToggleSkipIntro: () => undefined,
     onOpenInfo: () => undefined,
     showSoundHint: false,
     onDismissSoundHint: () => undefined,
@@ -266,34 +287,46 @@ describe("WireCard play/pause race", () => {
   });
 });
 
-describe("WireCard slow-mode chrome toggle", () => {
-  // Plan: _plans/2026-06-25-slow-mode-playback.md. The chrome toggle sits in
-  // the top-right cluster next to autoplay/advance/mute and shows a "0.75×"
-  // label when slow is on, "1×" when off. Tapping it calls onToggleSlow and
-  // the effect mirrors the chosen rate onto the <video> element.
+function openMore(container: HTMLElement): void {
+  const btn = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Playback options"]',
+  );
+  if (!btn) throw new Error("⋯ options button not found");
+  act(() => {
+    btn.click();
+  });
+}
+
+describe("WireCard slow-mode toggle (in the ⋯ options menu)", () => {
+  // Plan: _plans/2026-06-25-slow-mode-playback.md + the 2026-07-01 wires
+  // declutter. The slow toggle moved off the frame into the ⋯ playback-options
+  // menu; it shows ".75×" when slow is on, "1×" when off, and mirrors the rate
+  // onto the <video> element. The playbackRate assertions further down are
+  // driven by the `slow` prop and are independent of the button's location.
 
   function findSlowToggle(container: HTMLElement): HTMLButtonElement | null {
-    // Both states have the same label prefix "Turn slow mode on" /
-    // "Slow mode on; switch to normal speed" — easier to match aria-pressed.
+    // In the menu the row is a menuitemcheckbox whose title starts "Slow mode".
     return container.querySelector<HTMLButtonElement>(
-      'button[aria-pressed][title^="Slow mode"]',
+      'button[role="menuitemcheckbox"][title^="Slow mode"]',
     );
   }
 
-  it("renders '1×' and aria-pressed=false when slow mode is off", () => {
+  it("renders '1×' and aria-checked=false when slow mode is off", () => {
     const m = mount(defaultProps({ slow: false }));
+    openMore(m.container);
     const btn = findSlowToggle(m.container);
     expect(btn).not.toBeNull();
-    expect(btn!.getAttribute("aria-pressed")).toBe("false");
+    expect(btn!.getAttribute("aria-checked")).toBe("false");
     expect(btn!.textContent).toContain("1×");
     unmount(m);
   });
 
-  it("renders '.75×' and aria-pressed=true when slow mode is on", () => {
+  it("renders '.75×' and aria-checked=true when slow mode is on", () => {
     const m = mount(defaultProps({ slow: true }));
+    openMore(m.container);
     const btn = findSlowToggle(m.container);
     expect(btn).not.toBeNull();
-    expect(btn!.getAttribute("aria-pressed")).toBe("true");
+    expect(btn!.getAttribute("aria-checked")).toBe("true");
     expect(btn!.textContent).toContain(".75×");
     unmount(m);
   });
@@ -306,6 +339,7 @@ describe("WireCard slow-mode chrome toggle", () => {
         onToggleSlow: () => calls.push(1),
       }),
     );
+    openMore(m.container);
     const btn = findSlowToggle(m.container)!;
     act(() => {
       btn.click();
@@ -340,6 +374,374 @@ describe("WireCard slow-mode chrome toggle", () => {
     expect(v.playbackRate).toBeCloseTo(0.75);
     rerender(m, defaultProps({ slow: false }));
     expect(v.playbackRate).toBeCloseTo(1);
+    unmount(m);
+  });
+});
+
+describe("WireCard ⋯ options menu", () => {
+  // The 2026-07-01 declutter: autoplay / end-of-wire / slow / shuffle moved off
+  // the frame into a single ⋯ menu so the video is king.
+
+  function findMenu(container: HTMLElement): HTMLElement | null {
+    return container.querySelector<HTMLElement>('[role="menu"]');
+  }
+
+  it("is closed until the ⋯ button is tapped, then reveals the playback toggles", () => {
+    const m = mount(defaultProps());
+    expect(findMenu(m.container)).toBeNull();
+    openMore(m.container);
+    const menu = findMenu(m.container);
+    expect(menu).not.toBeNull();
+    // Autoplay + End-of-wire + Slow + Skip intro = four toggle rows.
+    expect(menu!.querySelectorAll('[role="menuitemcheckbox"]')).toHaveLength(4);
+    unmount(m);
+  });
+
+  it("hides the Shuffle action when no onShuffle is provided", () => {
+    const m = mount(defaultProps());
+    openMore(m.container);
+    expect(m.container.querySelector('[role="menuitem"]')).toBeNull();
+    unmount(m);
+  });
+
+  it("shows Shuffle when onShuffle is provided, and invokes + closes on select", () => {
+    const calls: number[] = [];
+    const m = mount(defaultProps({ onShuffle: () => calls.push(1) }));
+    openMore(m.container);
+    const shuffle = m.container.querySelector<HTMLButtonElement>('[role="menuitem"]');
+    expect(shuffle).not.toBeNull();
+    act(() => {
+      shuffle!.click();
+    });
+    expect(calls).toHaveLength(1);
+    // Selecting Shuffle closes the menu.
+    expect(findMenu(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("closes when the outside backdrop is tapped", () => {
+    const m = mount(defaultProps());
+    openMore(m.container);
+    expect(findMenu(m.container)).not.toBeNull();
+    const backdrop = m.container.querySelector<HTMLElement>(".fixed.inset-0");
+    expect(backdrop).not.toBeNull();
+    act(() => {
+      backdrop!.click();
+    });
+    expect(findMenu(m.container)).toBeNull();
+    unmount(m);
+  });
+});
+
+describe("WireCard immersive mode", () => {
+  // TikTok-style fullscreen: the bottom control bar is dropped and the actions
+  // overlay the video. The feed owns real fullscreen; these tests exercise the
+  // card's layout switch + the enter/exit callbacks.
+
+  function bottomBar(container: HTMLElement): Element | null {
+    // The below-video control bar is the only element with border-t + border-line.
+    return container.querySelector(".border-t.border-line");
+  }
+  function exitButton(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Exit fullscreen"]',
+    );
+  }
+  function enterButton(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Enter fullscreen"]',
+    );
+  }
+
+  it("normal mode shows the bottom control bar and no exit button", () => {
+    const m = mount(defaultProps({ immersive: false }));
+    expect(bottomBar(m.container)).not.toBeNull();
+    expect(exitButton(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("shows an Enter-fullscreen button only when onEnterImmersive is set, and invokes it", () => {
+    const a = mount(defaultProps({ immersive: false }));
+    expect(enterButton(a.container)).toBeNull(); // no handler → no button
+    unmount(a);
+
+    const calls: number[] = [];
+    const m = mount(
+      defaultProps({ immersive: false, onEnterImmersive: () => calls.push(1) }),
+    );
+    const btn = enterButton(m.container);
+    expect(btn).not.toBeNull();
+    act(() => {
+      btn!.click();
+    });
+    expect(calls).toHaveLength(1);
+    unmount(m);
+  });
+
+  it("immersive mode hides the bottom bar, shows the exit button, and invokes onExitImmersive", () => {
+    const calls: number[] = [];
+    const m = mount(
+      defaultProps({ immersive: true, onExitImmersive: () => calls.push(1) }),
+    );
+    expect(bottomBar(m.container)).toBeNull();
+    const x = exitButton(m.container);
+    expect(x).not.toBeNull();
+    act(() => {
+      x!.click();
+    });
+    expect(calls).toHaveLength(1);
+    unmount(m);
+  });
+
+  // 2026-07-02 manager report: users entered fullscreen by accident (the old
+  // enter button floated right above the scrubber) and then couldn't find the
+  // way out (the exit control was an unlabeled X circle). These tests pin the
+  // fix: entry lives in the bottom control bar off the video stage, exit is
+  // labeled + pinged on arrival, and voting stays reachable bottom-left.
+
+  it("keeps the enter-fullscreen button in the bottom control bar, off the video stage", () => {
+    const m = mount(
+      defaultProps({ immersive: false, onEnterImmersive: () => undefined }),
+    );
+    const enter = enterButton(m.container);
+    expect(enter).not.toBeNull();
+    // It sits inside the below-video bar (with like/save/share), so a tap
+    // aimed at the stage or the scrubber can never land on it.
+    expect(bottomBar(m.container)!.contains(enter)).toBe(true);
+    const share = m.container.querySelector('button[aria-label="Share"]');
+    expect(enter!.parentElement).toBe(share!.parentElement);
+    unmount(m);
+  });
+
+  // NOT unit-tested: the top row's +56px offset below the feed's centered
+  // pill (vs +14px in immersive, where the pill is hidden). It's a
+  // calc(env(safe-area-inset-top)) inline style and happy-dom's CSSOM
+  // rejects calc(env()) values entirely — neither style.paddingTop nor the
+  // style attribute reflects them. Covered by preview QA on a real phone.
+
+  it("labels the exit control so it reads as the way out", () => {
+    const m = mount(
+      defaultProps({ immersive: true, onExitImmersive: () => undefined }),
+    );
+    expect(exitButton(m.container)!.textContent).toMatch(/exit/i);
+    unmount(m);
+  });
+
+  it("pings the exit pill on the immersive transition, but not under reduced motion", () => {
+    // Entering immersive (false → true) arms the ping.
+    const a = mount(defaultProps({ immersive: false }));
+    act(() => {
+      a.root.render(
+        <WireCard
+          {...defaultProps({ immersive: true, onExitImmersive: () => undefined })}
+        />,
+      );
+    });
+    expect(a.container.querySelector(".wire-exit-ping")).not.toBeNull();
+    unmount(a);
+
+    // Same transition under reduced motion stays quiet.
+    const b = mount(defaultProps({ immersive: false, reducedMotion: true }));
+    act(() => {
+      b.root.render(
+        <WireCard
+          {...defaultProps({
+            immersive: true,
+            reducedMotion: true,
+            onExitImmersive: () => undefined,
+          })}
+        />,
+      );
+    });
+    expect(b.container.querySelector(".wire-exit-ping")).toBeNull();
+    unmount(b);
+
+    // A card that MOUNTS already immersive (windowed neighbour while
+    // browsing fullscreen) doesn't ping — only the entry transition does.
+    const c = mount(
+      defaultProps({ immersive: true, onExitImmersive: () => undefined }),
+    );
+    expect(c.container.querySelector(".wire-exit-ping")).toBeNull();
+    unmount(c);
+  });
+
+  it("stacks the vote pill with the title bottom-left and opens the poll sheet", () => {
+    const m = mount(
+      defaultProps({
+        short: { ...makeStory(), poll: makeWirePoll() },
+        immersive: true,
+        onExitImmersive: () => undefined,
+      }),
+    );
+    const pill = m.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Vote on this poll"]',
+    );
+    const title = m.container.querySelector(
+      'button[aria-label="Read the story: Test wire"]',
+    );
+    expect(pill).not.toBeNull();
+    expect(title).not.toBeNull();
+    expect(pill!.parentElement).toBe(title!.parentElement);
+    // Tapping the pill opens the poll sheet over the video (the panel's
+    // answer buttons appear).
+    act(() => {
+      pill!.click();
+    });
+    expect(m.container.querySelector('button[data-side="A"]')).not.toBeNull();
+    unmount(m);
+  });
+});
+
+// ─── Skip Intro ───────────────────────────────────────────────────────────────
+// _plans/2026-07-04-skip-intro.md. The intro window arrives server-resolved on
+// short.intro_window; the card shows a "Skip intro" pill while playback sits
+// inside it, and the always-skip pref auto-seeks on entry. Playback time is
+// simulated by stubbing currentTime/duration on the element and dispatching
+// real timeupdate events (React attaches media events straight to the node).
+
+const INTRO_WINDOW = { start_ms: 3000, end_ms: 9000 };
+
+function stubPlayback(
+  video: HTMLVideoElement,
+  durationSec: number,
+): { set: (tSec: number) => void } {
+  let cur = 0;
+  Object.defineProperty(video, "currentTime", {
+    configurable: true,
+    get: () => cur,
+    set: (v: number) => {
+      cur = v;
+    },
+  });
+  Object.defineProperty(video, "duration", {
+    configurable: true,
+    get: () => durationSec,
+  });
+  return {
+    set: (tSec) => {
+      cur = tSec;
+    },
+  };
+}
+
+function tick(video: HTMLVideoElement): void {
+  act(() => {
+    video.dispatchEvent(new Event("timeupdate"));
+  });
+}
+
+function skipButton(container: HTMLElement): HTMLButtonElement | null {
+  return container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Skip intro"]',
+  );
+}
+
+describe("WireCard — Skip intro", () => {
+  it("shows the button only inside the intro window; the click seeks past it", () => {
+    const m = mount(
+      defaultProps({ short: { ...makeStory(), intro_window: INTRO_WINDOW } }),
+    );
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 60);
+
+    pb.set(1);
+    tick(video);
+    expect(skipButton(m.container)).toBeNull();
+
+    pb.set(4);
+    tick(video);
+    const btn = skipButton(m.container);
+    expect(btn).not.toBeNull();
+
+    act(() => {
+      btn!.click();
+    });
+    expect(video.currentTime).toBe(9);
+    expect(skipButton(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("auto-skips on entering the window when the always-skip pref is on", () => {
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: { ...makeStory(), intro_window: INTRO_WINDOW },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 60);
+
+    pb.set(3.1);
+    tick(video);
+    expect(video.currentTime).toBe(9);
+    unmount(m);
+  });
+
+  it("a keyboard seek INTO the window suppresses auto-skip but keeps the button", () => {
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: { ...makeStory(), intro_window: INTRO_WINDOW },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    stubPlayback(video, 60);
+
+    // ArrowRight seeks 0 → 5s, landing inside the window — an explicit
+    // choice to watch the intro, so the pref must not yank playback away.
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight" }));
+    });
+    tick(video);
+    expect(video.currentTime).toBe(5);
+    expect(skipButton(m.container)).not.toBeNull();
+    unmount(m);
+  });
+
+  it("auto-skips an intro-first row (window at 0) as soon as metadata loads", () => {
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: {
+          ...makeStory(),
+          intro_window: { start_ms: 0, end_ms: 4000 },
+        },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    stubPlayback(video, 60);
+    act(() => {
+      video.dispatchEvent(new Event("loadedmetadata"));
+    });
+    expect(video.currentTime).toBe(4);
+    unmount(m);
+  });
+
+  it("never renders the button when the row has no intro window", () => {
+    const m = mount(defaultProps());
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 60);
+    pb.set(4);
+    tick(video);
+    expect(skipButton(m.container)).toBeNull();
+    unmount(m);
+  });
+
+  it("ignores a window that doesn't fit the real file duration", () => {
+    // The element says the file is 8s long; a window ending at 9s must be
+    // treated as wrong (no button, no auto-seek) rather than jumping to EOF.
+    const m = mount(
+      defaultProps({
+        skipIntro: true,
+        short: { ...makeStory(), intro_window: INTRO_WINDOW },
+      }),
+    );
+    const video = m.container.querySelector("video")!;
+    const pb = stubPlayback(video, 8);
+    pb.set(4);
+    tick(video);
+    expect(video.currentTime).toBe(4);
+    expect(skipButton(m.container)).toBeNull();
     unmount(m);
   });
 });

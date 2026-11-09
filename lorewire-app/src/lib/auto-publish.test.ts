@@ -54,6 +54,7 @@ async function seedSourceWithUsedStory(
     status: string;
     body: string;
     hero_image: string | null;
+    video_url: string | null;
   }> = {},
 ): Promise<void> {
   await run(
@@ -67,6 +68,10 @@ async function seedSourceWithUsedStory(
     storyPatch.hero_image === undefined
       ? "https://example.com/hero.png"
       : storyPatch.hero_image;
+  const videoUrl =
+    storyPatch.video_url === undefined
+      ? "https://example.com/short.mp4"
+      : storyPatch.video_url;
   // Seed every column the asset gate now checks: 5 hero/thumbnail
   // variants on the story row + a done short_renders row + a
   // short_config with a non-empty voiceover_url and at least one
@@ -84,9 +89,9 @@ async function seedSourceWithUsedStory(
   await run(
     "INSERT INTO stories (id, reddit_id, status, body, hero_image, " +
       "hero_image_landscape, thumbnail_image, thumbnail_image_landscape, " +
-      "thumbnail_image_square, short_config, " +
+      "thumbnail_image_square, short_config, video_url, " +
       "created_at, updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " +
       "'2026-06-24T00:00:00+00:00', '2026-06-24T00:00:00+00:00')",
     [
       storyId,
@@ -99,6 +104,7 @@ async function seedSourceWithUsedStory(
       "https://example.com/thumb-landscape.png",
       "https://example.com/thumb-square.png",
       shortConfig,
+      videoUrl,
     ],
   );
   // Done short_renders row — the gate looks for status='done' AND
@@ -227,5 +233,46 @@ describe("publishStoryIfReady", () => {
       ["s-1"],
     );
     expect(Number(count[0]?.n ?? 0)).toBe(1);
+  });
+
+  // The 2026-07-02 incident class: the short render finished (a done
+  // short_renders row with an output_url exists) but the copy onto
+  // stories.video_url was missed. The helper must apply the render and
+  // publish rather than ship a video story with nothing to play.
+  // Plan: _plans/2026-07-02-never-publish-without-video.md.
+  it("self-heals a missing video_url from the latest done short render, then publishes", async () => {
+    await seedSourceWithUsedStory("r-1", "s-1", { video_url: null });
+
+    const result = await publishStoryIfReady("r-1");
+
+    expect(result).toEqual({ ok: true, storyId: "s-1" });
+    const row = await one<{ status: string; video_url: string | null }>(
+      "SELECT status, video_url FROM stories WHERE id=?",
+      ["s-1"],
+    );
+    expect(row?.status).toBe("published");
+    expect(row?.video_url).toBe("https://example.com/short.mp4");
+  });
+
+  it("stays blocked with video_url in missing when no done render exists to heal from", async () => {
+    await seedSourceWithUsedStory("r-1", "s-1", { video_url: null });
+    await run("UPDATE short_renders SET status = 'rendering' WHERE story_id=?", [
+      "s-1",
+    ]);
+
+    const result = await publishStoryIfReady("r-1");
+
+    expect(result.ok).toBe(false);
+    if (result.ok === false) {
+      expect(result.reason).toBe("not_ready");
+      expect(result.missing).toContain("video_url");
+      expect(result.missing).toContain("short_render");
+    }
+    const row = await one<{ status: string; video_url: string | null }>(
+      "SELECT status, video_url FROM stories WHERE id=?",
+      ["s-1"],
+    );
+    expect(row?.status).toBe("review");
+    expect(row?.video_url).toBeNull();
   });
 });

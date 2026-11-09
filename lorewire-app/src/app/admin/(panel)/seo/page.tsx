@@ -21,6 +21,7 @@ import {
   SettingPresetText,
   SettingSlider,
 } from "@/app/admin/(panel)/settings/_components/SettingControls";
+import { SettingImageField } from "./_components/SettingImageField";
 import { SettingTextField } from "./_components/SettingTextField";
 import type { ChipOption } from "@/components/ui";
 
@@ -72,6 +73,7 @@ export default async function SeoPage() {
     siteName,
     siteUrl,
     titleTemplate,
+    homeTitle,
     defaultMetaDescription,
     themeColor,
     defaultOgImage,
@@ -88,6 +90,7 @@ export default async function SeoPage() {
     getSetting("seo.site_name"),
     getSetting("seo.site_url"),
     getSetting("seo.title_template"),
+    getSetting("seo.home_title"),
     getSetting("seo.default_meta_description"),
     getSetting("seo.theme_color"),
     getSetting("seo.default_og_image"),
@@ -140,6 +143,13 @@ export default async function SeoPage() {
             rows={1}
           />
           <SettingTextField
+            settingKey="seo.home_title"
+            label="Homepage title"
+            hint="The homepage's <title> — shown in Google results and browser tabs. Lead with what LoreWire is; the template above is not applied here."
+            initial={homeTitle ?? ""}
+            placeholder="LoreWire · True Internet Stories, Animated & Voted On"
+          />
+          <SettingTextField
             settingKey="seo.default_meta_description"
             label="Default meta description"
             hint="Fallback description for pages without their own. Keep under 160 characters for Google to render the whole thing."
@@ -159,13 +169,13 @@ export default async function SeoPage() {
           title="Social cards"
           description="What Twitter, Facebook, LinkedIn, iMessage, and Slack show when someone shares a link."
         >
-          <SettingTextField
+          <SettingImageField
             settingKey="seo.default_og_image"
             label="Default OG image"
-            hint="Fallback image when a page doesn't set its own og_image. 1200×630 PNG or JPG works for every platform."
+            hint="Fallback image when a page doesn't set its own og_image. Upload a 1200×630 PNG or JPG, or paste a URL — uploads are stored on our media storage."
             initial={defaultOgImage ?? ""}
             placeholder="https://lorewire.com/og.png"
-            inputType="url"
+            slot="seo-og-default"
           />
           <SettingChipGroup<TwitterCardType>
             settingKey="seo.twitter_card_type"
@@ -196,13 +206,13 @@ export default async function SeoPage() {
             initial={orgName ?? ""}
             placeholder="LoreWire Inc."
           />
-          <SettingTextField
+          <SettingImageField
             settingKey="seo.organization_logo_url"
-            label="Organization logo URL"
-            hint="Square PNG with transparent background, ≥ 600×600. Used in JSON-LD and the Google rich result."
+            label="Organization logo"
+            hint="Square PNG with transparent background, ≥ 600×600. Used in JSON-LD and the Google rich result. Upload a file or paste a URL."
             initial={orgLogoUrl ?? ""}
             placeholder="https://lorewire.com/logo.png"
-            inputType="url"
+            slot="seo-org-logo"
           />
           <SettingTextField
             settingKey="seo.organization_same_as"

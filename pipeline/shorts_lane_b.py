@@ -14,10 +14,12 @@ Flow:
               build_short_props_lane_b(claimed, repo_root, ...)
                   1. read lane_inputs
                   2. read baseline short_render's props (frames + character)
-                  3. voice.synthesize(script, override_provider=voice.provider,
-                                       override_voice_id=voice.voice_id)
-                  4. video._chunk_alignment(words) → new captions
+                  3. narration.render_hook_first_narration(script, hook=props.hook)
+                     — two-clip measured splice boundary; falls back to
+                     narration.render_narration (single clip + estimate)
+                  4. video._chunk_alignment per clip → new captions
                   5. assemble props: baseline frames + new voice + new captions
+                     + RECOMPUTED hook_end_ms / hook_tail_hold_ms
                   6. return BuiltPropsResult; drain calls store_short_props
                      and nulls the lane column so render drain picks it up
 
@@ -135,25 +137,78 @@ def build_short_props_lane_b(
         work_dir.mkdir(parents=True, exist_ok=True)
 
     audio_path = work_dir / "voice.mp3"
-    # `narration.render_narration` applies the normalize -> TTS -> script-graft
-    # pipeline so Lane B's voice swap inherits the same caption-accuracy fix as
-    # the baseline render. No structured hook here, so the pause anchors on the
-    # first sentence (render_narration fallback).
-    vres = narration.render_narration(
-        script,
-        audio_path,
-        override_provider=provider,
-        override_voice_id=voice_id,
-        speaking_rate=voiceover["speaking_rate"],
-        hook_pause=voiceover["hook_pause"],
-        style_prompt=voiceover["style_prompt"],
-    )
-    caption_chunks = video._chunk_alignment(vres.get("words") or [])
+    # A voice re-render MUST re-derive the hook splice boundary from the NEW
+    # audio: the baseline's hook_end_ms describes the old waveform, and
+    # carrying it over cuts the new narration mid-word (the stale-boundary bug
+    # fixed in _plans/2026-07-02-hook-clip-measured-boundary.md). The baseline
+    # props persist the spoken hook line, so the two-clip measured path runs
+    # first; it falls back to the legacy single-clip render + alignment
+    # estimate (e.g. the editor rewrote the script so the hook is no longer
+    # its prefix — render_hook_first_narration logs the reason). Both paths
+    # apply the same normalize -> TTS -> script-graft caption-accuracy fix.
+    baseline_hook = str(baseline_props.get("hook") or "").strip()
+    vres = None
+    if baseline_hook:
+        vres = narration.render_hook_first_narration(
+            script,
+            audio_path,
+            override_provider=provider,
+            override_voice_id=voice_id,
+            speaking_rate=voiceover["speaking_rate"],
+            style_prompt=voiceover["style_prompt"],
+            hook=baseline_hook,
+        )
+    measured = vres is not None
+    if not measured:
+        vres = narration.render_narration(
+            script,
+            audio_path,
+            override_provider=provider,
+            override_voice_id=voice_id,
+            speaking_rate=voiceover["speaking_rate"],
+            hook_pause=voiceover["hook_pause"],
+            hook_text=baseline_hook or None,
+            style_prompt=voiceover["style_prompt"],
+        )
+    # Measured mode chunks captions per clip so no chunk spans the splice seam
+    # (mirror of the full-render path in shorts_render.build_short_props).
+    if measured:
+        caption_chunks = video._chunk_alignment(
+            vres["hook_words"]
+        ) + video._chunk_alignment(vres["rest_words"])
+    else:
+        caption_chunks = video._chunk_alignment(vres.get("words") or [])
     if not caption_chunks:
         raise RuntimeError(
             "Lane B voice synthesis produced no caption chunks "
             "(empty alignment)"
         )
+
+    # Fresh splice boundary for the new audio — NEVER the baseline's value.
+    # No hook text at all (pre-hook-first baseline) -> 0: the splice falls
+    # through to the legacy [intro][body][outro] order, which cuts nothing.
+    # A stale boundary would cut the new waveform mid-word; zero only changes
+    # pacing.
+    if measured:
+        hook_end_ms = int(vres["hook_end_ms"])
+        hook_tail_hold_ms = int(vres["hook_tail_hold_ms"])
+        hook_source = "measured"
+    elif baseline_hook:
+        # Lazy import: shorts_render pulls heavy deps (media/images) that the
+        # drain shouldn't pay at module load (same reason _safe_id doesn't
+        # import media.py).
+        from pipeline import shorts_render
+        words = vres.get("words") or []
+        hook_end_ms, hook_source = shorts_render.compute_hook_end_ms(baseline_hook, words)
+        hook_tail_hold_ms = shorts_render.compute_hook_tail_hold_ms(
+            baseline_hook, words, hook_end_ms
+        )
+    else:
+        hook_end_ms, hook_tail_hold_ms, hook_source = 0, 0, "empty"
+    print(
+        f"[short laneB hook] recomputed hook_end_ms={hook_end_ms} "
+        f"tail_hold_ms={hook_tail_hold_ms} source={hook_source}"
+    )
     # Floor the body length at the real MP3 duration so the re-rendered short's
     # concatenated outro can't clip the new narration's closing words — the
     # last caption end_ms undershoots the real audio on some providers. Mirror
@@ -185,7 +240,8 @@ def build_short_props_lane_b(
     )
 
     # Merge: keep everything from the baseline EXCEPT voiceover_url +
-    # captions + duration_ms (the three fields the new audio drives). The
+    # captions + duration_ms + the hook splice boundary fields (the fields
+    # the new audio drives — see the recompute above). The
     # caller (drain handler) flips lane -> NULL so the render drain claims
     # the row immediately after this returns. Caption style: if the editor
     # has any short_config.caption_style override, merge it onto the
@@ -202,6 +258,8 @@ def build_short_props_lane_b(
         "voiceover_url": audio_ref,
         "captions": caption_chunks,
         "duration_ms": duration_ms,
+        "hook_end_ms": hook_end_ms,
+        "hook_tail_hold_ms": hook_tail_hold_ms,
     }
     if style_override:
         new_props["caption_template"] = {**baseline_template, **style_override}

@@ -7,10 +7,16 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  computePersistedIntroWindow,
   extractHookEndSecFromProps,
   extractHookTailHoldSecFromProps,
   stripHookFromProps,
 } from "./route";
+import {
+  INTRO_FADE_MS,
+  INTRO_HOOK_GAP_MS,
+  INTRO_INTRO_GAP_MS,
+} from "@/lib/intro-window";
 
 describe("extractHookEndSecFromProps", () => {
   it("returns hookEndSec in seconds when hook_end_ms is a positive number", () => {
@@ -158,6 +164,60 @@ describe("stripHookFromProps", () => {
     const before = JSON.stringify(props);
     stripHookFromProps(props);
     expect(JSON.stringify(props)).toBe(before);
+  });
+});
+
+// _plans/2026-07-04-skip-intro.md. The dispatcher persists the Skip Intro
+// window onto props at render-finish, computed from the exact segments
+// payload Cloud Run spliced with. hookEndSec presence selects the paced
+// hook-first math (the serve() gate only sets it when the reorder engaged).
+describe("computePersistedIntroWindow", () => {
+  it("computes the paced hook-first window when the reorder engaged", () => {
+    const w = computePersistedIntroWindow(
+      { hookEndSec: 3, hookTailHoldSec: 0.2, introDurationMs: 4000 },
+      60_000,
+    );
+    const start = 3000 + 200;
+    expect(w).toEqual({
+      start_ms: start,
+      end_ms:
+        start + INTRO_FADE_MS + INTRO_HOOK_GAP_MS + 4000 + INTRO_INTRO_GAP_MS,
+    });
+  });
+
+  it("computes the legacy intro-first window when no hook boundary was sent", () => {
+    const w = computePersistedIntroWindow(
+      { hookEndSec: null, hookTailHoldSec: null, introDurationMs: 4000 },
+      60_000,
+    );
+    expect(w).toEqual({ start_ms: 0, end_ms: 4000 });
+  });
+
+  it("returns null for a body-only render (no intro spliced)", () => {
+    expect(
+      computePersistedIntroWindow(
+        { hookEndSec: 3, hookTailHoldSec: 0.2, introDurationMs: null },
+        60_000,
+      ),
+    ).toBeNull();
+  });
+
+  it("fails closed when the window doesn't fit the probed MP4 duration", () => {
+    expect(
+      computePersistedIntroWindow(
+        { hookEndSec: 3, hookTailHoldSec: 0.2, introDurationMs: 4000 },
+        8_000,
+      ),
+    ).toBeNull();
+  });
+
+  it("still computes without a probed duration (older Cloud Run revision)", () => {
+    expect(
+      computePersistedIntroWindow(
+        { hookEndSec: null, hookTailHoldSec: null, introDurationMs: 4000 },
+        null,
+      ),
+    ).toEqual({ start_ms: 0, end_ms: 4000 });
   });
 });
 

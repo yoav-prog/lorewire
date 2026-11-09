@@ -128,6 +128,43 @@ describe("getPublishedStoryBySlug", () => {
     expect(row?.title).toBe("Public fixture");
     expect(row?.status).toBe("published");
   });
+
+  // 2026-07-03 regression: short_config was missing from PUBLIC_COLS, so
+  // the reader's generateMetadata read story.short_config as undefined
+  // and the Phase 3 OG poster silently never served. The artwork
+  // variants feed the og:image fallback chain (heroes render clean, so
+  // share cards need the titled 16:9 thumbnail).
+  it("carries short_config and the artwork variants for the OG chain", async () => {
+    const slug = `og-cols-${randomUUID().slice(0, 6)}`;
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    await run(
+      `INSERT INTO stories
+         (id, slug, category, title, status, short_config, hero_image,
+          hero_image_landscape, thumbnail_image_landscape,
+          created_at, updated_at, published_at)
+       VALUES (?, ?, 'Family Feuds', 'OG cols fixture', 'published', ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        slug,
+        '{"og_poster_landscape_url":"https://media/og-poster.png"}',
+        "https://media/hero.webp?v=1",
+        "https://media/hero-landscape.webp?v=1",
+        "https://media/thumbnail-landscape.webp?v=1",
+        now,
+        now,
+        now,
+      ],
+    );
+    const row = await getPublishedStoryBySlug(slug);
+    expect(row?.short_config).toContain("og_poster_landscape_url");
+    expect(row?.hero_image_landscape).toBe(
+      "https://media/hero-landscape.webp?v=1",
+    );
+    expect(row?.thumbnail_image_landscape).toBe(
+      "https://media/thumbnail-landscape.webp?v=1",
+    );
+  });
 });
 
 describe("countPublishedStories", () => {

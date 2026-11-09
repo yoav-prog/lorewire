@@ -551,6 +551,172 @@ class HookTailHoldTests(unittest.TestCase):
         self.assertEqual(hold, 0)
 
 
+class ExtendFirstSceneOverHookExactBoundaryTests(unittest.TestCase):
+    """Measured two-clip mode (_plans/2026-07-02-hook-clip-measured-boundary.md):
+    `hook_end_ms` is a frame-counted fact inside a constructed silence buffer,
+    so the scene shift still happens but the returned split must be the
+    boundary UNCHANGED — snapping to the rest clip's first estimated word
+    start would reintroduce the alignment-error class this mode removes."""
+
+    # Per-clip chunking shape: hook chunks end at <= 2000 (the hook clip),
+    # rest chunks start at 2360 (past the 360ms buffer). Boundary mid-buffer.
+    CAPS = [
+        {"start_ms": 0, "end_ms": 1000},     # hook clip line 1
+        {"start_ms": 1000, "end_ms": 2000},  # hook clip line 2
+        {"start_ms": 2360, "end_ms": 3400},  # rest clip line 1
+        {"start_ms": 3500, "end_ms": 4600},  # rest clip line 2
+    ]
+    BOUNDARY = 2180  # hook_ms(2000) + silence(360)//2
+
+    def _frames(self, *idxs: int) -> list[dict]:
+        return [
+            {"id": f"frame-{i:02d}", "url": f"u{i}", "caption_chunk_start_index": idx}
+            for i, idx in enumerate(idxs)
+        ]
+
+    def _idxs(self, frames: list[dict]) -> list[int]:
+        return [f["caption_chunk_start_index"] for f in frames]
+
+    def test_scene_shifts_but_split_stays_on_measured_boundary(self):
+        frames = self._frames(0, 1)  # scene 2 planned inside the hook
+        frames, split = shorts_render._extend_first_scene_over_hook(
+            frames, self.CAPS, self.BOUNDARY, exact_boundary=True
+        )
+        self.assertEqual(self._idxs(frames), [0, 2])
+        self.assertEqual(split, self.BOUNDARY)  # NOT snapped to 2360
+
+    def test_scenes_already_past_hook_unchanged_and_split_unchanged(self):
+        frames = self._frames(0, 2, 3)
+        frames, split = shorts_render._extend_first_scene_over_hook(
+            frames, self.CAPS, self.BOUNDARY, exact_boundary=True
+        )
+        self.assertEqual(self._idxs(frames), [0, 2, 3])
+        self.assertEqual(split, self.BOUNDARY)
+
+    def test_noop_when_no_chunk_starts_after_boundary(self):
+        frames = self._frames(0, 1)
+        frames, split = shorts_render._extend_first_scene_over_hook(
+            frames, self.CAPS, 99999, exact_boundary=True
+        )
+        self.assertEqual(self._idxs(frames), [0, 1])
+        self.assertEqual(split, 99999)
+
+
+class BuildShortPropsMeasuredHookTests(unittest.TestCase):
+    """build_short_props with a hook goes through the two-clip measured path:
+    ground-truth splice values flow into props untouched (no snap, no
+    alignment estimate), captions are chunked per clip, and a two-clip
+    fallback (None) drops to the legacy estimated path."""
+
+    SCRIPT = "Hello there. This is a short test script."
+    HOOK = "Hello there."
+    HOOK_MS = 1000
+    SILENCE_MS = 360
+
+    def _assets(self) -> shorts.ShortAssets:
+        return shorts.ShortAssets(
+            narration_style="suspense",
+            length_preset="standard",
+            script={"short_script": self.SCRIPT, "hook": self.HOOK},
+            character="a tall man with a red scarf",
+            base_url="https://kie/base.png",
+            base_prompt="BASE PROMPT",
+            scenes=[
+                {"caption_chunk_start_index": 0, "scene": "s0", "url": "https://kie/s0.png", "image_prompt": "p0"},
+                {"caption_chunk_start_index": 1, "scene": "s1", "url": "https://kie/s1.png", "image_prompt": "p1"},
+            ],
+            cost_credits=0.0,
+        )
+
+    def _measured(self) -> dict:
+        offset = (self.HOOK_MS + self.SILENCE_MS) / 1000.0
+        hook_words = [
+            {"word": "Hello", "start": 0.0, "end": 0.4},
+            {"word": "there.", "start": 0.4, "end": 0.9},
+        ]
+        rest_words = [
+            {"word": "This", "start": offset, "end": offset + 0.3},
+            {"word": "is", "start": offset + 0.3, "end": offset + 0.5},
+            {"word": "a", "start": offset + 0.5, "end": offset + 0.6},
+            {"word": "short.", "start": offset + 0.6, "end": offset + 1.1},
+        ]
+        return {
+            "audio": "voice.mp3",
+            "words": hook_words + rest_words,
+            "provider": "google",
+            "spoken_script": self.SCRIPT,
+            "hook_words": hook_words,
+            "rest_words": rest_words,
+            "hook_end_ms": self.HOOK_MS + self.SILENCE_MS // 2,
+            "hook_tail_hold_ms": self.SILENCE_MS - self.SILENCE_MS // 2,
+            "boundary": "measured",
+        }
+
+    def _build(self, hook_first_result, render_narration_mock):
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(shorts_render.store, "fetch_story",
+                              return_value={"id": "s1", "title": "T", "body": "Body text here."}), \
+            mock.patch.object(shorts_render.shorts, "generate_short_assets",
+                              return_value=self._assets()), \
+            mock.patch.object(shorts_render.narration, "render_hook_first_narration",
+                              return_value=hook_first_result) as hook_first, \
+            mock.patch.object(shorts_render.narration, "render_narration",
+                              render_narration_mock), \
+            mock.patch.object(shorts_render.images, "download", return_value=None), \
+            mock.patch.object(shorts_render.store, "get_setting", return_value=None):
+            built = shorts_render.build_short_props("s1", Path(tmp), remote=False)
+        return built, hook_first
+
+    def test_measured_values_flow_into_props_unsnapped(self):
+        legacy = mock.MagicMock(side_effect=AssertionError(
+            "legacy render_narration must not run when the measured path succeeds"
+        ))
+        built, hook_first = self._build(self._measured(), legacy)
+
+        hook_first.assert_called_once()
+        self.assertEqual(hook_first.call_args.kwargs.get("hook"), self.HOOK)
+        # Ground truth, byte-derived — and NOT snapped to the rest clip's
+        # first caption start (1360ms).
+        self.assertEqual(built.props["hook_end_ms"], 1180)
+        self.assertEqual(built.props["hook_tail_hold_ms"], 180)
+
+    def test_captions_chunked_per_clip_never_span_the_seam(self):
+        legacy = mock.MagicMock(side_effect=AssertionError("legacy path ran"))
+        built, _ = self._build(self._measured(), legacy)
+
+        boundary = built.props["hook_end_ms"]
+        for chunk in built.props["captions"]:
+            spans = chunk["start_ms"] < boundary < chunk["end_ms"]
+            self.assertFalse(spans, f"caption chunk spans the splice seam: {chunk}")
+        # The hook's last chunk ends at the hook clip; the rest's first chunk
+        # starts past the buffer.
+        ends = [c["end_ms"] for c in built.props["captions"]]
+        starts = [c["start_ms"] for c in built.props["captions"]]
+        self.assertIn(900, ends)
+        self.assertIn(1360, starts)
+
+    def test_two_clip_fallback_uses_legacy_estimated_path(self):
+        words = [
+            {"word": "Hello", "start": 0.0, "end": 0.4},
+            {"word": "there.", "start": 0.4, "end": 0.9},
+            {"word": "This", "start": 1.0, "end": 1.3},
+            {"word": "is", "start": 1.3, "end": 1.5},
+            {"word": "a", "start": 1.5, "end": 1.6},
+            {"word": "short.", "start": 1.6, "end": 2.1},
+        ]
+        legacy = mock.MagicMock(return_value={
+            "audio": "voice.mp3", "words": words, "provider": "google",
+            "spoken_script": self.SCRIPT,
+        })
+        built, hook_first = self._build(None, legacy)
+
+        hook_first.assert_called_once()
+        legacy.assert_called_once()
+        # Legacy estimate: "there." ends at 900ms (+80 pad = 980), snapped to
+        # the first post-hook caption edge (1000ms).
+        self.assertEqual(built.props["hook_end_ms"], 1000)
+
+
 class CacheBustHelperTests(unittest.TestCase):
     """Pure-helper tests for shorts_render._cache_bust. Covered separately so a
     URL-shape edge case can't regress without a targeted failure."""

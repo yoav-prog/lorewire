@@ -64,8 +64,9 @@ def _cache_bust(url: str) -> str:
     the full URL, so a new `v=` is a new cache entry.
 
     Idempotent: a URL already carrying `v=` is returned unchanged so
-    the resume path (`_build_hero_and_thumbnail_from_short` re-reading
-    `existing[column]` after a Vercel-function kill) doesn't double-stamp.
+    the resume path (`_build_hero_and_thumbnail_from_short` reusing a
+    prior tick's `image_saved` URL after a Vercel-function kill)
+    doesn't double-stamp.
     """
     if not url:
         return url
@@ -74,6 +75,34 @@ def _cache_bust(url: str) -> str:
     bust = int(time.time())
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}v={bust}"
+
+
+def _bust_stale_short_ref(url: str, render_token: str) -> str:
+    """Version a short-render reference URL that predates the renderer's
+    per-render cache token. `base.webp` lives at a stable object key with
+    a one-year immutable Cache-Control, so an un-versioned URL keeps
+    serving the PREVIOUS render's character to every i2i consumer — kie
+    fetched the old protagonist no matter how many times the short was
+    restarted (2026-07-04, idea_d4cd2bfe6e66's phantom cover character).
+    New renders stamp the token at staging time (shorts_render.py); this
+    read-side twin heals rows persisted before that fix. The token is
+    derived from the render row, so it is STABLE per render (repeat reads
+    stay cache-friendly) and fresh for every re-render. URLs that already
+    carry `v=` pass through unchanged."""
+    if not url or "v=" in url or not render_token:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}v={render_token}"
+
+
+def _short_render_token(render_row: dict) -> str:
+    """Per-render token for `_bust_stale_short_ref`: the digits of the
+    row's finished_at (stable, unique per re-render), falling back to a
+    prefix of the row id for rows without a finish timestamp."""
+    digits = "".join(
+        ch for ch in str(render_row.get("finished_at") or "") if ch.isdigit()
+    )[:14]
+    return digits or str(render_row.get("id") or "")[:8]
 
 
 def _staging_dir(safe_id: str, repo_root: Path) -> Path:
@@ -359,6 +388,23 @@ def _is_kie_quota_error(msg: str) -> bool:
     return any(m in msg for m in _KIE_QUOTA_MARKERS)
 
 
+# kie's content-moderation rejection ("The input or output was flagged as
+# sensitive. Please try again."). Deterministic for a given prompt+inputs —
+# an identical retry can never pass — but a SOFTENED prompt often can: the
+# flag usually trips on the story-body excerpt (family-drama stories
+# routinely contain minors + charged phrasing, e.g. 1m4fjwq "my 15yo kid
+# got his GF pregnant"), not on the reference images. Callers branch on
+# this to retry once WITHOUT the story text instead of failing the run.
+_KIE_MODERATION_MARKERS = (
+    "flagged as sensitive",
+)
+
+
+def _is_kie_moderation_error(msg: str) -> bool:
+    """True when `msg` is kie's content-moderation rejection."""
+    return any(m in msg for m in _KIE_MODERATION_MARKERS)
+
+
 def last_kie_error() -> str | None:
     """Return the upstream exception text from the most recent
     `_generate_with_retry` failure, or `None` when the last call
@@ -389,6 +435,12 @@ def _kie_failed_msg(label: str) -> str:
         return (
             f"{label} — kie.ai daily points cap exceeded; "
             "wait for the daily reset or top up the account"
+        )
+    if _LAST_KIE_ERROR["kind"] == "moderation":
+        return (
+            f"{label} — kie content moderation flagged this story even "
+            "without the story text; soften the title wording or pick a "
+            "different scene"
         )
     return f"{label} returned no URL after retries"
 
@@ -461,6 +513,20 @@ def _generate_with_retry(
                 _LAST_KIE_ERROR["msg"] = str(e)
                 _LAST_KIE_ERROR["kind"] = "quota"
                 return None
+            if _is_kie_moderation_error(str(e)):
+                # No identical retry on a moderation flag either — the
+                # same prompt + inputs deterministically re-flag. The
+                # caller reads kind == "moderation" and retries once
+                # with the story text stripped from the prompt (see
+                # _generate_with_moderation_fallback).
+                print(
+                    f"[media image moderation] {label} attempt {attempt} "
+                    f"refs={ref_count} model={model or 'global'} "
+                    "flagged as sensitive; skipping identical retry"
+                )
+                _LAST_KIE_ERROR["msg"] = str(e)
+                _LAST_KIE_ERROR["kind"] = "moderation"
+                return None
             if attempt < attempts:
                 print(
                     f"[media image retry] {label} attempt {attempt} "
@@ -474,6 +540,42 @@ def _generate_with_retry(
     _LAST_KIE_ERROR["msg"] = str(last) if last is not None else None
     _LAST_KIE_ERROR["kind"] = "generic" if last is not None else None
     return None
+
+
+def _generate_with_moderation_fallback(
+    prompt: str,
+    fallback_prompt: str,
+    label: str,
+    **gen_kwargs,
+) -> str | None:
+    """`_generate_with_retry`, plus ONE softened retry when kie's content
+    moderation flags the first prompt.
+
+    The flag is deterministic for a given prompt + inputs, and in
+    practice it trips on the story-body excerpt inside the prompt
+    (family-drama stories routinely contain minors + charged phrasing —
+    2026-07-03, story 1m4fjwq, all five finisher variants flagged).
+    `fallback_prompt` is the same prompt built WITHOUT the story text
+    (make_thumbnail_prompt include_story_context=False): the scene
+    reference image still carries the composition, so quality loss is
+    minimal. Any other failure kind returns None immediately — quota
+    caps and transient errors gain nothing from a reworded prompt."""
+    url = _generate_with_retry(prompt, label, **gen_kwargs)
+    if url is not None or last_kie_error_kind() != "moderation":
+        return url
+    store.log_render_event(
+        "moderation_retry",
+        f"{label} flagged as sensitive — retrying without story text",
+        level="warn",
+        payload={"label": label, "error": last_kie_error()},
+    )
+    print(
+        f"[media image moderation] {label} retrying once without "
+        "story context"
+    )
+    return _generate_with_retry(
+        fallback_prompt, f"{label} (no story context)", **gen_kwargs,
+    )
 
 
 # Wave 3 Phase 3 PropSlideIn budgets. Default 5 props per story; admin can
@@ -1041,7 +1143,26 @@ def regen_one(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if asset == "hero":
-        return _regen_hero(story, out_dir, safe_id)
+        # 2026-07-03: prefer the short-character i2i path so a hero regen
+        # keeps the SAME protagonist as the Watch tab and the thumbnails.
+        # The text-only path invents a fresh face in a registry style on
+        # every run — after the bulk "Hero image" action ran it, modal
+        # heroes stopped matching the cards. Text-only remains the
+        # fallback for stories that have no completed short to seed from
+        # (_regen_hero_from_short raises ValueError in that case).
+        try:
+            return _regen_hero_from_short(story, out_dir, safe_id)
+        except ValueError as e:
+            print(
+                f"[image regen hero] id={safe_id} no short character to "
+                f"seed from ({e}); falling back to text-only hero"
+            )
+            store.log_render_event(
+                "hero_fallback_text_only",
+                "No completed short to seed from — text-only hero path",
+                payload={"reason": str(e)[:200]},
+            )
+            return _regen_hero(story, out_dir, safe_id)
 
     if asset == "hero_from_short":
         # Pulls the short's persisted character (character_base_url) out of
@@ -1170,9 +1291,16 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     portrait_url: str | None = None
 
     # ─── 1. Portrait hero (3:4) — same prompt + dimensions as before. ─────
+    # bake_title=False (2026-07-03): heroes render clean; the site overlays
+    # its own HTML title, and baked typography underneath it doubled up.
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
+    )
+    portrait_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="3:4", dry_run=False,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
     )
     store.log_render_event(
         "prompt_built",
@@ -1184,8 +1312,9 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         "Submitted to kie — waiting on portrait generation",
         payload={"variant": "portrait", "aspect": "3:4"},
     )
-    portrait_kie = _generate_with_retry(
-        portrait_prompt, f"id={safe_id} hero regen portrait", aspect_ratio="3:4",
+    portrait_kie = _generate_with_moderation_fallback(
+        portrait_prompt, portrait_prompt_safe,
+        f"id={safe_id} hero regen portrait", aspect_ratio="3:4",
     )
     if portrait_kie is None:
         store.log_render_event(
@@ -1216,6 +1345,9 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
         payload={"variant": "portrait", "url": portrait_url},
     )
     store.update_story_hero(story["id"], portrait_url)
+    # The new hero is clean artwork, so the CSS title overlay must render
+    # again even if the previous hero was a title-baked cinematic one.
+    store.update_story_hero_baked_title(story["id"], 0)
     total_cents += per_image_cents
 
     # ─── 2. Landscape hero (16:9) — best-effort. ──────────────────────────
@@ -1223,15 +1355,21 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
     # coherent poster series.
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
+    )
+    landscape_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="16:9", dry_run=False,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
     )
     store.log_render_event(
         "kie_request_sent",
         "Submitted to kie — waiting on landscape generation",
         payload={"variant": "landscape", "aspect": "16:9"},
     )
-    landscape_kie = _generate_with_retry(
-        landscape_prompt, f"id={safe_id} hero regen landscape", aspect_ratio="16:9",
+    landscape_kie = _generate_with_moderation_fallback(
+        landscape_prompt, landscape_prompt_safe,
+        f"id={safe_id} hero regen landscape", aspect_ratio="16:9",
     )
     if landscape_kie is None:
         store.log_render_event(
@@ -1252,6 +1390,11 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
             f"[image regen hero] id={safe_id} landscape FAILED; "
             "portrait still updated"
         )
+        # Clear the stale landscape: the hero surfaces prefer 16:9 with a
+        # portrait fallback, so keeping the OLD landscape would pair the
+        # fresh portrait with a previous run's protagonist (the billboard
+        # and modal header would show a different person than the cards).
+        store.update_story_hero_landscape(story["id"], None)
     else:
         try:
             landscape_local = out_dir / "hero-landscape.png"
@@ -1276,6 +1419,8 @@ def _regen_hero(story: dict, out_dir: Path, safe_id: str) -> tuple[str, int]:
                 f"[image regen hero] id={safe_id} landscape download FAILED: {e}; "
                 "portrait still updated"
             )
+            # Same stale-pair guard as the kie-failure branch above.
+            store.update_story_hero_landscape(story["id"], None)
 
     # The queue's output_url shows the portrait by convention (the reader
     # picks portrait as primary). The full success is reflected in total_cents.
@@ -1288,7 +1433,7 @@ def _regen_hero_from_short(
     """Regenerate the hero set (portrait + landscape) using the short's
     `character_base_url` as the i2i seed.
 
-    Mirrors `_regen_hero` step-for-step (same title-baked cinematic prompt,
+    Mirrors `_regen_hero` step-for-step (same clean-hero cinematic prompt,
     same per-image cost, same portrait-first / landscape-best-effort flow)
     except both kie calls pass `image_input=[character_base_url]`. The
     prompt also flips to the character-faithful variant via
@@ -1339,6 +1484,11 @@ def _regen_hero_from_short(
             f"story {safe_id} short render has no character_base_url — "
             "re-render the short on the current shorts pipeline so the base is persisted"
         )
+    # Heal pre-token rows so kie fetches THIS render's character, not a
+    # cached previous one (see _bust_stale_short_ref).
+    character_base_url = _bust_stale_short_ref(
+        character_base_url, _short_render_token(latest),
+    )
     # Resolve which named poster style this render should use. Same
     # chain as the text-only _regen_hero; the i2i seed and the style
     # band are orthogonal — character comes from the reference image,
@@ -1365,10 +1515,18 @@ def _regen_hero_from_short(
     portrait_url: str | None = None
 
     # ─── 1. Portrait (3:4) ────────────────────────────────────────────────
+    # bake_title=False (2026-07-03): heroes render clean; the site overlays
+    # its own HTML title, and baked typography underneath it doubled up.
     portrait_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="3:4", dry_run=False,
         character_base_url=character_base_url,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
+    )
+    portrait_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="3:4", dry_run=False,
+        character_base_url=character_base_url,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
     )
     store.log_render_event(
         "prompt_built",
@@ -1380,8 +1538,9 @@ def _regen_hero_from_short(
         "Submitted to kie — waiting on portrait generation (i2i)",
         payload={"variant": "portrait", "aspect": "3:4", "mode": "i2i"},
     )
-    portrait_kie = _generate_with_retry(
+    portrait_kie = _generate_with_moderation_fallback(
         portrait_prompt,
+        portrait_prompt_safe,
         f"id={safe_id} hero regen portrait (i2i)",
         aspect_ratio="3:4",
         image_input=[character_base_url],
@@ -1422,6 +1581,9 @@ def _regen_hero_from_short(
         payload={"variant": "portrait", "url": portrait_url, "mode": "i2i"},
     )
     store.update_story_hero(story["id"], portrait_url)
+    # The new hero is clean artwork, so the CSS title overlay must render
+    # again even if the previous hero was a title-baked cinematic one.
+    store.update_story_hero_baked_title(story["id"], 0)
     total_cents += per_image_cents
 
     # ─── 2. Landscape (16:9) — best-effort ────────────────────────────────
@@ -1430,15 +1592,22 @@ def _regen_hero_from_short(
     landscape_prompt = stages.make_thumbnail_prompt(
         title, category, body, aspect_ratio="16:9", dry_run=False,
         character_base_url=character_base_url,
-        style=resolved.style,
+        style=resolved.style, bake_title=False,
+    )
+    landscape_prompt_safe = stages.make_thumbnail_prompt(
+        title, category, body, aspect_ratio="16:9", dry_run=False,
+        character_base_url=character_base_url,
+        style=resolved.style, bake_title=False,
+        include_story_context=False,
     )
     store.log_render_event(
         "kie_request_sent",
         "Submitted to kie — waiting on landscape generation (i2i)",
         payload={"variant": "landscape", "aspect": "16:9", "mode": "i2i"},
     )
-    landscape_kie = _generate_with_retry(
+    landscape_kie = _generate_with_moderation_fallback(
         landscape_prompt,
+        landscape_prompt_safe,
         f"id={safe_id} hero regen landscape (i2i)",
         aspect_ratio="16:9",
         image_input=[character_base_url],
@@ -1464,6 +1633,10 @@ def _regen_hero_from_short(
             f"[image regen hero from-short] id={safe_id} landscape FAILED; "
             "portrait still updated"
         )
+        # Clear the stale landscape so the hero surfaces fall back to the
+        # fresh portrait instead of pairing it with an older run's
+        # protagonist (mismatched hero vs cards).
+        store.update_story_hero_landscape(story["id"], None)
     else:
         try:
             landscape_local = out_dir / "hero-landscape.png"
@@ -1488,6 +1661,8 @@ def _regen_hero_from_short(
                 f"[image regen hero from-short] id={safe_id} landscape download FAILED: {e}; "
                 "portrait still updated"
             )
+            # Same stale-pair guard as the kie-failure branch above.
+            store.update_story_hero_landscape(story["id"], None)
 
     return portrait_url, total_cents
 
@@ -1569,6 +1744,11 @@ def _build_hero_and_thumbnail_from_short(
             f"story {safe_id} short render has no character_base_url — "
             "re-render the short on the current shorts pipeline so the base is persisted"
         )
+    # Heal pre-token rows so kie fetches THIS render's character, not a
+    # cached previous one (see _bust_stale_short_ref).
+    character_base_url = _bust_stale_short_ref(
+        character_base_url, _short_render_token(latest),
+    )
 
     # Scenes live under either `scenes` (raw assets list from shorts.py) or
     # `doodle_frames` (post-render Remotion props shape). Either source has a
@@ -1681,8 +1861,12 @@ def _build_hero_and_thumbnail_from_short(
         pick = stages.pick_hero_and_thumbnail_scenes(title, body, scenes, dry_run=False)
     hero_idx = pick["hero_index"]
     thumb_idx = pick["thumbnail_index"]
-    hero_scene_url = scenes[hero_idx].get("url") or ""
-    thumb_scene_url = scenes[thumb_idx].get("url") or ""
+    hero_scene_url = _bust_stale_short_ref(
+        scenes[hero_idx].get("url") or "", _short_render_token(latest),
+    )
+    thumb_scene_url = _bust_stale_short_ref(
+        scenes[thumb_idx].get("url") or "", _short_render_token(latest),
+    )
     if not hero_scene_url or not thumb_scene_url:
         raise ValueError(
             f"story {safe_id} picked scenes are missing URLs "
@@ -1715,59 +1899,86 @@ def _build_hero_and_thumbnail_from_short(
 
     per_image_cents = _per_image_cost_cents()
     seed_to_scene = {"hero": hero_scene_url, "thumbnail": thumb_scene_url}
-    # Re-fetch the story so a partial-success from a prior reclaim is
-    # visible. Each successful i2i in the loop below already commits
-    # its URL to the relevant `stories` column (see
-    # `_HERO_THUMB_COLUMN_WRITERS`), so the column read here is the
-    # authoritative "what's already done" signal even when the previous
-    # tick died before reaching `finish_image_render`. Skipping variants
-    # we already have stops re-burning kie credits on each reclaim.
-    fresh = store.fetch_story(story["id"]) or story
-    existing = {
-        col: (fresh.get(col) or "").strip()
-        for _seed, _aspect, _filename, _label, col in _HERO_THUMB_VARIANTS
-    }
+    # Resume scope: skip ONLY variants THIS render row already saved —
+    # recovered from its own `image_saved` events, which survive a
+    # Vercel function kill and travel with the reclaimed row. The old
+    # guard keyed on the story COLUMNS being non-empty, which cannot
+    # tell "saved by this render's earlier tick" from "the story has
+    # carried a hero for weeks": an operator regen on a story with
+    # existing artwork finished instantly as five `variant_resumed`
+    # no-ops and the old images survived. Every TS caller had to
+    # remember to NULL the five columns first (the 2026-06-25
+    # workaround), and the story-jobs re-run path that didn't stayed
+    # stale. A fresh render row has no events, so it always redraws all
+    # five regardless of what the columns hold.
+    resumed: dict[str, str] = {}
+    if render_id:
+        for ev in store.render_events_of_type(render_id, "image_saved"):
+            try:
+                payload = json.loads(ev.get("payload") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            variant = payload.get("variant")
+            url = payload.get("url")
+            if variant and url:
+                resumed[variant] = url
     result: dict = {
-        "hero_image": existing["hero_image"] or None,
-        "hero_image_landscape": existing["hero_image_landscape"] or None,
-        "thumbnail_image": existing["thumbnail_image"] or None,
-        "thumbnail_image_landscape": existing["thumbnail_image_landscape"] or None,
-        "thumbnail_image_square": existing["thumbnail_image_square"] or None,
+        col: resumed.get(label) or None
+        for _seed, _aspect, _filename, label, col in _HERO_THUMB_VARIANTS
+    }
+    result.update({
         "cost_cents": 0,
         "hero_index": hero_idx,
         "thumbnail_index": thumb_idx,
         "picker_reasoning": pick["picker_reasoning"],
-    }
+    })
 
     for seed, aspect, filename, label, column in _HERO_THUMB_VARIANTS:
-        if existing[column]:
+        if resumed.get(label):
             store.log_render_event(
                 "variant_resumed",
-                f"{label} already persisted — skipping i2i",
+                f"{label} already saved by this render — skipping i2i",
                 payload={
                     "variant": label,
-                    "url": existing[column],
+                    "url": resumed[label],
                     "resumed": True,
                 },
             )
             print(
                 f"[hero+thumb from-short] id={safe_id} {label} "
-                f"already persisted, skipping"
+                f"already saved by this render, skipping"
             )
             continue
         scene_url = seed_to_scene[seed]
+        # Heroes render clean (the site overlays its own HTML title);
+        # thumbnails keep the click-stopping baked-title treatment for the
+        # social cards. The no-context twin backs the moderation fallback
+        # (kie deterministically flags some story excerpts — see
+        # _generate_with_moderation_fallback).
+        bake = seed == "thumbnail"
         prompt = stages.make_thumbnail_prompt(
             title, category, body, aspect_ratio=aspect, dry_run=False,
             character_base_url=character_base_url,
             scene_image_url=scene_url,
+            bake_title=bake,
+        )
+        prompt_safe = stages.make_thumbnail_prompt(
+            title, category, body, aspect_ratio=aspect, dry_run=False,
+            character_base_url=character_base_url,
+            scene_image_url=scene_url,
+            bake_title=bake,
+            include_story_context=False,
         )
         store.log_render_event(
             "kie_request_sent",
             f"Submitted {label} to kie (hybrid i2i)",
             payload={"variant": label, "aspect": aspect, "mode": "i2i+scene"},
         )
-        kie_url = _generate_with_retry(
+        kie_url = _generate_with_moderation_fallback(
             prompt,
+            prompt_safe,
             f"id={safe_id} {label} (hybrid i2i)",
             aspect_ratio=aspect,
             # Order MUST be [character, scene] — `make_thumbnail_prompt`'s
@@ -1820,6 +2031,20 @@ def _build_hero_and_thumbnail_from_short(
         _HERO_THUMB_COLUMN_WRITERS[column](story["id"], stored_url)
         result[column] = stored_url
         result["cost_cents"] += per_image_cents
+
+    # A landed hero variant is clean artwork now, so the CSS title overlay
+    # must render again even if the previous hero was a title-baked
+    # cinematic one. Thumbnail-only outcomes leave the flag alone — the
+    # story is still showing its old hero.
+    if result["hero_image"] or result["hero_image_landscape"]:
+        store.update_story_hero_baked_title(story["id"], 0)
+
+    # Stale-pair guard: when the portrait landed but the landscape call
+    # failed, clear the OLD landscape so the hero surfaces (which prefer
+    # 16:9 with a portrait fallback) don't pair the fresh protagonist
+    # with a previous run's artwork.
+    if result["hero_image"] and not result["hero_image_landscape"]:
+        store.update_story_hero_landscape(story["id"], None)
 
     return result
 

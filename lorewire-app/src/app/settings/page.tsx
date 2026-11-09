@@ -19,8 +19,15 @@ import SettingsClient from "./SettingsClient";
 export const dynamic = "force-dynamic";
 
 export const metadata = {
-  title: "Settings · LoreWire",
+  // Bare title — the root layout's title.template appends the brand.
+  // The old hardcoded "Settings · LoreWire" got the template applied on
+  // top and rendered "Settings · LoreWire · LoreWire".
+  title: "Settings",
   description: "Playback and privacy controls for LoreWire.",
+  // Utility page for the visitor's own device settings — no search value,
+  // and it was fully indexable before. follow stays true so the back-home
+  // link keeps passing crawl.
+  robots: { index: false, follow: true },
 };
 
 export default async function SettingsPage() {

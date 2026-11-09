@@ -48,3 +48,27 @@ class SerializeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CacheBustVideoUrlTests(unittest.TestCase):
+    """2026-07-03: finish_short_render stamps `?v={epoch}` onto the stored
+    output_url. The renderer overwrites the SAME object key per story with
+    a one-year immutable Cache-Control, so a byte-identical URL kept
+    playing the OLD MP4 after a restart. Pure-helper tests — the DB write
+    path is covered by the TS twin (tests/lib/short-video-cache-bust)."""
+
+    def test_appends_epoch_version(self):
+        with mock.patch.object(store.time, "time", return_value=1_751_500_000.0):
+            out = store._cache_bust_video_url(
+                "https://media.lorewire.com/abc-short/video.mp4"
+            )
+        self.assertEqual(
+            out, "https://media.lorewire.com/abc-short/video.mp4?v=1751500000"
+        )
+
+    def test_idempotent_on_busted_url(self):
+        busted = "https://media.lorewire.com/abc-short/video.mp4?v=1751500000"
+        self.assertEqual(store._cache_bust_video_url(busted), busted)
+
+    def test_empty_passes_through(self):
+        self.assertEqual(store._cache_bust_video_url(""), "")

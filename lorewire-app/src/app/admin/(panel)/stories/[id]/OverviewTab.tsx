@@ -11,8 +11,10 @@
 
 import type { StoryRow } from "@/lib/repo";
 import { saveStory } from "@/app/admin/actions";
+import { listCategories } from "@/lib/categories/repo";
 import { CategoryChipGroup } from "./CategoryChipGroup";
 import { StoryAspectControl } from "./StoryAspectControl";
+import { OriginalityPanel } from "./OriginalityPanel";
 import type { VideoAspect } from "@/lib/aspect";
 
 const FIELD =
@@ -20,7 +22,7 @@ const FIELD =
 const LABEL =
   "mb-1 block font-mono text-[11px] uppercase tracking-wider text-muted";
 
-export function OverviewTab({
+export async function OverviewTab({
   story,
   initialAspect,
   aspectIsOverride,
@@ -29,9 +31,15 @@ export function OverviewTab({
   initialAspect: VideoAspect;
   aspectIsOverride: boolean;
 }) {
+  // Active categories from the DB-driven taxonomy (the 2026-07-01 arc);
+  // legacy/archived rows are excluded — a story still carrying one shows
+  // it as an extra chip inside the group.
+  const categories = await listCategories();
   return (
     <form action={saveStory} className="space-y-4">
       <input type="hidden" name="id" value={story.id} />
+
+      <OriginalityPanel storyId={story.id} />
 
       <div>
         <label className={LABEL}>Title</label>
@@ -47,7 +55,11 @@ export function OverviewTab({
           <label className={LABEL}>Category</label>
           <CategoryChipGroup
             name="category"
-            initial={story.category ?? "Entitled"}
+            initial={story.category ?? ""}
+            options={categories.map((c) => ({
+              label: c.label,
+              color: c.color,
+            }))}
           />
         </div>
         <div>

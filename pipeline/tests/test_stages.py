@@ -741,21 +741,106 @@ class ThumbnailPromptCharacterRefTests(unittest.TestCase):
         self.assertIn("(i2i)", i2i)
 
 
+class ThumbnailPromptBakeTitleTests(unittest.TestCase):
+    """Locks down the bake_title switch (2026-07-03).
+
+    Heroes render clean because the site overlays its own HTML title and
+    baked typography underneath it doubled up on the homepage billboard.
+    Thumbnails keep the baked-title treatment for the social cards. The
+    default (True) must keep every legacy caller byte-compatible.
+    """
+
+    TITLE = "SECRET CHILD SHOCK"
+    CATEGORY = "Dating Disasters"
+    BODY = "On a routine blind date, a man is blindsided by a secret child."
+
+    def _clean(self, aspect: str, **kwargs) -> str:
+        return stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, aspect, False,
+            bake_title=False, **kwargs,
+        )
+
+    def test_default_keeps_baked_title_instruction(self):
+        out = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "16:9", False,
+        )
+        self.assertIn(f'Render the title "{self.TITLE}" prominently', out)
+        self.assertIn("title baked into the lower-third band", out)
+
+    def test_clean_mode_forbids_all_text_in_every_aspect(self):
+        for aspect in ("3:4", "16:9", "1:1"):
+            out = self._clean(aspect)
+            self.assertIn("Do NOT render any text in the artwork", out)
+            self.assertNotIn("Render the title", out)
+            self.assertNotIn("baked into", out)
+            self.assertIn("No watermarks, no signatures, no text of any kind", out)
+
+    def test_clean_mode_applies_to_i2i_and_hybrid_variants_too(self):
+        i2i = self._clean("3:4", character_base_url="https://gcs/base.png")
+        hybrid = self._clean(
+            "16:9",
+            character_base_url="https://gcs/base.png",
+            scene_image_url="https://gcs/scene.png",
+        )
+        for out in (i2i, hybrid):
+            self.assertIn("Do NOT render any text in the artwork", out)
+            self.assertNotIn("Render the title", out)
+        # Identity instructions survive the switch.
+        self.assertIn("Redraw the EXACT same character", i2i)
+        self.assertIn("SECOND reference image", hybrid)
+
+    def test_clean_landscape_reserves_overlay_negative_space(self):
+        # The homepage billboard overlays its HTML title on the left, so
+        # the clean 16:9 composition must ask for quiet space there.
+        out = self._clean("16:9")
+        self.assertIn("negative space on the left", out)
+
+    def test_dry_run_marks_clean_variant(self):
+        baked = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", True,
+        )
+        clean = stages.make_thumbnail_prompt(
+            self.TITLE, self.CATEGORY, self.BODY, "3:4", True,
+            bake_title=False,
+        )
+        self.assertNotIn("no-title", baked)
+        self.assertIn("no-title", clean)
+
+    def test_include_story_context_false_drops_the_body_excerpt(self):
+        # 2026-07-04 moderation fallback: kie deterministically flags
+        # some story excerpts (minors + charged phrasing), so the
+        # fallback prompt must carry NO story text in any of the three
+        # prompt modes — while keeping the title treatment intact.
+        for kwargs in (
+            {},
+            {"character_base_url": "https://gcs/base.png"},
+            {
+                "character_base_url": "https://gcs/base.png",
+                "scene_image_url": "https://gcs/scene.png",
+            },
+        ):
+            out = stages.make_thumbnail_prompt(
+                self.TITLE, self.CATEGORY, self.BODY, "3:4", False,
+                include_story_context=False, **kwargs,
+            )
+            self.assertNotIn("from the story", out)
+            self.assertNotIn("blind date", out)
+            self.assertIn(f'Render the title "{self.TITLE}"', out)
+
+
 class BuildArticlePromptTests(unittest.TestCase):
     """The article prompt mirrors the short's _clarity_block.
     See _plans/2026-06-28-content-clarity-bar.md.
 
     What we lock down: the prompt names the clarity bar, the four anchor
-    concepts (retell-by-end, concrete event, curiosity question, sharp
-    specifics from the source), and still carries the existing "don't
-    moralize / don't invent" rules and the headline + research brief.
+    concepts (retell-by-end, concrete event, curiosity question, invented
+    sharp specifics), the "don't moralize" rule and the originality rules.
     """
 
-    IDEA = {"headline": "AITA for invoicing my coworkers?"}
-    RESEARCH = {"brief": "Three to six beats of the office gift fund story."}
+    PREMISE = {"premise": "A shared office fund goes missing.", "category": "Drama"}
 
     def _prompt(self) -> str:
-        return stages._build_article_prompt(self.IDEA, self.RESEARCH)
+        return stages._build_article_prompt(self.PREMISE)
 
     def test_clarity_bar_present(self) -> None:
         self.assertIn("Clarity bar", self._prompt())
@@ -772,22 +857,24 @@ class BuildArticlePromptTests(unittest.TestCase):
 
     def test_existing_brand_rules_still_present(self) -> None:
         # The clarity bar is added ON TOP of the existing rules; the
-        # don't-moralize and don't-invent guards must still appear or the
-        # article voice drifts back to verdict-rendering.
+        # don't-moralize guard must still appear or the article voice drifts
+        # back to verdict-rendering.
         prompt = self._prompt()
         self.assertIn("Do NOT analyze, moralize, or render a verdict", prompt)
-        self.assertIn("do not invent anything beyond the research", prompt)
+
+    def test_originality_rules_present(self) -> None:
+        prompt = self._prompt()
+        self.assertIn("Invent your own characters", prompt)
+        self.assertIn("Never say or imply the story is true", prompt)
+        self.assertIn("Mention no brands", prompt)
+        self.assertIn(self.PREMISE["premise"], prompt)
 
     def test_article_pov_third_person_rule(self) -> None:
         # Added 2026-06-28 alongside the shorts _pov_block. The article
-        # narrator is also a third-person storyteller — never the OP.
-        # Same fallback rule for unknown gender: 'they' or a role-noun.
+        # narrator is also a third-person storyteller.
         prompt = self._prompt()
         self.assertIn("third-person storyteller", prompt)
         self.assertIn("NEVER the character", prompt)
-        self.assertIn("translate every 'I/me/my' into third person", prompt)
-        self.assertIn("default to 'they' or a role-noun", prompt)
-        self.assertIn("NEVER guess a gender", prompt)
 
     def test_article_demands_naming_loss_directly(self) -> None:
         # Mirror of the shorts cold-open principle: name the THING, not the
@@ -826,10 +913,6 @@ class BuildArticlePromptTests(unittest.TestCase):
         self.assertIn("open on the highest-stakes moment", prompt)
         self.assertIn("opening line IS the catch", prompt)
 
-    def test_headline_and_research_carry_through(self) -> None:
-        prompt = self._prompt()
-        self.assertIn(self.IDEA["headline"], prompt)
-        self.assertIn(self.RESEARCH["brief"], prompt)
 
 
 class ClassifyCategoryTests(unittest.TestCase):
@@ -890,6 +973,23 @@ class ClassifyCategoryTests(unittest.TestCase):
         self._patch_llm("Humor — it reads like a sitcom beat.")
         out = stages.classify_category(self.TITLE, self.BODY, "Drama")
         self.assertEqual(out, "Humor")
+
+    def test_token_cap_leaves_room_for_reasoning(self):
+        # gpt-5-nano spends hidden reasoning tokens from max_completion_tokens
+        # before emitting any content; a starved cap returns '' and the
+        # classifier falls back every time. The original cap of 20 could
+        # never work. Pin a floor so the starvation can't regress.
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+        seen = {}
+
+        def fake_chat(_prompt, max_tokens, model=None):  # noqa: ARG001
+            seen["max_tokens"] = max_tokens
+            return "Humor"
+
+        pipeline_llm.chat = fake_chat
+        stages.classify_category(self.TITLE, self.BODY, "Drama")
+        self.assertGreaterEqual(seen["max_tokens"], 1000)
 
 
 class ClassifyStoryTagsTests(unittest.TestCase):
@@ -980,6 +1080,25 @@ class ClassifyStoryTagsTests(unittest.TestCase):
     def test_empty_when_llm_raises(self):
         self._patch_llm(RuntimeError("LLM HTTP 500: boom"))
         self.assertEqual(self._classify(), [])
+
+    def test_token_cap_leaves_room_for_reasoning(self):
+        # gpt-5-nano spends hidden reasoning tokens from max_completion_tokens
+        # before emitting any content; a starved cap returns '' and every
+        # story keeps the subreddit-map fallback. That is exactly what
+        # happened at cap 200 once the active-category prompt grew
+        # (2026-07-03: every new story landed as "Drama"). Pin a floor so the
+        # starvation can't regress.
+        from pipeline import llm as pipeline_llm
+        self._orig = pipeline_llm.chat
+        seen = {}
+
+        def fake_chat(_prompt, max_tokens, model=None):  # noqa: ARG001
+            seen["max_tokens"] = max_tokens
+            return '[{"slug":"workplace","confidence":0.8}]'
+
+        pipeline_llm.chat = fake_chat
+        self._classify()
+        self.assertGreaterEqual(seen["max_tokens"], 1000)
 
 
 if __name__ == "__main__":
