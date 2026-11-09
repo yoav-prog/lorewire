@@ -22,7 +22,7 @@ export default function AboutPage() {
         </Link>
         <h1 className="mt-2 text-2xl font-semibold">About LoreWire</h1>
         <p className="mt-1 font-mono text-[11px] uppercase tracking-wider text-muted">
-          True internet stories, hand-drawn.
+          Stories from the internet, hand-drawn.
         </p>
       </header>
 
@@ -38,20 +38,18 @@ export default function AboutPage() {
 
       <Section title="Why it exists">
         <p>
-          Most of these stories live as walls of text inside niche
-          subreddits, where the people who would enjoy them most never
-          see them. LoreWire pulls the good ones out, rewrites them so a
-          stranger can follow them in under a minute, illustrates them so
-          they look like a story instead of a forum post, and gives them
-          a place where the question they raise can be answered by more
-          than one community.
+          The best everyday dilemmas deserve better than a wall of text.
+          LoreWire tells them so a stranger can follow them in under a
+          minute, illustrates them, and gives them a place where the
+          question they raise can be answered by more than one community.
         </p>
       </Section>
 
       <Section title="How it is made">
         <p>
-          Stories are sourced from public posts, rewritten, narrated, and
-          illustrated. LoreWire uses a mix of human editing and AI
+          New stories start from a general real-life situation, and the
+          characters, details, dialogue, and ending are invented by us.
+          LoreWire uses a mix of human editing and AI
           assistance — the AI helps with first drafts of narration,
           illustration, and captions; a human reviews everything before
           it ships. Identifying details are removed or changed. We do

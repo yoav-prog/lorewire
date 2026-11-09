@@ -110,6 +110,12 @@ export const STORIES: Table = {
     // story's category whitelist. Admin override always wins; settings
     // changes never overwrite an existing row.
     { name: "hero_style_id", type: "TEXT" },
+    // 2026-11-09 content originality (CONTENT_POLICY.md). 'original' marks a
+    // clean-room story; NULL is older content the publish gate grandfathers.
+    // compliance_status is 'pass' or 'fail' from generation. The full report
+    // can quote the source, so it lives in story_sources. Mirrors store.py.
+    { name: "content_origin", type: "TEXT" },
+    { name: "compliance_status", type: "TEXT" },
     // 2026-06-24 LLM-generated SEO metadata
     // (_plans/2026-06-24-llm-seo-metadata.md). Per-platform titles /
     // descriptions / captions / hashtags / tags generated once per
@@ -1138,6 +1144,8 @@ export const SUBMISSIONS: Table = {
     // 'video' (approve + render) | 'poll_only' (publish the text poll, no render)
     // — the approver's cost release valve, set at approval time (Phase 3).
     { name: "render_choice", type: "TEXT" },
+    // When the author confirmed the story is their own (CONTENT_POLICY.md).
+    { name: "own_work_confirmed_at", type: "TEXT" },
     { name: "created_at", type: "TEXT" },
     { name: "updated_at", type: "TEXT" },
   ],
@@ -1612,8 +1620,27 @@ export const ADMIN_NOTIFICATIONS: Table = {
   ],
 };
 
+// What a clean-room story was derived from, plus its full compliance report.
+// Internal only: public queries must never read this table. Mirrors store.py.
+export const STORY_SOURCES: Table = {
+  name: "story_sources",
+  columns: [
+    { name: "story_id", type: "TEXT", pk: true },
+    { name: "source_kind", type: "TEXT" },
+    { name: "source_ref", type: "TEXT" },
+    { name: "source_title", type: "TEXT" },
+    { name: "source_text", type: "TEXT" },
+    { name: "source_url", type: "TEXT" },
+    { name: "premise", type: "TEXT" },
+    { name: "compliance_report", type: "TEXT" },
+    { name: "created_at", type: "TEXT" },
+    { name: "updated_at", type: "TEXT" },
+  ],
+};
+
 export const TABLES: Table[] = [
   STORIES,
+  STORY_SOURCES,
   SETTINGS,
   USERS,
   USER_SAVES,

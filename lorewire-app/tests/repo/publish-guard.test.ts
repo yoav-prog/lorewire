@@ -148,3 +148,71 @@ describe("setStatus publish guard", () => {
     ).rejects.toThrow(/cannot publish missing story/);
   });
 });
+
+describe("setStatus originality gate", () => {
+  const SOURCE = 'I told Karen that "nobody touches my yogurt" and walked away slowly.';
+
+  async function makeOriginalStory(
+    body: string,
+    withSource = true,
+  ): Promise<string> {
+    const id = await makeStory({ body });
+    const now = new Date().toISOString();
+    await run("UPDATE stories SET content_origin = 'original' WHERE id = ?", [id]);
+    if (withSource) {
+      await run(
+        "INSERT INTO story_sources (story_id, source_kind, source_ref, source_title, source_text, source_url, premise, compliance_report, created_at, updated_at) " +
+          "VALUES (?, 'reddit', ?, '', ?, 'https://example.test/thread', 'A premise.', '{}', ?, ?)",
+        [id, id, SOURCE, now, now],
+      );
+    }
+    return id;
+  }
+
+  it("publishes a clean original story", async () => {
+    const id = await makeOriginalStory("Priya taped a border down the shelf.");
+    await expect(setStatus(id, "published")).resolves.toBeUndefined();
+  });
+
+  it("blocks an original story that reuses a source name", async () => {
+    const id = await makeOriginalStory("Then Karen opened the fridge.");
+    await expect(setStatus(id, "published")).rejects.toThrow(/originality check \(identifying\)/);
+  });
+
+  it("names checks in the error, never source text", async () => {
+    const id = await makeOriginalStory("Karen said nobody touches my yogurt.");
+    const error = await setStatus(id, "published").catch((e: Error) => e);
+    expect(String(error)).not.toContain("yogurt");
+    expect(String(error)).not.toContain("Karen");
+  });
+
+  it("re-checks edited text at publish time", async () => {
+    const id = await makeOriginalStory("Priya taped a border down the shelf.");
+    await run("UPDATE stories SET body = ? WHERE id = ?", ["A true story about Karen.", id]);
+    await expect(setStatus(id, "ready")).rejects.toThrow(/originality check/);
+  });
+
+  it("checks the short's narration and social metadata", async () => {
+    const id = await makeOriginalStory("Priya taped a border down the shelf.");
+    await run("UPDATE stories SET short_config = ? WHERE id = ?", [
+      JSON.stringify({ script: "It was all over Reddit by noon." }),
+      id,
+    ]);
+    await expect(setStatus(id, "published")).rejects.toThrow(/labeling/);
+    await run("UPDATE stories SET short_config = NULL, seo_metadata_json = ? WHERE id = ?", [
+      JSON.stringify({ youtube: { description: "#TrueStory" } }),
+      id,
+    ]);
+    await expect(setStatus(id, "published")).rejects.toThrow(/labeling/);
+  });
+
+  it("fails closed when the source record is missing", async () => {
+    const id = await makeOriginalStory("Priya taped a border down the shelf.", false);
+    await expect(setStatus(id, "published")).rejects.toThrow(/originality check/);
+  });
+
+  it("leaves older stories alone", async () => {
+    const id = await makeStory({ body: "A true story about Reddit and Karen." });
+    await expect(setStatus(id, "published")).resolves.toBeUndefined();
+  });
+});

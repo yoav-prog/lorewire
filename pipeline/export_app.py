@@ -54,13 +54,7 @@ def _bust(url: str | None, version: str) -> str | None:
 
 def main() -> None:
     rows = store.published_stories()
-    # source_url isn't in published_stories' SELECT yet — pull it per row via
-    # fetch_story(). Tiny cost: one extra query per published row, and there
-    # are rarely more than a few dozen at a time.
     for r in rows:
-        full = store.fetch_story(r["id"])
-        if full and full.get("source_url"):
-            r["source_url"] = full["source_url"]
         # Cache-bust signature derived from updated_at so a single GCS
         # re-upload (same URL, new bytes) gets a fresh query string.
         ts = (r.get("updated_at") or r.get("published_at") or "")
@@ -92,7 +86,6 @@ def main() -> None:
             # Media columns are emitted only when set so the JS-side check
             # `if (story.heroImage)` is honest about availability instead of
             # always-truthy with empty strings.
-            **({"source_url": r["source_url"]} if r.get("source_url") else {}),
             **({"heroImage": r["hero_image"]} if r["hero_image"] else {}),
             **({"heroImageLandscape": r["hero_image_landscape"]} if r.get("hero_image_landscape") else {}),
             **({"heroHasBakedTitle": bool(r["hero_has_baked_title"])} if r.get("hero_has_baked_title") else {}),
@@ -120,7 +113,6 @@ def main() -> None:
         "  year: number;\n"
         "  syn: string;\n"
         "  body: string;\n"
-        "  source_url?: string;\n"
         "  heroImage?: string;\n"
         "  heroImageLandscape?: string;\n"
         "  heroHasBakedTitle?: boolean;\n"

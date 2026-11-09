@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import secrets
 import sqlite3
 import time
 import uuid
@@ -143,6 +144,24 @@ SCHEMA_STATEMENTS = [
     # auto-pick from the category's style whitelist). Admin override wins;
     # a settings change never overwrites an existing row's pin.
     "ALTER TABLE stories ADD COLUMN IF NOT EXISTS hero_style_id TEXT",
+    # 2026-11-09 content originality (CONTENT_POLICY.md). content_origin is
+    # 'original' for clean-room stories and NULL for everything older, which
+    # the publish gate grandfathers. story_sources holds source text and the
+    # full compliance report; public queries never read it.
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS content_origin TEXT",
+    "ALTER TABLE stories ADD COLUMN IF NOT EXISTS compliance_status TEXT",
+    """CREATE TABLE IF NOT EXISTS story_sources (
+        story_id          TEXT PRIMARY KEY,
+        source_kind       TEXT NOT NULL,
+        source_ref        TEXT,
+        source_title      TEXT,
+        source_text       TEXT NOT NULL,
+        source_url        TEXT,
+        premise           TEXT NOT NULL,
+        compliance_report TEXT NOT NULL,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+    )""",
     """CREATE TABLE IF NOT EXISTS settings (
         key   TEXT PRIMARY KEY,
         value TEXT
@@ -564,6 +583,8 @@ _COLUMNS = [
     # edit page's "Hero style" dropdown. Resolution chain lives in
     # pipeline/stages.py:resolve_hero_style.
     "hero_style_id",
+    # 2026-11-09 content originality. See the schema comment above.
+    "content_origin", "compliance_status",
     "tokens", "cost_cents", "created_at", "updated_at", "published_at", "payload",
 ]
 # Refreshed on conflict: everything except the identity and creation time.
@@ -3372,6 +3393,75 @@ def fetch_reddit_source(reddit_id: str) -> dict | None:
             f"SELECT {cols} FROM reddit_source WHERE reddit_id=?", (reddit_id,)
         ).fetchone()
         return dict(row) if row else None
+
+
+CONTENT_ORIGIN_ORIGINAL = "original"
+
+
+def new_story_id() -> str:
+    """A public story id with no link to where the premise came from."""
+    return f"lw-{secrets.token_hex(6)}"
+
+
+def story_id_for_reddit_source(reddit_id: str) -> str | None:
+    """The story already generated from this source, if any."""
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM stories WHERE reddit_id = %s LIMIT 1", (reddit_id,))
+                row = cur.fetchone()
+                return row["id"] if row else None
+    with _sqlite_conn() as c:
+        row = c.execute(
+            "SELECT id FROM stories WHERE reddit_id=? LIMIT 1", (reddit_id,)
+        ).fetchone()
+        return row["id"] if row else None
+
+
+def save_story_source(
+    story_id: str,
+    source_kind: str,
+    source_ref: str,
+    source_title: str,
+    source_text: str,
+    source_url: str,
+    premise: str,
+    compliance_report: dict,
+) -> None:
+    """Record what a clean-room story was derived from. Internal only."""
+    now = _now_iso()
+    values = (
+        story_id, source_kind, source_ref, source_title, source_text,
+        source_url, premise, json.dumps(compliance_report), now, now,
+    )
+    columns = (
+        "story_id, source_kind, source_ref, source_title, source_text, "
+        "source_url, premise, compliance_report, created_at, updated_at"
+    )
+    updates = (
+        "source_kind=excluded.source_kind, source_ref=excluded.source_ref, "
+        "source_title=excluded.source_title, source_text=excluded.source_text, "
+        "source_url=excluded.source_url, premise=excluded.premise, "
+        "compliance_report=excluded.compliance_report, updated_at=excluded.updated_at"
+    )
+    if _is_postgres():
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO story_sources ({columns}) "
+                    f"VALUES ({', '.join(['%s'] * len(values))}) "
+                    f"ON CONFLICT(story_id) DO UPDATE SET {updates}",
+                    values,
+                )
+            conn.commit()
+        return
+    with _sqlite_conn() as c:
+        c.execute(
+            f"INSERT INTO story_sources ({columns}) "
+            f"VALUES ({', '.join(['?'] * len(values))}) "
+            f"ON CONFLICT(story_id) DO UPDATE SET {updates}",
+            values,
+        )
 
 
 # Build a parameterized WHERE clause from a filter dict. Keeping the predicate

@@ -34,7 +34,7 @@ import traceback
 from pathlib import Path
 from typing import Callable
 
-from pipeline import llm, media, stages, store, video
+from pipeline import clean_room, llm, media, stages, store, video
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLL_SECONDS = 5
@@ -217,13 +217,8 @@ def _category_for(subreddit: str) -> str:
 
 def reddit_source_to_post(row: dict) -> dict:
     """Convert a reddit_source row into the `post` dict shape that
-    stages.make_idea / stages.research / stages.write_article expect.
-
-    Matches the shape stages._scrape_subreddit returns: id, category,
-    subreddit, title, selftext, score, num_comments, url. The pipeline's
-    real-scrape path and this queue-driven path go through identical
-    downstream stages from make_idea onward — the only difference is the
-    origin of the dict.
+    clean_room.generate expects: id, category, subreddit, title, selftext,
+    score, num_comments, url.
     """
     return {
         "id": row["reddit_id"],
@@ -242,7 +237,7 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     source row. Returns the story dict that was upserted into `stories`
     so the worker can extract `story_id` for finish_story_job.
 
-    Story-jobs scope: LLM (idea/research/article/title) + optional
+    Story-jobs scope: LLM (premise/article/title/compliance) + optional
     media (kie images + voice + alignment). Video render is NOT done
     here — it's enqueued into the video_renders queue and rendered out
     of band by the Cloud Run service (see
@@ -274,40 +269,41 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
     # / TTS_COST_PER_CHAR / STT_COST_PER_SECOND tables.
     before_cost_usd = media.running_cost_usd()
 
-    idea = stages.make_idea(post, dry_run=False)
-    print(f"[story-jobs idea] reddit_id={post['id']} category={idea['category']}")
-    store.update_story_job_progress(claimed_job["id"], 15)
-    store.log_story_job_event(
-        job_id, reddit_id, "idea_done",
-        message=f"Generated idea: {idea.get('headline', '')[:80]}",
-        payload={"category": idea.get("category"), "headline": idea.get("headline")},
-    )
+    # Clean-room generation (CONTENT_POLICY.md). The story id is LoreWire's own,
+    # never the Reddit id, and is reused when this source was processed before
+    # so a retried job updates its story instead of creating a duplicate.
+    story_id = store.story_id_for_reddit_source(post["id"]) or store.new_story_id()
 
-    research = stages.research(idea, post, dry_run=False)
-    store.update_story_job_progress(claimed_job["id"], 30)
-    store.log_story_job_event(
-        job_id, reddit_id, "research_done",
-        message="Researched supporting context",
-        payload={"keys": list(research.keys()) if isinstance(research, dict) else None},
-    )
+    def on_clean_room_progress(event: str, message: str, payload: dict) -> None:
+        store.log_story_job_event(
+            job_id, reddit_id, event, message=message, payload=payload
+        )
 
-    body = stages.write_article(idea, research, dry_run=False)
-    store.update_story_job_progress(claimed_job["id"], 50)
-    store.log_story_job_event(
-        job_id, reddit_id, "article_done",
-        message=f"Wrote article ({len(body)} chars)",
-        payload={"char_count": len(body)},
+    clean = clean_room.generate(
+        post, story_id, dry_run=False, on_progress=on_clean_room_progress
     )
-
-    branded_title, branded_syn = stages.make_title_and_synopsis(
-        idea, body, dry_run=False
+    idea, body = clean.idea, clean.body
+    branded_title, branded_syn = clean.title, clean.synopsis
+    compliance_passed = clean.report["passed"]
+    print(
+        f"[story-jobs compliance] reddit_id={post['id']} story_id={story_id} "
+        f"status={clean.report['status']} attempts={clean.attempts}"
     )
     store.update_story_job_progress(claimed_job["id"], 60)
+    # Check names and counts only: finding details can quote the source.
     store.log_story_job_event(
-        job_id, reddit_id, "title_done",
-        message=f"Title: {(branded_title or idea.get('headline', ''))[:80]}",
-        payload={"title": branded_title, "synopsis_chars": len(branded_syn or "")},
+        job_id, reddit_id, "compliance_checked",
+        message=f"Compliance {clean.report['status']} after {clean.attempts} attempt(s)",
+        level="info" if compliance_passed else "warn",
+        payload={
+            "status": clean.report["status"],
+            "attempts": clean.attempts,
+            "checks": sorted({f["check"] for f in clean.report["findings"]}),
+        },
     )
+    # A story that failed every blind rewrite is held for review. No image or
+    # voice spend on text a human may reject.
+    with_media = with_media and compliance_passed
 
     # 2026-07-01 multi-tag LLM classifier
     # (_plans/2026-07-01-category-taxonomy-multitag.md). Supersedes the old
@@ -363,9 +359,9 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     row = {
-        "id": idea["reddit_id"],
-        "reddit_id": idea["reddit_id"],
-        "slug": idea["reddit_id"],
+        "id": story_id,
+        "reddit_id": post["id"],
+        "slug": story_id,
         "category": idea["category"],
         # `branded_title` is guaranteed non-empty and length-gated by
         # stages.make_title_and_synopsis (validator + retry + salvage).
@@ -373,16 +369,19 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         # mechanism by which 99-char Reddit headlines reached the live
         # hero. Plan: _plans/2026-06-25-title-length-gate.md.
         "title": branded_title,
-        "summary": branded_syn or post.get("selftext", "")[:160],
+        "summary": branded_syn or body[:160],
         "body": body,
         # Fresh from the worker lands in review, never published — the
         # publish gate (Phase 4) is the only writer of status='published'.
         "status": "review",
-        "source_url": post.get("url", ""),
+        # The source URL lives in story_sources, never on the public row.
+        "source_url": "",
+        "content_origin": store.CONTENT_ORIGIN_ORIGINAL,
+        "compliance_status": clean.report["status"],
         "tokens": llm.totals["total_tokens"] - before_tokens,
         "created_at": now,
         "updated_at": now,
-        "payload": {"idea": idea, "research": research},
+        "payload": {"idea": idea},
     }
 
     if with_media:
@@ -453,6 +452,16 @@ def _default_process(claimed_job: dict, reddit_row: dict) -> dict:
         media_delta_usd, llm_token_delta,
     )
     store.upsert_story(row)
+    store.save_story_source(
+        story_id=row["id"],
+        source_kind="reddit",
+        source_ref=post["id"],
+        source_title=post.get("title", ""),
+        source_text=post.get("selftext", ""),
+        source_url=post.get("url", ""),
+        premise=clean.premise["premise"],
+        compliance_report=clean.report,
+    )
     # Persist the multi-tag set now the story row exists (story_tags.story_id
     # FKs stories.id). The primary tag's label is already mirrored into
     # stories.category above; this writes the full 1-3 tag set. Empty when the

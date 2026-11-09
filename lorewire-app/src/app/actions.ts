@@ -363,6 +363,8 @@ export interface HomepageCurationResult {
 // catalog or the live DB.
 export interface LiveCatalogStory {
   id: string;
+  /** 'original' for clean-room stories. Picks the reader-facing label. */
+  content_origin?: string | null;
   slug: string | null;
   title: string | null;
   category: string | null;
@@ -532,7 +534,7 @@ export async function listPublishedShorts(
   const rows = await all<LiveCatalogStory & IntroWindowStoryRow>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
-      "video_url, published_at, created_at, short_config, " +
+      "video_url, published_at, created_at, content_origin, short_config, " +
       "intro_segment_id, outro_segment_id, skip_intro, skip_outro, " +
       "video_config FROM stories " +
       `${clause} ` +
@@ -568,6 +570,7 @@ export async function listPublishedShorts(
       video_url: resolveMediaUrl(s.video_url),
       published_at: s.published_at,
       created_at: s.created_at,
+      content_origin: s.content_origin,
     }),
   );
   // Cursor matches the SQL COALESCE order so a row with NULL published_at

@@ -67,6 +67,7 @@ import { all, one } from "@/lib/db";
 import { getStory } from "@/lib/repo";
 import { evaluatePublishReadiness } from "@/lib/reddit-source";
 import { getPollByStoryId } from "@/lib/polls";
+import { originalityBlockers } from "@/lib/content-compliance-gate";
 import { latestDoneShortRenderForStory } from "@/lib/short-render-queue";
 import { parseShortConfig } from "@/lib/short-config";
 
@@ -87,6 +88,7 @@ export type AssetGate =
   | "voiceover"
   | "scene_images"
   | "poll"
+  | "originality"
   | "already_published"
   | "story_missing"
   | "wrong_kind";
@@ -200,6 +202,7 @@ export async function evaluateAssetCompleteness(
     shortRenderPresent,
     sceneState: parseShortConfigState(story.short_config),
     pollReady,
+    originalityBlocked: (await originalityBlockers([storyId])).has(storyId),
   });
 }
 
@@ -289,6 +292,8 @@ export async function evaluateAssetCompletenessForStories(
     for (const c of configRows) configByStory.set(c.id, c.short_config);
   }
 
+  const originality = await originalityBlockers(storyIds);
+
   for (const s of stories) {
     const poll = pollByStory.get(s.id);
     const pollReady =
@@ -312,6 +317,7 @@ export async function evaluateAssetCompletenessForStories(
         shortRenderPresent: Number(s.short_render_ok ?? 0) === 1,
         sceneState: parseShortConfigState(configByStory.get(s.id) ?? null),
         pollReady,
+        originalityBlocked: originality.has(s.id),
       }),
     );
   }
@@ -338,6 +344,7 @@ interface GateInputs {
   shortRenderPresent: boolean;
   sceneState: SceneState;
   pollReady: boolean;
+  originalityBlocked: boolean;
 }
 
 /** Pure gate derivation — the single source of truth for "what blocks
@@ -419,6 +426,9 @@ function deriveAssetCompleteness(inputs: GateInputs): AssetCompleteness {
   }
 
   if (!inputs.pollReady) missing.push("poll");
+
+  // Clean-room stories only. Re-checks final text; see content-compliance-gate.
+  if (inputs.originalityBlocked) missing.push("originality");
 
   const blocking = missing.filter((g) => !ADVISORY_GATES.has(g));
   return {

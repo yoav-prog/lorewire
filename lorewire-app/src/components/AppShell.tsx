@@ -7,6 +7,7 @@ import {
   PILLS,
   type Story,
 } from "@/lib/stories";
+import { isStoryOriginLabel } from "@/lib/story-labels";
 import { categoryVisual } from "@/lib/categories/visuals";
 import {
   CATEGORY_ORDER,
@@ -77,7 +78,6 @@ import SiteFooter from "@/components/SiteFooter";
 import { StoryLink } from "@/components/StoryLink";
 import { CommentsTab } from "@/components/CommentsTab";
 import { JumpToComments } from "@/components/JumpToComments";
-import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import { formatDurationMs } from "@/lib/duration";
 import {
@@ -1306,20 +1306,7 @@ function GenArticle({
     body_source: liveMedia.body ? "live" : "static",
   });
 
-  // Cross-check the article's source URL against the authoritative Reddit
-  // id (story.id, which equals stories.reddit_id for pipeline rows). When
-  // they disagree, the URL points at a different thread than the article
-  // was written from — refuse to embed rather than mislead the reader.
-  // The stub card still renders so the section never goes blank.
-  const redditTarget = resolveRedditEmbedTarget(story.source_url, story.id);
-  // eslint-disable-next-line no-console -- rule 14
-  console.info("[lorewire reddit embed]", {
-    storyId: story.id,
-    source_url: story.source_url ?? null,
-    rendered: redditTarget !== null,
-    embed_url: redditTarget?.url ?? null,
-    embed_reddit_id: redditTarget?.redditId ?? null,
-  });
+  const originLabel = story.tags.find(isStoryOriginLabel);
 
   // Aspect ratio + crop behaviour tracks the source. Long-form
   // illustrations are 16:9 and benefit from the upper-third crop to put
@@ -1359,163 +1346,12 @@ function GenArticle({
           )}
         </React.Fragment>
       ))}
-      {redditTarget ? (
-        <RedditSourceCard
-          url={redditTarget.url}
-          title={story.title}
-          redditId={redditTarget.redditId}
-          variant="mobile"
-        />
-      ) : (
-        <RedditSourceStub variant="mobile" />
+      {originLabel && (
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-8">
+          {originLabel}
+        </p>
       )}
     </article>
-  );
-}
-
-// Wraps the real Reddit embed in a designed container — gives the
-// "from the original thread" section the visual weight it deserves on a
-// page that's been heavily designed everywhere else. Header row carries
-// the Reddit avatar mark + subreddit chip; the embed widget hydrates
-// inside the card so we keep one consistent surface whether the embed
-// loaded or fell through to a link.
-function RedditSourceCard({
-  url,
-  title,
-  redditId,
-  variant,
-}: {
-  url: string;
-  title?: string;
-  redditId: string;
-  variant: "mobile" | "desktop";
-}) {
-  const pad = variant === "desktop" ? "p-6" : "p-5";
-  const headerSize = variant === "desktop" ? "text-[12px]" : "text-[11px]";
-  return (
-    <section
-      className={`mt-8 rounded-[16px] overflow-hidden ${pad}`}
-      style={{
-        background:
-          "linear-gradient(135deg, #1c1820 0%, #181620 65%, #221820 100%)",
-        border: "1px solid rgba(232,70,43,0.22)",
-        boxShadow: "0 14px 40px rgba(0,0,0,0.35)",
-      }}
-    >
-      <div className="flex items-center gap-3 mb-4">
-        <RedditMark />
-        <div className="min-w-0 flex-1">
-          <p className={`font-mono ${headerSize} uppercase tracking-[.2em] text-muted leading-tight`}>
-            From the original thread
-          </p>
-          <p className="font-display font-bold text-ink leading-tight mt-0.5 truncate" style={{ fontSize: variant === "desktop" ? 18 : 15 }}>
-            r/AmItheAsshole
-          </p>
-        </div>
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="shrink-0 font-mono text-[10px] uppercase tracking-[.18em] px-3 py-1.5 rounded-full transition hover:scale-[1.02]"
-          style={{
-            background: "rgba(232,70,43,0.14)",
-            color: "#E8462B",
-            border: "1px solid rgba(232,70,43,0.32)",
-          }}
-        >
-          Open in Reddit &rarr;
-        </a>
-      </div>
-      <div
-        className="rounded-[12px] overflow-hidden"
-        style={{ background: "rgba(245,243,239,0.04)" }}
-      >
-        <RedditEmbed url={url} title={title} />
-      </div>
-      <p className="font-mono text-[10px] text-muted/70 mt-3" data-reddit-id={redditId}>
-        Embed loads from Reddit. Falls back to a direct link if the widget is blocked.
-      </p>
-    </section>
-  );
-}
-
-// Stub for stories that have no verified Reddit source URL. Rendered when
-// resolveRedditEmbedTarget returns null (mismatch, placeholder, or a
-// sample catalog row). Looks like a designed "discuss this" card instead
-// of a half-broken embed placeholder.
-function RedditSourceStub({ variant }: { variant: "mobile" | "desktop" }) {
-  const pad = variant === "desktop" ? "p-6" : "p-5";
-  return (
-    <section
-      className={`mt-8 rounded-[16px] ${pad}`}
-      style={{
-        background:
-          "linear-gradient(135deg, #181620 0%, #15141A 60%, #1c1822 100%)",
-        border: "1px solid rgba(245,243,239,0.08)",
-      }}
-    >
-      <div className="flex items-center gap-3">
-        <RedditMark muted />
-        <div className="min-w-0 flex-1">
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted leading-tight">
-            Retold by LoreWire
-          </p>
-          <p className="font-display font-bold text-ink/85 leading-tight mt-0.5" style={{ fontSize: variant === "desktop" ? 18 : 15 }}>
-            From r/AmItheAsshole
-          </p>
-        </div>
-      </div>
-      <p className="text-ink/65 text-[13.5px] leading-relaxed mt-3">
-        This piece is one of many we've adapted from the subreddit. Want more? Browse what's resonating right now.
-      </p>
-      <a
-        href="https://www.reddit.com/r/AmItheAsshole/hot/"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex items-center gap-2 mt-4 font-mono text-[11px] uppercase tracking-[.18em] px-3.5 py-2 rounded-full transition hover:scale-[1.02]"
-        style={{
-          background: "rgba(232,70,43,0.14)",
-          color: "#E8462B",
-          border: "1px solid rgba(232,70,43,0.32)",
-        }}
-      >
-        Browse r/AmItheAsshole <span aria-hidden>&rarr;</span>
-      </a>
-    </section>
-  );
-}
-
-// Reddit's snoo avatar mark, inline SVG. Keeps the source card visually
-// anchored without pulling in a third-party icon set. The `muted` variant
-// desaturates for the stub card where there's no real Reddit thread.
-function RedditMark({ muted = false }: { muted?: boolean }) {
-  const fill = muted ? "#3a3540" : "#E8462B";
-  return (
-    <span
-      aria-hidden
-      className="shrink-0"
-      style={{
-        width: 40,
-        height: 40,
-        borderRadius: 999,
-        background: fill,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        boxShadow: muted ? "none" : "0 4px 14px rgba(232,70,43,0.35)",
-      }}
-    >
-      <svg
-        width="24"
-        height="24"
-        viewBox="0 0 24 24"
-        fill="#0A0A0C"
-        aria-hidden
-      >
-        <circle cx="12" cy="12" r="10" fill="none" />
-        <path d="M21 12.3c0-1.1-.9-2-2-2-.5 0-1 .2-1.4.5-1.4-.9-3.3-1.5-5.4-1.6l1-3.5 3 .7c0 .8.6 1.4 1.4 1.4s1.4-.6 1.4-1.4-.6-1.4-1.4-1.4c-.5 0-1 .3-1.2.7l-3.4-.8c-.2 0-.3.1-.4.2L11 9.2c-2.2 0-4.1.7-5.5 1.6-.4-.3-.9-.5-1.4-.5-1.1 0-2 .9-2 2 0 .8.5 1.5 1.2 1.8 0 .2-.1.5-.1.7 0 2.6 3.1 4.8 6.8 4.8s6.8-2.1 6.8-4.8c0-.2 0-.4-.1-.6.8-.3 1.3-1 1.3-1.9zM7 13.4c0-.8.6-1.4 1.4-1.4s1.4.6 1.4 1.4-.6 1.4-1.4 1.4-1.4-.6-1.4-1.4zm7.5 3.3c-.7.7-1.9 1-2.5 1s-1.8-.3-2.5-1c-.1-.1-.1-.3 0-.4.1-.1.3-.1.4 0 .5.5 1.4.7 2.1.7s1.7-.2 2.1-.7c.1-.1.3-.1.4 0 .2.1.2.3 0 .4zm-.4-1.9c-.8 0-1.4-.6-1.4-1.4s.6-1.4 1.4-1.4 1.4.6 1.4 1.4-.6 1.4-1.4 1.4z" />
-      </svg>
-    </span>
   );
 }
 
