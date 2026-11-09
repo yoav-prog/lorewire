@@ -81,5 +81,5 @@ def missing(group: str) -> list[str]:
     """Required env vars for a stage that are not set (for real, non-dry runs)."""
     if group == "llm":
         return [] if has_llm() else ["OPENAI_API_KEY (or LLM_API_KEY)"]
-    req = {"scrape": ["DECODO_TOKEN"], "images": ["KIE_API_KEY"], "voice": ["TTS_PROVIDER"]}
+    req = {"images": ["KIE_API_KEY"], "voice": ["TTS_PROVIDER"]}
     return [k for k in req.get(group, []) if not os.environ.get(k)]

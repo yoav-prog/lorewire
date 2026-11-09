@@ -21,6 +21,41 @@ counsel, `[operator]` is an account/admin action.
       that access/erasure requests are actioned within the 30-day clock
       (Art. 12(3)). Keep the existing `data_deletion_requests` audit trail.
 
+## Content originality (added 2026-11-09)
+
+Production facts as of 2026-11-09. LoreWire's stories were adapted from Reddit
+posts and labeled "True Story" with links to the source threads. New stories now
+use the premise-only process in `CONTENT_POLICY.md`. Older stories keep their
+adapted text; only their label and links changed.
+
+- 1,239 published stories, each with its Reddit post id in its public URL.
+- Already posted: 302 to YouTube, 170 to Facebook, 165 to Instagram.
+- Source pool: about 30,900 full-text Reddit posts held in the database.
+- Autopilot generates up to 10 stories a day from that pool and can publish them
+  without a person reviewing each one.
+
+Questions for counsel:
+
+- [ ] `[legal]` Copyright: are the published adaptations infringing derivative
+      works under German law? Should they be rewritten, unlisted, or removed?
+- [ ] `[legal]` Does a premise-only story avoid infringement when the premise is
+      distinctive? German law can protect a sufficiently individual plot.
+- [ ] `[legal]` Are the source links' removal and the new label a problem for
+      adapted stories, given that credit was previously shown?
+- [ ] `[legal]` UWG: were "True Story" and is "True stories from the internet"
+      misleading for adapted and AI-written content? Is "Fictionalized story,
+      inspired by real-life situations" adequate?
+- [ ] `[legal]` Reddit's terms: exposure from how the pool was collected and from
+      commercial use of it, including premises drawn from it by automation.
+- [ ] `[legal]` GDPR: lawful basis, retention and erasure for strangers' posts in
+      `reddit_source` and `story_sources`. Keep them as evidence, or purge?
+- [ ] `[legal]` Personality rights of people described in source posts.
+- [ ] `[legal]` Do EU AI-labeling duties apply to these videos and articles?
+- [ ] `[legal]` Should posts already on social platforms be taken down or edited?
+- [ ] `[operator]` Publish a takedown contact, once counsel confirms the process.
+- [ ] `[operator]` Decide whether autopilot may keep selecting sources, since
+      rule 6 of `CONTENT_POLICY.md` says sources are selected manually.
+
 ## Processor contracts and transfers (Art. 28, Chapter V)
 
 - [ ] `[operator]` Obtain and counter-sign a **DPA with every processor** in

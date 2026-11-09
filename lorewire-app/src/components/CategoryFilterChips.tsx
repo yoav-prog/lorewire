@@ -185,13 +185,3 @@ function CategoryChip({
     </button>
   );
 }
-
-// Filter a list of stories by the active selection. An empty selection
-// returns the input untouched so callers can pipe through unconditionally.
-export function filterStoriesByCategory<T extends { cat: string }>(
-  items: T[],
-  selected: Set<string>,
-): T[] {
-  if (selected.size === 0) return items;
-  return items.filter((s) => selected.has(s.cat));
-}

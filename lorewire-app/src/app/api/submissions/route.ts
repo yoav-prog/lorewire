@@ -17,6 +17,7 @@ import { screenSubmission } from "@/lib/submission-moderation";
 import {
   createSubmission,
   parseSubmissionInput,
+  recordOwnWorkConfirmation,
   SubmissionError,
   updateSubmission,
 } from "@/lib/submissions";
@@ -44,6 +45,7 @@ interface SubmissionBody {
   optionA?: unknown;
   optionB?: unknown;
   lang?: unknown;
+  ownWork?: unknown;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -81,11 +83,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const action = raw.action === "draft" ? "draft" : "submit";
   const id = typeof raw.id === "string" && raw.id ? raw.id : null;
 
+  if (action === "submit" && raw.ownWork !== true) {
+    return NextResponse.json(
+      { error: "Please confirm you wrote this story yourself." },
+      { status: 400 },
+    );
+  }
+
   try {
     const input = parseSubmissionInput(raw);
     let submission = id
       ? await updateSubmission({ id, userId: session.userId, input, action })
       : await createSubmission({ userId: session.userId, input, action });
+    if (action === "submit") await recordOwnWorkConfirmation(submission.id);
     // Screen newly-submitted text inline: clear violations auto-reject with a
     // reason, the rest enters the human queue. A draft save doesn't get screened.
     if (action === "submit" && submission.status === "pending_review") {

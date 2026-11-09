@@ -223,14 +223,22 @@ export async function uploadBuffer(
   body: ArrayBuffer | Uint8Array | Buffer,
   key: string,
   contentType: string,
+  opts?: {
+    /** Skip the WebP re-encode and store the bytes as-is. Brand/OG assets
+     *  need this: the LinkedIn and WhatsApp link crawlers don't render WebP
+     *  og:image, so those uploads must stay PNG/JPG. Default true. */
+    compress?: boolean;
+  },
 ): Promise<string> {
   // Compress raster images to WebP before upload (keeps quality, much smaller),
   // mirroring the pipeline. Swaps the key to .webp; non-images pass through.
-  ({ body, key, contentType } = await maybeCompressImageBuffer(
-    body,
-    key,
-    contentType,
-  ));
+  if (opts?.compress !== false) {
+    ({ body, key, contentType } = await maybeCompressImageBuffer(
+      body,
+      key,
+      contentType,
+    ));
+  }
   // Media migration target — see uploadFile. Inert until the cutover flag.
   if (isR2MediaActive()) {
     await putR2Object(mediaBucket(), key, body, {

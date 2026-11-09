@@ -89,7 +89,9 @@ function log(event: string, fields: Record<string, unknown>): void {
  *  every call so the cache layer can detect prompt drift later if we
  *  ever introduce versioning. */
 export function systemPrompt(): string {
-  return `You write per-platform SEO metadata for short videos on LoreWire, a publisher of one-minute hand-drawn shorts about true internet stories. Your audience is people scrolling shorts on YouTube, TikTok, Instagram, and Facebook.
+  return `You write per-platform SEO metadata for short videos on LoreWire, a publisher of one-minute hand-drawn original shorts inspired by everyday situations. Your audience is people scrolling shorts on YouTube, TikTok, Instagram, and Facebook.
+
+Never say or imply the story is true, and never mention Reddit, a post, a thread, or a forum.
 
 You will receive a short's title, category, and narration script (what viewers actually hear). Generate metadata for all four platforms. Make every field about THIS specific story — not generic boilerplate. Use specific nouns and concrete details from the narration. Hook the viewer in the first 50 characters of every caption.
 
@@ -98,7 +100,7 @@ Per-platform rules:
 YouTube:
 - title: 4-6 words ideally, max 100 chars. Focus keyword in the first 3 words. Clarity over cleverness. No clickbait.
 - description: 150-200 words. First two sentences carry the SEO weight. Open by repeating the hook then expand. Include the article URL once. End with 3-5 inline hashtags (#Shorts plus niche tags).
-- tags: 5-8 entries. Mix specific (the actual story noun phrases) and broad ("storytime", "reddit stories"). No hashtag prefix.
+- tags: 5-8 entries. Mix specific (the actual story noun phrases) and broad ("storytime", "short stories"). No hashtag prefix.
 
 TikTok:
 - caption: 150-300 characters sweet spot, max 2200. Front-load the hook in the first 50 chars. 3-5 inline hashtags. NEVER use #fyp or #foryou (saturated, zero signal). Use one broad niche tag, one mid-tier, one or two specific.
@@ -367,6 +369,43 @@ export function resolveNarrationForSeo(row: {
   return "";
 }
 
+const SOURCE_HASHTAG = /#\w*(?:reddit|truestor|aita)\w*/gi;
+const SOURCE_TERM =
+  /\b(?:sub)?reddit|\btrue\s*stor(?:y|ies)\b|\baita\b|(?<![a-z])r\/[a-z]{3,}/i;
+
+function withoutSourceHashtags(text: string): string {
+  return text
+    .replace(SOURCE_HASHTAG, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+$/gm, "")
+    .trim();
+}
+
+/** Metadata saved before CONTENT_POLICY.md can carry Reddit and "true story"
+ *  wording. Strip the hashtags and tags. Prose that still mentions them can't
+ *  be cleaned safely, so return null and let the publisher use its template. */
+export function sanitizeSeoMetadata(meta: SeoMetadata): SeoMetadata | null {
+  const clean: SeoMetadata = {
+    youtube: {
+      title: withoutSourceHashtags(meta.youtube.title),
+      description: withoutSourceHashtags(meta.youtube.description),
+      tags: meta.youtube.tags.filter((t) => !SOURCE_TERM.test(t)),
+    },
+    tiktok: { caption: withoutSourceHashtags(meta.tiktok.caption) },
+    facebook: { caption: withoutSourceHashtags(meta.facebook.caption) },
+    instagram: { caption: withoutSourceHashtags(meta.instagram.caption) },
+  };
+  const prose = [
+    clean.youtube.title,
+    clean.youtube.description,
+    clean.tiktok.caption,
+    clean.facebook.caption,
+    clean.instagram.caption,
+  ];
+  if (prose.some((text) => !text || SOURCE_TERM.test(text))) return null;
+  return clean.youtube.tags.length > 0 ? clean : null;
+}
+
 export async function loadSeoMetadata(
   storyId: string,
 ): Promise<SeoMetadata | null> {
@@ -378,7 +417,7 @@ export async function loadSeoMetadata(
   try {
     const parsed = JSON.parse(row.seo_metadata_json);
     const v = SeoMetadataSchema.safeParse(parsed);
-    return v.success ? v.data : null;
+    return v.success ? sanitizeSeoMetadata(v.data) : null;
   } catch {
     return null;
   }

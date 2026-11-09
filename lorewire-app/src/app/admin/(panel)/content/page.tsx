@@ -12,25 +12,23 @@
 import Link from "next/link";
 import { requireCapability } from "@/lib/dal";
 import {
-  listContentSlim,
   getAutoPublishFlaggedSummary,
   CONTENT_SUBKINDS,
   ARTICLE_LANGUAGES,
   SOCIAL_PLATFORMS,
   JOB_STATUSES,
+  type ContentPageOpts,
   type ContentSubKind,
   type JobStatus,
   type ProgressKind,
   type SocialPlatform,
 } from "@/lib/repo";
 import { ARTICLE_LANGUAGE_LABELS } from "@/lib/articles";
+import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 import { STATUSES } from "@/app/admin/ui";
 import { listCategories } from "@/lib/categories/repo";
 import { ContentList } from "./ContentList";
-import { AutoRefresh } from "./AutoRefresh";
 import { FilterPanel, type ActiveFilterChip } from "./FilterPanel";
-
-const LIST_LIMIT = 200;
 
 // 2026-06-24 last-updated filter. Bucket chips collapse the common case
 // ("what changed today") to one click; "Custom" reveals a from/to date
@@ -192,6 +190,12 @@ export default async function ContentPage({
     /** 2026-06-25 active-render filter. Closed-enum, see
      *  ACTIVE_KIND_VALUES. Unset = no filter. */
     active?: string;
+    /** 2026-07-15 title-length filter. "long" = title over the branded cap
+     *  (weird on the cover). Anything else / unset = no filter. */
+    titleLen?: string;
+    /** 2026-07-15 Phase 1 free-text search, server-side (title/slug/id/status/
+     *  badge). */
+    q?: string;
   }>;
 }) {
   await requireCapability("content.manage");
@@ -220,6 +224,10 @@ export default async function ContentPage({
     sp.flagged === "1" ? true : sp.flagged === "0" ? false : undefined;
   const activeKindFilter: ProgressKind | "any" | undefined =
     isActiveKindValue(sp.active) ? sp.active : undefined;
+  // 2026-07-15 closed-value title-length filter: "long" or no filter. A
+  // hand-edited URL with any other value collapses to "no filter".
+  const titleLength: "long" | undefined =
+    sp.titleLen === "long" ? "long" : undefined;
   const updatedBucket = isDateBucket(sp.updatedBucket)
     ? sp.updatedBucket
     : undefined;
@@ -244,23 +252,28 @@ export default async function ContentPage({
       : updatedBucket === "custom"
         ? { since: customAfter, until: customBefore }
         : resolveBucket(updatedBucket);
-  const [rows, flaggedSummary] = await Promise.all([
-    listContentSlim({
-      subKind,
-      status,
-      language,
-      category,
-      publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
-      publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
-      jobStatus,
-      updatedSince: resolvedRange?.since || undefined,
-      updatedUntil: resolvedRange?.until || undefined,
-      flagged: flaggedFilter,
-      activeKind: activeKindFilter,
-      limit: LIST_LIMIT,
-    }),
-    getAutoPublishFlaggedSummary(),
-  ]);
+  const flaggedSummary = await getAutoPublishFlaggedSummary();
+
+  // Filters + search that reach the paginated data layer (loadContentPage, via
+  // ContentList's client pager). Phase 2 moved the aggregate filters
+  // (published-on / not-on / job-status / active-render) into SQL, so they pass
+  // through here alongside the real-column filters.
+  // Plan: _plans/2026-07-15-content-pagination-and-bulk-safety.md.
+  const pageOpts: ContentPageOpts = {
+    subKind,
+    status,
+    language,
+    category,
+    updatedSince: resolvedRange?.since || undefined,
+    updatedUntil: resolvedRange?.until || undefined,
+    flagged: flaggedFilter,
+    publishedOn: publishedOn.length > 0 ? publishedOn : undefined,
+    publishedNotOn: publishedNotOn.length > 0 ? publishedNotOn : undefined,
+    jobStatus,
+    activeKind: activeKindFilter,
+    titleLength,
+    q: sp.q?.trim() || undefined,
+  };
 
   // Filter chips share a builder so adding a new dimension (Phase 3 will add
   // author) only edits one function. Clearing a filter means dropping its key.
@@ -282,6 +295,7 @@ export default async function ContentPage({
       updatedBefore: updatedBucket === "custom" ? sp.updatedBefore : undefined,
       flagged: sp.flagged,
       active: sp.active,
+      titleLen: sp.titleLen,
       ...override,
     };
     for (const [k, v] of Object.entries(merged)) {
@@ -374,6 +388,13 @@ export default async function ContentPage({
       key: "Active",
       label: ACTIVE_KIND_LABELS[activeKindFilter],
       clearHref: `/admin/content${baseQs({ active: undefined })}`,
+    });
+  }
+  if (titleLength) {
+    activeFilters.push({
+      key: "Title",
+      label: "Too long",
+      clearHref: `/admin/content${baseQs({ titleLen: undefined })}`,
     });
   }
   if (updatedBucket) {
@@ -629,6 +650,26 @@ export default async function ContentPage({
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
+            Title
+          </span>
+          {chip(
+            `/admin/content${baseQs({ titleLen: undefined })}`,
+            "All",
+            !titleLength,
+          )}
+          {chip(
+            `/admin/content${baseQs({ titleLen: "long" })}`,
+            "Too long",
+            titleLength === "long",
+          )}
+          <span className="font-mono text-[10px] text-muted">
+            (video stories only · over {TITLE_MAX_WORDS} words / {TITLE_MAX_CHARS}{" "}
+            chars — fix with Regenerate titles)
+          </span>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-wider text-muted">
             Updated
           </span>
           {chip(
@@ -688,6 +729,9 @@ export default async function ContentPage({
             {sp.active && (
               <input type="hidden" name="active" value={sp.active} />
             )}
+            {sp.titleLen && (
+              <input type="hidden" name="titleLen" value={sp.titleLen} />
+            )}
             <input type="hidden" name="updatedBucket" value="custom" />
             <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-muted">
               From
@@ -726,20 +770,12 @@ export default async function ContentPage({
       </FilterPanel>
 
       <ContentList
-        rows={rows}
+        pageOpts={pageOpts}
         categories={activeCategories.map((c) => ({
           label: c.label,
           color: c.color,
         }))}
       />
-
-      {rows.length >= LIST_LIMIT && (
-        <p className="font-mono text-[11px] text-muted">
-          Showing the {LIST_LIMIT} most recently updated. Filter to narrow.
-        </p>
-      )}
-
-      {rows.some((r) => r.progress != null) && <AutoRefresh />}
     </div>
   );
 }

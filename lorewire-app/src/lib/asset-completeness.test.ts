@@ -10,11 +10,14 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { run } from "@/lib/db";
-import { evaluateAssetCompleteness } from "@/lib/asset-completeness";
+import {
+  evaluateAssetCompleteness,
+  evaluateAssetCompletenessForStories,
+} from "@/lib/asset-completeness";
 
 const STORY_ID = "test-ac-story";
-const RENDER_ID = "test-ac-render";
-const POLL_ID = "test-ac-poll";
+// Second story for the batch tests — one call, two verdicts.
+const STORY_ID_B = "test-ac-story-b";
 
 interface SeedOverrides {
   body?: string | null;
@@ -39,12 +42,17 @@ const COMPLETE_SHORT_CONFIG = {
 };
 
 async function reset(): Promise<void> {
-  await run("DELETE FROM polls WHERE story_id = ?", [STORY_ID]);
-  await run("DELETE FROM short_renders WHERE story_id = ?", [STORY_ID]);
-  await run("DELETE FROM stories WHERE id = ?", [STORY_ID]);
+  for (const id of [STORY_ID, STORY_ID_B]) {
+    await run("DELETE FROM polls WHERE story_id = ?", [id]);
+    await run("DELETE FROM short_renders WHERE story_id = ?", [id]);
+    await run("DELETE FROM stories WHERE id = ?", [id]);
+  }
 }
 
-async function seedComplete(overrides: SeedOverrides = {}): Promise<void> {
+async function seedComplete(
+  overrides: SeedOverrides = {},
+  storyId: string = STORY_ID,
+): Promise<void> {
   const now = new Date().toISOString();
   const body = overrides.body === null ? null : overrides.body ?? "Body text long enough to publish.";
   const hero = overrides.hero_image === null ? null : overrides.hero_image ?? "https://example.com/hero.png";
@@ -80,7 +88,7 @@ async function seedComplete(overrides: SeedOverrides = {}): Promise<void> {
         hero_image_landscape, thumbnail_image, thumbnail_image_landscape,
         thumbnail_image_square, short_config, video_url, created_at, updated_at)
      VALUES (?, 'Drama', 'T', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [STORY_ID, status, body, hero, heroLand, thumb, thumbLand, thumbSq, shortConfig, videoUrl, now, now],
+    [storyId, status, body, hero, heroLand, thumb, thumbLand, thumbSq, shortConfig, videoUrl, now, now],
   );
 
   // short_render row representing a completed assembly — what the
@@ -89,7 +97,7 @@ async function seedComplete(overrides: SeedOverrides = {}): Promise<void> {
     `INSERT INTO short_renders
        (id, story_id, status, output_url, props, requested_at)
      VALUES (?, ?, 'done', ?, ?, ?)`,
-    [RENDER_ID, STORY_ID, "https://example.com/short.mp4", "{}", now],
+    [`${storyId}-render`, storyId, "https://example.com/short.mp4", "{}", now],
   );
 
   // Poll attached + enabled + question filled.
@@ -98,7 +106,7 @@ async function seedComplete(overrides: SeedOverrides = {}): Promise<void> {
        (id, story_id, article_id, question, option_a_text, option_b_text,
         enabled, category, created_at, updated_at)
      VALUES (?, ?, NULL, 'Who is right?', 'A', 'B', 1, 'Drama', ?, ?)`,
-    [POLL_ID, STORY_ID, now, now],
+    [`${storyId}-poll`, storyId, now, now],
   );
 }
 
@@ -305,5 +313,126 @@ describe("evaluateAssetCompleteness", () => {
     expect(r.missing).toContain("short_render");
     expect(r.missing).toContain("voiceover");
     expect(r.missing).toContain("scene_images");
+  });
+});
+
+// The batch evaluator feeds the Content list's per-row "missing: …"
+// chips. Its contract is verdict parity with the single-story gate —
+// same deriveAssetCompleteness underneath, so these tests pin the
+// input-assembly (the SQL) rather than re-testing every gate.
+// Plan: _plans/2026-07-21-content-row-publish-blockers.md.
+describe("evaluateAssetCompletenessForStories", () => {
+  it("returns an empty map for an empty id list", async () => {
+    const m = await evaluateAssetCompletenessForStories([]);
+    expect(m.size).toBe(0);
+  });
+
+  it("omits ids that have no stories row", async () => {
+    await seedComplete();
+    const m = await evaluateAssetCompletenessForStories([
+      STORY_ID,
+      "nope-no-such-story",
+    ]);
+    expect(m.has(STORY_ID)).toBe(true);
+    expect(m.has("nope-no-such-story")).toBe(false);
+  });
+
+  it("matches the single-story verdict across scenarios", async () => {
+    const scenarios: { name: string; seed: () => Promise<void> }[] = [
+      { name: "complete", seed: () => seedComplete() },
+      {
+        name: "missing portrait thumbnail",
+        seed: () => seedComplete({ thumbnail_image: null }),
+      },
+      {
+        name: "advisory variants only",
+        seed: () =>
+          seedComplete({
+            hero_image_landscape: null,
+            thumbnail_image_landscape: null,
+            thumbnail_image_square: null,
+          }),
+      },
+      {
+        name: "empty body + missing hero",
+        seed: () => seedComplete({ body: "", hero_image: null }),
+      },
+      { name: "empty video_url", seed: () => seedComplete({ video_url: "" }) },
+      { name: "already published", seed: () => seedComplete({ status: "published" }) },
+      {
+        name: "short missing with scene hints",
+        seed: async () => {
+          await seedComplete({
+            short_config: { config_version: 1, doodle_frames: [], captions: [] },
+          });
+          await run(
+            "UPDATE short_renders SET status = 'rendering' WHERE story_id = ?",
+            [STORY_ID],
+          );
+        },
+      },
+      {
+        name: "disabled poll",
+        seed: async () => {
+          await seedComplete();
+          await run("UPDATE polls SET enabled = 0 WHERE story_id = ?", [
+            STORY_ID,
+          ]);
+        },
+      },
+    ];
+    for (const scenario of scenarios) {
+      await reset();
+      await scenario.seed();
+      const single = await evaluateAssetCompleteness(STORY_ID);
+      const batch = (
+        await evaluateAssetCompletenessForStories([STORY_ID])
+      ).get(STORY_ID);
+      expect(batch, scenario.name).toBeDefined();
+      expect(
+        {
+          ready: batch!.ready,
+          missing: batch!.missing,
+          blocking: batch!.blocking,
+        },
+        scenario.name,
+      ).toEqual({
+        ready: single.ready,
+        missing: single.missing,
+        blocking: single.blocking,
+      });
+    }
+  });
+
+  it("evaluates several stories in one call", async () => {
+    await seedComplete();
+    await seedComplete({}, STORY_ID_B);
+    await run("DELETE FROM polls WHERE story_id = ?", [STORY_ID_B]);
+    const m = await evaluateAssetCompletenessForStories([STORY_ID, STORY_ID_B]);
+    expect(m.get(STORY_ID)?.ready).toBe(true);
+    expect(m.get(STORY_ID)?.blocking).toEqual([]);
+    expect(m.get(STORY_ID_B)?.ready).toBe(false);
+    expect(m.get(STORY_ID_B)?.blocking).toEqual(["poll"]);
+  });
+
+  it("judges the LATEST done render, matching the single path", async () => {
+    // A newer done-with-props render without an output_url must win over
+    // the older complete one — the semantics latestDoneShortRenderForStory
+    // gives the single path.
+    await seedComplete();
+    const later = new Date(Date.now() + 60_000).toISOString();
+    await run(
+      `INSERT INTO short_renders
+         (id, story_id, status, output_url, props, requested_at)
+       VALUES (?, ?, 'done', NULL, '{}', ?)`,
+      [`${STORY_ID}-render-newer`, STORY_ID, later],
+    );
+    const single = await evaluateAssetCompleteness(STORY_ID);
+    const batch = (
+      await evaluateAssetCompletenessForStories([STORY_ID])
+    ).get(STORY_ID);
+    expect(single.missing).toContain("short_render");
+    expect(batch?.missing).toEqual(single.missing);
+    expect(batch?.blocking).toEqual(single.blocking);
   });
 });

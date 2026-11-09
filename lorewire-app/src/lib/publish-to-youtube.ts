@@ -183,10 +183,10 @@ LoreWire turns the weirdest, most-argued-about stories on the internet into one-
 🔔 Subscribe for new shorts: https://www.youtube.com/@LoreWireHQ
 🌐 lorewire.com
 
-#Shorts #InternetStories #TrueStory #{{category}}Shorts #Reddit`;
+#Shorts #InternetStories #{{category}}Shorts`;
 
 export const DEFAULT_TAGS_BASE =
-  "true stories, internet stories, lorewire, short stories, storytime";
+  "internet stories, lorewire, short stories, storytime";
 
 /** Per-category tag defaults. Empty entries inherit only the base set.
  *  Capitalisation matches the story.category column (Drama, Entitled,

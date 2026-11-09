@@ -181,7 +181,7 @@ describe("filterIdsByPublished", () => {
     match: 90,
     year: 2026,
     glyph: "!",
-    tags: ["True Story"],
+    tags: ["True stories from the internet"],
     syn: "",
     ...overrides,
   });

@@ -17,9 +17,12 @@ import { getPublishedStoryBySlug } from "@/lib/stories-public";
 import { all, one, run } from "@/lib/db";
 import { type HomepageSurface } from "@/lib/homepage-curation";
 import {
+  loadBrowsePage,
   loadHomepageCuration,
   loadHomepagePolls,
   loadLiveCatalog,
+  type BrowsePageOpts,
+  type BrowsePageResult,
 } from "@/lib/homepage-data";
 import {
   getWirePollsForStories,
@@ -360,6 +363,8 @@ export interface HomepageCurationResult {
 // catalog or the live DB.
 export interface LiveCatalogStory {
   id: string;
+  /** 'original' for clean-room stories. Picks the reader-facing label. */
+  content_origin?: string | null;
   slug: string | null;
   title: string | null;
   category: string | null;
@@ -415,6 +420,20 @@ export interface LiveCatalogResult {
 // render. Plan: _plans/2026-06-18-homepage-no-flash-ssr.md.
 export async function getLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   return loadLiveCatalog(limit);
+}
+
+// Public client entry for the Browse + Search grids' cursor pagination (Search
+// also pushes its text query down through BrowsePageOpts). Thin "use server"
+// wrapper over loadBrowsePage (@/lib/homepage-data) so the query logic stays in a
+// server-only lib the tests can import directly, mirroring getLiveCatalog /
+// loadLiveCatalog. A "use server" module may only export async functions, so the
+// BrowsePageOpts / BrowsePageResult types are NOT re-exported here — callers that
+// need them import from @/lib/homepage-data, and the client hook reads the return
+// value structurally. Plan: _plans/2026-07-14-browse-pagination.md.
+export async function listBrowseStories(
+  opts: BrowsePageOpts = {},
+): Promise<BrowsePageResult> {
+  return loadBrowsePage(opts);
 }
 
 // ─── Wires feed: published shorts, cursor-paginated ──────────────────────────
@@ -515,7 +534,7 @@ export async function listPublishedShorts(
   const rows = await all<LiveCatalogStory & IntroWindowStoryRow>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
-      "video_url, published_at, created_at, short_config, " +
+      "video_url, published_at, created_at, content_origin, short_config, " +
       "intro_segment_id, outro_segment_id, skip_intro, skip_outro, " +
       "video_config FROM stories " +
       `${clause} ` +
@@ -551,6 +570,7 @@ export async function listPublishedShorts(
       video_url: resolveMediaUrl(s.video_url),
       published_at: s.published_at,
       created_at: s.created_at,
+      content_origin: s.content_origin,
     }),
   );
   // Cursor matches the SQL COALESCE order so a row with NULL published_at

@@ -7,12 +7,18 @@ import {
   PILLS,
   type Story,
 } from "@/lib/stories";
+import { isStoryOriginLabel } from "@/lib/story-labels";
 import { categoryVisual } from "@/lib/categories/visuals";
 import {
+  CATEGORY_ORDER,
   CategoryFilterChips,
-  filterStoriesByCategory,
   useCategoryFilter,
 } from "@/components/CategoryFilterChips";
+import {
+  useBrowseData,
+  useDebouncedValue,
+  useLoadMoreSentinel,
+} from "@/components/browse/useBrowseData";
 import {
   ALL_PILL,
   CATEGORY_RAILS,
@@ -21,6 +27,7 @@ import {
   filterIdsByNotVoted,
   filterIdsByPillCat,
   filterIdsByPublished,
+  liveRowToStory,
   pickHeroAtIndex,
   resolveHeroPool,
   resolveRailIds,
@@ -71,7 +78,6 @@ import SiteFooter from "@/components/SiteFooter";
 import { StoryLink } from "@/components/StoryLink";
 import { CommentsTab } from "@/components/CommentsTab";
 import { JumpToComments } from "@/components/JumpToComments";
-import { RedditEmbed, resolveRedditEmbedTarget } from "@/components/RedditEmbed";
 import { alignScriptToWords } from "@/lib/script-graft";
 import { formatDurationMs } from "@/lib/duration";
 import {
@@ -1300,20 +1306,7 @@ function GenArticle({
     body_source: liveMedia.body ? "live" : "static",
   });
 
-  // Cross-check the article's source URL against the authoritative Reddit
-  // id (story.id, which equals stories.reddit_id for pipeline rows). When
-  // they disagree, the URL points at a different thread than the article
-  // was written from — refuse to embed rather than mislead the reader.
-  // The stub card still renders so the section never goes blank.
-  const redditTarget = resolveRedditEmbedTarget(story.source_url, story.id);
-  // eslint-disable-next-line no-console -- rule 14
-  console.info("[lorewire reddit embed]", {
-    storyId: story.id,
-    source_url: story.source_url ?? null,
-    rendered: redditTarget !== null,
-    embed_url: redditTarget?.url ?? null,
-    embed_reddit_id: redditTarget?.redditId ?? null,
-  });
+  const originLabel = story.tags.find(isStoryOriginLabel);
 
   // Aspect ratio + crop behaviour tracks the source. Long-form
   // illustrations are 16:9 and benefit from the upper-third crop to put
@@ -1353,163 +1346,12 @@ function GenArticle({
           )}
         </React.Fragment>
       ))}
-      {redditTarget ? (
-        <RedditSourceCard
-          url={redditTarget.url}
-          title={story.title}
-          redditId={redditTarget.redditId}
-          variant="mobile"
-        />
-      ) : (
-        <RedditSourceStub variant="mobile" />
+      {originLabel && (
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-8">
+          {originLabel}
+        </p>
       )}
     </article>
-  );
-}
-
-// Wraps the real Reddit embed in a designed container — gives the
-// "from the original thread" section the visual weight it deserves on a
-// page that's been heavily designed everywhere else. Header row carries
-// the Reddit avatar mark + subreddit chip; the embed widget hydrates
-// inside the card so we keep one consistent surface whether the embed
-// loaded or fell through to a link.
-function RedditSourceCard({
-  url,
-  title,
-  redditId,
-  variant,
-}: {
-  url: string;
-  title?: string;
-  redditId: string;
-  variant: "mobile" | "desktop";
-}) {
-  const pad = variant === "desktop" ? "p-6" : "p-5";
-  const headerSize = variant === "desktop" ? "text-[12px]" : "text-[11px]";
-  return (
-    <section
-      className={`mt-8 rounded-[16px] overflow-hidden ${pad}`}
-      style={{
-        background:
-          "linear-gradient(135deg, #1c1820 0%, #181620 65%, #221820 100%)",
-        border: "1px solid rgba(232,70,43,0.22)",
-        boxShadow: "0 14px 40px rgba(0,0,0,0.35)",
-      }}
-    >
-      <div className="flex items-center gap-3 mb-4">
-        <RedditMark />
-        <div className="min-w-0 flex-1">
-          <p className={`font-mono ${headerSize} uppercase tracking-[.2em] text-muted leading-tight`}>
-            From the original thread
-          </p>
-          <p className="font-display font-bold text-ink leading-tight mt-0.5 truncate" style={{ fontSize: variant === "desktop" ? 18 : 15 }}>
-            r/AmItheAsshole
-          </p>
-        </div>
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="shrink-0 font-mono text-[10px] uppercase tracking-[.18em] px-3 py-1.5 rounded-full transition hover:scale-[1.02]"
-          style={{
-            background: "rgba(232,70,43,0.14)",
-            color: "#E8462B",
-            border: "1px solid rgba(232,70,43,0.32)",
-          }}
-        >
-          Open in Reddit &rarr;
-        </a>
-      </div>
-      <div
-        className="rounded-[12px] overflow-hidden"
-        style={{ background: "rgba(245,243,239,0.04)" }}
-      >
-        <RedditEmbed url={url} title={title} />
-      </div>
-      <p className="font-mono text-[10px] text-muted/70 mt-3" data-reddit-id={redditId}>
-        Embed loads from Reddit. Falls back to a direct link if the widget is blocked.
-      </p>
-    </section>
-  );
-}
-
-// Stub for stories that have no verified Reddit source URL. Rendered when
-// resolveRedditEmbedTarget returns null (mismatch, placeholder, or a
-// sample catalog row). Looks like a designed "discuss this" card instead
-// of a half-broken embed placeholder.
-function RedditSourceStub({ variant }: { variant: "mobile" | "desktop" }) {
-  const pad = variant === "desktop" ? "p-6" : "p-5";
-  return (
-    <section
-      className={`mt-8 rounded-[16px] ${pad}`}
-      style={{
-        background:
-          "linear-gradient(135deg, #181620 0%, #15141A 60%, #1c1822 100%)",
-        border: "1px solid rgba(245,243,239,0.08)",
-      }}
-    >
-      <div className="flex items-center gap-3">
-        <RedditMark muted />
-        <div className="min-w-0 flex-1">
-          <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted leading-tight">
-            Retold by LoreWire
-          </p>
-          <p className="font-display font-bold text-ink/85 leading-tight mt-0.5" style={{ fontSize: variant === "desktop" ? 18 : 15 }}>
-            From r/AmItheAsshole
-          </p>
-        </div>
-      </div>
-      <p className="text-ink/65 text-[13.5px] leading-relaxed mt-3">
-        This piece is one of many we've adapted from the subreddit. Want more? Browse what's resonating right now.
-      </p>
-      <a
-        href="https://www.reddit.com/r/AmItheAsshole/hot/"
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex items-center gap-2 mt-4 font-mono text-[11px] uppercase tracking-[.18em] px-3.5 py-2 rounded-full transition hover:scale-[1.02]"
-        style={{
-          background: "rgba(232,70,43,0.14)",
-          color: "#E8462B",
-          border: "1px solid rgba(232,70,43,0.32)",
-        }}
-      >
-        Browse r/AmItheAsshole <span aria-hidden>&rarr;</span>
-      </a>
-    </section>
-  );
-}
-
-// Reddit's snoo avatar mark, inline SVG. Keeps the source card visually
-// anchored without pulling in a third-party icon set. The `muted` variant
-// desaturates for the stub card where there's no real Reddit thread.
-function RedditMark({ muted = false }: { muted?: boolean }) {
-  const fill = muted ? "#3a3540" : "#E8462B";
-  return (
-    <span
-      aria-hidden
-      className="shrink-0"
-      style={{
-        width: 40,
-        height: 40,
-        borderRadius: 999,
-        background: fill,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        boxShadow: muted ? "none" : "0 4px 14px rgba(232,70,43,0.35)",
-      }}
-    >
-      <svg
-        width="24"
-        height="24"
-        viewBox="0 0 24 24"
-        fill="#0A0A0C"
-        aria-hidden
-      >
-        <circle cx="12" cy="12" r="10" fill="none" />
-        <path d="M21 12.3c0-1.1-.9-2-2-2-.5 0-1 .2-1.4.5-1.4-.9-3.3-1.5-5.4-1.6l1-3.5 3 .7c0 .8.6 1.4 1.4 1.4s1.4-.6 1.4-1.4-.6-1.4-1.4-1.4c-.5 0-1 .3-1.2.7l-3.4-.8c-.2 0-.3.1-.4.2L11 9.2c-2.2 0-4.1.7-5.5 1.6-.4-.3-.9-.5-1.4-.5-1.1 0-2 .9-2 2 0 .8.5 1.5 1.2 1.8 0 .2-.1.5-.1.7 0 2.6 3.1 4.8 6.8 4.8s6.8-2.1 6.8-4.8c0-.2 0-.4-.1-.6.8-.3 1.3-1 1.3-1.9zM7 13.4c0-.8.6-1.4 1.4-1.4s1.4.6 1.4 1.4-.6 1.4-1.4 1.4-1.4-.6-1.4-1.4zm7.5 3.3c-.7.7-1.9 1-2.5 1s-1.8-.3-2.5-1c-.1-.1-.1-.3 0-.4.1-.1.3-.1.4 0 .5.5 1.4.7 2.1.7s1.7-.2 2.1-.7c.1-.1.3-.1.4 0 .2.1.2.3 0 .4zm-.4-1.9c-.8 0-1.4-.6-1.4-1.4s.6-1.4 1.4-1.4 1.4.6 1.4 1.4-.6 1.4-1.4 1.4z" />
-      </svg>
-    </span>
   );
 }
 
@@ -2318,28 +2160,58 @@ function TitleSheet({ story, initialTab, initialCommentId, onClose, onOpen, inLi
 }
 
 /* ----------------------------- SEARCH ----------------------------- */
-// Mirrors DesktopShell's SearchPage + Browse page: only stories the
-// pipeline has actually produced content for (hero, short render,
-// narration, or article body) belong in the public listing. Reads off
-// the merged live + sample catalog so freshly-published live rows
-// surface without waiting for src/data/published.ts to be rebaked.
-//
-// Mobile has no dedicated Browse tab — Search is the catalog browser
-// when the query box is empty, so the URL-backed category filter
-// (?cat=Drama,Humor) lives here too. The chip row is hidden once a
-// text query is active to keep the screen focused on results.
-function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog }) {
+// Mobile has no dedicated Browse tab — Search is the catalog browser when the
+// query box is empty, so it pages the WHOLE published catalog through the same
+// pager desktop Browse uses instead of reading the shared in-memory catalog
+// (which loadLiveCatalog caps at 200 rows — the old version silently stopped
+// at ~201 titles once production passed 200 stories). The URL-backed category
+// chips (?cat=Drama,Humor) and the text query both push down as server-side
+// WHEREs, so a match beyond any loaded page is still found; the chip row is
+// hidden once a text query is active to keep the screen focused on results.
+// Loaded rows are lifted to the shell (onStoriesLoaded) so a tapped story
+// beyond the rails' catalog window still opens its TitleSheet. Plan:
+// _plans/2026-07-19-search-full-catalog.md.
+const SEARCH_PAGE_SIZE = 60;
+function Search({
+  onOpen,
+  onStoriesLoaded,
+}: {
+  onOpen: OpenFn;
+  onStoriesLoaded: (stories: Story[]) => void;
+}) {
   const [q, setQ] = useState("");
   const { selected, toggle, clear } = useCategoryFilter();
-  const published = catalog.array.filter(isPublishedStory);
-  const categoryFiltered = filterStoriesByCategory(published, selected);
-  const query = q.trim().toLowerCase();
-  const res = query
-    ? categoryFiltered.filter((s) => (s.title + s.cat).toLowerCase().includes(query))
-    : categoryFiltered;
-  const emptyCopy = query
+  // Stable, sorted category list (CATEGORY_ORDER order) so the pager's refetch
+  // dep is deterministic regardless of chip-click order.
+  const categories = useMemo(
+    () => CATEGORY_ORDER.filter((c) => selected.has(c)),
+    [selected],
+  );
+  const debouncedQ = useDebouncedValue(q.trim(), 250);
+  const { stories: liveRows, total, loading, loadingMore, reachedEnd, loadMore } =
+    useBrowseData(SEARCH_PAGE_SIZE, categories, debouncedQ);
+  const stories = useMemo(() => liveRows.map(liveRowToStory), [liveRows]);
+  useEffect(() => {
+    onStoriesLoaded(stories);
+  }, [stories, onStoriesLoaded]);
+  const sentinelRef = useLoadMoreSentinel(loadMore);
+
+  const totalLabel = total ?? stories.length;
+  // eslint-disable-next-line no-console -- rule 14
+  console.info("[search render]", {
+    shell: "mobile",
+    query: debouncedQ,
+    categories,
+    loaded: stories.length,
+    total,
+    reached_end: reachedEnd,
+  });
+  const emptyCopy = debouncedQ
     ? `No stories match “${q}”.`
     : "No stories in this category yet.";
+  // Slide context = the results exactly as loaded, so prev/next in the sheet
+  // covers every card fetched so far, never the whole catalog.
+  const slide = { ids: stories.map((s) => s.id), label: "Search" };
   return (
     <div className="pt-14 px-4 pb-28">
       <h1 className="font-display font-black uppercase tracking-tightest text-ink text-[26px] mb-3">Search</h1>
@@ -2357,8 +2229,8 @@ function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog })
           />
           <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted mt-4 mb-3">
             {selected.size === 0
-              ? `Browse all · ${published.length} stories`
-              : `${res.length} of ${published.length} · ${Array.from(selected).join(", ")}`}
+              ? `Browse all · ${totalLabel} stories`
+              : `${stories.length} of ${totalLabel} · ${categories.join(", ")}`}
           </p>
         </>
       )}
@@ -2366,16 +2238,26 @@ function Search({ onOpen, catalog }: { onOpen: OpenFn; catalog: MergedCatalog })
           (pipeline/media.py line 524) so the baked title at the bottom
           of every poster isn't cropped by object-cover. */}
       <div className="grid grid-cols-2 gap-3">
-        {res.map((s) => (
+        {stories.map((s) => (
           <div key={s.id} style={{ aspectRatio: "3 / 4" }}>
-            {/* Slide context = the FILTERED result set (query + category
-                chips), so prev/next in the sheet covers exactly the grid
-                the user tapped, never the whole catalog. */}
-            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, { ids: res.map((r) => r.id), label: "Search" })} w={"100%"} h={"100%"} />
+            <PosterCard story={s} onOpen={(sid, t) => onOpen(sid, t, slide)} w={"100%"} h={"100%"} />
           </div>
         ))}
       </div>
-      {res.length === 0 && <p className="font-body text-muted text-center mt-10">{emptyCopy}</p>}
+      {loading && stories.length === 0 && (
+        <p className="font-body text-muted text-center mt-10">Loading stories…</p>
+      )}
+      {!loading && stories.length === 0 && (
+        <p className="font-body text-muted text-center mt-10">{emptyCopy}</p>
+      )}
+      {/* Sentinel drives infinite scroll; kept below the grid with a little
+          height so the observer has a real box to watch. */}
+      <div ref={sentinelRef} className="h-10" aria-hidden />
+      {loadingMore && (
+        <p className="font-mono text-[10px] uppercase tracking-[.2em] text-muted text-center mt-2">
+          Loading more…
+        </p>
+      )}
     </div>
   );
 }
@@ -2608,6 +2490,25 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
     recordView(id);
   };
   const close = () => setActive(null);
+  // Search pages the whole catalog beyond the rails' 200-row window, so a
+  // tapped card can be a story resolveStory (rails catalog + static STORIES)
+  // doesn't know. Search reports its loaded rows here and the sheet resolution
+  // below falls back to this map so those stories still open. Held in state
+  // (read during render) — it only grows on a page append, a handful of times
+  // across a full scroll, so the extra shell renders are cheap.
+  const [pagedAdditions, setPagedAdditions] = useState<Map<string, Story>>(
+    () => new Map(),
+  );
+  const handlePagedStories = useCallback((stories: Story[]) => {
+    setPagedAdditions((prev) => {
+      // Only churn the map (and re-render) when a genuinely new id arrives.
+      const additions = stories.filter((s) => !prev.has(s.id));
+      if (additions.length === 0) return prev;
+      const next = new Map(prev);
+      for (const s of additions) next.set(s.id, s);
+      return next;
+    });
+  }, []);
   // "Play Something" picks a random playable story and opens it on the
   // Watch tab — same affordance as the hero's Play button, so the modal's
   // existing autoplay path kicks in. Excludes the current hero so the
@@ -2682,7 +2583,7 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
             posterVoteCounts={initial.posterVoteCounts}
           />
         )}
-        {tab === "Search" && <Search onOpen={open} catalog={catalog} />}
+        {tab === "Search" && <Search onOpen={open} onStoriesLoaded={handlePagedStories} />}
         {tab === "Today's" && <NewScreen onOpen={open} catalog={catalog} />}
         {tab === "Saved" && <MyList onOpen={open} list={list} resolveStory={resolveStory} session={initial.session} />}
       </div>
@@ -2694,10 +2595,11 @@ function MobileShell({ initial }: { initial: HomepageInitial }) {
 
       {active && (() => {
         // resolveStory checks the live catalog first so real-short ids saved
-        // through the Wires feed (not in STORIES) still open the sheet.
-        // Stale id -> render nothing; close button still works because
-        // `active` is set.
-        const s = resolveStory(active.id);
+        // through the Wires feed (not in STORIES) still open the sheet. The
+        // pagedAdditions fallback covers stories paged in on Search beyond
+        // the rails' 200-row catalog window. Stale id -> render nothing;
+        // close button still works because `active` is set.
+        const s = resolveStory(active.id) ?? pagedAdditions.get(active.id) ?? null;
         return s ? (
           <TitleSheet
             story={s}

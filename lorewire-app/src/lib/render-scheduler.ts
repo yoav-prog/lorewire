@@ -31,6 +31,12 @@ export const RENDER_SETTING_KEYS = {
   /** Master on/off. Defaults OFF so the scheduler never runs until an
    *  admin opts in. */
   enabled: "render.enabled",
+  /** Auto-publish on/off for scheduler-created stories. Defaults OFF: a
+   *  render-scheduler story publishes only after a human approves it,
+   *  until an admin opts into unattended publishing behind the safety
+   *  judge. Independent of `enabled` (that gates rendering; this gates
+   *  publishing what already rendered). */
+  autoPublish: "render.auto_publish",
   /** Renders to enqueue per hour when the gate is open. Fractional is
    *  fine (0.5 = 12/day). Used by the Phase 2 drip. */
   ratePerHour: "render.rate_per_hour",
@@ -71,6 +77,14 @@ export const RENDER_SCHEDULER_REQUESTED_BY = "render-scheduler";
  *  a missing or malformed value must never auto-start the scheduler. */
 export async function getRenderEnabled(): Promise<boolean> {
   const raw = (await getSetting(RENDER_SETTING_KEYS.enabled))?.trim().toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
+/** True only when the setting is explicitly "1" / "true". Defaults OFF:
+ *  unattended publishing is opt-in and must never turn on from a missing or
+ *  malformed value. */
+export async function getRenderAutoPublish(): Promise<boolean> {
+  const raw = (await getSetting(RENDER_SETTING_KEYS.autoPublish))?.trim().toLowerCase();
   return raw === "1" || raw === "true";
 }
 

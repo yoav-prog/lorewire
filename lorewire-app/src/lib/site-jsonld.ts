@@ -8,12 +8,15 @@
 // search-results URL (search is a client-side tab), and declaring a
 // fake one is worse than omitting it.
 //
-// Pure module: takes the resolved settings + origin so tests never
-// touch the DB. `import type` keeps the server-only site-seo module
-// out of any client bundle.
+// Takes the resolved settings + origin so tests never touch the DB.
+// Server-only by transitivity (fallbackBrandAsset comes from site-seo);
+// its only consumer is the root layout.
 
 import { maybe } from "@/lib/jsonld";
-import type { SiteSeoSettings } from "@/lib/site-seo";
+import {
+  fallbackBrandAsset,
+  type SiteSeoSettings,
+} from "@/lib/site-seo";
 
 export function buildSiteJsonLd(
   seo: SiteSeoSettings,
@@ -24,7 +27,8 @@ export function buildSiteJsonLd(
     "@type": "Organization",
     name: seo.organizationName || seo.siteName,
     url: origin || undefined,
-    logo: seo.organizationLogoUrl || undefined,
+    // Admin-set logo first, else the built-in /public/logo.png mark.
+    logo: fallbackBrandAsset(seo.organizationLogoUrl, origin, "/logo.png"),
     sameAs: seo.organizationSameAs.length
       ? seo.organizationSameAs
       : undefined,
