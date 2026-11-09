@@ -920,3 +920,31 @@ describe("parseColdStartFloor", () => {
     expect(parseColdStartFloor("  6  ")).toBe(6);
   });
 });
+
+describe("liveRowToStory origin label", () => {
+  const row = {
+    id: "x",
+    slug: "x",
+    title: "T",
+    category: "Drama",
+    summary: null,
+    duration: null,
+    hero_image: null,
+    hero_image_landscape: null,
+    hero_has_baked_title: null,
+    thumbnail_image: null,
+    video_url: null,
+    published_at: null,
+    created_at: null,
+  };
+
+  it("labels older stories as the catalog", () => {
+    expect(liveRowToStory(row).tags[0]).toBe("True stories from the internet");
+  });
+
+  it("labels clean-room stories as fictionalized", () => {
+    expect(liveRowToStory({ ...row, content_origin: "original" }).tags[0]).toBe(
+      "Fictionalized story, inspired by real-life situations",
+    );
+  });
+});

@@ -2581,6 +2581,7 @@ const BLOCKER_CHIP_LABEL: Record<string, string> = {
   voiceover: "voice",
   scene_images: "scenes",
   poll: "poll",
+  originality: "originality check",
 };
 
 const BLOCKER_FULL_LABEL: Record<string, string> = {
@@ -2592,6 +2593,7 @@ const BLOCKER_FULL_LABEL: Record<string, string> = {
   voiceover: "voiceover",
   scene_images: "scene images",
   poll: "enabled poll",
+  originality: "originality check",
 };
 
 const BLOCKER_CHIP_MAX = 3;

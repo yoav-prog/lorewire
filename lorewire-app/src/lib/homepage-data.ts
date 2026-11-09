@@ -85,7 +85,7 @@ export async function loadLiveCatalog(limit = 200): Promise<LiveCatalogResult> {
   const rows = await all<LiveCatalogStory>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
-      "video_url, published_at, created_at FROM stories " +
+      "video_url, published_at, created_at, content_origin FROM stories " +
       "WHERE status IN ('ready', 'published') " +
       "AND slug IS NOT NULL " +
       "AND (noindex IS NULL OR noindex = 0) " +
@@ -153,6 +153,7 @@ async function projectCatalogRows(
       video_url: resolveMediaUrl(r.video_url),
       published_at: r.published_at,
       created_at: r.created_at,
+      content_origin: r.content_origin,
     };
   });
   return { stories, durationsHealed };
@@ -271,7 +272,7 @@ export async function loadBrowsePage(
   const rows = await all<LiveCatalogStory & { _cursor_ts: string }>(
     "SELECT id, slug, title, category, summary, duration, hero_image, " +
       "hero_image_landscape, hero_has_baked_title, thumbnail_image, " +
-      "video_url, published_at, created_at, " +
+      "video_url, published_at, created_at, content_origin, " +
       "COALESCE(published_at, updated_at, created_at) AS _cursor_ts " +
       "FROM stories " +
       `WHERE ${where.join(" AND ")} ` +

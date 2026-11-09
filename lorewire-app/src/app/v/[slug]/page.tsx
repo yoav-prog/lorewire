@@ -36,6 +36,7 @@ import {
 } from "@/lib/polls";
 import { readVoteToken } from "@/lib/poll-cookie";
 import { getSubmissionAttribution } from "@/lib/submissions";
+import { storyOriginLabel } from "@/lib/story-labels";
 import { resolveIntroWindowForStory } from "@/lib/intro-window-resolve";
 import { SubmissionReportLink } from "./SubmissionReportLink";
 import StoryVideo from "./StoryVideo";
@@ -421,17 +422,9 @@ export default async function StoryReader({
           </footer>
         )}
 
-        {story.source_url && (
+        {!story.submission_id && (
           <footer className="border-t border-line pt-4 text-[13px] text-muted">
-            <span>Source: </span>
-            <Link
-              href={story.source_url}
-              className="text-ink underline decoration-line hover:decoration-accent"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {story.source_url}
-            </Link>
+            {storyOriginLabel(story.content_origin)}
           </footer>
         )}
       </article>

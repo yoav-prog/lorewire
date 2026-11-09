@@ -153,7 +153,7 @@ export const DEFAULT_CAPTION_TEMPLATE = `{{hook}}
 
 The full story → {{article_url}}
 
-#Shorts #TrueStory #InternetStories #{{category}}Stories #Reddit`;
+#Shorts #InternetStories #{{category}}Stories`;
 
 /** The default caption template already inlines hashtags, so the
  *  base hashtag list is empty by default — admin can add a global

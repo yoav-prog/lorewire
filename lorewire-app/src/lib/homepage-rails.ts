@@ -39,6 +39,7 @@ import {
 import { GRANULAR_CATEGORIES } from "@/lib/categories/granular";
 import { categoryGlyph } from "@/lib/categories/visuals";
 import { POLL_RAIL_KINDS, type PollRailKind } from "@/lib/polls-shared";
+import { storyOriginLabel } from "@/lib/story-labels";
 
 /** 2026-06-18 polls plan extension: client-side fetch hook for the
  *  per-story poll view the homepage DetailModal needs. Mirrors the
@@ -255,7 +256,7 @@ export function liveRowToStory(row: LiveCatalogStory): Story {
     match: 90,
     year,
     glyph: categoryGlyph(cat),
-    tags: ["True Story", cat],
+    tags: [storyOriginLabel(row.content_origin), cat],
     syn: row.summary ?? "",
   };
   if (row.hero_image) story.heroImage = row.hero_image;
@@ -297,7 +298,7 @@ export function mergeStaticAndLive(live: LiveCatalogStory[]): MergedCatalog {
   const byId = new Map<string, Story>();
   // On collision: MERGE field-by-field instead of replacing. The live
   // projection (LiveCatalogStory) doesn't carry body / images / audioUrl /
-  // alignment / source_url — those live only in the PUBLISHED overlay
+  // alignment — those live only in the PUBLISHED overlay
   // that has already been folded into STORIES at module load. Without this
   // merge, a story present in BOTH the DB and PUBLISHED loses its body
   // because the live entry overwrites the static one, and the Read tab
@@ -323,7 +324,7 @@ export function mergeStaticAndLive(live: LiveCatalogStory[]): MergedCatalog {
 }
 
 // Live wins for fields the LiveCatalogStory projection carries; static
-// supplies everything else (body, images, audio, alignment, source_url —
+// supplies everything else (body, images, audio, alignment —
 // none of which the homepage rails fetch live to keep the catalog payload
 // small).
 function mergeLiveOverStatic(staticStory: Story, liveStory: Story): Story {

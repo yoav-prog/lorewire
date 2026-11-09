@@ -6,6 +6,7 @@ import "server-only";
 // asset-completeness → polls → repo.
 import type { AssetGate } from "@/lib/asset-completeness";
 import { all, one, run } from "@/lib/db";
+import { originalityBlockers } from "@/lib/content-compliance-gate";
 import { TITLE_MAX_CHARS, TITLE_MAX_WORDS } from "@/lib/title-policy";
 
 export type StoryStatus =
@@ -29,6 +30,8 @@ export interface StoryRow {
   teleprompter: string | null;
   status: string | null;
   source_url: string | null;
+  /** 'original' for clean-room stories (CONTENT_POLICY.md). */
+  content_origin?: string | null;
   hero_image: string | null;
   images: string | null;
   audio_url: string | null;
@@ -471,11 +474,10 @@ export async function createStory(input: CreateStoryInput): Promise<void> {
 }
 
 // Promotion to public-facing statuses ("ready" / "published") refuses
-// stories whose Reddit identity is a dry-run fixture. The render path
-// already suppresses the embed when reddit_id / source_url disagree
-// (see lib/reddit-thread.ts), but a fixture row that reaches
-// status='published' still surfaces on rails as an article with no real
-// Reddit thread — which contradicts "every story is from Reddit".
+// stories whose source identity is a dry-run fixture. A fixture row that
+// reaches status='published' surfaces on rails as a dummy article.
+// Clean-room stories must also pass the originality gate, which checks
+// their final text (lib/content-compliance-gate.ts, CONTENT_POLICY.md).
 // Throwing here means the admin's publish click reports the failure
 // instead of silently shipping a dummy row.
 //
@@ -540,6 +542,14 @@ async function assertStoryReadyForPublicStatus(
   if (row.body && row.body.startsWith(FIXTURE_DRY_RUN_BODY_MARKER)) {
     throw new Error(
       `[stories repo] cannot publish story id=${id}: body is a dry-run fixture`,
+    );
+  }
+  // Check names only in the message: finding details can quote the source.
+  const originality = (await originalityBlockers([id])).get(id);
+  if (originality) {
+    const checks = [...new Set(originality.map((f) => f.check))].join(", ");
+    throw new Error(
+      `[stories repo] cannot publish story id=${id}: failed originality check (${checks}); see the Originality panel on the story`,
     );
   }
   // Publish-time media invariant. Last of the checks so the more

@@ -833,16 +833,14 @@ class BuildArticlePromptTests(unittest.TestCase):
     See _plans/2026-06-28-content-clarity-bar.md.
 
     What we lock down: the prompt names the clarity bar, the four anchor
-    concepts (retell-by-end, concrete event, curiosity question, sharp
-    specifics from the source), and still carries the existing "don't
-    moralize / don't invent" rules and the headline + research brief.
+    concepts (retell-by-end, concrete event, curiosity question, invented
+    sharp specifics), the "don't moralize" rule and the originality rules.
     """
 
-    IDEA = {"headline": "AITA for invoicing my coworkers?"}
-    RESEARCH = {"brief": "Three to six beats of the office gift fund story."}
+    PREMISE = {"premise": "A shared office fund goes missing.", "category": "Drama"}
 
     def _prompt(self) -> str:
-        return stages._build_article_prompt(self.IDEA, self.RESEARCH)
+        return stages._build_article_prompt(self.PREMISE)
 
     def test_clarity_bar_present(self) -> None:
         self.assertIn("Clarity bar", self._prompt())
@@ -859,22 +857,24 @@ class BuildArticlePromptTests(unittest.TestCase):
 
     def test_existing_brand_rules_still_present(self) -> None:
         # The clarity bar is added ON TOP of the existing rules; the
-        # don't-moralize and don't-invent guards must still appear or the
-        # article voice drifts back to verdict-rendering.
+        # don't-moralize guard must still appear or the article voice drifts
+        # back to verdict-rendering.
         prompt = self._prompt()
         self.assertIn("Do NOT analyze, moralize, or render a verdict", prompt)
-        self.assertIn("do not invent anything beyond the research", prompt)
+
+    def test_originality_rules_present(self) -> None:
+        prompt = self._prompt()
+        self.assertIn("Invent your own characters", prompt)
+        self.assertIn("Never say or imply the story is true", prompt)
+        self.assertIn("Mention no brands", prompt)
+        self.assertIn(self.PREMISE["premise"], prompt)
 
     def test_article_pov_third_person_rule(self) -> None:
         # Added 2026-06-28 alongside the shorts _pov_block. The article
-        # narrator is also a third-person storyteller — never the OP.
-        # Same fallback rule for unknown gender: 'they' or a role-noun.
+        # narrator is also a third-person storyteller.
         prompt = self._prompt()
         self.assertIn("third-person storyteller", prompt)
         self.assertIn("NEVER the character", prompt)
-        self.assertIn("translate every 'I/me/my' into third person", prompt)
-        self.assertIn("default to 'they' or a role-noun", prompt)
-        self.assertIn("NEVER guess a gender", prompt)
 
     def test_article_demands_naming_loss_directly(self) -> None:
         # Mirror of the shorts cold-open principle: name the THING, not the
@@ -913,10 +913,6 @@ class BuildArticlePromptTests(unittest.TestCase):
         self.assertIn("open on the highest-stakes moment", prompt)
         self.assertIn("opening line IS the catch", prompt)
 
-    def test_headline_and_research_carry_through(self) -> None:
-        prompt = self._prompt()
-        self.assertIn(self.IDEA["headline"], prompt)
-        self.assertIn(self.RESEARCH["brief"], prompt)
 
 
 class ClassifyCategoryTests(unittest.TestCase):
