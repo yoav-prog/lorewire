@@ -369,6 +369,43 @@ export function resolveNarrationForSeo(row: {
   return "";
 }
 
+const SOURCE_HASHTAG = /#\w*(?:reddit|truestor|aita)\w*/gi;
+const SOURCE_TERM =
+  /\b(?:sub)?reddit|\btrue\s*stor(?:y|ies)\b|\baita\b|(?<![a-z])r\/[a-z]{3,}/i;
+
+function withoutSourceHashtags(text: string): string {
+  return text
+    .replace(SOURCE_HASHTAG, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+$/gm, "")
+    .trim();
+}
+
+/** Metadata saved before CONTENT_POLICY.md can carry Reddit and "true story"
+ *  wording. Strip the hashtags and tags. Prose that still mentions them can't
+ *  be cleaned safely, so return null and let the publisher use its template. */
+export function sanitizeSeoMetadata(meta: SeoMetadata): SeoMetadata | null {
+  const clean: SeoMetadata = {
+    youtube: {
+      title: withoutSourceHashtags(meta.youtube.title),
+      description: withoutSourceHashtags(meta.youtube.description),
+      tags: meta.youtube.tags.filter((t) => !SOURCE_TERM.test(t)),
+    },
+    tiktok: { caption: withoutSourceHashtags(meta.tiktok.caption) },
+    facebook: { caption: withoutSourceHashtags(meta.facebook.caption) },
+    instagram: { caption: withoutSourceHashtags(meta.instagram.caption) },
+  };
+  const prose = [
+    clean.youtube.title,
+    clean.youtube.description,
+    clean.tiktok.caption,
+    clean.facebook.caption,
+    clean.instagram.caption,
+  ];
+  if (prose.some((text) => !text || SOURCE_TERM.test(text))) return null;
+  return clean.youtube.tags.length > 0 ? clean : null;
+}
+
 export async function loadSeoMetadata(
   storyId: string,
 ): Promise<SeoMetadata | null> {
@@ -380,7 +417,7 @@ export async function loadSeoMetadata(
   try {
     const parsed = JSON.parse(row.seo_metadata_json);
     const v = SeoMetadataSchema.safeParse(parsed);
-    return v.success ? v.data : null;
+    return v.success ? sanitizeSeoMetadata(v.data) : null;
   } catch {
     return null;
   }

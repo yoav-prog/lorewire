@@ -51,8 +51,10 @@ export default function AboutPage() {
           characters, details, dialogue, and ending are invented by us.
           LoreWire uses a mix of human editing and AI
           assistance — the AI helps with first drafts of narration,
-          illustration, and captions; a human reviews everything before
-          it ships. Identifying details are removed or changed. We do
+          illustration, and captions. Automated safety and originality
+          checks screen each story before it ships, and anything they hold
+          goes to a person for review. Identifying details are removed or
+          changed. We do
           not publish content that names a specific real person without
           a clear public-figure context.
         </p>
