@@ -34,7 +34,7 @@ const FIXTURE: SeoMetadata = {
       "honest stranger",
       "good samaritan",
       "found money",
-      "reddit storytime",
+      "bus storytime",
     ],
   },
   tiktok: {
